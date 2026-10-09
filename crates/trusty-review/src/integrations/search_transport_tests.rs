@@ -51,11 +51,35 @@ fn default_socket() -> PathBuf {
     search_rpc::search_socket().expect("resolve the default socket path")
 }
 
-/// A config whose `search_url` is the non-explicit default.
+/// The config as loaded with `TRUSTY_SEARCH_URL` unset: no explicit URL.
 fn default_config() -> ReviewConfig {
-    let mut config = ReviewConfig::load(None);
-    config.search_url = DEFAULT_SEARCH_URL.to_string();
-    config
+    ReviewConfig::load(None)
+}
+
+/// A loopback listener on an ephemeral port that counts every TCP connection.
+///
+/// #9214: the pre-fix fallback reached the address in `<TRUSTY_DATA_DIR>/http_addr`
+/// when the socket file was missing; pointing that file here makes any such
+/// attempt countable. Each connection is accepted and dropped at once.
+async fn tcp_tripwire() -> (String, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the tripwire");
+    let addr = listener.local_addr().expect("addr").to_string();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&hits);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            seen.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (addr, hits)
+}
+
+/// Let the tripwire's accept loop drain its backlog before it is read.
+async fn settle() {
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
 
 /// A one-route HTTP stub: every request gets `status` and `body`.
@@ -110,44 +134,126 @@ async fn socket_is_used_when_present() {
     assert_eq!(fake.methods(), vec!["search.health".to_string()]);
 }
 
-/// Rule 3's other half: no socket file → HTTP, on the configured URL.
+/// #9214 regression: no socket file and no explicit URL → the socket leg,
+/// failing as unavailable with the path it looked for. Pre-fix this resolved
+/// `Http("http://localhost:7878")`; the transport is asserted before any call,
+/// so the red run never dials that port.
+/// Test: this test.
 #[serial_test::serial]
 #[tokio::test]
-async fn http_is_used_when_the_socket_is_absent() {
+async fn missing_socket_fails_closed_on_the_config_leg() {
     let dir = short_tempdir();
     let _env = isolated(&dir);
-    assert!(
-        !default_socket().exists(),
-        "the isolated data dir holds no socket"
+    let missing = default_socket();
+    assert!(!missing.exists(), "the isolated data dir holds no socket");
+
+    let client = HttpSearchClient::from_config(&default_config()).expect("client builds");
+    assert_eq!(
+        client.transport(),
+        &SearchTransport::Socket(missing.clone()),
+        "a missing socket must not fall back to HTTP"
     );
+    let err = client
+        .health()
+        .await
+        .expect_err("nothing serves the socket");
+    let shown = missing.display().to_string();
+    assert!(
+        matches!(err, SearchClientError::Unavailable(ref m) if m.contains(&shown)),
+        "unavailable, naming {shown}: {err}"
+    );
+}
+
+/// #9214 regression: the report pass's resolver makes no TCP attempt when the
+/// socket file is missing. Pre-fix it resolved the `DaemonAddrLayout` address,
+/// which reads `<TRUSTY_DATA_DIR>/http_addr` — here a tripwire listener.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn missing_socket_fails_closed_without_tcp_on_the_advertised_leg() {
+    let dir = short_tempdir();
+    let _env = isolated(&dir);
+    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, &dir.path().to_string_lossy());
+    let (addr, hits) = tcp_tripwire().await;
+    std::fs::write(dir.path().join("http_addr"), &addr).expect("write http_addr");
+    let missing = dir.path().join("trusty-search.sock");
+    assert!(!missing.exists(), "the isolated data dir holds no socket");
+
+    let transport = SearchTransport::resolve_advertised();
+    let client = HttpSearchClient::with_transport(transport.clone()).expect("client builds");
+    let err = client
+        .health()
+        .await
+        .expect_err("nothing serves the socket");
+    settle().await;
+
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a missing socket reached TCP {addr}; transport was {transport:?}"
+    );
+    assert_eq!(transport, SearchTransport::Socket(missing.clone()));
+    let shown = missing.display().to_string();
+    assert!(
+        matches!(err, SearchClientError::Unavailable(ref m) if m.contains(&shown)),
+        "unavailable, naming {shown}: {err}"
+    );
+}
+
+/// #9214: a socket path that cannot be derived fails closed too — a relative
+/// `TRUSTY_DATA_DIR`, which the daemon refuses, is unavailable with the
+/// reason, and no TCP attempt is made.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn unresolvable_socket_path_fails_closed() {
+    let dir = short_tempdir();
+    let _env = isolated(&dir);
+    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, "relative-data-dir");
+
+    for transport in [
+        SearchTransport::resolve(&default_config()),
+        SearchTransport::resolve_advertised(),
+    ] {
+        let Some(path) = transport.socket_path() else {
+            panic!("an unresolvable socket must not fall back to HTTP: {transport:?}");
+        };
+        assert!(
+            path.display().to_string().contains("is relative"),
+            "the path names the reason: {}",
+            path.display()
+        );
+        let client = HttpSearchClient::with_transport(transport.clone()).expect("client builds");
+        let err = client.health().await.expect_err("nothing serves it");
+        assert!(
+            matches!(err, SearchClientError::Unavailable(ref m) if m.contains("is relative")),
+            "unavailable, naming the reason: {err}"
+        );
+    }
+}
+
+/// #9214: a deliberately set `TRUSTY_SEARCH_URL` keeps the HTTP leg, on that
+/// URL, for both resolvers.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn explicit_url_env_keeps_the_http_leg() {
+    let dir = short_tempdir();
+    let _env = isolated(&dir);
+    let (url, hits) = http_stub("200 OK", healthy().to_string()).await;
+    let _url = EnvGuard::set(TRUSTY_SEARCH_URL_ENV, &format!("{url}/"));
 
     assert_eq!(
         SearchTransport::resolve(&default_config()),
-        SearchTransport::Http(DEFAULT_SEARCH_URL.to_string())
+        SearchTransport::Http(url.clone())
     );
-
-    let (url, hits) = http_stub("200 OK", healthy().to_string()).await;
-    let mut config = default_config();
-    config.search_url = url;
-    let client = HttpSearchClient::from_config(&config).expect("client builds");
+    assert_eq!(
+        SearchTransport::resolve_advertised(),
+        SearchTransport::Http(url.clone())
+    );
+    let client = HttpSearchClient::from_config(&default_config()).expect("client builds");
     client.health().await.expect("the HTTP stub answers health");
     assert_eq!(hits.load(Ordering::SeqCst), 1, "the call went over HTTP");
-}
-
-/// A present socket beats the DEFAULT URL, trailing slash or not.
-#[serial_test::serial]
-#[tokio::test]
-async fn socket_overrides_a_config_url_that_is_not_explicit() {
-    let dir = short_tempdir();
-    let _env = isolated(&dir);
-    let _fake = FakeSearchSocket::serve(&default_socket(), health_only);
-
-    let mut config = ReviewConfig::load(None);
-    config.search_url = format!("{DEFAULT_SEARCH_URL}/");
-    assert_eq!(
-        SearchTransport::resolve(&config),
-        SearchTransport::Socket(default_socket())
-    );
 }
 
 /// Rule 1 beats rule 2: `TRUSTY_SEARCH_SOCKET` wins over `TRUSTY_SEARCH_URL`.
@@ -209,8 +315,7 @@ async fn dead_socket_file_does_not_fall_back_to_http() {
 /// and loads it. Most tests load the default config and set no env at all.
 /// What: with every transport env var and the data-dir override cleared, both
 /// resolvers must land on a socket path that does not exist. Reaching the real
-/// path fails here: while that file exists it is `Socket(<existing path>)`, and
-/// where it does not (CI) rule 3 falls through to `Http`.
+/// path fails here: it is `Socket(<real path>)`, not the hermetic one.
 /// Test: this test.
 #[serial_test::serial]
 #[test]

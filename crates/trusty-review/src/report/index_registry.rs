@@ -238,15 +238,15 @@ pub async fn fetch_registered_indexes_via(transport: SearchTransport) -> Vec<Ind
 
 /// [`fetch_registered_indexes`] against the daemon `trusty-search` advertises.
 ///
-/// Why: a hard-coded `127.0.0.1:7878` misses an auto-ported daemon and every
-/// `TRUSTY_DATA_DIR`-isolated one — the same resolution `HttpTraceSource` makes.
-/// What: #9214 — [`SearchTransport::resolve_advertised`]: the socket when one
-/// is present (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an isolated
-/// instance), else the `DaemonAddrLayout` HTTP address.
+/// Why: a fixed address misses every `TRUSTY_DATA_DIR`-isolated daemon — the
+/// same resolution `HttpTraceSource` makes.
+/// What: #9214 — [`SearchTransport::resolve_advertised`]: the socket
+/// (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an isolated instance), with no
+/// TCP fallback; a missing socket reads as the empty registry any down daemon
+/// gives.
 /// Test: the read is `an_unreachable_daemon_reads_an_empty_registry`; the
-/// HTTP address resolution is `DaemonAddrLayout`'s, covered by
-/// `the_shared_search_layout_is_the_one_being_resolved`; the isolated socket
-/// by `trusty_data_dir_isolates_the_default_socket`.
+/// missing socket by `missing_socket_fails_closed_without_tcp_on_the_advertised_leg`;
+/// the isolated socket by `trusty_data_dir_isolates_the_default_socket`.
 pub async fn registered_indexes() -> Vec<IndexInfo> {
     fetch_registered_indexes_via(SearchTransport::resolve_advertised()).await
 }

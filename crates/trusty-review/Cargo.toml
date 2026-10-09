@@ -140,7 +140,9 @@ name        = "trusty-review"
 #
 # 0.38.1 -> 0.38.2 (#9495, #9503, #9196): PATCH. 0.38.1 is live on crates.io;
 # 0.38.2 carries fixes only, with no public item added or changed.
-version     = "0.38.2"
+# 0.38.2 -> 0.38.3 (#9214): PATCH. 0.38.2 is live on crates.io; 0.38.3 carries
+# the search-socket fail-closed change, with no public item added or changed.
+version     = "0.38.3"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

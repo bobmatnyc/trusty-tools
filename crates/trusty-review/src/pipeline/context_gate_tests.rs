@@ -771,3 +771,52 @@ async fn degraded_reason_prefers_health_error_detail() {
 // #9194: which dependency the gate found wanting, for the source ledger.
 #[path = "context_gate_facts_tests.rs"]
 mod facts;
+
+/// #9214 regression: with the trusty-search socket file missing, the real
+/// client fails closed through the gate's search-down branch — `Skip` (no
+/// verdict) when search is required, a non-authoritative `Degraded` when it
+/// is opted out — and both name the socket path. The transport is asserted
+/// first, so the pre-fix `localhost` fallback is never dialled.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn missing_search_socket_skips_or_degrades_naming_the_path() {
+    use crate::integrations::search_client::HttpSearchClient;
+    use crate::integrations::search_transport::fixture::EnvGuard;
+    use crate::integrations::search_transport::{SearchTransport, TRUSTY_SEARCH_URL_ENV};
+
+    let dir = tempfile::Builder::new()
+        .prefix("g9")
+        .tempdir_in("/tmp")
+        .expect("tempdir under /tmp");
+    let _env = [
+        EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", &dir.path().to_string_lossy()),
+        EnvGuard::unset(trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
+        EnvGuard::unset("TRUSTY_DATA_DIR"),
+    ];
+    let missing = trusty_common::search_rpc::search_socket().expect("socket path");
+    assert!(!missing.exists(), "the temp dir holds no socket");
+    let shown = missing.display().to_string();
+
+    let mut required = config();
+    required.search_index = "main".to_string();
+    let client = HttpSearchClient::from_config(&required).expect("client builds");
+    assert_eq!(
+        client.transport(),
+        &SearchTransport::Socket(missing.clone())
+    );
+    let d = deps_with_search(Arc::new(client), true);
+
+    match preflight_context(&required, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Skip(msg) => assert!(msg.contains(&shown), "{msg}"),
+        other => panic!("required search must skip, not review: {other:?}"),
+    }
+
+    let mut opted_out = required.clone();
+    opted_out.context.require_search = Some(false);
+    match preflight_context(&opted_out, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Degraded(msg) => assert!(msg.contains(&shown), "{msg}"),
+        other => panic!("opted-out search must degrade: {other:?}"),
+    }
+}

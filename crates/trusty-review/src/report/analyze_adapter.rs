@@ -501,7 +501,7 @@ pub struct HttpAnalyzeMetricsSource {
     /// Where [`AnalyzeMetricsSource::registered_indexes`] reads the trusty-search
     /// registry from (#6677).
     ///
-    /// Why: the read resolved `DaemonAddrLayout::TRUSTY_SEARCH` unconditionally,
+    /// Why: the read resolved the host's advertised trusty-search unconditionally,
     /// so a caller holding this source over a stub analyze socket still issued a
     /// real HTTP GET to whatever trusty-search daemon the host happened to be
     /// running. The address is a property of the source now, so a caller that

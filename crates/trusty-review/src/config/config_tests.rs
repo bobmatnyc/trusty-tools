@@ -154,14 +154,13 @@ fn config_github_token_defaults_to_empty() {
 
 #[test]
 fn config_search_url_default() {
-    // When TRUSTY_SEARCH_URL is not set, falls back to localhost:7878.
-    // (Cannot reliably unset env vars in parallel tests; just check load.)
+    // #9214: with TRUSTY_SEARCH_URL unset the URL is empty — the socket leg,
+    // never a localhost default. (Env vars cannot be unset reliably in
+    // parallel tests, so this asserts only when the var is absent.)
     let config = ReviewConfig::from_env_and_file(None, None);
-    assert!(
-        config.search_url.starts_with("http"),
-        "search_url must start with http: {}",
-        config.search_url
-    );
+    if std::env::var_os(crate::integrations::search_transport::TRUSTY_SEARCH_URL_ENV).is_none() {
+        assert_eq!(config.search_url, "", "no default search URL");
+    }
 }
 
 /// Why (#6287, ADR-0032): the default is no longer a written-down address but a

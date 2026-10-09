@@ -4,8 +4,8 @@
 //! Why not `crate::integrations::search_client`: that client targets
 //! `ReviewConfig::search_url` — the review pipeline's configured address — while
 //! the report pass must address the daemon the audit actually indexed, which is
-//! whatever `DaemonAddrLayout::TRUSTY_SEARCH` resolves (an OS-assigned port and
-//! every `TRUSTY_DATA_DIR`-isolated instance included). It also needs two things
+//! whatever `SearchTransport::resolve_advertised` resolves (every
+//! `TRUSTY_DATA_DIR`-isolated instance included). It also needs two things
 //! that trait does not carry: `call_chain`, whose body is `text/plain` rather
 //! than JSON, and a `path_prefix`-scoped search. Address resolution and the
 //! proxy-free client builder are both `trusty-common`'s, so nothing here is a
@@ -173,17 +173,14 @@ pub struct HttpTraceSource {
 impl HttpTraceSource {
     /// Build a source against the daemon `trusty-search` itself advertises.
     ///
-    /// Why: a hard-coded `127.0.0.1:7878` misses an auto-ported daemon and every
-    /// `TRUSTY_DATA_DIR`-isolated one — the same reason
-    /// `trusty-audit`'s `grounding::daemons::search_base_url` resolves through
-    /// [`trusty_common::daemon_guard::DaemonAddrLayout`] rather than a literal.
+    /// Why: a fixed address misses every `TRUSTY_DATA_DIR`-isolated daemon.
     /// What: #9214 — [`SearchTransport::resolve_advertised`] picks the socket
-    /// when one is present (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an
-    /// isolated instance), else the `DaemonAddrLayout` HTTP address; then
-    /// builds the shared proxy-free loopback client with [`TRACE_TIMEOUT`].
+    /// (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an isolated instance), with
+    /// no TCP fallback when its file is missing; then builds the shared
+    /// proxy-free loopback client with [`TRACE_TIMEOUT`].
     /// `None` when the TLS backend will not initialise, which the caller
     /// reports as an unreachable daemon.
-    /// Test: `trace_client_tests::the_shared_search_layout_is_the_one_being_resolved`,
+    /// Test: `search_transport_tests::missing_socket_fails_closed_without_tcp_on_the_advertised_leg`,
     /// `search_transport_tests::trace_entry_node_and_usages_go_over_the_socket`,
     /// `search_transport_tests::trusty_data_dir_isolates_the_default_socket`.
     #[must_use]

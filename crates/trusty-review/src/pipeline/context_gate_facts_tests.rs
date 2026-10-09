@@ -128,6 +128,11 @@ async fn facts_are_empty_when_the_gate_proceeds() {
 
 /// #9194: the detailed gate decides exactly as `preflight_context` does,
 /// across the require/reachable/surface combinations the gate tests cover.
+///
+/// #9214: each gate call resolves the search socket from the process env and
+/// names it in a `Degraded` reason, so two calls compare equal only while no
+/// other test is changing `TRUSTY_DATA_DIR`; hold the env lock.
+#[serial_test::serial]
 #[tokio::test]
 async fn preflight_context_and_detailed_return_the_same_outcome() {
     let mut strict = config();
