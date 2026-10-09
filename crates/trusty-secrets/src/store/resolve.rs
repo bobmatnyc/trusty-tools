@@ -31,7 +31,8 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// `agent_parent`, a key whose "agents may use" flag is OFF is
 /// [`SecretsError::AgentUseRefused`], raised before the value is read. #9070:
 /// the flag is the backend's flag item, never the index row's field; a
-/// failed flag lookup is an error, never ON. A key with no index row is [`SecretsError::NotFound`] in either
+/// failed flag lookup is an error, never ON. Without `agent_parent` the
+/// flag is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
 /// mode, and the backend is not read. Otherwise the uncached backend read.
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
@@ -48,10 +49,14 @@ pub fn resolve_reference(
     reference: &SecretRef,
     agent_parent: bool,
 ) -> Result<SecretValue, SecretsError> {
+    if !agent_parent {
+        // #9070: no agent parent, no gate, so no flag lookup.
+        return store.read(reference, scopes);
+    }
     store.read_admitted(reference, scopes, |vault, row| {
         // #7525: judged on the located row, before any read. #9070: the
         // row's flag was filled from the backend by `read_admitted`.
-        if agent_parent && !row.agents_may_use {
+        if !row.agents_may_use {
             return Err(SecretsError::AgentUseRefused {
                 key: row.name.to_string(),
                 vault: vault.to_string(),
