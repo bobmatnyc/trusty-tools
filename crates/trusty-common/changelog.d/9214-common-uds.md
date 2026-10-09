@@ -1,3 +1,0 @@
-Changed
-- Incremental per-file indexing (`index_files_best_effort`) and `probe_index_readiness` reach trusty-search over its Unix socket (`search.index.file.put`, `search.index.status`), never the retired `:7878` listener (#9214).
-- `search_rpc::search_socket` honours `TRUSTY_DATA_DIR` the way the trusty-search daemon does, so a client reaches a daemon isolated with a custom data directory; an empty value counts as unset and a relative one is refused. The rule lives in the new `search_rpc::search_socket_under` (with `TRUSTY_SEARCH_DATA_DIR_ENV`), which the daemon now resolves its own socket through (#9214).
