@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{
-    AutoInitOutcome, AutoInitPlan, AutoInitRefusal, RepoContext, ensure_git_repo_with,
-    initialized_message, missing_git_error, plan_auto_init, refusal_message,
+    AutoInitOutcome, AutoInitPlan, AutoInitRefusal, RepoContext, classify_rev_parse_failure,
+    ensure_git_repo_with, initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
 use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete};
@@ -568,6 +568,78 @@ fn auto_init_refuses_the_classic_no_repo_wording_under_a_real_git() {
         err.to_string().contains(&expected.display().to_string()),
         "the error must name the .git it found: {err}"
     );
+}
+
+/// git's wording when upward discovery stops at a filesystem boundary, as on a
+/// `/tmp` that is its own mount.
+const MOUNT_BOUNDARY_NO_REPO: &str = "fatal: not a git repository (or any parent up to mount point /)\n\
+     Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).";
+
+/// FAILS BEFORE #9495: the mount-boundary wording did not match the full
+/// "(or any of the parent directories)" clause, so a plain directory on its
+/// own mount read as an unreadable verdict and every `tm` run there errored.
+#[test]
+fn classify_accepts_the_mount_boundary_wording_with_no_git_above() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, MOUNT_BOUNDARY_NO_REPO);
+
+    assert_eq!(context.ok(), Some(RepoContext::Absent));
+}
+
+/// The classic wording with no `.git` above is still absence (#9495 keeps it).
+#[test]
+fn classify_accepts_the_classic_wording_with_no_git_above() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, CLASSIC_NO_REPO);
+
+    assert_eq!(context.ok(), Some(RepoContext::Absent));
+}
+
+/// Fail-Open Check (#9495): the mount-boundary wording under a real `.git` is
+/// discovery stopping short of a real repository, never absence.
+#[test]
+fn classify_refuses_the_mount_boundary_wording_under_a_real_git() {
+    let tmp = hermetic_temp_dir();
+    let repo = tmp.path().join("real-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let dir = repo.join("sub");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, MOUNT_BOUNDARY_NO_REPO);
+
+    assert!(
+        context.is_err(),
+        "a .git above must not classify as Absent, got {context:?}"
+    );
+}
+
+/// Every other `rev-parse` failure stays an error, as before #9495: the colon
+/// forms name a broken repository, and the rest are not about discovery.
+#[test]
+fn classify_keeps_every_other_failure_an_error() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: not a git repository: '/srv/project/.git'",
+        "fatal: detected dubious ownership in repository at '/srv/project'",
+        "fatal: cannot change to '/srv/project': Permission denied",
+        "error: could not open '.git/HEAD': Permission denied",
+    ] {
+        let context = classify_rev_parse_failure(&dir, stderr);
+        assert!(
+            context.is_err(),
+            "{stderr:?} must stay an error, got {context:?}"
+        );
+    }
 }
 
 // ── What `tm launch` does after a refusal ────────────────────────────────────
