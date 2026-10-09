@@ -8,9 +8,9 @@
 //! `HnswStore::bounded_gate` / `HnswStore::bounded_graph`, each bounded by
 //! the store's budget (`TRUSTY_HNSW_OP_BUDGET_SECS`, default twice the redb
 //! write-transaction deadline). The vector layer runs its blocking work
-//! through [`HnswStore::run_bounded`], whose spawned watcher owns the
-//! operation's lifetime: it runs the budget clock even after the caller is
-//! dropped, trips the store's [`OpBreaker`], and counts the operation once.
+//! through [`HnswStore::run_bounded`], whose spawned watcher runs the budget
+//! clock even after the caller is dropped, trips the store's [`OpBreaker`],
+//! and counts each overrun once.
 //! From then on every bounded operation returns [`OpBudgetError::Wedged`]
 //! without spawning a thread or waiting on a lock. The breaker never resets:
 //! it lives on the `HnswStore`, so it clears only when the palace is reopened
@@ -21,16 +21,14 @@
 //! `a_tripped_store_refuses_the_next_call_without_spawning`,
 //! `a_dropped_caller_still_trips_the_breaker_at_the_budget`.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::Context as _;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::{MutexGuard, RwLockReadGuard};
 use thiserror::Error;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 
 use super::{HnswStore, HnswStoreError, Result};
 use crate::memory_core::timeouts::write_txn_deadline;
@@ -141,7 +139,7 @@ static ABANDONED_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// Why (#9487): a detached operation holds an `Arc<HnswStore>`, not the
 /// palace handle, so idle eviction can drop a tripped palace from the cache
 /// while its stuck operation still holds a thread and a lock.
-/// What: rises when a watcher gives up on an operation at its budget, and
+/// What: rises when the watcher abandons an operation at its budget, and
 /// falls when that operation's blocking task finally returns.
 /// Test: `a_dropped_caller_still_trips_the_breaker_at_the_budget`;
 /// trusty-memory's `health_stays_not_ok_after_a_palace_with_an_abandoned_op_is_evicted`.
@@ -149,18 +147,80 @@ pub fn abandoned_ops_in_flight() -> u64 {
     ABANDONED_IN_FLIGHT.load(Ordering::Acquire)
 }
 
-/// Holds one abandoned operation in [`abandoned_ops_in_flight`] until dropped.
-struct InFlight;
+/// The task is still running.
+const RUNNING: u8 = 0;
+/// The task returned before the watcher gave up on it.
+const DONE: u8 = 1;
+/// The watcher gave up on the task at the budget.
+const ABANDONED: u8 = 2;
 
-impl InFlight {
-    fn enter() -> Self {
-        ABANDONED_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-        Self
+/// One bounded operation, shared by its blocking task and its watcher.
+///
+/// Why (#9487 F2): the join bound and an inner lock bound can both fire for
+/// one operation; the breaker must count it once and the gauge must fall
+/// exactly when the task ends.
+/// What: `state` leaves `RUNNING` once: to `DONE` when the task returns
+/// first, to `ABANDONED` when the watcher's budget fires first. Whoever moves
+/// it counts an overrun — the watcher for a hung task, the task for an inner
+/// lock bound's `BudgetExceeded` — so each overrun counts once. The inner
+/// bounds themselves never count.
+struct OpSlot {
+    state: AtomicU8,
+    breaker: Arc<OpBreaker>,
+    palace: Arc<str>,
+    op: &'static str,
+}
+
+/// Settles the slot when the task ends, even by panic, then wakes the
+/// watcher by dropping `_ended` (fields drop after `drop` runs).
+struct TaskEnd {
+    slot: Arc<OpSlot>,
+    overrun: bool,
+    _ended: oneshot::Sender<()>,
+}
+
+impl Drop for TaskEnd {
+    fn drop(&mut self) {
+        match self.slot.state.swap(DONE, Ordering::AcqRel) {
+            ABANDONED => {
+                ABANDONED_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            }
+            RUNNING if self.overrun => {
+                self.slot.breaker.abandon(self.slot.op, &self.slot.palace);
+            }
+            _ => {}
+        }
     }
 }
 
-impl Drop for InFlight {
-    fn drop(&mut self) {
+/// Own one bounded operation's budget clock (#9487 F1, F2, F5).
+///
+/// Why: a clock inside the caller's future stops when that future is
+/// dropped, so a stuck task was detached uncounted and health stayed ok.
+/// What: waits for the task to end, up to the budget. At the budget it
+/// raises the gauge, then abandons the task by compare-and-swap; on a win it
+/// trips, counts and logs once, and sends the caller its verdict. The gauge
+/// rises before the swap, so the task's decrement never runs ahead of it.
+/// Test: `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
+/// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
+async fn watch_op(
+    slot: Arc<OpSlot>,
+    budget: Duration,
+    task_end: oneshot::Receiver<()>,
+    verdict: oneshot::Sender<OpBudgetError>,
+) {
+    if tokio::time::timeout(budget, task_end).await.is_ok() {
+        return;
+    }
+    ABANDONED_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+    let won = slot
+        .state
+        .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if won {
+        let _ = verdict.send(slot.breaker.abandon(slot.op, &slot.palace));
+    } else {
+        // The task ended as the budget fired; it settled the count.
         ABANDONED_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -171,9 +231,10 @@ impl Drop for InFlight {
 /// and an operator needs to see that it happened and how much work it left
 /// half-done.
 /// What: `tripped` is sticky; an inner lock bound or the watcher sets it.
-/// `abandoned_ops` counts operations given up on at the budget, once each,
-/// and only the [`HnswStore::run_bounded`] watcher counts; a vector one of
-/// them writes later is an orphan left for `compact_orphans`. `spawned_ops`
+/// `abandoned_ops` counts operations given up on at the budget, once each;
+/// only the [`HnswStore::run_bounded`] machinery counts, when it settles an
+/// operation, never an inner bound. A vector one of them writes later is an orphan left for
+/// `compact_orphans`. `spawned_ops`
 /// counts blocking tasks started by `run_bounded`, so a test can prove a
 /// refused call spawned none.
 /// Test: `a_tripped_store_refuses_the_next_call_without_spawning`,
@@ -251,7 +312,8 @@ impl OpBreaker {
         }
     }
 
-    /// Trip, count the abandoned operation once, and log it. Watcher only.
+    /// Trip, count the abandoned operation, and log it. Called only by the
+    /// party that settles an `OpSlot` as overrun, so once per operation.
     fn abandon(&self, op: &'static str, palace: &str) -> OpBudgetError {
         let err = self.exceeded(op, palace);
         let abandoned = self.abandoned.fetch_add(1, Ordering::Relaxed) + 1;
@@ -299,8 +361,11 @@ impl HnswStore {
     /// must outlive the caller: an HTTP client that disconnects, or the
     /// remember pipeline ceiling, drops the caller's future early.
     /// What: a tripped store returns `Wedged` before spawning anything.
-    /// Otherwise counts the spawn and hands the task to a spawned watcher that
-    /// owns its lifetime (`watch_op`); the caller only awaits the reply.
+    /// Otherwise counts the spawn, runs `work`, and spawns `watch_op`, which
+    /// owns the budget clock and the count whether or not the caller still
+    /// waits. The task replies to the caller directly (no scheduler hop, so a
+    /// `block_on` caller on a current-thread runtime still completes); the
+    /// caller returns that reply or the watcher's `BudgetExceeded` verdict.
     /// Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
     /// `a_tripped_store_refuses_the_next_call_without_spawning`,
     /// `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
@@ -314,60 +379,41 @@ impl HnswStore {
             .check(&self.palace)
             .map_err(HnswStoreError::from)?;
         self.breaker.spawned.fetch_add(1, Ordering::Relaxed);
-        let task = tokio::task::spawn_blocking(work);
-        let (reply, outcome) = oneshot::channel();
-        // #9487 F1: the watcher, not the caller, owns the budget clock.
-        tokio::spawn(watch_op(
-            task,
-            Arc::clone(&self.breaker),
-            Arc::clone(&self.palace),
+        let slot = Arc::new(OpSlot {
+            state: AtomicU8::new(RUNNING),
+            breaker: Arc::clone(&self.breaker),
+            palace: Arc::clone(&self.palace),
             op,
-            reply,
-        ));
-        outcome
-            .await
-            .with_context(|| format!("hnsw {op} watcher stopped before it replied"))?
-    }
-}
-
-/// Own one bounded operation from spawn to finish (#9487 F1, F2, F5).
-///
-/// Why: a budget clock inside the caller's future stops when that future is
-/// dropped, so the stuck task was detached uncounted and health stayed ok.
-/// What: joins `task` within the budget. On time, replies with its result,
-/// counting it once if an inner lock bound gave up. On timeout, counts and
-/// logs the abandonment once, holds [`abandoned_ops_in_flight`] up, replies
-/// `BudgetExceeded`, then waits for the task so the gauge falls when it
-/// really ends. A dropped caller only makes the reply go nowhere.
-/// Test: `a_dropped_caller_still_trips_the_breaker_at_the_budget`.
-async fn watch_op<T: Send + 'static>(
-    mut task: JoinHandle<anyhow::Result<T>>,
-    breaker: Arc<OpBreaker>,
-    palace: Arc<str>,
-    op: &'static str,
-    reply: oneshot::Sender<anyhow::Result<T>>,
-) {
-    match tokio::time::timeout(breaker.budget(), &mut task).await {
-        Ok(joined) => {
-            let outcome = joined
-                .with_context(|| format!("hnsw {op} task panicked"))
-                .and_then(|r| r);
-            if let Err(e) = &outcome
-                && matches!(
-                    op_budget_error(e),
-                    Some(OpBudgetError::BudgetExceeded { .. })
-                )
-            {
-                breaker.abandon(op, &palace);
-            }
-            let _ = reply.send(outcome);
-        }
-        Err(_) => {
-            let _in_flight = InFlight::enter();
-            let err = breaker.abandon(op, &palace);
-            let _ = reply.send(Err(HnswStoreError::from(err).into()));
-            // A late result is discarded; its vector is an orphan for compaction.
-            let _ = task.await;
+        });
+        let (reply, mut outcome) = oneshot::channel();
+        let (ended, task_end) = oneshot::channel();
+        let (verdict_tx, verdict) = oneshot::channel();
+        let mut end = TaskEnd {
+            slot: Arc::clone(&slot),
+            overrun: false,
+            _ended: ended,
+        };
+        let _detached = tokio::task::spawn_blocking(move || {
+            let result = work();
+            end.overrun = matches!(
+                result.as_ref().map_err(op_budget_error),
+                Err(Some(OpBudgetError::BudgetExceeded { .. }))
+            );
+            // Settle (and count an inner overrun) before the caller sees it.
+            drop(end);
+            let _ = reply.send(result);
+        });
+        // #9487 F1: the watcher, not the caller, owns the budget clock.
+        tokio::spawn(watch_op(slot, self.breaker.budget(), task_end, verdict_tx));
+        let panicked = || anyhow::anyhow!("hnsw {op} task panicked");
+        tokio::select! {
+            biased;
+            replied = &mut outcome => replied.unwrap_or_else(|_| Err(panicked())),
+            judged = verdict => match judged {
+                Ok(err) => Err(HnswStoreError::from(err).into()),
+                // The watcher saw the task end; its reply is already sent.
+                Err(_) => outcome.await.unwrap_or_else(|_| Err(panicked())),
+            },
         }
     }
 }
