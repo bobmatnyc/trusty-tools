@@ -1,2 +1,2 @@
 Added
-- `/health` lists open palaces whose HNSW vector store tripped its op breaker as `hnsw_wedged_palaces` (id plus abandoned-operation count), and reports `status: "wedged"` while any is listed (#9487).
+- `/health` lists open palaces whose HNSW vector store tripped its op breaker as `hnsw_wedged_palaces` (id plus abandoned-operation count), reports `hnsw_abandoned_ops_in_flight` (HNSW operations abandoned at their budget whose task still runs, across every palace), and reports `status: "wedged"` while either is non-empty or above zero (#9487). The gauge keeps `/health` from going back to `ok` when a palace with a stuck operation is evicted from the handle cache.

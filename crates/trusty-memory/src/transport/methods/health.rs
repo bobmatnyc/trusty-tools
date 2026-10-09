@@ -21,6 +21,7 @@
 
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
+use trusty_common::memory_core::store::hnsw_store::op_budget::abandoned_ops_in_flight;
 use uuid::Uuid;
 
 /// Persistent content stored in the probe palace as an always-present
@@ -222,6 +223,15 @@ pub struct HealthResponse {
     /// Test: `health_reports_a_palace_whose_hnsw_breaker_tripped`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hnsw_wedged_palaces: Vec<HnswWedgedPalace>,
+    /// HNSW operations abandoned at their budget whose task still runs (#9487).
+    ///
+    /// Why: a detached operation holds the vector store, not the palace
+    /// handle, so idle eviction can drop a tripped palace from the cache and
+    /// with it `hnsw_wedged_palaces`, while the stuck thread and lock remain.
+    /// What: the process-wide `abandoned_ops_in_flight` gauge. Above zero
+    /// turns an `ok` status into `wedged`, whether or not the palace is cached.
+    /// Test: `health_stays_not_ok_after_a_palace_with_an_abandoned_op_is_evicted`.
+    pub hnsw_abandoned_ops_in_flight: u64,
 }
 
 /// One open palace whose HNSW op breaker is tripped (#9487).
@@ -583,6 +593,20 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         ),
         _ => (status, detail),
     };
+    // #9487 F5: abandoned ops outlive their palace's cache entry; read the
+    // process-wide gauge so eviction cannot clear the alarm.
+    let hnsw_abandoned_ops_in_flight = abandoned_ops_in_flight();
+    let (status, detail) = if hnsw_abandoned_ops_in_flight > 0 && status == "ok" {
+        (
+            "wedged".to_string(),
+            Some(format!(
+                "{hnsw_abandoned_ops_in_flight} HNSW operation(s) abandoned at \
+                 their budget are still running; a palace's vector store is stuck"
+            )),
+        )
+    } else {
+        (status, detail)
+    };
 
     to_value(HealthResponse {
         status,
@@ -601,6 +625,7 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         unopenable_palaces,
         drawer_degraded_palaces,
         hnsw_wedged_palaces,
+        hnsw_abandoned_ops_in_flight,
     })
 }
 

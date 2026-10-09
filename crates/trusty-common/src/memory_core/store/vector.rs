@@ -652,9 +652,10 @@ impl UsearchStore {
         self.inner.op_breaker()
     }
 
-    /// The wrapped store, so tests can park its locks (#9487).
-    #[cfg(test)]
-    pub(crate) fn hnsw_for_test(&self) -> &HnswStore {
+    /// The wrapped store, so tests can park its locks or run a bounded
+    /// operation on it directly (#9487).
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn hnsw_for_test(&self) -> &HnswStore {
         &self.inner
     }
 }
