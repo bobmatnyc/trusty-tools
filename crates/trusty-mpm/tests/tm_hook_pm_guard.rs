@@ -94,9 +94,52 @@ fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
     ))
 }
 
-/// The daemon URL the URL-insensitive helpers pin: nothing listens on port 1,
-/// so a daemon call fails open on a refused connection, never on a timeout.
+/// The daemon URL the URL-insensitive helpers pin: nothing listens on port 1.
+/// Most hosts refuse it at once, but WSL2 mirrored networking lets the connect
+/// hang to the guard's timeout instead (#9526). A test whose verdict depends on
+/// "refused", not "timed out", uses [`RefusingDaemon`].
 const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
+
+/// A loopback daemon URL whose connect is refused at once on every host (#9526).
+///
+/// Why: the guard classifies a refused connect as "no daemon" and a connect
+/// timeout as "a daemon that did not answer" (`classify_transport_failure`).
+/// Under WSL2 mirrored networking a SYN to a 127.0.0.1 port outside Linux's
+/// ephemeral range goes to the Windows host and hangs, so port 1 times out
+/// there and the tests for the no-daemon branch got the other branch's verdict.
+/// What: holds a connected loopback pair and points the URL at the client's
+/// local port. That port sits in the ephemeral range and has no listener, so a
+/// SYN to it is answered with RST on Linux, WSL2 and macOS. A port bound and
+/// then released could be handed to another test's `bind(0)` before the guard
+/// connects; this one stays bound until the value drops.
+/// Test: `pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked`,
+/// `pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked`,
+/// `pm_guard_warns_when_no_daemon_answers_the_claim`.
+struct RefusingDaemon {
+    url: String,
+    _pair: (std::net::TcpStream, std::net::TcpStream),
+}
+
+impl RefusingDaemon {
+    fn new() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let client = std::net::TcpStream::connect(listener.local_addr().expect("listener addr"))
+            .expect("connect loopback pair");
+        let (server, _) = listener.accept().expect("accept loopback pair");
+        drop(listener);
+        let addr = client.local_addr().expect("client addr");
+        // Precondition the three tests rest on: a refusal, not a timeout.
+        let probe = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2));
+        assert!(
+            matches!(&probe, Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
+            "{addr} must refuse at once, got: {probe:?}"
+        );
+        Self {
+            url: format!("http://{addr}"),
+            _pair: (client, server),
+        }
+    }
+}
 
 /// Spawn `tm hook --pm-guard` and hand back the running child (#5914).
 ///
@@ -2122,22 +2165,15 @@ fn pm_guard_warns_when_no_daemon_answers_the_claim() {
     // opposite policy. Asserting #5923's warn-and-allow through an engineer
     // would be asserting two rules at once and getting the other one's answer.
     let cwd = tempfile::tempdir().expect("tempdir");
-    let stderr = run_pm_guard_at_stderr(
-        UNISOLATED_DOCUMENTATION_DISPATCH,
-        "http://127.0.0.1:1",
-        cwd.path(),
-    );
+    // #9526: a port that refuses on every host; port 1 times out under WSL2.
+    let daemon = RefusingDaemon::new();
+    let stderr = run_pm_guard_at_stderr(UNISOLATED_DOCUMENTATION_DISPATCH, &daemon.url, cwd.path());
     assert!(
         stderr.contains("#5923") && stderr.contains("NOT being enforced"),
         "an unreachable daemon must say the guard is off, got: {stderr:?}"
     );
     assert_eq!(
-        run_pm_guard_at(
-            UNISOLATED_DOCUMENTATION_DISPATCH,
-            "http://127.0.0.1:1",
-            cwd.path()
-        )
-        .trim(),
+        run_pm_guard_at(UNISOLATED_DOCUMENTATION_DISPATCH, &daemon.url, cwd.path()).trim(),
         "",
         "and it must still allow the dispatch"
     );
@@ -5145,7 +5181,9 @@ fn pm_guard_allows_ordinary_wrapped_commands_via_subagent_payload() {
 #[test]
 fn pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked() {
     let cwd = tempfile::tempdir().expect("tempdir");
-    let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, UNREACHABLE_DAEMON, cwd.path());
+    // #9526: a port that refuses on every host; port 1 times out under WSL2.
+    let daemon = RefusingDaemon::new();
+    let verdict = run_pm_guard_at(UNISOLATED_ENGINEER_DISPATCH, &daemon.url, cwd.path());
     assert!(
         !verdict.to_lowercase().contains("builder cap"),
         "dispatch must not meet a builder cap, got: {verdict:?}"
@@ -5161,12 +5199,14 @@ fn pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked() {
 #[test]
 fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
     let cwd = tempfile::tempdir().expect("tempdir");
+    // #9526: a port that refuses on every host; port 1 times out under WSL2.
+    let daemon = RefusingDaemon::new();
     for agent in ["research", "ticketing", "qa"] {
         let payload = format!(
             r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_ro","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
         );
         assert_eq!(
-            run_pm_guard_at(&payload, UNREACHABLE_DAEMON, cwd.path()).trim(),
+            run_pm_guard_at(&payload, &daemon.url, cwd.path()).trim(),
             "",
             "{agent} must not be denied by the builder cap"
         );
