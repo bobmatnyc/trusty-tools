@@ -862,11 +862,16 @@ async fn poll_marks_unreachable_clears_sessions() {
 
 /// Why (#9556): the `--single-pane` coordinator poll must report a dead
 /// explicit endpoint as unreachable instead of re-pointing at the lock-file or
-/// default daemon. With the URL pinned the poll dials only port 1.
+/// default daemon. With the URL pinned the poll dials only `dead`: a bound,
+/// never-listening loopback socket, refused at once on every host, including
+/// WSL2, where port 1 hangs instead (#9526).
 /// Test: itself.
 #[tokio::test]
 async fn coord_poll_keeps_explicit_url() {
-    let dead = dead_loopback_url();
+    let bound = tokio::net::TcpSocket::new_v4()
+        .and_then(|s| s.bind("127.0.0.1:0".parse().expect("addr")).map(|()| s))
+        .expect("bind loopback socket");
+    let dead = format!("http://{}", bound.local_addr().expect("bound addr"));
     let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
     let mut state = CoordinatorState::live();
     state.daemon_reachable = true;

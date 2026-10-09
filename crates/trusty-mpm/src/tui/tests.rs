@@ -19,13 +19,16 @@ fn rediscover_is_noop_when_resolved_url_unchanged() {
     }
 }
 
+/// An explicit URL no discovery source ever yields. Re-discovery dials
+/// nothing, so the #9556 tests below never connect to it.
+const EXPLICIT_URL: &str = "http://127.0.0.1:1";
+
 /// Why (#9556): an operator-chosen URL is never swapped for the lock-file or
-/// default daemon, which under a sandbox is the live fleet. Re-discovery
-/// itself dials nothing, so this test makes no connection.
+/// default daemon, which under a sandbox is the live fleet.
 /// Test: itself.
 #[test]
 fn rediscover_daemon_keeps_explicit_url() {
-    let dead = crate::test_support::dead_loopback_url();
+    let dead = EXPLICIT_URL.to_string();
     let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
     assert!(!rediscover_daemon(&mut client, false));
     assert_eq!(client.base_url(), dead);
@@ -36,7 +39,7 @@ fn rediscover_daemon_keeps_explicit_url() {
 /// Test: itself.
 #[test]
 fn rediscover_daemon_follows_discovery_when_not_pinned() {
-    let dead = crate::test_support::dead_loopback_url();
+    let dead = EXPLICIT_URL.to_string();
     let mut client = DaemonClient::new(dead.clone());
     assert!(rediscover_daemon(&mut client, false));
     assert_ne!(client.base_url(), dead);
