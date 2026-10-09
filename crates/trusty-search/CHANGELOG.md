@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.57.2] — 2026-10-09
+
+### Fixed
+
+- Heavy remove churn no longer strands surviving vectors where an unfiltered semantic search cannot reach them. The vector store now counts removals and replacements on every write path, keeps the count in the HNSW key sidecar, and rebuilds the graph at its current precision once churn reaches 10% of the live vectors; the rebuild runs at the idle write-cooldown persist, or in the background once writes stop after an incremental persist, never during a staged reindex ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- M005 now rebuilds the HNSW graph after it drops orphaned vectors, before it saves the snapshot ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- A snapshot written before this release is rebuilt once in the background when the daemon loads it, then stamped so later loads skip it. Rebuilds run one at a time across the daemon. A failed rebuild leaves the old graph serving and the churn count and stamp unchanged, so the next persist or load retries ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- A rebuild does not hold up index writes or searches. Writes wait only while the vectors are copied out and while the new graph is swapped in, not while it is built. A write during the build cancels the swap; the live graph keeps serving. A persist-triggered rebuild, inline or in the background, starts only after writes have been quiet for as long as the last rebuild took (at least 1 s). An incremental persist runs moments after a write, so when it finds writes still arriving it leaves one background task per index that rebuilds once they stop; this works with `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=off` or `TRUSTY_HNSW_REVIEW_IDLE=off`, and the next save writes the rebuilt graph to disk. A cancelled rebuild, including a load-time one, runs again at the next idle persist, or once writes stop after the next incremental persist. The idle write-cooldown persist runs without holding the index lock ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- Repeated rebuilds of a growing index no longer raise the daemon's memory by about one vector copy each time; the copy is made in fixed 16 MiB pieces ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- The stamp records which HNSW file it describes, so a crash between writing the key sidecar and the HNSW file leaves the old graph to be rebuilt on the next load. A copied index is rebuilt once more ([#9450](https://github.com/bobmatnyc/trusty-tools/issues/9450))
+- A normal stop (`trusty-search stop`, SIGTERM, admin stop) now closes every redb corpus before the daemon exits, so the next start no longer repairs each one and a read-only open of a stopped daemon's corpus succeeds instead of failing with `RepairAborted` (#9459).
+- `search.project.resolve` keeps reading `reindexed_unix` after a graceful restart; it fell back to the corpus mtime because the read-only stamp read failed (#9477).
+- The close waits at most 3 s. A corpus still held at that deadline is named in a `warn` log line and repaired on the next open, as before.
+- An index whose reindex, relocate or embed pass is still running at the stop keeps its corpus attached, is named in the same `warn` line, and is repaired on the next open. Taking that corpus would let the reindex write its HEAD marker with its last batches unsaved.
+- A boot or cold-load reconcile that is still running when the close takes a corpus now fails its file writes and deletes instead of answering success, so it does not record the new HEAD SHA and the next start retries the delta.
+- A plain directory on its own filesystem (for example a tmpfs `/tmp`) is now
+  classified as having no git repository. git reports
+  `not a git repository (or any parent up to mount point <dir>)` when its
+  discovery stops at a mount boundary, and the work-tree probe only recognised
+  the `(or any of the parent directories)` wording, so the reconcile mtime
+  path treated such roots as `Unknown` (#9475).
+
 ## [0.57.1] — 2026-10-08
 
 ### Fixed
