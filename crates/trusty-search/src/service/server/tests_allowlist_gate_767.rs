@@ -329,8 +329,8 @@ async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
 #[tokio::test]
 #[serial_test::parallel]
 async fn allow_sensitive_path_relaxes_only_the_prefix_denylist() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    // #9527: an explicit /tmp fixture, not `tempdir()`, which follows $TMPDIR.
+    let (_tmp, root) = crate::allowlist::test_fixtures::denylisted_root("ts-9527-relax-");
     let fx = tempfile::tempdir().expect("tempdir");
     let state = state_with(fixture(fx.path(), &[&root])).await;
 
