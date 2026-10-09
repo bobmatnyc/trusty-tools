@@ -11155,6 +11155,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "comrak",
+ "dirs 5.0.1",
  "jsonwebtoken",
  "reqwest 0.12.28",
  "serde",

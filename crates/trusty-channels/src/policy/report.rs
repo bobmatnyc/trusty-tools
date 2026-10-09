@@ -43,6 +43,16 @@ pub struct LoadReport {
 }
 
 impl LoadReport {
+    /// A placeholder with no route, replaced by the first load.
+    pub(crate) fn empty() -> Self {
+        Self {
+            policy: ChannelPolicy::default(),
+            denied: true,
+            findings: Vec::new(),
+            per_file: Vec::new(),
+        }
+    }
+
     /// A denied load: the empty policy, `finding` as the cause, and every
     /// project file `Withheld`.
     pub(crate) fn deny_all(
@@ -56,8 +66,8 @@ impl LoadReport {
             .map(|mut s| {
                 if s.state.contributes() {
                     s.state = FileState::Withheld;
-                    s.gchat_connection = None;
-                    s.gchat_spaces.clear();
+                    // RED STUB: s.gchat_connection = None;
+                    // RED STUB: s.gchat_spaces.clear();
                 }
                 s
             })
@@ -116,7 +126,7 @@ pub enum FindingScope {
 /// Why: every dropped route yields a named finding (#8454 plan §3.4); doctor
 /// prints them. No variant carries a credential value.
 /// What: each variant names its scope through [`Finding::scope`]. `Stale`
-/// is reserved for S2b's reload (Architect Q3) and is not produced here.
+/// comes only from [`crate::policy::PolicyLoader`]'s reload (Architect Q3).
 /// Test: `disabled_channel_drops_routes_with_finding`,
 /// `unlisted_project_has_no_routes`, `widening_rate_limit_fails_that_file_only`,
 /// `overlap_across_files_names_both_files`, `host_faults_deny_all`.
@@ -200,6 +210,13 @@ pub enum Finding {
         /// The project route file.
         file: PathBuf,
     },
+    /// S2b: the one project a load asked for is not listed for any of the
+    /// consumer's enabled channels; it has no routes.
+    #[error("project {} is not listed for any enabled channel this load serves", project.display())]
+    ProjectUnlisted {
+        /// The project directory asked for.
+        project: PathBuf,
+    },
 }
 
 impl Finding {
@@ -220,6 +237,7 @@ impl Finding {
             Self::ChannelDisabled { .. } | Self::ProjectNotListed { .. } => FindingScope::Route,
             Self::FileRefused { .. }
             | Self::Stale { .. }
+            | Self::ProjectUnlisted { .. }
             | Self::RouteRejected { .. }
             | Self::Widening { .. }
             | Self::NoGchatConnection { .. }
