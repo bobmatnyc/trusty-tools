@@ -194,14 +194,14 @@ async fn gather_with_fakes() {
     assert_eq!(section.snippets[0].subtitle.as_deref(), Some("closed"));
 }
 
-// ─── cap_query / build_query truncation tests (#675) ─────────────────────────
+// ─── cap_keywords / build_query truncation tests (#675) ─────────────────────────
 
 #[test]
 fn query_short_unchanged() {
-    // A query already within the 256-char limit must pass through unmodified.
-    let q = cap_query("repo:acme/backend is:issue fix login");
-    assert_eq!(q, "repo:acme/backend is:issue fix login");
-    assert!(q.chars().count() <= GITHUB_QUERY_MAX_CHARS);
+    // #9503: cap_keywords takes the free text only; a short one passes through
+    // unchanged apart from whitespace collapse.
+    assert_eq!(cap_keywords("fix login"), "fix login");
+    assert_eq!(cap_keywords("  fix\n\n login\t now "), "fix login now");
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn query_capped_at_256_chars() {
     };
     let q = GithubIssuesSource::build_query(&subj).expect("signal");
     assert!(
-        q.chars().count() <= GITHUB_QUERY_MAX_CHARS,
+        q.chars().count() <= 256,
         "query was {} chars (>256): {:?}",
         q.chars().count(),
         q
@@ -225,30 +225,22 @@ fn query_capped_at_256_chars() {
 
 #[test]
 fn query_capped_at_word_boundary() {
-    // The truncation must not split mid-word: the result must not end with a
-    // partial token (i.e. the last char must be a non-space complete word, or
-    // the cut landed exactly on a space which is stripped).
-    // Build a query that is just over 256 chars with word-aligned tokens so we
-    // can verify the boundary.
-    let prefix = "repo:acme/backend is:issue "; // 26 chars
-    let filler = "abcde ".repeat(40); // 240 chars of 6-char "word " tokens
-    let full = format!("{prefix}{filler}extra");
+    // #9503: the cut lands on a term boundary (no partial token) and the free
+    // text stays within GitHub's cost budget.  Was a raw-256-char cap on the
+    // whole query, which let GitHub's 422 through.
+    let filler = "abcde ".repeat(60);
+    let capped = cap_keywords(&filler);
     assert!(
-        full.chars().count() > GITHUB_QUERY_MAX_CHARS,
-        "test precondition: full query must exceed 256 chars"
+        free_text_cost(&capped) <= GITHUB_FREE_TEXT_BUDGET,
+        "{capped:?}"
     );
-    let capped = cap_query(&full);
     assert!(
-        capped.chars().count() <= GITHUB_QUERY_MAX_CHARS,
-        "capped query too long: {} chars",
-        capped.chars().count()
+        capped.split(' ').all(|t| t == "abcde"),
+        "partial token: {capped:?}"
     );
-    // Must not end with a space (the whitespace boundary is the trim point).
-    assert!(
-        !capped.ends_with(' '),
-        "capped query must not end with a space: {:?}",
-        capped
-    );
+    // A single giant token is hard-cut inside the budget.
+    let giant = cap_keywords(&"x".repeat(400));
+    assert!(free_text_cost(&giant) <= GITHUB_FREE_TEXT_BUDGET);
 }
 
 #[test]
@@ -271,7 +263,7 @@ fn build_query_long_body_stays_under_256() {
     };
     let q = GithubIssuesSource::build_query(&subj).expect("signal");
     assert!(
-        q.chars().count() <= GITHUB_QUERY_MAX_CHARS,
+        q.chars().count() <= 256,
         "build_query returned {} chars (>256): {:?}",
         q.chars().count(),
         q
