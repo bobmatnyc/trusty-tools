@@ -76,3 +76,45 @@ fn delimiter_quoted_value_substitutions_stay_data_9360() {
     assert_eq!(unclassifiable_command(command), None, "{command:?}");
     assert_eq!(floor(command), None, "{command:?}");
 }
+
+/// Operator lines whose prefix assignment holds a `(` or `)` inside a
+/// `${…}` parameter expansion, which opens or closes no substitution in
+/// bash; each runs its body through `.` under bash 5 (#9360 critic round).
+const PARAMETER_PARENS: &[&str] = &[
+    "X=${x:-(} . /dev/stdin <<'O'",
+    "X=${x/(/} . /dev/stdin <<'O'",
+    "X=${x:-( cat } . /dev/stdin <<'O'",
+    "X=${x/(/ cat } . /dev/stdin <<'O'",
+    "X=$(echo ${y:-) cat }) . /dev/stdin <<'O'",
+];
+
+/// #9360 critic round: a paren inside `${…}` neither opens nor closes a
+/// substitution, so the line is no data line and its body reaches the floor.
+#[test]
+fn parameter_expansion_parens_reach_the_floor_9360() {
+    let mut allowed = Vec::new();
+    for line in PARAMETER_PARENS {
+        if line_reads_as_data(line) {
+            allowed.push(line.to_string());
+        }
+        for payload in PAYLOADS {
+            let command = format!("{line}\n{payload}\nO");
+            if !floor(&command).is_some_and(DeleteTarget::is_floor) {
+                allowed.push(command);
+            }
+        }
+    }
+    assert!(allowed.is_empty(), "allowed: {allowed:#?}");
+}
+
+/// #9360 critic round: a parameter expansion with no paren in it keeps a
+/// reader line data.
+#[test]
+fn plain_parameter_expansions_stay_data_9360() {
+    for line in [
+        "msg=${x:-default} cat <<'EOF'",
+        "cat > \"${OUT:-f}\" <<'EOF'",
+    ] {
+        assert!(line_reads_as_data(line), "{line:?}");
+    }
+}

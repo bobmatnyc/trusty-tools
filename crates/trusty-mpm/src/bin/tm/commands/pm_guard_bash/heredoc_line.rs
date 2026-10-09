@@ -113,10 +113,14 @@ pub(super) fn line_runs_a_shell(line: &str) -> bool {
 /// closed that substitution where the scan did. #9360: or left it open.
 /// Test: `operator_lines_read_as_data_only_for_a_literal_reader_9180`,
 /// `injected_reader_lines_are_not_data_9344`,
-/// `unclosed_quoted_value_substitution_lines_are_not_data_9360`.
+/// `unclosed_quoted_value_substitution_lines_are_not_data_9360`,
+/// `parameter_expansion_parens_reach_the_floor_9360`.
 pub(super) fn line_reads_as_data(line: &str) -> bool {
     let words = operator_words(line);
-    !words.iter().any(|word| word.quoted)
+    // #9360 critic round: the scan does not track `${…}`, where a paren
+    // opens or closes no substitution, so such a line is shell-run.
+    !expansion_holds_a_paren(line.as_bytes())
+        && !words.iter().any(|word| word.quoted)
         && words
             .iter()
             .enumerate()
@@ -126,6 +130,37 @@ pub(super) fn line_reads_as_data(line: &str) -> bool {
                     && DATA_READERS.contains(&&*word.text)
                     && reader_keeps_trust(&words, at)
             })
+}
+
+/// Whether a `${…}` parameter expansion on `line` holds a `(`, `)` or
+/// backtick, read to the end of the line when its `}` never comes (#9360
+/// critic round).
+///
+/// Why: bash opens and closes no substitution on such a paren, but
+/// [`operator_words`] does, so `X=${x:-( cat } . f <<'O'` read `cat` as the
+/// program and the body as data.
+/// What: from each `${`, counts `{`/`}` depth to the matching `}`; quotes are
+/// not tracked, which only reads more as a paren and fails closed.
+/// Test: `parameter_expansion_parens_reach_the_floor_9360`,
+/// `plain_parameter_expansions_stay_data_9360`.
+fn expansion_holds_a_paren(line: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(start) = line[at..].windows(2).position(|w| w == b"${") {
+        let mut depth = 0usize;
+        for &byte in &line[at + start + 1..] {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                b'(' | b')' | b'`' => return true,
+                _ => {}
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        at += start + 2;
+    }
+    false
 }
 
 /// git global options whose value is the next word (#9344).
