@@ -1645,3 +1645,7 @@ async fn remove_file_refuses_a_relative_path_outside_the_root_9236() {
 // #7434: multi-root writes, a child module so it reuses this harness.
 #[path = "writes_7434_tests.rs"]
 mod roots_7434;
+
+// #9510: index-file by an absolute path, a child module reusing this harness.
+#[path = "writes_9510_tests.rs"]
+mod abs_path_9510;
