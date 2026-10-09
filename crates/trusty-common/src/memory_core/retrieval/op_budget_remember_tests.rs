@@ -49,6 +49,7 @@ mod tests {
     /// watchdog's future, so a hung remember releases it before the panic.
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // #9487: parking the gate is the point
     async fn a_remember_whose_vector_step_exceeds_its_budget_commits_nothing() {
         crate::memory_core::retrieval::seed_shared_embedder_with_mock();
         let dir = tempfile::tempdir().expect("tempdir");

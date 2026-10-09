@@ -38,6 +38,7 @@ fn open_store() -> (tempfile::TempDir, UsearchStore) {
 
 /// Park the graph lock and run one upsert under the watchdog; the guard drops
 /// with the future, so a hung upsert is released before the test panics.
+#[allow(clippy::await_holding_lock)] // #9487: parking the lock is the point
 async fn upsert_behind_parked_graph(store: &UsearchStore) -> (anyhow::Result<()>, Duration) {
     let attempt = async {
         let _parked = store.hnsw_for_test().park_graph_for_test();
