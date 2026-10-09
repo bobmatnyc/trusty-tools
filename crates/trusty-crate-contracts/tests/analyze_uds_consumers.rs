@@ -38,6 +38,11 @@
 //! `the_deadline_code_trusty_review_copies_is_the_one_this_daemon_sends`.
 
 use std::path::{Path, PathBuf};
+
+// #9214: the one fake trusty-search socket, shared with trusty-analyze's tests.
+#[path = "../../trusty-analyze/tests/support/fake_search.rs"]
+mod fake_search;
+use fake_search::FakeSearchSocket;
 use std::time::Duration;
 
 use trusty_analyze::core::{FactStore, ScipOverlayStore, TrustySearchClient};
@@ -117,41 +122,25 @@ impl Drop for SocketGuard {
     }
 }
 
-/// A loopback stub answering `GET /health` with 200.
+/// A fake trusty-search socket answering `search.health`.
 ///
 /// Why: `analyze.health` reports `status: "ok"` only when its own trusty-search
 /// dependency is reachable, and the consumers read anything short of `"ok"`
 /// as not healthy. So the contract cannot be asserted at all without a
 /// reachable search daemon.
-/// What: serves `GET /health` from axum on `127.0.0.1:0`. axum rather than a
-/// hand-written response because `TrustySearchClient` dials with
-/// `http2_prior_knowledge()` — a raw HTTP/1.1 reply is never read, and the
-/// daemon reports `degraded` with nothing to say why. trusty-search is still an
-/// HTTP daemon; #6287 moved trusty-analyze's OWN transport, not the one it
-/// consumes.
-async fn spawn_search_stub() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind search stub");
-    let addr = listener.local_addr().expect("stub addr");
-    let stub = axum::Router::new().route(
-        "/health",
-        axum::routing::get(|| async {
-            axum::response::Json(serde_json::json!({ "status": "ok" }))
-        }),
-    );
-    tokio::spawn(async move {
-        axum::serve(listener, stub).await.ok();
-    });
-    format!("http://{addr}")
+/// What: #9214 — trusty-analyze reaches trusty-search over its Unix socket, so
+/// this is trusty-analyze's own test fixture bound in a tempdir, not an HTTP
+/// stub.
+async fn spawn_search_stub() -> FakeSearchSocket {
+    FakeSearchSocket::healthy()
 }
 
-/// Build the daemon's real state over stores in `dir`, pointed at `search_base`.
-fn state_over(dir: &Path, search_base: &str) -> AnalyzerAppState {
+/// Build the daemon's real state over stores in `dir`, pointed at `search`.
+fn state_over(dir: &Path, search: impl AsRef<Path>) -> AnalyzerAppState {
     let facts = FactStore::open(&dir.join("facts.redb")).expect("open the facts store");
     let overlays =
         ScipOverlayStore::open(&dir.join("scip_overlays.redb")).expect("open the overlay store");
-    AnalyzerAppState::new(TrustySearchClient::new(search_base), facts, overlays)
+    AnalyzerAppState::new(TrustySearchClient::new(search.as_ref()), facts, overlays)
 }
 
 /// The version the daemon itself puts on the wire.

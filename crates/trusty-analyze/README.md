@@ -27,10 +27,14 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 > **trusty-analyze requires a running `trusty-search` daemon.**
 >
-> The analyzer performs a startup health check against `http://127.0.0.1:7878/health`
-> (or the URL given by `--search-url`) and exits with code 1 if that check fails.
-> There is no standalone or offline mode. **Start `trusty-search` before starting
-> `trusty-analyze`.**
+> The analyzer connects to the trusty-search daemon's Unix socket and performs a
+> startup health check over it. If the socket is missing or the daemon does not
+> answer, it prints an error naming the socket path, tells you to start the
+> daemon (`trusty-search daemon`), and exits with code 1. There is no standalone
+> or offline mode. **Start `trusty-search` before starting `trusty-analyze`.**
+>
+> The socket path is `TRUSTY_SEARCH_SOCKET` when that variable is set. Otherwise
+> it is the trusty-search default, `<data dir>/trusty-search/trusty-search.sock`.
 >
 > Install trusty-search: `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked`
 > or see [trusty-search's README](../trusty-search/README.md) for prebuilt binaries.
@@ -122,7 +126,7 @@ LaunchAgent and no `service install` — installing the binary is the whole setu
 Run it in the foreground only when you want to watch it:
 
 ```bash
-trusty-analyze --search-url http://127.0.0.1:7878 serve
+trusty-analyze serve
 ```
 
 Two environment variables govern the lifecycle:
@@ -158,8 +162,8 @@ printf '{"jsonrpc":"2.0","id":1,"method":"analyze.health"}\n' \
 # → {"jsonrpc":"2.0","id":1,"result":{"status":"ok","version":"…","search_reachable":true}}
 ```
 
-`search_reachable` reflects whether the upstream `trusty-search` daemon (port
-7878, still HTTP) is responding; a `false` here means every analysis method
+`search_reachable` reflects whether the upstream `trusty-search` daemon (on its
+Unix socket) is responding; a `false` here means every analysis method
 will fail even though the analyzer process itself is up, and `status` reads
 `degraded` rather than `ok`.
 
@@ -204,8 +208,8 @@ Add to your project's `.mcp.json`:
 ```
 
 `trusty-search` must already be running. The analyzer performs a startup health
-check against `http://127.0.0.1:7878/health` and exits with code 1 if
-unreachable.
+check over the trusty-search Unix socket and exits with code 1 if the socket is
+missing or unreachable.
 
 ## MCP Tools
 
@@ -282,7 +286,7 @@ ADR-0032 moved the daemon onto a socket.
 ## RPC Surface
 
 JSON-RPC 2.0 over `<data dir>/trusty-analyze/trusty-analyze.sock`, one
-newline-terminated frame per request. Requires trusty-search on port 7878.
+newline-terminated frame per request. Requires the trusty-search daemon's Unix socket.
 `service::rpc::METHODS` is the authoritative list — the four crates that dial
 these names by literal are checked against it by
 `tests/uds_consumer_contract.rs`:
@@ -311,7 +315,7 @@ the `TRUSTY_LLM_MODEL` environment variable.
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
 export TRUSTY_LLM_MODEL=openai/gpt-4o-mini   # default; override as needed
-trusty-analyze --search-url http://127.0.0.1:7878 serve
+trusty-analyze serve
 ```
 
 ### Using AWS Bedrock
@@ -330,7 +334,7 @@ export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_REGION=us-east-1           # or: export TRUSTY_AWS_REGION=eu-west-1
 
-trusty-analyze --search-url http://127.0.0.1:7878 serve
+trusty-analyze serve
 ```
 
 When the model id starts with `bedrock/`, the daemon routes the LLM call
@@ -377,7 +381,7 @@ The MCP equivalent is `tr_report`, with the same options as `manifest_path`,
 
 | Variable | Default | Description |
 |---|---|---|
-| `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon address |
+| `TRUSTY_SEARCH_SOCKET` | `<data dir>/trusty-search/trusty-search.sock` | trusty-search daemon socket path. |
 | `TRUSTY_AUDIT_REPORT_TEMPLATE` | unset | Lowest-precedence template selection for `report` / `tr_report`, set by `trusty-audit` from an engagement's `[report] template`. |
 | `TRUSTY_AUDIT_REPORT_CODE_ONLY` | unset | Same, for `code_only`. `1`/`true`/`yes`/`on` enable it; anything else reads as absent. |
 | `TRUSTY_ANALYZE_SOCKET` | derived from the data dir | Analyzer socket path, honoured by `trusty-audit`'s guard. `TRUSTY_ANALYZER_PORT` was removed with the listener (#6287). |
@@ -402,8 +406,8 @@ the MCP stdio server live within this one crate. Shared types (complexity metric
 code smells, knowledge-graph entities, facts) come from `trusty-common`.
 
 ```
-trusty-search (port 7878, HTTP)          trusty-analyze (trusty-analyze.sock)
-  GET /indexes/:id/chunks  ──────────►   complexity analysis (tree-sitter)
+trusty-search (trusty-search.sock)       trusty-analyze (trusty-analyze.sock)
+  JSON-RPC over UDS        ──────────►   complexity analysis (tree-sitter)
   (bulk corpus export)                   blame + temporal decay
                                          quality grade aggregation
                                          k-means concept clustering

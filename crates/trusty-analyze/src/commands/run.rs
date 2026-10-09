@@ -70,13 +70,14 @@ pub async fn run_serve(
     // Hard dependency: refuse to start if trusty-search is unreachable.
     // Why: there is no standalone/offline mode — every analysis operation
     // fetches chunk corpora from the search daemon at runtime.
-    // What: one GET /health probe before we bind our own port or open redb.
+    // What: one `search.health` probe (#9214: over the socket) before we bind
+    // our own socket or open redb.
     // Test: run `trusty-analyzer serve` without trusty-search running and
     // verify exit code 1 and the printed error message.
     if !search.health().await.unwrap_or(false) {
         eprintln!(
             "Error: trusty-search is not reachable at {}\n       Start it first: trusty-search daemon",
-            search.base_url()
+            search.socket_path().display()
         );
         std::process::exit(1);
     }
@@ -255,13 +256,13 @@ pub async fn run_review_pr(
         .ok_or_else(|| anyhow::anyhow!("--index-id is required to cross-reference the diff"))?;
 
     // Review is backed by trusty-search; refuse to run if it's unreachable.
-    let search = TrustySearchClient::new(
-        std::env::var("TRUSTY_SEARCH_URL").unwrap_or_else(|_| "http://127.0.0.1:7878".to_string()),
-    );
+    // #9214: the socket client — `TRUSTY_SEARCH_SOCKET` or the standard path,
+    // never a TCP default.
+    let search = TrustySearchClient::from_env()?;
     if !search.health().await.unwrap_or(false) {
         eprintln!(
             "Error: trusty-search is unreachable at {}. review-pr requires trusty-search to be running.",
-            search.base_url()
+            search.socket_path().display()
         );
         std::process::exit(1);
     }

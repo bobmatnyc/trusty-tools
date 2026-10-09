@@ -8,8 +8,9 @@
 //! that has one.
 //!
 //! What the fixtures supply: `trusty-analyze serve` refuses to start when
-//! trusty-search is unreachable, so [`StubSearch`] answers `/health` on a
-//! loopback port for the duration of a test. Everything else — the socket, the
+//! trusty-search is unreachable, so a [`FakeSearchSocket`] answers
+//! `search.health` on a tempdir socket for the duration of a test (#9214: was a
+//! loopback HTTP stub). Everything else — the socket, the
 //! facts store, the idle window — is pointed inside a tempdir, so no test
 //! touches a developer's real data directory or their running daemon.
 //!
@@ -20,60 +21,21 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::net::TcpListener;
+#[path = "support/fake_search.rs"]
+mod fake_search;
 
-/// A loopback `/health` responder standing in for trusty-search.
-///
-/// Why: `run_serve` exits 1 when `search.health()` is false, which would make
-/// every spawn in this file fail for a reason that has nothing to do with the
-/// behaviour under test. Answering one 2xx on `/health` is the whole contract
-/// these tests need from trusty-search.
-///
-/// Why axum and not a hand-written responder: `TrustySearchClient` builds its
-/// reqwest client with `http2_prior_knowledge()`, so it opens the connection by
-/// writing the h2 preface and never reads an HTTP/1.1 reply. `axum::serve` runs
-/// hyper's auto `Builder`, which recognises that preface — a raw
-/// `HTTP/1.1 200 OK` produces exactly the "trusty-search is not reachable"
-/// error a missing daemon would.
-struct StubSearch {
-    base_url: String,
-    _task: tokio::task::JoinHandle<()>,
-}
-
-impl StubSearch {
-    async fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
-        let addr = listener.local_addr().expect("addr");
-        // `/health` is what `run_serve` gates its startup on; `/indexes` is what
-        // `analyze.index_list` proxies to, and a 404 there surfaces as an RPC
-        // error the adapter reads as `Unreachable` — indistinguishable from a
-        // dead server, which is exactly the verdict these tests must be able to
-        // tell apart. An empty listing is the honest answer for a tempdir.
-        let app = axum::Router::new()
-            .route(
-                "/health",
-                axum::routing::get(|| async { axum::Json(serde_json::json!({ "status": "ok" })) }),
-            )
-            .route(
-                "/indexes",
-                axum::routing::get(|| async { axum::Json(serde_json::json!({ "indexes": [] })) }),
-            );
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Self {
-            base_url: format!("http://{addr}"),
-            _task: task,
-        }
-    }
-}
+use fake_search::FakeSearchSocket;
 
 /// Spawn `trusty-analyze serve` the way a client would, under a tempdir.
 ///
 /// The `--socket` and `--facts-path` overrides are what keep the test off the
 /// developer's real data directory; `TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS` is what
 /// makes an idle exit observable in seconds rather than minutes.
-fn spawn_server(dir: &Path, search: &StubSearch, idle_secs: u64) -> (PathBuf, std::process::Child) {
+fn spawn_server(
+    dir: &Path,
+    search: &FakeSearchSocket,
+    idle_secs: u64,
+) -> (PathBuf, std::process::Child) {
     spawn_server_with_store(dir, search, idle_secs, "store")
 }
 
@@ -90,7 +52,7 @@ fn spawn_server(dir: &Path, search: &StubSearch, idle_secs: u64) -> (PathBuf, st
 /// contend for.
 fn spawn_server_with_store(
     dir: &Path,
-    search: &StubSearch,
+    search: &FakeSearchSocket,
     idle_secs: u64,
     store_dir: &str,
 ) -> (PathBuf, std::process::Child) {
@@ -102,7 +64,7 @@ fn spawn_server_with_store(
         .arg(stores.join("facts.redb"))
         .args(["serve", "--socket"])
         .arg(&socket)
-        .env("TRUSTY_SEARCH_URL", &search.base_url)
+        .env("TRUSTY_SEARCH_SOCKET", search.path())
         .env("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", idle_secs.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -191,7 +153,7 @@ fn socket_identity(socket: &Path) -> Option<(u64, u64)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
     let (socket, mut child) = spawn_server(tmp.path(), &search, 1);
     let facts = tmp.path().join("store").join("facts.redb");
 
@@ -236,7 +198,7 @@ async fn an_idle_exit_frees_its_redb_locks_before_it_unlinks_the_socket() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_exits_on_its_own_idle_window() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
     let (socket, mut child) = spawn_server(tmp.path(), &search, 2);
 
     assert!(
@@ -272,7 +234,7 @@ async fn serve_exits_on_its_own_idle_window() {
 ///
 /// What makes it deterministic: `resolve_binary` consults `PATH` and then the
 /// well-known bin directories, so on a machine with trusty-analyze installed
-/// the missing-binary branch is unreachable — and pointing `TRUSTY_SEARCH_URL`
+/// the missing-binary branch is unreachable — and pointing `TRUSTY_SEARCH_SOCKET`
 /// at nothing is what forces a failure that does not depend on the machine.
 /// `run_serve` refuses to start when trusty-search is unreachable, so the child
 /// exits before binding and `ensure_running` reports `SpawnTimeout`. Without
@@ -292,9 +254,12 @@ async fn a_server_that_cannot_start_is_an_error_not_a_success() {
     // before setting its own.
     unsafe {
         std::env::set_var("TRUSTY_ANALYZER_FACTS", tmp.path().join("facts.redb"));
-        // Port 1 is privileged and unbound: the child's startup probe of
-        // trusty-search always refuses, so it always exits before its bind.
-        std::env::set_var("TRUSTY_SEARCH_URL", "http://127.0.0.1:1");
+        // #9214: a socket path nobody serves — the child's startup probe of
+        // trusty-search always fails, so it always exits before its bind.
+        std::env::set_var(
+            "TRUSTY_SEARCH_SOCKET",
+            tmp.path().join("absent-search.sock"),
+        );
     }
 
     let handle = trusty_common::uds::OnDemandAnalyze::at(&socket);
@@ -325,7 +290,7 @@ async fn a_server_that_cannot_start_is_an_error_not_a_success() {
 async fn two_concurrent_callers_share_one_server() {
     use_the_binary_under_test();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
     let socket = tmp.path().join("trusty-analyze.sock");
 
     // The child must find trusty-search and its own facts store, and both are
@@ -334,7 +299,7 @@ async fn two_concurrent_callers_share_one_server() {
     // SAFETY: this test binary sets these once, before any spawn, and no other
     // test in this file reads them.
     unsafe {
-        std::env::set_var("TRUSTY_SEARCH_URL", &search.base_url);
+        std::env::set_var("TRUSTY_SEARCH_SOCKET", search.path());
         std::env::set_var("TRUSTY_ANALYZER_FACTS", tmp.path().join("facts.redb"));
         std::env::set_var("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", "120");
     }
@@ -448,7 +413,7 @@ fn analyze_flush_budget_matches_the_supervisor_contract() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_racing_server_processes_leave_exactly_one() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
 
     // Started back to back with no await between, so both reach their bind
     // inside the same few milliseconds.
@@ -554,14 +519,14 @@ async fn the_adapter_respawns_a_server_that_idled_out() {
 
     use_the_binary_under_test();
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
     let socket = tmp.path().join("trusty-analyze.sock");
 
     // `ensure_running` spawns with this process's environment, so the child
     // finds the stub search, its own facts store, and a short idle window here.
     // SAFETY: set once, before any spawn; no other test in this file reads them.
     unsafe {
-        std::env::set_var("TRUSTY_SEARCH_URL", &search.base_url);
+        std::env::set_var("TRUSTY_SEARCH_SOCKET", search.path());
         std::env::set_var("TRUSTY_ANALYZER_FACTS", tmp.path().join("facts.redb"));
         std::env::set_var("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", "2");
     }
@@ -630,7 +595,7 @@ impl McpSession {
     ///
     /// The `--facts-path` and `--socket` overrides keep the child off the
     /// developer's real data directory, exactly as [`spawn_server`] does.
-    fn start(dir: &Path, search: &StubSearch, idle_secs: u64) -> Self {
+    fn start(dir: &Path, search: &FakeSearchSocket, idle_secs: u64) -> Self {
         use tokio::io::AsyncBufReadExt as _;
 
         let socket = dir.join("trusty-analyze.sock");
@@ -641,7 +606,7 @@ impl McpSession {
             .arg(stores.join("facts.redb"))
             .args(["serve", "--mcp", "--socket"])
             .arg(&socket)
-            .env("TRUSTY_SEARCH_URL", &search.base_url)
+            .env("TRUSTY_SEARCH_SOCKET", search.path())
             .env("TRUSTY_ANALYZE_IDLE_TIMEOUT_SECS", idle_secs.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -757,7 +722,7 @@ async fn an_mcp_session_outlives_the_idle_window() {
     const SILENCE: Duration = Duration::from_secs(12);
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let search = StubSearch::start().await;
+    let search = FakeSearchSocket::healthy();
     let mut session = McpSession::start(tmp.path(), &search, IDLE_SECS);
 
     let initialized = session

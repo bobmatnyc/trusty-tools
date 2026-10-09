@@ -54,14 +54,6 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
     about = "Sidecar code-analysis daemon for trusty-search"
 )]
 struct Cli {
-    /// Base URL of the trusty-search daemon. Defaults to http://127.0.0.1:7878.
-    #[arg(
-        long,
-        default_value = "http://127.0.0.1:7878",
-        env = "TRUSTY_SEARCH_URL"
-    )]
-    search_url: String,
-
     /// Path to the redb facts store (default: `~/.trusty-tools/analyze/facts.redb`).
     /// Override via `TRUSTY_ANALYZER_FACTS`. (#632: home-anchored to fix launchd cwd crash)
     #[arg(long, env = "TRUSTY_ANALYZER_FACTS")]
@@ -437,7 +429,9 @@ async fn main() -> Result<()> {
             std::process::exit(e.exit_code());
         }
     };
-    let search = TrustySearchClient::new(&cli.search_url);
+    // #9214: trusty-search is reached over its Unix socket — `TRUSTY_SEARCH_SOCKET`
+    // or the standard path. `--search-url` / `TRUSTY_SEARCH_URL` are gone.
+    let search = TrustySearchClient::from_env()?;
     // Home-anchored default; see daemon_cmds::resolve_facts_path (#632).
     let facts_path = daemon_cmds::resolve_facts_path(cli.facts_path)?;
 
@@ -554,13 +548,13 @@ async fn main() -> Result<()> {
             // so refuse to run if the search daemon is unreachable.
             // Why: there is no offline mode — review cross-references the
             // already-indexed chunks for the files the diff touches.
-            // What: one GET /health probe before reading the diff.
+            // What: one `search.health` probe before reading the diff (#9214).
             // Test: run `trusty-analyze review --index-id x` with trusty-search
             // down and verify exit code 1 and the printed error message.
             if !search.health().await.unwrap_or(false) {
                 eprintln!(
                     "Error: trusty-search is unreachable at {}. The review command requires trusty-search to be running.",
-                    search.base_url()
+                    search.socket_path().display()
                 );
                 std::process::exit(1);
             }
@@ -639,7 +633,7 @@ async fn main() -> Result<()> {
             let search_ok = search.health().await.unwrap_or(false);
             println!(
                 "trusty-search ({}): {}",
-                search.base_url(),
+                search.socket_path().display(),
                 if search_ok { "OK" } else { "DOWN" }
             );
             // #6287: the analyzer's own health comes off its socket. The #4392

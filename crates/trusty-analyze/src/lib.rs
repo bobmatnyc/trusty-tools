@@ -16,8 +16,9 @@
 //! # Prerequisites — REQUIRED before starting
 //!
 //! **`trusty-analyze` requires a running `trusty-search` daemon.** The analyzer
-//! performs a startup health check against `http://127.0.0.1:7878/health` (or the
-//! URL given by `--search-url`) and exits with code 1 if that check fails. There
+//! performs a startup `search.health` check over trusty-search's Unix socket (the
+//! path in `TRUSTY_SEARCH_SOCKET`, or the standard one — #9214) and exits with
+//! code 1 if that check fails. There
 //! is no standalone or offline mode. Start `trusty-search` first:
 //!
 //! ```text
@@ -51,7 +52,7 @@
 //! trusty-search daemon
 //!
 //! # Then start the analyzer
-//! trusty-analyze serve --search-url http://127.0.0.1:7878
+//! trusty-analyze serve
 //!
 //! # Analyze an index and view complexity hotspots
 //! trusty-analyze analyze <index-id> --top-k 20
