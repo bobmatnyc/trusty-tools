@@ -3155,12 +3155,17 @@ fn cli_parses_memory_forget() {
             action:
                 MemoryAction::Forget {
                     drawer_id,
+                    fact_key,
                     palace,
                     json,
                     memory_socket,
                 },
         } => {
-            assert_eq!(drawer_id, "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21");
+            assert_eq!(
+                drawer_id.as_deref(),
+                Some("0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21")
+            );
+            assert_eq!(fact_key, None);
             assert_eq!(palace.as_deref(), Some("p"));
             assert_eq!(memory_socket, Some(std::path::PathBuf::from("/tmp/m.sock")));
             assert!(json);
@@ -3169,6 +3174,34 @@ fn cli_parses_memory_forget() {
     }
     // The id is required: a bare `forget` is a usage error, not a no-op.
     assert!(Cli::try_parse_from(["trusty-mpm", "memory", "forget"]).is_err());
+}
+
+/// #9340 arm 7: `--fact-key` stands in for the positional id, never beside it,
+/// and one of the two is required.
+#[test]
+fn cli_parses_memory_forget_by_fact_key() {
+    let forget = |extra: &[&str]| {
+        let mut argv = vec!["trusty-mpm", "memory", "forget"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv)
+    };
+    assert!(
+        forget(&["--fact-key", "pr:9340/state"]).is_ok(),
+        "`forget --fact-key <key>` must parse"
+    );
+    assert!(
+        forget(&[
+            "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21",
+            "--fact-key",
+            "pr:9340/state"
+        ])
+        .is_err(),
+        "an id and --fact-key together must be refused"
+    );
+    assert!(
+        forget(&[]).is_err(),
+        "neither an id nor --fact-key: refused"
+    );
 }
 
 #[test]

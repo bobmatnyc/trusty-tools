@@ -400,3 +400,288 @@ async fn forget_with_a_dead_daemon_exits_non_zero_naming_the_socket() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// A stub daemon answering each method with its own canned body (#9340).
+///
+/// Why: `forget --fact-key` makes two calls — `memory_list`, then
+/// `memory_forget` — so one body for every method cannot drive it. A method
+/// with no body is refused, which a test sees as a non-zero exit.
+struct ByMethod {
+    bodies: Vec<(&'static str, Value)>,
+    calls: Calls,
+}
+
+#[async_trait]
+impl RpcFallback for ByMethod {
+    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push((method.to_string(), params));
+        }
+        self.bodies
+            .iter()
+            .find(|(m, _)| *m == method)
+            .map(|(_, body)| body.clone())
+            .ok_or_else(|| RpcError::new(-32601, format!("stub has no body for {method}")))
+    }
+}
+
+/// Bind a [`ByMethod`] stub at `socket`, serving until the guard is dropped.
+async fn serve_by_method(
+    socket: &Path,
+    bodies: Vec<(&'static str, Value)>,
+) -> (tokio::sync::oneshot::Sender<()>, Calls) {
+    let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind the stub socket");
+    let router = Arc::new(RpcRouter::new().fallback(ByMethod {
+        bodies,
+        calls: Arc::clone(&calls),
+    }));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        serve_until(&listener, router, RpcServeOptions::default(), async {
+            let _ = rx.await;
+        })
+        .await;
+    });
+    (tx, calls)
+}
+
+/// The `limit` `forget --fact-key` must ask `memory_list` for.
+///
+/// Mirrors `trusty_mpm::core::memory_forget::FACT_KEY_LIST_LIMIT`; spelled out
+/// here so the red-first run compiles against the pre-#9340 library.
+const LIST_LIMIT: usize = 100_000;
+
+/// The slot key the fact-key tests forget.
+const KEY: &str = "pr:9340/state";
+/// A second drawer id, for the ambiguous and expired arms.
+const OTHER: &str = "6d2e1f0a-3b4c-4d5e-8f60-718293a4b5c6";
+/// An `expires_at` that never passes inside a test run.
+const FUTURE: &str = "2999-01-01T00:00:00+00:00";
+/// An `expires_at` long gone.
+const PAST: &str = "2000-01-01T00:00:00+00:00";
+
+/// One listed drawer, as `handle_memory_list` shapes it after PR1 of #9340.
+fn listed(id: &str, fact_key: Option<&str>, expires_at: Option<&str>) -> Value {
+    json!({
+        "drawer_id": id,
+        "content": format!("drawer {id}"),
+        "importance": 0.5,
+        "tags": [],
+        "created_at": "2026-10-09T00:00:00+00:00",
+        "drawer_type": "Insight",
+        "expires_at": expires_at,
+        "fact_key": fact_key,
+    })
+}
+
+/// A `memory_list` body for palace `p`.
+fn list_body(drawers: Vec<Value>) -> Value {
+    json!({ "palace": "p", "drawers": drawers })
+}
+
+/// The methods the stub was sent, in order.
+fn methods(calls: &Calls) -> Vec<String> {
+    calls
+        .lock()
+        .expect("recorded calls")
+        .iter()
+        .map(|(m, _)| m.clone())
+        .collect()
+}
+
+/// Run `tm memory forget --fact-key KEY` against a stub listing `drawers`.
+async fn forget_by_key(drawers: Vec<Value>) -> (Output, Calls) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("memory.sock");
+    let (_stop, calls) = serve_by_method(
+        &socket,
+        vec![
+            ("memory_list", list_body(drawers)),
+            (
+                "memory_forget",
+                json!({ "palace": "p", "status": "deleted", "drawer_id": DRAWER }),
+            ),
+        ],
+    )
+    .await;
+    let out = run_tm(&socket, Some("p"), &["forget", "--fact-key", KEY]).await;
+    (out, calls)
+}
+
+/// Assert a fact-key run failed closed: non-zero, KEY named, only a listing sent.
+fn assert_refused(out: &Output, calls: &Calls) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "must not exit 0: {stderr}");
+    assert!(
+        stderr.contains(KEY),
+        "the error must name the key: {stderr}"
+    );
+    assert!(
+        stderr.contains("nothing was deleted"),
+        "the error must say nothing was deleted: {stderr}"
+    );
+    assert_eq!(
+        methods(calls),
+        vec!["memory_list".to_string()],
+        "a refused fact-key forget sends the listing and no memory_forget"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "nothing may be printed as deleted: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    stderr
+}
+
+/// Why (#9340 arm 1): `--fact-key` resolves the slot's one live occupant from
+/// the whole-palace listing and forgets it through the id form's own
+/// `memory_forget` call, in the same palace.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_forgets_the_one_listed_occupant() {
+    let (out, calls) = forget_by_key(vec![
+        listed(OTHER, None, None),
+        listed(DRAWER, Some(KEY), Some(FUTURE)),
+        listed(
+            "1a2b3c4d-0000-4000-8000-000000000001",
+            Some("pr:1/state"),
+            None,
+        ),
+    ])
+    .await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seen = calls.lock().expect("recorded calls").clone();
+    assert_eq!(seen.len(), 2, "one listing, one forget: {seen:?}");
+    assert_eq!(seen[0].0, "memory_list");
+    assert_eq!(
+        seen[0].1,
+        json!({ "palace": "p", "limit": LIST_LIMIT, "full": true }),
+        "the listing must ask for the whole palace, unfolded"
+    );
+    assert_eq!(seen[1].0, "memory_forget");
+    assert_eq!(seen[1].1, json!({ "palace": "p", "drawer_id": DRAWER }));
+    assert!(
+        stdout.contains("deleted") && stdout.contains(DRAWER),
+        "{stdout}"
+    );
+}
+
+/// Why (#9340 arm 2): a key no drawer holds must fail closed and name the key.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_with_no_match_fails_closed() {
+    let (out, calls) = forget_by_key(vec![
+        listed(DRAWER, None, None),
+        listed(OTHER, Some("pr:1/state"), Some(FUTURE)),
+    ])
+    .await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(stderr.contains("no live drawer"), "{stderr}");
+}
+
+/// Why (#9340 arm 3): two live drawers on one key is a palace this cannot
+/// resolve; it must list every candidate and forget neither.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_with_two_matches_names_every_candidate() {
+    let (out, calls) = forget_by_key(vec![
+        listed(DRAWER, Some(KEY), Some(FUTURE)),
+        listed(OTHER, Some(KEY), None),
+    ])
+    .await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(
+        stderr.contains(DRAWER) && stderr.contains(OTHER),
+        "every candidate id must be named: {stderr}"
+    );
+}
+
+/// Why (#9340 arm 4): `memory_list` has no cursor, so a page as long as the
+/// requested `limit` cannot prove the palace was seen whole, and a body the
+/// daemon's byte ceiling folded (`truncated: true`) dropped drawers from its
+/// tail. The occupant on either page must NOT be forgotten.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_on_an_incomplete_listing_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("memory.sock");
+    let mut folded = list_body(vec![listed(DRAWER, Some(KEY), Some(FUTURE))]);
+    folded["truncated"] = json!(true);
+    folded["withheld"] = json!(7);
+    let (_stop, calls) = serve_by_method(&socket, vec![("memory_list", folded)]).await;
+    let out = run_tm(&socket, Some("p"), &["forget", "--fact-key", KEY]).await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(stderr.contains("incomplete"), "{stderr}");
+
+    // Slim entries keep the page well inside the client's 32 MiB frame cap.
+    let mut drawers: Vec<Value> = (1..LIST_LIMIT)
+        .map(|i| {
+            json!({
+                "drawer_id": format!("00000000-0000-4000-8000-{i:012}"),
+                "expires_at": null,
+                "fact_key": null,
+            })
+        })
+        .collect();
+    drawers.push(listed(DRAWER, Some(KEY), Some(FUTURE)));
+    let (out, calls) = forget_by_key(drawers).await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(
+        stderr.contains("incomplete") && stderr.contains(&LIST_LIMIT.to_string()),
+        "{stderr}"
+    );
+}
+
+/// Why (#9340 arm 5): a drawer past its `expires_at` is no live occupant. The
+/// daemon does not sweep an expired Tier C drawer, so it stays listed with its
+/// key. It is skipped beside a live one; an only-expired match is zero matches
+/// and the error names its id, for the id form.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_skips_an_expired_occupant() {
+    let (out, calls) = forget_by_key(vec![
+        listed(OTHER, Some(KEY), Some(PAST)),
+        listed(DRAWER, Some(KEY), Some(FUTURE)),
+    ])
+    .await;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let seen = calls.lock().expect("recorded calls").clone();
+    assert_eq!(
+        seen.last()
+            .map(|(m, p)| (m.as_str(), p["drawer_id"].clone())),
+        Some(("memory_forget", json!(DRAWER))),
+        "the live occupant is the one forgotten: {seen:?}"
+    );
+
+    let (out, calls) = forget_by_key(vec![listed(OTHER, Some(KEY), Some(PAST))]).await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(
+        stderr.contains("no live drawer") && stderr.contains("expired") && stderr.contains(OTHER),
+        "{stderr}"
+    );
+}
+
+/// Why (#9340 arm 6): a daemon that predates the listed `fact_key` reports no
+/// such field at all. Read as zero matches, a typo and an old daemon would
+/// look the same; it must say the daemon is too old.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_by_fact_key_against_a_pre_fact_key_daemon_fails_closed() {
+    let mut old = listed(DRAWER, None, None);
+    if let Some(fields) = old.as_object_mut() {
+        fields.remove("fact_key");
+    }
+    let (out, calls) = forget_by_key(vec![old]).await;
+    let stderr = assert_refused(&out, &calls);
+    assert!(stderr.contains("too old"), "{stderr}");
+}

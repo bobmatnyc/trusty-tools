@@ -132,16 +132,25 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             };
             super::memory_verbs::run(verb, palace, memory_socket, json).await
         }
-        // #9340: delete one drawer by id over the same socket.
+        // #9340: delete one drawer by id, or by the slot it holds, over the same socket.
         MemoryAction::Forget {
             drawer_id,
+            fact_key,
             palace,
             json,
             memory_socket,
-        } => {
-            let verb = MemoryVerb::Forget { drawer_id };
-            super::memory_verbs::run(verb, palace, memory_socket, json).await
-        }
+        } => match (drawer_id, fact_key) {
+            (Some(drawer_id), None) => {
+                let verb = MemoryVerb::Forget { drawer_id };
+                super::memory_verbs::run(verb, palace, memory_socket, json).await
+            }
+            (None, Some(fact_key)) => {
+                super::memory_verbs::run_forget_fact_key(&fact_key, palace, memory_socket, json)
+                    .await
+            }
+            // clap enforces exactly one; this arm only guards a parser change.
+            _ => anyhow::bail!("pass exactly one of <DRAWER_ID> and --fact-key"),
+        },
     }
 }
 

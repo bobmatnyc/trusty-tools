@@ -126,15 +126,22 @@ pub(crate) enum MemoryAction {
         memory_socket: Option<PathBuf>,
     },
 
-    /// Delete one drawer by id — the no-MCP `memory_forget` (#9340).
+    /// Delete one drawer by id or by slot — the no-MCP `memory_forget` (#9340).
     ///
     /// For cleaning up test or throwaway drawers. Exits non-zero when the
     /// daemon is unreachable, and when it reports no drawer with that id in the
-    /// palace — an unknown id is never reported as deleted. There is no
-    /// `--fact-key` form yet: trusty-memory exposes no slot-to-drawer lookup.
+    /// palace — an unknown id is never reported as deleted. `--fact-key`
+    /// lists the palace and forgets the slot's one live occupant; zero
+    /// matches, several, an incomplete listing or a daemon too old to report
+    /// slots each exit non-zero with nothing deleted.
     Forget {
         /// UUID of the drawer to delete, as `remember`/`note`/`recall` print it.
-        drawer_id: String,
+        // #9340: exactly one of the id and `--fact-key`.
+        #[arg(required_unless_present = "fact_key", conflicts_with = "fact_key")]
+        drawer_id: Option<String>,
+        /// Forget the drawer that holds this ADR-0028 slot now, instead of an id.
+        #[arg(long)]
+        fact_key: Option<String>,
         /// Palace to delete from. Defaults to the session's own.
         #[arg(long)]
         palace: Option<String>,
