@@ -81,6 +81,32 @@ fn keychain_delete_maps_no_entry_to_false_and_failures_to_errors() {
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 }
 
+/// Why: #9070 — a flag lookup that failed must never read as ON, and a
+/// missing flag item is OFF. Mapping the failure arm to `Ok(true)` or
+/// `Ok(false)` fails this test.
+/// Test: itself.
+#[test]
+#[cfg(target_os = "macos")]
+fn keychain_flag_maps_no_entry_to_off_and_failures_to_errors() {
+    let (vault, key) = names();
+    assert!(map_flag(&vault, &key, Ok("1".to_string())).unwrap());
+    assert!(!map_flag(&vault, &key, Err(keyring::Error::NoEntry)).unwrap());
+    let locked = keyring::Error::NoStorageAccess("keychain is locked".into());
+    let err = map_flag(&vault, &key, Err(locked)).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+}
+
+/// Why: #9070 — the flag item lives in its own service, one account per
+/// (vault, key), so it can never collide with a value item.
+/// Test: itself.
+#[test]
+fn keychain_agents_account_is_vault_then_key() {
+    let (vault, key) = names();
+    assert_eq!(AGENTS_SERVICE, "trusty-secrets.agents");
+    assert_eq!(agents_account(&vault, &key), "trusty/acme/web/API_KEY");
+    assert_ne!(AGENTS_SERVICE, vault.as_str());
+}
+
 /// Why: `BadEncoding` carries the stored bytes — the secret. The mapped
 /// error, in both `Display` and `Debug`, must not contain them.
 /// Test: itself.
@@ -128,4 +154,8 @@ fn keychain_backend_fails_closed_off_macos() {
     unavailable(backend.set(&vault, &key, &value));
     unavailable(backend.get(&vault, &key).map(|_| ()));
     unavailable(backend.delete(&vault, &key).map(|_| ()));
+    // #9070: the flag item fails closed too; it never reads as ON.
+    unavailable(backend.agents_may_use(&vault, &key).map(|_| ()));
+    unavailable(backend.set_agents_may_use(&vault, &key, true));
+    unavailable(backend.set_agents_may_use(&vault, &key, false));
 }

@@ -8,7 +8,8 @@
 //! `delete_across` also clears backends other than the configured one (#7519).
 //! A `set` writes the backend inside the index lock, after the index read, so
 //! a corrupt or locked index fails before any value is stored and an index
-//! row never claims a value the backend refused.
+//! row never claims a value the backend refused. #9070: the "agents may use"
+//! flag is read from and written to the backend, never the index.
 //! Test: `store_tests.rs` beside this file.
 
 use std::fmt;
@@ -74,7 +75,9 @@ impl SecretStore {
     ///
     /// What: refuses an empty value and a backend without `WRITE`; then,
     /// under the index lock, writes the backend and the index row (length,
-    /// `updated_at`; the agents flag is kept on update, OFF when new). A
+    /// `updated_at`). The backend's agents flag is kept on update; for a new
+    /// key it is removed before the value is written, so a new key starts
+    /// OFF and a failed removal stores nothing. A
     /// corrupt index or a lock timeout fails before the backend is touched; a
     /// backend failure leaves the index untouched. If the index publish fails
     /// after a new key reached the backend, the entry is deleted again while
@@ -102,7 +105,13 @@ impl SecretStore {
             key,
             value.char_len(),
             platform::now_unix(),
-            |_| self.backend.set(vault, key, value),
+            |outcome| {
+                // #9070: a stale flag item must not turn a new key ON.
+                if outcome == SetOutcome::New {
+                    self.backend.set_agents_may_use(vault, key, false)?;
+                }
+                self.backend.set(vault, key, value)
+            },
             |outcome, publish| self.compensate(vault, key, outcome, publish),
         )?;
         Ok(SetResponse {
@@ -145,10 +154,19 @@ impl SecretStore {
 
     /// Every key in `vault` with its metadata (`secrets.list`).
     ///
-    /// What: reads the index only; never reads a value.
-    /// Test: `store_list_reports_length_and_time_never_characters`.
+    /// What: names, lengths and times from the index; each key's agents flag
+    /// from the backend (#9070), one flag lookup per key. A failed lookup
+    /// fails the list; it never reports the flag ON. Never reads a value.
+    /// Test: `store_list_reports_length_and_time_never_characters`,
+    /// `store_list_and_get_ignore_a_hand_edited_index_flag`,
+    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
     pub fn list(&self, vault: &VaultName) -> Result<Vec<KeyMeta>, SecretsError> {
-        self.index.list(vault)
+        let mut keys = self.index.list(vault)?;
+        for meta in &mut keys {
+            // #9070: the backend's flag item, never the index row's field.
+            meta.agents_may_use = self.backend.agents_may_use(vault, &meta.name)?;
+        }
+        Ok(keys)
     }
 
     /// Remove `key` from `vault` in this store's backend and the index.
@@ -176,7 +194,9 @@ impl SecretStore {
     /// index lock (a corrupt or locked index fails before any backend is
     /// touched), deletes from the configured backend, then from each of
     /// `others`, and keeps going after a failure so every backend that can
-    /// be cleared is. If any backend failed, the first error is returned and
+    /// be cleared is. #9070: each backend's agents flag item is removed too,
+    /// before its value, so a key set again later starts OFF. If any backend
+    /// failed, the first error is returned and
     /// the index row is kept, so `list` still shows a key a backend may hold.
     /// Otherwise the row is dropped in the same locked update, so no `set`
     /// can land between the sweep and the removal. `removed` is true when
@@ -196,11 +216,15 @@ impl SecretStore {
             let mut existed = false;
             let mut failure: Option<SecretsError> = None;
             for backend in std::iter::once(&self.backend).chain(others) {
-                match backend.delete(vault, key) {
-                    Ok(held) => existed |= held,
-                    // #7519: a failed delete may leave a value; never a miss.
-                    Err(e) if failure.is_none() => failure = Some(e),
-                    Err(_) => {}
+                // #9070: the flag item goes with the key.
+                let flag = backend.set_agents_may_use(vault, key, false);
+                for result in [flag.map(|()| false), backend.delete(vault, key)] {
+                    match result {
+                        Ok(held) => existed |= held,
+                        // #7519: a failed delete may leave a value; never a miss.
+                        Err(e) if failure.is_none() => failure = Some(e),
+                        Err(_) => {}
+                    }
                 }
             }
             failure.map_or(Ok(existed), Err)
@@ -212,14 +236,25 @@ impl SecretStore {
 
     /// Set the "agents may use" flag on an indexed key (DOC-74 §15.8).
     ///
-    /// Test: `index_upsert_preserves_the_agents_flag`.
+    /// Why: #9070 — the flag in the index JSON was editable by any same-uid
+    /// process; the backend's own flag item is not part of that file.
+    /// What: under the index lock, a key with no row is
+    /// [`SecretsError::NotFound`]; otherwise the backend creates (`true`) or
+    /// removes (`false`) the key's flag item. A backend that holds no flag
+    /// refuses `true` with [`SecretsError::Unsupported`]. The index file is
+    /// not changed.
+    /// Test: `store_agents_flag_survives_an_update_and_clears_on_delete`,
+    /// `store_default_agent_flag_reads_off_and_refuses_on`.
     pub fn set_agents_may_use(
         &self,
         vault: &VaultName,
         key: &SecretKey,
         allowed: bool,
     ) -> Result<(), SecretsError> {
-        self.index.set_agents_may_use(vault, key, allowed)
+        // #9070: the backend holds the flag; the lock only orders it with delete.
+        self.index.with_row(vault, key, || {
+            self.backend.set_agents_may_use(vault, key, allowed)
+        })
     }
 
     /// The vault a reference resolves to, by the names-only index.
@@ -291,7 +326,9 @@ impl SecretStore {
         reference: &SecretRef,
         scopes: &ScopeSet,
     ) -> Result<SecretValue, SecretsError> {
-        self.read_admitted(reference, scopes, |_, _| Ok(()))
+        self.require(Capabilities::READ, "read")?;
+        let (vault, _) = self.locate_row(reference, scopes)?;
+        self.read_located(&vault, reference.key())
     }
 
     /// [`Self::read`], with `admit` judging the located row before the
@@ -299,9 +336,13 @@ impl SecretStore {
     ///
     /// Why: #7525 — a refused key must never reach the Keychain, so the gate
     /// runs between the index lookup and the value read.
-    /// What: `require(READ)`, [`Self::locate_row`], `admit(vault, row)`, then
-    /// the uncached backend read. An `admit` error is returned as-is.
-    /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`.
+    /// What: `require(READ)`, [`Self::locate_row`], the row's agents flag
+    /// from the backend (#9070), `admit(vault, row)`, then the uncached
+    /// backend read. A failed flag lookup and an `admit` error are returned
+    /// as-is, before the value is read.
+    /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`,
+    /// `resolve_agent_gate_ignores_a_hand_edited_index_flag`,
+    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
     pub(crate) fn read_admitted(
         &self,
         reference: &SecretRef,
@@ -309,11 +350,21 @@ impl SecretStore {
         admit: impl FnOnce(&VaultName, &KeyMeta) -> Result<(), SecretsError>,
     ) -> Result<SecretValue, SecretsError> {
         self.require(Capabilities::READ, "read")?;
-        let (vault, row) = self.locate_row(reference, scopes)?;
+        let (vault, mut row) = self.locate_row(reference, scopes)?;
+        // #9070: the gate judges the backend's flag item, never the index row.
+        row.agents_may_use = self.backend.agents_may_use(&vault, &row.name)?;
         admit(&vault, &row)?;
-        let key = reference.key();
+        self.read_located(&vault, reference.key())
+    }
+
+    /// The uncached backend read of a located key; a miss is `NotFound`.
+    fn read_located(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<SecretValue, SecretsError> {
         self.backend
-            .get(&vault, key)?
+            .get(vault, key)?
             .ok_or_else(|| SecretsError::NotFound {
                 key: key.to_string(),
                 searched: vault.to_string(),

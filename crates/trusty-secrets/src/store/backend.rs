@@ -120,6 +120,44 @@ pub trait SecretBackend: Send + Sync + fmt::Debug {
             operation: "list_names",
         })
     }
+
+    /// Whether `key` in `vault` is flagged "agents may use" (DOC-74 §15.8).
+    ///
+    /// Why: #9070 — the flag sat in the 0600 index JSON, which any same-uid
+    /// process can edit. The backend holds it now, as its own item per key.
+    /// What: `Ok(true)` only when the backend holds the flag item for this
+    /// key. A missing item is `Ok(false)`; a failed lookup is an `Err`, never
+    /// `Ok(true)`. The default holds no flag, so every key reads OFF.
+    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`,
+    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        let _ = (vault, key);
+        Ok(false)
+    }
+
+    /// Create (`allowed`) or remove (`!allowed`) `key`'s flag item.
+    ///
+    /// What: removing a flag that is not there succeeds. The default holds
+    /// no flag: `false` succeeds with nothing to remove, and `true` is
+    /// [`SecretsError::Unsupported`] for operation `agents_may_use`.
+    /// Test: `store_default_agent_flag_reads_off_and_refuses_on`.
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        let _ = (vault, key);
+        if allowed {
+            // #9070: a backend with no flag item can never hold the flag ON.
+            Err(SecretsError::Unsupported {
+                backend: self.id().to_string(),
+                operation: "agents_may_use",
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Whether this build links an OS Keychain backend (macOS only, #9064).

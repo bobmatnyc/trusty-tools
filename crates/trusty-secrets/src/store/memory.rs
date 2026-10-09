@@ -6,9 +6,11 @@
 //! What: a mutex-guarded map keyed by (vault, key), with configurable
 //! capabilities. `Debug` shows the entry count only. [`MemoryBackend::reads`]
 //! counts `get` calls, so a test can prove a gate refused before any read.
+//! #9070: "agents may use" flags sit in a separate set, as the Keychain's
+//! flag items sit in a separate service, so they never count as entries.
 //! Test: `store_debug_never_contains_a_value`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -17,12 +19,14 @@ use super::{Capabilities, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 type Entries = BTreeMap<(VaultName, SecretKey), SecretValue>;
+type Flags = BTreeSet<(VaultName, SecretKey)>;
 
 /// An in-memory backend for tests.
 pub struct MemoryBackend {
     id: BackendId,
     capabilities: Capabilities,
     entries: Mutex<Entries>,
+    flags: Mutex<Flags>,
     reads: AtomicUsize,
 }
 
@@ -38,6 +42,7 @@ impl MemoryBackend {
             id: BackendId::from_static("memory"),
             capabilities,
             entries: Mutex::new(BTreeMap::new()),
+            flags: Mutex::new(BTreeSet::new()),
             reads: AtomicUsize::new(0),
         }
     }
@@ -47,12 +52,24 @@ impl MemoryBackend {
         vault: &VaultName,
         key: &SecretKey,
     ) -> Result<MutexGuard<'_, Entries>, SecretsError> {
-        self.entries.lock().map_err(|_| SecretsError::Backend {
+        self.entries.lock().map_err(|_| self.poisoned(vault, key))
+    }
+
+    fn flags(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<MutexGuard<'_, Flags>, SecretsError> {
+        self.flags.lock().map_err(|_| self.poisoned(vault, key))
+    }
+
+    fn poisoned(&self, vault: &VaultName, key: &SecretKey) -> SecretsError {
+        SecretsError::Backend {
             backend: self.id.to_string(),
             vault: vault.to_string(),
             key: key.to_string(),
             reason: "memory backend lock poisoned".to_string(),
-        })
+        }
     }
 
     /// Number of stored entries across all vaults.
@@ -122,5 +139,26 @@ impl SecretBackend for MemoryBackend {
             .entries(vault, key)?
             .remove(&(vault.clone(), key.clone()))
             .is_some())
+    }
+
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Ok(self
+            .flags(vault, key)?
+            .contains(&(vault.clone(), key.clone())))
+    }
+
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        let mut flags = self.flags(vault, key)?;
+        if allowed {
+            flags.insert((vault.clone(), key.clone()));
+        } else {
+            flags.remove(&(vault.clone(), key.clone()));
+        }
+        Ok(())
     }
 }

@@ -297,10 +297,27 @@ async fn server_set_list_delete_round_trip_over_a_real_socket() {
     assert_eq!(list["keys"][0]["length"], VALUE.chars().count());
     assert_eq!(list["keys"][0]["agents_may_use"], false);
     assert!(list["keys"][0]["updated_at"].as_u64().unwrap() > 0);
+    // #9070: list reports the flag the backend holds, not an index field.
+    fx.keychain
+        .set_agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"), true)
+        .unwrap();
+    let list = ok(call(
+        socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await);
+    assert_eq!(list["keys"][0]["agents_may_use"], true);
 
     let deleted = ok(call(socket, method::DELETE, target).await);
     assert_eq!(deleted, json!({"removed": true}));
     assert!(fx.keychain.is_empty());
+    assert!(
+        !fx.keychain
+            .agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"))
+            .unwrap(),
+        "the flag goes with the key"
+    );
     let list = ok(call(
         socket,
         method::LIST,

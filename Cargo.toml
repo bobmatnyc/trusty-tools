@@ -118,7 +118,7 @@ trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9" }
 trusty-common = { path = "crates/trusty-common", version = "0.56" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
-trusty-secrets = { path = "crates/trusty-secrets", version = "0.1", default-features = false }
+trusty-secrets = { path = "crates/trusty-secrets", version = "0.2", default-features = false }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }

@@ -757,3 +757,67 @@ fn store_set_reports_an_orphan_when_compensation_fails() {
     );
     assert!(backend.0.get(&project(), &key("SECOND")).unwrap().is_some());
 }
+
+/// Why: #9070 — the flag must survive a value update, go with the key on
+/// delete, and start OFF for a new key even when a stale flag item exists.
+/// What: every flag read goes through the backend; the index is not
+/// consulted for it.
+/// Test: itself.
+#[test]
+fn store_agents_flag_survives_an_update_and_clears_on_delete() {
+    let (_tmp, backend, store) = fixture();
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    store
+        .set_agents_may_use(&project(), &key("API_KEY"), true)
+        .unwrap();
+    assert!(backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    assert!(
+        store.list(&project()).unwrap()[0].agents_may_use,
+        "an update keeps the flag"
+    );
+
+    store.delete(&project(), &key("API_KEY")).unwrap();
+    assert!(!backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
+
+    // A stale flag item never turns a new key ON.
+    backend
+        .set_agents_may_use(&project(), &key("API_KEY"), true)
+        .unwrap();
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    assert!(!store.list(&project()).unwrap()[0].agents_may_use);
+
+    let err = store
+        .set_agents_may_use(&project(), &key("MISSING"), true)
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::NotFound { .. }), "{err:?}");
+    assert!(!backend.agents_may_use(&project(), &key("MISSING")).unwrap());
+}
+
+/// Why: #9070 — a backend with no flag item (file, 1Password, Keeper) must
+/// read every key OFF and refuse to turn one ON, never accept it silently.
+/// Test: itself.
+#[test]
+fn store_default_agent_flag_reads_off_and_refuses_on() {
+    let (vault, name) = (project(), key("API_KEY"));
+    assert!(!FailingBackend.agents_may_use(&vault, &name).unwrap());
+    FailingBackend
+        .set_agents_may_use(&vault, &name, false)
+        .unwrap();
+
+    let (_tmp, store) = fixture_with(Arc::new(FailingBackend));
+    store.index().upsert(&vault, &name, 4, 1).unwrap();
+    let err = store.set_agents_may_use(&vault, &name, true).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SecretsError::Unsupported {
+                operation: "agents_may_use",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(!store.list(&vault).unwrap()[0].agents_may_use);
+}
