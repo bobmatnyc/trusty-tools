@@ -7,6 +7,8 @@
 #![allow(clippy::too_many_lines)]
 
 use super::*;
+// #9269: `handle_message` (and the `json!` import it carried) moved to `mcp_message`.
+use serde_json::{json, Value};
 
 /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests
 /// could keep using `AppState` without juggling the directory handle, but

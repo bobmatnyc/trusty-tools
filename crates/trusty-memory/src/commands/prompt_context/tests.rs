@@ -10,7 +10,7 @@ use super::*;
 // Why (issue #226): `serde_json::json!` is only used by the daemon-based
 //      tests, which are themselves gated behind `axum-server`. Mirror the
 //      gate here so `--no-default-features` builds stay warning-free.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use serde_json::json;
 
 /// Why (issue #134): the recall query needs the actual prompt text the
@@ -959,7 +959,7 @@ async fn prompt_context_returns_ok_without_daemon() {
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server` because it spins up the
 /// real HTTP daemon via `run_http_on`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_recalls_palace_drawers() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1055,7 +1055,7 @@ async fn prompt_context_recalls_palace_drawers() {
 /// (the daemon redirects) under a header reading the derived slug.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_header_names_the_alias_target() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1137,7 +1137,7 @@ async fn prompt_context_header_names_the_alias_target() {
 /// Test: itself. Fails against the pre-#5819 handler, which emits the
 /// "cleared the relevance floor" paragraph.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_off_topic_prompt_injects_nothing() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1214,7 +1214,7 @@ async fn prompt_context_off_topic_prompt_injects_nothing() {
 /// Test: itself. Fails against the pre-#5819 handler, which returns
 /// `"No prompt facts stored yet."`.
 /// Note (issue #226): gated on `axum-server`; spawns the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_empty_palace_falls_back_to_global() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1257,7 +1257,7 @@ async fn prompt_context_empty_palace_falls_back_to_global() {
 /// `prompt_context_empty_palace_falls_back_to_global`.
 /// Note (#226, #6286): gated on `daemon` because the serving surface
 /// is only compiled in behind that feature.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 async fn spin_up_test_daemon_with_palace(
     palace_slug: &str,
 ) -> (
@@ -1385,7 +1385,7 @@ async fn spin_up_test_daemon_with_palace(
 /// real unlink path runs and the next fixture in the same process can bind a
 /// fresh socket. The abort is kept as the fallback for a loop that does not
 /// return.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 struct DaemonHandle {
     #[allow(dead_code)]
     socket: std::path::PathBuf,
@@ -1393,7 +1393,7 @@ struct DaemonHandle {
     join: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 impl DaemonHandle {
     async fn shutdown(mut self) {
         if let Some(stop) = self.stop.take() {
@@ -1431,7 +1431,7 @@ impl DaemonHandle {
 /// content surfaces.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_recall_filters_deny_tags() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1514,7 +1514,7 @@ async fn prompt_context_recall_filters_deny_tags() {
 /// (no `Relevant memories` section).
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_recall_env_override_extends_deny_list() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1572,7 +1572,7 @@ async fn prompt_context_recall_env_override_extends_deny_list() {
 /// drawer content nor a `Relevant memories` section header.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_recall_all_filtered_falls_back_to_global() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1752,7 +1752,7 @@ async fn bounded_blocking_returns_value_when_fast_enough() {
 /// a connection and never answers — a listener that reads the request frame and
 /// then sleeps is exactly the stall this test exists to survive, and it needs no
 /// HTTP server to build.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test(flavor = "multi_thread")]
 async fn handle_prompt_context_fails_open_on_slow_daemon() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -1955,7 +1955,7 @@ fn injection_caps_rendered_tag_bytes() {
 /// rendered injection carries no `creator:` and no bullet over the cap.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_injection_has_no_provenance_tags() {
     use format::MAX_RENDERED_TAGS;
@@ -2050,7 +2050,7 @@ async fn prompt_context_injection_has_no_provenance_tags() {
 /// within-budget send, a stripped envelope, and a non-zero dropped-unit count.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[tokio::test]
 async fn prompt_context_logs_recall_query_shape() {
     let _guard = crate::commands::env_test_lock().lock().await;

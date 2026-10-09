@@ -63,7 +63,7 @@ name = "trusty-memory"
 # changed shape.
 # 0.29.5 (Refs #9299): patch — recall_all searches resident palaces by default; 0.29.4 is live on crates.io. Additive only.
 # 0.29.6 (Refs #9433): patch — trusty-common floor moves 0.54.4 -> 0.54.5 so a locked install carries the #9433 fix. No source change.
-version = "0.29.6"
+version = "0.30.0"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -97,11 +97,12 @@ crate-type = ["rlib"]
 name = "trusty-memory"
 path = "src/main.rs"
 # Why: `serve` / `start` bind the daemon's socket, so the binary needs the
-#      `daemon` feature compiled in. Listing it here keeps a
-#      `--no-default-features` library build (the trusty-agents in-process
-#      linker, which wants only `MemoryMcpService`) from trying to build this
-#      binary without the serving surface and failing to link `serve`.
-required-features = ["daemon"]
+#      `server` feature compiled in. Listing it here keeps a
+#      `--no-default-features` library build (the engine-only build, and the
+#      trusty-agents `mcp-schema` linker) from trying to build this binary
+#      without the serving surface and failing to link `serve`.
+# #9269: `server` (default) replaces `daemon`, which stays as its alias.
+required-features = ["server"]
 
 # Why (#5329): the `trusty-bm25-daemon` `[[bin]]` shim was REMOVED. BM25 no
 # longer runs as a subprocess — `bm25_lane::Bm25Lane` owns the same
@@ -120,11 +121,14 @@ required-features = ["daemon"]
 #      to minimise maintenance surface. Users should migrate to
 #      `"command": "trusty-memory", "args": ["serve", "--stdio"]` at their
 #      convenience; this shim will be removed in a future minor version.
-# What: standalone binary at src/bin/mcp_bridge.rs; no required-features (no
-#      axum, no redb — this binary never opens a database).
+# What: standalone binary at src/bin/mcp_bridge.rs (no axum, no redb — this
+#      binary never opens a database).
 # Test: `cargo run --bin trusty-memory-mcp-bridge -- 2>&1 | grep DEPRECATED`
 name = "trusty-memory-mcp-bridge"
 path = "src/bin/mcp_bridge.rs"
+# #9269: a CLI binary, so it ships with the server build only (ADR-0066 D1.4);
+# a `--no-default-features` engine build compiles no binary at all.
+required-features = ["server"]
 
 # Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
 # Single-owner-per-binary — the standalone `trusty-console` crate is now the
@@ -140,12 +144,16 @@ path = "src/bin/mcp_bridge.rs"
 # JSON-RPC / MCP primitives (ADR-0040, #5803). #6316: `daemon-bridge-json-rpc`
 # compiles the shared stdio<->UDS forwarder `commands::serve_stdio_bridge` runs
 # instead of a second copy of the transport.
-trusty-mcp = { workspace = true, features = ["daemon-bridge-json-rpc"] }
+# #9269: optional — `mcp-schema` enables it bare, `server` adds the forwarder.
+trusty-mcp = { workspace = true, optional = true }
 # `uds` (#6286) is what this crate now serves on: `trusty_common::uds::server`
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-trusty-common = { path = "../trusty-common", version = "0.55", default-features = false, features = ["memory-core", "monitor-tui", "bm25", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config", "palace-resolve", "codex-config", "uds", "machine-tier"] }
+# #9269: only the engine's `memory-core` is unconditional; every feature the
+# serving surface needs is switched on by `server` below (`config-cli` is what
+# pulls in clap).
+trusty-common = { path = "../trusty-common", version = "0.55", default-features = false, features = ["memory-core"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -160,14 +168,14 @@ tempfile = { workspace = true }
 # #8434: `palace legacy-kg` reads the pre-redb SQLite `kg.db` read-only to
 # recover the drawers the #45 migration never imported (it compiled only under
 # a feature this binary never enabled).
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why axum and tower-http are gone (#6286): they were here for the HTTP/SSE
 #      listener ADR-0032 retired. Nothing in this crate constructs a `Router`,
 #      a `Response`, or a middleware layer any more — the daemon serves one
 #      Unix socket through `trusty_common::uds::server`.
-clap = { workspace = true }
+clap = { workspace = true, optional = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
@@ -253,18 +261,43 @@ chrono = { workspace = true }
 # shape.
 
 [features]
-# Why (issue #226, renamed #6286): a library consumer that only needs
-#      `MemoryMcpService` for in-process MCP discovery — `trusty-agents` is the
-#      one — should not compile the daemon's serving surface. The gate is
-#      unchanged in purpose and its name is not: `axum-server` described a
-#      dependency this crate no longer has, and there is no listener left for
-#      the old name to be about.
-#
-# Defaults to `daemon` so `cargo install trusty-memory` and
-# `cargo test -p trusty-memory` build the binary exactly as before; a slim
-# consumer overrides with `default-features = false`, which is what
-# trusty-agents already does and which needs no edit there.
-default = ["daemon"]
+# Why (#9269, ADR-0066 D1.4): the trusty-memory 1.x contract freezes the
+#      engine library built with `--no-default-features`, so that build must
+#      carry no serving surface — no trusty-mcp, no clap, no rusqlite. The
+#      daemon, the CLI and every server module sit behind `server`.
+# What: `default = ["server"]` keeps `cargo install trusty-memory` and
+#      `cargo test -p trusty-memory` exactly as before. `daemon` is an alias
+#      of `server` for all of 1.x (#6286 renamed `axum-server` to it).
+#      `mcp-schema` compiles only the MCP tool schema and `MemoryMcpService`,
+#      for a host that merges the schema into its own `rpc.discover` without
+#      linking the daemon — trusty-agents is that host.
+# Test: `tests/feature_gate.rs` (the manifest wiring) plus
+#      `cargo check -p trusty-memory --no-default-features` and
+#      `--no-default-features --features mcp-schema`.
+default = ["server"]
 # The socket-serving surface: `transport::uds`, `transport::methods`, `chat`,
-# and the `serve` / `start` commands that drive them.
-daemon = []
+# the `serve` / `start` commands, the CLI, and every daemon module.
+server = [
+    "mcp-schema",
+    "dep:clap",
+    "dep:rusqlite",
+    "trusty-mcp/daemon-bridge-json-rpc",
+    "trusty-common/monitor-tui",
+    "trusty-common/bm25",
+    "trusty-common/cli-help",
+    "trusty-common/update-check",
+    "trusty-common/bug-capture",
+    "trusty-common/console-metrics",
+    "trusty-common/config-cli",
+    "trusty-common/crate-config",
+    "trusty-common/palace-resolve",
+    "trusty-common/codex-config",
+    "trusty-common/uds",
+    "trusty-common/machine-tier",
+]
+# Alias of `server`, kept for all of 1.x (ADR-0066 D1.4).
+daemon = ["server"]
+# The MCP tool schema (`tools::tool_definitions*`, `openrpc`) and the
+# `MemoryMcpService` descriptor. Its Rust types are out of the 1.x contract;
+# only the feature name is frozen (ADR-0066 D7).
+mcp-schema = ["dep:trusty-mcp"]
