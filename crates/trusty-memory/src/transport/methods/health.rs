@@ -212,6 +212,25 @@ pub struct HealthResponse {
     /// `health_drawer_degraded_check_opens_no_palace`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drawer_degraded_palaces: Vec<String>,
+    /// Open palaces whose HNSW vector store tripped its op breaker (#9487).
+    ///
+    /// Why: a tripped store refuses every vector operation until the palace is
+    /// reopened, so remembers on it fail. Without this field the only trace is
+    /// an error line in the daemon log.
+    /// What: cache-only, like `drawer_degraded_palaces`; sorted by id and
+    /// omitted when empty. Any entry turns an `ok` status into `wedged`.
+    /// Test: `health_reports_a_palace_whose_hnsw_breaker_tripped`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hnsw_wedged_palaces: Vec<HnswWedgedPalace>,
+}
+
+/// One open palace whose HNSW op breaker is tripped (#9487).
+#[derive(serde::Serialize)]
+pub struct HnswWedgedPalace {
+    /// The palace id.
+    pub id: String,
+    /// HNSW operations abandoned at their budget since the palace opened.
+    pub abandoned_ops: u64,
 }
 
 /// One palace the daemon has on disk but could not open (issue #4911).
@@ -537,6 +556,34 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         );
     }
 
+    // #9487: a tripped HNSW breaker fails every write on that palace.
+    let mut hnsw_wedged_palaces: Vec<HnswWedgedPalace> = state
+        .registry
+        .list()
+        .into_iter()
+        .filter_map(|id| {
+            let breaker_handle = state.registry.peek(&id)?;
+            let breaker = breaker_handle.vector_store.op_breaker();
+            breaker.is_tripped().then(|| HnswWedgedPalace {
+                id: id.as_str().to_string(),
+                abandoned_ops: breaker.abandoned_ops(),
+            })
+        })
+        .collect();
+    hnsw_wedged_palaces.sort_by(|a, b| a.id.cmp(&b.id));
+    let (status, detail) = match hnsw_wedged_palaces.first() {
+        Some(first) if status == "ok" => (
+            "wedged".to_string(),
+            Some(format!(
+                "palace '{}' HNSW vector store exceeded its operation budget and \
+                 refuses every vector operation until the palace is reopened or \
+                 the daemon restarts",
+                first.id
+            )),
+        ),
+        _ => (status, detail),
+    };
+
     to_value(HealthResponse {
         status,
         detail,
@@ -553,6 +600,7 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         worker,
         unopenable_palaces,
         drawer_degraded_palaces,
+        hnsw_wedged_palaces,
     })
 }
 

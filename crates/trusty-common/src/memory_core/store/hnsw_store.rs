@@ -44,6 +44,8 @@ mod op_watch;
 pub use op_watch::OpPark;
 pub(crate) use op_watch::OpWatch;
 pub use op_watch::{HnswOp, HnswOpKind};
+// #9487 AC4: per-operation budget and sticky breaker.
+pub mod op_budget;
 mod quiet_insert;
 mod replay;
 mod stranded;
@@ -133,6 +135,9 @@ pub enum HnswStoreError {
          before retrying via stdio"
     )]
     ReadOnly,
+    /// #9487: an operation exceeded its budget, or the store is wedged.
+    #[error(transparent)]
+    OpBudget(#[from] op_budget::OpBudgetError),
 }
 
 mod alloc;
@@ -234,6 +239,8 @@ pub struct HnswStore {
     palace: Arc<str>,
     /// #9187: serialises graph inserts so `quiet_insert` reads an exact count.
     insert_gate: parking_lot::Mutex<()>,
+    /// #9487: the budget every bounded operation gets, and the sticky breaker.
+    breaker: op_budget::OpBreaker,
     /// #9174: graph points a search for their own vector misses; scanned exactly.
     stranded: RwLock<Vec<stranded::StrandedGroup>>,
     /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
@@ -399,6 +406,7 @@ impl HnswStore {
             shadowed: RwLock::new(std::collections::HashSet::new()),
             palace: Arc::from("unnamed palace"),
             insert_gate: parking_lot::Mutex::new(()),
+            breaker: op_budget::OpBreaker::from_env(),
             stranded: RwLock::new(stranded),
             ops: Arc::default(),
             #[cfg(test)]
@@ -541,8 +549,9 @@ impl HnswStore {
         }
         // #9187: the redb row is committed either way; on Err the next open
         // replays it.
-        let _gate = self.insert_gate.lock();
-        let index = self.index.read();
+        // #9487: both waits are bounded; a timeout trips the breaker.
+        let _gate = self.bounded_gate("upsert")?;
+        let index = self.bounded_graph("upsert")?;
         // #9174: the lists this insert can evict from, read before it runs.
         let before = stranded::neighbourhoods_before_insert(&index, vector);
         quiet_insert::insert_quietly(&index, vector, vector_id as usize)
@@ -621,7 +630,7 @@ impl HnswStore {
         // superseded vector evict a true neighbour. The `out.len() >= k` break
         // below does the bounding instead, on the corrected ranking.
         let mut raw: Vec<(u64, f32)> = {
-            let index = self.index.read();
+            let index = self.bounded_graph("search")?; // #9487
             if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
                 exhaustive_nearest(&index, query, tombstones)
             } else {
