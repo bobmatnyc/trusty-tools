@@ -102,6 +102,7 @@ fn json_fields_cover_every_audited_requirement() {
     // checked, so the list is asserted rather than trusted.
     for field in [
         "number",
+        "title",
         "milestone",
         "projectItems",
         "labels",
