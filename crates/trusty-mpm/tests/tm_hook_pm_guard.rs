@@ -107,27 +107,28 @@ const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
 /// Under WSL2 mirrored networking a SYN to a 127.0.0.1 port outside Linux's
 /// ephemeral range goes to the Windows host and hangs, so port 1 times out
 /// there and the tests for the no-daemon branch got the other branch's verdict.
-/// What: holds a connected loopback pair and points the URL at the client's
-/// local port. That port sits in the ephemeral range and has no listener, so a
-/// SYN to it is answered with RST on Linux, WSL2 and macOS. A port bound and
-/// then released could be handed to another test's `bind(0)` before the guard
-/// connects; this one stays bound until the value drops.
+/// What: binds a loopback socket to an ephemeral port, never calls `listen`,
+/// and points the URL at it. No listener means a SYN is answered with RST on
+/// Linux, WSL2 and macOS. The socket stays bound until the value drops, with
+/// `SO_REUSEADDR` off, so no other `bind(0)` can take the port and no
+/// `connect` can pick it as a source port. A connected client's port would
+/// allow the latter, and a connect from that port to itself completes a TCP
+/// simultaneous open instead of being refused.
 /// Test: `pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked`,
 /// `pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked`,
 /// `pm_guard_warns_when_no_daemon_answers_the_claim`.
 struct RefusingDaemon {
     url: String,
-    _pair: (std::net::TcpStream, std::net::TcpStream),
+    _bound: tokio::net::TcpSocket,
 }
 
 impl RefusingDaemon {
     fn new() -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let client = std::net::TcpStream::connect(listener.local_addr().expect("listener addr"))
-            .expect("connect loopback pair");
-        let (server, _) = listener.accept().expect("accept loopback pair");
-        drop(listener);
-        let addr = client.local_addr().expect("client addr");
+        let bound = tokio::net::TcpSocket::new_v4().expect("loopback socket");
+        bound
+            .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("bind loopback");
+        let addr = bound.local_addr().expect("bound addr");
         // Precondition the three tests rest on: a refusal, not a timeout.
         let probe = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2));
         assert!(
@@ -136,7 +137,7 @@ impl RefusingDaemon {
         );
         Self {
             url: format!("http://{addr}"),
-            _pair: (client, server),
+            _bound: bound,
         }
     }
 }
