@@ -81,9 +81,15 @@ pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
 
 /// `secrets.list`: names, lengths, `updated_at`, and the agents flag.
 ///
-/// What: reads the names-only index only; never opens a backend. A denied
-/// call leaves one audit record; an allowed one leaves none (#4567).
+/// What: names, lengths and times from the names-only index. #9070: each
+/// key's agents flag comes from the project's backend through
+/// [`SecretStore::list`], never from the index file. When that backend does
+/// not open — not in this build, not enabled, its CLI missing, `$HOME`
+/// unknown — the index listing is returned with every flag OFF. A failed
+/// flag lookup on an opened backend is an error. Never reads a value. A
+/// denied call leaves one audit record; an allowed one leaves none (#4567).
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `server_list_lists_flags_off_when_the_backend_does_not_open`,
 /// `server_corrupt_index_is_a_fixed_error`,
 /// `audit_list_records_only_denials_and_scopes_doctor_none`.
 pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
@@ -94,7 +100,13 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
-        let keys = state.index.list(&request.vault)?;
+        // #9070: the flag is the backend's. A backend that does not open
+        // vouches for no flag, so the index listing stands with every flag
+        // OFF; a list that worked before the flag moved keeps working.
+        let keys = match project.backend(state) {
+            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
+            Err(_) => state.index.list(&request.vault)?,
+        };
         to_json(&ListResponse {
             vault: request.vault,
             keys,

@@ -297,10 +297,27 @@ async fn server_set_list_delete_round_trip_over_a_real_socket() {
     assert_eq!(list["keys"][0]["length"], VALUE.chars().count());
     assert_eq!(list["keys"][0]["agents_may_use"], false);
     assert!(list["keys"][0]["updated_at"].as_u64().unwrap() > 0);
+    // #9070: list reports the flag the backend holds, not an index field.
+    fx.keychain
+        .set_agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"), true)
+        .unwrap();
+    let list = ok(call(
+        socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await);
+    assert_eq!(list["keys"][0]["agents_may_use"], true);
 
     let deleted = ok(call(socket, method::DELETE, target).await);
     assert_eq!(deleted, json!({"removed": true}));
     assert!(fx.keychain.is_empty());
+    assert!(
+        !fx.keychain
+            .agents_may_use(&vault("trusty/acme/web"), &key("API_KEY"))
+            .unwrap(),
+        "the flag goes with the key"
+    );
     let list = ok(call(
         socket,
         method::LIST,
@@ -309,6 +326,49 @@ async fn server_set_list_delete_round_trip_over_a_real_socket() {
     .await);
     assert_eq!(list["keys"], json!([]));
     server.stop().await;
+}
+
+/// Why: #9070 — list read only the index before the flag moved to the
+/// backend, so a backend that does not open must not fail it. Every open
+/// failure lists the index rows with the flag OFF, even when the backend
+/// holds the flag ON. Red when only `UnknownBackend` fell back.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_list_lists_flags_off_when_the_backend_does_not_open() {
+    let open_failures: [fn() -> SecretsError; 3] = [
+        || SecretsError::BackendNotEnabled {
+            backend: "keychain".to_string(),
+        },
+        || SecretsError::CliNotInstalled {
+            program: "op".to_string(),
+            hint: "install it",
+        },
+        || SecretsError::HomeUnavailable,
+    ];
+    for failure in open_failures {
+        let fx = fixture();
+        let store = SecretStore::new(
+            Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
+            NamesIndex::at(&fx.settings.index_root),
+        );
+        let (web, api_key) = (vault("trusty/acme/web"), key("API_KEY"));
+        store.set(&web, &api_key, &SecretValue::new(VALUE)).unwrap();
+        store.set_agents_may_use(&web, &api_key, true).unwrap();
+        let shown = format!("{:?}", failure());
+        let factory: BackendFactory = Arc::new(move |_: &BackendId| Err(failure()));
+        let server = fx.start_with(factory).await;
+        let list = call(
+            &fx.settings.socket,
+            method::LIST,
+            json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+        )
+        .await;
+        assert!(list.error.is_none(), "{shown}: {:?}", list.error);
+        let list = ok(list);
+        assert_eq!(list["keys"][0]["name"], "API_KEY", "{shown}");
+        assert_eq!(list["keys"][0]["agents_may_use"], false, "{shown}");
+        server.stop().await;
+    }
 }
 
 /// Why: DOC-74 §13 Q6 — copy moves this project's keys between its

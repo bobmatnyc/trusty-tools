@@ -112,31 +112,51 @@ fn index_rows_round_trip_without_plaintext() {
         .map(String::as_str)
         .collect();
     fields.sort_unstable();
-    assert_eq!(fields, ["agents_may_use", "length", "updated_at"]);
+    // #9070: the agents flag is the backend's; the index never writes it.
+    assert_eq!(fields, ["length", "updated_at"]);
 }
 
-/// Why: "agents may use" is set in the console and must survive a value
-/// update; a new key starts OFF.
+/// Why: #9070 — the index is a file any same-uid process can edit, so it
+/// never holds the agents flag. A pre-#9070 file carrying
+/// `"agents_may_use": true` still loads, reads OFF, and loses the field on
+/// the next write; the deprecated index setter cannot turn it ON.
 /// Test: itself.
 #[test]
-fn index_upsert_preserves_the_agents_flag() {
+#[allow(deprecated)]
+fn index_never_holds_the_agents_flag() {
     let (_tmp, index) = fixture();
     index.upsert(&vault(), &key("API_KEY"), 10, 1).unwrap();
-    index
-        .set_agents_may_use(&vault(), &key("API_KEY"), true)
-        .unwrap();
-    assert_eq!(
-        index.upsert(&vault(), &key("API_KEY"), 20, 2).unwrap(),
-        SetOutcome::Updated
-    );
+    let path = index.path_for(&vault());
+    let legacy = r#"{"version":1,"vault":"trusty/acme/web","keys":{"API_KEY":{"length":10,"updated_at":1,"agents_may_use":true}}}"#;
+    std::fs::write(&path, legacy).unwrap();
+
     let row = index.get(&vault(), &key("API_KEY")).unwrap().unwrap();
-    assert!(row.agents_may_use, "an update must keep the flag");
-    assert_eq!((row.length, row.updated_at), (20, 2));
+    assert!(!row.agents_may_use, "a legacy ON flag reads OFF");
+    assert!(!index.list(&vault()).unwrap()[0].agents_may_use);
 
     let err = index
-        .set_agents_may_use(&vault(), &key("MISSING"), true)
+        .set_agents_may_use(&vault(), &key("API_KEY"), true)
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Unsupported { .. }), "{err:?}");
+    index
+        .set_agents_may_use(&vault(), &key("API_KEY"), false)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        legacy,
+        "never written"
+    );
+    let err = index
+        .set_agents_may_use(&vault(), &key("MISSING"), false)
         .unwrap_err();
     assert!(matches!(err, SecretsError::NotFound { .. }), "{err:?}");
+
+    index.upsert(&vault(), &key("API_KEY"), 20, 2).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !raw.contains("agents_may_use"),
+        "the next write drops it: {raw}"
+    );
 }
 
 /// Why: fail closed — a corrupt index must be an error on read AND on write,

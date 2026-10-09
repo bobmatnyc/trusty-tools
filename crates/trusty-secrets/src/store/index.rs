@@ -2,8 +2,10 @@
 //!
 //! Why: the OS keychain cannot enumerate a service's accounts portably, and
 //! `list` must never read values to learn names. The index is the listable
-//! record. It also carries per-key metadata no backend stores: value length,
-//! `updated_at`, and the "agents may use" flag (DOC-74 §15.3, §15.8).
+//! record. It also carries per-key metadata no backend stores: value length
+//! and `updated_at` (DOC-74 §15.3). #9070: the "agents may use" flag (§15.8)
+//! is not index metadata; the backend holds it, because any same-uid process
+//! can edit this file.
 //! What: one JSON file per vault under
 //! `~/.trusty-tools/trusty-secrets/index/` (root injectable), named by
 //! [`VaultName::file_stem`]. Files are 0600 in a 0700 directory, published by
@@ -46,8 +48,10 @@ struct IndexFile {
 struct IndexRow {
     length: usize,
     updated_at: u64,
-    #[serde(default)]
-    agents_may_use: bool,
+    // #9070: the flag moved to the backend. Accepted so pre-#9070 files
+    // still load, ignored on read, and never written.
+    #[serde(default, rename = "agents_may_use", skip_serializing)]
+    _legacy_agents_may_use: bool,
 }
 
 impl IndexFile {
@@ -134,9 +138,8 @@ impl NamesIndex {
 
     /// Record a write of `length` characters to `key` at `now`.
     ///
-    /// What: a new row starts with "agents may use" OFF; an existing row keeps
-    /// its flag. Returns whether the row was new.
-    /// Test: `index_upsert_preserves_the_agents_flag`.
+    /// What: creates or refreshes the row. Returns whether the row was new.
+    /// Test: `index_rows_round_trip_without_plaintext`.
     pub fn upsert(
         &self,
         vault: &VaultName,
@@ -182,7 +185,7 @@ impl NamesIndex {
             let row = file.keys.entry(key.to_string()).or_insert(IndexRow {
                 length,
                 updated_at: now,
-                agents_may_use: false,
+                _legacy_agents_may_use: false,
             });
             row.length = length;
             row.updated_at = now;
@@ -221,25 +224,62 @@ impl NamesIndex {
         })
     }
 
-    /// Set the "agents may use" flag on an indexed key.
+    /// The index no longer holds the "agents may use" flag (#9070).
     ///
-    /// What: a key the vault does not index is [`SecretsError::NotFound`].
-    /// Test: `index_upsert_preserves_the_agents_flag`.
+    /// Why: a flag in this file is one any same-uid process can set.
+    /// What: a key the vault does not index is [`SecretsError::NotFound`];
+    /// `allowed` is [`SecretsError::Unsupported`], since the index cannot hold
+    /// the flag ON; `false` succeeds and writes nothing. The index file is
+    /// never changed.
+    /// Test: `index_never_holds_the_agents_flag`.
+    #[deprecated(
+        since = "0.1.3",
+        note = "the flag is held by the backend; use SecretStore::set_agents_may_use (#9070)"
+    )]
     pub fn set_agents_may_use(
         &self,
         vault: &VaultName,
         key: &SecretKey,
         allowed: bool,
     ) -> Result<(), SecretsError> {
-        self.update(vault, |file| match file.keys.get_mut(key.as_str()) {
-            Some(row) => {
-                row.agents_may_use = allowed;
+        self.with_row(vault, key, || {
+            if allowed {
+                // #9070: the index can never hold the flag ON.
+                Err(SecretsError::Unsupported {
+                    backend: "index".to_string(),
+                    operation: "agents_may_use",
+                })
+            } else {
                 Ok(())
             }
-            None => Err(SecretsError::NotFound {
-                key: key.to_string(),
-                searched: vault.to_string(),
-            }),
+        })
+    }
+
+    /// Run `act` under the index lock while `key` has a row in `vault`.
+    ///
+    /// Why: #9070 — the flag write goes to the backend, but must not land
+    /// for a key a concurrent delete is removing; a delete takes this lock.
+    /// What: takes the lock and re-reads the file (a corrupt file or a lock
+    /// timeout fails here), returns [`SecretsError::NotFound`] when the row
+    /// is missing, else `act`'s result. Publishes nothing.
+    /// Test: `store_agents_flag_survives_an_update_and_clears_on_delete`.
+    pub(crate) fn with_row<R>(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        act: impl FnOnce() -> Result<R, SecretsError>,
+    ) -> Result<R, SecretsError> {
+        platform::create_private_dir(&self.root)?;
+        let path = self.path_for(vault);
+        platform::with_exclusive_lock(&path, self.lock_timeout, || {
+            if read_file(&path, vault)?.keys.contains_key(key.as_str()) {
+                act()
+            } else {
+                Err(SecretsError::NotFound {
+                    key: key.to_string(),
+                    searched: vault.to_string(),
+                })
+            }
         })
     }
 
@@ -342,12 +382,15 @@ fn read_file(path: &Path, vault: &VaultName) -> Result<IndexFile, SecretsError> 
     Ok(file)
 }
 
+/// A row as [`KeyMeta`]. The flag is always OFF here: only the backend can
+/// report it ON ([`super::SecretStore::list`]).
 fn to_meta(path: &Path, name: &str, row: &IndexRow) -> Result<KeyMeta, SecretsError> {
     let name = SecretKey::new(name).map_err(|_| corrupt(path, "holds an invalid key name"))?;
     Ok(KeyMeta {
         name,
         length: row.length,
         updated_at: row.updated_at,
-        agents_may_use: row.agents_may_use,
+        // #9070: a hand-edited `"agents_may_use": true` is never reported.
+        agents_may_use: false,
     })
 }
