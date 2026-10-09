@@ -25,6 +25,7 @@ mod socket_daemon;
 #[path = "support/test_daemon.rs"]
 mod test_daemon;
 
+mod auto_start_socket_9214;
 mod bundled_install;
 mod config_mount;
 mod corpus_corruption_quarantine_4227;
