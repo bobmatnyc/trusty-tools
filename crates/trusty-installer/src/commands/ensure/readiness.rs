@@ -8,9 +8,9 @@
 //!
 //! What: [`PollConfig`] (poll interval + overall timeout, env-overridable),
 //! [`poll_until_ready`] (the generic deadline-bounded loop over an injected async
-//! readiness probe — pure of HTTP so it is unit-testable), and
-//! [`probe_ready`] (the real probe: trusty-search's `/health` returns 2xx and
-//! something is serving trusty-memory's socket).
+//! readiness probe — pure of I/O so it is unit-testable), and
+//! [`probe_ready`] (the real probe: trusty-search answers its health method on
+//! its socket and something is serving trusty-memory's socket).
 //!
 //! Test: `tests` drive `poll_until_ready` with a probe that flips ready after N
 //! attempts (success) and one that never readies (timeout), asserting the
@@ -19,7 +19,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use super::daemon::{health_ok, memory_serving, memory_socket, resolve_base_url, SEARCH_APP};
+use super::daemon::{memory_serving, memory_socket, search_healthy, search_socket};
 
 /// Env var overriding the `--wait` overall timeout, in seconds.
 ///
@@ -131,36 +131,26 @@ where
     }
 }
 
-/// The real readiness probe: trusty-search answers `/health` and something is
-/// serving trusty-memory's socket.
+/// The real readiness probe: trusty-search answers its health method and
+/// something is serving trusty-memory's socket.
 ///
 /// Why: "ready" for a fully-provisioned project means the search daemon (serving
 /// the just-registered index) and the memory daemon (serving the palace) are
-/// both live.
+/// both live. #6286 moved the memory arm onto its socket; #9214 moves the
+/// search arm, so a stale `http_addr` can neither fake readiness nor hide it.
 ///
-/// **`--wait` could never report ready between #6286 pass A and this fix.** It
-/// asked `resolve_base_url(MEMORY_APP)`, which reads an `http_addr` file
-/// ADR-0032 stopped writing — so the memory arm returned `false` on every
-/// iteration and every `tctl ensure --wait` ran its whole 120-second budget and
-/// exited 4, whatever the stack was doing.
-///
-/// What: resolves trusty-search's base URL and derives trusty-memory's socket;
-/// returns `true` only when the former answers `GET /health` with a 2xx AND
-/// something is serving the latter. Any resolution error or down daemon → not
-/// ready, so the loop keeps waiting until the deadline.
-/// Test: side-effecting (network); the loop control flow is unit-tested via
-/// `poll_until_ready` with an injected probe, and the memory arm's
-/// absent-socket verdict by
-/// `super::daemon::tests::memory_serving_is_false_for_an_absent_socket`.
-pub async fn probe_ready(client: &reqwest::Client) -> bool {
-    let search = match resolve_base_url(SEARCH_APP) {
-        Ok(Some(b)) => b,
-        _ => return false,
-    };
-    let Ok(socket) = memory_socket() else {
+/// What: derives both sockets; returns `true` only when trusty-search answers
+/// `search.health` AND something is serving trusty-memory's socket. Any
+/// resolution error or down daemon → not ready, so the loop keeps waiting until
+/// the deadline.
+/// Test: `tests::probe_ready_is_true_with_only_the_search_and_memory_sockets`,
+/// `tests::probe_ready_is_false_without_the_search_socket_despite_a_live_http_addr`,
+/// `tests::wait_returns_once_the_search_socket_serves`.
+pub async fn probe_ready() -> bool {
+    let (Ok(search), Ok(memory)) = (search_socket(), memory_socket()) else {
         return false;
     };
-    health_ok(client, &search).await && memory_serving(&socket).await
+    search_healthy(&search).await && memory_serving(&memory).await
 }
 
 #[cfg(test)]
@@ -202,7 +192,7 @@ mod tests {
         let (seen, search) = search_stub("search.health", Ok(json!({ "status": "ok" }))).await;
         set_env(TRUSTY_SEARCH_SOCKET_ENV, search.socket());
         let _memory = serve_memory().await;
-        let ready = probe_ready(&super::super::daemon::build_client().unwrap()).await;
+        let ready = probe_ready().await;
         clear_env(SOCKET_ENVS);
         clear_data_dir_override(&dir);
         assert!(ready, "a serving search socket + memory socket is ready");
@@ -224,7 +214,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         set_env(TRUSTY_SEARCH_SOCKET_ENV, &tmp.path().join("absent.sock"));
         let _memory = serve_memory().await;
-        let ready = probe_ready(&super::super::daemon::build_client().unwrap()).await;
+        let ready = probe_ready().await;
         clear_env(SOCKET_ENVS);
         clear_data_dir_override(&dir);
         assert_eq!(
@@ -247,13 +237,12 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         set_env(TRUSTY_SEARCH_SOCKET_ENV, &tmp.path().join("absent.sock"));
         let _memory = serve_memory().await;
-        let client = super::super::daemon::build_client().unwrap();
         let cfg = PollConfig {
             interval: Duration::from_millis(10),
             timeout: Duration::from_millis(200),
         };
         let start = Instant::now();
-        let ready = poll_until_ready(cfg, || probe_ready(&client)).await;
+        let ready = poll_until_ready(cfg, probe_ready).await;
         let elapsed = start.elapsed();
         clear_env(SOCKET_ENVS);
         clear_data_dir_override(&dir);
@@ -286,13 +275,12 @@ mod tests {
             set_env(TRUSTY_SEARCH_SOCKET_ENV, search.socket());
             search
         });
-        let client = super::super::daemon::build_client().unwrap();
         let cfg = PollConfig {
             interval: Duration::from_millis(20),
             timeout: Duration::from_secs(5),
         };
         let start = Instant::now();
-        let ready = poll_until_ready(cfg, || probe_ready(&client)).await;
+        let ready = poll_until_ready(cfg, probe_ready).await;
         let elapsed = start.elapsed();
         let _search = late.await.expect("late binder");
         clear_env(SOCKET_ENVS);

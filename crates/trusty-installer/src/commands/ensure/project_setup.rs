@@ -6,27 +6,27 @@
 //! `ensure` must not error or duplicate — and tolerant of a daemon that is not
 //! yet running (plain `tctl ensure` is commonly run before the stack is up).
 //!
-//! What: [`register_index`] issues `POST /indexes` to trusty-search (idempotent:
-//! the daemon returns `created:false` for an existing id) and [`create_palace`]
+//! What: [`register_index`] calls `search.index.create` on trusty-search's
+//! socket (idempotent: the daemon returns `created:false` for an existing id)
+//! and [`create_palace`]
 //! calls `palace_create` on trusty-memory's socket (idempotent: a duplicate name
 //! resolves to the same palace dir). When the relevant daemon is not running,
 //! the stage is reported as an idempotent no-op ("daemon not running; skipped")
 //! rather than a hard failure, so `ensure` stays useful pre-boot. A reachable
 //! daemon returning an error IS a hard failure (the project is mis-provisioned).
 //!
-//! The two stages no longer share a transport: trusty-search is still loopback
-//! HTTP, and trusty-memory is the Unix socket ADR-0032 moved it onto. See
-//! [`super::daemon`] for why the shared resolver could not serve both.
+//! Both stages dial Unix sockets: trusty-memory since ADR-0032 (#6286),
+//! trusty-search since #9214. Neither reads an `http_addr` file.
 //!
-//! Test: `tests` stand up a stub HTTP server and a stub memory socket to
-//! exercise the created / already-exists / daemon-down / error branches for
-//! both stages.
+//! Test: `tests` stand up stub search and memory sockets to exercise the
+//! created / already-exists / daemon-down / error branches for both stages.
 
 use anyhow::Result;
 use serde_json::json;
 
 use super::daemon::{
-    build_client, memory_serving, memory_socket, resolve_base_url, MEMORY_CALL_TIMEOUT, SEARCH_APP,
+    memory_serving, memory_socket, search_serving, search_socket, MEMORY_CALL_TIMEOUT,
+    SEARCH_CALL_TIMEOUT,
 };
 use super::identity;
 use super::report::StageOutcome;
@@ -80,50 +80,47 @@ fn noop(stage: &str, detail: impl Into<String>) -> StageOutcome {
 ///
 /// Why: the project must be a registered search index for hybrid search to work;
 /// `ensure` provisions it so the user does not have to run `trusty-search index`
-/// separately. The daemon's `POST /indexes` is idempotent (`created:false` for an
-/// existing id), so re-running is safe.
-/// What: resolves the trusty-search base URL; if the daemon is down, returns an
-/// idempotent no-op. Otherwise derives the index id (directory basename), POSTs
-/// `{id, root_path}`, and maps the response: `created:true` → changed, an
-/// existing index → unchanged no-op, a non-2xx → failure.
-/// Test: `tests::register_index_created`, `register_index_already_exists`,
-/// `register_index_daemon_down`, `register_index_http_error`.
+/// separately. The daemon's `search.index.create` is idempotent (`created:false`
+/// for an existing id), so re-running is safe.
+/// What: probes trusty-search's `socket`; if nothing is serving it, returns an
+/// idempotent no-op. Otherwise derives the index id (directory basename), calls
+/// `search.index.create` with `{id, root_path}`, and maps the answer:
+/// `created:true` → changed, `created:false` → unchanged no-op, any JSON-RPC
+/// error (a conflict included) or failed call → failure carrying the reason.
+/// Test: `tests::register_index_dials_the_socket_not_http_addr`,
+/// `register_index_already_exists`, `register_index_daemon_errors_fail_with_its_message`,
+/// `register_index_dead_or_missing_socket_is_skipped`.
 pub async fn register_index(
-    client: &reqwest::Client,
+    socket: &std::path::Path,
     project_root: &std::path::Path,
 ) -> Result<StageOutcome> {
-    let base = match resolve_base_url(SEARCH_APP)? {
-        Some(b) => b,
-        None => {
-            return Ok(noop(
-                STAGE_INDEX,
-                "trusty-search daemon not running; skipped (run `tctl start` then re-run)",
-            ));
-        }
-    };
+    // #9214: a bare connect decides "not running"; no http_addr is read.
+    if !search_serving(socket).await {
+        return Ok(noop(
+            STAGE_INDEX,
+            "trusty-search daemon not running; skipped (run `tctl start` then re-run)",
+        ));
+    }
     let Some(id) = identity::index_id_for(project_root) else {
         return Ok(fail(
             STAGE_INDEX,
             format!("cannot derive index id from {}", project_root.display()),
         ));
     };
-    let url = format!("{base}/indexes");
-    let body = json!({ "id": id, "root_path": project_root });
-    let resp = match client.post(&url).json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => return Ok(fail(STAGE_INDEX, format!("POST {url}: {e}"))),
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        return Ok(fail(STAGE_INDEX, format!("POST {url} returned {status}")));
-    }
-    // The daemon returns `{ "created": bool, .. }`; treat a parse failure as a
-    // benign "registered" since the 2xx already confirms success.
-    let created = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| v.get("created").and_then(|c| c.as_bool()))
+    let params = json!({ "id": id, "root_path": project_root });
+    let method = trusty_common::search_rpc::METHOD_INDEX_CREATE;
+    let answer =
+        match trusty_common::search_rpc::call_at(socket, method, params, SEARCH_CALL_TIMEOUT).await
+        {
+            Ok(v) => v,
+            // #9214: SearchRpcError's Display carries the daemon's own message.
+            Err(e) => return Ok(fail(STAGE_INDEX, format!("{method}: {e:#}"))),
+        };
+    // The daemon answers `{ "created": bool, .. }`; a result without the field
+    // still confirms success, so read it as registered.
+    let created = answer
+        .get("created")
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
     if created {
         Ok(StageOutcome {
@@ -250,8 +247,8 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 ///
 /// Why: the caller wants a single entry point that provisions the index then the
 /// palace; resolving each stage's transport here keeps `mod.rs` thin.
-/// What: builds the HTTP client for trusty-search and resolves trusty-memory's
-/// socket, runs [`register_index`] then [`create_palace`], and collects the two
+/// What: resolves trusty-search's and trusty-memory's sockets, runs
+/// [`register_index`] then [`create_palace`], and collects the two
 /// [`StageOutcome`]s. Each transport's own init failure fails only the stage it
 /// serves — an unresolvable data directory has nothing to do with whether the
 /// index registered — so the report still renders either way.
@@ -259,11 +256,11 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 pub async fn run_stages(project_root: &std::path::Path) -> Vec<StageOutcome> {
     let mut out = Vec::with_capacity(2);
 
-    out.push(match build_client() {
-        Ok(client) => register_index(&client, project_root)
+    out.push(match search_socket() {
+        Ok(socket) => register_index(&socket, project_root)
             .await
             .unwrap_or_else(|e| fail(STAGE_INDEX, e.to_string())),
-        Err(e) => fail(STAGE_INDEX, format!("HTTP client init failed: {e}")),
+        Err(e) => fail(STAGE_INDEX, format!("{e:#}")),
     });
 
     out.push(match memory_socket() {
@@ -278,30 +275,29 @@ pub async fn run_stages(project_root: &std::path::Path) -> Vec<StageOutcome> {
 
 #[cfg(test)]
 // These tests serialise on a process-global env-var lock (`ENV_TEST_LOCK`) that
-// must stay held across the async daemon call (the `TRUSTY_DATA_DIR_OVERRIDE`
-// it guards is read inside that call). Holding a std `MutexGuard` across an
+// must stay held across the async daemon call (the `TRUSTY_SEARCH_SOCKET` /
+// `TRUSTY_DATA_DIR_OVERRIDE` it guards are read inside that call). Holding a std `MutexGuard` across an
 // `.await` is the `await_holding_lock` lint's target; here it is intentional and
 // safe (test-only serialisation, no cross-task deadlock), so it is allowed.
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::commands::ensure::ENV_TEST_LOCK as ENV_LOCK;
-    // #4246: the stub-server + stubbed-data-dir vehicle these tests grew is now
-    // shared with `probe_http`/`verify_tail` — one copy, in `test_support`.
     use crate::commands::test_support::{
-        clear_data_dir_override, stub_data_dir, stub_empty_data_dir, stub_memory_socket, stub_once,
+        clear_data_dir_override, clear_env, search_stub, set_env, stub_data_dir,
+        stub_empty_data_dir, stub_memory_socket, tcp_tripwire,
     };
-    use crate::commands::test_support::{clear_env, search_stub, set_env, tcp_tripwire};
     use serde_json::Value;
     use std::sync::atomic::Ordering;
-    use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+    use trusty_common::search_rpc::{CODE_CONFLICT, TRUSTY_SEARCH_SOCKET_ENV};
     use trusty_common::uds::server::RpcError;
 
     /// Why (#9214): the index stage must dial trusty-search's socket, never the
     /// TCP address a stale `http_addr` names — that listener is going away.
-    /// What: a stub socket answering `search.index.create`, and a counting TCP
-    /// tripwire behind a planted `http_addr`; assert `changed`, the exact method
-    /// literal and `{id, root_path}` params, and zero TCP connections.
+    /// What: a stub socket answering `search.index.create`, reached through
+    /// `TRUSTY_SEARCH_SOCKET`, and a counting TCP tripwire behind a planted
+    /// `http_addr`; assert `changed`, the exact method literal and
+    /// `{id, root_path}` params, and zero TCP connections.
     /// Test: This is the test.
     #[tokio::test]
     async fn register_index_dials_the_socket_not_http_addr() {
@@ -312,10 +308,10 @@ mod tests {
         )
         .await;
         let (addr, hits) = tcp_tripwire().await;
-        let dir = stub_data_dir(SEARCH_APP, &addr);
+        let dir = stub_data_dir(super::super::daemon::SEARCH_APP, &addr);
         set_env(TRUSTY_SEARCH_SOCKET_ENV, daemon.socket());
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
+        let socket = search_socket().unwrap();
+        let out = register_index(&socket, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
         clear_env(&[TRUSTY_SEARCH_SOCKET_ENV]);
@@ -349,8 +345,8 @@ mod tests {
         .await;
         let dir = stub_empty_data_dir("tctl-ensure-uds");
         set_env(TRUSTY_SEARCH_SOCKET_ENV, daemon.socket());
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
+        let socket = search_socket().unwrap();
+        let out = register_index(&socket, std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
         clear_env(&[TRUSTY_SEARCH_SOCKET_ENV]);
@@ -359,75 +355,71 @@ mod tests {
         assert!(out.ok && out.changed, "detail: {}", out.detail);
     }
 
-    /// Why: a fresh registration (`created:true`) must report `changed = true`.
-    /// What: stub returns `{"created":true}`; assert the outcome.
-    /// Test: This is the test.
-    #[tokio::test]
-    async fn register_index_created() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let addr = stub_once("HTTP/1.1 200 OK", r#"{"id":"proj","created":true}"#).await;
-        let dir = stub_data_dir(SEARCH_APP, &addr);
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
-            .await
-            .unwrap();
-        clear_data_dir_override(&dir);
-        assert_eq!(out.stage, STAGE_INDEX);
-        assert!(out.ok);
-        assert!(out.changed);
-    }
-
     /// Why: re-registering an existing index (`created:false`) must be an
     /// idempotent no-op (`ok`, `!changed`).
-    /// What: stub returns `{"created":false}`; assert the outcome.
+    /// What: the stub answers `{"created":false}`; assert the outcome.
     /// Test: This is the test.
     #[tokio::test]
     async fn register_index_already_exists() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let addr = stub_once("HTTP/1.1 200 OK", r#"{"id":"proj","created":false}"#).await;
-        let dir = stub_data_dir(SEARCH_APP, &addr);
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
+        let (_seen, daemon) = search_stub(
+            "search.index.create",
+            Ok(json!({ "id": "proj", "created": false })),
+        )
+        .await;
+        let out = register_index(daemon.socket(), std::path::Path::new("/tmp/proj"))
             .await
             .unwrap();
-        clear_data_dir_override(&dir);
-        assert!(out.ok);
+        assert!(out.ok, "detail: {}", out.detail);
         assert!(!out.changed);
+        assert!(out.detail.contains("already registered"), "{}", out.detail);
     }
 
-    /// Why: a non-2xx from a reachable daemon means the project is
-    /// mis-provisioned and must be a hard failure.
-    /// What: stub returns 500; assert `!ok`.
+    /// Why (#9214): a reachable daemon that refuses — a `409`-style conflict or
+    /// any other error — means the project is mis-provisioned. That must be a
+    /// hard failure carrying the daemon's own reason, never a skip.
+    /// What: one stub per refusal; assert `!ok` and that the message survives.
     /// Test: This is the test.
     #[tokio::test]
-    async fn register_index_http_error() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let addr = stub_once("HTTP/1.1 500 Internal Server Error", r#"{"error":"boom"}"#).await;
-        let dir = stub_data_dir(SEARCH_APP, &addr);
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
-            .await
-            .unwrap();
-        clear_data_dir_override(&dir);
-        assert!(!out.ok);
+    async fn register_index_daemon_errors_fail_with_its_message() {
+        for (refusal, message) in [
+            (
+                RpcError::new(CODE_CONFLICT, "index 'proj' is registered to /elsewhere"),
+                "registered to /elsewhere",
+            ),
+            (
+                RpcError::internal("registry unreadable"),
+                "registry unreadable",
+            ),
+        ] {
+            let (_seen, daemon) = search_stub("search.index.create", Err(refusal)).await;
+            let out = register_index(daemon.socket(), std::path::Path::new("/tmp/proj"))
+                .await
+                .unwrap();
+            assert!(!out.ok, "a refusal must fail the stage: {}", out.detail);
+            assert!(out.detail.contains(message), "{}", out.detail);
+        }
     }
 
     /// Why: when the trusty-search daemon is not running, the stage must be an
-    /// idempotent no-op so plain `tctl ensure` still exits 0 pre-boot.
-    /// What: a data dir with no `http_addr` → `ok`, `!changed`.
+    /// idempotent no-op so plain `tctl ensure` still exits 0 pre-boot. Since
+    /// #9214 "not running" is a socket nothing serves: a missing path, or a
+    /// stale socket file a dead daemon left behind.
+    /// What: both shapes → `ok`, `!changed`, "not running".
     /// Test: This is the test.
     #[tokio::test]
-    async fn register_index_daemon_down() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = stub_empty_data_dir("tctl-ensure-down");
-        let client = build_client().unwrap();
-        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
-            .await
-            .unwrap();
-        clear_data_dir_override(&tmp);
-        assert!(out.ok);
-        assert!(!out.changed);
-        assert!(out.detail.contains("not running"));
+    async fn register_index_dead_or_missing_socket_is_skipped() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let stale = tmp.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).expect("bind"));
+        assert!(stale.exists(), "the stale socket file must remain");
+        for socket in [tmp.path().join("absent.sock"), stale] {
+            let out = register_index(&socket, std::path::Path::new("/tmp/proj"))
+                .await
+                .unwrap();
+            assert!(out.ok, "{}: {}", socket.display(), out.detail);
+            assert!(!out.changed);
+            assert!(out.detail.contains("not running"), "{}", out.detail);
+        }
     }
 
     /// Why: when the trusty-memory daemon is not running, the palace stage must

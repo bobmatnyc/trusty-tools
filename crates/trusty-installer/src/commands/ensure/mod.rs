@@ -16,14 +16,14 @@
 //! themselves live in focused submodules:
 //! [`mcp_patch`] (`.mcp.json`), [`project_setup`] (index/palace),
 //! [`readiness`] (`--wait` polling), [`identity`] (pure name derivation),
-//! [`daemon`] (address + HTTP seam), [`report`] (types + exit codes).
+//! [`daemon`] (socket resolution + probes), [`report`] (types + exit codes).
 //!
 //! Exit codes (#1341): `0` = fully provisioned (and, if `--wait`, ready);
 //! `2` = a `.mcp.json` patch or a reachable-daemon project-setup stage failed;
 //! `4` = `--wait` was requested but readiness was not reached before the timeout.
 //!
 //! Test: the submodules are unit-tested; `run` is side-effecting (filesystem +
-//! network + a tokio runtime) and is exercised end-to-end by the CLI smoke path.
+//! sockets + a tokio runtime) and is exercised end-to-end by the CLI smoke path.
 
 pub mod daemon;
 pub mod identity;
@@ -124,13 +124,9 @@ pub fn run(wait: bool, json: bool) -> i32 {
     let (stages, ready) = block_on(async {
         let stages = project_setup::run_stages(&root).await;
         let ready = if wait {
+            // #9214: both arms of the probe dial Unix sockets; no HTTP client.
             let cfg = readiness::PollConfig::from_env();
-            match daemon::build_client() {
-                Ok(client) => {
-                    readiness::poll_until_ready(cfg, || readiness::probe_ready(&client)).await
-                }
-                Err(_) => false,
-            }
+            readiness::poll_until_ready(cfg, readiness::probe_ready).await
         } else {
             // No `--wait`: readiness is not evaluated; `ready` is irrelevant to
             // the exit code (see `EnsureReport::exit_code`).

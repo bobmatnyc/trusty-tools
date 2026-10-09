@@ -329,7 +329,7 @@ pub(crate) fn dead_addr() -> String {
 /// The caller MUST be holding [`ENV_TEST_LOCK`].
 /// # Postconditions
 /// Returns the created directory; teardown is [`clear_data_dir_override`].
-/// Test: used by `ensure::project_setup::tests::register_index_daemon_down`,
+/// Test: used by `ensure::project_setup::tests::register_index_created_over_the_socket_without_http_addr`,
 /// `create_palace_daemon_down`.
 pub(crate) fn stub_empty_data_dir(tag: &str) -> std::path::PathBuf {
     let tmp = std::env::temp_dir().join(format!(
