@@ -229,13 +229,48 @@ impl Drop for RehydrateGateClearOnDrop {
 /// partway through Phase 1-3 — there is no production code path that does
 /// this intentionally, so a dedicated test hook is the only way to exercise
 /// the unwind deterministically.
-/// What: when `true`, `spawn_detached_rehydrate` panics immediately after
-/// the redb scan completes (i.e. inside the commit phase, after the
-/// `RehydrateGateClearOnDrop` guard is already live), instead of running
-/// Phase 1-3 normally. Reset to `false` by tests when done.
+/// What: holds the keys of the indexers armed via [`CommitPhasePanicArmed`];
+/// an armed indexer's `spawn_detached_rehydrate` panics immediately after the
+/// redb scan completes (inside the commit phase, after the
+/// `RehydrateGateClearOnDrop` guard is already live) instead of running
+/// Phase 1-3. A key is the address of the indexer's `rehydrate_inflight` gate.
+// #9513: keyed per indexer, not a process-global bool — a global flag panicked
+// every concurrent test's rehydrate (e.g. `warm_corpus_rehydrates_an_evicted_index`).
 #[cfg(test)]
-pub(crate) static TEST_PANIC_IN_COMMIT_PHASE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static TEST_PANIC_IN_COMMIT_PHASE: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
+
+/// Test-only: arms the commit-phase panic for ONE indexer until dropped.
+/// Test: `commit_phase_panic_injection_reaches_only_the_armed_indexer`,
+/// `rehydrate_gate_clears_after_a_panic_in_the_commit_phase`.
+#[cfg(test)]
+pub(crate) struct CommitPhasePanicArmed(usize);
+
+#[cfg(test)]
+impl CommitPhasePanicArmed {
+    /// Arm the injected commit-phase panic for `indexer` only.
+    pub(crate) fn arm(indexer: &CodeIndexer) -> Self {
+        let key = Arc::as_ptr(&indexer.rehydrate_inflight) as usize;
+        armed_commit_panics().push(key);
+        Self(key)
+    }
+}
+
+#[cfg(test)]
+impl Drop for CommitPhasePanicArmed {
+    fn drop(&mut self) {
+        let mut armed = armed_commit_panics();
+        if let Some(pos) = armed.iter().position(|k| *k == self.0) {
+            armed.swap_remove(pos);
+        }
+    }
+}
+
+#[cfg(test)]
+fn armed_commit_panics() -> std::sync::MutexGuard<'static, Vec<usize>> {
+    TEST_PANIC_IN_COMMIT_PHASE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 /// Test-only hook: pause AFTER Phase 1-3 have published fresh data but
 /// BEFORE the generation-CAS commit check (issue #3683 code-critic review
@@ -700,6 +735,8 @@ impl CodeIndexer {
         let chunks_evicted = Arc::clone(&self.chunks_evicted);
         let bm25_entities_evicted = Arc::clone(&self.bm25_entities_evicted);
         let inflight_gate = Arc::clone(&self.rehydrate_inflight);
+        #[cfg(test)]
+        let commit_panic_key = Arc::as_ptr(&inflight_gate) as usize;
         let rehydrate_generation = Arc::clone(&self.rehydrate_generation);
         let lane_degraded = Arc::clone(&self.lane_degraded);
         // #5917: the two failure arms below used to report an unreadable corpus
@@ -748,7 +785,7 @@ impl CodeIndexer {
                 scan_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
             #[cfg(test)]
-            if TEST_PANIC_IN_COMMIT_PHASE.load(Ordering::Relaxed) {
+            if armed_commit_panics().contains(&commit_panic_key) {
                 panic!("test-injected panic in rehydrate commit phase (issue #3683 finding 1)");
             }
 

@@ -349,7 +349,7 @@ async fn rehydrate_gate_clears_after_a_panic_in_the_commit_phase() {
 
     // Inject a panic right after the scan completes — inside the commit
     // phase, after `RehydrateGateClearOnDrop` is already live.
-    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(true, Ordering::Relaxed);
+    let armed = super::idle_evict::CommitPhasePanicArmed::arm(&idx);
 
     // `ensure_bm25_entities_loaded` becomes the leader, spawns the detached
     // task (which will panic), and waits up to its own bounded budget. The
@@ -388,7 +388,7 @@ async fn rehydrate_gate_clears_after_a_panic_in_the_commit_phase() {
 
     // A NEXT caller must get a fresh, successful attempt — not be denied
     // forever by a stale wedge.
-    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(false, Ordering::Relaxed);
+    drop(armed);
     idx.ensure_bm25_entities_loaded().await;
     assert!(
         !idx.bm25_entities_evicted.load(Ordering::Relaxed),
@@ -430,7 +430,7 @@ async fn commit_phase_panic_injection_reaches_only_the_armed_indexer() {
     let armed = indexed_and_evicted(&dir_a.path().join("index.redb")).await;
     let unarmed = indexed_and_evicted(&dir_b.path().join("index.redb")).await;
 
-    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(true, Ordering::Relaxed);
+    let guard = super::idle_evict::CommitPhasePanicArmed::arm(&armed);
 
     unarmed.ensure_bm25_entities_loaded().await;
     let unarmed_rehydrated = !unarmed.bm25_entities_evicted.load(Ordering::Relaxed);
@@ -439,7 +439,7 @@ async fn commit_phase_panic_injection_reaches_only_the_armed_indexer() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let armed_still_evicted = armed.bm25_entities_evicted.load(Ordering::Relaxed);
 
-    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(false, Ordering::Relaxed);
+    drop(guard);
 
     assert!(
         unarmed_rehydrated,
