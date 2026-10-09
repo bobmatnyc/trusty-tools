@@ -581,7 +581,7 @@ required (`true`) everywhere unless explicitly opted out via
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PR_INTELLIGENCE_DRY_RUN` | `true` | Governs the webhook/service default. Does NOT gate `trusty-review run`, which requires the explicit `--live` flag to post ([#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460)) |
-| `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon URL |
+| `TRUSTY_SEARCH_URL` | unset (Unix socket) | explicit trusty-search HTTP URL; unset uses the daemon socket, with no TCP fallback (#9214) |
 | `PR_INTELLIGENCE_ANALYZER_SOCKET` | derived data-directory path | Unix socket used by report-mode `--analyze` |
 | `TRUSTY_ANALYZE_BIN` | `trusty-analyze` | Binary spawned on demand by the review pipeline |
 | `TRUSTY_REVIEW_REQUIRE_SEARCH` | per-surface (see above) | Force search required (`true`) or allow degrade (`false`) regardless of invocation surface |

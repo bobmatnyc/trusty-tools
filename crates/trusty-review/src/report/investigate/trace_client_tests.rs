@@ -9,7 +9,6 @@
 
 use super::*;
 // #9214: the HTTP leg's layout now resolves inside `search_transport`.
-use trusty_common::daemon_guard::DaemonAddrLayout;
 
 /// Verbatim from `GET /indexes/trusty-tools-2c24d89f/call_chain?entry_point=
 /// SHRINK_GUARD_RATIO_DIVISOR` on 2026-08-22 — the report the RED finding at
@@ -134,15 +133,4 @@ async fn the_registry_read_uses_this_sources_base_url() {
         source.registered_indexes().await.is_empty(),
         "the read must go to this source's base_url, never the machine's daemon"
     );
-}
-
-/// The layout the source resolves through, pinned so a later edit cannot
-/// quietly swap it for a literal `127.0.0.1:7878` — which would miss an
-/// auto-ported daemon and every `TRUSTY_DATA_DIR`-isolated one. Nothing here
-/// calls `resolve_base_url`: it probes the network and can refresh a file under
-/// `$HOME`, neither of which belongs in a unit test.
-#[test]
-fn the_shared_search_layout_is_the_one_being_resolved() {
-    assert_eq!(DaemonAddrLayout::TRUSTY_SEARCH.addr_file_name, "http_addr");
-    assert_eq!(DaemonAddrLayout::TRUSTY_SEARCH.default_port, 7878);
 }

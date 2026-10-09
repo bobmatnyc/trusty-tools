@@ -8,13 +8,14 @@
 //! 1. `TRUSTY_SEARCH_SOCKET` set and non-empty → that socket;
 //! 2. an explicit URL (`TRUSTY_SEARCH_URL` set, or a `search_url` that is not
 //!    the default) → HTTP on that URL;
-//! 3. otherwise the default socket when its file exists, else HTTP on the
-//!    configured URL. The default socket follows the daemon's own rule:
+//! 3. otherwise the default socket, whether or not its file exists. The
+//!    default socket follows the daemon's own rule:
 //!    `<TRUSTY_DATA_DIR>/trusty-search.sock` when `TRUSTY_DATA_DIR` is set,
 //!    else `search_rpc::search_socket()`.
 //!
-//! A socket file whose daemon is dead is a dial error on the socket leg. It
-//! never falls back to HTTP: a silent fallback would hide a split-brain.
+//! A missing socket file, or one whose daemon is dead, is a dial error on the
+//! socket leg. Neither falls back to HTTP (#9214: fail closed): a silent
+//! fallback would hide a split-brain and keep a TCP client alive.
 //! `call_socket` is the socket leg's one call, over
 //! `trusty_common::search_rpc::call_at`; it maps the daemon's JSON-RPC codes
 //! onto the same [`SearchClientError`] values the HTTP leg produces, so every
@@ -27,7 +28,6 @@ use std::sync::Once;
 use std::time::Duration;
 
 use serde_json::Value;
-use trusty_common::daemon_guard::DaemonAddrLayout;
 use trusty_common::search_rpc::{self, SearchRpcError, TRUSTY_SEARCH_SOCKET_ENV};
 
 use super::search_client::SearchClientError;
@@ -35,9 +35,6 @@ use crate::pipeline::optional_context::probes::redact_credentials;
 
 /// The env var that pins an explicit HTTP URL.
 pub const TRUSTY_SEARCH_URL_ENV: &str = "TRUSTY_SEARCH_URL"; // #9214 phase C: delete
-
-/// `ReviewConfig::search_url` when nothing sets it.
-pub(crate) const DEFAULT_SEARCH_URL: &str = "http://localhost:7878"; // #9214 phase C: delete
 
 // #9214: switch to trusty_common constants after B1
 /// The daemon's "no such index / entry point" code (HTTP 404).
@@ -71,47 +68,45 @@ impl SearchTransport {
     /// Why: one rule for every review-pipeline client, so a probe and the
     /// search it gates never talk to two different daemons.
     /// What: the module-doc precedence, with `config.search_url` as the HTTP
-    /// URL. The URL counts as explicit when `TRUSTY_SEARCH_URL` is set or when
-    /// `search_url` is not the default `http://localhost:7878`. Logs the leg
-    /// once per process.
-    /// Limitation: a `search_url` equal to the default counts as not explicit,
-    /// so pinning HTTP to the default address needs `TRUSTY_SEARCH_URL` set.
-    /// Test: `socket_is_used_when_present`, `http_is_used_when_the_socket_is_absent`,
-    /// `socket_overrides_a_config_url_that_is_not_explicit`,
-    /// `explicit_socket_env_beats_explicit_url`.
+    /// URL. A non-empty `search_url` is explicit; it is empty unless
+    /// `TRUSTY_SEARCH_URL` set it. With no explicit URL the default socket is
+    /// chosen even when its file is missing. Logs the leg once per process.
+    /// Test: `socket_is_used_when_present`,
+    /// `missing_socket_fails_closed_on_the_config_leg`,
+    /// `explicit_socket_env_beats_explicit_url`,
+    /// `explicit_url_env_keeps_the_http_leg`.
     #[must_use]
     pub fn resolve(config: &crate::config::ReviewConfig) -> Self {
-        let url = config.search_url.trim_end_matches('/').to_string();
-        let explicit = url_env_is_set() || url != DEFAULT_SEARCH_URL; // #9214 phase C: delete
-        Self::resolve_with(explicit, || url)
+        // #9214: an empty `search_url` is "not set", never a localhost default.
+        let url = config.search_url.trim().trim_end_matches('/');
+        Self::resolve_with((!url.is_empty()).then(|| url.to_string())) // #9214 phase C: delete
     }
 
     /// Resolve the transport for the daemon trusty-search itself advertises.
     ///
     /// Why: the report pass addresses the daemon the audit indexed, not the
-    /// review config's URL; its HTTP leg resolves through [`DaemonAddrLayout`].
-    /// What: the same precedence; explicit only when `TRUSTY_SEARCH_URL` is set,
-    /// and the HTTP leg keeps the pre-#9214 `DaemonAddrLayout` address.
-    /// Test: `trace_entry_node_and_usages_go_over_the_socket` covers the leg it
-    /// feeds; the precedence is `resolve`'s.
+    /// review config's URL.
+    /// What: the same precedence; the only explicit URL is `TRUSTY_SEARCH_URL`'s
+    /// own value. #9214: it no longer resolves a discovery-file or default-port
+    /// HTTP address, so a missing socket is a dial error, never a TCP call.
+    /// Test: `missing_socket_fails_closed_without_tcp_on_the_advertised_leg`,
+    /// `trace_entry_node_and_usages_go_over_the_socket`.
     #[must_use]
     pub fn resolve_advertised() -> Self {
-        Self::resolve_with(url_env_is_set(), || {
-            DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url() // #9214 phase C: delete
-        })
+        Self::resolve_with(url_env()) // #9214 phase C: delete the URL argument
     }
 
-    /// The precedence itself; `http_url` runs only when HTTP is chosen.
-    fn resolve_with(url_explicit: bool, http_url: impl FnOnce() -> String) -> Self {
+    /// The precedence itself; `explicit_url` is rule 2's URL, when one is set.
+    ///
+    /// #9214: rule 3 always answers a socket. A missing file, or a path that
+    /// cannot be derived, is a dial error the caller reports as unavailable.
+    fn resolve_with(explicit_url: Option<String>) -> Self {
         let chosen = if let Some(pinned) = socket_env() {
             Self::Socket(pinned)
-        } else if url_explicit {
-            Self::Http(http_url()) // #9214 phase C: delete
+        } else if let Some(url) = explicit_url {
+            Self::Http(url) // #9214 phase C: delete
         } else {
-            match default_socket() {
-                Some(path) => Self::Socket(path),
-                None => Self::Http(http_url()), // #9214 phase C: delete
-            }
+            Self::Socket(default_socket())
         };
         log_once(&chosen);
         chosen
@@ -153,21 +148,29 @@ impl SearchTransport {
     }
 }
 
-/// Rule 3's socket: the default path, when its file exists.
+/// Rule 3's socket: the default path, whether or not its file exists.
 ///
-/// #9214: a unit-test build never reads the operator's real path. Unless a test
+/// #9214: fail closed. A path that cannot be derived (a relative
+/// `TRUSTY_DATA_DIR`, a refused `TRUSTY_DATA_DIR_OVERRIDE`, no home dir) is
+/// one the daemon cannot bind either; it becomes a `<unresolved …>` path that
+/// names the reason, so the dial fails with that reason in its error.
+/// A unit-test build never reads the operator's real path. Unless a test
 /// isolated the data dir with `TRUSTY_DATA_DIR_OVERRIDE` or `TRUSTY_DATA_DIR`,
 /// it gets `hermetic_socket()`, a path that never exists, so no test dials or
 /// stats the live daemon's socket.
-/// Test: `unit_tests_never_resolve_the_real_default_socket`.
-fn default_socket() -> Option<PathBuf> {
+/// Test: `unit_tests_never_resolve_the_real_default_socket`,
+/// `unresolvable_socket_path_fails_closed`.
+fn default_socket() -> PathBuf {
     #[cfg(test)]
     if std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_none()
         && isolated_data_dir().is_none()
     {
-        return Some(hermetic_socket());
+        return hermetic_socket();
     }
-    default_socket_path().filter(|path| path.exists())
+    default_socket_path().unwrap_or_else(|reason| {
+        tracing::warn!(%reason, "trusty-search socket path unresolved; search is unavailable");
+        PathBuf::from(format!("<unresolved trusty-search socket: {reason}>"))
+    })
 }
 
 /// The path the trusty-search daemon binds, by its own rule.
@@ -177,16 +180,25 @@ fn default_socket() -> Option<PathBuf> {
 /// `service::socket::resolve_socket_path`, #7801), but
 /// `search_rpc::search_socket()` honours only `TRUSTY_DATA_DIR_OVERRIDE`. Without
 /// this branch an isolated report pass would read the production daemon.
-/// What: `<TRUSTY_DATA_DIR>/trusty-search.sock` when that var is non-empty; `None`
+/// What: `<TRUSTY_DATA_DIR>/trusty-search.sock` when that var is non-empty; `Err`
 /// when it is relative, which the daemon refuses, so no isolated socket exists;
-/// otherwise the shared derivation.
-/// Test: `trusty_data_dir_isolates_the_default_socket`.
-fn default_socket_path() -> Option<PathBuf> {
+/// otherwise the shared derivation, whose error is the reason it failed.
+/// Test: `trusty_data_dir_isolates_the_default_socket`,
+/// `unresolvable_socket_path_fails_closed`.
+fn default_socket_path() -> Result<PathBuf, String> {
     // #9214: drop once B1 makes search_rpc::search_socket() honour TRUSTY_DATA_DIR
     if let Some(dir) = isolated_data_dir() {
-        return dir.is_absolute().then(|| dir.join(SEARCH_SOCKET_FILE)); // #9214 B1: delete
+        // #9214 B1: delete
+        return if dir.is_absolute() {
+            Ok(dir.join(SEARCH_SOCKET_FILE))
+        } else {
+            Err(format!(
+                "{TRUSTY_DATA_DIR_ENV}={} is relative, which the daemon refuses",
+                dir.display()
+            ))
+        };
     }
-    search_rpc::search_socket().ok()
+    search_rpc::search_socket().map_err(|e| format!("{e:#}"))
 }
 
 // #9214: drop once B1 makes search_rpc::search_socket() honour TRUSTY_DATA_DIR
@@ -222,10 +234,12 @@ fn socket_env() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Whether `TRUSTY_SEARCH_URL` is set and non-empty.
-fn url_env_is_set() -> bool {
+/// `TRUSTY_SEARCH_URL`, trimmed and without a trailing slash, when non-empty.
+fn url_env() -> Option<String> {
     std::env::var(TRUSTY_SEARCH_URL_ENV) // #9214 phase C: delete
-        .is_ok_and(|v| !v.trim().is_empty()) // #9214 phase C: delete
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Log the chosen leg once per process.
