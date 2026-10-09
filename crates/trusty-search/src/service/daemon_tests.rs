@@ -779,7 +779,7 @@ async fn run_daemon_without_http_serves_only_the_socket() {
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
         let mut events = state.events.subscribe();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
 
         let serving = wait_for_socket(&socket_path).await;
         let health: Option<serde_json::Value> = trusty_common::uds::send_framed_request(
@@ -862,7 +862,7 @@ async fn run_daemon_without_http_removes_a_stale_http_addr() {
 
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
         let serving = wait_for_socket(&socket_path).await;
         let addr_left = stale_addr.exists();
         let port_left = stale_port.exists();
@@ -952,7 +952,7 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
 
         let socket_path = socket::socket_path().expect("resolve the isolated socket path");
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
         assert!(wait_for_socket(&socket_path).await, "the socket must serve");
         let _ = shutdown_tx.send(true);
         let exit = tokio::time::timeout(std::time::Duration::from_secs(20), handle).await;
@@ -993,6 +993,69 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
             stamp,
             Some(STAMP),
             "#9477: project.resolve must read reindexed_unix after a normal stop"
+        );
+    })
+    .await;
+}
+
+/// #9214: `start --socket` must not change the mode of a directory it did not
+/// create.
+///
+/// Why: `--socket ~/x.sock` narrowed `$HOME` to `0700` — the bind hardens the
+/// socket's parent, and that parent already existed.
+/// What: runs a real isolated daemon with `--socket` inside an existing `0755`
+/// directory, asserts it returned an error naming that directory (so the
+/// refusal was reached, not an earlier failure such as the lock), and asserts
+/// the directory is still `0755`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged() {
+    use crate::core::registry::IndexRegistry;
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_daemon_paths(|_data_dir| async move {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent = tmp.path().join("existing");
+        std::fs::create_dir(&parent).expect("create the existing parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the existing parent to 0755");
+        let socket_path = parent.join("ts.sock");
+
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let handle = tokio::spawn(run_daemon_with(
+            state,
+            HttpListener::Off,
+            Some(socket_path.clone()),
+        ));
+        // Either the daemon refuses and returns, or it binds; stop it either way.
+        for _ in 0..250 {
+            if handle.is_finished() || socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let _ = shutdown_tx.send(true);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("the daemon must return within 10 s of shutdown")
+            .expect("the daemon task must not panic");
+        let err = outcome.expect_err("start --socket must refuse a 0755 parent it did not create");
+        let dir = parent.display().to_string();
+        assert!(
+            err.to_string().contains(&dir),
+            "the refusal must name the --socket directory {dir}: {err}"
+        );
+
+        let mode = std::fs::metadata(&parent)
+            .expect("stat the existing parent")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "start --socket changed the mode of a directory it did not create (now {mode:04o})"
         );
     })
     .await;

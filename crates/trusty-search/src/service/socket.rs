@@ -369,6 +369,60 @@ pub struct BoundSocket {
     pub path: PathBuf,
 }
 
+/// Prepare the parent directory of a `start --socket` path, and return the path.
+///
+/// Why: #9214 — [`bind`] narrows the socket's parent to `0700`, so
+/// `--socket ~/x.sock` narrowed `$HOME`. Leaving a wider parent alone and
+/// binding anyway is no fix: every client dials through
+/// `trusty_common::uds::connect_hardened`, which refuses a socket whose
+/// directory is not `0700`.
+/// What: a missing parent is created by `uds::prepare_socket_dir`, the leaf at
+/// `0700`. An existing directory at `0700` is accepted as is; one at any other
+/// mode is refused and left untouched. A symlink or non-directory is left to
+/// [`bind`], which refuses it before any chmod. A socket in the data directory
+/// (auto-start passes the data-dir socket) is skipped: [`bind`] narrows that
+/// directory exactly as it does without `--socket`.
+/// Test: `run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged`,
+/// `prepare_named_socket_dir_creates_a_missing_parent_at_0700`,
+/// `prepare_named_socket_refusal_names_the_chmod_remedy`,
+/// `prepare_named_socket_reports_an_unstatable_parent`,
+/// `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`.
+pub fn prepare_named_socket(socket: PathBuf) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    use trusty_common::uds::SOCKET_DIR_MODE;
+
+    // A bare filename has no directory to prepare; `bind` refuses it.
+    let Some(dir) = socket.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(socket);
+    };
+    // The data directory is the daemon's own; the default bind narrows it.
+    if socket_path()?.parent() == Some(dir) {
+        return Ok(socket);
+    }
+    let checked = match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            trusty_common::uds::prepare_socket_dir(dir)
+                .with_context(|| format!("create --socket directory {}", dir.display()))
+        }
+        Err(e) => Err(e).with_context(|| format!("stat --socket directory {}", dir.display())),
+        Ok(meta) if meta.is_dir() => {
+            let mode = meta.permissions().mode() & 0o777;
+            // #9214: the refusal names the remedy, not only the reason.
+            anyhow::ensure!(
+                mode == SOCKET_DIR_MODE,
+                "--socket directory {dir} is mode {mode:04o}; clients refuse a socket outside a \
+                 {SOCKET_DIR_MODE:04o} directory, and start does not change the mode of a \
+                 directory it did not create. Run `chmod 700 {dir}`, or pass a --socket path \
+                 whose directory does not exist yet (start creates it at 0700)",
+                dir = dir.display()
+            );
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+    };
+    checked.map(|()| socket)
+}
+
 /// Bind `socket`, refusing to start when another daemon is live on it.
 ///
 /// Why `bind_singleton_hardened` rather than `bind_hardened`: this daemon is

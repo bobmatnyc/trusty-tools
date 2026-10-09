@@ -4,7 +4,8 @@
 //! `--no-http` adds a field. The fields moved here verbatim; `main.rs` keeps
 //! the subcommand's help text and flattens this struct into it.
 //! What: one `clap::Args` struct, read by [`super::handle_start`].
-//! Test: `bare_flag_still_means_true` and `no_http_flag_spellings_parse`
+//! Test: `bare_flag_still_means_true`, `no_http_flag_spellings_parse` and
+//! `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`
 //! parse `start` through the real `Cli`.
 
 /// Every flag `trusty-search start` accepts.
@@ -138,4 +139,33 @@ pub struct StartArgs {
     /// start.
     #[arg(long, env = "TRUSTY_SEARCH_NO_HTTP", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = crate::commands::service_unit::parse_truthy_bool)]
     pub(crate) no_http: bool,
+
+    /// Bind the RPC socket at exactly this path (#9214).
+    ///
+    /// Without it the daemon binds `<TRUSTY_DATA_DIR>/trusty-search.sock`, or
+    /// the shared default socket when `TRUSTY_DATA_DIR` is unset. A client
+    /// whose `TRUSTY_SEARCH_SOCKET` names another path passes it here when it
+    /// auto-starts the daemon, so both sides use one socket. Must be an
+    /// absolute path. A missing parent is created at `0700`; an existing one
+    /// other than the data directory is never chmodded, and is refused unless `0700`.
+    /// The lockfile and the port file stay under the data directory.
+    #[arg(long, value_name = "PATH", value_parser = parse_socket_path)]
+    pub(crate) socket: Option<std::path::PathBuf>,
+}
+
+/// Parse `start --socket`: an absolute path, refused otherwise.
+///
+/// Why: #9214 — a relative socket path resolves against the daemon's cwd
+/// (`/` under launchd), so the daemon would bind somewhere no client looks.
+/// The data-dir resolver refuses a relative `TRUSTY_DATA_DIR` the same way.
+/// What: returns the path unchanged when absolute; otherwise an error naming
+/// the flag, which clap reports before the daemon starts.
+/// Test: `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`.
+pub(crate) fn parse_socket_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!("--socket must be an absolute path (got: {raw:?})"))
+    }
 }

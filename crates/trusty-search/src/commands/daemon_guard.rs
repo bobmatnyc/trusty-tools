@@ -21,6 +21,7 @@
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 use trusty_search::service::daemon_client::DaemonClient;
 
@@ -32,37 +33,51 @@ use trusty_search::service::daemon_client::DaemonClient;
 /// wait than fail spuriously.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Spawn `trusty-search start --foreground` as a detached background process.
+/// The `trusty-search` arguments an auto-start spawns the daemon with.
 ///
-/// Why: we want the daemon to outlive this CLI invocation. We use the
-/// currently-running executable so a `cargo run` session boots its own debug
-/// daemon and a production install boots the production binary. The
-/// `--foreground` flag prevents recursive self-spawning.
-/// What: delegates to `spawn_daemon_with_device(None)`.
-#[allow(dead_code)]
-pub(crate) fn spawn_daemon() -> Result<u32> {
-    spawn_daemon_with_device(None)
+/// Why: #9214 — the spawned daemon must bind the socket the client polls. With
+/// no `--socket` it bound `<TRUSTY_DATA_DIR>/trusty-search.sock`, so a client
+/// whose `TRUSTY_SEARCH_SOCKET` named another path waited 60 s and failed.
+/// What: `start --foreground --socket <socket>`, plus `--device <device>` when
+/// given. A relative `socket` is made absolute against this process's cwd,
+/// which the child inherits, because `start --socket` refuses a relative path.
+///
+/// # Errors
+///
+/// When the path is not valid UTF-8 (the spawn helper takes `&str` arguments),
+/// or when the cwd needed to make it absolute cannot be read.
+///
+/// Test: `spawn_args_name_the_clients_socket`,
+/// `spawn_args_make_a_relative_socket_absolute`,
+/// `spawn_args_refuse_a_non_utf8_socket`.
+fn spawn_args(socket: &Path, device: Option<&str>) -> Result<Vec<String>> {
+    let socket = std::path::absolute(socket)
+        .map_err(|e| anyhow!("resolve socket path {}: {e}", socket.display()))?;
+    let socket = socket
+        .to_str()
+        .ok_or_else(|| anyhow!("socket path is not valid UTF-8: {}", socket.display()))?;
+    let mut args = vec!["start", "--foreground", "--socket", socket];
+    if let Some(dev) = device {
+        args.extend(["--device", dev]);
+    }
+    Ok(args.into_iter().map(str::to_owned).collect())
 }
 
-/// Spawn `trusty-search start --foreground` as a detached background process,
-/// optionally forcing a specific execution-provider device.
+/// Spawn `trusty-search start --foreground` as a detached background process
+/// bound to `socket`, optionally forcing an execution-provider device.
 ///
 /// Why (issue #24): on Apple Silicon, CoreML EP session-init alone allocates
 /// from the unified memory pool and inflates virtual RSS to ~72 GB before any
 /// inference runs. Auto-spawning the daemon with `--device cpu` sidesteps
-/// CoreML init entirely for the indexing path.
-/// What: invokes `<exe> start --foreground` and, when `device` is `Some`,
-/// appends `--device <device>`. Delegates to
-/// `spawn_current_exe_forwarding_parent_link`.
-/// Test: `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`.
-pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
-    let mut args = vec!["start", "--foreground"];
-    let device_str;
-    if let Some(dev) = device {
-        args.push("--device");
-        device_str = dev.to_string();
-        args.push(&device_str);
-    }
+/// CoreML init entirely for the indexing path. We use the current executable
+/// so a `cargo run` session boots its own debug daemon; `--foreground`
+/// prevents recursive self-spawning.
+/// What: [`spawn_args`], then `spawn_current_exe_forwarding_parent_link`.
+/// Test: `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`,
+/// `auto_start_binds_the_socket_the_client_resolved`.
+pub(crate) fn spawn_daemon_on(socket: &Path, device: Option<&str>) -> Result<u32> {
+    let args = spawn_args(socket, device)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     // #8900: forward a parent-death stamp, so a daemon a stamped CLI (a test)
     // auto-starts dies with that test rather than outliving the run. No stamp
     // in the environment — every production invocation — forwards nothing.
@@ -122,7 +137,8 @@ pub async fn ensure_daemon_up_with_device(
             ),
             None => eprintln!("{} Starting trusty-search daemon…", "◉".cyan()),
         }
-        spawn_daemon_with_device(device)?;
+        // #9214: the daemon binds the socket this client polls below.
+        spawn_daemon_on(client.socket(), device)?;
     }
     wait_for_socket(client, READY_TIMEOUT).await
 }
@@ -213,6 +229,53 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains(&socket.display().to_string()), "{text}");
         assert!(!text.contains("http://"), "{text}");
+    }
+
+    /// #9214: the spawn names the client's socket, with and without a device.
+    #[test]
+    fn spawn_args_name_the_clients_socket() {
+        let socket = Path::new("/tmp/ts-9214/custom.sock");
+        assert_eq!(
+            spawn_args(socket, None).expect("an absolute UTF-8 path"),
+            [
+                "start",
+                "--foreground",
+                "--socket",
+                "/tmp/ts-9214/custom.sock"
+            ]
+        );
+        assert_eq!(
+            spawn_args(socket, Some("cpu")).expect("an absolute UTF-8 path"),
+            [
+                "start",
+                "--foreground",
+                "--socket",
+                "/tmp/ts-9214/custom.sock",
+                "--device",
+                "cpu"
+            ]
+        );
+    }
+
+    /// #9214: a relative client socket reaches the child as the same file,
+    /// made absolute against the cwd the child inherits.
+    #[test]
+    fn spawn_args_make_a_relative_socket_absolute() {
+        let args = spawn_args(Path::new("rel/custom.sock"), None).expect("resolvable");
+        let expected = std::env::current_dir()
+            .expect("cwd")
+            .join("rel/custom.sock");
+        assert_eq!(args[3], expected.to_str().expect("UTF-8 cwd"));
+    }
+
+    /// #9214: the error arm — a non-UTF-8 socket is refused, naming the path,
+    /// rather than spawned under a lossy name no client polls.
+    #[test]
+    fn spawn_args_refuse_a_non_utf8_socket() {
+        use std::os::unix::ffi::OsStrExt;
+        let socket = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/ts-\xff.sock"));
+        let err = spawn_args(socket, None).expect_err("non-UTF-8 must be refused");
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
     }
 
     /// Why: as of trusty-search 0.3.55 the indexing flow defaults to `auto`
