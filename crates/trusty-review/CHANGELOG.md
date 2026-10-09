@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.38.2] — 2026-10-09
+
+### Fixed
+
+- B5 symbol context now lists a caller in a Rust test file named `tests_*.rs` under tests, not callers, even when its name has no `test_` prefix (#9196).
+- A plain directory on its own filesystem (for example a tmpfs `/tmp`) now
+  falls back to the directory walk instead of contributing an empty corpus.
+  git reports `not a git repository (or any parent up to mount point <dir>)`
+  when discovery stops at a mount boundary, and the `git ls-files` failure
+  classifier only recognised the `(or any of the parent directories)`
+  wording. An ancestor `.git` still refuses the walk (#9495).
+- The GitHub Issues context source no longer gets HTTP 422 ("The search is longer than 256 characters.") on most real PRs. GitHub bounds the free text of the query (qualifiers excluded, about 2 extra per term), not its raw length, so the keywords are now whitespace-collapsed and cut at a term boundary to a budget of 200 (#9503).
+
 ## [0.38.1] — 2026-10-09
 
 ### Added
