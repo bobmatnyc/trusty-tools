@@ -618,6 +618,20 @@ impl UsearchStore {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    /// #9487: the longest-running in-flight graph call; see [`HnswStore::oldest_op`].
+    pub fn oldest_hnsw_op(&self) -> Option<crate::memory_core::store::hnsw_store::HnswOp> {
+        self.inner.oldest_op()
+    }
+
+    /// #9487 test hook; see [`HnswStore::set_op_park`].
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn set_hnsw_op_park(
+        &self,
+        park: Option<Arc<crate::memory_core::store::hnsw_store::OpPark>>,
+    ) {
+        self.inner.set_op_park(park);
+    }
 }
 
 #[async_trait]

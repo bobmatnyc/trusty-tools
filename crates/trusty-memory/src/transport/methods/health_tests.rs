@@ -20,8 +20,9 @@ use super::HEALTH_PROBE_PALACE;
 use serde_json::Value;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::retrieval::{PalaceHandle, RecallResult};
+use trusty_common::memory_core::store::hnsw_store::OpPark;
 use trusty_common::memory_core::store::kg::KnowledgeGraph;
-use trusty_common::memory_core::store::vector::UsearchStore;
+use trusty_common::memory_core::store::vector::{UsearchStore, VectorHit, VectorStore};
 use uuid::Uuid;
 
 /// `GET /health` returns HTTP 200 with `status: "ok"` after the
@@ -878,4 +879,95 @@ async fn health_drawer_degraded_check_opens_no_palace() {
         "/health must not open a palace that is not already resident; got {v:?}"
     );
     assert_eq!(registry.len(), 2, "/health must not grow the cache");
+}
+
+/// Upper bound on waiting for a parked HNSW call to arrive (#9487); never a
+/// synchronising sleep.
+const HNSW_PARK_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Register a palace and start a `search` on it that parks inside the vector
+/// store's registered section (#9487). Returns once the call is held, or the
+/// bound passes, with whether it was held.
+async fn park_an_hnsw_search(
+    state: &crate::AppState,
+    palace: &str,
+) -> (
+    std::sync::Arc<OpPark>,
+    tokio::task::JoinHandle<anyhow::Result<Vec<VectorHit>>>,
+    bool,
+) {
+    let handle = degraded_handle(palace, false);
+    state.registry.register_arc(std::sync::Arc::clone(&handle));
+    let park = OpPark::new();
+    handle
+        .vector_store
+        .set_hnsw_op_park(Some(std::sync::Arc::clone(&park)));
+    let task = tokio::spawn(async move { handle.vector_store.search(&[1.0; 384], 1).await });
+    let waiter = std::sync::Arc::clone(&park);
+    let entered = tokio::task::spawn_blocking(move || waiter.wait_entered(HNSW_PARK_BOUND))
+        .await
+        .expect("park wait task");
+    (park, task, entered)
+}
+
+/// Why (#9487): a graph call blocked inside `hnsw_rs` held no handle mutex and
+/// no worker-liveness guard, so health read `ok` for the whole incident.
+/// What: parks a real vector `search` with the wedge threshold at zero and
+/// asserts health names the `hnsw` lock of that palace as the wedge; then
+/// releases it and asserts the report clears once the call returns.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_a_parked_hnsw_op_as_a_wedged_hnsw_lock() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    let (park, task, entered) = park_an_hnsw_search(&state, "hnsw-wedged").await;
+
+    let wedged = health_body(state.clone()).await;
+    park.release();
+    task.await.expect("search task").expect("search");
+    let cleared = health_body(state).await;
+
+    assert!(entered, "the search never parked");
+    assert_eq!(wedged["status"], "wedged", "got {wedged:?}");
+    assert_eq!(wedged["worker"]["wedged"], true, "got {wedged:?}");
+    assert_eq!(wedged["worker"]["wedged_reason"], "lock", "got {wedged:?}");
+    assert_eq!(
+        wedged["worker"]["stalled_lock"]["lock"], "hnsw",
+        "got {wedged:?}"
+    );
+    assert_eq!(
+        wedged["worker"]["stalled_lock"]["palace"], "hnsw-wedged",
+        "got {wedged:?}"
+    );
+    assert_eq!(cleared["worker"]["wedged"], false, "got {cleared:?}");
+    assert!(
+        cleared["worker"]["stalled_lock"].is_null(),
+        "a returned call leaves no stall; got {cleared:?}"
+    );
+    assert_eq!(cleared["status"], "ok", "got {cleared:?}");
+}
+
+/// Why (#9487): the incident shape. The #8314 timeout drops the future that
+/// awaited the blocking call, which empties the pool gauge, while the thread
+/// stays blocked inside the graph.
+/// What: parks a vector `search`, aborts the task awaiting it, and asserts
+/// health reports `in_flight: 0` and still calls the `hnsw` lock wedged.
+/// Test: this test.
+#[tokio::test]
+async fn health_stays_wedged_after_the_awaiting_future_is_dropped() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    let (park, task, entered) = park_an_hnsw_search(&state, "hnsw-orphaned").await;
+    task.abort();
+    let cancelled = task.await.expect_err("aborted").is_cancelled();
+
+    let v = health_body(state).await;
+    park.release();
+
+    assert!(entered, "the search never parked");
+    assert!(cancelled, "the awaiting future was dropped");
+    assert_eq!(v["worker"]["in_flight"], 0, "got {v:?}");
+    assert_eq!(v["worker"]["wedged"], true, "got {v:?}");
+    assert_eq!(v["worker"]["stalled_lock"]["lock"], "hnsw", "got {v:?}");
+    assert_eq!(v["status"], "wedged", "got {v:?}");
 }
