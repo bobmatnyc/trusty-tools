@@ -6,8 +6,8 @@
 //! poller, the typed wire shapes, and the pure rendering helpers here (away
 //! from the coordinator chat in `dashboard.rs`) keeps both surfaces small and
 //! independently testable.
-//! What: [`HealthClient`] is a typed `reqwest` transport for one daemon's
-//! `/health` + list endpoints; [`PanelData`] is the projected per-daemon
+//! What: [`HealthClient`] is a Unix-socket RPC client for one daemon's health
+//! and list methods (#6286, #9214); [`PanelData`] is the projected per-daemon
 //! payload; [`PanelState`] is `Connecting` / `Online` / `Offline`;
 //! [`HealthScreen`] holds both panels plus focus and renders the side-by-side
 //! layout. A background tokio task drives polling and pushes [`HealthUpdate`]s
