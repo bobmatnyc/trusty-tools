@@ -12,10 +12,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{
-    Corpus, NO_REPO_STDERR, classify_ls_files_failure, git_ls_files_with, list_tracked_files,
-    scan_repo,
-};
+use super::{Corpus, classify_ls_files_failure, git_ls_files_with, list_tracked_files, scan_repo};
+
+/// git's classic wording of "no repository": discovery reached `/`.
+const PARENT_DIRS_STDERR: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
 
 /// Initialise a git repo at `dir` and stage everything, best-effort.
 fn git_init_add(dir: &Path) {
@@ -191,8 +192,8 @@ fn scan_empty_git_repo_does_not_walk_untracked_files() {
     assert!(scan_repo(dir).is_none(), "no tracked files → no baseline");
 }
 
-/// Why: git prints [`NO_REPO_STDERR`] for an unreadable `.git` just as readily
-/// as for a genuinely empty directory, so the message alone is a necessary
+/// Why: git prints its "no repository" wording for an unreadable `.git` just as
+/// readily as for a genuinely empty directory, so the message alone is a necessary
 /// condition and never a sufficient one. The filesystem witness is what makes it
 /// decidable.
 /// What: asserts the classifier refuses when an ancestor carries a `.git` entry
@@ -206,7 +207,7 @@ fn classify_ls_files_failure_corroborates_the_no_repo_message() {
 
     assert!(
         matches!(
-            classify_ls_files_failure(dir, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            classify_ls_files_failure(dir, PARENT_DIRS_STDERR),
             Corpus::NoRepo
         ),
         "no ancestor .git witness → the message is believed"
@@ -215,7 +216,7 @@ fn classify_ls_files_failure_corroborates_the_no_repo_message() {
     std::fs::write(dir.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
     assert!(
         matches!(
-            classify_ls_files_failure(dir, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            classify_ls_files_failure(dir, PARENT_DIRS_STDERR),
             Corpus::Refused
         ),
         "a .git entry contradicts the message — a disagreement is 'cannot be asked'"
@@ -290,7 +291,7 @@ fn classify_ls_files_failure_canonicalises_before_walking_ancestors() {
 
     assert!(
         matches!(
-            classify_ls_files_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            classify_ls_files_failure(&link, PARENT_DIRS_STDERR),
             Corpus::Refused
         ),
         "the real parent carries a .git — only a canonicalised ancestor walk sees it"
