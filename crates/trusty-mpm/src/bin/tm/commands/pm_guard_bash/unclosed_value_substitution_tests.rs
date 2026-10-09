@@ -86,6 +86,10 @@ const PARAMETER_PARENS: &[&str] = &[
     "X=${x:-( cat } . /dev/stdin <<'O'",
     "X=${x/(/ cat } . /dev/stdin <<'O'",
     "X=$(echo ${y:-) cat }) . /dev/stdin <<'O'",
+    // #9360 delta critic: a quoted or escaped `}` does not close the expansion.
+    "X=${x:-\"}\"( cat } . /dev/stdin <<'O'",
+    "X=${x:-'}'( cat } . /dev/stdin <<'O'",
+    "X=${x:-\\}( cat } . /dev/stdin <<'O'",
 ];
 
 /// #9360 critic round: a paren inside `${…}` neither opens nor closes a

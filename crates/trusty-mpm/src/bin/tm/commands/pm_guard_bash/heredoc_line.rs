@@ -132,15 +132,17 @@ pub(super) fn line_reads_as_data(line: &str) -> bool {
             })
 }
 
-/// Whether a `${…}` parameter expansion on `line` holds a `(`, `)` or
-/// backtick, read to the end of the line when its `}` never comes (#9360
+/// Whether a `${…}` parameter expansion on `line` holds a `(`, `)`, backtick,
+/// quote or `\`, read to the end of the line when its `}` never comes (#9360
 /// critic round).
 ///
 /// Why: bash opens and closes no substitution on such a paren, but
 /// [`operator_words`] does, so `X=${x:-( cat } . f <<'O'` read `cat` as the
 /// program and the body as data.
-/// What: from each `${`, counts `{`/`}` depth to the matching `}`; quotes are
-/// not tracked, which only reads more as a paren and fails closed.
+/// What: from each `${`, counts `{`/`}` depth to the matching `}`. Quotes are
+/// not tracked, so a `"`, `'` or `\` inside the expansion is itself a `true`:
+/// a quoted or escaped `}` (`${x:-"}"( cat }`) does not end the expansion in
+/// bash, and the walk cannot tell where it does end.
 /// Test: `parameter_expansion_parens_reach_the_floor_9360`,
 /// `plain_parameter_expansions_stay_data_9360`.
 fn expansion_holds_a_paren(line: &[u8]) -> bool {
@@ -151,7 +153,8 @@ fn expansion_holds_a_paren(line: &[u8]) -> bool {
             match byte {
                 b'{' => depth += 1,
                 b'}' => depth -= 1,
-                b'(' | b')' | b'`' => return true,
+                // #9360 delta critic: a quote or `\` may hide the closing `}`.
+                b'(' | b')' | b'`' | b'"' | b'\'' | b'\\' => return true,
                 _ => {}
             }
             if depth == 0 {
