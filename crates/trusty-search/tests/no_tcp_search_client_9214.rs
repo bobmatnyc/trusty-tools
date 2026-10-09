@@ -82,16 +82,6 @@ const EXEMPT: &[(&str, &str, &str)] = &[
         "moves in #9214 slice trusty-mpm",
     ),
     (
-        "crates/trusty-review/src/integrations/search_transport.rs",
-        "localhost:7878",
-        "moves in #9214 slice trusty-review",
-    ),
-    (
-        "crates/trusty-review/src/integrations/search_transport.rs",
-        "DaemonAddrLayout::TRUSTY_SEARCH",
-        "moves in #9214 slice trusty-review",
-    ),
-    (
         "crates/trusty-search/src/commands/daemon_utils.rs",
         "DaemonAddrLayout::TRUSTY_SEARCH",
         "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",
