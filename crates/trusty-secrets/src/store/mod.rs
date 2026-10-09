@@ -42,6 +42,8 @@ pub(crate) mod program;
 pub mod resolve;
 mod scope;
 mod secret_store;
+// #7524 P2-L7: the time limit on every Keychain call.
+mod time_limit;
 
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
@@ -57,7 +59,7 @@ pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
-pub use keychain::KeychainBackend;
+pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
 pub use mask::{MASK_HEAD_CHARS, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;

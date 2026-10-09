@@ -159,3 +159,41 @@ fn keychain_backend_fails_closed_off_macos() {
     unavailable(backend.set_agents_may_use(&vault, &key, true));
     unavailable(backend.set_agents_may_use(&vault, &key, false));
 }
+
+/// Why: #7524 P2-L7 — a `KeychainBackend` method that called `keyring`
+/// directly would skip the time limit. Under a request deadline that has
+/// already passed, a bounded call never starts, so this needs no Keychain.
+/// What: each of the five operations answers `Timeout` naming `keychain`
+/// and that operation; a bypass answers anything else (off macOS,
+/// `UnknownBackend`).
+/// Test: itself.
+#[test]
+#[cfg(any(feature = "server", feature = "cli-backends"))]
+fn keychain_backend_runs_every_call_under_the_time_limit() {
+    type Op = fn(&KeychainBackend, &VaultName, &SecretKey) -> Result<(), SecretsError>;
+    const OPS: [(&str, Op); 5] = [
+        ("get", |b, v, k| b.get(v, k).map(drop)),
+        ("set", |b, v, k| b.set(v, k, &SecretValue::new(FAKE_VALUE))),
+        ("delete", |b, v, k| b.delete(v, k).map(drop)),
+        ("agents_may_use", |b, v, k| b.agents_may_use(v, k).map(drop)),
+        ("set_agents_may_use", |b, v, k| {
+            b.set_agents_may_use(v, k, true)
+        }),
+    ];
+    let (vault, key) = names();
+    let backend = KeychainBackend::new();
+    for (name, op) in OPS {
+        let result = crate::store::deadline::within(std::time::Instant::now(), || {
+            op(&backend, &vault, &key)
+        });
+        match result {
+            Err(SecretsError::Timeout {
+                backend, operation, ..
+            }) => {
+                assert_eq!(backend, "keychain");
+                assert_eq!(operation, name);
+            }
+            other => panic!("{name} bypassed the time limit: {other:?}"),
+        }
+    }
+}

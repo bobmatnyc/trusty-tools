@@ -118,11 +118,15 @@ pub enum ErrorKind {
     /// A delete found no 1Password vault visible to this identity.
     // #7524 P2-M3 fix round: its own kind, so the wire text names the escapes.
     VaultNotVisible = 32,
+    /// A backend call ran past its time limit, e.g. an unanswered Keychain
+    /// access prompt.
+    // #7524 P2-L7: its own kind, so a caller knows a write may still land.
+    BackendTimeout = 33,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -156,6 +160,7 @@ impl ErrorKind {
         Self::BackendNotEnabled,
         Self::DeadlineExceeded,
         Self::VaultNotVisible,
+        Self::BackendTimeout,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -200,6 +205,7 @@ impl ErrorKind {
             Self::BackendNotEnabled => "backend_not_enabled",
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::VaultNotVisible => "vault_not_visible",
+            Self::BackendTimeout => "backend_timeout",
             Self::Internal => "internal",
         }
     }
@@ -276,6 +282,10 @@ impl ErrorKind {
             Self::VaultNotVisible => {
                 "1Password shows no vault with this name to this identity, so the key may still be held there and its index row was kept; create the vault in 1Password, or stop enabling 1Password by removing the `secrets.onepassword` section (and any `secrets.default_backend: onepassword`) from the machine config ~/.trusty-tools/trusty-common/config.yaml"
             }
+            // #7524 P2-L7: the abandoned call may still complete.
+            Self::BackendTimeout => {
+                "the secrets backend did not answer in time, for example while a Keychain access prompt waits; the call was abandoned, not stopped, so a write may still land, and that key refuses further calls until the abandoned call ends; check the backend before retrying"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -325,6 +335,8 @@ impl ErrorKind {
             Self::DeadlineExceeded => -32079,
             // #7524 P2-M3 fix round: the next unused code.
             Self::VaultNotVisible => -32080,
+            // #7524 P2-L7: the next unused code.
+            Self::BackendTimeout => -32081,
         }
     }
 
@@ -374,6 +386,7 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
             SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
             SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
+            SecretsError::Timeout { .. } => Self::BackendTimeout,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.
