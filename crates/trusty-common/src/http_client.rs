@@ -105,12 +105,20 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Upper bound on the request head the stub reads before it answers.
+    const STUB_HEAD_LIMIT: usize = 8 * 1024;
+
     /// A loopback stub that answers one `200 OK` per connection, forever.
     ///
     /// Returns the bound `host:port`. Modelled on
     /// `daemon_guard::tests::spin_until_ready_returns_ok_for_live_server` — a
     /// real listener rather than a mocked client, so the proxy behaviour under
     /// test is the real transport's.
+    ///
+    /// Each connection reads the request head (to `\r\n\r\n`, at most
+    /// [`STUB_HEAD_LIMIT`] bytes) before it writes the response, then sends
+    /// `Connection: close` and shuts down its write half.
+    /// Test: `stub_server_answers_only_after_the_request_arrives`.
     async fn stub_server() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -119,14 +127,74 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 tokio::spawn(async move {
-                    use tokio::io::AsyncWriteExt;
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // #6575: answering before the request arrived let hyper read
+                    // the 200 on an idle connection (`unexpected message`), and
+                    // closing with the request unread sends RST, not FIN.
+                    let mut head = Vec::with_capacity(512);
+                    let mut chunk = [0u8; 512];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
+                        if head.len() >= STUB_HEAD_LIMIT {
+                            break;
+                        }
+                    }
                     let _ = stream
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
                         .await;
+                    let _ = stream.shutdown().await;
                 });
             }
         });
         addr
+    }
+
+    /// Why (#6575): the proxy tests below flaked on the GUARDED client, which a
+    /// proxy cannot touch. The stub answered at `accept` time, before the
+    /// client had written its request, so the 200 could reach hyper on an idle
+    /// connection and the stub could close with the request unread.
+    /// What: connects with a raw socket, proves no byte arrives before a
+    /// request is sent, then sends a GET and reads to a clean EOF.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn stub_server_answers_only_after_the_request_arrives() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let addr = stub_server().await;
+        let mut stream = tokio::net::TcpStream::connect(&addr)
+            .await
+            .expect("connect to stub");
+
+        let mut early = [0u8; 64];
+        let premature =
+            tokio::time::timeout(Duration::from_millis(300), stream.read(&mut early)).await;
+        assert!(
+            premature.is_err(),
+            "the stub must not answer before the request arrives; got {premature:?}"
+        );
+
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: stub\r\n\r\n")
+            .await
+            .expect("send request");
+        let mut response = Vec::new();
+        let read =
+            tokio::time::timeout(LOOPBACK_REQUEST_TIMEOUT, stream.read_to_end(&mut response))
+                .await
+                .expect("stub answers within the request bound");
+        assert!(
+            read.is_ok(),
+            "the stub must end with FIN, not RST: {read:?}"
+        );
+        let text = String::from_utf8_lossy(&response);
+        assert!(
+            text.starts_with("HTTP/1.1 200 OK\r\n") && text.ends_with("\r\n\r\nok"),
+            "the client must get the whole 200; got {text:?}"
+        );
     }
 
     /// An address with nothing listening: bind port 0, read it, release it.
