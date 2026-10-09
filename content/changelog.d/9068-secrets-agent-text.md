@@ -1,3 +1,0 @@
-Changed
-- `secrets-manager` no longer documents unbuilt `tm secrets` verbs or 1Password/Keeper backends. It works by vault and key name or `secret://` reference only, never calls `secrets.set` or hand-rolls a socket call, and reports `vault_out_of_scope`, `remote_host_unsupported` and `agent_use_refused` to the PM (#9068).
-- The `tm-secrets` skill describes what `trusty-secrets` 0.1.0 ships (Keychain backend, own-vault scoping on github.com remotes, the names-only index, the `secrets.*` socket methods), lists each refusal kind with its action, and states the value rules as numbered imperatives (#9068).
