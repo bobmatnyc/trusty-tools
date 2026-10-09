@@ -42,16 +42,6 @@ const FORBIDDEN: &[&str] = &[
 /// until the last #9214 phase. Each row must still match.
 const EXEMPT: &[(&str, &str, &str)] = &[
     (
-        "crates/trusty-analyze/src/commands/run.rs",
-        "127.0.0.1:7878",
-        "moves in #9214 slice trusty-analyze",
-    ),
-    (
-        "crates/trusty-analyze/src/main.rs",
-        "127.0.0.1:7878",
-        "moves in #9214 slice trusty-analyze",
-    ),
-    (
         "crates/trusty-common/src/monitor/search_client.rs",
         "127.0.0.1:7878",
         "moves in #9214 slice trusty-common",
