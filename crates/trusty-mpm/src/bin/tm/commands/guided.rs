@@ -117,8 +117,9 @@ pub(crate) async fn run_guided_default(
 
     // #2157 item 4: nested-session guard. `try_inplace_relaunch` above only
     // fires when bare `tm` runs in THIS EXACT pane after its runtime exited
-    // (env var resolved + record Stopped). A sibling pane/window in the SAME
-    // tmux session is a different case entirely: no env var to key off, the
+    // (env var resolved + record Stopped, or Active on this pane — #9034). A
+    // sibling pane/window in the SAME tmux session is a different case
+    // entirely: no env var to key off, the
     // record may still be Active, yet launching a brand-new session from here
     // would nest one tmux client's session inside another (the root cause of
     // #2157). Check BEFORE any project detection or picker logic runs.
