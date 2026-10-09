@@ -17,8 +17,9 @@
 //! the first existing of `last_cwd`, then `workspace_path` or `cwd`, returning a
 //! typed [`ManagedError::WorkspaceMissing`] when none exist (never a silent
 //! `$HOME` fallback). [`verify_pane_cwd`] compares the driver-reported pane cwd against
-//! the expected workdir right after a fresh `create_session`, failing loudly on
-//! a mismatch (tmux silently fell back) rather than proceeding to type the
+//! the expected workdir right after a fresh `create_session` — waiting a
+//! bounded time for tmux's stale first report to settle (#9524) — failing
+//! loudly on a mismatch (tmux silently fell back) rather than proceeding to type the
 //! resume command into a mis-rooted pane. A driver that cannot report the pane
 //! cwd (`get_pane_cwd` returns `None` — the trait default, and every test
 //! double unless it opts in) is treated as "cannot verify", not a mismatch.
@@ -26,11 +27,14 @@
 //! `resolve_existing_workdir_falls_back_through_candidates`,
 //! `resolve_existing_workdir_errors_when_all_missing`,
 //! `verify_pane_cwd_ok_on_match`, `verify_pane_cwd_ok_when_unknown`,
-//! `verify_pane_cwd_errors_on_mismatch`, `is_unresumable_*` (this file's
+//! `verify_pane_cwd_errors_on_mismatch`, `verify_pane_cwd_waits_for_a_stale_cwd_to_settle`,
+//! `verify_pane_cwd_errors_once_the_deadline_passes`,
+//! `verify_pane_cwd_keeps_the_mismatch_when_a_later_read_fails`, `is_unresumable_*` (this file's
 //! `#[cfg(test)]` module); end-to-end coverage of the recreate branch lives in
 //! `resume_reattach_tests.rs`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::ManagedTmuxDriver;
 use super::manager::ManagedError;
@@ -202,46 +206,80 @@ pub(crate) async fn is_unresumable(record: &SessionRecord) -> bool {
     true
 }
 
+/// How long a fresh pane's reported cwd may lag `new-session -c` (#9524).
+///
+/// tmux 3.6a reports the server's own cwd for about 12 ms after the session
+/// is created; this bound leaves a wide margin over that on a loaded host.
+const PANE_CWD_DEADLINE: Duration = Duration::from_millis(300);
+
+/// Pause between two pane-cwd reads while waiting out [`PANE_CWD_DEADLINE`].
+const PANE_CWD_POLL: Duration = Duration::from_millis(10);
+
 /// Verify a freshly created tmux pane actually landed at `expected`.
 ///
 /// Why: `tmux new-session -c <missing-dir>` exits 0 but silently roots the
 /// pane at `$HOME` — exit status alone can never detect this (#2250); this is
 /// the only point where the ACTUAL pane cwd can be cross-checked before the
-/// resume command is typed into it.
-/// What: reads `driver.get_pane_cwd(name)`; `None` (driver doesn't support the
-/// probe — the trait default, and every test double unless it opts in) is
-/// treated as "cannot verify", not a failure, so drivers/tests that never
-/// implement it don't spuriously break. `Some(actual)` is compared against
-/// `expected`, canonicalizing both when possible (falls back to the raw path
-/// when canonicalization fails, e.g. a path that doesn't exist from this
-/// process's perspective) so a symlinked tmp dir does not spuriously
-/// mismatch; a real mismatch returns [`ManagedError::TmuxUnavailable`] with an
-/// actionable message instead of silently proceeding.
+/// resume command is typed into it. #9524: tmux 3.6a reports a stale cwd for
+/// ~12 ms after the create, so one read refused a good pane.
+/// What: [`verify_pane_cwd_within`] with [`PANE_CWD_DEADLINE`]. A blocking
+/// wait — at most the deadline, and only on a mismatch — like every other
+/// tmux call on this driver, which spawns a process synchronously.
 /// Test: `verify_pane_cwd_ok_on_match`, `verify_pane_cwd_ok_when_unknown`,
-/// `verify_pane_cwd_errors_on_mismatch`.
+/// `verify_pane_cwd_errors_on_mismatch`,
+/// `verify_pane_cwd_waits_for_a_stale_cwd_to_settle`,
+/// `verify_pane_cwd_errors_once_the_deadline_passes`,
+/// `verify_pane_cwd_keeps_the_mismatch_when_a_later_read_fails`.
 pub(super) fn verify_pane_cwd(
     driver: &dyn ManagedTmuxDriver,
     name: &str,
     expected: &Path,
 ) -> Result<(), ManagedError> {
-    let Some(actual) = driver.get_pane_cwd(name) else {
+    verify_pane_cwd_within(driver, name, expected, PANE_CWD_DEADLINE)
+}
+
+/// [`verify_pane_cwd`] with the wait bound passed in.
+///
+/// What: the first `driver.get_pane_cwd(name)` read decides "cannot verify":
+/// `None` (the trait default, and every test double unless it opts in) is
+/// `Ok`, so drivers that never implement the probe don't spuriously break.
+/// Otherwise the pane cwd is re-read every [`PANE_CWD_POLL`] until it equals
+/// `expected` or `deadline` passes. Both sides are canonicalized when possible
+/// (the raw path otherwise) so a symlinked tmp dir does not mismatch. Fails
+/// closed: a read that fails mid-wait keeps the last mismatch, and a mismatch
+/// still standing at the deadline is [`ManagedError::TmuxUnavailable`] with an
+/// actionable message — the timeout never becomes success.
+/// Test: see [`verify_pane_cwd`].
+fn verify_pane_cwd_within(
+    driver: &dyn ManagedTmuxDriver,
+    name: &str,
+    expected: &Path,
+    deadline: Duration,
+) -> Result<(), ManagedError> {
+    let Some(mut actual) = driver.get_pane_cwd(name) else {
         return Ok(());
     };
-    let expected_c = expected
-        .canonicalize()
-        .unwrap_or_else(|_| expected.to_path_buf());
-    let actual_c = actual.canonicalize().unwrap_or_else(|_| actual.clone());
-    if expected_c == actual_c {
-        Ok(())
-    } else {
-        Err(ManagedError::TmuxUnavailable(format!(
-            "tmux session '{name}' pane landed at '{}' instead of the requested workspace \
-             '{}' — tmux silently fell back (likely $HOME) because the target directory was \
-             unusable; refusing to type the resume command into a mis-rooted pane",
-            actual.display(),
-            expected.display()
-        )))
+    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let expected_c = canonical(expected);
+    // #9524: wait out tmux's stale pane_current_path, bounded by `deadline`.
+    let give_up = Instant::now() + deadline;
+    while canonical(&actual) != expected_c {
+        if Instant::now() >= give_up {
+            return Err(ManagedError::TmuxUnavailable(format!(
+                "tmux session '{name}' pane landed at '{}' instead of the requested workspace \
+                 '{}' — tmux silently fell back (likely $HOME) because the target directory was \
+                 unusable; refusing to type the resume command into a mis-rooted pane",
+                actual.display(),
+                expected.display()
+            )));
+        }
+        std::thread::sleep(PANE_CWD_POLL);
+        // #9524: a failed re-read is not "cannot verify"; the mismatch stands.
+        if let Some(next) = driver.get_pane_cwd(name) {
+            actual = next;
+        }
     }
+    Ok(())
 }
 
 /// Create a fresh tmux session at `workdir`, then verify it actually landed
@@ -566,8 +604,25 @@ mod tests {
     /// Minimal `ManagedTmuxDriver` test double whose `get_pane_cwd` is
     /// controllable, so `verify_pane_cwd` can be exercised without pulling in
     /// the full `FakeTmuxDriver` from `tests.rs`.
+    ///
+    /// #9524: answers `reads` in order and repeats the last one, so a test can
+    /// script a pane cwd that changes between reads. `served` counts reads.
     struct StubDriver {
-        pane_cwd: Mutex<Option<PathBuf>>,
+        reads: Mutex<Vec<Option<PathBuf>>>,
+        served: Mutex<usize>,
+    }
+
+    impl StubDriver {
+        fn answering(reads: Vec<Option<PathBuf>>) -> Self {
+            Self {
+                reads: Mutex::new(reads),
+                served: Mutex::new(0),
+            }
+        }
+
+        fn served(&self) -> usize {
+            *self.served.lock().unwrap()
+        }
     }
 
     impl ManagedTmuxDriver for StubDriver {
@@ -587,16 +642,20 @@ mod tests {
             Ok(Vec::new())
         }
         fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
-            self.pane_cwd.lock().unwrap().clone()
+            *self.served.lock().unwrap() += 1;
+            let mut reads = self.reads.lock().unwrap();
+            if reads.len() > 1 {
+                reads.remove(0)
+            } else {
+                reads.first().cloned().flatten()
+            }
         }
     }
 
     #[test]
     fn verify_pane_cwd_ok_on_match() {
         let dir = TempDir::new().unwrap();
-        let driver = StubDriver {
-            pane_cwd: Mutex::new(Some(dir.path().to_path_buf())),
-        };
+        let driver = StubDriver::answering(vec![Some(dir.path().to_path_buf())]);
         assert!(verify_pane_cwd(&driver, "s", dir.path()).is_ok());
     }
 
@@ -605,9 +664,7 @@ mod tests {
         // Driver reports no pane cwd (the trait default) — "cannot verify" is
         // NOT the same as a mismatch, so this must succeed.
         let dir = TempDir::new().unwrap();
-        let driver = StubDriver {
-            pane_cwd: Mutex::new(None),
-        };
+        let driver = StubDriver::answering(vec![None]);
         assert!(verify_pane_cwd(&driver, "s", dir.path()).is_ok());
     }
 
@@ -615,11 +672,52 @@ mod tests {
     fn verify_pane_cwd_errors_on_mismatch() {
         let expected = TempDir::new().unwrap();
         let actual = TempDir::new().unwrap();
-        let driver = StubDriver {
-            pane_cwd: Mutex::new(Some(actual.path().to_path_buf())),
-        };
+        let driver = StubDriver::answering(vec![Some(actual.path().to_path_buf())]);
         let err = verify_pane_cwd(&driver, "s", expected.path())
             .expect_err("pane cwd disagrees with the requested workdir — must fail loudly");
         assert!(matches!(err, ManagedError::TmuxUnavailable(_)));
+    }
+
+    /// #9524: tmux 3.6a reports the server's cwd for ~12 ms after the create.
+    /// A pane whose cwd is correct only from the third read is accepted.
+    #[test]
+    fn verify_pane_cwd_waits_for_a_stale_cwd_to_settle() {
+        let expected = TempDir::new().unwrap();
+        let stale = TempDir::new().unwrap();
+        let driver = StubDriver::answering(vec![
+            Some(stale.path().to_path_buf()),
+            Some(stale.path().to_path_buf()),
+            Some(expected.path().to_path_buf()),
+        ]);
+        verify_pane_cwd(&driver, "s", expected.path())
+            .expect("the pane settled at the requested workdir inside the deadline");
+        assert_eq!(driver.served(), 3);
+    }
+
+    /// Fail-Open Check, #9524: a mismatch that outlasts the deadline still
+    /// errors, after the deadline and not before, having re-read the pane.
+    #[test]
+    fn verify_pane_cwd_errors_once_the_deadline_passes() {
+        let expected = TempDir::new().unwrap();
+        let actual = TempDir::new().unwrap();
+        let driver = StubDriver::answering(vec![Some(actual.path().to_path_buf())]);
+        let started = std::time::Instant::now();
+        let err = verify_pane_cwd(&driver, "s", expected.path())
+            .expect_err("a persistent mismatch must never time out into success");
+        assert!(matches!(err, ManagedError::TmuxUnavailable(_)), "{err:?}");
+        assert!(started.elapsed() >= PANE_CWD_DEADLINE);
+        assert!(driver.served() > 1, "the pane cwd was read only once");
+    }
+
+    /// Fail-Open Check, #9524: once a mismatch is seen, a read that fails is
+    /// not "cannot verify" — the mismatch stands and errors at the deadline.
+    #[test]
+    fn verify_pane_cwd_keeps_the_mismatch_when_a_later_read_fails() {
+        let expected = TempDir::new().unwrap();
+        let actual = TempDir::new().unwrap();
+        let driver = StubDriver::answering(vec![Some(actual.path().to_path_buf()), None]);
+        let err = verify_pane_cwd_within(&driver, "s", expected.path(), Duration::from_millis(30))
+            .expect_err("a failed re-read after a mismatch must not pass");
+        assert!(matches!(err, ManagedError::TmuxUnavailable(_)), "{err:?}");
     }
 }
