@@ -217,6 +217,46 @@ fn uds_search_is_down_on_a_missing_stale_or_hung_socket() {
     }
 }
 
+/// A process prober that always matches, as `pgrep -f trusty-search` does on a
+/// host running `trusty-search serve` MCP bridges.
+struct BridgeMatches;
+
+impl ProcessProber for BridgeMatches {
+    fn pgrep(&self, _pattern: &str) -> Option<u32> {
+        Some(4242)
+    }
+}
+
+/// Why: a dead socket is DOWN even when `pgrep` matches some process — an MCP
+/// bridge must never make `tm services status trusty-search` exit 0. For
+/// `uds_search`, running is exactly "the socket answered"; the PID is display.
+/// Test: this test.
+#[test]
+fn uds_search_is_down_on_a_dead_socket_even_when_pgrep_matches() {
+    let http = CountingHttp::default();
+    let mut d = Discoverer::with_probers(
+        ServicesManifest::default_manifest(),
+        Box::new(BridgeMatches),
+        Box::new(NoPortFile),
+        Box::new(http.clone()),
+        Box::new(NoVersion),
+    )
+    .with_socket_prober(Box::new(FixedSocket {
+        socket: PathBuf::from("/tmp/ts-9543.sock"),
+        state: HealthState::Fail {
+            detail: "connection refused".into(),
+        },
+    }));
+    let status = d.status(SEARCH).expect("trusty-search is declared");
+    assert!(
+        !status.running,
+        "a dead socket is not running, whatever pgrep matched: {status:?}"
+    );
+    assert!(matches!(status.health, HealthState::Fail { .. }));
+    let health = d.health(SEARCH).expect("trusty-search is declared");
+    assert!(matches!(health.state, HealthState::Fail { .. }));
+}
+
 /// Why: no listing, status, health, port or URL query may reach the HTTP
 /// prober for a `uds_search` service, healthy or not.
 /// Test: this test.
