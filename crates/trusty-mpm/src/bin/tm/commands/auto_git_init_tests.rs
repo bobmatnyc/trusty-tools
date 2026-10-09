@@ -562,9 +562,11 @@ fn auto_init_refuses_the_classic_no_repo_wording_under_a_real_git() {
         !dir.join(INIT_MARKER).exists(),
         "git init must not run under a real .git, got {result:?}"
     );
+    let err = result.expect_err("a .git above the directory must be an error, never an init");
+    let expected = repo.canonicalize().unwrap().join(".git");
     assert!(
-        !matches!(result, Ok(AutoInitOutcome::Initialized)),
-        "a .git above the directory must refuse the init, got {result:?}"
+        err.to_string().contains(&expected.display().to_string()),
+        "the error must name the .git it found: {err}"
     );
 }
 
