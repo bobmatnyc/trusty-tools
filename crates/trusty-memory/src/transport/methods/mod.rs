@@ -28,10 +28,15 @@ pub mod chat;
 pub mod health;
 pub mod kg;
 pub mod palaces;
+// #9288: the protocol handshake.
+pub mod protocol;
 
 #[cfg(test)]
 #[path = "health_tests.rs"]
 mod health_tests;
+#[cfg(test)]
+#[path = "protocol_tests.rs"]
+mod protocol_tests;
 
 use serde::{Deserialize, Serialize};
 

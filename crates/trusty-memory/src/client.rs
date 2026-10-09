@@ -71,15 +71,32 @@ pub async fn call_with_timeout(method: &str, params: Value, timeout: Duration) -
 /// that had to mutate the real data directory to be testable would not be a
 /// test of the hook.
 ///
+/// #9288: runs the shared protocol check first, so a daemon from another
+/// release is refused with `MemoryProtocolError` instead of misparsed. A daemon
+/// that predates the handshake is called, per
+/// `trusty_common::memory_rpc::check_memory_protocol_at`.
+///
 /// # Errors
 ///
-/// As [`call`].
+/// As [`call`], plus a `MemoryProtocolError` for a daemon this build cannot
+/// talk to or whose protocol check failed.
+///
+/// Test: `client_refuses_an_unsupported_daemon_before_calling_it`,
+/// `client_calls_a_daemon_that_predates_the_handshake`.
 pub async fn call_at(
     socket: &Path,
     method: &str,
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    // #9288: bounded by the shared default so a slow handshake cannot eat a
+    // long call's whole budget.
+    trusty_common::memory_rpc::ensure_memory_protocol_at(
+        socket,
+        timeout.min(trusty_common::memory_rpc::DEFAULT_TIMEOUT),
+    )
+    .await?;
+
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -145,5 +162,88 @@ mod tests {
             "a refused dial must not wait out the budget: {:?}",
             started.elapsed()
         );
+    }
+
+    /// Serve `router` on a temp socket until the returned sender drops.
+    fn serve_fake(
+        router: trusty_common::uds::server::RpcRouter,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        use trusty_common::uds::server::{serve_until, RpcServeOptions};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("fake-memory.sock");
+        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            serve_until(
+                &listener,
+                std::sync::Arc::new(router),
+                RpcServeOptions::default(),
+                async {
+                    let _ = shutdown.await;
+                },
+            )
+            .await;
+        });
+        (dir, socket, stop)
+    }
+
+    /// Why (#9288): the CLI and hooks must refuse a daemon from another release
+    /// by name, before the call whose reply they would misparse is sent.
+    /// What: a fake daemon reports a protocol past this build's range and
+    /// counts `memory.status` calls; the client must refuse and send none.
+    /// Test: itself.
+    #[tokio::test]
+    async fn client_refuses_an_unsupported_daemon_before_calling_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use trusty_common::memory_rpc::{
+            MemoryProtocolError, METHOD_PROTOCOL, SUPPORTED_MEMORY_PROTOCOLS,
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        let newer = SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
+        let router = trusty_common::uds::server::RpcRouter::new()
+            .typed::<Value, Value, _, _>(METHOD_PROTOCOL, move |_| async move {
+                Ok(json!({ "protocol_version": newer }))
+            })
+            .typed::<Value, Value, _, _>("memory.status", move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { Ok(json!({ "ok": true })) }
+            });
+        let (_dir, socket, _stop) = serve_fake(router);
+
+        let err = call_at(&socket, "memory.status", json!({}), Duration::from_secs(10))
+            .await
+            .expect_err("an unsupported daemon is refused");
+
+        assert!(
+            matches!(
+                err.downcast_ref::<MemoryProtocolError>(),
+                Some(MemoryProtocolError::Unsupported { daemon, .. }) if *daemon == newer
+            ),
+            "expected the named protocol error, got {err:#}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the call must not be sent");
+    }
+
+    /// Why (#9288): during a rolling upgrade the installed client meets a
+    /// daemon that predates the handshake; every call must not fail.
+    /// Test: itself.
+    #[tokio::test]
+    async fn client_calls_a_daemon_that_predates_the_handshake() {
+        let router = trusty_common::uds::server::RpcRouter::new()
+            .typed::<Value, Value, _, _>("memory.status", |_| async { Ok(json!({ "ok": true })) });
+        let (_dir, socket, _stop) = serve_fake(router);
+
+        let answer = call_at(&socket, "memory.status", json!({}), Duration::from_secs(10))
+            .await
+            .expect("a pre-handshake daemon is still called");
+
+        assert_eq!(answer, json!({ "ok": true }));
     }
 }

@@ -61,7 +61,7 @@ use tracing::info;
 use trusty_common::uds::server::{serve_until, RpcError, RpcFallback, RpcRouter, RpcServeOptions};
 
 #[cfg(feature = "server")]
-use crate::transport::methods::{activity, admin, chat, health, kg, palaces};
+use crate::transport::methods::{activity, admin, chat, health, kg, palaces, protocol};
 #[cfg(feature = "server")]
 use crate::transport::rpc::{dispatch, JsonRpcRequest};
 #[cfg(feature = "server")]
@@ -89,6 +89,8 @@ pub const METHOD_HEALTH: &str = "memory.health";
 /// Test: `rpc_router_registers_every_documented_method`.
 pub const FOLDED_METHODS: &[&str] = &[
     METHOD_HEALTH,
+    // #9288: the protocol handshake every first-party client calls first.
+    trusty_common::memory_rpc::METHOD_PROTOCOL,
     "memory.status",
     "memory.config",
     "memory.palace_get",
@@ -248,6 +250,13 @@ pub fn build_router(state: AppState) -> RpcRouter {
 
     let router = RpcRouter::new();
     let router = bind!(router, METHOD_HEALTH, health::HealthQuery, health::health);
+    // #9288: the protocol handshake.
+    let router = bind!(
+        router,
+        trusty_common::memory_rpc::METHOD_PROTOCOL,
+        NoParams,
+        protocol::protocol
+    );
     let router = bind!(router, "memory.status", NoParams, palaces::status);
     let router = bind!(router, "memory.config", NoParams, palaces::config);
     let router = bind!(
