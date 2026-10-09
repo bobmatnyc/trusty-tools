@@ -45,7 +45,7 @@ pub enum HostError {
     /// The text is not YAML, or its top level is not a mapping.
     #[error("config.yaml is malformed: {reason}")]
     Malformed {
-        /// The parser's message.
+        /// The parser's message, any quoted value withheld.
         reason: String,
     },
     /// The file has no top-level `channels` key.
@@ -55,7 +55,7 @@ pub enum HostError {
     /// field.
     #[error("channels section is invalid: {reason}")]
     Invalid {
-        /// The parser's message.
+        /// The parser's message, any quoted value withheld.
         reason: String,
     },
     /// `channels.version` is not [`HOST_SCHEMA_VERSION`].
@@ -199,9 +199,10 @@ fn allowed_refs(channel: Channel) -> &'static [&'static str] {
 /// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`,
 /// `no_channels_section_denies_all`, `host_ceiling_parses_every_field`.
 pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostError> {
+    // #8454: both serde_yaml messages pass through withhold_values.
     let value: serde_yaml::Value =
         serde_yaml::from_str(text).map_err(|e| HostError::Malformed {
-            reason: e.to_string(),
+            reason: withhold_values(&e),
         })?;
     let section = match value {
         serde_yaml::Value::Null => return Err(HostError::NoChannelsSection),
@@ -215,7 +216,7 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
         }
     };
     let raw: RawHost = serde_yaml::from_value(section).map_err(|e| HostError::Invalid {
-        reason: e.to_string(),
+        reason: withhold_values(&e),
     })?;
     if raw.version != HOST_SCHEMA_VERSION {
         return Err(HostError::Version { found: raw.version });
@@ -285,6 +286,60 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
         rate_limit,
         channels,
     })
+}
+
+/// serde messages whose `, expected …` tail is written by this code's types.
+const EXPECTING: [&str; 5] = [
+    "invalid type: ",
+    "invalid value: ",
+    "invalid length ",
+    "unknown variant ",
+    "unknown field ",
+];
+
+/// A serde_yaml message from host input, with every value it quotes withheld.
+///
+/// Why: serde quotes the value it could not read (`invalid type: string
+/// "xoxb-…"`), so a token typed into the wrong host key would reach a
+/// `HostError` and every finding built from it (#8454).
+/// What: `missing field` and `duplicate field` name a field of this code's
+/// types and stay. A message with a code-written `, expected …` tail keeps
+/// the tail and replaces the span from its first to its last quote mark
+/// (`"` or `` ` ``) before it. Any other message that quotes something (a
+/// duplicate key, or a key path) becomes a fixed text with its position. A
+/// message that quotes nothing, such as a libyaml syntax error, stays.
+/// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`.
+fn withhold_values(e: &serde_yaml::Error) -> String {
+    let msg = e.to_string();
+    if msg.starts_with("missing field `") || msg.starts_with("duplicate field `") {
+        return msg;
+    }
+    let (head, tail) = match msg.rfind(", expected ") {
+        Some(i) if EXPECTING.iter().any(|p| msg.starts_with(p)) => msg.split_at(i),
+        _ => (msg.as_str(), ""),
+    };
+    let quote = |c: char| c == '"' || c == '`';
+    let (Some(first), Some(last)) = (head.find(quote), head.rfind(quote)) else {
+        return msg;
+    };
+    if tail.is_empty() {
+        let at = e
+            .location()
+            .map(|l| format!(" at line {} column {}", l.line(), l.column()))
+            .unwrap_or_default();
+        let what = if msg.contains("duplicate entry") {
+            "a mapping repeats a key"
+        } else {
+            "a quoted value is invalid"
+        };
+        return format!("{what}{at} (value withheld)");
+    }
+    // Quote marks are ASCII, so `last + 1` is a char boundary.
+    format!(
+        "{}<value withheld>{}{tail}",
+        &head[..first],
+        &head[last + 1..]
+    )
 }
 
 fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChannel, HostError> {

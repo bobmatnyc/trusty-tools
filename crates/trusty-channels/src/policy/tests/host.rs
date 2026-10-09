@@ -186,6 +186,16 @@ fn host_faults_deny_all() {
             HOST_ALL.replacen("projects: [/work/a, /work/b]", "projects: xoxb-1", 1),
             |e| matches!(e, HostError::Invalid { .. }),
         ),
+        (
+            "token as a kind",
+            HOST_ALL.replace("  slack:\n", "  slack:\n    kinds: [xoxb-1]\n"),
+            |e| matches!(e, HostError::Invalid { .. }),
+        ),
+        (
+            "token as a repeated key",
+            "channels:\n  version: 1\n  xoxb-1: a\n  xoxb-1: b\n".into(),
+            |e| matches!(e, HostError::Malformed { .. }),
+        ),
     ];
     for (what, yaml, is) in cases {
         let result = host(&yaml);
