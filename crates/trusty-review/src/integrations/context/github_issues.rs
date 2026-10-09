@@ -46,52 +46,62 @@ const MAX_RESULTS: u32 = 5;
 /// Max diff identifiers folded into the keyword query.
 const MAX_QUERY_IDENTIFIERS: usize = 4;
 
-/// GitHub Search API hard limit on the `q` query-parameter length (characters).
+/// Budget for the free-text part of the GitHub issue-search query.
 ///
-/// Why: queries longer than 256 characters cause the GitHub Search API to return
-/// HTTP 422 Unprocessable Entity, silently dropping the entire GitHub Issues
-/// context section.  The cap is enforced in `cap_query` before the HTTP call.
-/// What: the maximum allowed query length in chars (not bytes).
-/// Test: `query_capped_at_256_chars`, `query_short_unchanged`.
-const GITHUB_QUERY_MAX_CHARS: usize = 256;
+/// Why: GitHub answers 422 "The search is longer than 256 characters." based on
+/// the FREE-TEXT part of `q` only: qualifiers (`repo:o/r`, `is:issue`) are
+/// excluded, and each space-separated term costs about 2 extra on top of its
+/// length.  It is not the raw length and not percent-encoding.  A raw 256 cap
+/// let a real PR title + body through at 254 raw chars, which GitHub rejected,
+/// so the whole GitHub Issues section was dropped (#9503).
+/// What: the maximum free-text cost, `chars + 2 * terms`, with margin under
+/// GitHub's 256.  The single place the limit lives; `cap_keywords` enforces it.
+/// Test: `query_free_text_cost_within_budget_and_single_line_9503`,
+/// `query_capped_at_256_chars`, `query_short_unchanged`.
+const GITHUB_FREE_TEXT_BUDGET: usize = 200;
 
-/// Truncate a GitHub search query to at most `GITHUB_QUERY_MAX_CHARS` chars at a
-/// word boundary.
+/// Extra cost GitHub charges per space-separated free-text term (empirical, #9503).
+const GITHUB_TERM_COST: usize = 2;
+
+/// Collapse whitespace and bound the free-text keywords by GitHub's cost model.
 ///
-/// Why: prevents HTTP 422 from the GitHub Search API when the assembled query
-/// (`repo:… is:issue <keywords>`) is longer than 256 characters.  Truncating at
-/// whitespace avoids splitting a keyword token mid-word, which would corrupt the
-/// search term.
-/// What: if `q` is already within the limit it is returned unchanged.  Otherwise
-/// the function walks backwards from char position 256 to find the last
-/// whitespace character and slices there; if no whitespace is found (a single
-/// giant token) it falls back to the hard 256-char char-boundary cut.
-/// Test: `query_capped_at_256_chars`, `query_capped_at_word_boundary`,
-/// `query_short_unchanged`.
-fn cap_query(q: &str) -> &str {
-    if q.chars().count() <= GITHUB_QUERY_MAX_CHARS {
-        return q;
+/// Why: prevents HTTP 422 from the GitHub Search API (see
+/// [`GITHUB_FREE_TEXT_BUDGET`]).  Newlines and runs of whitespace in a PR body
+/// are not search terms and only add cost.
+/// What: splits on whitespace, rejoins with single spaces, and stops before the
+/// term that would push `chars + 2 * terms` over the budget (a term boundary,
+/// never mid-word).  A first term longer than the budget is hard-cut on a char
+/// boundary.  A short input comes back unchanged apart from the collapse.
+/// Test: `query_free_text_cost_within_budget_and_single_line_9503`,
+/// `query_capped_at_word_boundary`, `query_short_unchanged`.
+fn cap_keywords(keywords: &str) -> String {
+    let mut out = String::new();
+    for (terms, term) in keywords.split_whitespace().enumerate() {
+        let sep = usize::from(!out.is_empty());
+        let cost =
+            out.chars().count() + sep + term.chars().count() + GITHUB_TERM_COST * (terms + 1);
+        if cost > GITHUB_FREE_TEXT_BUDGET {
+            if out.is_empty() {
+                // #9503: a single giant token still has to fit the budget.
+                out = term
+                    .chars()
+                    .take(GITHUB_FREE_TEXT_BUDGET - GITHUB_TERM_COST)
+                    .collect();
+            }
+            tracing::debug!(
+                source = SOURCE_NAME,
+                capped_chars = out.chars().count(),
+                budget = GITHUB_FREE_TEXT_BUDGET,
+                "truncated GitHub issue-search keywords to stay within the Search API limit"
+            );
+            break;
+        }
+        if sep == 1 {
+            out.push(' ');
+        }
+        out.push_str(term);
     }
-    // Find the byte index at char position GITHUB_QUERY_MAX_CHARS.
-    let hard_cut_byte = q
-        .char_indices()
-        .nth(GITHUB_QUERY_MAX_CHARS)
-        .map(|(i, _)| i)
-        .unwrap_or(q.len());
-    let candidate = &q[..hard_cut_byte];
-    // Prefer to break at the last whitespace so we don't split mid-token.
-    let capped = match candidate.rfind(|c: char| c.is_whitespace()) {
-        Some(ws_byte) if ws_byte > 0 => &q[..ws_byte],
-        _ => candidate, // fallback: hard char-boundary cut
-    };
-    tracing::debug!(
-        source = SOURCE_NAME,
-        original_chars = q.chars().count(),
-        capped_chars = capped.chars().count(),
-        limit = GITHUB_QUERY_MAX_CHARS,
-        "truncated GitHub issue-search query to stay within the Search API limit"
-    );
-    capped
+    out
 }
 
 // ─── Auth seam (reuses #582 dual-mode auth) ─────────────────────────────────
@@ -400,31 +410,32 @@ impl GithubIssuesSource {
     ///
     /// Why: GitHub's issue search scopes by `repo:` and `is:issue`; centralising
     /// the construction keeps the qualifier set consistent and testable.  The
-    /// assembled query is capped at 256 characters (the GitHub Search API limit)
-    /// to prevent HTTP 422 responses when the PR title + body + identifiers are
-    /// long.
-    /// What: returns `repo:{owner}/{repo} is:issue <keywords>` truncated to at
-    /// most 256 chars at a word boundary.  `None` when there is no keyword signal
-    /// or no owner/repo, or the owner is [`LOCAL_OWNER`]: a local diff names
+    /// free text is whitespace-collapsed and bounded by GitHub's cost model
+    /// ([`GITHUB_FREE_TEXT_BUDGET`]) to prevent HTTP 422 responses when the PR
+    /// title + body + identifiers are long (#9503).
+    /// What: returns `repo:{owner}/{repo} is:issue <keywords>` with the keywords
+    /// capped at a term boundary by `cap_keywords`.  `None` when there is no
+    /// keyword signal or no owner/repo, or the owner is [`LOCAL_OWNER`]: a local diff names
     /// no repository, and the search GitHub answered with a 422 was a wasted
     /// call (#9194, owner comment 2026-10-07; Architect ruling Q7).
     /// Test: `query_builds_search`, `query_capped_at_256_chars`,
     /// `query_capped_at_word_boundary`, `query_short_unchanged`,
+    /// `query_free_text_cost_within_budget_and_single_line_9503`,
     /// `github_issues_makes_no_search_call_for_the_local_owner`.
     fn build_query(subject: &ReviewSubject) -> Option<String> {
         if subject.owner.is_empty() || subject.repo.is_empty() || subject.owner == LOCAL_OWNER {
             return None;
         }
         let keywords = subject.keyword_query(MAX_QUERY_IDENTIFIERS);
-        let keywords = keywords.trim();
+        // #9503: bound the free text by GitHub's cost, not the raw query length.
+        let keywords = cap_keywords(&keywords);
         if keywords.is_empty() {
             return None;
         }
-        let full = format!(
+        Some(format!(
             "repo:{}/{} is:issue {keywords}",
             subject.owner, subject.repo
-        );
-        Some(cap_query(&full).to_string())
+        ))
     }
 
     /// Parse a GitHub issue-search body into a `ContextSection`.
