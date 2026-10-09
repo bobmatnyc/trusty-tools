@@ -28,8 +28,9 @@
  * `index.html` and a trailing `ui/` path segment. Checks `window.__SEARCH_BASE__`
  * first so deployments that inject that global keep working.
  * Test: Unit-covered in base.test.js. In a browser at
- * http://127.0.0.1:7878/ui/ the API base should be "http://127.0.0.1:7878/"
- * and api.health() should fetch http://127.0.0.1:7878/health (NOT
+ * http://127.0.0.1:7788/tools/search/ the API base should be "/api/search/"
+ * (injected as __SEARCH_BASE__) and api.health() should fetch
+ * http://127.0.0.1:7788/api/search/health (NOT
  * .../ui/health). Behind the console at
  * https://console/proxy/search/ui/ the base should be
  * "https://console/proxy/search/" and api.health() should fetch

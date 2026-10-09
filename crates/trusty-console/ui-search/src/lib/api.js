@@ -4,7 +4,7 @@
  * The daemon serves the bundle at /ui and the API at flat paths
  * (/health, /indexes, /search, ...) so requests are always same-origin in
  * production. In `vite dev`, vite.config.js proxies the API paths through to
- * 127.0.0.1:7878. When served through the trusty-console reverse-proxy at
+ * 127.0.0.1:7788/api/search (the console bridge). When served through the trusty-console reverse-proxy at
  * /proxy/search/, apiUrl() rebases absolute paths to the proxy sub-path so
  * every API call reaches the daemon via the proxy instead of 404ing at the
  * console host root.
