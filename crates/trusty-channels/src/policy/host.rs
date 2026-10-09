@@ -79,13 +79,14 @@ pub enum HostError {
         reason: String,
     },
     /// A `projects` entry is empty, relative, holds `..`, or needs a home
-    /// directory that is not known.
-    #[error("channels.{channel}.projects entry {entry:?}: {reason}")]
+    /// directory that is not known. The entry is named by position only
+    /// (#8454): a token typed into the list must not reach a log.
+    #[error("channels.{channel}.projects[{index}]: {reason}")]
     Project {
         /// The channel.
         channel: Channel,
-        /// The entry as written.
-        entry: String,
+        /// The entry's zero-based position in the list.
+        index: usize,
         /// What is wrong.
         reason: String,
     },
@@ -303,16 +304,29 @@ const EXPECTING: [&str; 5] = [
 /// "xoxb-…"`), so a token typed into the wrong host key would reach a
 /// `HostError` and every finding built from it (#8454).
 /// What: `missing field` and `duplicate field` name a field of this code's
-/// types and stay. A message with a code-written `, expected …` tail keeps
-/// the tail and replaces the span from its first to its last quote mark
-/// (`"` or `` ` ``) before it. Any other message that quotes something (a
-/// duplicate key, or a key path) becomes a fixed text with its position. A
-/// message that quotes nothing, such as a libyaml syntax error, stays.
+/// types and stay. Every duplicate-key message becomes a fixed text with its
+/// position, quoted or not. A message with a code-written `, expected …`
+/// tail keeps the tail and replaces the span from its first to its last
+/// quote mark (`"` or `` ` ``) before it. Any other message that quotes
+/// something (a key path) becomes a fixed text with its position. A message
+/// that quotes nothing, such as a libyaml syntax error, stays.
 /// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`.
 fn withhold_values(e: &serde_yaml::Error) -> String {
     let msg = e.to_string();
     if msg.starts_with("missing field `") || msg.starts_with("duplicate field `") {
         return msg;
+    }
+    let withheld = |what: &str| {
+        let at = e
+            .location()
+            .map(|l| format!(" at line {} column {}", l.line(), l.column()))
+            .unwrap_or_default();
+        format!("{what}{at} (value withheld)")
+    };
+    // #8454: a number, null or collection key is printed unquoted, and the
+    // key-path prefix can carry input text, so no duplicate keeps its text.
+    if msg.contains("duplicate entry ") {
+        return withheld("a mapping repeats a key");
     }
     let (head, tail) = match msg.rfind(", expected ") {
         Some(i) if EXPECTING.iter().any(|p| msg.starts_with(p)) => msg.split_at(i),
@@ -323,16 +337,7 @@ fn withhold_values(e: &serde_yaml::Error) -> String {
         return msg;
     };
     if tail.is_empty() {
-        let at = e
-            .location()
-            .map(|l| format!(" at line {} column {}", l.line(), l.column()))
-            .unwrap_or_default();
-        let what = if msg.contains("duplicate entry") {
-            "a mapping repeats a key"
-        } else {
-            "a quoted value is invalid"
-        };
-        return format!("{what}{at} (value withheld)");
+        return withheld("a quoted value is invalid");
     }
     // Quote marks are ASCII, so `last + 1` is a char boundary.
     format!(
@@ -364,7 +369,8 @@ fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChanne
     let projects = raw
         .projects
         .into_iter()
-        .map(|entry| project_entry(c, entry, home))
+        .enumerate()
+        .map(|(index, entry)| project_entry(c, index, &entry, home))
         .collect::<Result<_, _>>()?;
     Ok(HostChannel {
         enabled: raw.enabled,
@@ -376,23 +382,29 @@ fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChanne
 }
 
 /// #8454 plan §4: a bad `projects` entry is a ceiling fault, never skipped.
-fn project_entry(c: Channel, entry: String, home: Option<&Path>) -> Result<PathBuf, HostError> {
-    let fail = |entry: String, reason: &str| HostError::Project {
+fn project_entry(
+    c: Channel,
+    index: usize,
+    entry: &str,
+    home: Option<&Path>,
+) -> Result<PathBuf, HostError> {
+    // #8454: the error names the entry's position; no reason repeats it.
+    let fail = |reason: &str| HostError::Project {
         channel: c,
-        entry,
+        index,
         reason: reason.into(),
     };
     if entry.trim().is_empty() {
-        return Err(fail(entry, "is empty"));
+        return Err(fail("is empty"));
     }
-    let Some(path) = expand_home(&entry, home) else {
-        return Err(fail(entry, "starts with ~/ but no home directory is known"));
+    let Some(path) = expand_home(entry, home) else {
+        return Err(fail("starts with ~/ but no home directory is known"));
     };
     if !path.is_absolute() {
-        return Err(fail(entry, "is not an absolute path"));
+        return Err(fail("is not an absolute path"));
     }
     if path.components().any(|p| matches!(p, Component::ParentDir)) {
-        return Err(fail(entry, "holds a .. component"));
+        return Err(fail("holds a .. component"));
     }
     Ok(path)
 }
