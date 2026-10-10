@@ -175,7 +175,9 @@ pub fn is_self_or_descendant(
 ///
 /// Why: the production [`ProcessTable`].
 /// What: Linux reads `/proc/<pid>/stat`; macOS calls `proc_pidinfo` with
-/// `PROC_PIDTBSDINFO`; every other target answers
+/// `PROC_PIDT_SHORTBSDINFO` for the parent and name, which answers across
+/// uids, and `PROC_PIDTBSDINFO` for the start time, which answers the
+/// caller's own uid only (#9070); every other target answers
 /// [`ProcessError::Unreadable`] for every pid, so no grant can be minted.
 /// #9070: `is_agent` also reads `/proc/<pid>/exe` (Linux) or `proc_pidpath`
 /// (macOS) when it can.
@@ -282,7 +284,89 @@ mod os {
 mod os {
     use super::{ProcessError, StartTime};
 
-    /// One `PROC_PIDTBSDINFO` record for `pid`.
+    /// `proc_pidinfo` flavor `PROC_PIDT_SHORTBSDINFO`; libc 0.2.186 lacks it.
+    // XNU bsd/sys/proc_info.h: `#define PROC_PIDT_SHORTBSDINFO 13`.
+    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+
+    /// `MAXCOMLEN` from XNU bsd/sys/param.h.
+    const MAXCOMLEN: usize = 16;
+
+    /// `struct proc_bsdshortinfo`, field for field, from XNU
+    /// bsd/sys/proc_info.h; libc 0.2.186 lacks it.
+    ///
+    /// Why: #9070 fix round — `PROC_PIDTBSDINFO` answers only a caller with
+    /// the target's uid, so the parent read of the root-owned `login` above
+    /// every Terminal or iTerm2 shell (and the root `sshd` above an SSH
+    /// shell) failed with EPERM, and every grant from such a shell was
+    /// refused. `PROC_PIDT_SHORTBSDINFO` answers across uids.
+    /// What: 64 bytes, checked at compile time. `uid_t` and `gid_t` are
+    /// `u32` on Darwin; `char pbsi_comm[MAXCOMLEN]` is read as bytes.
+    // Source: XNU bsd/sys/proc_info.h, as shipped in the macOS SDK at
+    // usr/include/sys/proc_info.h (struct at L85-99, flavor at L754).
+    // Layout evidence (2026-10-10, this Mac): flavor 13 on root `login`
+    // returned 64 bytes with ppid, pgid, uid 0 and gid 20 at these offsets,
+    // matching `ps`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    #[allow(
+        dead_code,
+        reason = "mirrors the kernel struct; only some fields are read"
+    )]
+    struct ProcBsdShortInfo {
+        pbsi_pid: u32,
+        pbsi_ppid: u32,
+        pbsi_pgid: u32,
+        pbsi_status: u32,
+        pbsi_comm: [u8; MAXCOMLEN],
+        pbsi_flags: u32,
+        pbsi_uid: u32,
+        pbsi_gid: u32,
+        pbsi_ruid: u32,
+        pbsi_rgid: u32,
+        pbsi_svuid: u32,
+        pbsi_svgid: u32,
+        pbsi_rfu: u32,
+    }
+
+    const _: () = assert!(std::mem::size_of::<ProcBsdShortInfo>() == 64);
+
+    /// One `PROC_PIDT_SHORTBSDINFO` record for `pid`, readable across uids.
+    ///
+    /// What: anything but exactly `size_of` bytes written, or a record for
+    /// another pid, is [`ProcessError::Unreadable`].
+    fn short_info(pid: u32) -> Result<ProcBsdShortInfo, ProcessError> {
+        let unreadable = ProcessError::Unreadable { pid };
+        let raw = libc::c_int::try_from(pid).map_err(|_| unreadable)?;
+        let size = libc::c_int::try_from(std::mem::size_of::<ProcBsdShortInfo>())
+            .map_err(|_| unreadable)?;
+        let mut info = std::mem::MaybeUninit::<ProcBsdShortInfo>::zeroed();
+        // SAFETY: `info` is a writable buffer of exactly `size` bytes, and
+        // `proc_pidinfo` writes at most `buffersize` bytes into it.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                raw,
+                PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if written != size {
+            return Err(unreadable);
+        }
+        // SAFETY: `ProcBsdShortInfo` is plain integers and bytes, so the
+        // zeroed buffer was already a valid value, and the kernel filled all
+        // `size` bytes.
+        let info = unsafe { info.assume_init() };
+        if info.pbsi_pid != pid {
+            return Err(unreadable);
+        }
+        Ok(info)
+    }
+
+    /// One `PROC_PIDTBSDINFO` record for `pid`; same uid only.
+    // #9070: kept for `start_time` alone, which reads the granted child,
+    // always the caller's own uid.
     fn bsd_info(pid: u32) -> Result<libc::proc_bsdinfo, ProcessError> {
         let unreadable = ProcessError::Unreadable { pid };
         let raw = libc::c_int::try_from(pid).map_err(|_| unreadable)?;
@@ -312,8 +396,9 @@ mod os {
         Ok(info)
     }
 
+    // #9070: across uids, so a walk passes the root `login` or `sshd`.
     pub(super) fn parent(pid: u32) -> Result<u32, ProcessError> {
-        Ok(bsd_info(pid)?.pbi_ppid)
+        Ok(short_info(pid)?.pbsi_ppid)
     }
 
     pub(super) fn start_time(pid: u32) -> Result<StartTime, ProcessError> {
@@ -329,19 +414,18 @@ mod os {
             .ok_or(missing)
     }
 
-    /// The executable path when `proc_pidpath` answers, then `pbi_name` and
-    /// `pbi_comm`.
+    /// The executable path when `proc_pidpath` answers, then `pbsi_comm`.
     // #9070: the native Claude Code binary's short name is its version
-    // string (`2.1.295`); only its path names it.
+    // string (`2.1.295`); only its path names it. Both reads work across
+    // uids; an unreadable record denies.
     pub(super) fn is_agent(pid: u32) -> Result<bool, ProcessError> {
-        let info = bsd_info(pid)?;
+        let info = short_info(pid)?;
         if let Some(path) = executable_path(pid)
             && super::names_agent(&path)
         {
             return Ok(true);
         }
-        Ok(super::names_agent(&c_text(&info.pbi_name))
-            || super::names_agent(&c_text(&info.pbi_comm)))
+        Ok(super::names_agent(&c_text(&info.pbsi_comm)))
     }
 
     /// `proc_pidpath` for `pid`, or `None` when it fails.
@@ -360,14 +444,10 @@ mod os {
         Some(String::from_utf8_lossy(&buf).into_owned())
     }
 
-    /// A NUL-terminated `c_char` field as text.
-    fn c_text(field: &[libc::c_char]) -> String {
-        let bytes: Vec<u8> = field
-            .iter()
-            .take_while(|c| **c != 0)
-            .map(|c| c.to_ne_bytes()[0])
-            .collect();
-        String::from_utf8_lossy(&bytes).into_owned()
+    /// A NUL-terminated byte field as text; bytes after the NUL are stale.
+    fn c_text(field: &[u8]) -> String {
+        let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+        String::from_utf8_lossy(&field[..end]).into_owned()
     }
 }
 
