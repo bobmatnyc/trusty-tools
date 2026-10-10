@@ -190,6 +190,10 @@ async fn shutdown_skips_a_record_whose_pane_identity_is_unreadable() {
 /// does not end it, so only a kill can.
 const LIVE_PRINTING_PANE: &str = "echo live-9101; trap '' INT; sleep 600";
 
+/// Like [`LIVE_PRINTING_PANE`], but the text arrives a second late, as it does
+/// on a loaded host.
+const LATE_PRINTING_PANE: &str = "sleep 1; echo live-9101; trap '' INT; sleep 600";
+
 /// What the restarted server's pane prints.
 const LIVE_TEXT: &str = "live-9101";
 
@@ -209,6 +213,11 @@ struct Restarted {
 impl Restarted {
     /// `None` without tmux.
     async fn new(tag: &str) -> Option<Self> {
+        Self::with_pane_command(tag, LIVE_PRINTING_PANE).await
+    }
+
+    /// [`Restarted::new`] with the restarted session running `pane_command`.
+    async fn with_pane_command(tag: &str, pane_command: &str) -> Option<Self> {
         let (server, f) = live_fixture(tag).await?;
         let name = reserved_session_name(tag);
         let first =
@@ -222,26 +231,44 @@ impl Restarted {
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let second = ScratchTmuxSession::spawn_on_socket(
-            TMUX,
-            Some(server.name()),
-            &name,
-            LIVE_PRINTING_PANE,
-        );
+        let second =
+            ScratchTmuxSession::spawn_on_socket(TMUX, Some(server.name()), &name, pane_command);
         let now = live_pane(&server, &name).expect("the second session is live");
         assert_eq!(
             now.0, pane,
             "precondition: the restarted server reused the pane id"
         );
         assert_ne!(now.1, old_server, "precondition: a new server instance");
-        Some(Self {
+        let restarted = Self {
             server,
             f,
             name,
             _second: second,
             pane,
             old_server,
-        })
+        };
+        restarted.wait_until_printed();
+        Some(restarted)
+    }
+
+    /// Why: #9587: the pane prints asynchronously, so a single read right
+    /// after the spawn loses the race on a loaded host.
+    /// What: polls the new pane every 50 ms for up to 5 s until it shows
+    /// [`LIVE_TEXT`]; panics with the last screen on a real timeout.
+    /// Test: `restarted_returns_only_once_the_pane_has_printed`.
+    fn wait_until_printed(&self) {
+        let mut screen = self.screen();
+        for _ in 0..100 {
+            if screen.contains(LIVE_TEXT) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            screen = self.screen();
+        }
+        assert!(
+            screen.contains(LIVE_TEXT),
+            "precondition: the restarted pane never printed {LIVE_TEXT:?} within 5s: {screen:?}"
+        );
     }
 
     /// A stale record in `state`, captured on the server before the restart.
@@ -258,6 +285,21 @@ impl Restarted {
             .query(&["capture-pane", "-p", "-t", &target])
             .unwrap_or_default()
     }
+}
+
+/// #9587: a `Restarted` harness hands back a pane that has already printed,
+/// even when the print lands late.
+#[serial_test::serial]
+#[tokio::test]
+async fn restarted_returns_only_once_the_pane_has_printed() {
+    let Some(r) = Restarted::with_pane_command("9587-late", LATE_PRINTING_PANE).await else {
+        return;
+    };
+    let screen = r.screen();
+    assert!(
+        screen.contains(LIVE_TEXT),
+        "the harness returned before the pane printed: {screen:?}"
+    );
 }
 
 /// #9101 send class, on a real tmux: no send reaches the restarted server's
