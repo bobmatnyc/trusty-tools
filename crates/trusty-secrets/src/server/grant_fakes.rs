@@ -3,7 +3,8 @@
 //! Why: AC 7 — the ancestry and expiry rules are proven against a process
 //! table and a clock the test controls.
 //! What: [`FakeProcs`] maps pid to (parent, start time) and can fail every
-//! read, fail one pid's start time, or panic on one pid. [`FakeClock`]
+//! read, fail one pid's start time, panic on one pid, or mark a pid as
+//! Claude Code. [`FakeClock`]
 //! holds a settable time and can fail.
 //! Test: used by `grant_tests.rs` and `ancestry_tests.rs`.
 
@@ -20,6 +21,7 @@ struct ProcState {
     unreadable: bool,
     start_unreadable: HashSet<u32>,
     panic_on: Option<u32>,
+    agents: HashSet<u32>,
     parent_delay: Option<Duration>,
 }
 
@@ -63,6 +65,11 @@ impl FakeProcs {
     /// Fail `pid`'s start time with `StartTimeUnreadable`.
     pub(crate) fn set_start_unreadable(&self, pid: u32) {
         self.with(|s| s.start_unreadable.insert(pid));
+    }
+
+    /// Mark `pid` as a Claude Code process (#9070 slice 2).
+    pub(crate) fn set_agent(&self, pid: u32) {
+        self.with(|s| s.agents.insert(pid));
     }
 
     /// Panic when `pid`'s start time is read.
@@ -110,6 +117,15 @@ impl ProcessTable for FakeProcs {
         });
         assert!(!panic, "fake process table: injected panic for pid {pid}");
         result
+    }
+
+    fn is_agent(&self, pid: u32) -> Result<bool, ProcessError> {
+        self.with(|s| {
+            if s.unreadable || !s.procs.contains_key(&pid) {
+                return Err(ProcessError::Unreadable { pid });
+            }
+            Ok(s.agents.contains(&pid))
+        })
     }
 }
 

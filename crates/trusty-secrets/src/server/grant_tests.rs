@@ -347,3 +347,27 @@ fn live_grant_count_is_capped() {
     f.clock.set(T0 + 10);
     assert!(f.registry.mint(request(10)).is_ok());
 }
+
+/// Why: #9070 slice 2 — `secrets.resolve` resolves in the grant's own
+/// project and re-applies its agent judgement, never the resolver's word.
+/// Test: itself.
+#[test]
+fn authorize_scoped_returns_the_minted_scope() {
+    let f = fixture();
+    let scope = GrantScope::new("/repo/acme", true);
+    let token = f
+        .registry
+        .mint(request(60).with_scope(scope.clone()))
+        .expect("mint")
+        .token;
+    assert_eq!(
+        f.registry
+            .authorize_scoped(&token, &[key("API_TOKEN")], CHILD),
+        Ok(scope)
+    );
+    let plain = mint(&f, 60);
+    assert_eq!(
+        f.registry.authorize_scoped(&plain, &[key("DB_URL")], 30),
+        Ok(GrantScope::default())
+    );
+}

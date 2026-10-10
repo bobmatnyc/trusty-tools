@@ -211,7 +211,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 34] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 36] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1219,7 +1219,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 34;
+    const ARMS: usize = 36;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1262,6 +1262,9 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::VaultNotVisible => 32,
             // #7524 P2-L7: after `VaultNotVisible`.
             ErrorKind::BackendTimeout => 33,
+            // #9070: after `BackendTimeout`.
+            ErrorKind::GrantRefused => 34,
+            ErrorKind::GrantLimitReached => 35,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1275,12 +1278,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 34 variants, and the
+/// What: `kind as i32` equals its pinned value for all 36 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 34] = [
+    const PINNED: [(ErrorKind, i32); 36] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1315,6 +1318,8 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::DeadlineExceeded, 31),
         (ErrorKind::VaultNotVisible, 32),
         (ErrorKind::BackendTimeout, 33),
+        (ErrorKind::GrantRefused, 34),
+        (ErrorKind::GrantLimitReached, 35),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
@@ -1810,7 +1815,14 @@ fn client_wait_exceeds_the_server_deadline_for_every_method() {
             "{name}"
         );
     }
-    for name in [method::SET, method::DELETE, method::COPY] {
+    // #9070: `resolve` and `grant` reach CLI-backed backends too.
+    for name in [
+        method::SET,
+        method::DELETE,
+        method::COPY,
+        method::GRANT,
+        method::RESOLVE,
+    ] {
         assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
         assert!(client_wait(name) > Duration::from_secs(120), "{name}");
     }
@@ -1841,6 +1853,10 @@ mod posture_tests;
 #[cfg(all(unix, feature = "cli-backends"))]
 #[path = "onepassword_tests.rs"]
 mod onepassword_tests;
+
+// #9070: the exec-grant wire tests share this module's fixture.
+#[path = "wire_tests.rs"]
+mod wire_tests;
 
 // #7519 P3: the Keeper server-path tests share this module's fixture.
 #[cfg(all(unix, feature = "cli-backends"))]
@@ -2098,13 +2114,13 @@ static RAN_CLOSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 static RAN_LATE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A method body that counts its runs in [`RAN_CLOSED`].
-fn body_counted_closed(_: &State, _: Value) -> Result<Value, ErrorKind> {
+fn body_counted_closed(_: &State, _: methods::Caller, _: Value) -> Result<Value, ErrorKind> {
     RAN_CLOSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Ok(json!("ran"))
 }
 
 /// A method body that counts its runs in [`RAN_LATE`].
-fn body_counted_late(_: &State, _: Value) -> Result<Value, ErrorKind> {
+fn body_counted_late(_: &State, _: methods::Caller, _: Value) -> Result<Value, ErrorKind> {
     RAN_LATE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Ok(json!("ran"))
 }
@@ -2119,8 +2135,15 @@ async fn server_closed_admission_is_internal_and_never_runs_the_body() {
     let admission = Arc::new(tokio::sync::Semaphore::new(1));
     admission.close();
     let deadline = std::time::Instant::now() + STUCK_DEADLINE;
-    let answer =
-        router::run_blocking(state, admission, deadline, body_counted_closed, json!({})).await;
+    let answer = router::run_blocking(
+        state,
+        admission,
+        deadline,
+        body_counted_closed,
+        methods::Caller::default(),
+        json!({}),
+    )
+    .await;
     assert_eq!(answer, Err(ErrorKind::Internal));
     assert_eq!(RAN_CLOSED.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -2142,6 +2165,7 @@ async fn server_request_admitted_past_its_deadline_never_runs_the_body() {
         Arc::clone(&admission),
         deadline,
         body_counted_late,
+        methods::Caller::default(),
         json!({}),
     )
     .await;

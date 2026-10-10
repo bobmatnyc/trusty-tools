@@ -6,9 +6,9 @@
 //! up with a transport timeout, and the server then committed the write.
 //! The two numbers must come from one table, so the server's deadline is
 //! always shorter than the client's wait for the same method.
-//! What: [`request_deadline`] — [`WRITE_DEADLINE`] for `set`, `delete` and
-//! `copy`, which reach vendor CLIs, and [`READ_DEADLINE`] for every other
-//! method. [`client_wait`] is that deadline plus [`CLIENT_MARGIN`], which
+//! What: [`request_deadline`] — [`WRITE_DEADLINE`] for `set`, `delete`,
+//! `copy`, `grant` and `resolve`, which reach vendor CLIs, and
+//! [`READ_DEADLINE`] for every other method. [`client_wait`] is that deadline plus [`CLIENT_MARGIN`], which
 //! covers the connect, the index publish and the audit record that follow
 //! the last CLI call. The router sets the deadline on the thread a body runs
 //! on (`store::deadline`); the CLI runner refuses or stops a call past it.
@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use crate::api::methods::method;
 
-/// The deadline for `set`, `delete` and `copy`: room for one 60 s CLI call
-/// that waits on a desktop unlock prompt, plus the calls around it.
+/// The deadline for `set`, `delete`, `copy`, `grant` and `resolve`: room
+/// for one 60 s CLI call that waits on a desktop unlock prompt, plus the
+/// calls around it.
 pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The deadline for every other method; none of them runs a vendor CLI.
@@ -45,7 +46,11 @@ pub(crate) const BODY_GRACE: Duration = Duration::from_secs(2);
 /// The whole-operation deadline the server gives one request of `name`.
 pub(crate) fn request_deadline(name: &str) -> Duration {
     match name {
-        method::SET | method::DELETE | method::COPY => WRITE_DEADLINE,
+        // #9070: `resolve` reads a value and `grant` may read agents flags,
+        // both through a CLI-backed backend.
+        method::SET | method::DELETE | method::COPY | method::GRANT | method::RESOLVE => {
+            WRITE_DEADLINE
+        }
         _ => READ_DEADLINE,
     }
 }

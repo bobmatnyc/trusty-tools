@@ -122,11 +122,19 @@ pub enum ErrorKind {
     /// access prompt.
     // #7524 P2-L7: its own kind, so a caller knows a write may still land.
     BackendTimeout = 33,
+    /// No exec grant allows the call: an unknown, expired or revoked token,
+    /// a key outside the grant, or a caller outside the granted tree.
+    // #9070: ONE kind for every grant refusal, so a refusal says nothing
+    // about which check failed (DOC-74 §15.8).
+    GrantRefused = 34,
+    /// The server already holds its most live exec grants.
+    // #9070: the next unused value.
+    GrantLimitReached = 35,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 34] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -161,6 +169,8 @@ impl ErrorKind {
         Self::DeadlineExceeded,
         Self::VaultNotVisible,
         Self::BackendTimeout,
+        Self::GrantRefused,
+        Self::GrantLimitReached,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -206,6 +216,8 @@ impl ErrorKind {
             Self::DeadlineExceeded => "deadline_exceeded",
             Self::VaultNotVisible => "vault_not_visible",
             Self::BackendTimeout => "backend_timeout",
+            Self::GrantRefused => "grant_refused",
+            Self::GrantLimitReached => "grant_limit_reached",
             Self::Internal => "internal",
         }
     }
@@ -286,6 +298,13 @@ impl ErrorKind {
             Self::BackendTimeout => {
                 "the secrets backend did not answer in time, for example while a Keychain access prompt waits; the call was abandoned, not stopped, so a write may still land, and that key refuses further calls until the abandoned call ends; check the backend before retrying"
             }
+            // #9070: one sentence for every refusal; it names no check.
+            Self::GrantRefused => {
+                "no exec grant allows this call: the token is unknown, expired or revoked, the key is outside the grant, or the calling process is outside the granted process tree"
+            }
+            Self::GrantLimitReached => {
+                "the server holds the most live exec grants it allows; revoke one or wait for one to expire"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -337,6 +356,9 @@ impl ErrorKind {
             Self::VaultNotVisible => -32080,
             // #7524 P2-L7: the next unused code.
             Self::BackendTimeout => -32081,
+            // #9070: the next unused codes.
+            Self::GrantRefused => -32082,
+            Self::GrantLimitReached => -32083,
         }
     }
 

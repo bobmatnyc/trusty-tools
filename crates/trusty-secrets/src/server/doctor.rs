@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::errors::ErrorKind;
-use super::methods::to_json;
+use super::methods::{Caller, to_json};
 use super::project::{self, ProjectContext, RefusedProject};
 use super::router::State;
 use super::tools::{self, DetectedTool};
@@ -391,7 +391,7 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
 /// `doctor_selected_is_the_backend_a_write_uses_when_the_configs_differ`,
 /// `doctor_reports_a_refused_tracked_setting_on_the_selected_row`,
 /// `doctor_file_row_is_unavailable_when_every_write_into_it_is_refused`.
-pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
