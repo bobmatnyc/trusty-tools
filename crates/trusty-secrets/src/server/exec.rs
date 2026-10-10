@@ -166,6 +166,7 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// [`GrantRegistry::authorize_scoped`]: super::grant::GrantRegistry::authorize_scoped
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
 /// `resolve_by_agent_descendant_of_unflagged_grant_is_refused`,
+/// `resolve_with_unreadable_caller_ancestry_is_refused`,
 /// `resolve_from_sibling_with_valid_token_is_refused`,
 /// `resolve_allow_with_unwritable_audit_returns_no_value`,
 /// `resolve_sentinel_never_reaches_the_audit_file_or_logs`.

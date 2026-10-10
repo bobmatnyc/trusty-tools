@@ -557,3 +557,47 @@ async fn resolve_of_seeded_key_outside_the_grant_is_refused() {
     );
     assert_no_value(&response);
 }
+
+/// Why: #9070 slice 3, fail-closed — an ancestry `resolve` cannot read never
+/// counts as "no agent". The caller's parent is re-pointed after the grant
+/// to a pid the table does not hold, so the descendant check still passes
+/// (the caller is the granted process) and only the agent check can fail.
+/// Red when `resolve` treats a read error as `false`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_with_unreadable_caller_ancestry_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    let (state, _grants) = state_with(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    let token = granted(&fx, me(), &["API_KEY"]).await;
+    procs.add(me(), 99, 4242);
+    let response = call(
+        &fx.settings.socket,
+        method::RESOLVE,
+        resolve_params(&token, "API_KEY"),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&response, method::RESOLVE),
+        ErrorKind::GrantRefused
+    );
+    assert_no_value(&response);
+    let resolves: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Resolve)
+        .collect();
+    assert_eq!(resolves.len(), 1, "{resolves:?}");
+    assert_eq!(
+        shape(&resolves[0]),
+        (
+            AuditMethod::Resolve,
+            AuditDecision::Deny,
+            Some("grant_refused"),
+            Some("API_KEY")
+        )
+    );
+}

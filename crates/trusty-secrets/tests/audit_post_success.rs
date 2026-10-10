@@ -365,7 +365,9 @@ async fn copy_stops_before_the_next_key_after_a_failed_deny_append() {
 /// Why: #9070 slice 3, Architect ruling 2026-10-10 — the flag-set allow
 /// record is written before the backend call. When the log opens but that
 /// append fails, the flag is never changed: distinct from an unopenable log,
-/// this catches a gate that only checks the open.
+/// this catches a gate that only checks the open. The call turns the flag
+/// OFF, which reads no ancestry: the public `serve` judges callers on the
+/// host's real process table, so an ON call would depend on the host.
 /// Red when the record is appended after the backend call.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -379,15 +381,22 @@ async fn set_flag_append_failure_after_open_changes_nothing() {
             &SecretValue::new("v-1234567890"),
         )
         .unwrap();
+    fx.keychain
+        .set_agents_may_use(
+            &VaultName::new(VAULT).unwrap(),
+            &SecretKey::new("K").unwrap(),
+            true,
+        )
+        .unwrap();
     let (task, stop) = fx.start().await;
     let set = fx
         .call(
             "secrets.set_agents_may_use",
-            json!({"vault": VAULT, "key": "K", "allowed": true}),
+            json!({"vault": VAULT, "key": "K", "allowed": false}),
         )
         .await;
     assert_eq!(kind(&set), "audit_unavailable");
-    assert!(!fx.keychain.flagged("K"), "the flag was never changed");
+    assert!(fx.keychain.flagged("K"), "the flag was never changed");
     assert_eq!(fx.log_len(), LIMIT, "no torn record appended");
     let _ = stop.send(());
     task.await.unwrap().unwrap();
