@@ -205,7 +205,7 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
 /// one alive (the reply is then [`ErrorKind::AuditUnavailable`], whose text
 /// says the change may have been applied). An unknown token answers
 /// `revoked: false`. One record per call.
-/// Test: `revoke_ends_a_grant_and_leaves_one_record`.
+/// Test: `resolve_sentinel_never_reaches_the_audit_file_or_logs`.
 pub(crate) fn revoke(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
         state,
