@@ -130,6 +130,39 @@ impl Project {
         })
     }
 
+    /// Run the binary with `args` and `path_dir` prepended to `$PATH`,
+    /// returning the raw `Output`.
+    ///
+    /// Why: #9617 — a test must be able to put a stub `trusty-search` ahead of
+    /// any real one, so the plugin spawn path runs without starting a daemon.
+    /// What: same isolation as `run_inspect` (cwd = tempdir, pinned `$HOME`,
+    /// project-dir hints cleared), plus the `$PATH` prefix. Does not check the
+    /// exit status; the caller asserts on what it came for.
+    /// Test: `plugins_status_stamps_the_trusty_search_child_for_parent_death`.
+    pub async fn run_args_with_path_prefix(
+        &self,
+        args: &[&str],
+        path_dir: &Path,
+    ) -> Result<std::process::Output> {
+        let mut dirs = vec![path_dir.to_path_buf()];
+        if let Some(inherited) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&inherited));
+        }
+        let path = std::env::join_paths(dirs).context("join PATH")?;
+        Command::new(&self.binary)
+            .current_dir(self.root.path())
+            .env("HOME", self.home.path())
+            .env("PATH", path)
+            .env_remove("TAGENT_PROJECT_DIR")
+            .env_remove("OPEN_MPM_PROJECT_DIR")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("spawn trusty-agents")
+    }
+
     /// Run the binary in dry-run inspection mode and return the parsed JSON
     /// report.
     ///
