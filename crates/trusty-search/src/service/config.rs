@@ -371,13 +371,19 @@ mod tests {
             ("search = 5\n", "daemon config [search]"),
             ("[search]\nripgrep_fallback = fals\n", "declares [search]"),
         ];
+        // Every case is checked before failing, so one run names them all.
+        let mut loaded = Vec::new();
         for (src, key) in cases {
-            let err = parse(src).expect_err(&format!("{src:?} must not load"));
+            let Err(err) = parse(src) else {
+                loaded.push(src);
+                continue;
+            };
             let msg = err.to_string();
             assert!(msg.contains(key), "{src:?}: {msg}");
             assert!(msg.contains("config.toml"), "{src:?}: {msg}");
             assert!(!msg.contains("\"50\""), "the value is never echoed: {msg}");
         }
+        assert!(loaded.is_empty(), "loaded instead of refusing: {loaded:?}");
     }
 
     /// The pre-#9258 warn-and-default path for the other sections stays, and
