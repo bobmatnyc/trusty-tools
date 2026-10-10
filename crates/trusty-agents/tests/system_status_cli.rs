@@ -29,6 +29,8 @@ const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 /// Test: `system_status_json_has_expected_top_level_keys`.
 fn tagent() -> Command {
     let mut cmd = Command::new(BIN);
+    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+    trusty_common::parent_death::exit_with_parent(&mut cmd);
     cmd.env_remove("TAGENT_PROJECT_DIR")
         .env_remove("OPEN_MPM_PROJECT_DIR");
     cmd

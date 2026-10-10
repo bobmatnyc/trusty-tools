@@ -209,6 +209,21 @@ mod tests {
     /// a mutex.
     #[tokio::test]
     async fn init_global_is_idempotent() {
+        // #9617: `init_global` spawns `trusty-search serve` when one is on PATH,
+        // and that starts a setsid-detached daemon. Stamp this process so the
+        // daemon exits when the test runner does; the OnceLock never drops it.
+        {
+            let _env = crate::test_env::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // SAFETY: ENV_LOCK is held, the convention for every env mutation here.
+            unsafe {
+                std::env::set_var(
+                    trusty_common::parent_death::ENV_EXIT_WITH_PARENT,
+                    std::process::id().to_string(),
+                );
+            }
+        }
         let first = init_global().await;
         let second = init_global().await;
         assert!(Arc::ptr_eq(&first, &second));
