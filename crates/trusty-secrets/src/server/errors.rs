@@ -262,8 +262,10 @@ impl ErrorKind {
             }
             // #4567: fixed text, no path or value. Usually returned before the
             // backend call; after a completed one the change stands (DOC-45 C-7.7a).
+            // #9621: the write-ahead paths fail before any change, so the text
+            // no longer says one "may already have been applied".
             Self::AuditUnavailable => {
-                "the credential access audit log could not be written; the requested change may already have been applied"
+                "the credential access audit log could not be written; no value was returned, and a requested change was made only if the record failed after the backend call"
             }
             Self::TrackedAuditRefused => {
                 "the project's tracked config may not turn the credential audit off; set `secrets.audit: false` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"

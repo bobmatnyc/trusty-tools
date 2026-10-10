@@ -795,6 +795,48 @@ fn store_agents_flag_survives_an_update_and_clears_on_delete() {
     assert!(!backend.agents_may_use(&project(), &key("MISSING")).unwrap());
 }
 
+/// Why: #9621 — the server's write-ahead audit record runs in `before`, so
+/// it must run under the key's index lock, after the row check and before
+/// the backend call. A racer with a zero lock timeout cannot write the
+/// index while `before` runs; a missing row never calls `before`; a refusal
+/// from `before` leaves the flag unchanged.
+/// Red when `before` runs outside `with_row` (the racer's write lands, or
+/// `before` runs for a missing key).
+/// Test: itself.
+#[test]
+fn store_flag_before_hook_runs_under_the_row_check() {
+    let (tmp, backend, store) = fixture();
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    let racer = SecretStore::new(
+        Arc::clone(&backend) as Arc<dyn SecretBackend>,
+        NamesIndex::at(tmp.path().join("index")).with_lock_timeout(std::time::Duration::ZERO),
+    );
+    let mut raced = None;
+    let applied = store.set_agents_may_use_after(&project(), &key("API_KEY"), true, || {
+        raced = Some(racer.set(&project(), &key("RACER"), &value).is_ok());
+        Ok::<(), &str>(())
+    });
+    assert_eq!(applied.unwrap(), Ok(()));
+    assert_eq!(raced, Some(false), "the racer wrote under the lock");
+    assert!(backend.agents_may_use(&project(), &key("API_KEY")).unwrap());
+
+    let refused = store.set_agents_may_use_after(&project(), &key("API_KEY"), false, || Err("no"));
+    assert_eq!(refused.unwrap(), Err("no"));
+    assert!(
+        backend.agents_may_use(&project(), &key("API_KEY")).unwrap(),
+        "a refused hook changes nothing"
+    );
+
+    let mut called = false;
+    let missing = store.set_agents_may_use_after(&project(), &key("MISSING"), true, || {
+        called = true;
+        Ok::<(), &str>(())
+    });
+    assert!(matches!(missing, Err(SecretsError::NotFound { .. })));
+    assert!(!called, "no hook for a key with no row");
+}
+
 /// Why: #9070 — a backend with no flag item (file, 1Password, Keeper) must
 /// read every key OFF and refuse to turn one ON, never accept it silently.
 /// Test: itself.

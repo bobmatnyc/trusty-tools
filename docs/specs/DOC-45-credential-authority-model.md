@@ -662,8 +662,9 @@ not the record was written. A log whose last line was torn by a partial write
 gets a `\n` before the next record, and the directory is synced after the log is
 created or rotated. The policy is one constant (`FAIL_CLOSED_ON_ALLOW` in
 `server/gate.rs`), set by owner ruling 2b, "Fail closed on allow" (2026-10-06).
-The error text says the requested change may already have been applied, because
-after a completed backend call it has.
+The error text says no value was returned, and that a requested change was made
+only if the record failed after the backend call (#9621). A write-ahead method
+(`set_agents_may_use`, `resolve`) fails before its effect, so nothing was applied.
 
 ### 9.4 Routability — settled
 

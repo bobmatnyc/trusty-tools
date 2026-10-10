@@ -371,3 +371,58 @@ fn authorize_scoped_returns_the_minted_scope() {
         Ok(GrantScope::default())
     );
 }
+
+/// Why: #9621 — a grant whose child exited (its spawner never revoked it)
+/// is dropped: it no longer defers the idle exit, no longer holds a
+/// [`MAX_LIVE_GRANTS`] slot, and its token is refused.
+/// Red when pruning keeps a dead child's grant (`has_unexpired` stays
+/// `true`, and the full registry refuses the next mint).
+/// Test: itself.
+#[test]
+fn dead_child_grants_are_pruned_and_free_capacity() {
+    let f = fixture();
+    let token = mint(&f, 60);
+    assert_eq!(f.registry.has_unexpired(), Ok(true));
+    f.procs.remove(CHILD);
+    assert_eq!(f.registry.has_unexpired(), Ok(false), "dead child pruned");
+    assert_eq!(f.registry.revoke(&token), Ok(false), "already gone");
+    assert_eq!(
+        f.registry.authorize(&token, &[key("API_TOKEN")], CHILD),
+        Err(GrantError::Refused)
+    );
+
+    f.procs.add(CHILD, 10, 200);
+    for _ in 0..MAX_LIVE_GRANTS {
+        mint(&f, 60);
+    }
+    // The pid is reused by a new process: every grant names a dead child.
+    f.procs.add(CHILD, 10, 999);
+    assert!(f.registry.mint(request(60)).is_ok(), "slots were freed");
+}
+
+/// Why: #9621 — `check_scoped` runs every check and spends nothing, so a
+/// one-shot grant survives a later failure in `secrets.resolve`; `spend`
+/// then lets exactly one caller through.
+/// Red when `check_scoped` spends a one-shot grant (the second check is
+/// refused), or `spend` answers `true` twice.
+/// Test: itself.
+#[test]
+fn check_scoped_never_spends_and_spend_does_once() {
+    let f = fixture();
+    let token = f.registry.mint(request(60).one_shot()).expect("mint").token;
+    let wanted = [key("API_TOKEN")];
+    assert!(f.registry.check_scoped(&token, &wanted, CHILD).is_ok());
+    assert!(f.registry.check_scoped(&token, &wanted, 30).is_ok());
+    assert_eq!(f.registry.spend(&token), Ok(true));
+    assert_eq!(f.registry.spend(&token), Ok(false), "spent once");
+    assert_eq!(
+        f.registry.check_scoped(&token, &wanted, CHILD),
+        Err(GrantError::Refused)
+    );
+
+    let reusable = mint(&f, 60);
+    assert_eq!(f.registry.spend(&reusable), Ok(true));
+    assert_eq!(f.registry.spend(&reusable), Ok(true), "reusable is kept");
+    f.clock.set(T0 + 60);
+    assert_eq!(f.registry.spend(&reusable), Ok(false), "expired");
+}

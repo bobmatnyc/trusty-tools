@@ -43,6 +43,11 @@ impl FakeProcs {
         self
     }
 
+    /// Remove `pid`, as when the process exits (#9621).
+    pub(crate) fn remove(&self, pid: u32) {
+        self.with(|s| s.procs.remove(&pid));
+    }
+
     /// init(1) -> parent(10) -> { child(20, start 200) -> grandchild(30),
     /// sibling(21) }; unrelated(50) hangs off init.
     pub(crate) fn sample_tree() -> Self {
