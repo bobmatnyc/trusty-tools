@@ -1281,34 +1281,27 @@ async fn tune_listener_buffers_refuses_where_the_connected_form_tolerates() {
 /// A read-back failure names the read, not a set that never happened.
 #[test]
 fn a_read_back_failure_names_its_own_operation() {
-    // A closed fd is the one way to make `getsockopt` fail on demand.
-    let bad = std::os::unix::net::UnixStream::pair()
-        .expect("socketpair")
-        .0;
-    let fd = std::os::fd::AsRawFd::as_raw_fd(&bad);
-    drop(bad);
+    // #9322: an open non-socket fd, held for the whole test, so no parallel
+    // test can reuse its number the way it could a closed socketpair end.
+    let not_a_socket = std::fs::File::open("/dev/null").expect("open /dev/null");
 
-    let err = socket_buffer_sizes(&BorrowedFdForTest(fd))
-        .expect_err("a closed fd cannot answer getsockopt");
+    let err =
+        socket_buffer_sizes(&not_a_socket).expect_err("a non-socket fd cannot answer getsockopt");
 
-    assert!(
-        matches!(err, UdsSecurityError::SocketBufferRead { .. }),
-        "expected SocketBufferRead, got {err:?}"
+    let UdsSecurityError::SocketBufferRead { option, source } = &err else {
+        panic!("expected SocketBufferRead, got {err:?}");
+    };
+    assert_eq!(*option, "SO_SNDBUF", "the first read is the send buffer");
+    assert_eq!(
+        source.raw_os_error(),
+        Some(libc::ENOTSOCK),
+        "getsockopt on /dev/null must fail as a non-socket: {source}"
     );
     let text = err.to_string();
     assert!(
         text.starts_with("read SO_SNDBUF back"),
         "a read failure must not be reported as a set: {text}"
     );
-}
-
-/// A bare fd, so a read-back can be aimed at one that is already closed.
-struct BorrowedFdForTest(i32);
-
-impl std::os::fd::AsRawFd for BorrowedFdForTest {
-    fn as_raw_fd(&self) -> i32 {
-        self.0
-    }
 }
 
 /// On Linux, the server side is sized on the accepted socket, not inherited
