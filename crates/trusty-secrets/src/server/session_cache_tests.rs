@@ -400,3 +400,70 @@ fn failed_read_is_not_cached() {
     assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
     assert_eq!(op.gets(), 2, "a failure was cached, or a value was not");
 }
+
+/// Select `onepassword` under 1Password account `account` in the account
+/// machine config, the file the server's factory opens CLI backends from.
+fn select_onepassword_account(fx: &Fixture, account: &str) {
+    std::fs::write(
+        &fx.settings.machine_config,
+        format!(
+            "secrets:\n  default_backend: onepassword\n  onepassword:\n    account: {account}\n"
+        ),
+    )
+    .unwrap();
+}
+
+/// Why: #7520 M1 — `backends_with` rereads the account machine config on
+/// every open, so `onepassword.account` can change mid-session. A value
+/// filled under the old account must not answer once the backend opens
+/// under the new one. The factory here builds the backend from that file's
+/// account, as the production factory does.
+/// Red while entries are keyed by backend id alone (account A's value
+/// answers after the switch to B).
+/// Test: itself.
+#[test]
+fn cache_cleared_when_cli_account_settings_change() {
+    let fx = fixture();
+    let account_a = Counting::new(BackendId::onepassword());
+    let account_b = Counting::new(BackendId::onepassword());
+    put(&fx, &account_a, PROJECT_VAULT, "API_KEY", "account-a-value");
+    put(&fx, &account_b, PROJECT_VAULT, "API_KEY", "account-b-value");
+    let config = fx.settings.machine_config.clone();
+    let (a, b) = (Arc::clone(&account_a), Arc::clone(&account_b));
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| {
+        let machine = crate::store::config::load_machine_at(&config)?.unwrap_or_default();
+        let account = machine.onepassword.and_then(|section| section.account);
+        match account.as_deref() {
+            Some("a.1password.com") => Ok(Arc::clone(&a) as Arc<dyn SecretBackend>),
+            Some("b.1password.com") => Ok(Arc::clone(&b) as Arc<dyn SecretBackend>),
+            _ => Err(SecretsError::BackendNotEnabled {
+                backend: id.to_string(),
+            }),
+        }
+    });
+    select_onepassword_account(&fx, "a.1password.com");
+    let mut state = fx.state(factory);
+    state.grants = Arc::new(GrantRegistry::new(
+        procs_with_me(),
+        Arc::new(FakeClock::at(T0)),
+        DEFAULT_MAX_TTL,
+    ));
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-a-value");
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-a-value");
+    assert_eq!(
+        account_a.gets(),
+        1,
+        "the cache was not warm under account A"
+    );
+
+    select_onepassword_account(&fx, "b.1password.com");
+    assert_eq!(
+        value_of(&state, &token, "API_KEY"),
+        "account-b-value",
+        "a value filled under account A answered under account B"
+    );
+    assert_eq!(account_b.gets(), 1, "account B's backend was not read");
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-b-value");
+    assert_eq!(account_b.gets(), 1, "account B's value was not cached");
+}
