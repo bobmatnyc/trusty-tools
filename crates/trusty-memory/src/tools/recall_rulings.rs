@@ -10,7 +10,7 @@
 //! bound and one [`PalaceState`] per palace: the running search, if any, and
 //! the last failure. [`fetch_user_rulings`] searches every listed palace
 //! concurrently, each on the blocking pool under [`RULINGS_TIMEOUT`];
-//! [`fold_rulings`] keeps ruling-tagged drawers
+//! [`fold_rulings`] keeps rulings, by tag or by type
 //! ([`super::recall_rank::is_ruling`]), drops duplicates, caps the leg's share
 //! and merges the rest into the project recall at layer 1, naming the ones
 //! that answer the query for the rank floor (`super::recall_rulings_floor`).
@@ -570,8 +570,8 @@ pub(crate) struct RulingsFold {
 /// `apply_score_floor` exempts layer 1 by design. The cap keeps the leg from
 /// crowding the project's own answer (#9143 review).
 /// What: every `Err` is returned in `degraded`. From the `Ok` hits it keeps
-/// ruling-tagged drawers at or above `min_score` whose drawer id and content
-/// hash are new — against `results` and against every earlier ruling, so one
+/// rulings (by tag, or typed `Ruling`/`Decision`, #9144) at or above
+/// `min_score` whose drawer id and content hash are new — against `results` and against every earlier ruling, so one
 /// ruling stored in two palaces appears once — then the best
 /// `ceil(top_k / 3)` by score, appended as layer 1. Of those, the ones that
 /// answer `query` ([`ruling_answers_query`]) are listed in `floored`. Every
@@ -580,7 +580,8 @@ pub(crate) struct RulingsFold {
 /// Test: `a_search_error_degrades_and_keeps_every_primary_hit`,
 /// `the_same_ruling_from_two_palaces_appears_once`,
 /// `rulings_contribute_at_most_a_third_of_top_k`,
-/// `only_capped_rulings_that_answer_the_query_are_floored`.
+/// `only_capped_rulings_that_answer_the_query_are_floored`,
+/// `typed_rulings_join_the_leg_without_a_ruling_tag`.
 pub(crate) fn fold_rulings(
     results: &mut Vec<RecallResult>,
     outcomes: Vec<PalaceOutcome>,

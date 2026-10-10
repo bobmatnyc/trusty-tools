@@ -23,7 +23,8 @@ use super::bm25::bm25_delete_document;
 use super::helpers::{
     apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate, content_gate,
     dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
-    resolve_palace, resolve_tier_c, room_label, skipped_envelope, write_drawer, WriteDrawerParams,
+    resolve_palace, resolve_tier_c, resolve_type_arg, room_label, skipped_envelope, write_drawer,
+    WriteDrawerParams,
 };
 // #6318: the read tools below fall back to a palace index; the write tools in
 // this file keep `resolve_palace`'s error.
@@ -48,6 +49,9 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
         .to_string();
+    // #9144: parse the optional drawer `type` before every content gate, so a
+    // gate's "skipped" success envelope can never mask a bad type.
+    let classify_as = resolve_type_arg(&args, "memory_remember")?;
 
     // Issue #2442: `force` must be parsed BEFORE any content-quality gate
     // runs so it can bypass every one of them uniformly — it is an explicit
@@ -165,6 +169,8 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     let admission = resolve_tier_c(&args, "memory_remember")?;
     let mut opts = RememberOptions {
         wing_id,
+        // #9144: an explicit type beats the heuristic classifier; `None` keeps it.
+        classify_as,
         ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
     };
     let (tier, refusal) = apply_tier_c(&admission, &mut opts);

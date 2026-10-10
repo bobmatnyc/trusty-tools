@@ -14,8 +14,10 @@ mod recall_support;
 
 use chrono::Duration;
 use recall_support::{
-    backdate, fact_key, rank_of, recall, recall_on, remember, state_with, Surface,
+    backdate, fact_key, rank_of, recall, recall_on, remember, remember_typed, state_with, Surface,
 };
+use serde_json::Value;
+use uuid::Uuid;
 
 /// Why (#9142, #8246): the review's Q02/Q11 shape — an old status snapshot
 /// that matches the query better than the current ruling outranked it.
@@ -205,5 +207,53 @@ async fn a_fresh_drawer_just_past_top_k_is_lifted_above_stale_snapshots() {
     assert!(
         rank_of(&results, fresh).is_some(),
         "the fresh note must be lifted into the top 3: {results:#?}"
+    );
+}
+
+/// The `score` of the hit for drawer `id`.
+fn score_of(results: &[Value], id: Uuid) -> f64 {
+    let rank = rank_of(results, id).unwrap_or_else(|| panic!("{id} recalled: {results:#?}"));
+    results[rank]["score"].as_f64().expect("score")
+}
+
+/// Why (#9144): a `type` the write path accepts but recall ignores would pass
+/// every unit test. This drives the whole path: `memory_remember` with `type`,
+/// then `memory_recall`.
+/// What: the same two texts go into a control palace untyped and into a typed
+/// palace as Status and Ruling, all created now. In the control palace the
+/// status text matches the query better, and the ruling's score is above 0.8
+/// of it, so the Status factor alone must flip the order in the typed palace.
+#[tokio::test]
+async fn a_typed_ruling_outranks_a_better_matching_typed_status_end_to_end() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["typed", "control"], &[]).await;
+    let query = "deploy freeze window for the release train";
+    let status_text = "deploy freeze window for the release train is open today";
+    let ruling_text = "deploy freeze window for the release train is fixed by the owner";
+
+    let c_status = remember_typed(&state, "control", status_text, None).await;
+    let c_ruling = remember_typed(&state, "control", ruling_text, None).await;
+    let control = recall(&state, "control", query, 5).await;
+    let (cs, cr) = (score_of(&control, c_status), score_of(&control, c_ruling));
+    eprintln!(
+        "#9144 control scores: status {cs} ruling {cr} ratio {}",
+        cr / cs
+    );
+    assert!(
+        cs > cr && cr / cs > 0.8,
+        "precondition: the status text must match better, by less than the 0.8 factor: {control:#?}"
+    );
+
+    let status = remember_typed(&state, "typed", status_text, Some("Status")).await;
+    let ruling = remember_typed(&state, "typed", ruling_text, Some("Ruling")).await;
+    let results = recall(&state, "typed", query, 5).await;
+    eprintln!(
+        "#9144 typed scores: status {} ruling {}",
+        score_of(&results, status),
+        score_of(&results, ruling)
+    );
+    assert!(
+        rank_of(&results, ruling) < rank_of(&results, status),
+        "the typed Ruling must rank above the better-matching typed Status: {results:#?}"
     );
 }

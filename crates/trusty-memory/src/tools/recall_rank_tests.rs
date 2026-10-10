@@ -241,3 +241,92 @@ fn fusion_ranks_tied_drawers_by_id_whatever_the_input_order() {
         "ties must rank by drawer id: {results:#?}"
     );
 }
+
+/// A fresh, untagged drawer of type `t`, as a recall hit scoring `score`.
+fn typed_hit(content: &str, t: DrawerType, score: f32, now: DateTime<Utc>) -> RecallResult {
+    let mut d = drawer(content, &[], Duration::zero(), now);
+    d.drawer_type = t;
+    hit(d, score)
+}
+
+/// Why (#9144): with equal similarity and age, a typed ruling must outrank a
+/// typed status report — the status line is the one a newer write replaces.
+/// What: both fresh at 0.70; after demotion the Status hit scores 0.70 * 0.8
+/// and the Ruling keeps 0.70, so the Ruling ranks first whatever its id.
+#[test]
+fn a_ruling_typed_drawer_outranks_an_equal_status_typed_drawer() {
+    let now = Utc::now();
+    let status = typed_hit("status", DrawerType::Status, 0.70, now);
+    let ruling = typed_hit("ruling", DrawerType::Ruling, 0.70, now);
+    let mut results = vec![status, ruling];
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
+    let score = |c: &str| {
+        results
+            .iter()
+            .find(|r| r.drawer.content() == c)
+            .map(|r| r.score)
+    };
+    assert_eq!(score("ruling"), Some(0.70));
+    let s = score("status").expect("status hit kept");
+    assert!((s - 0.70 * 0.8).abs() < 1e-6, "status score {s}");
+    assert_eq!(results[0].drawer.content(), "ruling", "{results:#?}");
+}
+
+/// Why (#9144): a recorded conversational turn is weaker still than a status.
+/// What: as above with Turn, whose factor is 0.7.
+#[test]
+fn a_ruling_typed_drawer_outranks_an_equal_turn_typed_drawer() {
+    let now = Utc::now();
+    let turn = typed_hit("turn", DrawerType::Turn, 0.70, now);
+    let ruling = typed_hit("ruling", DrawerType::Ruling, 0.70, now);
+    let mut results = vec![turn, ruling];
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
+    let t = results
+        .iter()
+        .find(|r| r.drawer.content() == "turn")
+        .map(|r| r.score)
+        .expect("turn hit kept");
+    assert!((t - 0.70 * 0.7).abs() < 1e-6, "turn score {t}");
+    assert_eq!(results[0].drawer.content(), "ruling", "{results:#?}");
+}
+
+/// Why (#9144): a live Tier C slot is current by construction (ADR-0028 D5),
+/// so its type must not demote it; once the slot is retired it is an ordinary
+/// Status drawer and takes the 0.8 factor.
+#[test]
+fn a_live_keyed_status_typed_drawer_is_exempt_from_the_type_factor() {
+    let now = Utc::now();
+    let mut keyed = drawer("s", &[], Duration::zero(), now);
+    keyed.drawer_type = DrawerType::Status;
+    keyed.fact_key = Some("ws:s1/resume".to_string());
+    keyed.expires_at = Some(now + Duration::hours(1));
+    assert_eq!(temporal_weight(&keyed, now), 1.0);
+    keyed.fact_key = None;
+    keyed.expires_at = None;
+    assert!((temporal_weight(&keyed, now) - 0.8).abs() < 1e-6);
+}
+
+/// Why (#9144): a typed Ruling or Decision is a ruling for the rank pass and
+/// the rulings leg alike; the other typed variants are not, and only Status
+/// and Turn carry a factor below 1.
+/// What: fresh untagged drawers of each writable type.
+#[test]
+fn ruling_and_decision_types_are_rulings_and_the_rest_keep_their_factor() {
+    let now = Utc::now();
+    for (t, ruling, weight) in [
+        (DrawerType::Ruling, true, 1.0),
+        (DrawerType::Decision, true, 1.0),
+        (DrawerType::Reference, false, 1.0),
+        (DrawerType::Status, false, 0.8),
+        (DrawerType::Turn, false, 0.7),
+    ] {
+        let mut d = drawer("x", &[], Duration::zero(), now);
+        d.drawer_type = t;
+        assert_eq!(is_ruling(&d), ruling, "{t:?}");
+        assert!((temporal_weight(&d, now) - weight).abs() < 1e-6, "{t:?}");
+    }
+    // The factor multiplies the snapshot decay: floor 0.5 times 0.8.
+    let mut old_status = drawer("x", &["status"], Duration::days(365), now);
+    old_status.drawer_type = DrawerType::Status;
+    assert!((temporal_weight(&old_status, now) - SNAPSHOT_FLOOR * 0.8).abs() < 1e-6);
+}

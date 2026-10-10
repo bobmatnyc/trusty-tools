@@ -281,7 +281,7 @@ this table is generated from it, not maintained by hand.
 | `memory_recall` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
 | `memory_recall_all` | `q`, `deep?`, `full?`, `include_creator_tags?`, `max_bytes?`, `scope?`, `top_k?` | Semantic search across palaces: by default (`scope: "resident"`) only the palaces already loaded in memory, opening none; with `scope:… |
 | `memory_recall_deep` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
-| `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
+| `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `type?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
 | `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
@@ -313,6 +313,21 @@ over the socket as `memory.status` (`StatusPayload` in
 `src/service/types.rs`, bound in `src/transport/uds.rs`); there is no
 corresponding MCP tool, which is why the generated roster above does not
 list one.
+
+### Typed writes (`memory_remember` `type`)
+
+`memory_remember` takes an optional `type`: `Ruling`, `Decision`, `Status`,
+`Turn` or `Reference`, matched in any case (#9144). The drawer is stored with
+that type, and `memory_list` reports it as `drawer_type`. Without `type`, the
+heuristic classifier picks the type, as before. Any other value, `UserFact`
+included, fails the call and writes nothing. `memory_note`, the
+`memory.remember_async` RPC and the HTTP create-drawer route take no type.
+
+Recall uses the type. A `Ruling` or `Decision` drawer counts as a ruling, the
+same as a ruling tag, so it is exempt from snapshot decay and eligible for the
+cross-palace rulings leg. A `Status` drawer's score is multiplied by 0.8 and a
+`Turn` drawer's by 0.7, on top of any snapshot decay. A drawer that holds a
+live `fact_key` slot is exempt from that factor.
 
 ### Task drawers (protected memory)
 
