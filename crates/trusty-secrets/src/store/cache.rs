@@ -22,7 +22,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use super::config::{self, CliSettings};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
@@ -57,6 +58,9 @@ impl OpenedUnder {
         Some(Self(section))
     }
 }
+
+/// The cache's clock; [`Instant::now`] outside tests.
+pub(crate) type CacheClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// What one cached value is filed under.
 type Slot = (BackendId, VaultName, SecretKey);
@@ -97,24 +101,36 @@ impl Entries {
 /// no error.
 /// Test: `resolve_second_call_does_not_reread_cli_backend`,
 /// `cache_is_namespaced_per_vault`, `cache_debug_never_prints_value`.
-#[derive(Default)]
 pub(crate) struct SecretCache {
     entries: Mutex<Entries>,
+    // #7520 S2: no entry answers once this old.
+    max_age: Duration,
+    now: CacheClock,
 }
 
 impl fmt::Debug for SecretCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // #7520 AC3: a count, never a key or a value.
+        // #7520 AC3: a count and the max age, never a key or a value.
         f.debug_struct("SecretCache")
             .field("entries", &self.count())
+            .field("max_age", &self.max_age)
             .finish()
     }
 }
 
 impl SecretCache {
-    /// An empty cache.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// An empty cache whose entries answer for at most `max_age`.
+    pub(crate) fn new(max_age: Duration) -> Self {
+        Self::with_clock(max_age, Arc::new(Instant::now))
+    }
+
+    /// [`Self::new`] reading the time from `now`.
+    pub(crate) fn with_clock(max_age: Duration, now: CacheClock) -> Self {
+        Self {
+            entries: Mutex::default(),
+            max_age,
+            now,
+        }
     }
 
     /// Whether values read from `backend` are cached: `onepassword` and
@@ -240,7 +256,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn cache_read_started_under_other_settings_is_not_stored() {
-        let cache = SecretCache::new();
+        let cache = SecretCache::new(Duration::from_secs(600));
         let (op, web, name) = (BackendId::onepassword(), vault("trusty/acme/web"), key("K"));
         let (a, b) = (account("a"), account("b"));
         let raced = cache.read_through(&op, Some(&a), &web, &name, || {
@@ -275,7 +291,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn cache_read_started_before_an_eviction_is_not_stored() {
-        let cache = SecretCache::new();
+        let cache = SecretCache::new(Duration::from_secs(600));
         let (op, web, name) = (BackendId::onepassword(), vault("trusty/acme/web"), key("K"));
         let under = account("a");
         let stale = cache.read_through(&op, Some(&under), &web, &name, || {
@@ -296,7 +312,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn poisoned_cache_misses_and_stores_nothing() {
-        let cache = SecretCache::new();
+        let cache = SecretCache::new(Duration::from_secs(600));
         let (op, web, name) = (BackendId::onepassword(), vault("trusty/acme/web"), key("K"));
         let under = account("a");
         cache
@@ -318,6 +334,9 @@ mod tests {
         }
         assert_eq!(reads, 2, "a poisoned cache served a value");
         cache.evict(&web, &name);
-        assert_eq!(format!("{cache:?}"), "SecretCache { entries: 0 }");
+        assert_eq!(
+            format!("{cache:?}"),
+            "SecretCache { entries: 0, max_age: 600s }"
+        );
     }
 }

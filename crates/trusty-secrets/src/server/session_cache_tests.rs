@@ -8,11 +8,13 @@
 //!
 //! Test: itself.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::time::Instant;
 
 use super::*;
 use crate::server::exec;
 use crate::server::methods::{self, Caller};
+use crate::store::SecretCache;
 
 /// The project vault of the second fixture repo, `Acme/Api`.
 const API_VAULT: &str = "trusty/acme/api";
@@ -239,8 +241,8 @@ fn cache_is_namespaced_per_vault() {
     assert_eq!(keeper.gets(), 1);
 }
 
-/// Why: #7520 AC3 — the cache shows in `State`'s `Debug` as an entry count,
-/// never a value.
+/// Why: #7520 AC3 — the cache shows in `State`'s `Debug` as an entry count
+/// (and, since S2, its max age), never a value.
 /// Red while `State` holds no cache (no count in its `Debug`).
 /// Test: itself.
 #[test]
@@ -259,7 +261,7 @@ fn cache_debug_never_prints_value() {
             .split_whitespace()
             .collect::<String>()
             .replace(",}", "}");
-        assert!(compact.contains("SecretCache{entries:1}"), "{debug}");
+        assert!(compact.contains("SecretCache{entries:1,"), "{debug}");
     }
 }
 
@@ -604,4 +606,34 @@ fn one_shot_grant_is_spent_by_a_cache_hit() {
         Err(ErrorKind::GrantRefused),
         "a cache hit spent nothing"
     );
+}
+
+/// Why: #7520 S2 — idle exit alone does not bound how long a value is
+/// served, since a busy server never goes idle. An entry as old as the
+/// configured max age is not served: the next resolve reads the backend
+/// again and refills it. `State::new` takes the max age from the settings.
+/// Red while entries never expire (one read for the whole run).
+/// Test: itself.
+#[test]
+fn entry_expires_after_max_age() {
+    let mut fx = fixture();
+    fx.settings.cache_max_age = Duration::from_secs(5);
+    let op = Counting::new(BackendId::onepassword());
+    put(&fx, &op, PROJECT_VAULT, "API_KEY", SENTINEL_VALUE);
+    let mut state = cache_state(&fx, std::slice::from_ref(&op), procs_with_me());
+    let debug = format!("{state:?}");
+    assert!(debug.contains("max_age: 5s"), "{debug}");
+    let (base, elapsed) = (Instant::now(), Arc::new(AtomicU64::new(0)));
+    let clock = Arc::clone(&elapsed);
+    state.cache = Arc::new(SecretCache::with_clock(
+        state.settings.cache_max_age,
+        Arc::new(move || base + Duration::from_secs(clock.load(Ordering::SeqCst))),
+    ));
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+
+    for (at, reads) in [(0, 1), (4, 1), (5, 2), (9, 2), (10, 3)] {
+        elapsed.store(at, Ordering::SeqCst);
+        assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
+        assert_eq!(op.gets(), reads, "backend reads after the resolve at {at}s");
+    }
 }

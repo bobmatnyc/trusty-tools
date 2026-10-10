@@ -71,6 +71,19 @@ pub const IDLE_TIMEOUT_ENV: &str = "TRUSTY_SECRETS_IDLE_TIMEOUT_SECS";
 /// Idle window before the server exits (owner ruling 31).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Shortens the session cache's max age, in whole seconds (#7520 S2).
+///
+/// What: a positive integer up to [`DEFAULT_CACHE_MAX_AGE`] is that many
+/// seconds; anything else — unset, `0`, garbage, or longer than the default
+/// — is the default. It never lengthens the max age: the on-demand client
+/// passes the first spawner's environment to the server every client shares
+/// (#7524), so only `--cache-max-age-secs` may.
+pub const CACHE_MAX_AGE_ENV: &str = "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS";
+
+/// How long a cached 1Password or Keeper value answers before the next
+/// resolve reads the backend again (#7520 S2; provisional, plan §6 point 1).
+pub const DEFAULT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+
 /// The subcommand that serves the socket.
 pub const SERVE_SUBCOMMAND: &str = "serve";
 
@@ -80,7 +93,7 @@ pub const SERVE_SUBCOMMAND: &str = "serve";
 pub enum SettingsError {
     /// The first argument is not `serve`.
     #[error(
-        "usage: trusty-secrets serve [--socket PATH] [--index-dir PATH] [--machine-config PATH] [--audit-log PATH] [--idle-timeout-secs N]"
+        "usage: trusty-secrets serve [--socket PATH] [--index-dir PATH] [--machine-config PATH] [--audit-log PATH] [--idle-timeout-secs N] [--cache-max-age-secs N]"
     )]
     Usage,
     /// A flag this binary does not define. The flag itself is not echoed.
@@ -95,6 +108,9 @@ pub enum SettingsError {
     /// `--idle-timeout-secs` is not a positive integer.
     #[error("--idle-timeout-secs must be a positive whole number of seconds")]
     InvalidIdleTimeout,
+    /// `--cache-max-age-secs` is not a positive integer (#7520 S2).
+    #[error("--cache-max-age-secs must be a positive whole number of seconds")]
+    InvalidCacheMaxAge,
     /// A default location needs `$HOME`.
     #[error(transparent)]
     Home(#[from] SecretsError),
@@ -118,6 +134,8 @@ pub struct ServerSettings {
     pub machine_config: PathBuf,
     /// How long the server stays up with no answered request.
     pub idle_timeout: Duration,
+    /// How long a cached CLI-backed value may answer (#7520 S2).
+    pub cache_max_age: Duration,
     /// The append-only credential access audit log (#4567).
     pub audit_log: PathBuf,
     /// Size at which [`Self::audit_log`] is rotated when next opened.
@@ -147,6 +165,7 @@ impl ServerSettings {
             index_root,
             machine_config,
             idle_timeout,
+            cache_max_age: DEFAULT_CACHE_MAX_AGE,
         }
     }
 
@@ -260,6 +279,7 @@ impl ServerSettings {
                 None => under_home(MACHINE_CONFIG_SUBPATH)?,
             },
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
+            cache_max_age: DEFAULT_CACHE_MAX_AGE,
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
             template_root,
