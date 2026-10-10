@@ -194,6 +194,9 @@ lanes = [
         "knowledge-document",
         "memory-core",
         "embedder-test-support",
+        # #9274: the format-0 palace fixture; the memory-core tests already
+        # compile it under `cfg(test)`, this lane compiles its feature form.
+        "memory-core-test-support",
         "embedder-client",
         "catchup",
         "monitor-tui",
