@@ -1490,8 +1490,10 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
 /// Why (#9544): the two alias choke-point tests below need the same live
 /// alias, and a wrong shape (an alias directory, a missing target) silently
 /// disables the redirect, so the helper asserts the redirect fires.
-/// Test: used by `palace_write_lock_follows_a_live_alias` and
-/// `session_store_follows_a_live_alias_and_creates_no_alias_dir`.
+/// Test: used by `palace_write_lock_follows_a_live_alias`,
+/// `session_store_follows_a_live_alias_and_creates_no_alias_dir`,
+/// `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir` and
+/// `session_store_fails_open_when_the_alias_dir_store_cannot_be_read`.
 fn live_alias(state: &AppState, canonical: &str, alias: &str) {
     let palace = trusty_common::memory_core::Palace {
         id: trusty_common::memory_core::palace::PalaceId::new(canonical),
@@ -1589,5 +1591,115 @@ async fn session_store_follows_a_live_alias_and_creates_no_alias_dir() {
     assert!(
         !state.data_root.join("chat-alias").exists(),
         "no directory may be created under the alias name"
+    );
+}
+
+/// Size and mtime of a file, read without opening it.
+fn size_and_mtime(path: &std::path::Path) -> (u64, std::time::SystemTime) {
+    let md = std::fs::metadata(path).expect("stat seeded store");
+    (md.len(), md.modified().expect("mtime"))
+}
+
+/// Why (#9612): before #9544 a chat call through an alias wrote
+/// `<root>/<alias>/chat_sessions.redb`. The redirect now opens the target's
+/// store, so that file is never read again and nothing said so.
+/// What: a seeded alias-dir store is flagged in exactly one warn naming its
+/// path, size and target, however often the alias is used; a clean alias and
+/// a direct call are silent; the stray file's size and mtime do not change.
+/// Test: this test.
+#[tokio::test]
+async fn session_store_flags_a_chat_store_stranded_in_a_live_alias_dir() {
+    let (state, _tmp) = test_state();
+    let stray = state.data_root.join("a").join("chat_sessions.redb");
+    {
+        let old = ChatSessionStore::open(&state.data_root.join("a").join("chat_sessions.db"))
+            .expect("seed the pre-#9544 alias-dir store");
+        old.create_session(Some("written before the redirect".to_string()))
+            .expect("seed a session");
+    }
+    live_alias(&state, "stranded-target", "a");
+    live_alias(&state, "clean-target", "a2");
+    let before = size_and_mtime(&stray);
+
+    let (log, _guard) = crate::service::core_tests::LogCapture::install();
+    let first = state.session_store("a").expect("store via alias");
+    let second = state.session_store("a").expect("store via alias again");
+    state.session_store("a2").expect("store via clean alias");
+    state
+        .session_store("stranded-target")
+        .expect("store via target");
+
+    assert!(Arc::ptr_eq(&first, &second), "the redirect still proceeds");
+    let flags = log.lines_naming("#9612");
+    assert_eq!(flags.len(), 1, "exactly one flag per alias: {flags:?}");
+    let flag = &flags[0];
+    assert!(flag.contains("WARN"), "the flag is a warn: {flag}");
+    assert!(
+        flag.contains(&stray.display().to_string()),
+        "the flag names the stray path: {flag}"
+    );
+    assert!(
+        flag.contains(&format!("{} bytes", before.0)),
+        "the flag names the stray size: {flag}"
+    );
+    assert!(
+        flag.contains("stranded-target"),
+        "the flag names the target palace: {flag}"
+    );
+    assert!(
+        flag.contains("back up the file"),
+        "the flag tells the operator what to do: {flag}"
+    );
+    let clean_dir = state.data_root.join("a2").display().to_string();
+    assert!(
+        !flags.iter().any(|l| l.contains(&clean_dir)),
+        "a clean alias is never flagged"
+    );
+    assert_eq!(
+        size_and_mtime(&stray),
+        before,
+        "the stray store must not be touched"
+    );
+    assert!(
+        !state.data_root.join("a2").exists(),
+        "no directory may be created under a clean alias"
+    );
+}
+
+/// Why (#9612): a stat failure other than NotFound must not block chat; the
+/// check is advisory, so it fails open.
+/// What: a self-referencing symlink at the alias-dir store path makes the
+/// stat fail with ELOOP while `palace.json` stays absent, so the redirect
+/// still fires; the failure is logged at warn and the target store opens.
+/// Test: this test.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_store_fails_open_when_the_alias_dir_store_cannot_be_read() {
+    let (state, _tmp) = test_state();
+    let alias_dir = state.data_root.join("loop-alias");
+    std::fs::create_dir_all(&alias_dir).expect("alias dir");
+    let stray = alias_dir.join("chat_sessions.redb");
+    std::os::unix::fs::symlink(&stray, &stray).expect("self-referencing symlink");
+    live_alias(&state, "loop-target", "loop-alias");
+
+    let (log, _guard) = crate::service::core_tests::LogCapture::install();
+    let via_alias = state
+        .session_store("loop-alias")
+        .expect("redirect proceeds");
+    let via_target = state
+        .session_store("loop-target")
+        .expect("store via target");
+
+    assert!(
+        Arc::ptr_eq(&via_alias, &via_target),
+        "the redirect proceeds"
+    );
+    let flags = log.lines_naming("#9612");
+    assert_eq!(flags.len(), 1, "one warn for the failed stat: {flags:?}");
+    assert!(flags[0].contains("WARN"), "logged at warn: {}", flags[0]);
+    assert!(
+        flags[0].contains(&stray.display().to_string()),
+        "the warn names the path it could not stat: {}",
+        flags[0]
     );
 }
