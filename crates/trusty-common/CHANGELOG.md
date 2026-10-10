@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.59.2] — 2026-10-10
+
+### Breaking
+
+- `bind_with_auto_port` and the `port` module are removed. No workspace crate called them after #9214; trusty-console is the one TCP listener (a REST proxy, no MCP endpoint) (ADR-0032, #9542).
+
+### Added
+
+- `PalaceRegistry::rename_palace` moves a palace to a new id: it writes `old -> new` into the alias map, moves the directory, and rewrites `palace.json`. It refuses a missing or aliased source, an invalid target, a target that is another palace's alias, a non-empty target, and a source in a newer on-disk format (before anything changes); with `replace_empty` an empty target goes to `<root>/.trash/<new>-replaced-<UTC>/`. A referenced handle makes it answer `Busy` with nothing changed, a failed move rolls the alias keys back, and a re-run finishes a rename a crash left partway (#9544).
+- `PalaceAliasStore::rename_target_with_undo` does the `rename_target` write and returns an `AliasUndo` naming every alias key it changed; `PalaceAliasStore::undo` restores exactly those keys (#9544).
+- `memory_core::palace_emptiness::check_palace_empty` is the shared "this palace is empty" check: no drawers, no unabsorbed legacy data, and no chat sessions (#9544).
+- `json_rmw::update_blank_as_absent` reads a whitespace-only document as absent (#9544).
+
+### Fixed
+
+- Palace alias writes (`register_alias`, `remove_alias`, `rename_target`) now run under the alias file's cross-process lock, so concurrent writers no longer lose updates or share one temp file (#9544).
+- `register_alias` and `remove_alias` now refuse a corrupt `palace_aliases.json` and leave its bytes unchanged, instead of overwriting it or answering "no such alias" (#9544).
+- The first alias write stamps schema `version: 1`, and a whitespace-only alias file still accepts a write (#9544).
+
 ## [0.59.1] — 2026-10-10
 
 ### Breaking
