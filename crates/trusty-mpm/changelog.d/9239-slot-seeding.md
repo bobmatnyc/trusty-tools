@@ -1,5 +1,0 @@
-Fixed
-- `tm build-lease` no longer blocks a builder on a slot seed for hours (#9239). The `cp -c -R` clone of the shared target directory now runs against the lease wait (`--wait-secs`, else `builders.lease_wait_secs`); past it the clone is killed, its staging tree is discarded, and the slot is committed cold so the build proceeds.
-- Every lease now sweeps dead owners' `.slot-N.seeding.*` and `.slot-N.evicting.*` trees for every slot index, not only the slot being seeded. The sweep renames each tree aside and deletes it on a background thread, so it never holds the build; a tree it cannot move is reported and left in place.
-- A slot is handed to a build only once its seed has committed. A marker that does not read as seeded and cannot be retired is now a failed seed instead of a grant.
-- `tm build-lease status` prints the lease holders, each repo's slots as seeded or unseeded, and every seed staging tree with its slot, owner pid, liveness and age. It takes no lease and deletes nothing.

@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.58.0] — 2026-10-10
+
+### Breaking
+
+- `trusty_search::service::run_daemon_with` takes a third argument, `rpc_socket: Option<PathBuf>`, the socket to bind in place of `service::socket::socket_path()` (#9214). Pass `None` for the previous behaviour.
+- Removed the unused public `trusty_search::service::client::SearchClient` HTTP client (#9214). Use `trusty_search::service::daemon_client::DaemonClient`, which speaks the daemon socket.
+
+### Added
+
+- `trusty-search start --socket <PATH>` binds the daemon's RPC socket at exactly that path (#9214). The path must be absolute; a relative one is refused before the daemon starts. Without the flag the daemon binds `<TRUSTY_DATA_DIR>/trusty-search.sock`, or the shared default socket, as before. The HTTP listener is unchanged.
+- `start --socket` creates a missing parent directory at `0700` and never changes the mode of an existing one other than the data directory: such a parent not already at `0700` is refused, because clients refuse a socket outside a `0700` directory. The refusal names the remedy: `chmod 700 <dir>`, or a `--socket` path whose directory does not exist yet (#9214).
+
+### Fixed
+
+- `migrate-redb` reports a redb error reading the migrated corpus's `_meta` schema version and stops before it replaces the original. It used to read that error as schema version 0 and install the corpus anyway. trusty-search now builds against redb 4.3.0; its other redb table scans and lookups already propagated their errors and are unchanged (#8254).
+- `get_call_chain` and other entry-point lookups now resolve `<path>::<method>` to a method defined inside an `impl Type` or `impl Trait for Type` block. The path suffix is matched against the defining file, so `src/a.rs::m` finds `src/a.rs::Foo::m` instead of answering "entry point not found".
+- A command that auto-starts the daemon (`query`, `list` and the others that wait for it) now starts it on the socket the command polls (#9214). With `TRUSTY_SEARCH_SOCKET` naming a non-default path and no daemon running, the spawned daemon bound the data-dir socket instead, and the command waited 60 s and failed with "did not become ready within 60s on socket <path>".
+- `index-file` (HTTP `POST /indexes/{id}/index-file` and the socket method `search.index.file.put`) now stores an absolute path under the index root by its root-relative key, the key the watcher and reindex use. Re-adding a file by its absolute path replaces its chunks instead of adding a second copy, and a `path_prefix` search finds them. An absolute path outside the root answers `400 index_file_path_outside_root`; a relative path is unchanged ([#9510](https://github.com/bobmatnyc/trusty-tools/issues/9510))
+- An absolute `index-file` re-add, including one refused with `403 index_file_excluded`, also purges the chunks and content hash an earlier `index-file` stored under the verbatim absolute path, so that copy stops answering searches. A failed purge answers `500 index_file_failed` and nothing is written ([#9510](https://github.com/bobmatnyc/trusty-tools/issues/9510))
+- The test-only commit-phase panic hook in the corpus rehydrate is now armed per indexer, so `warm_corpus_rehydrates_an_evicted_index` no longer fails when the rehydrate panic tests run in the same test process (#9513). Release builds are unchanged.
+- The #767 denylist tests build their denylisted fixture explicitly under `/tmp`, so they no longer fail on a host whose `TMPDIR` is outside the sensitive-path denylist (EVO, `/var/tmp`). The denylist itself is unchanged. (#9527)
+
+### Changed
+
+- The daemon resolves its own socket through trusty-common's `search_rpc::search_socket_under`, the rule every client applies, so a client that exports the daemon's `TRUSTY_DATA_DIR` dials the same socket. The daemon's socket path is unchanged (#9214).
+- `query`, `doctor`, `monitor status` and `monitor indexes`, and the daemon's auto-discovery now reach the daemon over its Unix socket only (#9214). With no daemon answering they fail with an error naming the socket, never a guessed `127.0.0.1:7878`.
+- `doctor` reports the HTTP listener the daemon says it bound (or "socket-only") in place of a TCP probe of the port file's port.
+
 ## [0.57.3] — 2026-10-09
 
 ### Fixed

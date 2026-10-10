@@ -1,2 +1,0 @@
-Fixed
-- A caller pin passed to `PinnedTool::with_sha256` is parsed as a SHA-256 digest before any download and compared with `Sha256Digest::verify`. A pin in GitHub's `sha256:<hex>` asset-digest form now matches instead of being reported as `PinnedChecksumMismatch`, and a pin that is not a digest is the new `PinnedError::InvalidPin` (#8378). The published-sidecar check also compares parsed digests. `sha2` is now a dev-dependency only.

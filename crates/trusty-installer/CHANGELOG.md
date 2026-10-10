@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.0] — 2026-10-10
+
+### Breaking
+
+- `tctl ensure` and `tctl ensure --wait` reach trusty-search over its Unix socket only. A stale `http_addr` file is never read and no TCP connection is made (#9214).
+- `commands::ensure::project_setup::register_index` takes the trusty-search socket path instead of a `reqwest::Client`, and `commands::ensure::readiness::probe_ready` takes no arguments.
+- Removed `commands::ensure::daemon::{resolve_base_url, build_client, health_ok}`. Use `search_socket`, `search_serving` and `search_healthy` in the same module instead.
+
+### Fixed
+
+- Test-only: the fake binaries that the `shadow_check`, `probe`, `plist_bootstrap` and `path_shadow_e2e` tests execute are now written by a short-lived `/bin/sh` child. The test process never holds a writable fd to them, so a sibling test's fork can no longer inherit one and make the later exec fail with `Text file busy` (os error 26). No change to shipped behavior ([#3782](https://github.com/bobmatnyc/trusty-tools/issues/3782), class epic [#3451](https://github.com/bobmatnyc/trusty-tools/issues/3451))
+- The `--version` check of a binary the installer has just written (pinned-set staging, prebuilt install, prebuilt upgrade, `self-update`) no longer fails a correct install with `Text file busy` (os error 26) on Linux. A thread that forks while the installer writes the file hands its child a copy of the write fd, and the kernel refuses the exec until that child execs. The check now retries only that error, 8 times over 635 ms at most, and reports the original error unchanged if it persists ([#6231](https://github.com/bobmatnyc/trusty-tools/issues/6231))
+- `tctl status` no longer prints trusty-analyze's startup lines (the missing-API-key WARN and the serving banner) when its probe starts the server on demand. The started server's stderr goes to `trusty-analyze.stderr.log` beside its socket (#8103).
+- A caller pin passed to `PinnedTool::with_sha256` is parsed as a SHA-256 digest before any download and compared with `Sha256Digest::verify`. A pin in GitHub's `sha256:<hex>` asset-digest form now matches instead of being reported as `PinnedChecksumMismatch`, and a pin that is not a digest is the new `PinnedError::InvalidPin` (#8378). The published-sidecar check also compares parsed digests. `sha2` is now a dev-dependency only.
+- The `ORT_DYLIB_PATH` setup note printed after installing a load-dynamic trusty-search asset now points at ONNX Runtime 1.24.2 instead of 1.20.1. The bundled `ort` 2.0.0-rc.12 refuses any runtime below 1.24, so following the old note left the embedding daemon unable to start ([#8612](https://github.com/bobmatnyc/trusty-tools/issues/8612))
+- `tctl upgrade`, `tctl install` and `taudit install` now fetch `tga` and `trusty-audit` prebuilts from `bobmatnyc/trusty-git-analytics`, where those crates publish their releases. Every other crate still resolves from `bobmatnyc/trusty-tools`. The release list is requested 100 entries per page instead of GitHub's default 30 ([#8642](https://github.com/bobmatnyc/trusty-tools/issues/8642))
+- `tctl upgrade` no longer reports a member as upgraded when its version did not change. A prebuilt release that is not newer than the installed version falls back to `cargo install` before any file is placed. A placed binary whose `--version` differs from its release tag, or an upgrade that leaves the version unchanged, fails the member and makes the command exit non-zero. That error names the binary path that was already replaced and the version it now holds ([#8642](https://github.com/bobmatnyc/trusty-tools/issues/8642))
+- The `tctl upgrade` summary lists each upgraded member as `<member>: <installed> → <applied> (<size>)`, with the real binary size in place of `0.00 MiB` ([#8642](https://github.com/bobmatnyc/trusty-tools/issues/8642))
+- `tctl ui` now fails the launch when it cannot start `trusty-console serve` in its own session. The `setsid` result used to be discarded, so a failure left the console in `tctl`'s process group, where a terminal hangup or a group kill aimed at `tctl` reached it (#8783).
+- Tests that read repository content outside this crate resolve the checkout at runtime through `trusty_common::test_harness::test_repo_root()`, so a test binary built in one worktree under a shared `CARGO_TARGET_DIR` no longer reads another worktree's files (#9298).
+- `tctl install` and `tctl upgrade` run the just-placed `tm content update` after every member has finished, whenever trusty-mpm was installed or upgraded, so a new tm has its instructional content. `--dry-run` lists the command without running it. When the step fails, the binaries stay installed and every other step still completes. The step then prints the failure with the remedy `tm content update`, and the command exits non-zero (#9396).
+
+### Changed
+
+- `tctl ensure` writes the trusty-mpm `.mcp.json` entry as `tm serve --stdio`
+  instead of `trusty-mpm serve --stdio`. An existing `trusty-mpm` entry keeps
+  working through the alias and is rewritten on the next `tctl ensure`.
+- `tga` and `trusty-audit` are external tools in the installer's catalogue: they build and release from `bobmatnyc/trusty-git-analytics`, and `tctl` fetches their prebuilts from that repo's GitHub releases, falling back to `cargo install` from crates.io. Nothing in `tctl` depends on either crate being in this workspace. `tctl install tga` is unchanged; `tctl install` still does not take `trusty-audit` or `taudit` by name
+- Prebuilt and pinned downloads parse the `.sha256` sidecar and hash the artifact through trusty-common's `integrity::Sha256Digest`, the single sha256 implementation ADR-0064 requires, instead of a private copy (#8378). What is accepted and refused is unchanged; the wording of a malformed-checksum or unreadable-artifact error now comes from trusty-common.
+
+### Removed
+
+- `trusty-mpm-gui` (`com.trusty.trusty-mpm.gui`) is no longer in the macOS signable-binary table; the crate was retired (Refs [#7964](https://github.com/bobmatnyc/trusty-tools/issues/7964))
+
 ## [0.13.8] — 2026-09-23
 
 ### Fixed
