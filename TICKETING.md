@@ -151,14 +151,25 @@ gh project item-add 45 --owner bobmatnyc --url https://github.com/bobmatnyc/trus
 ## Lifecycle
 
 Status lives in the `Status` single-select field on project #45 (trusty-tools-master), not in labels.
-Seven values, in order: Backlog, Groomed, In development, Development complete, Merged, Deployed, Published.
+The board's nine options, in order: Backlog, Ready for Development, In Development, In PR, On Preview, Merged,
+On Prod, Published, Won't Do. The lifecycle stage names below map to them as follows; "Deployed" means On Prod.
+On Preview has no lifecycle stage and is not set by the workflow. Won't Do is for issues closed as not planned.
+
+| Lifecycle stage | Board option | `status:*` label |
+|---|---|---|
+| Backlog | Backlog | none |
+| Groomed | Ready for Development | none |
+| In development | In Development | `status:in-progress` |
+| Development complete | In PR | `status:coded` |
+| Merged | Merged | `status:merged` |
+| Deployed | On Prod | `status:tested` |
+| Published | Published | none |
 GitHub's open/closed state is separate. Two date fields, `Deployed on` and `Published on`, record those stages.
 
 **Hand-maintained period (owner ruling fc).** The migration and the tooling follow-ups (`tm issue
 transition`, `tm pr open`, `tm issue current/states/repair`, `tm issue standard/audit`, release tooling) are
 pending. Until they land, the `status:*` labels and the Status field are both maintained by hand, and the
-labels stay authoritative for the tools. `status:in-progress` maps to In development, `status:coded` to
-Development complete, `status:merged` to Merged, `status:tested` to Deployed. The labels are removed
+labels stay authoritative for the tools (label mapping in the table above). The labels are removed
 at migration and deleted after one release soak.
 
 | Status | Entry condition | Moved by | Evidence |
