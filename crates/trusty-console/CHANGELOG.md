@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.5] — 2026-10-10
+
+### Fixed
+
+- The search dashboard enables chat under the console exactly when the daemon reports `chat_available: true` in `/health`; it no longer claims no socket method serves `/chat` (Refs #9030).
+- The analyze dashboard's connection-error text no longer tells the operator to make trusty-search reachable on port 7878, which the daemon no longer binds; it points at `trusty-search status` (#9214).
+- The console's port-collision guard no longer reserves 7878 for trusty-search (#9214).
+
 ## [0.12.4] — 2026-10-10
 
 ### Fixed

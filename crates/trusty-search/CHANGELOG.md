@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.59.0] — 2026-10-10
+
+### Breaking
+
+- The daemon binds no TCP listener: `:7878` is gone and it serves only its Unix socket (#9214, ADR-0032). It writes no `daemon.port` or `http_addr` file, removes the ones an older build left, clears the default instance's shared discovery entry (an entry it cannot remove is logged as a warning naming its path, and the daemon keeps serving), and `search.health` reports `transport.http_addr: null`. Socket-only is the only behaviour.
+- `start --port`, `start --no-http` and `TRUSTY_SEARCH_NO_HTTP` are accepted for this release and ignored, each with a warning on stderr; a later release rejects them. Remove them from launchd units and scripts.
+- Affected outside this workspace: claude-mpm. Its setup health check, which probes the daemon over HTTP on `:7878`, now finds nothing there and must call `search.health` on the socket. Its launchd plist rewrite that adds `--port` still starts the daemon, with the warning above, until the flag is rejected.
+- The public library API loses `service::DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`, `write_http_addr_file`, `DaemonHandle` and `DaemonError::NoFreePort`. `run_daemon` now takes `(state, rpc_socket: Option<PathBuf>)`. The axum router (`service::server::build_router*`) compiles only under `cfg(test)` until it is deleted.
+- `trusty-search serve` speaks MCP over stdio only. `--with-http`, `--http <addr>` and `--port` exit 1 naming #9542 and bind nothing; the MCP HTTP/SSE listener and its `~/.trusty-search/mcp_http_addr` file are gone (ADR-0032). There is no MCP over HTTP: trusty-console has no MCP endpoint. Use stdio (`trusty-search serve`) or the daemon's Unix socket.
+
+### Added
+
+- `search.health` and `GET /health` now carry `chat_available: bool`, true only when a chat provider (local Ollama / LM Studio, or an OpenRouter key) exists, so the console can hide a chat that would answer 503; it is false when no provider exists or resolution does not finish within 2 s ([#9030](https://github.com/bobmatnyc/trusty-tools/issues/9030))
+- Search can now measure the BM25 lane alone (#9258). Two new optional request fields on the socket's `search.query` and `search.query.all` and on the MCP search tools: `ripgrep_fallback: false` stops the content-scan lanes (grep fallback and exact-match injection) from adding rows, so no hit is labelled `fallback:ripgrep`; `lexical_limit` sets each lexical lane's candidate depth (1..=10000, default `top_k × 4`). An out-of-range limit is refused with `invalid_lexical_limit` (JSON-RPC `-32602`) instead of being clamped.
+- `~/.trusty-search/config.toml` accepts a `[search]` section with the same two keys as daemon defaults; a per-query value wins. A config without `[search]` behaves as before. A bad `[search]` value (wrong type, negative, `0`, above 10000, or a file that declares `[search]` but is not valid TOML) stops `trusty-search start` with an error naming the key; it never falls back to defaults. `service::load_user_config` now returns `Result<LoadedUserConfig, UserConfigError>` for this.
+
+### Fixed
+
+- `GET /health` and `search.health` no longer decide the chat provider: a poll made at boot, before a local model server is up, used to lock `search.chat` into a 503 (or into OpenRouter over local) until restart; health now reads the provider cell when filled and otherwise probes without writing it ([#9030](https://github.com/bobmatnyc/trusty-tools/issues/9030))
+
+### Changed
+
+- Auto-discovery runs on every start again, over the socket; it was withheld from a `--no-http` daemon (#9214).
+- `trusty-search port` exits 1 naming the socket for every current daemon and no longer reads an old `http_addr` file; `dashboard` and `monitor web` fail naming the socket and trusty-console, which serves the search dashboard (#9214).
+- `trusty-search doctor` warns when the running daemon still binds HTTP, which means an older build is running and needs a restart (#9214).
+- `trusty-search service install` drops `TRUSTY_SEARCH_NO_HTTP` from the regenerated unit, and the unit carries no `--port` or `--no-http` (#9214).
+
 ## [0.58.0] — 2026-10-10
 
 ### Breaking
