@@ -18,6 +18,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -231,6 +232,9 @@ pub struct State {
     pub(crate) deadline_override: Option<Duration>,
     /// Replaces [`MAX_BLOCKING_CALLS`]; tests only (#9572).
     pub(crate) admission_cap_override: Option<usize>,
+    /// Raised when [`serve_state`] ends, by return or drop; every method
+    /// body's CLI calls watch it (#9572).
+    pub(crate) cancel: Arc<AtomicBool>,
 }
 
 impl State {
@@ -253,6 +257,7 @@ impl State {
             start: StartEnv::default(),
             deadline_override: None,
             admission_cap_override: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -349,7 +354,8 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
 /// gives its own answer. A permit granted at or past the deadline starts no
 /// body. Past either wait the answer is
 /// [`ErrorKind::DeadlineExceeded`]; a closed semaphore or a panicking body
-/// is [`ErrorKind::Internal`]. Neither is ever a success.
+/// is [`ErrorKind::Internal`]. Neither is ever a success. #9572: the body
+/// runs under [`State::cancel`] too, so its CLI calls end when the server does.
 /// Test: `server_stuck_backend_calls_do_not_starve_a_later_request`,
 /// `server_timed_out_request_keeps_its_permit_until_its_call_returns`,
 /// `server_closed_admission_is_internal_and_never_runs_the_body`,
@@ -377,7 +383,11 @@ pub(crate) async fn run_blocking(
     let task = tokio::task::spawn_blocking(move || {
         // #9572: the permit is the thread's, released only when it finishes.
         let _permit = permit;
-        crate::store::deadline::within(deadline, || body(&state, params))
+        // #9572: the body's CLI calls also watch the server's cancel flag.
+        let cancel = Arc::clone(&state.cancel);
+        crate::store::deadline::within(deadline, || {
+            crate::store::deadline::cancellable(cancel, || body(&state, params))
+        })
     });
     // See #9572: past the deadline and its grace the request answers
     // `DeadlineExceeded`, but the body's thread cannot be cancelled. It keeps
@@ -497,12 +507,33 @@ pub async fn serve_with(
     serve_state(state, shutdown).await
 }
 
+/// Raises a server's cancel flag when dropped (#9572).
+///
+/// Why: a CLI call in flight when the server exits runs on a blocking thread
+/// that [`run_to_exit`] abandons; its process group then outlived the process.
+/// What: held by [`serve_state`], so the flag goes up on every way that
+/// future ends: an idle exit, a signal and its drain, an error, or the future
+/// being dropped (a panic unwinding through `block_on`, or the runtime
+/// dropping a spawned serve task). The runner then kills and reaps its group.
+/// Test: `server_exit_kills_the_process_group_of_an_in_flight_cli_call`,
+/// `server_panic_exit_kills_the_process_group_of_an_in_flight_cli_call`,
+/// `sigterm_during_a_cli_call_kills_its_process_group`.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// [`serve`] over a prepared [`State`].
 // #7524: tests set `State::keychain_compiled` to act as either build.
 pub(crate) async fn serve_state(
     state: State,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
+    // #9572: lives as long as this future, however it ends.
+    let _cancel = CancelOnDrop(Arc::clone(&state.cancel));
     // #7519: owner ruling — a crash skips the template guard's drop, so the
     // leftover is removed here, before any request can write a new one.
     #[cfg(all(unix, feature = "cli-backends"))]
@@ -556,8 +587,16 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// a call that is about to finish complete instead of being cut off.
 /// If `future` panics, the same bounded shutdown runs and the panic then
 /// resumes in the caller.
+/// #9572: a CLI call is not abandoned with its process group alive. When
+/// `future` awaits [`serve`] inline, as the binary does, the serve future
+/// ends or unwinds inside `block_on`, so [`CancelOnDrop`] raises the flag
+/// before the grace starts. A serve task spawned on `runtime` is dropped by
+/// its workers during the grace. Either way the runner kills its group
+/// within one poll.
 /// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`,
-/// `server_process_exit_is_bounded_when_the_served_future_panics`.
+/// `server_process_exit_is_bounded_when_the_served_future_panics`,
+/// `server_exit_kills_the_process_group_of_an_in_flight_cli_call`,
+/// `server_panic_exit_kills_the_process_group_of_an_in_flight_cli_call`.
 pub fn run_to_exit<T>(runtime: tokio::runtime::Runtime, future: impl Future<Output = T>) -> T {
     // #9572: a panic unwinding out of `block_on` dropped the runtime, which
     // waits with no limit for a stuck thread; catch it, shut down, re-raise.

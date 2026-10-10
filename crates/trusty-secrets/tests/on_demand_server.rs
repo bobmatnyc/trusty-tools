@@ -298,3 +298,213 @@ async fn binary_doctor_detects_tools_on_its_start_path() {
     assert!(wait_exit(&mut child, Duration::from_secs(15)).success());
     assert!(!marker.exists(), "the server ran doppler");
 }
+
+/// #9572: a real `SIGTERM` to a server process while a CLI call is in
+/// flight; the call's process group must not outlive the process.
+///
+/// Why: the server drains, then `run_to_exit` abandons the blocking thread
+/// still running the CLI call; that thread was the only thing that would
+/// kill the CLI's process group, so the group survived, reparented to pid 1.
+/// What: the server is this test binary, re-run as a child on one entry,
+/// [`harness_serves_until_sigterm`]. That entry runs the binary's own exit
+/// path — `run_to_exit` over `serve_with` and `trusty_common::shutdown_signal`
+/// — with a factory that maps `onepassword` to a fake `op` named by absolute
+/// path. The installed binary cannot run here: ruling 74 lets only the
+/// account's own machine config, read through the password database, enable
+/// 1Password, and no test may touch that file. A `set` is the call, because a
+/// `delete` also reads that file; the drain is `TRUSTY_TERMINATION_GRACE_SECS`
+/// = 7 less the 5 s reserve.
+/// Test: [`sigterm_during_a_cli_call_kills_its_process_group`].
+#[cfg(feature = "cli-backends")]
+mod sigterm_9572 {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use serde_json::json;
+    use trusty_common::uds::send_framed_request;
+    use trusty_common::uds::server::RpcResponse;
+    use trusty_secrets::BackendId;
+    use trusty_secrets::server::{
+        BackendFactory, ServeExit, ServerSettings, StartEnv, default_backends, run_to_exit,
+        serve_with,
+    };
+    use trusty_secrets::store::SecretBackend;
+    use trusty_secrets::store::onepassword::{OnePasswordBackend, OnePasswordSettings};
+
+    use super::{paths, repo, wait_exit, wait_serving};
+
+    /// Names the harness directory; unset, the harness entry does nothing.
+    const HARNESS_ENV: &str = "TRUSTY_SECRETS_9572_HARNESS_DIR";
+
+    /// The harness entry's libtest name, for `--exact`.
+    const HARNESS_TEST: &str = "sigterm_9572::harness_serves_until_sigterm";
+
+    /// How long the fake `op` sleeps, and its runner timeout: far past the
+    /// test's span, so only an exit-time kill can end the group within it.
+    const HANG_SPAN: Duration = Duration::from_secs(600);
+
+    /// From `SIGTERM` to exit: the 2 s drain, `EXIT_GRACE`, and load slack.
+    const EXIT_BOUND: Duration = Duration::from_secs(15);
+
+    /// How long after the server exits the `op` group may live.
+    const GROUP_GONE_WITHIN: Duration = Duration::from_secs(3);
+
+    /// The child side: serve on the harness directory's paths until a
+    /// signal, through the binary's exit path. A no-op in a normal run.
+    #[test]
+    fn harness_serves_until_sigterm() {
+        let Some(dir) = std::env::var_os(HARNESS_ENV).map(PathBuf::from) else {
+            return;
+        };
+        let settings = ServerSettings::new(
+            dir.join("run").join("s.sock"),
+            dir.join("index"),
+            dir.join("machine.yaml"),
+            Duration::from_secs(60),
+        );
+        let mut op = OnePasswordSettings::new(settings.template_root.clone());
+        op.program = "/bin/sh".into();
+        op.leading_args = vec![dir.join("op.sh").into_os_string()];
+        op.timeout = HANG_SPAN;
+        let backend: Arc<dyn SecretBackend> = Arc::new(OnePasswordBackend::new(op));
+        let others = default_backends();
+        let backends: BackendFactory = Arc::new(move |id: &BackendId| {
+            if id.as_str() == BackendId::ONEPASSWORD {
+                Ok(Arc::clone(&backend))
+            } else {
+                others(id)
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let shutdown = trusty_common::shutdown_signal();
+        let exit = run_to_exit(
+            runtime,
+            serve_with(settings, backends, StartEnv::default(), shutdown),
+        );
+        assert!(matches!(exit, Ok(ServeExit::Shutdown)), "{exit:?}");
+    }
+
+    /// The pid in `pidfile`, if it holds one above 1.
+    fn read_pid(pidfile: &Path) -> Option<libc::pid_t> {
+        let text = std::fs::read_to_string(pidfile).ok()?;
+        text.trim().parse().ok().filter(|pid| *pid > 1)
+    }
+
+    /// Whether any live, non-zombie process is in process group `pgid`.
+    ///
+    /// What: `ps -A -o pgid=,stat=`; a zombie (`Z`) is dead, waiting to be
+    /// reaped. `kill(-pgid, 0)` would count a zombie as alive.
+    fn group_alive(pgid: libc::pid_t) -> bool {
+        let out = Command::new("ps")
+            .args(["-A", "-o", "pgid=,stat="])
+            .output()
+            .expect("ps runs");
+        assert!(out.status.success(), "ps failed: {:?}", out.status);
+        String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+            let mut cols = line.split_whitespace();
+            cols.next().and_then(|g| g.parse::<libc::pid_t>().ok()) == Some(pgid)
+                && cols.next().is_some_and(|stat| !stat.starts_with('Z'))
+        })
+    }
+
+    /// `SIGKILL`s the group whose leader wrote `pidfile`, if it still
+    /// lives, so a red run leaks no `sleep`.
+    struct KillGroupOnDrop(PathBuf);
+
+    impl Drop for KillGroupOnDrop {
+        fn drop(&mut self) {
+            if let Some(pgid) = read_pid(&self.0)
+                && group_alive(pgid)
+            {
+                // SAFETY: `kill` takes two integers and touches no caller
+                // memory; `pgid > 1`, so it never signals every process.
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Why: #9572 — see the module docs.
+    /// What: the child serves; a `set` waits on the fake `op`; about 2 s
+    /// after `op` starts, the child gets `SIGTERM`. It exits 0 within
+    /// [`EXIT_BOUND`], its socket is gone, and within [`GROUP_GONE_WITHIN`]
+    /// no live member of the `op` group remains.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sigterm_during_a_cli_call_kills_its_process_group() {
+        let p = paths();
+        let dir = p.tmp.path();
+        let project = dir.join("repo");
+        repo(&project, "git@github.com:acme/web.git");
+        std::fs::write(&p.machine, "secrets:\n  default_backend: onepassword\n").unwrap();
+        let pidfile = dir.join("op.pid");
+        let partial = dir.join("op.pid.partial");
+        let script = format!(
+            "echo $$ > '{partial}'\nmv '{partial}' '{pidfile}'\nsleep {span}\n",
+            partial = partial.display(),
+            pidfile = pidfile.display(),
+            span = HANG_SPAN.as_secs(),
+        );
+        std::fs::write(dir.join("op.sh"), script).unwrap();
+        let _cleanup = KillGroupOnDrop(pidfile.clone());
+        let log = dir.join("harness.log");
+        let out = std::fs::File::create(&log).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([HARNESS_TEST, "--exact", "--nocapture", "--test-threads=1"])
+            .env(HARNESS_ENV, dir)
+            .env("TRUSTY_TERMINATION_GRACE_SECS", "7")
+            .stdin(Stdio::null())
+            .stdout(out.try_clone().unwrap())
+            .stderr(out)
+            .spawn()
+            .unwrap();
+        wait_serving(&p.socket).await;
+
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "secrets.set",
+            "params": {"project": project.display().to_string(), "vault": "trusty/acme/web",
+                       "key": "A", "value": "sk-fake-9572-0123456789abcdef"}});
+        let socket = p.socket.clone();
+        let _call = tokio::spawn(async move {
+            send_framed_request::<_, RpcResponse>(&socket, &request, HANG_SPAN).await
+        });
+        let started = Instant::now();
+        let leader = loop {
+            if let Some(pid) = read_pid(&pidfile) {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the fake `op` never started:\n{}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let pid = libc::pid_t::try_from(child.id()).expect("a pid");
+        // SAFETY: `kill` takes two integers and touches no caller memory;
+        // `pid` is our own child, which we have not reaped.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        let status = wait_exit(&mut child, EXIT_BOUND);
+        assert!(
+            status.success(),
+            "{status:?}:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+        assert!(!p.socket.exists(), "the socket outlived the server");
+        let exited = Instant::now();
+        while group_alive(leader) {
+            assert!(
+                exited.elapsed() < GROUP_GONE_WITHIN,
+                "`op` group {leader} outlived the server process"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
