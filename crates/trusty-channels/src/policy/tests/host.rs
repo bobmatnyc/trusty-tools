@@ -10,7 +10,10 @@ use crate::policy::{
 
 /// Merge `yaml` with the two good projects and assert the load is denied
 /// by a `HostRefused` finding.
-fn assert_host_denies(what: &str, result: Result<crate::policy::HostCeiling, HostError>) {
+pub(super) fn assert_host_denies(
+    what: &str,
+    result: Result<crate::policy::HostCeiling, HostError>,
+) {
     let report = merge(result, vec![input(PROJ_A, A_V2), input(PROJ_B, B_V1)]);
     assert_denied(&report);
     assert!(
@@ -59,7 +62,7 @@ fn host_unknown_key_denies_all() {
         ),
         (
             "connection level",
-            HOST_ALL.replace("credential_ref: slack", "credential_ref: slack, token: x"),
+            HOST_ALL.replace("bot_ref: slack", "bot_ref: slack, token: x"),
         ),
         (
             "rate_limit level",
@@ -162,18 +165,18 @@ fn host_faults_deny_all() {
         ),
         (
             "user token ref",
-            HOST_ALL.replace("credential_ref: slack", "credential_ref: slack-user"),
+            HOST_ALL.replace("bot_ref: slack", "bot_ref: slack-user"),
             |e| matches!(e, HostError::CredentialRef { channel: Channel::Slack, .. }),
         ),
         (
             "token pasted as ref",
-            HOST_ALL.replace("credential_ref: slack", "credential_ref: xoxb-123-pasted"),
+            HOST_ALL.replace("bot_ref: slack", "bot_ref: xoxb-123-pasted"),
             |e| matches!(e, HostError::CredentialRef { .. }),
         ),
         // #8454: a type fault must not quote the value it read.
         (
             "token as the connection",
-            HOST_ALL.replace("connection: { credential_ref: slack }", "connection: xoxb-1"),
+            HOST_ALL.replace("connection: { bot_ref: slack }", "connection: xoxb-1"),
             |e| matches!(e, HostError::Invalid { .. }),
         ),
         (
@@ -250,7 +253,7 @@ channels:
     connection: { project_id: p, subscription: s, key_file: ~/sa.json }
     kinds: [question]
     projects: [~/proj, /abs/proj/]
-  slack: { enabled: true, connection: { credential_ref: slack-app }, projects: [/abs] }
+  slack: { enabled: true, connection: { bot_ref: slack, app_ref: slack-app }, projects: [/abs] }
   telegram: { enabled: false, projects: [] }
 ";
     let ceiling = host(yaml).expect("valid ceiling");
@@ -273,7 +276,8 @@ channels:
         "trailing slash compares equal"
     );
     let slack = ceiling.channel(Channel::Slack).expect("slack");
-    assert_eq!(slack.credential_ref(), Some("slack-app"));
+    assert_eq!(slack.bot_ref(), Some("slack"));
+    assert_eq!(slack.app_ref(), Some("slack-app"));
     assert_eq!(slack.kinds().len(), 1, "slack defaults to question only");
     let telegram = ceiling.channel(Channel::Telegram).expect("telegram");
     assert!(!telegram.enabled());

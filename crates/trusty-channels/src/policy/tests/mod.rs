@@ -10,6 +10,7 @@ mod build;
 mod egress;
 mod gate;
 mod host;
+mod host_refs;
 mod inbound;
 mod load;
 mod merge;
@@ -47,7 +48,7 @@ channels:
     projects: [/work/a, /work/b]
   slack:
     enabled: true
-    connection: { credential_ref: slack }
+    connection: { bot_ref: slack }
     projects: [/work/a, /work/b]
   telegram:
     enabled: true

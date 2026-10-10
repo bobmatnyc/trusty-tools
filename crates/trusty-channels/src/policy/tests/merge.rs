@@ -68,8 +68,8 @@ fn disabled_channel_drops_routes_with_finding() {
 fn unlisted_project_has_no_routes() {
     // Q7: projects is per channel. A is listed for Telegram only.
     let yaml = HOST_ALL.replacen(
-        "    connection: { credential_ref: slack }\n    projects: [/work/a, /work/b]",
-        "    connection: { credential_ref: slack }\n    projects: [/work/b]",
+        "    connection: { bot_ref: slack }\n    projects: [/work/a, /work/b]",
+        "    connection: { bot_ref: slack }\n    projects: [/work/b]",
         1,
     );
     let report = merge(host(&yaml), vec![input(PROJ_A, A_V2)]);
