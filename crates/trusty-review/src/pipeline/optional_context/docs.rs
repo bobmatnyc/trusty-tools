@@ -279,11 +279,13 @@ pub(super) fn fork_not_found(sha: &str) -> String {
 /// `MAX_DOC_DISCOVERY_HITS` hits under the read timeout; each hit's path is
 /// made repository-relative (an absolute one through the index root from
 /// `list_indexes`). Any error or timeout, of the search or of that root
-/// lookup, or an index missing from the list, returns no hits and a detail.
+/// lookup, or an index missing from the list or listed without a root,
+/// returns no hits and a detail.
 /// Test: `search_down_is_unavailable_and_explicit_paths_still_read`,
 /// `search_hit_adds_candidate_and_text_comes_from_head`,
 /// `search_hit_absolute_path_is_made_repo_relative`,
-/// `index_root_lookup_failure_marks_discovery_unavailable`.
+/// `index_root_lookup_failure_marks_discovery_unavailable`,
+/// `index_without_root_path_marks_discovery_unavailable`.
 async fn discover(call: &DocsCall<'_>) -> (Vec<String>, Option<String>) {
     let limit = Duration::from_secs(DOC_READ_TIMEOUT_SECS);
     let stems: Vec<&str> = call
@@ -316,7 +318,12 @@ async fn discover(call: &DocsCall<'_>) -> (Vec<String>, Option<String>) {
             Err(_) => return fail("index root lookup timed out".to_string()),
             Ok(Err(e)) => return fail(format!("index root lookup failed: {e}")),
             Ok(Ok(indexes)) => match indexes.into_iter().find(|i| i.id == call.index) {
-                Some(index) => index.root_path,
+                // #9593: a listed index with no root_path drops every
+                // absolute hit just as a missing index does.
+                Some(index) => match index.root_path {
+                    Some(root) => Some(root),
+                    None => return fail(format!("index {} has no root_path", call.index)),
+                },
                 None => return fail(format!("index {} not in list_indexes", call.index)),
             },
         }

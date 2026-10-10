@@ -94,6 +94,8 @@ enum Lookup {
     Fails,
     /// Lists another index only.
     Omits,
+    /// Lists index `main` with no `root_path`.
+    Rootless,
 }
 
 /// A search client whose `search` returns `hits` (or fails), and whose index
@@ -117,17 +119,18 @@ impl SearchClient for DocSearch {
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
         let id = match self.lookup {
-            Lookup::Listed => "main",
+            Lookup::Listed | Lookup::Rootless => "main",
             Lookup::Hangs => std::future::pending().await,
             Lookup::Fails => {
                 return Err(SearchClientError::Transport("fixture: list down".into()));
             }
             Lookup::Omits => "other",
         };
+        let root_path = (self.lookup != Lookup::Rootless).then(|| "/srv/repo".to_string());
         Ok(vec![IndexInfo {
             id: id.to_string(),
             name: None,
-            root_path: Some("/srv/repo".to_string()),
+            root_path,
         }])
     }
 
@@ -639,6 +642,38 @@ async fn index_root_lookup_failure_marks_discovery_unavailable() {
         assert_completed(&seen);
     }
     assert_eq!(seen_arms, want_arms);
+}
+
+/// #9593: an index that is listed but has no `root_path` cannot make an
+/// absolute hit repository-relative, so discovery is `unavailable` with the
+/// cause rather than silently dropping every hit; the PR-body doc is still read.
+#[serial_test::serial]
+#[tokio::test]
+async fn index_without_root_path_marks_discovery_unavailable() {
+    let fetcher = FakeFetcher::adr();
+    let mut setup = Setup::new(spec_docs(), fetcher.clone());
+    setup.search.hits = vec![("/srv/repo/docs/specs/abs.md".into(), String::new())];
+    setup.search.lookup = Lookup::Rootless;
+    let seen = run(setup).await;
+    let row = seen.row("spec_docs");
+    let discovery = row.items.iter().find(|i| i.id == "discovery");
+    assert_eq!(
+        (
+            discovery.map(|i| i.state),
+            discovery.and_then(|i| i.detail.clone()),
+            row.state,
+            seen.item("spec_docs", ADR),
+            fetcher.paths(),
+        ),
+        (
+            Some(SourceState::Unavailable),
+            Some("index main has no root_path".to_string()),
+            SourceState::Unavailable,
+            SourceState::Used,
+            vec![ADR.to_string()],
+        )
+    );
+    assert_completed(&seen);
 }
 
 // ── Head SHA and fork arms (Fail-Open Check) ─────────────────────────────────
