@@ -47,15 +47,32 @@ async fn chat_availability_fails_closed_when_resolution_does_not_finish() {
 /// Why: `chat_provider` fills a daemon-lifetime `OnceCell`; an early health
 /// poll at boot, before Ollama is up, locked in `None` and `search.chat`
 /// answered 503 until restart.
-/// What: points the local probe at a closed port, calls `health_report`
-/// (`chat_available` is false), then brings a `/v1/models` server up on that
-/// port and asserts a later `chat_provider()` resolves it.
+/// What: serves `/v1/models` on an ephemeral port (ADR-0032) that answers 503
+/// until a flag flips, so the probe sees no provider; calls `health_report`
+/// (`chat_available` is false), flips the flag to 200, and asserts a later
+/// `chat_provider()` resolves it.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
+    let up = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = up.clone();
+    let app = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let up = flag.load(Ordering::SeqCst);
+            async move {
+                if up {
+                    (axum::http::StatusCode::OK, "{}")
+                } else {
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "")
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
         .with_openrouter_api_key("");
     state.local_model.enabled = true;
@@ -65,9 +82,7 @@ async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
     let early = health_report(state.clone()).await;
     assert_eq!(early["chat_available"], serde_json::json!(false), "{early}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    let app = axum::Router::new().route("/v1/models", axum::routing::get(|| async { "{}" }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    up.store(true, Ordering::SeqCst);
     let later = state.chat_provider().await;
     server.abort();
     assert!(
