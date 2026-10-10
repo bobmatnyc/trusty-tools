@@ -3,7 +3,9 @@
 //! Why: the host file is the root of trust for every channel (#8454 plan
 //! §3.1, Bob Daa). It names which channels are on, which projects may define
 //! routes for each, the default rate limit, the kind ceiling and the
-//! connection refs. A project file can narrow it, never widen it.
+//! connection refs. A project file can narrow it, never widen it. Slack and
+//! Telegram name their credentials by role (#8454 S2c): `bot_ref` is the
+//! token that posts, `app_ref` Slack's Socket Mode token, which cannot post.
 //! What: [`parse_host`] takes the file text, reads only the `channels` key,
 //! and deserializes it with unknown keys denied at every level. Any fault is
 //! a [`HostError`], which denies every route. No file I/O here (S2b).
@@ -18,13 +20,15 @@
 //!     connection: { project_id: p, subscription: s, key_file: ~/sa.json }
 //!     kinds: [question, review_notice]
 //!     projects: [/Users/me/proj]
-//!   slack: { enabled: true, connection: { credential_ref: slack }, projects: [/abs] }
+//!   slack: { enabled: true, connection: { bot_ref: slack, app_ref: slack-app }, projects: [/abs] }
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+use serde::de::IgnoredAny;
 use serde::Deserialize;
+use trusty_common::credentials::CredentialRef;
 
 use crate::gchat::routes::{expand_home, validate_connection, Connection, RawConnection};
 use crate::policy::redact::withhold;
@@ -32,6 +36,11 @@ use crate::policy::types::{Channel, MessageKind, RateLimit, RateLimitSpec};
 
 /// The only `channels.version` this parser reads.
 pub const HOST_SCHEMA_VERSION: i64 = 1;
+
+/// The connection key naming the credential that posts.
+pub(super) const BOT_REF: &str = "bot_ref";
+/// The connection key naming Slack's Socket Mode (app-level) credential.
+pub(super) const APP_REF: &str = "app_ref";
 
 /// Why the host ceiling was refused. Any of these denies every route.
 ///
@@ -136,16 +145,69 @@ pub enum HostError {
         /// What is wrong.
         reason: String,
     },
-    /// A `credential_ref` names something other than the channel's bot or
-    /// app credential. The value is not echoed: a pasted token must not
-    /// reach a log.
+    /// A connection still names `credential_ref`, which `bot_ref` and
+    /// `app_ref` replaced (#8454 S2c). Refused, never ignored.
     #[error(
-        "channels.{channel}.connection.credential_ref is not allowed; expected one of {allowed:?}"
+        "channels.{channel}.connection.credential_ref was replaced: name the token that posts in \
+         bot_ref and, for Slack Socket Mode, the app-level token in app_ref"
     )]
+    LegacyCredentialRef {
+        /// The channel.
+        channel: Channel,
+    },
+    /// A connection names no `bot_ref`, so nothing could post.
+    #[error("channels.{channel}.connection needs bot_ref, the credential that posts")]
+    MissingBotRef {
+        /// The channel.
+        channel: Channel,
+    },
+    /// A `bot_ref` or `app_ref` is refused. The value is not echoed: a
+    /// pasted token must not reach a log.
+    #[error("channels.{channel}.connection.{key} {fault}")]
     CredentialRef {
         /// The channel.
         channel: Channel,
-        /// The names allowed for this channel.
+        /// `bot_ref` or `app_ref`.
+        key: &'static str,
+        /// Why the reference was refused.
+        fault: RefFault,
+    },
+}
+
+/// Why a `bot_ref` or `app_ref` was refused (#8454 S2c).
+///
+/// Why: each fault tells the operator a different fix; none carries the
+/// value, which may be a pasted token.
+/// What: the allowed provider keys travel with each fault that has any.
+/// Test: `secret_scheme_and_pasted_token_refused_without_echo`,
+/// `slack_app_ref_in_bot_slot_refused`, `telegram_app_ref_refused`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RefFault {
+    /// The channel has no such credential role: Telegram has no app token.
+    #[error("is not supported: this channel has no app-level token")]
+    NoSuchRole,
+    /// A `secret://` reference; only provider keys are read for now.
+    #[error(
+        "is a secret:// reference, which is not accepted; name a provider key, one of {allowed:?}"
+    )]
+    SecretScheme {
+        /// The provider keys this slot accepts.
+        allowed: &'static [&'static str],
+    },
+    /// Not a provider-key name (lowercase kebab-case, at most 64 bytes):
+    /// most likely a credential value.
+    #[error(
+        "is not a provider key name; it may be a credential value. Expected one of {allowed:?}"
+    )]
+    NotAName {
+        /// The provider keys this slot accepts.
+        allowed: &'static [&'static str],
+    },
+    /// A provider key this slot does not accept.
+    #[error("is not allowed; expected one of {allowed:?}")]
+    NotAllowed {
+        /// The provider keys this slot accepts.
         allowed: &'static [&'static str],
     },
 }
@@ -181,7 +243,9 @@ pub struct HostChannel {
     kinds: BTreeSet<MessageKind>,
     projects: Vec<PathBuf>,
     gchat_connection: Option<Connection>,
-    credential_ref: Option<String>,
+    // #8454 S2c: the allowlisted key itself, so `CredentialRef` stays internal.
+    bot_ref: Option<&'static str>,
+    app_ref: Option<&'static str>,
 }
 
 impl HostChannel {
@@ -210,21 +274,89 @@ impl HostChannel {
         self.gchat_connection.as_ref()
     }
 
-    /// Slack and Telegram: the credential name, never its value.
-    pub fn credential_ref(&self) -> Option<&str> {
-        self.credential_ref.as_deref()
+    /// Slack and Telegram: the provider key of the token that posts, e.g.
+    /// `"slack"`. Test: `slack_bot_and_app_ref_parse`.
+    pub fn bot_ref(&self) -> Option<&str> {
+        self.bot_ref
+    }
+
+    /// Slack only: the provider key of the Socket Mode token, `"slack-app"`.
+    /// It cannot post. Test: `slack_bot_and_app_ref_parse`.
+    pub fn app_ref(&self) -> Option<&str> {
+        self.app_ref
     }
 }
 
-/// The `credential_ref` names each channel accepts: a bot or app-level
-/// token only, never a user token (#8454 ruling 2026-09-23). Names come from
-/// `trusty_common::credential_registry::REGISTRY`.
-fn allowed_refs(channel: Channel) -> &'static [&'static str] {
-    match channel {
-        Channel::Slack => &["slack", "slack-app"],
-        Channel::Telegram => &["telegram"],
-        Channel::Gchat => &[],
+/// The provider keys a connection key accepts on a channel; empty when the
+/// channel has no such role.
+///
+/// Why: the role is the type (#8454 S2c): the Socket Mode token cannot post,
+/// so it never fills `bot_ref`; a user token is never accepted (#8454 ruling
+/// 2026-09-23).
+/// What: names from `trusty_common::credential_registry::REGISTRY`.
+/// Test: `every_allowed_ref_is_a_registry_key`,
+/// `ref_names_round_trip_through_credential_ref_parse`.
+pub(super) fn allowed_refs(channel: Channel, key: &str) -> &'static [&'static str] {
+    match (channel, key) {
+        (Channel::Slack, BOT_REF) => &["slack"],
+        (Channel::Slack, APP_REF) => &["slack-app"],
+        (Channel::Telegram, BOT_REF) => &["telegram"],
+        _ => &[],
     }
+}
+
+/// Validate a Slack or Telegram connection into its two references.
+///
+/// Why: a credential slot that accepts the wrong thing is a fail-open path;
+/// every fault here denies the whole host (#8454 S2c Fail-Open Check).
+/// What: refuses a legacy `credential_ref` key and a missing `bot_ref`,
+/// then checks each reference with [`check_ref`].
+/// Test: `legacy_credential_ref_key_is_refused_naming_its_replacement`,
+/// `bot_ref_required_when_connection_present`, `slack_bot_and_app_ref_parse`.
+fn connection_refs(
+    channel: Channel,
+    conn: RawBotConnection,
+) -> Result<(&'static str, Option<&'static str>), HostError> {
+    if conn.credential_ref {
+        return Err(HostError::LegacyCredentialRef { channel });
+    }
+    let Some(bot) = conn.bot_ref else {
+        return Err(HostError::MissingBotRef { channel });
+    };
+    let bot = check_ref(channel, BOT_REF, &bot)?;
+    let app = conn
+        .app_ref
+        .map(|app| check_ref(channel, APP_REF, &app))
+        .transpose()?;
+    Ok((bot, app))
+}
+
+/// One reference: the role exists, no `secret://` scheme, the DOC-45
+/// provider-key grammar, then the role's allowlist. Returns the allowlisted
+/// key; the error never holds `text`.
+/// Test: `secret_scheme_and_pasted_token_refused_without_echo`,
+/// `slack_user_ref_refused_in_either_slot`, `telegram_app_ref_refused`.
+fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<&'static str, HostError> {
+    let fail = |fault| HostError::CredentialRef {
+        channel,
+        key,
+        fault,
+    };
+    let allowed = allowed_refs(channel, key);
+    if allowed.is_empty() {
+        return Err(fail(RefFault::NoSuchRole));
+    }
+    // #8454 S2c: a trusty-secrets reference is a later, additive change.
+    let scheme = text.trim_start().as_bytes().get(..9);
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case(b"secret://")) {
+        return Err(fail(RefFault::SecretScheme { allowed }));
+    }
+    CredentialRef::parse(text).map_err(|_| fail(RefFault::NotAName { allowed }))?;
+    allowed
+        .iter()
+        .copied()
+        .find(|k| *k == text)
+        .ok_or_else(|| fail(RefFault::NotAllowed { allowed }))
 }
 
 /// Parse and validate the host ceiling from `config.yaml` text.
@@ -235,7 +367,7 @@ fn allowed_refs(channel: Channel) -> &'static [&'static str] {
 /// What: YAML to a value, take only `channels`, deserialize it with unknown
 /// keys denied at every level, then check `version`, the rate limit, each
 /// channel's kinds, projects (absolute after `~/` expansion against `home`,
-/// no `..`), gchat connection and credential ref. Other top-level keys are
+/// no `..`), gchat connection and credential refs. Other top-level keys are
 /// ignored. Pure: `home` is a parameter.
 /// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`,
 /// `no_channels_section_denies_all`, `host_ceiling_parses_every_field`.
@@ -296,17 +428,12 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
         (Channel::Telegram, raw.telegram),
     ] {
         let Some(b) = raw_ch else { continue };
-        let credential_ref = match b.connection {
-            None => None,
+        // #8454 S2c: role-typed refs; any fault denies the whole host.
+        let (bot_ref, app_ref) = match b.connection {
+            None => (None, None),
             Some(conn) => {
-                let allowed = allowed_refs(c);
-                if !allowed.contains(&conn.credential_ref.as_str()) {
-                    return Err(HostError::CredentialRef {
-                        channel: c,
-                        allowed,
-                    });
-                }
-                Some(conn.credential_ref)
+                let (bot, app) = connection_refs(c, conn)?;
+                (Some(bot), app)
             }
         };
         let common = RawCommon {
@@ -318,7 +445,8 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
         channels.insert(
             c,
             HostChannel {
-                credential_ref,
+                bot_ref,
+                app_ref,
                 ..ch
             },
         );
@@ -370,7 +498,8 @@ fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChanne
         kinds,
         projects,
         gchat_connection: None,
-        credential_ref: None,
+        bot_ref: None,
+        app_ref: None,
     })
 }
 
@@ -452,5 +581,17 @@ struct RawBotChannel {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBotConnection {
-    credential_ref: String,
+    #[serde(default)]
+    bot_ref: Option<String>,
+    #[serde(default)]
+    app_ref: Option<String>,
+    // #8454 S2c: read only to refuse it by name, even when null; the value
+    // is skipped, never kept.
+    #[serde(default, deserialize_with = "key_present")]
+    credential_ref: bool,
+}
+
+/// True for any value, null included: the key is present.
+fn key_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    IgnoredAny::deserialize(d).map(|_| true)
 }
