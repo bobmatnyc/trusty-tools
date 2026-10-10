@@ -84,7 +84,7 @@ on:
   workflow_dispatch:
     inputs:
       crate:
-        description: "Crate being released (package name, e.g. trusty-common). Optional — only the contract diff uses it."
+        description: "Crate being released (package name, e.g. trusty-common). Gate 6 diffs this crate; empty means the crate is parsed from a <crate>-v<semver> tag, else Gate 6 SKIPs. Gate 5 checks every crate with a contracts.json either way; an unknown crate fails both."
         required: false
         type: string
       sha:
@@ -638,7 +638,12 @@ jobs:
   # and never a green tick implying contracts were verified. The moment #5729
   # lands, both steps go live with no edit to this file.
   #
-  # THE DIFF HAS NO BASELINE YET. No published trusty-common carries
+  # GATE 5 covers every crate that ships a contracts.json, whatever crate the
+  # run names. GATE 6 covers one crate: the `crate` input, else the crate in a
+  # <crate>-v<semver> tag (#9539). With neither, or for a crate with no
+  # contracts.json, Gate 6 is an annotated SKIP; an unknown crate fails it.
+  #
+  # THE DIFF HAS NO BASELINE YET. No published release of any crate carries
   # contracts.json, so the first run of gate 6 has nothing to compare against.
   # That is a recorded SKIP with a stated reason — the same treatment
   # preflight-publish.sh CHECK 5 gives a crate with no crates.io baseline — and
@@ -688,7 +693,16 @@ jobs:
           key: pre-publish-contracts
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # #9539: Gate 5 checks every crates/*/contracts.json on every run, so a
+      # dispatch with no `crate` input still checks trusty-common. A `crate`
+      # input naming no crate in this tree fails the step. Gate 6 diffs the
+      # crate scripts/resolve_contract_target.sh resolves (crate input, else
+      # the <crate>-v<semver> tag). Inputs pass as env, never interpolated.
       - name: "Gate 5 — contract drift (scripts/check_contracts.sh)"
+        env:
+          INPUT_CRATE: ${{ inputs.crate }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ ! -f scripts/check_contracts.sh ]; then
@@ -701,7 +715,29 @@ jobs:
             echo "contract_drift=SKIPPED-NO-SCRIPT" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bash scripts/check_contracts.sh --crate trusty-common
+          # #9539: the resolver only rejects a named crate that does not exist.
+          # Its SKIP annotations (10, 11) are dropped: this gate never skips.
+          rc=0
+          err="$(bash scripts/resolve_contract_target.sh --gate contract-drift 2>&1 >/dev/null)" || rc=$?
+          case "$rc" in 0 | 10 | 11) ;; *) printf '%s\n' "$err" >&2; exit 1 ;; esac
+          checked=0
+          failed=""
+          for artifact in crates/*/contracts.json; do
+            [ -f "$artifact" ] || continue
+            crate="${artifact#crates/}"
+            crate="${crate%/contracts.json}"
+            checked=$((checked + 1))
+            bash scripts/check_contracts.sh --crate "$crate" || failed="${failed} ${crate}"
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::contract-drift: no crates/*/contracts.json in this tree — nothing was checked."
+            exit 1
+          fi
+          if [ -n "$failed" ]; then
+            echo "::error::contract-drift: drift or no verdict for:${failed}"
+            exit 1
+          fi
+          echo "contract-drift: ${checked} contracts.json artifact(s) match their source."
         id: contract-drift
 
       # NEXT AUTHOR, READ THIS BEFORE WIRING A REAL crates.io FETCH. The entry
@@ -721,6 +757,10 @@ jobs:
       # (if intentionally absent) inputs, not a probe of a flag it doesn't
       # support, and it fails closed the same way if the tool ever misbehaves.
       - name: "Gate 6 — cross-version contract diff"
+        env:
+          INPUT_CRATE: ${{ inputs.crate }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [ ! -f scripts/diff_contracts.py ]; then
@@ -728,17 +768,20 @@ jobs:
             echo "  RECORDED SKIP — no behavioural-contract comparison was performed."
             exit 0
           fi
-          pkg="${{ inputs.crate || 'trusty-common' }}"
-          ver="$(grep -m1 -E '^version[[:space:]]*=' "crates/trusty-common/Cargo.toml" \
-                 | sed -E 's/.*"([^"]+)".*/\1/')"
+          # #9539: the same resolution as Gate 5; 10 and 11 are annotated SKIPs.
+          rc=0
+          target="$(bash scripts/resolve_contract_target.sh --gate contract-diff)" || rc=$?
+          case "$rc" in 0) ;; 10 | 11) exit 0 ;; *) exit 1 ;; esac
+          pkg="$(sed -n 's/^crate=//p' <<< "$target")"
+          ver="$(sed -n 's/^version=//p' <<< "$target")"
           echo "Looking for a published contracts.json baseline for ${pkg} (current ${ver})"
 
-          # No published trusty-common carries contracts.json yet, so there is
-          # no baseline artifact to fetch. CURRENT is the artifact Gate 5 just
+          # No published release of the resolved crate carries contracts.json
+          # yet, so there is no baseline artifact to fetch. CURRENT is the artifact Gate 5 just
           # verified matches this tree's source; BASELINE is a path that is
           # deliberately never created, so the tool itself — not this step —
           # is the one that decides whether that counts as "no baseline".
-          CURRENT="crates/trusty-common/contracts.json"
+          CURRENT="$(sed -n 's/^contracts=//p' <<< "$target")"
           SCRATCH="$(mktemp -d "${RUNNER_TEMP:-/tmp}/gate6.XXXXXX")"
           trap 'rm -rf "$SCRATCH"' EXIT
           BASELINE="${SCRATCH}/no-published-baseline.json"

@@ -273,6 +273,12 @@ jobs:
           bash scripts/rustdoc-links-scope-selftest.sh
           bash scripts/check_rustdoc_links_selftest.sh
 
+      # #9539: pre-publish.yml Gates 5-6 resolve their crate through
+      # scripts/resolve_contract_target.sh. Its selftest also pins that wiring,
+      # and needs no toolchain.
+      - name: Contract-gate target selftest (#9539)
+        run: bash scripts/contract_target_selftest.sh
+
       # #9121: the live-check sandbox launcher must forward no inherited
       # variable. Its selftest drives a stub `tm`, so it needs no build.
       - name: Sandbox-daemon launcher selftest (#9121)
