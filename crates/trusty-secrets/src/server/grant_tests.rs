@@ -131,6 +131,37 @@ fn one_shot_grant_refuses_second_use() {
 }
 
 #[test]
+fn one_shot_grant_racing_callers_get_exactly_one_allow() {
+    const CALLERS: usize = 8;
+    let f = fixture();
+    let token = f.registry.mint(request(60).one_shot()).expect("mint").token;
+    // Each walk from the grandchild sleeps in `parent`, so a registry that
+    // dropped its lock during the walk would let every caller through.
+    f.procs.set_parent_delay(Duration::from_millis(50));
+    let start = std::sync::Barrier::new(CALLERS);
+    let results: Vec<Result<(), GrantError>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|_| {
+                s.spawn(|| {
+                    start.wait();
+                    f.registry.authorize(&token, &[key("API_TOKEN")], 30)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("caller thread"))
+            .collect()
+    });
+    let allowed = results.iter().filter(|r| r.is_ok()).count();
+    let refused = results
+        .iter()
+        .filter(|r| **r == Err(GrantError::Refused))
+        .count();
+    assert_eq!((allowed, refused), (1, CALLERS - 1), "{results:?}");
+}
+
+#[test]
 fn key_outside_grant_is_refused() {
     let f = fixture();
     let token = mint(&f, 60);

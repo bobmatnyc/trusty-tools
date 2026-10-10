@@ -20,6 +20,7 @@ struct ProcState {
     unreadable: bool,
     start_unreadable: HashSet<u32>,
     panic_on: Option<u32>,
+    parent_delay: Option<Duration>,
 }
 
 /// A process table the test edits.
@@ -68,10 +69,19 @@ impl FakeProcs {
     pub(crate) fn panic_on_start(&self, pid: u32) {
         self.with(|s| s.panic_on = Some(pid));
     }
+
+    /// Sleep `delay` in every `parent` read, outside this fake's own lock, so
+    /// racing callers overlap inside the ancestry walk.
+    pub(crate) fn set_parent_delay(&self, delay: Duration) {
+        self.with(|s| s.parent_delay = Some(delay));
+    }
 }
 
 impl ProcessTable for FakeProcs {
     fn parent(&self, pid: u32) -> Result<u32, ProcessError> {
+        if let Some(delay) = self.with(|s| s.parent_delay) {
+            std::thread::sleep(delay);
+        }
         self.with(|s| {
             if s.unreadable {
                 return Err(ProcessError::Unreadable { pid });
