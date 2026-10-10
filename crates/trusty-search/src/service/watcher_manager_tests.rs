@@ -15,6 +15,44 @@ fn handle_for(id: &str, root: &std::path::Path) -> Arc<IndexHandle> {
     ))
 }
 
+/// Upper bound on [`spawn_until`]: room for several overrun
+/// `WATCHER_START_BOUND` starts on a loaded host; a healthy host is done on
+/// the first spawn.
+const SPAWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run `spawn`, then run it again until `done` holds or [`SPAWN_BUDGET`]
+/// passes. Returns whether `done` held.
+///
+/// Why: #9466 — a real OS-watch start that overruns `WATCHER_START_BOUND`
+/// under host load is recorded `Failed`, and a test that asserted right after
+/// one spawn went red. Production retries a failed root on the next query;
+/// this is that retry, so the caller's assertions still run unchanged.
+/// What: polls `done` every 50 ms; while a timed-out start is still in
+/// flight a re-spawn records nothing, so the loop simply waits it out.
+/// Test: `spawn_is_idempotent`, `stop_all_clears_all`,
+/// `a_stuck_root_start_does_not_block_the_other_roots`.
+pub(super) async fn spawn_until(spawn: impl AsyncFn(), done: impl AsyncFn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + SPAWN_BUDGET;
+    spawn().await;
+    while !done().await {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        spawn().await;
+    }
+    true
+}
+
+/// [`spawn_until`] for `spawn_for_index`, until every root of `handle` watches.
+pub(super) async fn spawn_until_watching(mgr: &WatcherManager, handle: &Arc<IndexHandle>) {
+    spawn_until(
+        async || mgr.spawn_for_index(handle).await,
+        async || !mgr.needs_root_resync(handle).await,
+    )
+    .await;
+}
+
 /// Why: the opt-out gate must match ONLY the exact value "1" so a stray
 /// `TRUSTY_DISABLE_WATCHER=true` (or `0`, or any other value) doesn't
 /// silently disable incremental indexing. Issue #1641: the previous version
@@ -49,7 +87,9 @@ async fn spawn_is_idempotent() {
     let mgr = WatcherManager::new();
     let handle = handle_for("idx", dir.path());
 
-    mgr.spawn_for_index(&handle).await;
+    // #9466: the first spawn may need the retry; the second is the repeat
+    // registration under test.
+    spawn_until_watching(&mgr, &handle).await;
     mgr.spawn_for_index(&handle).await;
 
     assert_eq!(
@@ -71,7 +111,7 @@ async fn is_watching_reflects_spawn_and_stop() {
     let id = IndexId::new("idx");
 
     assert!(!mgr.is_watching(&id).await, "not watching before spawn");
-    mgr.spawn_for_index(&handle).await;
+    spawn_until_watching(&mgr, &handle).await;
     assert!(mgr.is_watching(&id).await, "watching after spawn");
     assert!(mgr.stop_for_index(&id).await);
     assert!(!mgr.is_watching(&id).await, "not watching after stop");
@@ -86,7 +126,7 @@ async fn stop_for_index_removes_entry() {
     let mgr = WatcherManager::new();
     let handle = handle_for("idx", dir.path());
 
-    mgr.spawn_for_index(&handle).await;
+    spawn_until_watching(&mgr, &handle).await;
     assert_eq!(mgr.watched_count().await, 1);
 
     let stopped = mgr.stop_for_index(&handle.id).await;
@@ -137,7 +177,7 @@ async fn stop_for_index_releases_the_indexer_before_it_returns() {
     drop(indexer);
 
     let mgr = WatcherManager::new();
-    mgr.spawn_for_index(&handle).await;
+    spawn_until_watching(&mgr, &handle).await;
     assert!(mgr.is_watching(&id).await, "watcher must be running");
 
     // Drive the loop until it has provably picked work up, so the abort
@@ -189,8 +229,8 @@ async fn stop_all_clears_all() {
     let dir_b = tempfile::tempdir().expect("tempdir b");
     let mgr = WatcherManager::new();
 
-    mgr.spawn_for_index(&handle_for("a", dir_a.path())).await;
-    mgr.spawn_for_index(&handle_for("b", dir_b.path())).await;
+    spawn_until_watching(&mgr, &handle_for("a", dir_a.path())).await;
+    spawn_until_watching(&mgr, &handle_for("b", dir_b.path())).await;
     assert_eq!(mgr.watched_count().await, 2);
 
     let stopped = mgr.stop_all().await;
@@ -210,7 +250,7 @@ async fn save_triggers_incremental_index_via_manager() {
     let dir = tempfile::tempdir().expect("tempdir");
     let handle = handle_for("live", dir.path());
     let mgr = WatcherManager::new();
-    mgr.spawn_for_index(&handle).await;
+    spawn_until_watching(&mgr, &handle).await;
 
     let file = dir.path().join("lib.rs");
     let indexed = {
@@ -298,8 +338,15 @@ async fn local_root_is_unaffected_by_network_check() {
     let handle = handle_for("local-idx", dir.path());
     let id = IndexId::new("local-idx");
 
-    mgr.spawn_for_index_with_mount_kind(&handle, MountKind::Local)
-        .await;
+    // #9466: retry an overrun start, as `spawn_until_watching` does.
+    spawn_until(
+        async || {
+            mgr.spawn_for_index_with_mount_kind(&handle, MountKind::Local)
+                .await
+        },
+        async || !mgr.needs_root_resync(&handle).await,
+    )
+    .await;
 
     assert!(
         mgr.is_watching(&id).await,

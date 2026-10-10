@@ -39,7 +39,7 @@ async fn every_index_root_is_watched() {
     let (_e, extra) = canonical_tempdir();
     let handle = two_root_handle("every-root-7434", &primary, &extra);
     let mgr = WatcherManager::new();
-    mgr.spawn_for_index(&handle).await;
+    super::tests::spawn_until_watching(&mgr, &handle).await;
 
     let states = mgr.root_watch_states(&handle.id).await;
     let labels: Vec<(&str, bool)> = states.iter().map(|r| (r.state, r.primary)).collect();
@@ -93,10 +93,21 @@ async fn a_stuck_root_start_does_not_block_the_other_roots() {
     let bound =
         crate::service::watcher_start::WATCHER_START_BOUND + std::time::Duration::from_secs(5);
     let spawned = tokio::time::timeout(bound, mgr.spawn_for_index(&handle)).await;
+    assert!(spawned.is_ok(), "spawn hung for {:?}", started.elapsed());
+    // #9466: a loaded host can overrun the bound on the primary's real start
+    // too; retry it while the extra root's start is still held.
+    let primary_watching = async || {
+        let states = mgr.root_watch_states(&handle.id).await;
+        states.iter().any(|r| r.primary && r.state == "watching")
+    };
+    super::tests::spawn_until(
+        async || mgr.spawn_for_index(&handle).await,
+        primary_watching,
+    )
+    .await;
     let states = mgr.root_watch_states(&handle.id).await;
     drop(release);
 
-    assert!(spawned.is_ok(), "spawn hung for {:?}", started.elapsed());
     let primary_state = states.iter().find(|r| r.primary).map(|r| r.state);
     let extra_state = states.iter().find(|r| !r.primary).map(|r| r.state);
     assert_eq!(primary_state, Some("watching"), "{states:?}");
@@ -107,14 +118,9 @@ async fn a_stuck_root_start_does_not_block_the_other_roots() {
         "a failed root is retried"
     );
 
-    // The detached start thread reopens the root once it ends.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while crate::service::watcher_start::starts_in_flight_for(&extra) > 0
-        && std::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    mgr.spawn_for_index(&handle).await;
+    // The detached start thread reopens the root once it ends; until then a
+    // resync records nothing (#9466: retried, not a fixed 10 s wait).
+    super::tests::spawn_until_watching(&mgr, &handle).await;
     let states = mgr.root_watch_states(&handle.id).await;
     assert!(states.iter().all(|r| r.state == "watching"), "{states:?}");
     mgr.stop_all().await;
