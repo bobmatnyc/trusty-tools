@@ -488,6 +488,146 @@ fn a_denied_load_without_a_host_finding_is_fail() {
     assert_eq!(host.status, CheckStatus::Fail, "{host:?}");
 }
 
+/// Names the fixture home of `doctor_leaves_no_git_running_at_its_budget`'s
+/// child run; set only on that child.
+const CHILD_HOME: &str = "TM_8454_DOCTOR_CHILD_HOME";
+/// The child run's doctor budget: far under the gate's 10 s step timeout.
+const CHILD_LIMIT: Duration = Duration::from_secs(4);
+
+/// The first `git` on this process's PATH.
+fn real_git() -> PathBuf {
+    let path = std::env::var_os("PATH").expect("PATH");
+    std::env::split_paths(&path)
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+        .expect("git on PATH")
+}
+
+/// A `git` wrapper in `bin` that, in a directory holding `.block-git`, starts
+/// a grandchild sleep, records both pids in `pids`, then sleeps; elsewhere it
+/// runs the real git.
+fn blocking_git(bin: &Path, pids: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = format!(
+        "#!/bin/sh\nif [ -e .block-git ]; then\n  /bin/sleep 300 &\n  \
+         echo \"$$ $!\" >> '{}'\n  exec /bin/sleep 300\nfi\nexec '{}' \"$@\"\n",
+        pids.display(),
+        real_git().display()
+    );
+    let wrapper = bin.join("git");
+    std::fs::write(&wrapper, script).expect("write git wrapper");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // A sibling test's fork can briefly hold the script's write fd (ETXTBSY).
+    let runs = (0..50).any(|_| {
+        let ok = Command::new(&wrapper)
+            .arg("--version")
+            .current_dir(bin)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !ok {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        ok
+    });
+    assert!(runs, "the git wrapper never ran");
+}
+
+/// The pids in `pids` still alive after up to `grace`; each is then killed.
+fn survivors(pids: &Path, grace: Duration) -> Vec<libc::pid_t> {
+    let text = std::fs::read_to_string(pids).unwrap_or_default();
+    let mut alive: Vec<libc::pid_t> = text
+        .split_whitespace()
+        .map(|p| p.parse().expect("pid"))
+        .collect();
+    let until = Instant::now() + grace;
+    loop {
+        // SAFETY: kill(2) with signal 0 only checks the pid.
+        alive.retain(|&pid| unsafe { libc::kill(pid, 0) } == 0);
+        if alive.is_empty() || Instant::now() >= until {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for &pid in &alive {
+        // SAFETY: as above; frees a sleep this test started.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    alive
+}
+
+/// Why: #8454: doctor's load thread outlived its wait, so a blocked git (its
+/// own process group) was orphaned, still running, when tm exited.
+/// What: re-runs itself as a child process, as `tm doctor` runs: a `git`
+/// wrapper on the child's PATH blocks in the one project the daemon and
+/// gchat views both load, and the child returns from [`rows_with`] and
+/// exits. No wrapper process may be alive afterwards. PATH is set on the
+/// child only; this target never writes its own environment.
+#[tokio::test]
+async fn doctor_leaves_no_git_running_at_its_budget() {
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let home = PathBuf::from(home);
+        let base = LoadRequest {
+            host_path: trusty_common::crate_config::crate_config_path_at(&home, "trusty-mpm"),
+            home: Some(home),
+            project: None,
+            channels: Vec::new(),
+        };
+        let rows = rows_with(base, real(), CHILD_LIMIT).await;
+        println!("child rows: {rows:?}");
+        return;
+    }
+    let home = Home::new();
+    let dir = repo(&home, "proj");
+    commit_routes(&dir, &slack_route("bob-dm", "U0ABCDEF1"));
+    std::fs::write(dir.join(".block-git"), b"").expect("marker");
+    home.write_host(&format!(
+        "{}  gchat:\n    enabled: true\n    projects: [\"{}\"]\n",
+        slack_host(&[&dir]),
+        dir.display()
+    ));
+    let bin = home.home.join("bin");
+    std::fs::create_dir(&bin).expect("mkdir bin");
+    let pids = bin.join("pids");
+    blocking_git(&bin, &pids);
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&rest)))
+            .expect("join PATH");
+    // libtest names tests relative to the crate root, without the crate name.
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let name = format!("{module}::doctor_leaves_no_git_running_at_its_budget");
+    let started = Instant::now();
+    let out = Command::new(std::env::current_exe().expect("test binary path"))
+        .args([
+            name.as_str(),
+            "--exact",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(CHILD_HOME, &home.home)
+        .env("PATH", &path)
+        .output()
+        .expect("re-run this test as a child process");
+    let took = started.elapsed();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("1 passed") && stdout.contains("child rows"),
+        "the child must have run doctor; stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(&pids).is_ok_and(|t| !t.trim().is_empty()),
+        "the wrapper never blocked; stdout: {stdout}"
+    );
+    let left = survivors(&pids, Duration::from_millis(500));
+    assert!(
+        left.is_empty(),
+        "git wrapper processes {left:?} outlived a doctor run of {took:?} with a {CHILD_LIMIT:?} budget"
+    );
+}
+
 #[test]
 fn host_loaded_but_unreadable_details_is_unknown() {
     let home = Home::new();
