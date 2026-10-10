@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 /// How long a paste tool may run before it is killed (#7524 P2-L6).
@@ -85,10 +85,12 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
 /// Why: #7524 P2-L6 — `Command::output` waits forever and keeps every byte,
 /// and a killed tool's backgrounded grandchild outlived it.
 /// What: stdin and stderr are null; stdout is read on its own thread, at
-/// most one byte past the cap. The child leads its own process group. On a
-/// timeout or an oversize the group is killed with `SIGKILL` and the child
-/// reaped before the error returns. A non-zero exit is `Failed`; an exit
-/// with no output is `Ok(vec![])`.
+/// most one byte past the cap. The child leads its own process group. The
+/// run waits for stdout to close, then reaps the child, both by one
+/// deadline. On a timeout or an oversize the group is killed with `SIGKILL`
+/// and then the child is reaped, in that order: the group is never
+/// signalled after the reap, when its id could belong to a new group. A
+/// non-zero exit is `Failed`; an exit with no output is `Ok(vec![])`.
 /// Test: `a_hung_paste_tool_times_out_and_its_whole_process_group_is_killed`,
 /// `output_over_the_cap_is_an_error_not_a_truncated_value`,
 /// `a_fast_tool_answers_and_an_empty_one_is_ok_empty_not_a_timeout`.
@@ -128,37 +130,28 @@ pub(crate) fn run_bounded(
         None => output = Some(Vec::new()),
     }
 
+    // #7524: P2-L6 stdout first, reap second. Until the reap the leader, even
+    // as a zombie, holds its pid, so the group id cannot be reused and the
+    // guard's kill can only reach this tool's own group.
+    let bytes = match output {
+        Some(bytes) => bytes,
+        None => match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(read) => settle(read, &name)?,
+            // The guard's drop kills the group, then reaps the child.
+            Err(RecvTimeoutError::Timeout) => return Err(timed_out()),
+            Err(RecvTimeoutError::Disconnected) => return Err(run_error(reader_lost())),
+        },
+    };
     let status = loop {
-        if output.is_none() {
-            match rx.try_recv() {
-                Ok(read) => output = Some(settle(read, &name)?),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => return Err(run_error(reader_lost())),
-            }
-        }
         if let Some(status) = guard.try_wait().map_err(run_error)? {
             break status;
         }
         let now = Instant::now();
         if now >= deadline {
-            // The guard's drop kills the group and reaps the child.
+            // Not reaped yet: the guard's drop kills the group, then reaps.
             return Err(timed_out());
         }
         std::thread::sleep(POLL.min(deadline - now));
-    };
-    let bytes = match output {
-        Some(bytes) => bytes,
-        // The child is reaped; stdout closes once the last holder exits.
-        None => match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(read) => settle(read, &name)?,
-            Err(RecvTimeoutError::Timeout) => {
-                // A straggler still holds stdout. The group id cannot be
-                // reused while the group has a member.
-                kill_group(guard.child.id());
-                return Err(timed_out());
-            }
-            Err(RecvTimeoutError::Disconnected) => return Err(run_error(reader_lost())),
-        },
     };
     if !status.success() {
         return Err(ClipboardError::Failed {
