@@ -202,7 +202,7 @@ fn role(exe: &Path, test: &str, role: &str) -> Command {
 fn error_of(response: &RpcResponse) -> Option<(i64, String)> {
     response.error.as_ref().map(|e| {
         let kind = e.data.as_ref().and_then(|d| d["kind"].as_str());
-        (i64::from(e.code), kind.unwrap_or_default().to_owned())
+        (e.code, kind.unwrap_or_default().to_owned())
     })
 }
 
@@ -340,7 +340,10 @@ fn live_peer_pid_is_the_kernels() {
         // Start the registrar and exit at once, so it re-parents away from
         // this test (and from any Claude Code above it).
         Ok("detach") => {
-            role(&me(), PEER_TEST, "registrar")
+            // Never waited on: this process exits at once so the registrar
+            // re-parents; that is the point of the role.
+            #[allow(clippy::zombie_processes)]
+            let _registrar = role(&me(), PEER_TEST, "registrar")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
