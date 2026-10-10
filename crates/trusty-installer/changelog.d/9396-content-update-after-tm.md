@@ -1,2 +1,0 @@
-Fixed
-- `tctl install` and `tctl upgrade` run the just-placed `tm content update` after every member has finished, whenever trusty-mpm was installed or upgraded, so a new tm has its instructional content. `--dry-run` lists the command without running it. When the step fails, the binaries stay installed and every other step still completes. The step then prints the failure with the remedy `tm content update`, and the command exits non-zero (#9396).

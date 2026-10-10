@@ -1,2 +1,0 @@
-Changed
-- `tga` and `trusty-audit` are external tools in the installer's catalogue: they build and release from `bobmatnyc/trusty-git-analytics`, and `tctl` fetches their prebuilts from that repo's GitHub releases, falling back to `cargo install` from crates.io. Nothing in `tctl` depends on either crate being in this workspace. `tctl install tga` is unchanged; `tctl install` still does not take `trusty-audit` or `taudit` by name

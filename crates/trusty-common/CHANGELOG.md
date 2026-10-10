@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.58.0] — 2026-10-10
+
+### Added
+
+- A palace whose format marker (the `palace_format` row in `kg.redb`) or `palace.json` `format_version` mirror names a format newer than this binary reads is now refused under every open intent, and `ChatSessionStore::open` refuses its chat store, before any file in the palace changes. A marker and mirror that disagree, or a marker that cannot be decoded, also refuse the palace. The new `PalaceStoreError` variants are `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch` and `FormatMarkerUnreadable` (#9274, ADR-0067).
+- New `memory_core::store::format_backup` module: `ensure_format_backup` copies the primary palace files into `<data_root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`, checks free space first, verifies every copy and its source by SHA-256, writes a `MANIFEST` last and keeps the two newest backups. Failures are `BackupFailed`, `BackupVerifyMismatch` and `InsufficientSpace`. No migration calls it yet (#9274).
+- No marker is stamped in this release, so every existing palace reads as format 0 and opens as before. Three pre-existing fail-open paths remain until the format 0 to 1 migration lands: the triple-key migration, its undecodable-row skip, and the redb 2 rename-aside recovery (#9274).
+
+### Changed
+
+- `PalaceStoreError` is now `#[non_exhaustive]`; a `match` on it outside trusty-common needs a wildcard arm. `PalaceStore::save_palace` keeps an existing `format_version` mirror and refuses to rewrite a `palace.json` that names a newer format (#9274).
+
 ## [0.57.0] — 2026-10-09
 
 ### Breaking

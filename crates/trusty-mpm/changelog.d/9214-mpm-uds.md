@@ -1,4 +1,0 @@
-Changed
-- The `tm session tui` health screen and startup banner reach trusty-search over its Unix socket (`TRUSTY_SEARCH_SOCKET`, else the daemon's derived socket) instead of HTTP on port 7878; a socket that cannot be resolved shows the search panel offline rather than failing the TUI ([#9214](https://github.com/bobmatnyc/trusty-tools/issues/9214))
-- `trusty_mpm::tui::health::DEFAULT_SEARCH_URL` is removed, replaced by `trusty_mpm::tui::health::resolve_search_socket_or_unreachable()`; `HealthScreen::search_url` is renamed `search_socket`, and `probe_search` / `print_startup_banner` take a socket path ([#9214](https://github.com/bobmatnyc/trusty-tools/issues/9214))
-- The health screen's Collections pane no longer requests `/indexes/{id}/communities`, which the daemon never served; community counts show as zero ([#9214](https://github.com/bobmatnyc/trusty-tools/issues/9214))
