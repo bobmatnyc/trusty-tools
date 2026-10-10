@@ -17,9 +17,12 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::RememberOptions;
-use trusty_common::memory_core::store::PalaceStoreError;
+use trusty_common::memory_core::store::{PalaceStore, PalaceStoreError};
 use trusty_common::memory_core::PalaceRegistry;
+use trusty_common::palace_alias::canonical_palace_id;
 use uuid::Uuid;
+
+use crate::tools::helpers::begin_budgeted_write;
 
 use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
@@ -460,42 +463,26 @@ impl MemoryService {
     /// name on disk) is immutable — only the human-readable `name` field in
     /// `palace.json` changes — so cached `PalaceHandle`s stay valid and no
     /// registry invalidation is required.
-    /// What: 1) loads the palace via `PalaceStore::load_palace` (404 when the
-    /// directory or `palace.json` is genuinely missing; a probe that cannot
-    /// determine whether it is there is a 500, not a 404 — #5549), 2) trims the
-    /// new name and
-    /// returns `BadRequest` when empty, 3) mutates `palace.name` and writes
-    /// the metadata back through the atomic `PalaceStore::save_palace`
-    /// (tmp file + rename), 4) emits an aggregate `StatusChanged` so
-    /// dashboards re-render the relabelled palace, 5) returns the updated
-    /// palace as JSON (enriched with the live handle stats, so callers see
-    /// drawer/vector/KG counts in the same shape as `GET /palaces/{id}`).
+    /// What: 1) trims the new name and returns an error when empty, 2) under
+    /// the palace write mutex, loads, relabels and saves the palace at its
+    /// canonical id ([`Self::relabel_palace_locked`], #9544), 3) emits an
+    /// aggregate `StatusChanged` so dashboards re-render the relabelled
+    /// palace, 4) returns the updated palace as JSON (enriched with the live
+    /// handle stats, so callers see drawer/vector/KG counts in the same shape
+    /// as `GET /palaces/{id}`).
     /// Test: `update_palace_name_renames_palace`,
     /// `update_palace_name_rejects_empty_name`,
-    /// `update_palace_name_returns_not_found_for_missing_id` in `web::tests`.
+    /// `update_palace_name_returns_not_found_for_missing_id` in `web::tests`,
+    /// `palace_update_through_old_id_after_rename_updates_new_palace`.
     pub async fn update_palace_name(&self, palace_id: &str, name: &str) -> Result<Value> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err(anyhow!("name must be non-empty after trimming"));
         }
-        let palace_dir = self.state.data_root.join(palace_id);
-        let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
-            .map_err(|e| {
-            // #5549: only a genuine absence may be reported as "not found".
-            if matches!(&e, PalaceStoreError::NotFound(_)) {
-                anyhow!("palace not found: {palace_id} ({e})")
-            } else {
-                anyhow!("cannot load palace {palace_id}: {e}")
-            }
-        })?;
-        palace.name = trimmed.to_string();
-        trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
-            .with_context(|| format!("save palace metadata for {palace_id}"))?;
-        // Issue #228: refresh the in-memory name cache so subsequent writes
-        // surface the new label without a disk walk.
-        self.state
-            .palace_names
-            .insert(palace_id.to_string(), trimmed.to_string());
+        let palace = self
+            .relabel_palace_locked(palace_id, trimmed)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
         let handle = self
             .state
             .registry
@@ -520,11 +507,13 @@ impl MemoryService {
     /// for palace metadata that is genuinely absent. Metadata whose presence
     /// cannot be determined — a denied or transient stat — is
     /// `ServiceError::Internal`: a 404 would tell the client the palace does
-    /// not exist when nobody established that (#5549, ADR-0045).
+    /// not exist when nobody established that (#5549, ADR-0045). A palace
+    /// write mutex still busy at its bound is `ServiceError::Conflict` (#9544).
     /// Test: `update_palace_name_renames_palace`,
     /// `update_palace_name_rejects_empty_name`,
     /// `update_palace_name_returns_not_found_for_missing_id`,
-    /// `update_palace_name_reports_an_unstattable_palace_as_internal`.
+    /// `update_palace_name_reports_an_unstattable_palace_as_internal`,
+    /// `palace_update_waits_for_an_in_flight_rename_and_does_not_recreate_old_dir`.
     pub async fn update_palace_name_typed(
         &self,
         palace_id: &str,
@@ -536,26 +525,7 @@ impl MemoryService {
                 "name must be non-empty after trimming",
             ));
         }
-        let palace_dir = self.state.data_root.join(palace_id);
-        let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
-            .map_err(|e| {
-            // #5549: `not_found` on every variant told the client the palace
-            // does not exist for a stat we were merely denied.
-            if matches!(&e, PalaceStoreError::NotFound(_)) {
-                ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
-            } else {
-                ServiceError::internal(format!("cannot load palace {palace_id}: {e}"))
-            }
-        })?;
-        palace.name = trimmed.to_string();
-        trusty_common::memory_core::store::PalaceStore::save_palace(&palace).map_err(|e| {
-            ServiceError::internal(format!("save palace metadata for {palace_id}: {e}"))
-        })?;
-        // Issue #228: refresh the in-memory name cache so subsequent writes
-        // surface the new label without a disk walk.
-        self.state
-            .palace_names
-            .insert(palace_id.to_string(), trimmed.to_string());
+        let palace = self.relabel_palace_locked(palace_id, trimmed).await?;
         let handle = self
             .state
             .registry
@@ -566,6 +536,44 @@ impl MemoryService {
         self.state.emit(self.aggregate_status_event());
         serde_json::to_value(info)
             .map_err(|e| ServiceError::internal(format!("serialize palace info: {e}")))
+    }
+
+    /// Load, relabel and save one palace's `palace.json` under its write mutex.
+    ///
+    /// Why (#9544, A2): an unlocked load then save raced `palace_rename`. A
+    /// move landing between them let `save_palace` recreate `<root>/<old>`,
+    /// which shadows the `old -> new` alias.
+    /// What: takes the palace write mutex through `begin_budgeted_write`, so a
+    /// waiter re-keys to the renamed palace's mutex. Then loads
+    /// `<root>/<canonical id>`, sets `name`, saves, and refreshes the name
+    /// cache (#228) under the canonical id. A lock wait past its bound is
+    /// `Conflict`, never an unlocked save. A missing palace is `NotFound`; any
+    /// other load failure is `Internal` (#5549). The mutex is released on
+    /// return.
+    /// Test: `palace_update_waits_for_an_in_flight_rename_and_does_not_recreate_old_dir`,
+    /// `palace_update_through_old_id_after_rename_updates_new_palace`.
+    async fn relabel_palace_locked(&self, palace_id: &str, name: &str) -> ServiceResult<Palace> {
+        let state = &self.state;
+        let lock = state.palace_write_lock(palace_id);
+        let (_guard, _budget) = begin_budgeted_write(state, &lock, palace_id, "palace_update")
+            .await
+            .map_err(|e| ServiceError::Conflict(format!("{e:#}")))?;
+        // #9544: resolved under the lock, so no rename can move it before the save.
+        let canonical = canonical_palace_id(&state.data_root, palace_id);
+        let mut palace =
+            PalaceStore::load_palace(&state.data_root.join(&canonical)).map_err(|e| {
+                if matches!(&e, PalaceStoreError::NotFound(_)) {
+                    ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+                } else {
+                    ServiceError::internal(format!("cannot load palace {palace_id}: {e}"))
+                }
+            })?;
+        palace.name = name.to_string();
+        PalaceStore::save_palace(&palace).map_err(|e| {
+            ServiceError::internal(format!("save palace metadata for {palace_id}: {e}"))
+        })?;
+        state.palace_names.insert(canonical, name.to_string());
+        Ok(palace)
     }
 
     /// Look up a single palace by id and enrich with live handle stats.
