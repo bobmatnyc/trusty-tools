@@ -42,6 +42,17 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 thread_local! {
     static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static TEST_PATH: std::cell::RefCell<Option<OsString>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with git steps on this thread started under `PATH=path`, so a
+/// test's git wrapper runs in place of git (#8454).
+#[cfg(test)]
+pub(crate) fn with_git_path<T>(path: OsString, f: impl FnOnce() -> T) -> T {
+    let before = TEST_PATH.with(|p| p.replace(Some(path)));
+    let out = f();
+    TEST_PATH.with(|p| p.replace(before));
+    out
 }
 
 /// Run `f` with git steps on this thread bounded by `limit`.
@@ -528,6 +539,10 @@ fn git(dir: &Path) -> Command {
         if key.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(key);
         }
+    }
+    #[cfg(test)]
+    if let Some(path) = TEST_PATH.with(|p| p.borrow().clone()) {
+        cmd.env("PATH", path);
     }
     cmd
 }

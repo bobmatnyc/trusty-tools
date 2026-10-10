@@ -10,6 +10,7 @@
 //! Test: `src/policy/tests/load.rs`.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::gchat::routes::routes_path;
 use crate::policy::fs::{read_host, read_project, ProjectRead};
@@ -69,6 +70,13 @@ impl LoadRequest {
 pub fn load_effective(req: &LoadRequest) -> LoadReport {
     let prepared = prepare(req);
     assemble(prepared, &req.channels)
+}
+
+/// Load the effective policy for `req`, stopping git at `deadline`.
+/// Red stub (#8454): the deadline is ignored.
+pub fn load_effective_until(req: &LoadRequest, deadline: Instant) -> LoadReport {
+    let _ = deadline;
+    load_effective(req)
 }
 
 /// One listed project's route file after the read and the gate.
