@@ -1120,9 +1120,11 @@ pub use palace_resolve::{
 /// palace does not exist and memory splits in two. A persisted alias map lets the
 /// non-existent `owner-repo` name resolve to the existing bare palace. This is a
 /// PALACE-level redirect, distinct from the in-palace term/KG entity aliases.
-/// What: exposes [`palace_alias::PalaceAliasStore`] (load/register/resolve),
+/// What: exposes [`palace_alias::PalaceAliasStore`] (load/register/resolve, and
+/// rename_target/remove_alias for #9544),
 /// [`palace_alias::alias_target_if_absent`] (the one rule for whether a redirect
-/// fires, shared with the registry), plus
+/// fires, shared with the registry), [`palace_alias::canonical_palace_id`] and
+/// [`palace_alias::LiveAliasError`] (#9544), plus
 /// [`palace_alias::default_palace_registry_dir`] and
 /// [`palace_alias::palace_registry_dir_from`] for locating the registry dir. This
 /// module is always compiled (no `memory-core` gate) so trusty-mpm's always-on
