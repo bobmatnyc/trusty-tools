@@ -501,3 +501,48 @@ fn runner_stderr_over_the_cap_on_failure_is_other() {
         assert_eq!(run.code, Some(1), "{marker}");
     }
 }
+
+/// Why: #9572 — the server exits while a CLI call runs and abandons the
+/// call's thread; the call must not start once the server's cancel flag is
+/// up, and a call in flight must kill and reap its whole group within a
+/// poll, whether the leader still runs or only a straggler holds a pipe.
+/// Test: itself.
+#[test]
+fn runner_kills_the_cli_group_when_the_server_cancels() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let is_exit = |err: &SecretsError| matches!(err, SecretsError::Backend { reason, .. } if reason.contains("exiting"));
+    let shim = Shim::new(RECORDER);
+    let up = Arc::new(AtomicBool::new(true));
+    let err = crate::store::deadline::cancellable(up, || shim.command().run()).unwrap_err();
+    assert!(is_exit(&err), "{err:?}");
+    assert!(shim.logged_nothing(), "a run started after the cancel");
+
+    let leader_waits = "sleep 60 &\necho $! > '@LOG@/pid'\nwait\n";
+    let straggler_only = "sleep 60 &\necho $! > '@LOG@/pid'\nexit 0\n";
+    for body in [leader_waits, straggler_only] {
+        let shim = Shim::new(body);
+        let flag = Arc::new(AtomicBool::new(false));
+        let raise = {
+            let flag = Arc::clone(&flag);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                flag.store(true, Ordering::Release);
+            })
+        };
+        let started = Instant::now();
+        let err = crate::store::deadline::cancellable(flag, || {
+            shim.command().timeout(Duration::from_secs(30)).run()
+        })
+        .unwrap_err();
+        raise.join().unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(3), "{body}: {elapsed:?}");
+        assert!(is_exit(&err), "{body}: {err:?}");
+        assert!(
+            gone_soon(shim.logged_pid()),
+            "{body}: the grandchild outlived the cancel"
+        );
+    }
+}

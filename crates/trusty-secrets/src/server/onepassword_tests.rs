@@ -1,6 +1,7 @@
 //! The 1Password backend through the server (#7519 P2): the delete sweep,
 //! scope refusals before any spawn, doctor, the token, the enablement
-//! gate, and the startup template sweep.
+//! gate, the startup template sweep, and the `op` process group a server
+//! exit leaves behind (#9572).
 //!
 //! A child of `server_tests`, so it shares that module's fixture: every path
 //! is under a `TempDir` and `keychain` is an in-memory double. `onepassword`
@@ -11,8 +12,8 @@
 
 use super::*;
 use crate::store::Capabilities;
-use crate::store::onepassword::OnePasswordBackend;
 use crate::store::onepassword::shim::{OpShim, install_op, plant_op};
+use crate::store::onepassword::{OnePasswordBackend, OnePasswordSettings};
 
 const TOKEN: &str = "ops_token_canary_7519_server_0123456789";
 
@@ -722,4 +723,237 @@ async fn server_delete_refused_for_a_hidden_vault_names_both_escapes() {
         "the row was dropped"
     );
     server.stop().await;
+}
+
+/// How long the hanging `op`, its runner timeout and its request deadline
+/// last (#9572): far past each test's span, so only an exit-time kill can
+/// end the group within it.
+const HANG_SPAN: Duration = Duration::from_secs(600);
+
+/// How long after `run_to_exit` returns the `op` group may live (#9572).
+const GROUP_GONE_WITHIN: Duration = Duration::from_secs(3);
+
+/// A fake `op`, run by absolute path, that writes its pid to a pidfile and
+/// then waits on a `sleep` child for [`HANG_SPAN`] (#9572).
+///
+/// What: the pid is the leader of the run's own process group, so it is
+/// also the group id; the `sleep` child is a second member, which a kill
+/// of the leader alone would leave running.
+struct HangingOp {
+    program: PathBuf,
+    pidfile: PathBuf,
+}
+
+impl HangingOp {
+    fn install(fx: &Fixture) -> Self {
+        let pidfile = fx.tmp.path().join("op.pid");
+        let partial = fx.tmp.path().join("op.pid.partial");
+        let body = format!(
+            "echo $$ > '{partial}'\nmv '{partial}' '{pidfile}'\nsleep {span}",
+            partial = partial.display(),
+            pidfile = pidfile.display(),
+            span = HANG_SPAN.as_secs(),
+        );
+        let program = install_op(&fx.tmp.path().join("hanging-op"), &body);
+        Self { program, pidfile }
+    }
+
+    /// The fixture's state, with `onepassword` over this `op` and the
+    /// request deadline at [`HANG_SPAN`].
+    fn state(&self, fx: &Fixture) -> State {
+        let mut settings = OnePasswordSettings::new(fx.settings.template_root.clone());
+        settings.program = self.program.clone().into_os_string();
+        settings.timeout = HANG_SPAN;
+        let backend: Arc<dyn SecretBackend> = Arc::new(OnePasswordBackend::new(settings));
+        let base = fx.backends();
+        let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+            BackendId::ONEPASSWORD => Ok(Arc::clone(&backend)),
+            _ => base(id),
+        });
+        let mut state = fx.state(factory);
+        state.deadline_override = Some(HANG_SPAN);
+        state
+    }
+}
+
+/// The pid the hanging `op` wrote, once it has written one.
+async fn op_leader(pidfile: &Path) -> libc::pid_t {
+    for _ in 0..400 {
+        if let Some(pid) = read_pid(pidfile) {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the hanging `op` never started");
+}
+
+/// The pid in `pidfile`, if it holds one above 1.
+fn read_pid(pidfile: &Path) -> Option<libc::pid_t> {
+    let text = std::fs::read_to_string(pidfile).ok()?;
+    text.trim().parse().ok().filter(|pid| *pid > 1)
+}
+
+/// Whether any live, non-zombie process is in process group `pgid`.
+///
+/// What: `ps -A -o pgid=,stat=`; a zombie (`Z`) is dead, waiting for its
+/// parent to reap it. `kill(-pgid, 0)` would count a zombie as alive.
+fn group_alive(pgid: libc::pid_t) -> bool {
+    let out = Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .output()
+        .expect("ps runs");
+    assert!(out.status.success(), "ps failed: {:?}", out.status);
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        cols.next().and_then(|g| g.parse::<libc::pid_t>().ok()) == Some(pgid)
+            && cols.next().is_some_and(|stat| !stat.starts_with('Z'))
+    })
+}
+
+/// Whether group `pgid` has no live member within `bound`.
+fn group_gone_within(pgid: libc::pid_t, bound: Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if !group_alive(pgid) {
+            return true;
+        }
+        if started.elapsed() >= bound {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `SIGKILL`s the group whose leader wrote `pidfile`, if it still lives,
+/// so a red run leaks no `sleep` (#9572).
+struct KillGroupOnDrop(PathBuf);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        if let Some(pgid) = read_pid(&self.0)
+            && group_alive(pgid)
+        {
+            // SAFETY: `kill` takes two integers and touches no caller memory;
+            // `pgid > 1`, so this never signals every process or our own group.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// A `secrets.delete` of `name`, spawned so it stays in flight.
+fn delete_in_flight(
+    fx: &Fixture,
+    socket: &Path,
+    name: &str,
+) -> impl std::future::Future<Output = ()> + use<> {
+    let socket = socket.to_path_buf();
+    let params = target(fx, name);
+    async move {
+        let _ = send_framed_request::<Value, RpcResponse>(
+            &socket,
+            &json!({"jsonrpc": "2.0", "id": 7, "method": method::DELETE, "params": params}),
+            HANG_SPAN,
+        )
+        .await;
+    }
+}
+
+/// A two-worker runtime, the shape the binary builds.
+fn exit_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a test runtime")
+}
+
+/// Why: #9572 — a CLI call in flight when the server exits kept running on
+/// its abandoned blocking thread, so its `op` process group outlived the
+/// process, reparented to pid 1, until its own 60 s timeout.
+/// What: `run_to_exit` serves while a `delete` waits on a hanging `op`; once
+/// `op` runs, the served future returns and drops the serve future inline.
+/// Within [`GROUP_GONE_WITHIN`] after `run_to_exit` returns, no live member
+/// of the `op` group remains. Neither the runner timeout nor the request
+/// deadline can fire in that span.
+/// Test: itself.
+#[test]
+fn server_exit_kills_the_process_group_of_an_in_flight_cli_call() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let op = HangingOp::install(&fx);
+    let _cleanup = KillGroupOnDrop(op.pidfile.clone());
+    let state = op.state(&fx);
+    let socket = fx.settings.socket.clone();
+    let call = delete_in_flight(&fx, &socket, "A");
+    let pidfile = op.pidfile.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let leader = router::run_to_exit(exit_runtime(), async move {
+            let serving = router::serve_state(state, std::future::pending());
+            let in_flight = async {
+                wait_serving(&socket).await;
+                let _call = tokio::spawn(call);
+                op_leader(&pidfile).await
+            };
+            tokio::select! {
+                served = serving => panic!("the server returned first: {served:?}"),
+                leader = in_flight => leader,
+            }
+        });
+        let _ = tx.send(leader);
+    });
+    let leader = match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(leader) => leader,
+        Err(e) => panic!("run_to_exit did not return: {e}"),
+    };
+    assert!(
+        group_gone_within(leader, GROUP_GONE_WITHIN),
+        "`op` group {leader} outlived the server's exit"
+    );
+}
+
+/// Why: #9572 — on the panic path `run_to_exit` drops the spawned serve task
+/// during `shutdown_timeout`; the `op` group of a call in flight then must
+/// not outlive the process either.
+/// What: as [`server_exit_kills_the_process_group_of_an_in_flight_cli_call`],
+/// but the server is a spawned task and the served future panics once `op`
+/// runs. The panic reaches the caller, and the group is gone within
+/// [`GROUP_GONE_WITHIN`] after `run_to_exit` returns.
+/// Test: itself.
+#[test]
+fn server_panic_exit_kills_the_process_group_of_an_in_flight_cli_call() {
+    const PANIC: &str = "the served future panicked";
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let op = HangingOp::install(&fx);
+    let _cleanup = KillGroupOnDrop(op.pidfile.clone());
+    let state = op.state(&fx);
+    let socket = fx.settings.socket.clone();
+    let call = delete_in_flight(&fx, &socket, "A");
+    let pidfile = op.pidfile.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            router::run_to_exit(exit_runtime(), async move {
+                let _server = tokio::spawn(router::serve_state(state, std::future::pending()));
+                wait_serving(&socket).await;
+                let _call = tokio::spawn(call);
+                op_leader(&pidfile).await;
+                std::panic::panic_any(PANIC);
+            })
+        }));
+        let _ = tx.send(exit.map_err(|p| p.downcast_ref::<&str>().copied()));
+    });
+    let exit: Result<(), Option<&str>> = match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(exit) => exit,
+        Err(e) => panic!("run_to_exit did not return: {e}"),
+    };
+    assert_eq!(exit, Err(Some(PANIC)), "the panic must surface");
+    let leader = read_pid(&op.pidfile).expect("the `op` pid");
+    assert!(
+        group_gone_within(leader, GROUP_GONE_WITHIN),
+        "`op` group {leader} outlived the server's panic exit"
+    );
 }
