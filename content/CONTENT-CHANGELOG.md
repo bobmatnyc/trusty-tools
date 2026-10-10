@@ -9,6 +9,17 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.2.1] — 2026-10-10
+
+### Fixed
+
+- The `research` agent returns its findings as text in its final response instead of saving them under `docs/research/`, which the harness refuses for subagents; it writes a file only when the PM brief names the path (#8566).
+
+### Changed
+
+- The tm-capabilities doctor reference says the trusty-search daemon binds no TCP port from 0.59.0, and that `tcp_listeners` fails on any trusty-search TCP listener (#9214, #9542).
+- The tm-capabilities CLI reference lists the `tm memory rename` verb (trusty-memory's `palace_rename`, #9544).
+
 ## [2.2.0] — 2026-10-09
 
 ### Added
