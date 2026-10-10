@@ -62,7 +62,7 @@ pub use backend::{
     Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
     open_backend_at, swept_backends,
 };
-pub(crate) use cache::{CacheClock, OpenedUnder, SecretCache};
+pub(crate) use cache::{OpenedUnder, SecretCache};
 pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};
