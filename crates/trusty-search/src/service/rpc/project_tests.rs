@@ -148,3 +148,29 @@ async fn an_unreadable_registry_is_an_internal_error_not_a_miss() {
         .expect("refused");
     assert_eq!(err.code, CODE_INTERNAL_ERROR, "{err:?}");
 }
+
+/// Why: #9169 — a `project-map.toml` that cannot be parsed must fail the
+/// resolve closed. Deriving an answer from `indexes.toml` instead would hide
+/// operator pins and parks, and a later write would overwrite the bad file.
+/// What: garbage bytes next to `indexes.toml`; the resolve is an internal
+/// error naming the file and the remedy, and the file keeps its bytes.
+/// Test: this test.
+#[tokio::test]
+async fn resolve_with_corrupt_project_map_errors_not_derived() {
+    let fx = fixture();
+    let map = fx._tmp.path().join("project-map.toml");
+    let garbage = b"this is [[ not a project map";
+    std::fs::write(&map, garbage).expect("garbage map");
+    let response = rpc(&fx.router, serde_json::json!({ "project": "trusty-tools" })).await;
+    let err = response
+        .error
+        .unwrap_or_else(|| panic!("a corrupt map must not resolve: {:?}", response.result));
+    assert_eq!(err.code, CODE_INTERNAL_ERROR, "{err:?}");
+    assert!(err.message.contains("project-map.toml"), "{}", err.message);
+    assert!(err.message.contains("rebuild-map"), "{}", err.message);
+    assert_eq!(
+        std::fs::read(&map).expect("map"),
+        garbage,
+        "bytes untouched"
+    );
+}
