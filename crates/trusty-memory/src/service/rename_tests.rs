@@ -49,11 +49,12 @@ fn make_palace(state: &AppState, id: &str) {
         .expect("create palace");
 }
 
+/// `force`: the fixture notes share a prefix the Jaro-Winkler dedup gate merges.
 async fn remember(state: &AppState, palace: &str, text: &str) -> Value {
     dispatch_tool(
         state,
         "memory_remember",
-        json!({"palace": palace, "text": text}),
+        json!({"palace": palace, "text": text, "force": true}),
     )
     .await
     .expect("memory_remember")

@@ -76,6 +76,8 @@ impl Fixture {
     }
 }
 
+/// Distinct per `i`; writes pass `force` because the notes share a prefix the
+/// Jaro-Winkler dedup gate would merge.
 fn note(i: usize) -> String {
     format!("palace rename integration note {i} carries a separate durable fact for recall")
 }
@@ -94,7 +96,7 @@ async fn rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated() 
     for i in 0..3 {
         fx.tool(
             "memory_remember",
-            json!({"palace": "rw-src", "text": note(i)}),
+            json!({"palace": "rw-src", "text": note(i), "force": true}),
         )
         .await
         .expect("remember");
@@ -122,7 +124,7 @@ async fn rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated() 
     .expect("recall through the old id");
     fx.tool(
         "memory_remember",
-        json!({"palace": "rw-src", "text": note(3)}),
+        json!({"palace": "rw-src", "text": note(3), "force": true}),
     )
     .await
     .expect("remember through the old id");
@@ -160,7 +162,7 @@ async fn rename_concurrent_remember_loses_and_duplicates_nothing() {
                 let out = fx
                     .tool(
                         "memory_remember",
-                        json!({"palace": "race-src", "text": note(i)}),
+                        json!({"palace": "race-src", "text": note(i), "force": true}),
                     )
                     .await;
                 if let Ok(out) = out {
