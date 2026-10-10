@@ -51,13 +51,41 @@ async fn dispatch_remember_stores_requested_type_and_list_round_trips_it() {
     let (state, _tmp) = test_state();
     create(&state, "rt1").await;
     let cases = [
-        (json!("ruling"), "Ruling", "Owner ruling: never merge a red CI run"),
-        (json!("DECISION"), "Decision", "Decision: ship PR A before PR B lands"),
-        (json!("Status"), "Status", "Status: batch A is in review this morning"),
-        (json!("tUrN"), "Turn", "Turn: the operator asked for the gate table"),
-        (json!("Reference"), "Reference", "Reference: ADR-0067 owns the drawer format"),
-        (Value::Null, "Unknown", "The sourdough starter wants flour every day"),
-        (Value::Null, "Commit", "feat(trusty-memory): add a typed drawer write arg"),
+        (
+            json!("ruling"),
+            "Ruling",
+            "Owner ruling: never merge a red CI run",
+        ),
+        (
+            json!("DECISION"),
+            "Decision",
+            "Decision: ship PR A before PR B lands",
+        ),
+        (
+            json!("Status"),
+            "Status",
+            "Status: batch A is in review this morning",
+        ),
+        (
+            json!("tUrN"),
+            "Turn",
+            "Turn: the operator asked for the gate table",
+        ),
+        (
+            json!("Reference"),
+            "Reference",
+            "Reference: ADR-0067 owns the drawer format",
+        ),
+        (
+            Value::Null,
+            "Unknown",
+            "The sourdough starter wants flour every day",
+        ),
+        (
+            Value::Null,
+            "Commit",
+            "feat(trusty-memory): add a typed drawer write arg",
+        ),
     ];
     let mut written = Vec::new();
     for (ty, want, text) in cases {
@@ -70,7 +98,10 @@ async fn dispatch_remember_stores_requested_type_and_list_round_trips_it() {
             .await
             .expect("memory_remember");
         assert_eq!(out["status"], "stored", "{out}");
-        written.push((out["drawer_id"].as_str().expect("drawer_id").to_string(), want));
+        written.push((
+            out["drawer_id"].as_str().expect("drawer_id").to_string(),
+            want,
+        ));
     }
     // An explicit JSON `null` is the same as omitting the argument.
     let out = dispatch_tool(
@@ -80,7 +111,10 @@ async fn dispatch_remember_stores_requested_type_and_list_round_trips_it() {
     )
     .await
     .expect("memory_remember with type null");
-    written.push((out["drawer_id"].as_str().expect("drawer_id").to_string(), "Unknown"));
+    written.push((
+        out["drawer_id"].as_str().expect("drawer_id").to_string(),
+        "Unknown",
+    ));
 
     let drawers = list(&state, "rt1").await;
     for (id, want) in written {
@@ -117,9 +151,15 @@ async fn dispatch_remember_rejects_unknown_type_and_writes_nothing() {
         )
         .await
         .expect_err("a non-string type must be rejected");
-        assert!(format!("{err:#}").starts_with("memory_remember: "), "{err:#}");
+        assert!(
+            format!("{err:#}").starts_with("memory_remember: "),
+            "{err:#}"
+        );
     }
-    assert!(list(&state, "rt2").await.is_empty(), "nothing may be written");
+    assert!(
+        list(&state, "rt2").await.is_empty(),
+        "nothing may be written"
+    );
 }
 
 /// Why (#9144 criterion 2): the blocklist, content and dedup gates answer with

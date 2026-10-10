@@ -235,7 +235,10 @@ async fn a_typed_ruling_outranks_a_better_matching_typed_status_end_to_end() {
     let c_ruling = remember_typed(&state, "control", ruling_text, None).await;
     let control = recall(&state, "control", query, 5).await;
     let (cs, cr) = (score_of(&control, c_status), score_of(&control, c_ruling));
-    eprintln!("#9144 control scores: status {cs} ruling {cr} ratio {}", cr / cs);
+    eprintln!(
+        "#9144 control scores: status {cs} ruling {cr} ratio {}",
+        cr / cs
+    );
     assert!(
         cs > cr && cr / cs > 0.8,
         "precondition: the status text must match better, by less than the 0.8 factor: {control:#?}"

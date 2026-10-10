@@ -101,11 +101,13 @@ pub(crate) const TURN_TYPE_FACTOR: f32 = 0.7;
 /// `ruling_tags_exempt_a_drawer_that_is_also_tagged_status`.
 pub(crate) fn is_ruling(drawer: &Drawer) -> bool {
     // #9144: the typed form of a ruling.
-    matches!(drawer.drawer_type, DrawerType::Ruling | DrawerType::Decision)
-        || drawer
-            .tags
-            .iter()
-            .any(|t| RULING_TAGS.contains(&t.as_str()))
+    matches!(
+        drawer.drawer_type,
+        DrawerType::Ruling | DrawerType::Decision
+    ) || drawer
+        .tags
+        .iter()
+        .any(|t| RULING_TAGS.contains(&t.as_str()))
 }
 
 /// Fixed score factor for a drawer's written type (#9144).

@@ -260,7 +260,12 @@ fn a_ruling_typed_drawer_outranks_an_equal_status_typed_drawer() {
     let ruling = typed_hit("ruling", DrawerType::Ruling, 0.70, now);
     let mut results = vec![status, ruling];
     demote_stale_snapshots(&mut results, now, &Supersessions::new());
-    let score = |c: &str| results.iter().find(|r| r.drawer.content() == c).map(|r| r.score);
+    let score = |c: &str| {
+        results
+            .iter()
+            .find(|r| r.drawer.content() == c)
+            .map(|r| r.score)
+    };
     assert_eq!(score("ruling"), Some(0.70));
     let s = score("status").expect("status hit kept");
     assert!((s - 0.70 * 0.8).abs() < 1e-6, "status score {s}");
