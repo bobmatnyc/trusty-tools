@@ -172,21 +172,10 @@ commands:
     examples:
       - cmd: trusty-search stop
   serve:
-    description: Start MCP server (stdio by default; add --with-http for HTTP)
-    flags:
-      - name: with-http
-        description: Enable the HTTP/SSE listener in addition to MCP stdio
-      - name: port
-        type_hint: PORT
-        default: "0"
-        description: HTTP port (only used when --with-http is set; 0 = OS picks)
-      - name: http
-        type_hint: ADDR
-        description: 'Legacy: explicit "host:port" bind address'
+    description: Start the MCP server over stdio (#9542 retired --with-http)
     examples:
       - cmd: trusty-search serve
-        note: MCP stdio only (Claude hook)
-      - cmd: trusty-search serve --with-http --port 7878
+        note: MCP stdio (Claude hook)
   service:
     description: Manage the macOS launchd service
     subcommands:

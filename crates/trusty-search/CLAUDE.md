@@ -15,7 +15,7 @@ serves multiple named indexes (one per project) via HTTP daemon and MCP server.
   expansion, fused via Reciprocal Rank Fusion (RRF, k=60, parameter-free)
 - **Query-type routing**: classify intent (Definition / Usage / Conceptual / BugDebt /
   Keyword / Unknown) and route to optimal weighting before searching
-- **MCP server**: stdio + HTTP/SSE for Claude Code integration
+- **MCP server**: stdio for Claude Code integration (#9542 retired HTTP/SSE)
 - **Zero cold-start**: HNSW stays hot (Duration::MAX cool-after), LRU embedding cache
   (256 entries) skips re-embedding on repeated queries
 - **Native multi-request**: `Arc<SearchAppState>`, concurrent reads via `RwLock`,
@@ -1475,7 +1475,7 @@ trusty-search status                                 # daemon + index overview (
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search
-trusty-search serve [--http <addr>]                  # MCP stdio (default) or HTTP/SSE
+trusty-search serve                                  # MCP stdio (#9542: no HTTP/SSE)
 # Aliases preserved for backward compatibility:
 trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
@@ -1536,7 +1536,7 @@ trusty-search/
 │   ├── doctor.rs                    diagnostic checks
 │   ├── core/                        CodeIndexer, BM25, HNSW, chunking, classifier
 │   ├── service/                     axum daemon, FileWatcher, socket client, Svelte UI
-│   └── mcp/                         MCP server (stdio + HTTP/SSE)
+│   └── mcp/                         MCP server (stdio)
 └── tests/
     ├── integration_tests.rs         imports `trusty_search::core::*`
     └── benchmark_harness.rs         MRR@5 / Recall@10 quality bench
@@ -1554,7 +1554,7 @@ them via the crate's `Cargo.toml` features. Key surfaces consumed here:
 |------------------|----------|
 | the `trusty-mcp` crate (`trusty_mcp`) | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, OpenRPC discovery — extracted out of `trusty_common::mcp` by ADR-0040 (#5803) |
 | `embedder` (`trusty_common::embedder`) | `Embedder` trait, `FastEmbedder` (LRU + persistent model cache), `MockEmbedder` (formerly `trusty-embedder`) |
-| core (always available) | `bind_with_auto_port`, `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
+| core (always available) | `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
 
 ## Development
 
@@ -1778,7 +1778,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport (see [MCP Tools](#mcp-tools))
+- MCP server: full JSON-RPC 2.0 stdio transport (see [MCP Tools](#mcp-tools))
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection
