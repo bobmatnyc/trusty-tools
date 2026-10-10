@@ -166,3 +166,52 @@ fn v2_slack_route_requires_v2() {
     let report = merge(host(HOST_ALL), vec![input(PROJ_A, &v2)]);
     assert_eq!(names(&report), ["bob-dm"]);
 }
+
+#[test]
+fn project_parse_errors_withhold_input_values() {
+    // #8454 S2b: a token typed into a project file must not reach a finding.
+    const TOKEN: &str = "xoxb-123-secret";
+    let route = |kinds: &str| {
+        format!("version = 2\n[[slack.routes]]\nname = \"b\"\nrecipient = \"U0ABCDEF1\"\nkinds = {kinds}\n")
+    };
+    let cases = [
+        ("version is a string", format!("version = \"{TOKEN}\"\n")),
+        ("unknown key", format!("version = 2\n{TOKEN} = 1\n")),
+        ("unknown kind", route(&format!("[\"{TOKEN}\"]"))),
+        ("wrong type", route(&format!("\"{TOKEN}\""))),
+        (
+            "duplicate key",
+            format!("version = 2\n{TOKEN} = 1\n{TOKEN} = 2\n"),
+        ),
+        ("bare value", format!("version = 2\nx = {TOKEN}\n")),
+        (
+            "quoted key path",
+            format!("version = 2\n[\"{TOKEN}\"]\nx = 1\n"),
+        ),
+    ];
+    for (what, text) in cases {
+        let err = parse(&text).expect_err(what);
+        assert!(
+            matches!(err, ProjectFileError::Parse { .. }),
+            "{what}: {err:?}"
+        );
+        let shown = format!("{err} {err:?}");
+        assert!(!shown.contains("xoxb"), "{what}: {shown}");
+    }
+}
+
+#[test]
+fn project_file_errors_withhold_a_token_typed_into_space() {
+    // #8454: a token typed into `space` (or a route name) must not reach a
+    // finding, as for the host file.
+    const TOKEN: &str = "xoxb-1";
+    let text = B_V1.replace("name = \"janet\"", &format!("name = \"{TOKEN}\""))
+        + &format!("space = \"{TOKEN}\"\n");
+    let err = parse(&text).expect_err("a malformed space is refused");
+    assert!(
+        matches!(&err, ProjectFileError::Invalid { entry, .. } if entry.starts_with("gchat.routes[0]")),
+        "{err:?}"
+    );
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains("xoxb"), "{shown}");
+}

@@ -21,7 +21,8 @@ name = "gchat-mcp"
 path = "src/bin/gchat-mcp.rs"
 
 [dependencies]
-trusty-common = { workspace = true, features = ["credentials"] }
+# #8454 S2b: crate-config locates the host config.yaml.
+trusty-common = { workspace = true, features = ["credentials", "crate-config"] }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { workspace = true }
 anyhow = { workspace = true }
@@ -42,6 +43,11 @@ url = { workspace = true }
 chrono = { workspace = true }
 # #8454 S2a: strict parse of the host `channels:` section of config.yaml.
 serde_yaml = { workspace = true }
+# #8454 S2b: the home directory for the host file and `~/` entries.
+dirs = { workspace = true }
+# #8454 S2b: O_NOFOLLOW and O_NONBLOCK for opening a route or host file;
+# std names neither. Already in the graph via tokio.
+libc = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

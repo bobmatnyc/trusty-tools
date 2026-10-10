@@ -27,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 
 use crate::gchat::routes::{expand_home, validate_connection, Connection, RawConnection};
+use crate::policy::redact::withhold;
 use crate::policy::types::{Channel, MessageKind, RateLimit, RateLimitSpec};
 
 /// The only `channels.version` this parser reads.
@@ -42,6 +43,45 @@ pub const HOST_SCHEMA_VERSION: i64 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HostError {
+    /// No home directory is known; the host file cannot be found and `~/`
+    /// entries cannot expand. No cwd fallback (#8454 S2b).
+    #[error("no home directory is known; every channel is denied")]
+    HomeUnknown,
+    /// config.yaml does not exist.
+    #[error("config.yaml is missing; every channel is denied")]
+    Missing,
+    /// config.yaml or its parent directory is a symlink or not a regular
+    /// file or directory (#8454 S2b, Architect review).
+    #[error("{what} is a symlink or not a regular {kind}; every channel is denied")]
+    NotRegular {
+        /// `config.yaml` or `its parent directory`.
+        what: &'static str,
+        /// `file` or `directory`.
+        kind: &'static str,
+    },
+    /// config.yaml does not resolve to `.trusty-tools/trusty-mpm/config.yaml`
+    /// under the canonical home: a symlinked `~/.trusty-tools` would let
+    /// another tree supply the ceiling (#8454 Architect ruling).
+    #[error("config.yaml {reason}; every channel is denied")]
+    NotUnderHome {
+        /// What failed: the paths did not match, or one did not resolve.
+        reason: &'static str,
+    },
+    /// config.yaml could not be read.
+    #[error("config.yaml could not be read: {reason}")]
+    Read {
+        /// The I/O error kind.
+        reason: String,
+    },
+    /// config.yaml is larger than the read cap.
+    #[error("config.yaml is larger than {limit} bytes")]
+    TooLarge {
+        /// The cap in bytes.
+        limit: u64,
+    },
+    /// config.yaml is not UTF-8.
+    #[error("config.yaml is not valid UTF-8")]
+    NotUtf8,
     /// The text is not YAML, or its top level is not a mapping.
     #[error("config.yaml is malformed: {reason}")]
     Malformed {
@@ -289,62 +329,15 @@ pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostEr
     })
 }
 
-/// serde messages whose `, expected …` tail is written by this code's types.
-const EXPECTING: [&str; 5] = [
-    "invalid type: ",
-    "invalid value: ",
-    "invalid length ",
-    "unknown variant ",
-    "unknown field ",
-];
-
 /// A serde_yaml message from host input, with every value it quotes withheld.
 ///
-/// Why: serde quotes the value it could not read (`invalid type: string
-/// "xoxb-…"`), so a token typed into the wrong host key would reach a
-/// `HostError` and every finding built from it (#8454).
-/// What: `missing field` and `duplicate field` name a field of this code's
-/// types and stay. Every duplicate-key message becomes a fixed text with its
-/// position, quoted or not. A message with a code-written `, expected …`
-/// tail keeps the tail and replaces the span from its first to its last
-/// quote mark (`"` or `` ` ``) before it. Any other message that quotes
-/// something (a key path) becomes a fixed text with its position. A message
-/// that quotes nothing, such as a libyaml syntax error, stays.
+/// Why: a token typed into the wrong host key must not reach a `HostError`
+/// (#8454).
+/// What: [`withhold`] over the message, with serde_yaml's location.
 /// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`.
 fn withhold_values(e: &serde_yaml::Error) -> String {
-    let msg = e.to_string();
-    if msg.starts_with("missing field `") || msg.starts_with("duplicate field `") {
-        return msg;
-    }
-    let withheld = |what: &str| {
-        let at = e
-            .location()
-            .map(|l| format!(" at line {} column {}", l.line(), l.column()))
-            .unwrap_or_default();
-        format!("{what}{at} (value withheld)")
-    };
-    // #8454: a number, null or collection key is printed unquoted, and the
-    // key-path prefix can carry input text, so no duplicate keeps its text.
-    if msg.contains("duplicate entry ") {
-        return withheld("a mapping repeats a key");
-    }
-    let (head, tail) = match msg.rfind(", expected ") {
-        Some(i) if EXPECTING.iter().any(|p| msg.starts_with(p)) => msg.split_at(i),
-        _ => (msg.as_str(), ""),
-    };
-    let quote = |c: char| c == '"' || c == '`';
-    let (Some(first), Some(last)) = (head.find(quote), head.rfind(quote)) else {
-        return msg;
-    };
-    if tail.is_empty() {
-        return withheld("a quoted value is invalid");
-    }
-    // Quote marks are ASCII, so `last + 1` is a char boundary.
-    format!(
-        "{}<value withheld>{}{tail}",
-        &head[..first],
-        &head[last + 1..]
-    )
+    // #8454 S2b: the rule is shared with the project-file parser.
+    withhold(&e.to_string(), e.location().map(|l| (l.line(), l.column())))
 }
 
 fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChannel, HostError> {

@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{
-    assert_denied, host, input, names, routes_file, state, A_V2, B_V1, HOST_ALL, PROJ_A, PROJ_B,
+    assert_denied, host, input, names, routes_file, state, A_V2, B_V1, HOST_ALL, JANET, PROJ_A,
+    PROJ_B,
 };
 use crate::policy::merge::attribute;
 use crate::policy::{
-    merge, Channel, FileState, Finding, FindingScope, MessageKind, Origin, PolicyError,
+    merge, merge_for, Channel, FileState, Finding, FindingScope, MessageKind, Origin, PolicyError,
 };
 
 fn origin(dir: &str, entry: &str) -> Origin {
@@ -354,4 +355,69 @@ fn unmapped_policy_error_keeps_raw_entry() {
             error: err,
         }
     );
+}
+
+// ── S2b (#8454 S2b plan §8): items carried from the S2a critic ──
+
+/// A gchat connection and one route to janet, with no version line.
+fn gchat_janet(name: &str, space: Option<&str>) -> String {
+    let space = space
+        .map(|s| format!("space = \"{s}\"\n"))
+        .unwrap_or_default();
+    format!(
+        "\n[gchat.connection]\nproject_id = \"p\"\nsubscription = \"s\"\nkey_file = \"/k.json\"\n\n\
+         [[gchat.routes]]\nname = \"{name}\"\nrecipient = \"{JANET}\"\nkinds = [\"question\"]\n{space}"
+    )
+}
+
+#[test]
+fn combined_overlap_spans_only_the_consumer_channels() {
+    // A and B both route gchat to janet; A also has Slack and Telegram.
+    let bots = A_V2.strip_prefix("version = 2\n").expect("v2 fixture");
+    let a = format!("version = 2\n{}{bots}", gchat_janet("j-a", None));
+    let b = format!("version = 1\n{}", gchat_janet("j-b", None));
+    let inputs = || vec![input(PROJ_A, &a), input(PROJ_B, &b)];
+    let daemon = merge_for(
+        host(HOST_ALL),
+        inputs(),
+        &[Channel::Slack, Channel::Telegram],
+    );
+    assert!(
+        !daemon.denied,
+        "a gchat overlap denied the daemon: {:#?}",
+        daemon.findings
+    );
+    assert_eq!(names(&daemon), ["bob-dm", "bob-tg"]);
+    // The gchat consumer still sees the overlap and is denied.
+    assert_denied(&merge_for(host(HOST_ALL), inputs(), &[Channel::Gchat]));
+}
+
+#[test]
+fn duplicate_project_input_does_not_overlap_itself() {
+    let report = merge(
+        host(HOST_ALL),
+        vec![input(PROJ_A, A_V2), input(PROJ_A, A_V2)],
+    );
+    assert!(!report.denied, "{:#?}", report.findings);
+    assert_eq!(names(&report), ["bob-dm", "bob-tg"]);
+    assert_eq!(report.per_file.len(), 1);
+}
+
+#[test]
+fn deny_all_clears_gchat_connection_and_spaces() {
+    // B's space route is effective alone; A's overlap denies the load.
+    let b = format!(
+        "version = 1\n{}",
+        gchat_janet("j-b", Some("spaces/AAAAexample"))
+    );
+    let alone = merge(host(HOST_ALL), vec![input(PROJ_B, &b)]);
+    let status = &alone.per_file[0];
+    assert!(status.gchat_connection.is_some() && !status.gchat_spaces.is_empty());
+    let a = format!("version = 1\n{}", gchat_janet("j-a", None));
+    let report = merge(host(HOST_ALL), vec![input(PROJ_B, &b), input(PROJ_A, &a)]);
+    assert_denied(&report);
+    for s in &report.per_file {
+        assert_eq!(s.gchat_connection, None, "{s:?}");
+        assert!(s.gchat_spaces.is_empty(), "{s:?}");
+    }
 }

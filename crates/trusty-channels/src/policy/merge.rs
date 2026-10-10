@@ -10,7 +10,7 @@
 //! refuses only its own routes.
 //! Test: `src/policy/tests/merge.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::gchat::routes::Connection;
@@ -63,6 +63,28 @@ pub struct ProjectInput {
 /// `broken_file_in_one_project_leaves_other_project_effective`,
 /// `host_faults_deny_all`, `gchat_routes_without_any_connection_fail_file`.
 pub fn merge(host: Result<HostCeiling, HostError>, projects: Vec<ProjectInput>) -> LoadReport {
+    merge_for(host, projects, &Channel::ALL)
+}
+
+/// [`merge`] for a consumer that serves only `channels`.
+///
+/// Why: S2a critic (#8454 S2b plan §8): the combined overlap build must span
+/// only the consumer's channels, so two projects routing gchat to one person
+/// do not deny the daemon's Slack/Telegram load. A dir listed for two
+/// channels must not overlap with itself.
+/// What: inputs naming a file already seen are dropped (first kept). Each
+/// file is checked over all its routes exactly as in [`merge`]; only routes
+/// on `channels` enter the policy and the combined build.
+/// Test: `combined_overlap_spans_only_the_consumer_channels`,
+/// `duplicate_project_input_does_not_overlap_itself`.
+pub fn merge_for(
+    host: Result<HostCeiling, HostError>,
+    mut projects: Vec<ProjectInput>,
+    channels: &[Channel],
+) -> LoadReport {
+    // #8454 S2b §8: one file read twice must not overlap with itself.
+    let mut seen = HashSet::new();
+    projects.retain(|p| seen.insert(p.file.clone()));
     let host = match host {
         Ok(h) => h,
         Err(error) => {
@@ -85,7 +107,14 @@ pub fn merge(host: Result<HostCeiling, HostError>, projects: Vec<ProjectInput>) 
         let outcome = merge_file(&host, default, input);
         findings.extend(outcome.findings);
         per_file.push(outcome.status);
-        kept.extend(outcome.routes);
+        // #8454 S2b §8: the per-file build above spans every route; the
+        // combined build spans the consumer's channels only.
+        kept.extend(
+            outcome
+                .routes
+                .into_iter()
+                .filter(|(s, _)| channels.contains(&s.channel)),
+        );
     }
     let origins = origin_map(kept.iter().map(|(s, o)| (s, o.clone())));
     let spec = PolicySpec {

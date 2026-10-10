@@ -13,15 +13,22 @@
 //! without I/O: [`parse_host`] reads the host ceiling (the `channels:`
 //! section of `config.yaml`), [`parse_project_file`] a project's
 //! `routes.toml` v1 or v2, and [`merge`] combines them into a
-//! [`LoadReport`]. Reading the files is S2b.
+//! [`LoadReport`]. S2b adds the I/O: [`load_effective`] reads the host
+//! file and each listed project's file under the default-branch gate ([`check_default_branch`]),
+//! and [`PolicyLoader`] reloads on a content or branch change.
 //! Test: `src/policy/tests/`.
 
 mod bucket;
 mod check;
 mod error;
+mod fs;
+pub(crate) mod gate;
 mod host;
+mod load;
 mod merge;
 mod project_file;
+mod redact;
+mod reload;
 mod report;
 mod table;
 mod types;
@@ -34,9 +41,13 @@ pub use check::{
     DenyReason, DropReason, EgressDecision, InboundDecision, QuestionId, QuestionState,
 };
 pub use error::PolicyError;
+pub use fs::MAX_FILE_BYTES;
+pub use gate::{check_default_branch, BranchState, GateError};
 pub use host::{parse_host, HostCeiling, HostChannel, HostError, HOST_SCHEMA_VERSION};
-pub use merge::{merge, ProjectInput};
+pub use load::{load_effective, LoadRequest};
+pub use merge::{merge, merge_for, ProjectInput};
 pub use project_file::{parse_project_file, ProjectFile, ProjectFileError, ProjectRoute};
+pub use reload::PolicyLoader;
 pub use report::{FileState, FileStatus, Finding, FindingScope, LoadReport, Origin};
 pub use table::{ChannelPolicy, PolicySpec};
 pub use types::{

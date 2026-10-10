@@ -28,6 +28,8 @@ use serde::Deserialize;
 
 use crate::gchat::api::client::is_space_name;
 use crate::gchat::routes::{validate_connection, Connection, RawConnection};
+use crate::policy::gate::GateError;
+use crate::policy::redact::{line_col, withhold};
 use crate::policy::types::{Channel, MessageKind, RateLimitSpec, RouteSpec};
 
 /// Why a project file was refused. Only that project's routes are lost.
@@ -58,6 +60,36 @@ pub enum ProjectFileError {
         entry: String,
         /// What is wrong.
         reason: String,
+    },
+    /// The file or `.trusty-channels` is a symlink or not a regular file or
+    /// directory (#8454 S2b).
+    #[error("{what} is a symlink or not a regular {kind}")]
+    NotRegular {
+        /// `routes.toml` or `.trusty-channels`.
+        what: &'static str,
+        /// `file` or `directory`.
+        kind: &'static str,
+    },
+    /// The file could not be read.
+    #[error("routes file could not be read: {reason}")]
+    Read {
+        /// The I/O error kind.
+        reason: String,
+    },
+    /// The file is larger than the read cap.
+    #[error("routes file is larger than {limit} bytes")]
+    TooLarge {
+        /// The cap in bytes.
+        limit: u64,
+    },
+    /// The file is not UTF-8.
+    #[error("routes file is not valid UTF-8")]
+    NotUtf8,
+    /// The load gate refused the bytes read (Bob Db1).
+    #[error("routes file is not the reviewed version: {error}")]
+    Gate {
+        /// Why the gate refused.
+        error: GateError,
     },
 }
 
@@ -175,9 +207,11 @@ fn routes_of(channel: Channel, raw: Vec<RawFields>) -> Result<Vec<ProjectRoute>,
             // #9448: a configured space passes the same check as a send target.
             if let Some(s) = &space {
                 if !is_space_name(s) {
+                    // #8454: the error repeats no input value, not even the
+                    // route name; a token typed into either must not leak.
                     return Err(ProjectFileError::Invalid {
-                        entry,
-                        reason: format!("space {s:?} must be spaces/{{space}}"),
+                        entry: format!("{channel}.routes[{i}]"),
+                        reason: "space must be spaces/{space}".into(),
                     });
                 }
             }
@@ -204,8 +238,9 @@ fn connection(raw: RawConnection, home: Option<&Path>) -> Result<Connection, Pro
 }
 
 fn toml_parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, ProjectFileError> {
-    toml::from_str(text).map_err(|e| ProjectFileError::Parse {
-        reason: e.message().to_string(),
+    // #8454 S2b: the TOML message can quote an input value; withhold it.
+    toml::from_str(text).map_err(|e: toml::de::Error| ProjectFileError::Parse {
+        reason: withhold(e.message(), e.span().map(|s| line_col(text, s.start))),
     })
 }
 
