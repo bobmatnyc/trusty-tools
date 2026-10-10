@@ -1801,9 +1801,14 @@ fn settings_reject_unknown_and_incomplete_flags() {
 /// Test: itself.
 #[test]
 fn client_wait_exceeds_the_server_deadline_for_every_method() {
-    use super::deadline::{client_wait, request_deadline};
+    use super::deadline::{BODY_GRACE, client_wait, request_deadline};
     for (name, _) in router::METHODS {
-        assert!(client_wait(name) > request_deadline(name), "{name}");
+        // #9572: the router's last answer, at the deadline plus its grace,
+        // still reaches a waiting client.
+        assert!(
+            client_wait(name) > request_deadline(name) + BODY_GRACE,
+            "{name}"
+        );
     }
     for name in [method::SET, method::DELETE, method::COPY] {
         assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
@@ -1874,4 +1879,371 @@ fn settings_template_root_follows_the_index_flag_only() {
         DEFAULT_IDLE_TIMEOUT,
     );
     assert_eq!(built.template_root, PathBuf::from("/x/tmp"));
+}
+
+/// A backend whose every value call blocks until the test drops the sender
+/// [`StuckBackend::new`] returns (#9572), then goes to an in-memory store.
+///
+/// Why: a backend call that never returns (a file backend on a hung mount)
+/// must not hold its request past the deadline. A panicking test drops the
+/// sender while it unwinds, so the blocked threads end and the test binary
+/// exits instead of hanging.
+#[derive(Debug)]
+struct StuckBackend {
+    inner: MemoryBackend,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl StuckBackend {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = Self {
+            inner: MemoryBackend::new(),
+            release: std::sync::Mutex::new(rx),
+        };
+        (Arc::new(backend), tx)
+    }
+
+    /// Block until the test drops its sender; nothing is ever sent.
+    fn wait(&self) {
+        if let Ok(rx) = self.release.lock() {
+            let _ = rx.recv();
+        }
+    }
+}
+
+impl SecretBackend for StuckBackend {
+    fn id(&self) -> BackendId {
+        self.inner.id()
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.wait();
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.wait();
+        self.inner.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.wait();
+        self.inner.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.wait();
+        self.inner.delete(vault, key)
+    }
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.wait();
+        self.inner.agents_may_use(vault, key)
+    }
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        self.wait();
+        self.inner.set_agents_may_use(vault, key, allowed)
+    }
+}
+
+/// The request deadline the stuck-backend tests run under (#9572).
+const STUCK_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How late past its deadline a reply may arrive and still pass (#9572):
+/// the router's grace plus slack for a loaded host.
+const REPLY_MARGIN: Duration = Duration::from_secs(4);
+
+/// The fixture's factory with `keychain`, the project's backend, mapped to
+/// `stuck`.
+fn stuck_factory(fx: &Fixture, stuck: &Arc<StuckBackend>) -> BackendFactory {
+    let base = fx.backends();
+    let stuck = Arc::clone(stuck);
+    Arc::new(move |id: &BackendId| match id.as_str() {
+        "keychain" => Ok(Arc::clone(&stuck) as Arc<dyn SecretBackend>),
+        _ => base(id),
+    })
+}
+
+/// Call `method` and fail the test, rather than hang it, when no reply comes
+/// within the deadline plus [`REPLY_MARGIN`] (#9572).
+async fn call_within_deadline(fx: &Fixture, method: &str, params: Value) -> RpcResponse {
+    let watchdog = STUCK_DEADLINE + REPLY_MARGIN;
+    tokio::time::timeout(watchdog, call(&fx.settings.socket, method, params))
+        .await
+        .unwrap_or_else(|_| panic!("no reply to {method} within {watchdog:?}"))
+}
+
+/// A `secrets.set` of `name` into the project vault, under the watchdog.
+async fn set_within_deadline(fx: &Fixture, name: &str) -> RpcResponse {
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": name, "value": VALUE});
+    call_within_deadline(fx, method::SET, params).await
+}
+
+/// A `secrets.scopes` call, which touches no backend, under the watchdog.
+async fn scopes_within_deadline(fx: &Fixture) -> RpcResponse {
+    call_within_deadline(fx, method::SCOPES, json!({"project": fx.project()})).await
+}
+
+/// Why: #9572 — the router awaited a blocking body with no bound, so a
+/// backend call that never returns held its request forever, and nothing
+/// capped how many threads such calls could hold.
+/// What: with a cap of 6, (a) a request to a stuck backend answers
+/// `deadline_exceeded` within its deadline plus a margin; (b) with 6 calls
+/// stuck, a 7th request that needs no backend waits for admission until its
+/// deadline, then answers `deadline_exceeded`; (c) once the stuck calls are
+/// released, a later request to the now working backend completes.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_stuck_backend_calls_do_not_starve_a_later_request() {
+    let fx = fixture();
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(STUCK_DEADLINE);
+    state.admission_cap_override = Some(6);
+    let server = fx.start_state(state).await;
+
+    // (a) the stuck call's request answers at its deadline.
+    let started = std::time::Instant::now();
+    let first = set_within_deadline(&fx, "STUCK_1").await;
+    assert!(started.elapsed() < STUCK_DEADLINE + REPLY_MARGIN);
+    assert_eq!(
+        fixed_error(&first, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+
+    // Five more stuck calls fill the cap of 6; each answers at its deadline.
+    let more = tokio::join!(
+        set_within_deadline(&fx, "STUCK_2"),
+        set_within_deadline(&fx, "STUCK_3"),
+        set_within_deadline(&fx, "STUCK_4"),
+        set_within_deadline(&fx, "STUCK_5"),
+        set_within_deadline(&fx, "STUCK_6"),
+    );
+    for response in [more.0, more.1, more.2, more.3, more.4] {
+        assert_eq!(
+            fixed_error(&response, method::SET),
+            ErrorKind::DeadlineExceeded
+        );
+    }
+
+    // (b) a 7th request is not admitted and gives up at its own deadline.
+    let started = std::time::Instant::now();
+    let seventh = scopes_within_deadline(&fx).await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= STUCK_DEADLINE - Duration::from_millis(50),
+        "{waited:?}"
+    );
+    assert!(waited < STUCK_DEADLINE + REPLY_MARGIN, "{waited:?}");
+    assert_eq!(
+        fixed_error(&seventh, method::SCOPES),
+        ErrorKind::DeadlineExceeded
+    );
+
+    // (c) released, the stuck threads finish and a later request completes.
+    drop(release);
+    let later = ok(set_within_deadline(&fx, "WORKING").await);
+    assert_eq!(later["outcome"], json!("new"), "{later}");
+    let stored = stuck.inner.get(&vault("trusty/acme/web"), &key("WORKING"));
+    assert_eq!(stored.unwrap().unwrap().expose(), VALUE);
+    server.stop().await;
+}
+
+/// Why: #9572 — the permit must be the stuck thread's, not the request's;
+/// were it released when the request timed out, every timed-out request
+/// would free a slot and stuck threads would pile up without bound.
+/// What: with a cap of 1, a request to a stuck backend times out; a request
+/// that needs no backend then still waits until its own deadline, because
+/// the first request's thread holds the only permit; once the stuck call is
+/// released, the same request is admitted and answers.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_timed_out_request_keeps_its_permit_until_its_call_returns() {
+    let fx = fixture();
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(STUCK_DEADLINE);
+    state.admission_cap_override = Some(1);
+    let server = fx.start_state(state).await;
+
+    let timed_out = set_within_deadline(&fx, "STUCK_1").await;
+    assert_eq!(
+        fixed_error(&timed_out, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+    // The request has answered; its thread, still stuck, holds the permit.
+    let refused = scopes_within_deadline(&fx).await;
+    assert_eq!(
+        fixed_error(&refused, method::SCOPES),
+        ErrorKind::DeadlineExceeded
+    );
+
+    drop(release);
+    let admitted = ok(scopes_within_deadline(&fx).await);
+    assert_eq!(admitted["scopes"][0]["vault"], json!("trusty/acme/web"));
+    server.stop().await;
+}
+
+/// Runs of [`body_counted_closed`]; only its one test reads it.
+static RAN_CLOSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Runs of [`body_counted_late`]; only its one test reads it.
+static RAN_LATE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A method body that counts its runs in [`RAN_CLOSED`].
+fn body_counted_closed(_: &State, _: Value) -> Result<Value, ErrorKind> {
+    RAN_CLOSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(json!("ran"))
+}
+
+/// A method body that counts its runs in [`RAN_LATE`].
+fn body_counted_late(_: &State, _: Value) -> Result<Value, ErrorKind> {
+    RAN_LATE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(json!("ran"))
+}
+
+/// Why: #9572 Fail-Open Check — an admission failure is never a success: a
+/// closed semaphore answers `internal` and the body never runs.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_closed_admission_is_internal_and_never_runs_the_body() {
+    let fx = fixture();
+    let state = Arc::new(fx.state(fx.backends()));
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    admission.close();
+    let deadline = std::time::Instant::now() + STUCK_DEADLINE;
+    let answer =
+        router::run_blocking(state, admission, deadline, body_counted_closed, json!({})).await;
+    assert_eq!(answer, Err(ErrorKind::Internal));
+    assert_eq!(RAN_CLOSED.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Why: #9572 fix round — `Timeout` polls its future before its timer, so a
+/// free permit was granted to a request whose deadline had already passed,
+/// and its body ran with no time left (a `file` set would commit).
+/// What: a deadline already past and a free permit answer
+/// `deadline_exceeded`, the body never runs, and the permit comes back.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_request_admitted_past_its_deadline_never_runs_the_body() {
+    let fx = fixture();
+    let state = Arc::new(fx.state(fx.backends()));
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let deadline = std::time::Instant::now();
+    let answer = router::run_blocking(
+        state,
+        Arc::clone(&admission),
+        deadline,
+        body_counted_late,
+        json!({}),
+    )
+    .await;
+    assert_eq!(answer, Err(ErrorKind::DeadlineExceeded));
+    assert_eq!(RAN_LATE.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(admission.available_permits(), 1, "the permit was kept");
+}
+
+/// Why: #9572 fix round — with a stuck call answered, the server idles out
+/// and then waited, with no limit, in the runtime's drop for the stuck
+/// thread, so one hung process was left behind per idle cycle.
+/// What: the binary's exit path, [`router::run_to_exit`], serves until idle
+/// on its own runtime while a [`StuckBackend`] call is still held, and must
+/// return within a bound; a watchdog fails the test instead of hanging it.
+/// Test: itself.
+#[test]
+fn server_process_exit_is_bounded_while_a_call_is_stuck() {
+    let fx = fixture_with_idle(Duration::from_secs(1));
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let socket = fx.settings.socket.clone();
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "STUCK_1", "value": VALUE});
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let exit = router::run_to_exit(runtime, async move {
+            let server = tokio::spawn(router::serve_state(state, std::future::pending()));
+            wait_serving(&socket).await;
+            let answer = call(&socket, method::SET, params).await;
+            (answer, server.await)
+        });
+        let _ = tx.send(exit);
+    });
+    let bound = Duration::from_secs(20);
+    let (answer, served) = match rx.recv_timeout(bound) {
+        Ok(exit) => exit,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the server did not exit within {bound:?} while a call was stuck")
+        }
+        Err(e) => panic!("the server thread ended without an answer: {e}"),
+    };
+    assert_eq!(
+        fixed_error(&answer, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+    assert!(matches!(served, Ok(Ok(ServeExit::Idle))), "{served:?}");
+    drop(release);
+}
+
+/// Why: #9572 review — a panic in the served future (an `eprintln!` on a
+/// broken stderr) unwound out of `block_on` and dropped the runtime with no
+/// limit, so the process hung on a stuck call after unlinking its socket.
+/// What: [`router::run_to_exit`] runs a future that panics while a
+/// [`StuckBackend`] call is held; it must still return within a bound, and
+/// the panic must reach the caller rather than be swallowed.
+/// Test: itself.
+#[test]
+fn server_process_exit_is_bounded_when_the_served_future_panics() {
+    const PANIC: &str = "the served future panicked";
+    let fx = fixture_with_idle(Duration::from_secs(60));
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let socket = fx.settings.socket.clone();
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "STUCK_1", "value": VALUE});
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            router::run_to_exit(runtime, async move {
+                let _server = tokio::spawn(router::serve_state(state, std::future::pending()));
+                wait_serving(&socket).await;
+                let answer = call(&socket, method::SET, params).await;
+                // The call answered at its deadline; its thread is still held.
+                if fixed_error(&answer, method::SET) == ErrorKind::DeadlineExceeded {
+                    std::panic::panic_any(PANIC);
+                }
+            })
+        }));
+        let _ = tx.send(exit.map_err(|p| p.downcast_ref::<&str>().copied()));
+    });
+    let bound = Duration::from_secs(20);
+    let exit = match rx.recv_timeout(bound) {
+        Ok(exit) => exit,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!(
+                "run_to_exit did not return within {bound:?} after a panic while a call was stuck"
+            )
+        }
+        Err(e) => panic!("the server thread ended without an answer: {e}"),
+    };
+    assert_eq!(exit, Err(Some(PANIC)), "the panic must surface");
+    drop(release);
 }

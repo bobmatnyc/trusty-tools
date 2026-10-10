@@ -4,8 +4,8 @@
 //! idle, and is no daemon. Ruling 32 — the bind, the peer check and the idle
 //! loop are trusty-common's, not hand-rolled here.
 //! What: [`State`] (settings, index, backend factory), [`build_router`]
-//! (each `secrets.*` method on the blocking pool, errors folded to fixed
-//! text), and [`serve`]: `prepare_socket_dir` (0700) →
+//! (each `secrets.*` method on the blocking pool under its deadline and an
+//! admission cap, errors folded to fixed text), and [`serve`]: `prepare_socket_dir` (0700) →
 //! `bind_singleton_hardened` (0600, refuses a live owner) →
 //! `serve_until_idle` (every connection uid-checked by `handle_connection`
 //! before a byte is read) → unlink the socket → drop the listener.
@@ -21,13 +21,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tokio::sync::Semaphore;
 use trusty_common::uds::server::{
     IdleTracker, RpcRouter, RpcServeOptions, ServeExit as UdsServeExit, serve_until_idle,
 };
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::audit::AuditSink;
-use super::deadline::request_deadline;
+use super::deadline::{BODY_GRACE, request_deadline};
 use super::doctor;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
@@ -228,6 +229,8 @@ pub struct State {
     pub(crate) start: StartEnv,
     /// Replaces every method's deadline; tests only (#7524 P2-M1).
     pub(crate) deadline_override: Option<Duration>,
+    /// Replaces [`MAX_BLOCKING_CALLS`]; tests only (#9572).
+    pub(crate) admission_cap_override: Option<usize>,
 }
 
 impl State {
@@ -249,6 +252,7 @@ impl State {
             file_consent_config: account_machine_config(),
             start: StartEnv::default(),
             deadline_override: None,
+            admission_cap_override: None,
         }
     }
 
@@ -256,6 +260,11 @@ impl State {
     fn deadline_for(&self, name: &str) -> Duration {
         self.deadline_override
             .unwrap_or_else(|| request_deadline(name))
+    }
+
+    /// How many method bodies may run at once (#9572).
+    fn admission_cap(&self) -> usize {
+        self.admission_cap_override.unwrap_or(MAX_BLOCKING_CALLS)
     }
 }
 
@@ -267,6 +276,21 @@ impl fmt::Debug for State {
             .finish_non_exhaustive()
     }
 }
+
+/// How many method bodies may run on the blocking pool at once (#9572).
+///
+/// Why: a backend call that never returns (a file backend on a hung mount)
+/// keeps its blocking-pool thread forever; no thread can be cancelled. With
+/// no cap, each such request adds a thread, up to tokio's default pool of
+/// 512, and later requests wait for the pool.
+/// What: the router takes one permit before it spawns a body and moves the
+/// permit into the body's closure, so a permit comes back only when its
+/// thread finishes. At most this many threads are ever stuck; a request
+/// that waits for a permit past its deadline answers
+/// [`ErrorKind::DeadlineExceeded`].
+/// Test: `server_stuck_backend_calls_do_not_starve_a_later_request`,
+/// `server_timed_out_request_keeps_its_permit_until_its_call_returns`.
+pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
 pub(crate) const METHODS: [(&str, MethodFn); 6] = [
@@ -287,28 +311,82 @@ pub(crate) const METHODS: [(&str, MethodFn); 6] = [
 /// [`ErrorKind::to_rpc`] for that method, and a body that panics becomes
 /// [`ErrorKind::Internal`]. #7524 P2-M1: the request's deadline starts when
 /// the call arrives and is set on the body's thread, so every CLI call the
-/// body makes is bounded by it (`store::deadline`).
+/// body makes is bounded by it (`store::deadline`). #9572: every method
+/// shares one admission semaphore of [`State::admission_cap`] permits; see
+/// [`run_blocking`].
 /// Test: `server_error_text_is_fixed_per_method_and_kind`,
-/// `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`.
+/// `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`,
+/// `server_stuck_backend_calls_do_not_starve_a_later_request`.
 pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
+    let admission = Arc::new(Semaphore::new(state.admission_cap()));
     METHODS
         .into_iter()
         .fold(RpcRouter::new(), |router, (name, body)| {
             let state = Arc::clone(&state);
+            let admission = Arc::clone(&admission);
             router.typed::<Value, Value, _, _>(name, move |params| {
                 let state = Arc::clone(&state);
+                let admission = Arc::clone(&admission);
                 async move {
                     // #7524 P2-M1: one deadline for the whole request.
                     let deadline = Instant::now() + state.deadline_for(name);
-                    tokio::task::spawn_blocking(move || {
-                        crate::store::deadline::within(deadline, || body(&state, params))
-                    })
-                    .await
-                    .unwrap_or(Err(ErrorKind::Internal))
-                    .map_err(|kind| kind.to_rpc(name))
+                    run_blocking(state, admission, deadline, body, params)
+                        .await
+                        .map_err(|kind| kind.to_rpc(name))
                 }
             })
         })
+}
+
+/// Run `body` on the blocking pool under `deadline` and one admission permit.
+///
+/// Why: #9572 — the router awaited the body with no bound, so a backend call
+/// that never returns held its request forever, and nothing capped how many
+/// threads such calls could hold.
+/// What: waits for a permit from `admission` until `deadline`, then spawns
+/// the body with the permit moved into its closure, and waits for it until
+/// `deadline` plus [`BODY_GRACE`], so a body that stops at the deadline still
+/// gives its own answer. A permit granted at or past the deadline starts no
+/// body. Past either wait the answer is
+/// [`ErrorKind::DeadlineExceeded`]; a closed semaphore or a panicking body
+/// is [`ErrorKind::Internal`]. Neither is ever a success.
+/// Test: `server_stuck_backend_calls_do_not_starve_a_later_request`,
+/// `server_timed_out_request_keeps_its_permit_until_its_call_returns`,
+/// `server_closed_admission_is_internal_and_never_runs_the_body`,
+/// `server_request_admitted_past_its_deadline_never_runs_the_body`.
+pub(crate) async fn run_blocking(
+    state: Arc<State>,
+    admission: Arc<Semaphore>,
+    deadline: Instant,
+    body: MethodFn,
+    params: Value,
+) -> Result<Value, ErrorKind> {
+    let until = tokio::time::Instant::from_std(deadline);
+    // #9572: the wait for a permit counts against the request's deadline.
+    let permit = match tokio::time::timeout_at(until, admission.acquire_owned()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_closed)) => return Err(ErrorKind::Internal),
+        Err(_elapsed) => return Err(ErrorKind::DeadlineExceeded),
+    };
+    // #9572: `timeout_at` polls the acquire before its timer, so a free
+    // permit is granted past the deadline; the body must not start then.
+    // Returning drops the permit, which releases it.
+    if Instant::now() >= deadline {
+        return Err(ErrorKind::DeadlineExceeded);
+    }
+    let task = tokio::task::spawn_blocking(move || {
+        // #9572: the permit is the thread's, released only when it finishes.
+        let _permit = permit;
+        crate::store::deadline::within(deadline, || body(&state, params))
+    });
+    // See #9572: past the deadline and its grace the request answers
+    // `DeadlineExceeded`, but the body's thread cannot be cancelled. It keeps
+    // running, and keeps its permit, until the backend call returns; the cap
+    // bounds such threads.
+    match tokio::time::timeout_at(until + BODY_GRACE, task).await {
+        Ok(joined) => joined.unwrap_or(Err(ErrorKind::Internal)),
+        Err(_elapsed) => Err(ErrorKind::DeadlineExceeded),
+    }
 }
 
 /// Why [`serve`] returned.
@@ -456,6 +534,41 @@ pub(crate) async fn serve_state(
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))
+}
+
+/// How long the process waits at exit for blocking threads still running.
+///
+/// Why: #9572 — dropping the runtime waits with no limit for every blocking
+/// thread, so a call that never returns kept an idled-out server alive.
+pub const EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// Run `future` on `runtime` to completion, then shut the runtime down
+/// within [`EXIT_GRACE`].
+///
+/// Why: #9572 — after a stuck request answers, the server idles out; a
+/// plain runtime drop then hung on the stuck thread, and the next client
+/// started another server, so one hung process accrued per idle cycle.
+/// What: `block_on`, then `shutdown_timeout(EXIT_GRACE)`. A blocking call
+/// that is finishing normally gets up to [`EXIT_GRACE`] to end; one that is
+/// still running then is abandoned, and the process exits with `future`'s
+/// result. A write that call started may or may not land.
+/// `shutdown_timeout` rather than `shutdown_background`: the short wait lets
+/// a call that is about to finish complete instead of being cut off.
+/// If `future` panics, the same bounded shutdown runs and the panic then
+/// resumes in the caller.
+/// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`,
+/// `server_process_exit_is_bounded_when_the_served_future_panics`.
+pub fn run_to_exit<T>(runtime: tokio::runtime::Runtime, future: impl Future<Output = T>) -> T {
+    // #9572: a panic unwinding out of `block_on` dropped the runtime, which
+    // waits with no limit for a stuck thread; catch it, shut down, re-raise.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(future)));
+    // See #9572: no stuck thread can hold the process past this bound.
+    runtime.shutdown_timeout(EXIT_GRACE);
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 /// Remove stale template directories under `root`, reporting on stderr.

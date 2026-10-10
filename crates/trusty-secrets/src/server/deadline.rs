@@ -12,6 +12,7 @@
 //! covers the connect, the index publish and the audit record that follow
 //! the last CLI call. The router sets the deadline on the thread a body runs
 //! on (`store::deadline`); the CLI runner refuses or stops a call past it.
+//! #9572: the router stops waiting for the body [`BODY_GRACE`] after it.
 //! Test: `client_wait_exceeds_the_server_deadline_for_every_method`,
 //! `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`.
 
@@ -28,6 +29,18 @@ pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(15);
 
 /// How much longer a client waits than the server's deadline.
 pub(crate) const CLIENT_MARGIN: Duration = Duration::from_secs(15);
+
+/// How long past the deadline the router still waits for a body (#9572).
+///
+/// Why: a body that honours the deadline answers just after it: the CLI
+/// runner kills the CLI at the deadline, and `copy` then names the keys it
+/// did not finish. A router that stopped waiting at the deadline itself
+/// would replace that answer with a bare `deadline_exceeded`.
+/// What: two seconds, well inside [`CLIENT_MARGIN`], so the client still
+/// receives the router's answer for a body that never returns.
+/// Test: `server_copy_past_its_deadline_starts_no_further_key`,
+/// `client_wait_exceeds_the_server_deadline_for_every_method`.
+pub(crate) const BODY_GRACE: Duration = Duration::from_secs(2);
 
 /// The whole-operation deadline the server gives one request of `name`.
 pub(crate) fn request_deadline(name: &str) -> Duration {
