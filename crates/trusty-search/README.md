@@ -234,7 +234,9 @@ Add trusty-search as an MCP server in your Claude Code config (`~/.claude/claude
 
 `serve` speaks MCP over stdio only. #9542 retired `--with-http`, `--http` and
 `--port`: each exits 1 naming the issue and binds nothing. MCP clients that
-need HTTP reach trusty-search through trusty-console.
+need HTTP have no trusty-search endpoint: trusty-console has no MCP route, only a REST proxy
+at `/api/{service}/{*path}`. Use stdio (`trusty-search serve`) or the daemon's Unix
+socket (`<TRUSTY_DATA_DIR>/trusty-search.sock`, or `TRUSTY_SEARCH_SOCKET`).
 
 Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and the rest of the surface directly — see [MCP tools](#mcp-tools) for the generated roster. The daemon must be running independently (`trusty-search start`) before Claude Code connects.
 

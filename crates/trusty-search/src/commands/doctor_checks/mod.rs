@@ -165,7 +165,7 @@ pub fn doctor_data_dir() -> std::path::PathBuf {
 /// this test binary that also mutate it. Every such call site already
 /// carries the crate's bare `#[serial]` tag (audited across
 /// `commands/migrate_storage/*`, `commands/start/tests.rs`,
-/// `commands/daemon_utils.rs`, `service/data_dir.rs`,
+/// `service/data_dir.rs`,
 /// `service/daemon_tests.rs`, `service/server/*_tests.rs`,
 /// `service/reindex/root_hijack_tests.rs`, and
 /// `service/warm_boot/warm_boot_tests.rs`), so the logical race the

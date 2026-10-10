@@ -2,7 +2,7 @@
 //!
 //! #9168: the bridge reaches the daemon only through `DaemonClient` on its
 //! Unix socket. #9542: the `--with-http` MCP HTTP/SSE listener is retired;
-//! MCP-over-HTTP clients use trusty-console.
+//! MCP is stdio only; the daemon's Unix socket is the one other client path.
 
 use super::serve_scope::{auto_pin_from_cwd, PinChoice};
 use anyhow::Result;
@@ -17,7 +17,7 @@ pub(crate) use super::serve_scope::resolve_pinned_index;
 /// flag that was silently ignored would leave an MCP client pointed at an
 /// address nothing serves, so each one fails closed and names the issue.
 /// What: `Err` naming the first retired flag present (`--with-http`, `--http`,
-/// `--port`) and the replacements; `Ok` when none is.
+/// `--port`) and the stdio and socket alternatives; `Ok` when none is.
 /// Test: `serve_binds_no_tcp_listener_9542`.
 fn refuse_retired_http(with_http: bool, port: Option<u16>, http: Option<&str>) -> Result<()> {
     let flag = if with_http {
@@ -31,8 +31,9 @@ fn refuse_retired_http(with_http: bool, port: Option<u16>, http: Option<&str>) -
     };
     anyhow::bail!(
         "`serve {flag}` is retired (#9542): trusty-search binds no TCP listener (ADR-0032). \
-         Run `trusty-search serve` for MCP over stdio, or reach MCP over HTTP through \
-         trusty-console."
+         Run `trusty-search serve` with no flags for MCP over stdio, or talk to the \
+         daemon on its Unix socket (`<TRUSTY_DATA_DIR>/trusty-search.sock`, or \
+         `TRUSTY_SEARCH_SOCKET`). trusty-console has no MCP endpoint."
     )
 }
 
