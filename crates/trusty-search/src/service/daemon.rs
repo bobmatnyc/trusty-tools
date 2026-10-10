@@ -586,10 +586,11 @@ use trusty_common::shutdown_signal;
 /// removes stale ones and clears the default instance's shared discovery
 /// registry entry; `search.health` reports `transport.http_addr: null`. The
 /// tickers start here, since no router starts them. The socket bind is
-/// fatal. `rpc_socket` (`start --socket`) replaces [`socket::socket_path`]
-/// as the socket to bind.
+/// fatal; a stale entry it cannot remove is only warned. `rpc_socket`
+/// (`start --socket`) replaces [`socket::socket_path`] as the socket to bind.
 /// Test: `run_daemon_serves_only_the_socket`,
 /// `run_daemon_removes_a_stale_http_addr`,
+/// `run_daemon_serves_when_a_stale_http_addr_cannot_be_removed`,
 /// `run_daemon_health_reports_the_transport_it_bound`.
 pub async fn run_daemon(
     state: SearchAppState,
@@ -613,7 +614,8 @@ pub async fn run_daemon(
         .map_err(|e| DaemonError::Server(format!("{e:#}")))?;
 
     // #9214: no HTTP address exists to announce; withdraw an older build's.
-    withdraw_http_discovery()?;
+    // A stale entry it cannot remove is warned, never fatal.
+    withdraw_http_discovery();
 
     // Startup banner (stderr only — stdout is JSON-RPC transport).
     eprintln!(
@@ -765,23 +767,45 @@ pub async fn run_daemon(
 /// shared registry entry, and older clients still resolve the daemon from
 /// them. Left in place, they send those clients to a dead port — or to
 /// whatever now holds it.
-/// What: removes the port file and the `http_addr` file (a missing file is
-/// fine; any other removal error is fatal, because the stale announcement
-/// would survive) and clears the default instance's shared registry entry.
+/// What: removes the port file and the `http_addr` file and clears the
+/// default instance's shared registry entry. A missing entry is fine. Every
+/// arm shares one failure policy, [`warn_stale_discovery`]: a WARN naming the
+/// stale path, never an error. The socket is already bound, so a stale entry
+/// must not stop the daemon serving it — under launchd `KeepAlive` a fatal
+/// error relaunches the daemon into the same failure forever.
 /// Safe because the caller holds the daemon lock, so no live instance of this
 /// data dir owns them.
-/// Test: `run_daemon_removes_a_stale_http_addr`.
-fn withdraw_http_discovery() -> Result<(), DaemonError> {
-    let port_path = daemon_port_path()?;
-    for path in std::iter::once(port_path).chain(legacy_http_addr_path()) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => tracing::info!("removed stale {} (no HTTP listener)", path.display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(DaemonError::Io(e)),
-        }
+/// Test: `run_daemon_removes_a_stale_http_addr`,
+/// `run_daemon_serves_when_a_stale_http_addr_cannot_be_removed`,
+/// `deregister_shared_discovery_warns_when_the_entry_cannot_be_removed`.
+fn withdraw_http_discovery() {
+    // #9214: a path that cannot resolve is warned like one that cannot go.
+    match daemon_port_path() {
+        Ok(port_path) => remove_stale_discovery_file(&port_path),
+        Err(e) => warn_stale_discovery("daemon.port (path unresolved)", &e),
+    }
+    if let Some(addr_path) = legacy_http_addr_path() {
+        remove_stale_discovery_file(&addr_path);
     }
     deregister_shared_discovery();
-    Ok(())
+}
+
+/// Remove one stale discovery file; a missing file is fine (#9214).
+fn remove_stale_discovery_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => tracing::info!("removed stale {} (no HTTP listener)", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn_stale_discovery(&path.display().to_string(), &e),
+    }
+}
+
+/// The one failure policy for a stale HTTP discovery entry (#9214): warn,
+/// naming the entry, and carry on serving the socket.
+fn warn_stale_discovery(entry: &str, err: &dyn std::fmt::Display) {
+    tracing::warn!(
+        "cannot remove the stale HTTP discovery entry {entry}: {err}; an older client may \
+         still resolve it to a dead port — remove it by hand (#9214)"
+    );
 }
 
 /// Wake every parked embedding stage so shutdown is never held open by a pause
@@ -822,14 +846,19 @@ pub use crate::service::shutdown_flush::{
 /// so a surviving entry can only name a dead port.
 /// What: no-ops when `TRUSTY_DATA_DIR` is set — an isolated instance never
 /// wrote it and must never clear the default instance's entry; otherwise
-/// calls `trusty_common::remove_daemon_addr("trusty-search")`, ignoring any
-/// error (best-effort, like the file removals beside it).
-/// Test: `deregister_shared_discovery_removes_when_default_instance`.
+/// calls `trusty_common::remove_daemon_addr("trusty-search")`. A failure takes
+/// the same policy as the file removals beside it, [`warn_stale_discovery`]:
+/// the error's context names the registry path.
+/// Test: `deregister_shared_discovery_removes_when_default_instance`,
+/// `deregister_shared_discovery_warns_when_the_entry_cannot_be_removed`.
 fn deregister_shared_discovery() {
     if std::env::var("TRUSTY_DATA_DIR").is_ok() {
         return;
     }
-    let _ = trusty_common::remove_daemon_addr("trusty-search");
+    // #9214: never swallowed — warned like an unremovable stale file.
+    if let Err(e) = trusty_common::remove_daemon_addr("trusty-search") {
+        warn_stale_discovery("in the shared registry", &format!("{e:#}"));
+    }
 }
 
 #[cfg(test)]

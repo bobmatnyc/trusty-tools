@@ -1469,7 +1469,8 @@ The daemon serves every method on its Unix socket and binds no TCP port
 - writes no `daemon.port` or `http_addr` file, and removes any an older build
   of the same data dir left;
 - clears the default instance's shared discovery registry entry, and
-  registers none;
+  registers none. A stale file or entry it cannot remove is logged as a
+  warning naming its path, and the daemon keeps serving;
 - reports `transport.http_addr: null` from `search.health`;
 - runs every background ticker, and `trusty-search stop` finds it through the
   lockfile pid;

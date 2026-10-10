@@ -688,6 +688,100 @@ async fn run_daemon_removes_a_stale_http_addr() {
     .await;
 }
 
+/// #9214: a stale `http_addr` the daemon cannot remove never stops it serving.
+///
+/// Why: the socket is bound before the withdrawal runs. A removal failure
+/// that ended `run_daemon` with an error sent a launchd `KeepAlive` daemon
+/// into a relaunch loop over one stale file.
+/// What: plants a non-empty directory where `http_addr` lives, so removing
+/// it fails, and runs the daemon under a WARN capture. The socket must serve,
+/// a graceful stop must return `Ok`, and a warning must name the stale path.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_serves_when_a_stale_http_addr_cannot_be_removed() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+    use crate::service::watcher_teardown::tests::WarnCapture;
+    use tracing::instrument::WithSubscriber;
+
+    with_isolated_daemon_paths(|data_dir| async move {
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let stale_addr = data_dir.join("http_addr");
+        std::fs::create_dir_all(&stale_addr).unwrap();
+        std::fs::write(stale_addr.join("keep"), "x").unwrap();
+
+        let capture = WarnCapture::default();
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let daemon = run_daemon(state, None).with_subscriber(capture.dispatch());
+        let handle = tokio::spawn(daemon);
+        let serving = wait_for_socket(&socket_path).await;
+        let _ = shutdown_tx.send(true);
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+
+        let stale = stale_addr.display().to_string();
+        let warnings = capture.warnings();
+        assert!(
+            serving,
+            "a stale entry must not stop the daemon serving its socket"
+        );
+        assert!(
+            matches!(exit, Ok(Ok(Ok(())))),
+            "a graceful stop must return Ok: {exit:?}"
+        );
+        assert!(
+            stale_addr.is_dir(),
+            "the fixture must make the removal fail"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains(&stale)),
+            "a WARN must name the stale path {stale}: {warnings:?}"
+        );
+    })
+    .await;
+}
+
+/// #9214: an unremovable shared registry entry is warned, never swallowed.
+///
+/// Why: the registry arm discarded its error while the file arm returned one,
+/// so one stale state was fatal in one arm and silent in the other.
+/// What: as the default instance, plants a non-empty directory where the
+/// shared registry's `http_addr` lives, calls `deregister_shared_discovery`
+/// under a WARN capture, and asserts a warning names that path.
+/// Test: this function IS the test.
+#[test]
+#[serial]
+fn deregister_shared_discovery_warns_when_the_entry_cannot_be_removed() {
+    use crate::service::watcher_teardown::tests::WarnCapture;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // SAFETY: `#[serial]` with every other env mutator in this module.
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", tmp.path());
+    }
+    let stale = trusty_common::resolve_data_dir("trusty-search")
+        .unwrap()
+        .join("http_addr");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("keep"), "x").unwrap();
+    let capture = WarnCapture::default();
+    tracing::dispatcher::with_default(&capture.dispatch(), deregister_shared_discovery);
+    // SAFETY: as above.
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+    }
+
+    let stale_text = stale.display().to_string();
+    let warnings = capture.warnings();
+    assert!(stale.is_dir(), "the fixture must make the removal fail");
+    assert!(
+        warnings.iter().any(|w| w.contains(&stale_text)),
+        "a WARN must name the stale registry path {stale_text}: {warnings:?}"
+    );
+}
+
 /// #9214: a clean stop of a socket-only daemon returns `Ok`, every time.
 ///
 /// Why: a normal stop cancels the drain AND ends the rpc serve loop, so both
