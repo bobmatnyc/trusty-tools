@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 
 use trusty_channels::policy::{
     Channel, FileState, GateError, LoadReport, LoadRequest, ProjectFileError, ProjectInput,
-    load_effective, merge_for, parse_host, parse_project_file,
+    load_effective_until, merge_for, parse_host, parse_project_file,
 };
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
-use super::{HostProbe, Loader, Outcome, Unfinished, gate_row, host_row, rows_with, view_row};
+use super::{
+    HostProbe, LOAD_TIMEOUT, Loader, Outcome, Unfinished, gate_row, host_row, load_deadline,
+    rows_with, view_row,
+};
 
 const NAMES: [&str; 4] = [
     "channels_host",
@@ -60,7 +63,7 @@ impl Home {
 }
 
 fn real() -> Loader {
-    Arc::new(load_effective)
+    Arc::new(load_effective_until)
 }
 
 async fn rows(home: &Home) -> Vec<DoctorCheck> {
@@ -367,9 +370,9 @@ async fn daemon_view_serves_slack_and_telegram_and_gchat_loads_each_project() {
     ));
     let seen: Arc<Mutex<Vec<LoadRequest>>> = Arc::default();
     let log = Arc::clone(&seen);
-    let loader: Loader = Arc::new(move |req: &LoadRequest| {
+    let loader: Loader = Arc::new(move |req: &LoadRequest, deadline: Instant| {
         log.lock().expect("log").push(req.clone());
-        load_effective(req)
+        load_effective_until(req, deadline)
     });
     rows_with(home.base(), loader, Duration::from_secs(30)).await;
     let seen = seen.lock().expect("log");
@@ -395,9 +398,9 @@ async fn a_load_that_hangs_is_unknown_and_doctor_finishes() {
     // The loader blocks until the test ends and drops the sender.
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     let rx = Arc::new(Mutex::new(rx));
-    let loader: Loader = Arc::new(move |req: &LoadRequest| {
+    let loader: Loader = Arc::new(move |req: &LoadRequest, deadline: Instant| {
         let _ = rx.lock().map(|r| r.recv());
-        load_effective(req)
+        load_effective_until(req, deadline)
     });
     let started = Instant::now();
     let rows = rows_with(home.base(), loader, Duration::from_millis(100)).await;
@@ -422,7 +425,7 @@ async fn a_load_that_hangs_is_unknown_and_doctor_finishes() {
 async fn a_load_that_panics_is_unknown() {
     let home = Home::new();
     home.write_host(&slack_host(&[]));
-    let loader: Loader = Arc::new(|_: &LoadRequest| panic!("synthetic loader panic"));
+    let loader: Loader = Arc::new(|_: &LoadRequest, _: Instant| panic!("synthetic loader panic"));
     let rows = rows_with(home.base(), loader, Duration::from_secs(30)).await;
     for name in NAMES {
         assert_eq!(row(&rows, name).status, CheckStatus::Unknown, "{rows:?}");
@@ -486,6 +489,19 @@ fn a_denied_load_without_a_host_finding_is_fail() {
         ceiling: None,
     }));
     assert_eq!(host.status, CheckStatus::Fail, "{host:?}");
+}
+
+#[test]
+fn a_load_deadline_falls_before_its_wait_ends() {
+    let start = Instant::now();
+    assert_eq!(
+        load_deadline(start, LOAD_TIMEOUT),
+        start + Duration::from_secs(28)
+    );
+    assert_eq!(
+        load_deadline(start, Duration::from_millis(100)),
+        start + Duration::from_millis(50)
+    );
 }
 
 /// Names the fixture home of `doctor_leaves_no_git_running_at_its_budget`'s

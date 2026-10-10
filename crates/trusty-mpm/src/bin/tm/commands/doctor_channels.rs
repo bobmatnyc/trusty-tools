@@ -4,13 +4,14 @@
 //! a fresh load of the route policy would put in effect, and why anything is
 //! refused, without sending a message or changing a file.
 //! What: four READ-ONLY rows, each the verdict of
-//! `trusty_channels::policy::load_effective`: `channels_host` (the host
+//! `trusty_channels::policy::load_effective_until`: `channels_host` (the host
 //! ceiling, loaded with no channel, so no git runs), `channels_routes` (the
 //! daemon view: Slack and Telegram over every listed project),
 //! `channels_gchat` (one load per gchat-listed project, as gchat-mcp loads)
 //! and `channels_gate` (the default-branch gate's refusals, with the fix).
-//! Each load runs on its own thread under [`LOAD_TIMEOUT`]; one that does not
-//! finish reads Unknown and doctor moves on. No enforcement, no `refresh()`
+//! Each load runs on its own thread under [`LOAD_TIMEOUT`], and its git is
+//! killed [`KILL_MARGIN`] before that wait ends; one that does not finish
+//! reads Unknown and doctor moves on. No enforcement, no `refresh()`
 //! and no credential resolution (S2c rulings Q1, Q8, Q9). A row names a
 //! credential ref, never a value.
 //! Test: `doctor_channels_tests.rs`.
@@ -19,16 +20,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use trusty_channels::policy::{
     Channel, FileState, Finding, FindingScope, GateError, HostCeiling, HostError, LoadReport,
-    LoadRequest, ProjectFileError, load_effective, parse_host,
+    LoadRequest, ProjectFileError, load_effective_until, parse_host,
 };
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 
 /// The budget for each channel load (S2c ruling Q8).
 pub(crate) const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long before its wait ends a load's git is killed (#8454), so no git
+/// process outlives doctor.
+pub(crate) const KILL_MARGIN: Duration = Duration::from_secs(2);
 
 const HOST: &str = "channels_host";
 const ROUTES: &str = "channels_routes";
@@ -37,8 +41,9 @@ const GATE: &str = "channels_gate";
 /// A row names at most this many files or findings, then "+N more".
 const MAX_NAMED: usize = 5;
 
-/// A route-policy load, injectable so tests can stall or record it.
-pub(crate) type Loader = Arc<dyn Fn(&LoadRequest) -> LoadReport + Send + Sync>;
+/// A route-policy load whose git ends by the given deadline, injectable so
+/// tests can stall or record it.
+pub(crate) type Loader = Arc<dyn Fn(&LoadRequest, Instant) -> LoadReport + Send + Sync>;
 
 /// Why a load gave no report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +86,7 @@ pub(crate) struct HostProbe {
 pub(crate) async fn channel_rows() -> Vec<DoctorCheck> {
     rows_with(
         LoadRequest::for_host(None, &[]),
-        Arc::new(load_effective),
+        Arc::new(load_effective_until),
         LOAD_TIMEOUT,
     )
     .await
@@ -93,9 +98,11 @@ pub(crate) async fn channel_rows() -> Vec<DoctorCheck> {
 /// person deny the combined set, while gchat-mcp loads one project at a time
 /// (S2c plan §3). So each consumer's view is loaded as that consumer loads it.
 /// What: the host load first (its ceiling lists the gchat projects), then the
-/// daemon view and the gchat view concurrently, each under `limit`.
+/// daemon view and the gchat view concurrently, each under `limit`, with
+/// its git ending by [`timed`]'s deadline.
 /// Test: `daemon_view_serves_slack_and_telegram_and_gchat_loads_each_project`,
-/// `a_load_that_hangs_is_unknown_and_doctor_finishes`, `a_load_that_panics_is_unknown`.
+/// `a_load_that_hangs_is_unknown_and_doctor_finishes`, `a_load_that_panics_is_unknown`,
+/// `doctor_leaves_no_git_running_at_its_budget`.
 pub(crate) async fn rows_with(
     base: LoadRequest,
     loader: Loader,
@@ -103,13 +110,13 @@ pub(crate) async fn rows_with(
 ) -> Vec<DoctorCheck> {
     let host = {
         let (loader, base) = (Arc::clone(&loader), base.clone());
-        timed(limit, move || host_probe(&*loader, &base)).await
+        timed(limit, move |deadline| host_probe(&*loader, &base, deadline)).await
     };
     let gchat_dirs = host.as_ref().map(|p| gchat_dirs(p.ceiling.as_ref()));
     let daemon = {
         let req = view(&base, None, &[Channel::Slack, Channel::Telegram]);
         let loader = Arc::clone(&loader);
-        timed(limit, move || vec![loader(&req)])
+        timed(limit, move |deadline| vec![loader(&req, deadline)])
     };
     let gchat = async {
         // #8454 S2c: no host result means no project list; never "no projects".
@@ -122,7 +129,11 @@ pub(crate) async fn rows_with(
                 .collect()
         };
         let loader = Arc::clone(&loader);
-        timed(limit, move || reqs.iter().map(|r| loader(r)).collect()).await
+        // #8454: one deadline for every project; past it, the rest are refused.
+        timed(limit, move |deadline| {
+            reqs.iter().map(|r| loader(r, deadline)).collect()
+        })
+        .await
     };
     let (daemon, gchat) = tokio::join!(daemon, gchat);
     vec![
@@ -138,16 +149,23 @@ pub(crate) async fn rows_with(
 /// Why (Q8): a git step can block up to 10 s and a project list is unbounded,
 /// so a load has no overall budget of its own. A detached std thread, not
 /// `spawn_blocking`: a runtime waits for its blocking tasks on shutdown, so a
-/// stuck load would hold doctor's exit.
+/// stuck load would hold doctor's exit. #8454: a thread left behind must not
+/// leave git behind, so `f` gets a deadline to pass to the load.
+/// What: hands `f` the deadline [`load_deadline`] sets, [`KILL_MARGIN`]
+/// before the wait ends, and waits up to `limit` for its value; a panic in
+/// `f`, or a thread that cannot start, is [`Unfinished::Stopped`].
+/// Test: `a_load_that_hangs_is_unknown_and_doctor_finishes`,
+/// `a_load_that_panics_is_unknown`, `doctor_leaves_no_git_running_at_its_budget`.
 async fn timed<T: Send + 'static>(
     limit: Duration,
-    f: impl FnOnce() -> T + Send + 'static,
+    f: impl FnOnce(Instant) -> T + Send + 'static,
 ) -> Outcome<T> {
+    let deadline = load_deadline(Instant::now(), limit);
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("tm-doctor-channels".into())
         .spawn(move || {
-            let _ = tx.send(f());
+            let _ = tx.send(f(deadline));
         })
         .map_err(|_| Unfinished::Stopped)?;
     match tokio::time::timeout(limit, rx).await {
@@ -156,6 +174,13 @@ async fn timed<T: Send + 'static>(
         Ok(Err(_)) => Err(Unfinished::Stopped),
         Err(_) => Err(Unfinished::TimedOut(limit)),
     }
+}
+
+/// When a load waited on from `start` for `limit` must have killed its git:
+/// [`KILL_MARGIN`] before the wait ends, or halfway through a shorter wait.
+/// Test: `a_load_deadline_falls_before_its_wait_ends`.
+pub(crate) fn load_deadline(start: Instant, limit: Duration) -> Instant {
+    start + limit - KILL_MARGIN.min(limit / 2)
 }
 
 /// `base`'s host file and home, for `project` and `channels`.
@@ -170,10 +195,11 @@ fn view(base: &LoadRequest, project: Option<PathBuf>, channels: &[Channel]) -> L
 
 /// Load with no channel, then re-read the accepted ceiling for its detail.
 fn host_probe(
-    loader: &(dyn Fn(&LoadRequest) -> LoadReport + Send + Sync),
+    loader: &(dyn Fn(&LoadRequest, Instant) -> LoadReport + Send + Sync),
     base: &LoadRequest,
+    deadline: Instant,
 ) -> HostProbe {
-    let report = loader(&view(base, None, &[]));
+    let report = loader(&view(base, None, &[]), deadline);
     let ceiling = if report.denied {
         None
     } else {
