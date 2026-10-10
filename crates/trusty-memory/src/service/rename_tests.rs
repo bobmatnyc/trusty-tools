@@ -634,3 +634,74 @@ fn from_anyhow_maps_palace_rename_errors() {
         assert_eq!(resp.error.expect("error").code, code, "row {i}: {label}");
     }
 }
+
+/// Why (#9544, A2): `palace_update` loaded `<root>/<old>` and saved it with no
+/// lock, so a rename landing between the two let `save_palace` recreate
+/// `<root>/<old>/palace.json`, which shadows the `old -> new` alias.
+/// What: holds `upd-src`'s write mutex, starts a `palace_update` on it, and
+/// asserts the update waits. Moves the palace with the core primitive, then
+/// releases the mutex. The update must land in `upd-dst` and `<root>/upd-src`
+/// must not come back.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn palace_update_waits_for_an_in_flight_rename_and_does_not_recreate_old_dir() {
+    let (state, _tmp) = fixture();
+    make_palace(&state, "upd-src");
+    let held = state.palace_write_lock("upd-src").lock_owned().await;
+    let update = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            MemoryService::new(state)
+                .update_palace_name_typed("upd-src", "Relabelled")
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !update.is_finished(),
+        "#9544: palace_update ran while the palace write mutex was held"
+    );
+
+    let (registry, root) = (Arc::clone(&state.registry), state.data_root.clone());
+    tokio::task::spawn_blocking(move || {
+        registry.rename_palace(&root, "upd-src", "upd-dst", &RenameOptions::default())
+    })
+    .await
+    .expect("join")
+    .expect("core rename");
+    drop(held);
+
+    tokio::time::timeout(RENAME_BOUND, update)
+        .await
+        .expect("the update finishes once the mutex is free")
+        .expect("join")
+        .expect("the update lands in the renamed palace");
+    assert!(
+        !state.data_root.join("upd-src").exists(),
+        "#9544 A2: palace_update recreated <root>/upd-src"
+    );
+    let saved = PalaceStore::load_palace(&state.data_root.join("upd-dst")).expect("load dst");
+    assert_eq!(saved.name, "Relabelled");
+}
+
+/// Why (#9544, A2): after a rename, `palace_update(old)` must relabel the new
+/// palace through the alias, not report "not found" or write under `old`.
+/// What: renames `upd2-src` to `upd2-dst`, calls the MCP-path
+/// `update_palace_name` with the old id, and checks the new palace's name.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_update_through_old_id_after_rename_updates_new_palace() {
+    let (state, _tmp) = fixture();
+    make_palace(&state, "upd2-src");
+    rename(&state, "upd2-src", "upd2-dst", false)
+        .await
+        .expect("rename");
+
+    MemoryService::new(state.clone())
+        .update_palace_name("upd2-src", "Via Old Id")
+        .await
+        .expect("palace_update through the old id");
+    assert!(!state.data_root.join("upd2-src").exists());
+    let saved = PalaceStore::load_palace(&state.data_root.join("upd2-dst")).expect("load dst");
+    assert_eq!(saved.name, "Via Old Id");
+}
