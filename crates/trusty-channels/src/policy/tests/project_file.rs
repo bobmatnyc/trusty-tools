@@ -72,7 +72,7 @@ fn project_file_faults_are_refused() {
             "v2 slack connection: no credentials in project files",
             A_V2.replace(
                 "[[slack.routes]]",
-                "[slack.connection]\ncredential_ref = \"slack\"\n\n[[slack.routes]]",
+                "[slack.connection]\nbot_ref = \"slack\"\n\n[[slack.routes]]",
             ),
             parse_err,
         ),
