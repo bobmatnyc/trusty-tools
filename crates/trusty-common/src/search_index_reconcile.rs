@@ -699,7 +699,10 @@ mod tests {
                     *registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
                     // The registration landed; the connection dies before the
                     // reply is written, which is what the client saw live.
-                    panic!("the mock daemon dropped the create connection after registering");
+                    // #9125: hook-free, so a slow panic hook cannot stall the mock.
+                    uds_mock::hang_up(
+                        "the mock daemon dropped the create connection after registering",
+                    );
                 }
                 let listed = registered.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 Ok(match listed {
