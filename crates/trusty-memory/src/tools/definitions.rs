@@ -486,6 +486,12 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // production cap on this file.
     let tools = result["tools"].as_array_mut().expect("tools is array");
     let metrics = tools.pop().expect("console_metrics sentinel");
+    // #9544: after `palace_update`, from its own `json!` for the recursion limit.
+    let at = tools
+        .iter()
+        .position(|t| t["name"] == "palace_update")
+        .map_or(tools.len(), |i| i + 1);
+    tools.insert(at, palace_rename_definition());
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
     tools.extend(super::chat_assets::definitions());
@@ -503,4 +509,25 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // advertised. Applied after the splices so a spliced group is covered too.
     super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
+}
+
+/// The `palace_rename` schema (#9544).
+///
+/// Why: its own `json!` call, because one more tool in the main literal trips
+/// the macro recursion limit (the same reason `embed_audit_definitions` splits).
+/// Test: `tool_definitions_lists_all_tools`.
+fn palace_rename_definition() -> Value {
+    json!({
+        "name": "palace_rename",
+        "description": "Move a palace to a new id. Drawers, vectors, the knowledge graph, rooms, wings and chat sessions move with it, and their counts are verified unchanged. The old id becomes an alias of the new one, so reads and writes through it keep working, and every alias of the old id follows. Refuses a source that is an alias, a target that is an alias of another palace, and an existing target unless it is empty and `replace_empty=true`. Not rewritten: knowledge-graph subjects written by kg_bootstrap, backups under backups/format-migration/<old>, and project pin files on disk, which still name the old id (it resolves through the alias).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "palace_id":     {"type": "string", "description": "Current id of the palace to rename. Must be the palace itself, not an alias."},
+                "new_id":        {"type": "string", "description": "New palace id ([a-z0-9][a-z0-9-]{0,62})."},
+                "replace_empty": {"type": "boolean", "description": "Replace an existing, empty palace at new_id; it is moved to <data root>/.trash, not deleted. Defaults to false.", "default": false}
+            },
+            "required": ["palace_id", "new_id"]
+        }
+    })
 }

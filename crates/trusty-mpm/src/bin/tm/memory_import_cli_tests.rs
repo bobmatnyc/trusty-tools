@@ -2,7 +2,8 @@
 //!
 //! Why: split out of `tests.rs` (#9340) so that file stays under the
 //! 3000-SLOC test cap when `tm memory forget` adds its parse test there.
-//! What: parse round-trips for the two bulk-import verbs.
+//! What: parse round-trips for the two bulk-import verbs, and for
+//! `tm memory rename` (#9544).
 //! Test: this file.
 
 use clap::Parser;
@@ -148,4 +149,34 @@ fn cli_parses_memory_import_dry_run_json() {
         }
         other => panic!("expected Memory/Import, got {other:?}"),
     }
+}
+
+/// Why (#9544): `tm memory rename <old> <new>` takes both ids positionally and
+/// `--replace-empty` defaults off, so a bare call never replaces a palace.
+#[test]
+fn tm_memory_rename_parses_old_new_and_replace_empty() {
+    for (extra, expect_replace) in [(None, false), (Some("--replace-empty"), true)] {
+        let mut argv = vec!["trusty-mpm", "memory", "rename", "src-pal", "dst-pal"];
+        argv.extend(extra);
+        let cli = Cli::try_parse_from(argv).unwrap();
+        match cli.command.unwrap() {
+            Command::Memory {
+                action:
+                    MemoryAction::Rename {
+                        old,
+                        new,
+                        replace_empty,
+                        json,
+                        memory_socket,
+                    },
+            } => {
+                assert_eq!((old.as_str(), new.as_str()), ("src-pal", "dst-pal"));
+                assert_eq!(replace_empty, expect_replace);
+                assert!(!json);
+                assert!(memory_socket.is_none());
+            }
+            other => panic!("expected memory rename, got {other:?}"),
+        }
+    }
+    assert!(Cli::try_parse_from(["trusty-mpm", "memory", "rename", "only-one"]).is_err());
 }

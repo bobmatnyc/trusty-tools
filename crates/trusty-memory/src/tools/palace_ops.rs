@@ -199,6 +199,35 @@ pub(crate) async fn handle_palace_delete(state: &AppState, args: Value) -> Resul
     }
 }
 
+/// `palace_rename` — move a palace to a new id (#9544).
+///
+/// Why: renaming by hand leaves the old id dead and races every open of
+/// either id; the service runs the move under both palaces' write locks.
+/// What: reads `palace_id`, `new_id` and the optional boolean
+/// `replace_empty`, then delegates to `MemoryService::rename_palace`. A
+/// missing or mistyped argument is `RenameError::InvalidParams` (-32602);
+/// every error stays a typed `RenameError` so `JsonRpcResponse::from_anyhow`
+/// maps its code.
+/// Test: `palace_rename_9544.rs`, `from_anyhow_maps_palace_rename_errors`.
+pub(crate) async fn handle_palace_rename(state: &AppState, args: Value) -> Result<Value> {
+    use crate::service::rename::RenameError;
+    let invalid =
+        |m: &str| anyhow::Error::new(RenameError::InvalidParams(format!("palace_rename: {m}")));
+    let arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    let (Some(old), Some(new)) = (arg("palace_id"), arg("new_id")) else {
+        return Err(invalid("'palace_id' and 'new_id' are required strings"));
+    };
+    let replace_empty = match args.get("replace_empty") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(invalid("'replace_empty' must be a boolean")),
+    };
+    crate::service::MemoryService::new(state.clone())
+        .rename_palace(&old, &new, replace_empty)
+        .await
+        .map_err(anyhow::Error::new)
+}
+
 pub(crate) async fn handle_palace_update(state: &AppState, args: Value) -> Result<Value> {
     // Issue #180 follow-up: rename a palace's display name. The HTTP
     // layer is the canonical implementation; we delegate to the
