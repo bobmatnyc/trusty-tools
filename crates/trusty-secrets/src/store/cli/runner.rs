@@ -20,6 +20,10 @@
 //! request's deadline (`store::deadline`): it is refused before spawning
 //! once the deadline has passed, and a run the deadline cuts short is
 //! [`SecretsError::DeadlineExceeded`].
+//! #9572: a run inside a server request also watches that server's cancel
+//! flag (`store::deadline::cancelled`), raised when the server exits: it is
+//! refused before spawning, and a run in flight has its group killed and
+//! reaped within one poll, so no CLI outlives the server process.
 //! Test: `runner_tests.rs` beside this file.
 
 use std::ffi::{OsStr, OsString};
@@ -57,6 +61,7 @@ const TIMED_OUT: &str = "the CLI did not finish within its timeout; its process 
 const TOO_LARGE: &str = "the CLI's output exceeded 1 MiB";
 const NOT_UTF8: &str = "the CLI's output is not UTF-8";
 const NON_ZERO: &str = "the CLI exited unsuccessfully; its output was withheld";
+const CANCELLED: &str = "the server is exiting; the CLI's process group was killed";
 
 /// One vendor-CLI invocation, built then run. Never goes through a shell.
 ///
@@ -259,6 +264,10 @@ impl CliCommand {
         if by_request && budget.is_zero() {
             return Err(self.deadline_exceeded());
         }
+        // #9572: nothing starts once the server is exiting.
+        if deadline::cancelled() {
+            return Err(self.failure(CANCELLED));
+        }
         let timed_out = || {
             if by_request {
                 self.deadline_exceeded()
@@ -316,6 +325,11 @@ impl CliCommand {
             {
                 break status;
             }
+            // #9572: the server is exiting and will abandon this thread; the
+            // guard's drop kills the group and reaps the child now.
+            if deadline::cancelled() {
+                return Err(self.failure(CANCELLED));
+            }
             let now = Instant::now();
             if now >= deadline {
                 // The guard's drop kills the group and reaps the child.
@@ -325,14 +339,23 @@ impl CliCommand {
         };
         // The child is reaped; its streams close once the last holder exits.
         loop {
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            // #9572: wait at most one poll, so a server exit is seen here too.
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left.min(POLL)) {
                 Ok(event) => self.absorb(event, &mut got, &guard)?,
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
-                    // A straggler still holds a pipe. The group id cannot be
-                    // reused while the group has a member.
-                    kill_group(guard.child.id());
-                    return Err(timed_out());
+                    let cancelled = deadline::cancelled();
+                    if cancelled || Instant::now() >= deadline {
+                        // A straggler still holds a pipe. The group id cannot
+                        // be reused while the group has a member.
+                        kill_group(guard.child.id());
+                        return Err(if cancelled {
+                            self.failure(CANCELLED)
+                        } else {
+                            timed_out()
+                        });
+                    }
                 }
             }
         }
