@@ -102,6 +102,32 @@ fn rulings_contribute_at_most_a_third_of_top_k() {
     assert!(results[2..].iter().all(|r| r.layer == 1));
 }
 
+/// Why (#9144): a drawer written with `type: Ruling` or `Decision` is a ruling
+/// even with no ruling tag; a typed Status is not.
+/// What: three untagged hits from a rulings palace; the two typed rulings join
+/// at layer 1 and the Status hit is dropped.
+#[test]
+fn typed_rulings_join_the_leg_without_a_ruling_tag() {
+    use trusty_common::memory_core::palace::DrawerType;
+    let typed = |content: &str, t: DrawerType, score: f32| {
+        let mut h = hit(content, &[], score, 2);
+        h.drawer.drawer_type = t;
+        h
+    };
+    let mut results = primary();
+    let outcomes = vec![Ok(vec![
+        typed("typed ruling", DrawerType::Ruling, 0.7),
+        typed("typed decision", DrawerType::Decision, 0.6),
+        typed("typed status", DrawerType::Status, 0.9),
+    ]
+    .into())];
+    fold_rulings(&mut results, outcomes, "q", 9, None);
+    assert_eq!(
+        contents(&results),
+        ["project a", "project b", "typed ruling", "typed decision"]
+    );
+}
+
 /// Why (#9143 AC2): the rank floor may only lift rulings the cap admitted, and
 /// only those that answer the query.
 /// What: three rulings answer the query and one does not; `top_k` 6 caps the

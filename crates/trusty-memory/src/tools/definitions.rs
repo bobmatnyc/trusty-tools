@@ -109,7 +109,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         "tools": [
             {
                 "name": "memory_remember",
-                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass content-QUALITY gates (blocklist, short-content, dedup, noise); this does NOT bypass secret detection — see allow_secret_like. Or use memory_note for short curated facts.",
+                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass content-QUALITY gates (blocklist, short-content, dedup, noise); this does NOT bypass secret detection — see allow_secret_like. Or use memory_note for short curated facts. Pass `type` (Ruling, Decision, Status, Turn or Reference) to label the drawer; recall ranks Ruling and Decision as rulings and weights Status and Turn below other drawers.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -492,6 +492,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         .position(|t| t["name"] == "palace_update")
         .map_or(tools.len(), |i| i + 1);
     tools.insert(at, palace_rename_definition());
+    // #9144: `memory_remember`'s `type`, from its own `json!` for the recursion limit.
+    if let Some(remember) = tools.iter_mut().find(|t| t["name"] == "memory_remember") {
+        remember["inputSchema"]["properties"]["type"] = remember_type_property();
+    }
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
     tools.extend(super::chat_assets::definitions());
@@ -509,6 +513,22 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // advertised. Applied after the splices so a spliced group is covered too.
     super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
+}
+
+/// The `type` property of `memory_remember`'s input schema (#9144).
+///
+/// Why: its own `json!` call, because the enum array in the main literal trips
+/// the macro recursion limit (the same reason [`palace_rename_definition`]
+/// splits).
+/// What: an optional string, enum of the five writable drawer types, matched
+/// case-insensitively by `helpers::resolve_type_arg`.
+/// Test: `memory_remember_schema_advertises_the_type_enum`.
+fn remember_type_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["Ruling", "Decision", "Status", "Turn", "Reference"],
+        "description": "#9144: optional drawer type, matched case-insensitively. Ruling = a standing rule that holds until revoked; Decision = a choice made for a piece of work; Status = a point-in-time state report a newer one replaces; Turn = a record of one conversational turn; Reference = a pointer to an external source of truth. Recall treats Ruling and Decision as rulings, and weights Status by 0.8 and Turn by 0.7 unless the drawer holds a live `fact_key` slot. Omit it for the heuristic classifier (today's behaviour). Any other value, including UserFact, is an error and nothing is written."
+    })
 }
 
 /// The `palace_rename` schema (#9544).

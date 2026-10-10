@@ -575,6 +575,8 @@ mod lease_refusal_tests;
 mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
+// #9144: `memory_remember`'s optional drawer `type`.
+mod remember_type_tests;
 mod write_budget_tests;
 // #4001: a write stalled on the palace lock must reach `memory.health`.
 mod write_liveness_tests;

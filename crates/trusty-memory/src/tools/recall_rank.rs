@@ -11,6 +11,10 @@
 //! of hours. Existing unkeyed drawers never became Tier C (ADR-0028 migration
 //! step 2), so this pass applies that half-life at read time instead. Nothing
 //! is deleted or rewritten (D6): a snapshot only loses score.
+//! #9144: drawers now carry a written type. A `Ruling` or `Decision` drawer is
+//! a ruling like a ruling-tagged one, and a `Status` or `Turn` drawer takes a
+//! fixed [`type_factor`] on top of any snapshot decay, so with equal relevance
+//! a current ruling outranks a status line or a recorded turn.
 //! What: [`temporal_weight`] classifies one drawer and returns its score
 //! multiplier; [`demote_stale_snapshots`] and [`demote_stale_snapshots_across`]
 //! apply it to a single-palace and a cross-palace result list and re-sort.
@@ -31,8 +35,8 @@ use super::recall_supersede::{demote_superseded, Supersessions};
 
 /// Tags that mark a drawer as an owner ruling or decision.
 ///
-/// Why: drawers carry no ruling type yet (#9138 O5), so tags are the only
-/// signal. These are the spellings the review counted in the Architect's
+/// Why: most stored drawers predate the typed write (#9144) and carry no
+/// ruling type, so tags remain a ruling signal beside it. These are the spellings the review counted in the Architect's
 /// rulings palace (`bob-ruling` 36, `standing-rule` 11) and ADR-0028 §C4
 /// (`bob-decision`), plus their generic forms. `standing-instruction` is left
 /// out on purpose: §C4 found it on one-shot actions as well as rules.
@@ -76,12 +80,50 @@ pub(crate) const SNAPSHOT_FLOOR: f32 = 0.5;
 /// Test: `snapshot_weight_halves_toward_the_floor`.
 pub(crate) const SNAPSHOT_HALF_LIFE_HOURS: f32 = 24.0;
 
-/// True when `drawer` carries one of [`RULING_TAGS`].
+/// Score factor for a `Status` drawer: a point-in-time report a newer one
+/// replaces (#9144).
+pub(crate) const STATUS_TYPE_FACTOR: f32 = 0.8;
+
+/// Score factor for a `Turn` drawer: a record of one conversational turn,
+/// weaker evidence than a status report (#9144).
+pub(crate) const TURN_TYPE_FACTOR: f32 = 0.7;
+
+/// True when `drawer` is a ruling: typed `Ruling` or `Decision`, or carrying
+/// one of [`RULING_TAGS`].
+///
+/// Why (#9144): a typed write is the explicit form of the ruling tag; the
+/// rank pass and the rulings leg (`super::recall_rulings`) must agree on it.
+/// The heuristic classifier never produces either type, so only a caller that
+/// named the type is affected.
+/// What: the type check, then the exact tag match.
+/// Test: `ruling_and_decision_types_are_rulings_and_the_rest_keep_their_factor`,
+/// `typed_rulings_join_the_leg_without_a_ruling_tag`,
+/// `ruling_tags_exempt_a_drawer_that_is_also_tagged_status`.
 pub(crate) fn is_ruling(drawer: &Drawer) -> bool {
-    drawer
+    // #9144: the typed form of a ruling.
+    matches!(
+        drawer.drawer_type,
+        DrawerType::Ruling | DrawerType::Decision
+    ) || drawer
         .tags
         .iter()
         .any(|t| RULING_TAGS.contains(&t.as_str()))
+}
+
+/// Fixed score factor for a drawer's written type (#9144).
+///
+/// Why: a status line and a recorded turn answer "what was true then", a
+/// ruling or reference "what holds"; with equal relevance the second must rank
+/// first even when both are fresh, which the age decay alone cannot do.
+/// What: [`STATUS_TYPE_FACTOR`] for `Status`, [`TURN_TYPE_FACTOR`] for `Turn`,
+/// `1.0` for every other type.
+/// Test: `ruling_and_decision_types_are_rulings_and_the_rest_keep_their_factor`.
+pub(crate) fn type_factor(drawer_type: DrawerType) -> f32 {
+    match drawer_type {
+        DrawerType::Status => STATUS_TYPE_FACTOR,
+        DrawerType::Turn => TURN_TYPE_FACTOR,
+        _ => 1.0,
+    }
 }
 
 /// True when `drawer` is a session snapshot by tag or by type.
@@ -100,27 +142,36 @@ fn is_snapshot(drawer: &Drawer) -> bool {
 /// tag on the same drawer, because §C4 shows authors tag rulings `status` too),
 /// and a live Tier C fact (a `fact_key` that has not expired), which is current
 /// by construction — its slot retires the previous occupant on write.
-/// What: `1.0` for a ruling, a live keyed drawer, or a non-snapshot. For a
-/// snapshot, `SNAPSHOT_FLOOR + (1 - SNAPSHOT_FLOOR) * 0.5^(age / half-life)`,
-/// with a future `created_at` (clock skew) treated as age zero. Always in
-/// `[SNAPSHOT_FLOOR, 1.0]`.
+/// What: `1.0` for a ruling (tag or type) or a live keyed drawer. Otherwise
+/// the drawer's [`type_factor`] (#9144), times the snapshot decay
+/// `SNAPSHOT_FLOOR + (1 - SNAPSHOT_FLOOR) * 0.5^(age / half-life)` when it is a
+/// snapshot, with a future `created_at` (clock skew) treated as age zero.
+/// Always in `[SNAPSHOT_FLOOR * TURN_TYPE_FACTOR, 1.0]`.
 /// Test: `a_stale_snapshot_loses_score_and_a_fresh_one_does_not`,
 /// `a_live_keyed_snapshot_is_exempt`,
 /// `ruling_tags_exempt_a_drawer_that_is_also_tagged_status`,
-/// `a_future_created_at_is_age_zero_not_a_boost`.
+/// `a_future_created_at_is_age_zero_not_a_boost`,
+/// `a_ruling_typed_drawer_outranks_an_equal_status_typed_drawer`,
+/// `a_live_keyed_status_typed_drawer_is_exempt_from_the_type_factor`.
 pub(crate) fn temporal_weight(drawer: &Drawer, now: DateTime<Utc>) -> f32 {
-    if is_ruling(drawer) || !is_snapshot(drawer) {
+    if is_ruling(drawer) {
         return 1.0;
     }
+    // #9144: a live slot is exempt from the type factor as well as the decay.
     if drawer.fact_key.is_some() && !drawer.is_expired_at(now) {
         return 1.0;
     }
+    let factor = type_factor(drawer.drawer_type);
+    if !is_snapshot(drawer) {
+        return factor;
+    }
     // #8246: clock skew — a future `created_at` is age zero, never a boost.
     let age_hours = (now - drawer.created_at).num_seconds().max(0) as f32 / 3600.0;
-    let weight = SNAPSHOT_FLOOR
+    let decay = SNAPSHOT_FLOOR
         + (1.0 - SNAPSHOT_FLOOR) * 0.5_f32.powf(age_hours / SNAPSHOT_HALF_LIFE_HOURS);
-    debug_assert!((SNAPSHOT_FLOOR..=1.0).contains(&weight));
-    weight
+    debug_assert!((SNAPSHOT_FLOOR..=1.0).contains(&decay));
+    // #9144: the type factor multiplies the decay.
+    decay * factor
 }
 
 /// Recall rank order: score descending, then layer, then drawer id.

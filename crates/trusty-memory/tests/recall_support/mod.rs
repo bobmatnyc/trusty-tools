@@ -65,6 +65,22 @@ pub async fn remember(
         .expect("drawer_id")
 }
 
+/// Write one untagged drawer through `memory_remember` with an optional
+/// drawer `type` (#9144); returns its id.
+pub async fn remember_typed(state: &AppState, palace: &str, text: &str, ty: Option<&str>) -> Uuid {
+    let mut args = json!({ "palace": palace, "text": text, "force": true });
+    if let Some(t) = ty {
+        args["type"] = json!(t);
+    }
+    let out = dispatch_tool(state, "memory_remember", args)
+        .await
+        .expect("memory_remember");
+    out["drawer_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("drawer_id")
+}
+
 /// Move a drawer's `created_at` by `age` into the past (negative: future).
 pub fn backdate(state: &AppState, palace: &str, id: Uuid, age: Duration) {
     let handle = state
