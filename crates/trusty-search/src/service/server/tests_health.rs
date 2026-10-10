@@ -89,6 +89,32 @@ async fn health_reports_a_null_transport_when_no_listener_was_bound() {
     );
 }
 
+/// #9030: `chat_available` is true with a chat provider and false without.
+///
+/// Why: the console's chat panel gates on this field instead of guessing from
+/// the transport; a wrong `true` offers a chat that answers 503.
+/// What: reads the field off `health_report` (the body both doors serve) as a
+/// raw `Value`, so a missing key fails on the assertion, not at compile time.
+/// The local-model probe is disabled so the result depends on the key alone.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn health_reports_chat_available_only_with_a_provider() {
+    let build = |key: &str| {
+        let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
+            .with_openrouter_api_key(key);
+        state.local_model.enabled = false;
+        std::sync::Arc::new(state)
+    };
+    let with = health_report(build("sk-test-9030")).await;
+    assert_eq!(with["chat_available"], serde_json::json!(true), "{with}");
+    let without = health_report(build("")).await;
+    assert_eq!(
+        without["chat_available"],
+        serde_json::json!(false),
+        "{without}"
+    );
+}
+
 /// Issue #3408 — a network-mounted index root must surface through
 /// `/health`: `indexes_watcher_network_degraded` counts it and the top-level
 /// `status` flips to `"degraded"`, mirroring the existing
