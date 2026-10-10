@@ -531,6 +531,53 @@ async fn refuses_another_projects_daemon_on_this_projects_own_socket() {
     );
 }
 
+/// A third project answering on our own socket after the spawn is refused,
+/// naming both projects (#4600).
+// #4600: covers the post-spawn identity check in `use_shared_socket`; without
+// it the TUI would attach to whatever answers on its own socket.
+#[tokio::test]
+async fn refuses_a_third_projects_daemon_that_answers_on_our_socket_after_our_spawn() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let their_project = tempfile::tempdir().expect("their project");
+    let our_project = tempfile::tempdir().expect("our project");
+    let third_project = tempfile::tempdir().expect("third project");
+    let theirs = their_project.path().canonicalize().expect("canonicalize");
+    let ours = our_project.path().canonicalize().expect("canonicalize");
+    let third = third_project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let shared = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&theirs))));
+    let own = own_socket(&shared, Some(&ours));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
+    bind_once_argv_has(
+        &stub.argv_log,
+        "--project-socket",
+        own.clone(),
+        Some(binding_json(Some(&third))),
+    );
+
+    let err = ensure_daemon_with(Some(&ours), &stub.path, &shared)
+        .await
+        .expect_err("a third project's daemon must not be attached to");
+
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains(&third.display().to_string()),
+        "error must name the project that answered on our socket: {rendered}"
+    );
+    assert!(
+        rendered.contains(&ours.display().to_string()),
+        "error must name the requested project: {rendered}"
+    );
+    let argv = stub.argv().await;
+    assert!(
+        argv.lines().count() == 1 && argv.contains("--project-socket"),
+        "exactly one own-socket spawn must have happened: {argv}"
+    );
+}
+
 /// Assert a #4600 refusal names `socket`, offers a retry, and never tells the
 /// operator to stop a daemon (owner directive 2026-08-01).
 fn assert_unverified_refusal(rendered: &str, socket: &Path) {
