@@ -8,7 +8,7 @@
 //! interactive command stops on its first terminal read (SIGTTIN).
 //! What: [`Signals`] (SIGINT, SIGTERM, SIGHUP sent to tm), [`kill_group`],
 //! [`Foreground`] (the terminal handoff, undone on drop) and
-//! [`clear_cloexec`] (keep one fd across exec).
+//! [`clear_cloexec`] / [`set_cloexec`] (keep one fd across exec, or not).
 //! Test: `tests/tm_secrets_exec.rs` — `exec_forwards_sigterm_and_revokes`,
 //! `exec_kills_the_stub_group_when_the_grant_is_refused`,
 //! `exec_drain_after_exit_answers_terminal_ctrl_c` ([`Foreground`]'s drop).
@@ -67,13 +67,28 @@ pub(crate) fn kill_group(pgid: u32, sig: i32) {
 ///
 /// What: async-signal-safe (`fcntl` only), so it may run in `pre_exec`.
 pub(crate) fn clear_cloexec(fd: RawFd) -> io::Result<()> {
+    cloexec(fd, false)
+}
+
+/// Set `FD_CLOEXEC` on `fd`, so no later exec or spawn inherits it (#9621).
+pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    cloexec(fd, true)
+}
+
+/// Set or clear `FD_CLOEXEC` on `fd`; `fcntl` only.
+fn cloexec(fd: RawFd, on: bool) -> io::Result<()> {
     // SAFETY: `fcntl` on an fd number; an invalid fd is an error, not UB.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    let flags = if on {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
     // SAFETY: as above.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
