@@ -19,8 +19,9 @@ use super::{
 use crate::gchat::api::client::Endpoints;
 use crate::gchat::api::events::{ChatEvent, MessageEvent, PulledMessage};
 use crate::gchat::channel::GchatChannel;
+use crate::gchat::doctor::{report_for_channel, run_doctor, LimiterRow};
 use crate::gchat::inbound::{InboundOutcome, LimitBucket};
-use crate::gchat::poller::Poller;
+use crate::gchat::poller::{PollStatus, Poller};
 use crate::policy::Clock;
 
 const STRANGER: &str = "stranger@example.com";
@@ -541,4 +542,42 @@ async fn poll_status_counts_rate_limited_and_stays_healthy() {
     assert!(status.is_healthy(), "{status:?}");
     assert_eq!(status.consecutive_failures, 0);
     assert!(status.last_ok_at.is_some());
+}
+
+#[tokio::test]
+async fn doctor_limiter_row_reports_limits_and_counter() {
+    let server = MockServer::start().await;
+    let project = Project::committed(THREE_ROUTES);
+    let endpoints = Endpoints::single_host(&server.uri());
+    // Doctor with no serving process: the limits, and no count.
+    let report = run_doctor(project.dir(), endpoints, true).await;
+    assert_eq!(
+        report.limiter,
+        LimiterRow {
+            limit: 100,
+            window_secs: 60,
+            rate_limited: None
+        }
+    );
+    let text = report.render();
+    assert!(
+        text.contains(
+            "limiter: limit=100 window_secs=60 scope=per_route+shared_unknown_sender \
+             rate_limited=n/a\n"
+        ),
+        "{text}"
+    );
+
+    // From the serving process: the poller's count, and the report stays ok.
+    let clock = FakeClock::default();
+    let channel = open(&project, &server, &clock);
+    let status = PollStatus {
+        rate_limited: 3,
+        ..PollStatus::default()
+    };
+    let report = report_for_channel(&channel, true, Some(status)).await;
+    assert_eq!(report.limiter.rate_limited, Some(3));
+    let text = report.render();
+    assert!(text.contains(" rate_limited=3\n"), "{text}");
+    assert!(report.ok(), "{text}");
 }

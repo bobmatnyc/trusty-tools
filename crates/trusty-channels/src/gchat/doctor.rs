@@ -31,6 +31,7 @@ use crate::gchat::channel::{ChannelHealth, GchatChannel};
 use crate::gchat::error::{RouteError, StateError};
 use crate::gchat::poller::PollStatus;
 use crate::gchat::routes::{load_routes, routes_path, RouteTable};
+use crate::policy::RateLimit;
 
 /// The state columns' text while another process holds the state lock.
 pub const IN_USE: &str = "in use by a running gchat-mcp";
@@ -115,6 +116,37 @@ pub struct DoctorReport {
     pub rows: Vec<DoctorRow>,
     /// The serving process's poller, when the report comes from it.
     pub poller: Option<PollStatus>,
+    /// The inbound rate limiter (#8454).
+    pub limiter: LimiterRow,
+}
+
+/// The inbound rate limiter's settings and drop count, for doctor.
+///
+/// Why: an operator needs to see the limit a flood hits and how many
+/// messages it dropped (#8454 S3b).
+/// What: `limit` admits per `window_secs`, per route and in the shared
+/// unknown-sender window, from [`RateLimit::DEFAULT`]; `rate_limited` is
+/// the serving process's count, `None` when the report does not come from
+/// it. Informational: it never fails the report.
+/// Test: `doctor_limiter_row_reports_limits_and_counter`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LimiterRow {
+    /// Admits allowed per window.
+    pub limit: u32,
+    /// The window length in seconds.
+    pub window_secs: u32,
+    /// Messages the serving process dropped over a limit.
+    pub rate_limited: Option<u64>,
+}
+
+impl LimiterRow {
+    fn new(poller: Option<&PollStatus>) -> Self {
+        Self {
+            limit: RateLimit::DEFAULT.limit(),
+            window_secs: RateLimit::DEFAULT.window_secs(),
+            rate_limited: poller.map(|p| p.rate_limited),
+        }
+    }
 }
 
 impl DoctorReport {
@@ -143,9 +175,11 @@ impl DoctorReport {
     /// The report as text, one line per route.
     ///
     /// Why: the CLI's output and the tool's `text` field.
-    /// What: header lines, then `route=<name> …` per row, then the poller
-    /// line when present, then `result: ok` or `result: FAILED`.
-    /// Test: `doctor_prints_one_row_per_route_and_passes`.
+    /// What: header lines, then `route=<name> …` per row, then the limiter
+    /// line, then the poller line when present, then `result: ok` or
+    /// `result: FAILED`.
+    /// Test: `doctor_prints_one_row_per_route_and_passes`,
+    /// `doctor_limiter_row_reports_limits_and_counter`.
     pub fn render(&self) -> String {
         let mut out = format!("gchat doctor: {}\n", self.project_dir);
         out.push_str(&format!("load: {}\n", self.load.render()));
@@ -167,6 +201,16 @@ impl DoctorReport {
                 r.subscription,
             ));
         }
+        // #8454: the limiter line, before the poller line.
+        let l = &self.limiter;
+        out.push_str(&format!(
+            "limiter: limit={} window_secs={} scope=per_route+shared_unknown_sender \
+             rate_limited={}\n",
+            l.limit,
+            l.window_secs,
+            l.rate_limited
+                .map_or_else(|| "n/a".to_string(), |n| n.to_string()),
+        ));
         if let Some(p) = &self.poller {
             out.push_str(&format!(
                 "poller: ticks={} answered={} withheld={} last_ok_at={} \
@@ -383,6 +427,7 @@ fn build(
         token,
         state: state_cell,
         rows,
+        limiter: LimiterRow::new(poller.as_ref()),
         poller,
     }
 }
