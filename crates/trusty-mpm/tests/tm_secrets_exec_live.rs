@@ -67,6 +67,8 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A run's exit status (signal included), stdout and stderr, for a message.
+// #9621: its only caller is the macOS Keychain proof.
+#[cfg(target_os = "macos")]
 fn report(out: &std::process::Output) -> String {
     format!(
         "status {}; stdout {:?}; stderr {:?}",
