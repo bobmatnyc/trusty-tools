@@ -10,10 +10,12 @@
 //! only. [`SecretCache::evict`] drops a (vault, key) under every backend and
 //! advances an epoch, so a read already in flight when a value changed can
 //! never store the old value. Each backend's entries belong to the
-//! [`OpenedUnder`] settings they were filled under; a read under other
-//! settings drops them and advances the epoch the same way. A poisoned lock
+//! [`OpenedUnder`] settings they were filled under, and to the account
+//! config file's stat fingerprint; a read under other settings, or after
+//! that file changed, drops them and advances the epoch the same way. An
+//! entry as old as the max age is never served (#7520 S2). A poisoned lock
 //! or unknown settings fail closed: every lookup misses and nothing is
-//! stored. `Debug` shows the entry count only. The
+//! stored. `Debug` shows the entry count and the max age only. The
 //! cache is not a gate: [`super::SecretStore`] consults it only after the
 //! grant, ancestry, agents-flag and audit checks have passed.
 //! Test: the tests at the end of this file, and `session_cache_tests.rs`
@@ -21,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -29,33 +32,100 @@ use super::config::{self, CliSettings};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// The CLI settings a backend was opened under: its section of the account
-/// machine config.
+/// machine config, and that file's stat fingerprint.
 ///
 /// Why: #7520 M1 — `backends_with` rereads that file on every open, so
 /// `onepassword.account`, `keeper.config_path` or `program` can change
 /// mid-session; a value read under one account must not answer under
-/// another.
-/// What: the section, compared whole. No `Debug`, so it never prints.
+/// another. #7520 S2 — the server reads the file before and after the open;
+/// a file that went A→B→A in between reads the same both times, so the
+/// fingerprint tells the two reads apart.
+/// What: the section and the fingerprint, compared whole, so any change to
+/// the file counts as other settings. No `Debug`, so it never prints.
 /// Test: `cache_cleared_when_cli_account_settings_change`,
-/// `cache_read_started_under_other_settings_is_not_stored`.
+/// `cache_read_started_under_other_settings_is_not_stored`,
+/// `cache_not_filled_across_account_file_flip`.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct OpenedUnder(Option<CliSettings>);
+pub(crate) struct OpenedUnder {
+    settings: Option<CliSettings>,
+    // #7520 S2: `None` when the file does not exist.
+    file: Option<Fingerprint>,
+}
 
 impl OpenedUnder {
-    /// `backend`'s section of the machine config at `path`.
+    /// `backend`'s section of the machine config at `path`, with the file's
+    /// fingerprint.
     ///
-    /// What: a missing file or section is a known "no settings"; no path or
-    /// a file that does not load is `None`, which the cache treats as
-    /// unknown (fail closed). Only `onepassword` and `keeper` have a section.
+    /// What: the fingerprint is taken before the file is read, so a change
+    /// made after it shows in the next fingerprint. A missing file or section
+    /// is a known "no settings"; no path, a file that cannot be stat'd, or one
+    /// that does not load is `None`, which the cache treats as unknown (fail
+    /// closed). Only `onepassword` and `keeper` have a section.
     pub(crate) fn read(path: Option<&Path>, backend: &BackendId) -> Option<Self> {
+        let path = path?;
+        // #7520 S2: stamp first; an unreadable stamp is unknown settings.
+        let file = Fingerprint::of(path).ok()?;
         // #7520 M1: an unreadable config is unknown settings, never "none".
-        let machine = config::load_machine_at(path?).ok()?;
+        let machine = config::load_machine_at(path).ok()?;
         let section = machine.and_then(|machine| match backend.as_str() {
             BackendId::ONEPASSWORD => machine.onepassword,
             BackendId::KEEPER => machine.keeper,
             _ => None,
         });
-        Some(Self(section))
+        Some(Self {
+            settings: section,
+            file,
+        })
+    }
+}
+
+/// One `stat` of a file: device, inode, length, mtime and ctime.
+#[cfg_attr(not(unix), allow(dead_code, reason = "built on unix only"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// The account config file as two [`Stamp`]s: the path itself (`lstat`) and
+/// what it resolves to (`stat`), so replacing a symlink or its target both
+/// show (#7520 S2).
+///
+/// What: a rename or rewrite changes the inode or ctime, which no caller can
+/// set. A filesystem with coarse timestamps can miss an in-place rewrite of
+/// the same length within one tick; DOC-74 §8.4 records that limit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fingerprint([Stamp; 2]);
+
+impl Fingerprint {
+    /// `path`'s fingerprint; `Ok(None)` when it does not exist.
+    #[cfg(unix)]
+    fn of(path: &Path) -> io::Result<Option<Self>> {
+        use std::os::unix::fs::MetadataExt;
+        let stamp = |meta: std::fs::Metadata| Stamp {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.size(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        };
+        let link = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let target = std::fs::metadata(path)?;
+        Ok(Some(Self([stamp(link), stamp(target)])))
+    }
+
+    /// No fingerprint off unix: the settings are unknown, so the cache is
+    /// bypassed (fail closed).
+    #[cfg(not(unix))]
+    fn of(_path: &Path) -> io::Result<Option<Self>> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -68,7 +138,8 @@ type Slot = (BackendId, VaultName, SecretKey);
 /// The map and the eviction epoch, under one lock.
 #[derive(Default)]
 struct Entries {
-    values: HashMap<Slot, SecretValue>,
+    /// Each value with the time the read that filled it started.
+    values: HashMap<Slot, (SecretValue, Instant)>,
     /// Advanced by every eviction; a read stores its value only when the
     /// epoch it started under is still current.
     epoch: u64,
@@ -160,10 +231,14 @@ impl SecretCache {
     /// other keys; an `Ok(Some(value))` is stored if no eviction happened
     /// since the miss. An error and an `Ok(None)` are returned and never
     /// stored. With a poisoned lock, `read` runs and nothing is stored.
+    /// #7520 S2: every entry as old as the max age is dropped before the
+    /// lookup, so it is never served; a value's age counts from the start of
+    /// the read that filled it.
     /// Test: `failed_read_is_not_cached`,
     /// `cache_read_started_before_an_eviction_is_not_stored`,
     /// `cache_read_started_under_other_settings_is_not_stored`,
-    /// `poisoned_cache_misses_and_stores_nothing`.
+    /// `poisoned_cache_misses_and_stores_nothing`,
+    /// `entry_expires_after_max_age`.
     pub(crate) fn read_through(
         &self,
         backend: &BackendId,
@@ -177,11 +252,17 @@ impl SecretCache {
             return read();
         };
         let slot = (backend.clone(), vault.clone(), key.clone());
+        let now = (self.now)();
         let epoch = match self.lock() {
             Some(mut entries) => {
                 entries.adopt(backend, under);
+                // #7520 S2: a busy server never idles out; age bounds a value.
+                let max_age = self.max_age;
+                entries
+                    .values
+                    .retain(|_, (_, filled)| now.saturating_duration_since(*filled) < max_age);
                 match entries.values.get(&slot) {
-                    Some(value) => return Ok(Some(value.clone())),
+                    Some((value, _)) => return Ok(Some(value.clone())),
                     None => Some(entries.epoch),
                 }
             }
@@ -194,7 +275,7 @@ impl SecretCache {
             && let Some(mut entries) = self.lock()
             && entries.epoch == epoch
         {
-            entries.values.insert(slot, value.clone());
+            entries.values.insert(slot, (value.clone(), now));
         }
         Ok(value)
     }
@@ -244,10 +325,13 @@ mod tests {
 
     /// Settings naming 1Password account `account`.
     fn account(account: &str) -> OpenedUnder {
-        OpenedUnder(Some(CliSettings {
-            account: Some(account.to_owned()),
-            ..CliSettings::default()
-        }))
+        OpenedUnder {
+            settings: Some(CliSettings {
+                account: Some(account.to_owned()),
+                ..CliSettings::default()
+            }),
+            file: None,
+        }
     }
 
     /// Why: #7520 M1 — a read started under account A while a resolve under
