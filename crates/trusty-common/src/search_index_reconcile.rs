@@ -646,6 +646,37 @@ mod tests {
         );
     }
 
+    /// THROWAWAY red probe for #9125 — removed once the red/green proof is
+    /// recorded. Stands in for a process-global panic hook that is slow under
+    /// full-suite load: it sleeps past `CONFIRM_DEADLINE` whenever the mock's
+    /// hang-up payload reaches it, and delegates every other panic unchanged.
+    /// Fails with `NotConfirmed` while the mock hangs up through `panic!`.
+    #[test]
+    fn probe_9125_a_slow_panic_hook_stalls_the_hung_up_create() {
+        let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
+            Arc::from(std::panic::take_hook());
+        let delegate = Arc::clone(&previous);
+        std::panic::set_hook(Box::new(move |info| {
+            if info
+                .payload_as_str()
+                .is_some_and(|p| p.contains("dropped the create connection"))
+            {
+                std::thread::sleep(Duration::from_secs(7));
+            }
+            delegate(info);
+        }));
+
+        let root = tempfile::tempdir().expect("tempdir for the indexed tree");
+        let (resolved, registration) = with_daemon(late_registering_daemon(), |socket| {
+            create_and_reconcile(socket, "asked-for", root.path(), IndexOptions::default())
+        });
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| previous(info)));
+
+        assert_eq!(registration, IndexRegistration::Confirmed);
+        assert_eq!(resolved, LATE_REGISTERED_ID);
+    }
+
     /// The id the mock registry hands back, deliberately NOT the id the create
     /// asked for, so a pass proves the id came from the REGISTRY (#7390).
     const LATE_REGISTERED_ID: &str = "registered-late-by-the-daemon";
