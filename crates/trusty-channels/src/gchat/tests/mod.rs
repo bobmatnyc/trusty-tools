@@ -18,6 +18,7 @@ mod doctor;
 mod egress;
 mod inbound;
 mod ledger;
+mod rate_limit;
 mod routes_load;
 mod server;
 mod space_routes;

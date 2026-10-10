@@ -48,6 +48,46 @@ pub enum InboundOutcome {
         /// The event type.
         event_type: String,
     },
+    /// Dropped over the rate limit of this bucket (#8454); it resolved no
+    /// question and learned no space.
+    RateLimited {
+        /// The window the message was refused by.
+        bucket: LimitBucket,
+    },
+}
+
+/// The inbound rate-limit window a message is counted in.
+///
+/// Why: a window is per binding, never per raw sender id, and every sender
+/// with no route shares one window (#8454 Q3, #7457).
+/// What: `Route` is keyed by route name; `UnknownSender` takes a sender
+/// with no email, no route match, or a BOT type.
+/// Test: `buckets_are_keyed_by_route_not_sender_id`,
+/// `unknown_senders_share_one_bucket`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LimitBucket {
+    /// The window of the route whose recipient sent the message.
+    Route(String),
+    /// The one window every sender with no route shares.
+    UnknownSender,
+}
+
+impl LimitBucket {
+    /// The audit reason code of a drop by this bucket.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Route(_) => "route_rate_limit",
+            Self::UnknownSender => "unknown_sender_rate_limit",
+        }
+    }
+
+    /// The route name, for a route bucket.
+    pub fn route(&self) -> Option<&str> {
+        match self {
+            Self::Route(name) => Some(name),
+            Self::UnknownSender => None,
+        }
+    }
 }
 
 /// The result of processing one pulled batch.
@@ -60,6 +100,8 @@ pub struct BatchReport {
     /// Ack ids withheld because their audit line or answer could not be
     /// written; Pub/Sub redelivers them.
     pub withheld: Vec<String>,
+    /// Messages dropped over a rate limit in this batch (#8454).
+    pub rate_limited: u64,
 }
 
 impl GchatChannel {

@@ -40,6 +40,6 @@ mod tests;
 pub use channel::{ChannelHealth, GchatChannel, LoadStatus, RouteHealth};
 pub use egress::{SentNotice, SentQuestion};
 pub use error::{InboundError, RouteError, SendError, StateError};
-pub use inbound::{BatchReport, InboundOutcome};
+pub use inbound::{BatchReport, InboundOutcome, LimitBucket};
 pub use routes::{MessageKind, Route, RouteTable};
 pub use state::ledger::{Answer, Question};
