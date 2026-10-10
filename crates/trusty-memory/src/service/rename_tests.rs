@@ -705,3 +705,39 @@ async fn palace_update_through_old_id_after_rename_updates_new_palace() {
     let saved = PalaceStore::load_palace(&state.data_root.join("upd2-dst")).expect("load dst");
     assert_eq!(saved.name, "Via Old Id");
 }
+
+/// Why (#9544, A2): `relabel_palace_locked` must fail closed. A write-lock wait
+/// that expires has to return `Conflict` before any load or save; falling
+/// through to an unlocked save would reopen the rename race.
+/// What: injects a short write budget, holds the palace's write mutex for the
+/// whole call, and runs `palace_update`. Asserts `ServiceError::Conflict`, an
+/// unchanged `palace.json` name, and no name-cache entry for the new label.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_update_lock_timeout_returns_conflict_and_saves_nothing() {
+    let (state, _tmp) = fixture();
+    let state = state.with_write_op_budget(Duration::from_millis(200));
+    make_palace(&state, "upd3");
+    let cached_before = state.palace_names.get("upd3").map(|n| n.value().clone());
+
+    let held = state.palace_write_lock("upd3").lock_owned().await;
+    let result = tokio::time::timeout(
+        RENAME_BOUND,
+        MemoryService::new(state.clone()).update_palace_name_typed("upd3", "Relabelled"),
+    )
+    .await
+    .expect("the update must give up at its write budget, not hang");
+    drop(held);
+
+    assert!(
+        matches!(result, Err(crate::service::ServiceError::Conflict(_))),
+        "#9544: a lock-wait timeout must be Conflict; got {result:?}"
+    );
+    let saved = PalaceStore::load_palace(&state.data_root.join("upd3")).expect("load palace");
+    assert_eq!(saved.name, "upd3", "#9544: a timed-out update saved a name");
+    let cached_after = state.palace_names.get("upd3").map(|n| n.value().clone());
+    assert_eq!(
+        cached_after, cached_before,
+        "#9544: a timed-out update changed the name cache"
+    );
+}
