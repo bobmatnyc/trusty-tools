@@ -1445,8 +1445,7 @@ Additional internal caps (not env-tunable):
 ## CLI
 
 ```bash
-trusty-search start                                  # start HTTP daemon (background)
-trusty-search start --no-http                        # socket-only daemon (see below)
+trusty-search start                                  # start the socket-only daemon (background)
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]  # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml for multi-index repos
@@ -1462,44 +1461,35 @@ trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
 
-### Socket-only daemon (`--no-http`, #9214)
+### Socket-only daemon (#9214)
 
-`trusty-search start --no-http`, or `TRUSTY_SEARCH_NO_HTTP=1` in the daemon's
-environment, serves every socket method and binds no TCP port. It is off by
-default; ADR-0032 flips it once the in-tree clients use the socket. With it set
-the daemon:
+The daemon serves every method on its Unix socket and binds no TCP port
+(ADR-0032, #9214 PR-A). It:
 
-- writes no `daemon.port` or `http_addr` file, and removes any an earlier run
+- writes no `daemon.port` or `http_addr` file, and removes any an older build
   of the same data dir left;
-- registers no address in the shared discovery registry;
+- clears the default instance's shared discovery registry entry, and
+  registers none. A stale file or entry it cannot remove is logged as a
+  warning naming its path, and the daemon keeps serving;
 - reports `transport.http_addr: null` from `search.health`;
-- still runs every background ticker, and `trusty-search stop` still finds it
-  through the lockfile pid;
-- skips auto-discovery and logs why, because auto-discovery registers
-  projects over HTTP.
+- runs every background ticker, and `trusty-search stop` finds it through the
+  lockfile pid;
+- runs auto-discovery over the socket.
 
-The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
-`/upgrade`, `/metrics`, `/api/chat/providers`. `status`, `list`, `add`'s
-guard, `remove` and `watch` use the socket (#9214 B2(a)), and so do
-`config get|set`, `cleanup`, `convert` and `migrate`'s index phase (#9214
-B2(b1)); `config` and `cleanup` never start the daemon. `index`, `reindex`
-(with its progress stream), `index-status`, `index remove`, `index relocate`,
-`add`'s per-file write and `init`/`discover` registration use it too (#9214
-B2(b2)); with no daemon answering they exit 1 naming the socket. `port`,
-`dashboard` and `monitor web` ask the daemon over the socket which HTTP
-address it bound (#9214 B2(d1)). Against a `--no-http` daemon, `port` exits 1
-with `no HTTP listener (socket-only daemon at <socket>)`; `dashboard` and
-`monitor web` exit non-zero, name the socket, and open no browser, because the
-dashboard needs the HTTP listener until phase C. `port` reports "no daemon
-running" only when nothing answers on the socket, and never starts a daemon.
-`query`, `doctor`, `monitor status`/`indexes` and the daemon's
-auto-discovery use the socket too (#9214 slice 1), so no CLI path dials TCP;
-`doctor` reports the HTTP listener the daemon says it bound instead of
-probing a port. `monitor tui` reads through trusty-common's socket-only
-`SearchClient` (#9214 trusty-common slice). Auto-discovery is still withheld
-under `--no-http`.
-`--no-http` on `trusty-search serve` is a different, older flag and is still a
-no-op there.
+`--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are accepted for one
+release and ignored, each with a warning on stderr (ruling D2). A unit
+`service install` regenerates carries none of them. The axum router compiles
+only under `cfg(test)` until PR-B deletes it (ruling D1), so `/ui`,
+`/upgrade`, `/metrics` and `/api/chat/providers` are unavailable; the search
+dashboard is served by trusty-console.
+
+Every CLI path uses the socket. `port` exits 1 with `no HTTP listener
+(socket-only daemon at <socket>)`; `dashboard` and `monitor web` exit
+non-zero, name the socket and trusty-console, and open no browser. `port`
+reports "no daemon running" only when nothing answers on the socket, and
+never starts a daemon. `doctor` reports the HTTP listener the daemon says it
+bound, and warns when an older daemon still binds one. `--no-http` on
+`trusty-search serve` is a different, older flag and is still a no-op there.
 
 ## Crate Layout
 

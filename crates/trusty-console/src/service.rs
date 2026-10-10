@@ -335,16 +335,12 @@ mod tests {
     fn default_port_does_not_collide_with_known_siblings() {
         // (binary, port, source-of-truth pointer)
         //
-        // #6277 / #6287 / #6286: trusty-review, trusty-analyze and trusty-memory
-        // have NO ROW. None binds a TCP port any more — all three serve a Unix
-        // socket (ADR-0032), so 7891, 7879 and 7070 are not reserved by
-        // anything and listing them would forbid a future daemon a free port.
+        // #6277 / #6287 / #6286 / #9214: trusty-review, trusty-analyze,
+        // trusty-memory and trusty-search have NO ROW. None binds a TCP port
+        // any more — all four serve a Unix socket (ADR-0032), so 7891, 7879,
+        // 7070 and 7878 are not reserved by anything and listing them would
+        // forbid a future daemon a free port.
         let known_siblings: &[(&str, u16, &str)] = &[
-            (
-                "trusty-search",
-                7878,
-                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
-            ),
             (
                 "trusty-mpm",
                 7880,

@@ -1,5 +1,5 @@
-//! #8232: replacing an index's files after `DELETE /indexes/{id}` must not
-//! crash the daemon through a handle that outlived the delete.
+//! #8232: replacing an index's files after an index delete must not crash
+//! the daemon through a handle that outlived the delete.
 //!
 //! Why: the reported SIGBUS came from a deleted index whose `hnsw.usearch` was
 //! still memory-mapped by a surviving `Arc<IndexHandle>` (a deferred-embed job,
@@ -10,7 +10,9 @@
 //! the binary dies by signal instead of reporting a failed assertion.
 //! What: builds a real colocated index with a saved HNSW snapshot, reloads it
 //! so the snapshot is served from the mmap view, keeps a second handle alive,
-//! deletes the index through the real router, truncates `hnsw.usearch` to zero
+//! deletes the index through the daemon's real socket router
+//! (`search.index.delete`; #9214 retired the HTTP route), truncates
+//! `hnsw.usearch` to zero
 //! bytes, and searches through the surviving handle. The search must return an
 //! error that names the deletion. That refusal comes from the indexer's
 //! `deleted` flag and never reaches the store, so the test also proves the
@@ -22,18 +24,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
 use tokio::sync::RwLock;
-use tower::ServiceExt;
 
 use trusty_common::embedder::MockEmbedder;
 use trusty_search::core::indexer::SearchQuery;
 use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use trusty_search::core::Embedder;
+use trusty_search::service::daemon_client::DaemonClient;
 use trusty_search::service::persistence::{hnsw_path_for_entry, PersistedIndex};
 use trusty_search::service::persistence_loader::build_indexer_from_entry;
-use trusty_search::service::server::{build_router, SearchAppState};
+use trusty_search::service::rpc::writes::METHOD_INDEX_DELETE;
+use trusty_search::service::server::SearchAppState;
+use trusty_search::service::socket::{bind, serve_until_shutdown};
 
 const INDEX_ID: &str = "delete-mmap-8232";
 
@@ -153,7 +155,18 @@ async fn a_search_through_a_surviving_handle_after_delete_and_truncate_errors() 
         Arc::new(RwLock::new(indexer)),
         entry.root_path.clone(),
     ));
-    let router = build_router(SearchAppState::new(registry));
+    // #9214: the delete goes through the daemon's real socket router.
+    let socket_dir = tempfile::tempdir().expect("socket dir");
+    let socket = socket_dir.path().join("ts.sock");
+    let bound = bind(&socket).await.expect("bind the scratch socket");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(serve_until_shutdown(
+        bound,
+        Arc::new(SearchAppState::new(registry)),
+        async {
+            let _ = stopped.await;
+        },
+    ));
 
     // Preconditions: each release check below can see the live view.
     let hnsw = hnsw_path_for_entry(&entry).expect("hnsw path");
@@ -169,17 +182,13 @@ async fn a_search_through_a_surviving_handle_after_delete_and_truncate_errors() 
         "precondition: the view maps the snapshot"
     );
 
-    let resp = router
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/indexes/{INDEX_ID}"))
-                .body(Body::empty())
-                .expect("request"),
+    DaemonClient::at(&socket)
+        .call(
+            METHOD_INDEX_DELETE,
+            serde_json::json!({ "index_id": INDEX_ID }),
         )
         .await
-        .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "the delete must succeed");
+        .unwrap_or_else(|e| panic!("the delete must succeed: {e}"));
 
     // The release itself, observed below the indexer's `deleted` refusal.
     assert_eq!(
@@ -227,5 +236,6 @@ async fn a_search_through_a_surviving_handle_after_delete_and_truncate_errors() 
         format!("{err:#}").contains("deleted"),
         "the refusal must say the index was deleted: {err:#}"
     );
+    drop(stop);
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }

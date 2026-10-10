@@ -81,30 +81,69 @@ fn value_form_rejects_garbage() {
     assert!(parse_flag(&["trusty-search", "start", "--no-auto-discover=ture"]).is_err());
 }
 
-/// Why (#9214): `TRUSTY_SEARCH_NO_HTTP=1` is how a launchd unit or the sandbox
-/// script turns the HTTP listener off, and it flows through the same
-/// `value_parser` as the value form below. A bare `bool` would reject `1`.
-/// What: the bare flag, the documented spellings, absence, and a typo.
+/// Why (#9214, ruling D2): `--port` and `--no-http` are retired but stay
+/// accepted for one release, so a launchd unit or claude-mpm plist that still
+/// passes them starts. A retired flag must not stop the daemon, so any
+/// `--no-http` value parses, including one the old `bool` parser refused.
+/// What: each spelling parses and is carried as given; absence is `None`.
 /// Test: this function.
 #[test]
-fn no_http_flag_spellings_parse() {
-    let parse = |args: &[&str]| -> Result<bool, String> {
+fn retired_flags_still_parse() {
+    let parse = |args: &[&str]| -> Result<(Option<u16>, Option<String>), String> {
         match Cli::try_parse_from(args)
             .map_err(|e| e.to_string())?
             .command
         {
-            Commands::Start { args } => Ok(args.no_http),
+            Commands::Start { args } => Ok((args.port, args.no_http)),
             _ => panic!("expected Commands::Start"),
         }
     };
-    assert_eq!(parse(&["trusty-search", "start"]), Ok(false));
-    assert_eq!(parse(&["trusty-search", "start", "--no-http"]), Ok(true));
-    for spelling in ["1", "true", "yes", "on"] {
-        let arg = format!("--no-http={spelling}");
-        assert_eq!(parse(&["trusty-search", "start", &arg]), Ok(true), "{arg}");
+    assert_eq!(parse(&["trusty-search", "start"]), Ok((None, None)));
+    assert_eq!(
+        parse(&["trusty-search", "start", "--port", "7878"]),
+        Ok((Some(7878), None))
+    );
+    for (arg, value) in [
+        ("--no-http", "true"),
+        ("--no-http=1", "1"),
+        ("--no-http=0", "0"),
+        ("--no-http=ture", "ture"),
+    ] {
+        assert_eq!(
+            parse(&["trusty-search", "start", arg]),
+            Ok((None, Some(value.to_string()))),
+            "{arg}"
+        );
     }
-    assert_eq!(parse(&["trusty-search", "start", "--no-http=0"]), Ok(false));
-    assert!(parse(&["trusty-search", "start", "--no-http=ture"]).is_err());
+}
+
+/// Why (#9214, ruling D2): an ignored setting that prints nothing hides that
+/// it no longer does anything.
+/// What: one warning per input present, each naming its input and #9214;
+/// none when no retired input is set.
+/// Test: this function.
+#[test]
+fn retired_flag_warnings_name_each_input() {
+    use crate::commands::start::args::retired_flag_warnings;
+    assert!(retired_flag_warnings(None, None, None).is_empty());
+    let env = std::ffi::OsString::from("1");
+    let all = retired_flag_warnings(Some(7878), Some("true"), Some(env.as_os_str()));
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert!(
+        all[0].contains("--port 7878") && all[0].contains("#9214"),
+        "{all:?}"
+    );
+    assert!(
+        all[1].contains("--no-http") && all[1].contains("ignored"),
+        "{all:?}"
+    );
+    assert!(all[2].contains("TRUSTY_SEARCH_NO_HTTP"), "{all:?}");
+    // Setting `TRUSTY_SEARCH_NO_HTTP=0` is still a retired input.
+    let off = std::ffi::OsString::from("0");
+    assert_eq!(
+        retired_flag_warnings(None, None, Some(off.as_os_str())).len(),
+        1
+    );
 }
 
 /// Why: #9214 — `start --socket` names the socket the daemon binds; a relative

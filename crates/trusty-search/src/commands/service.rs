@@ -193,8 +193,10 @@ fn launchd_env_pairs(
     }
 
     // Operator tunables and everything else the unit carried: process env wins,
-    // installed unit is the fallback (#4868).
-    pairs.extend(resolve_persisted_env(&lookup, existing, TEMPLATE_OWNED_ENV));
+    // installed unit is the fallback (#4868). #9214: minus the retired keys.
+    pairs.extend(crate::commands::service_unit::without_retired_env(
+        resolve_persisted_env(&lookup, existing, TEMPLATE_OWNED_ENV),
+    ));
 
     // #4829: give the unit a RUST_LOG so the daemon logs at INFO under launchd.
     // Lowest precedence of the three sources — a value the installed unit
@@ -323,15 +325,12 @@ fn build_launchd_config(
     suppress_auto_discover: bool,
     existing: Option<&crate::commands::service_unit::InstalledUnit>,
 ) -> trusty_common::launchd::LaunchdConfig {
-    use crate::commands::service_unit::NO_AUTO_DISCOVER_ARG;
     use trusty_common::launchd::{KeepAlive, LaunchdConfig, LAUNCHD_FD_LIMIT};
 
-    let mut args = vec!["start".to_string(), "--foreground".to_string()];
     // #4823: express the operator's auto-discovery choice as a CLI flag so it
     // survives regeneration and cannot carry an unparseable env value.
-    if suppress_auto_discover {
-        args.push(NO_AUTO_DISCOVER_ARG.to_string());
-    }
+    // #9214: no `--port` / `--no-http` — see `unit_program_args`.
+    let args = crate::commands::service_unit::unit_program_args(suppress_auto_discover);
 
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),

@@ -172,7 +172,7 @@ trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-installer: the pinned, fail-closed prebuilt download entry point
 # (#5491, #5495) is also consumed as a library by trusty-audit, which now
 # builds from bobmatnyc/trusty-git-analytics against the crates.io release.
-trusty-installer = { path = "crates/trusty-installer", version = "0.14" }
+trusty-installer = { path = "crates/trusty-installer", version = "0.15" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"

@@ -2112,12 +2112,12 @@ async fn swap_back_stops_watching_once_backend_already_moved() {
 /// Wraps the handle in a real `SwitchableEmbedder` (active = Python/Ready,
 /// mirroring what PR-3's hot-swap installs). Runs the real
 /// `drive_swap_back_watchdog` (short poll interval, bounded by an overall
-/// test timeout) and waits for it to act. Finally boots a real axum router
-/// (`service::server::build_router`) on an ephemeral port and asserts, via
-/// real HTTP calls: `GET /health` reports `embedder_bootstrap:
-/// "fell_back_to_ort"`, and a real search against a freshly-registered empty
-/// index still returns `200` (proving search is unaffected, not just that
-/// the switchable's in-memory state flipped).
+/// test timeout) and waits for it to act. Finally serves the real socket
+/// router (#9214: the daemon binds no HTTP listener) and asserts:
+/// `search.health` reports `embedder_bootstrap: "fell_back_to_ort"`, and a
+/// real search against a freshly-registered empty index still answers
+/// (proving search is unaffected, not just that the switchable's in-memory
+/// state flipped).
 /// Test: this test.
 #[tokio::test]
 #[ignore = "requires a real trusty-embedderd-py launcher + bootstrapped torch/MPS venv \
@@ -2181,7 +2181,7 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
     let switchable =
         OrchestratorArc::new(SwitchableEmbedder::new(adapter, test_python_ready_active()));
 
-    // The HTTP registration gate requires an explicitly allowed safe root;
+    // The registration gate requires an explicitly allowed safe root;
     // OS temp roots such as /tmp are denied even in this hardware fixture.
     let corpus = home_anchored_root("swap-back-e2e-");
     let allowlist_dir = tempfile::tempdir().expect("create fixture allowlist directory");
@@ -2190,7 +2190,7 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
         .with_allowlist_paths(allowlist);
     state.install_switchable_embedder(OrchestratorArc::clone(&switchable));
     // Match daemon startup: publish both the concrete switchable handle and
-    // the trait slot that marks the embedder ready for HTTP registration.
+    // the trait slot that marks the embedder ready for registration.
     let embedder: OrchestratorArc<dyn crate::core::Embedder> = switchable.clone();
     state.install_embedder(embedder).await;
     state
@@ -2220,61 +2220,50 @@ async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
         SwitchableBootstrapState::FellBackToOrt
     );
 
-    // Real HTTP layer: boot the actual router and assert /health + search.
-    let app = crate::service::server::build_router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    // #9214: the daemon serves its socket only, so drive the real socket
+    // router and assert `search.health` + search.
+    let socket_dir = tempfile::tempdir().expect("create the socket dir");
+    let socket = socket_dir.path().join("ts.sock");
+    let bound = crate::service::socket::bind(&socket)
         .await
-        .expect("bind failed");
-    let addr = listener.local_addr().expect("local_addr failed");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let client = reqwest::Client::new();
-    let health: serde_json::Value = client
-        .get(format!("http://{addr}/health"))
-        .send()
-        .await
-        .expect("GET /health failed")
-        .json()
-        .await
-        .expect("/health did not return JSON");
+        .expect("bind the test socket");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(crate::service::socket::serve_until_shutdown(
+        bound,
+        OrchestratorArc::new(state.clone()),
+        async {
+            let _ = stopped.await;
+        },
+    ));
+    let client = crate::service::daemon_client::DaemonClient::at(&socket);
+    let health = client.health().await.expect("search.health failed");
     assert_eq!(
         health.get("embedder_bootstrap").and_then(|v| v.as_str()),
         Some("fell_back_to_ort"),
-        "/health must report the swap-back: {health:?}"
+        "search.health must report the swap-back: {health:?}"
     );
 
-    // Register an empty index and confirm search still returns 200 —
-    // proving the fallback did not just flip in-memory state but that
-    // search actually keeps working end-to-end.
-    let create_resp = client
-        .post(format!("http://{addr}/indexes"))
-        .json(&serde_json::json!({ "id": "swap-back-e2e", "root_path": corpus.path() }))
-        .send()
+    // Register an empty index and confirm search still answers — proving
+    // the fallback did not just flip in-memory state but that search keeps
+    // working end-to-end.
+    client
+        .call(
+            crate::service::rpc::writes::METHOD_INDEX_CREATE,
+            serde_json::json!({ "id": "swap-back-e2e", "root_path": corpus.path() }),
+        )
         .await
-        .expect("POST /indexes failed");
-    let create_status = create_resp.status();
-    assert!(
-        create_status.is_success(),
-        "fixture registration failed: {create_status}: {}",
-        create_resp
-            .text()
-            .await
-            .expect("registration response body")
-    );
-
-    let search_resp = client
-        .post(format!("http://{addr}/indexes/swap-back-e2e/search"))
-        .json(&serde_json::json!({ "text": "fn main", "top_k": 5 }))
-        .send()
+        .unwrap_or_else(|e| panic!("fixture registration failed: {e}"));
+    client
+        .call(
+            crate::service::rpc::queries::METHOD_QUERY,
+            serde_json::json!({
+                "index_id": "swap-back-e2e",
+                "body": { "text": "fn main", "top_k": 5 },
+            }),
+        )
         .await
-        .expect("POST /indexes/:id/search failed");
-    assert!(
-        search_resp.status().is_success(),
-        "search must still succeed after swap-back: {}",
-        search_resp.status()
-    );
+        .unwrap_or_else(|e| panic!("search must still succeed after swap-back: {e}"));
+    drop(stop);
 }
 
 /// Why (#6590): a bare `trusty-search start` forks a detached `--foreground`

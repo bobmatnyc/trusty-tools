@@ -23,7 +23,7 @@
 permanent	trusty-console	trusty-console	crates/trusty-console/src/	ADR-0032	the one TCP surface, 127.0.0.1:7788
 permanent	trusty-gworkspace	trusty-gworkspace-mcp	crates/trusty-gworkspace/src/api/auth/oauth/callback.rs	ruling-135	RFC 8252 loopback redirect (owner ruling 135)
 temporary	trusty-mpm	trusty-mpm,tm	crates/trusty-mpm/src/daemon/mod.rs,crates/trusty-mpm/src/bin/tm/commands/daemon_run.rs	#6288	tm daemon HTTP on 127.0.0.1:7880 (run_http, daemon_run) until it serves UDS only
-temporary	trusty-search	trusty-search	crates/trusty-search/src/service/daemon.rs,crates/trusty-search/src/service/daemon_tests.rs,crates/trusty-search/src/commands/serve.rs,crates/trusty-common/src/port.rs	#6285	daemon HTTP on 127.0.0.1:7878 (bind_with_auto_port, whose only caller is trusty-search) and opt-in `serve --with-http`
+temporary	trusty-search	trusty-search	crates/trusty-search/src/commands/serve.rs,crates/trusty-common/src/port.rs	#9214	a pre-#9214 daemon still binds 127.0.0.1:7878 until hosts upgrade, and opt-in `serve --with-http`; bind_with_auto_port has no caller until PR-B deletes it with this row
 source-only	trusty-agents	-	crates/trusty-agents/src/api/server/routes.rs	#6433	opt-in `tagent --api` / `--serve` HTTP server (serve_with_config)
 source-only	trusty-code	-	crates/trusty-code/src/serve/http.rs	#6637	opt-in `tcode serve --http` listener
 source-only	trusty-code-gui	-	crates/trusty-code-gui/src/bridge/serve.rs	#6637	webview bridge on 127.0.0.1:0; replacing it is #6637's GUI-transport design round

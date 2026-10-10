@@ -43,7 +43,7 @@ struct StatusReport {
 ///
 /// Why (#9214): the URL used to be the HTTP base the CLI dialled. Over the
 /// socket, `search.health`'s `transport.http_addr` names the same listener, so
-/// the line is unchanged for an HTTP-bound daemon; a `--no-http` daemon is
+/// the line is unchanged for an older HTTP-bound daemon; a current daemon is
 /// named by its socket.
 fn daemon_location(health: &serde_json::Value, socket: &std::path::Path) -> String {
     match health

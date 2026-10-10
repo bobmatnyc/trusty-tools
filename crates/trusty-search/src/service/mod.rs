@@ -108,13 +108,13 @@ mod delete_stamp_7434_tests;
 pub use mcp_descriptor::SearchMcpService;
 
 pub use config::{load_user_config, LoadedUserConfig};
-pub use constants::DEFAULT_PORT;
+// #9214: `DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`
+// and `write_http_addr_file` went with the `:7878` bind.
 pub use daemon::{
-    bootstrap_process_env, daemon_env_path, daemon_lock_path, daemon_port_path, http_addr_path,
-    is_already_running, load_daemon_env, load_daemon_env_early, load_daemon_env_early_for,
-    parse_daemon_env, remove_daemon_files_if_unheld, run_daemon, run_daemon_with,
-    running_daemon_pid, save_daemon_env, write_http_addr_file, DaemonEnvPair, DaemonEnvReject,
-    DaemonError, DaemonHandle, HttpListener, StaleLockRemoval, PERSISTED_ENV_VARS,
+    bootstrap_process_env, daemon_env_path, daemon_lock_path, daemon_port_path, is_already_running,
+    load_daemon_env, load_daemon_env_early, load_daemon_env_early_for, parse_daemon_env,
+    remove_daemon_files_if_unheld, run_daemon, running_daemon_pid, save_daemon_env, DaemonEnvPair,
+    DaemonEnvReject, DaemonError, StaleLockRemoval, PERSISTED_ENV_VARS,
 };
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;

@@ -11341,7 +11341,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.12.4"
+version = "0.12.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -11464,7 +11464,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11571,7 +11571,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.8.1"
+version = "1.8.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11692,7 +11692,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.58.0"
+version = "0.59.0"
 dependencies = [
  "anyhow",
  "arc-swap",

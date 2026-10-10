@@ -538,7 +538,8 @@ pub fn reap_orphans_before_start() {
     // #8760: and only while holding the daemon lock ourselves. A concurrent
     // starter that already holds it keeps its lock and port file.
     if let Ok(lock) = crate::service::daemon_lock_path() {
-        let port = crate::commands::daemon_utils::daemon_port_path();
+        // #9214: the port file an older daemon left, if any.
+        let port = crate::service::daemon_port_path().ok();
         let also: Vec<&Path> = port.as_deref().into_iter().collect();
         match crate::service::remove_daemon_files_if_unheld(&lock, &also) {
             Ok(crate::service::StaleLockRemoval::HeldByLiveDaemon) => tracing::info!(
