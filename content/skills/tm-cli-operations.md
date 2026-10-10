@@ -429,7 +429,7 @@ by calling `search.health` on its Unix socket, resolved from
 `TRUSTY_SEARCH_SOCKET`, else the daemon's data directory. trusty-search is UP
 only when the socket answers; otherwise it is DOWN and the dial error is shown.
 A process that `pgrep` matches never makes it UP. The default manifest starts
-trusty-search with `trusty-search start --no-http`, so it binds no TCP port.
+trusty-search with `trusty-search start`; the daemon binds no TCP port.
 
 ```bash
 tm doctor                          # full diagnostic report
