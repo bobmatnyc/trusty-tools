@@ -227,3 +227,34 @@ async fn a_search_on_a_parked_id_is_a_conflict_naming_the_canonical_index() {
     assert_eq!(status, axum::http::StatusCode::CONFLICT);
     assert_eq!(body["parked"], true);
 }
+
+/// Why: the fan-out must skip a parked index even while it is still loaded
+/// (an unload that could not run, or a park written by another process).
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fan_out_skips_a_parked_index_that_is_still_resident() {
+    let fx = fixture().await;
+    let query = serde_json::json!({ "query": "authenticate" });
+    let before = fx.ok(queries::METHOD_QUERY_ALL, query.clone()).await;
+    assert_eq!(before["total_indexes"], 1, "{before}");
+
+    let map_path = crate::core::project_map_io::map_path_beside(&fx.registry());
+    crate::core::project_map_io::update(&map_path, |map| {
+        let mut map = map.unwrap_or_default();
+        map.park(crate::core::project_map::ParkedIndex {
+            index_id: WT.to_string(),
+            key: REPO.to_string(),
+            root_path: fx.wt.clone(),
+            reason: crate::core::project_map::ParkReason::Operator,
+            parked_unix: 1,
+        });
+        Ok((Some(map), ()))
+    })
+    .expect("park in the map only");
+    assert!(
+        fx.state.registry.get(&IndexId::new(WT)).is_some(),
+        "still resident"
+    );
+    let after = fx.ok(queries::METHOD_QUERY_ALL, query).await;
+    assert_eq!(after["total_indexes"], 0, "{after}");
+}

@@ -86,6 +86,7 @@ pub(super) fn parked_refusal_json(
 }
 
 /// `ids` without the parked ones — the fan-out never searches a parked index.
+/// Test: `the_fan_out_skips_a_parked_index_that_is_still_resident`.
 pub(super) fn without_parked(state: &SearchAppState, ids: Vec<IndexId>) -> Vec<IndexId> {
     match readable_map(state) {
         Some(map) => ids.into_iter().filter(|id| !map.is_parked(&id.0)).collect(),
