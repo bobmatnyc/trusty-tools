@@ -276,24 +276,76 @@ fn rename_palace_resumes_after_alias_written_but_dir_unmoved() {
 }
 
 /// Why: a crash after the move and before the `palace.json` rewrite must be
-/// finishable by re-running the same rename.
+/// finishable by re-running the same rename. #9544: in that state an open of
+/// `new-p` caches its handle under the json id `old-p`; the resume must drop
+/// it, or `old-p` serves a stale handle and `new-p` opens a second Writer.
 /// Test: itself.
 #[test]
 fn rename_palace_resumes_after_dir_moved_but_id_unwritten() {
     let tmp = tempdir().unwrap();
     let root = tmp.path();
-    let reg = PalaceRegistry::new();
+    let reg = PalaceRegistry::new().with_writer_intent();
     drop(create(&reg, root, "old-p"));
     PalaceAliasStore::rename_target(root, "old-p", "new-p").unwrap();
+    // Close the create-time handle (it points at the pre-move path).
     reg.remove(&PalaceId::new("old-p"));
     std::fs::rename(root.join("old-p"), root.join("new-p")).unwrap();
     assert_eq!(json_id(root, "new-p").0, "old-p");
+    drop(
+        reg.open_palace(root, &PalaceId::new("new-p"))
+            .expect("open"),
+    );
+    assert!(
+        reg.peek(&PalaceId::new("old-p")).is_some(),
+        "cached under old"
+    );
 
     let out = reg
         .rename_palace(root, "old-p", "new-p", &opts())
         .expect("resume");
     assert!(out.resumed && out.name_rewritten);
     assert_eq!(json_id(root, "new-p"), ("new-p".into(), "new-p".into()));
+    assert!(
+        reg.peek(&PalaceId::new("old-p")).is_none(),
+        "stale handle gone"
+    );
+    let h = reg
+        .open_palace(root, &PalaceId::new("new-p"))
+        .expect("reopen");
+    assert_eq!(h.id.as_str(), "new-p");
+    assert!(!h.is_read_only(), "one Writer");
+    assert_eq!(reg.len(), 1, "exactly one cached handle");
+}
+
+/// Why (#9544): `save_palace` refuses a newer-format palace, so a rename that
+/// moved one first would stick half-done. The refusal must change nothing.
+/// Test: itself.
+#[test]
+fn rename_palace_refuses_a_newer_format_source_and_changes_nothing() {
+    use crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+    let tmp = tempdir().unwrap();
+    let root = tmp.path();
+    let reg = PalaceRegistry::new();
+    drop(create(&reg, root, "old-p"));
+    reg.remove(&PalaceId::new("old-p"));
+    let json = root.join("old-p").join("palace.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+    v["format_version"] = serde_json::json!(PALACE_FORMAT_SUPPORTED + 1);
+    std::fs::write(&json, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    let before = std::fs::read(&json).unwrap();
+
+    let err = reg
+        .rename_palace(root, "old-p", "new-p", &opts())
+        .unwrap_err();
+    assert!(matches!(err, PalaceRenameError::Io { .. }), "{err:?}");
+    assert!(format!("{err:#}").contains("FormatTooNew"), "{err}");
+    assert!(aliases(root).is_empty(), "no alias written");
+    assert!(!root.join("new-p").exists(), "dir not moved");
+    assert_eq!(
+        std::fs::read(&json).unwrap(),
+        before,
+        "palace.json unchanged"
+    );
 }
 
 /// Why: a failed move must restore the replaced target and exactly the alias

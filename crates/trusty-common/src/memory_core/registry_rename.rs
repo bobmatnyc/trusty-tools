@@ -21,6 +21,7 @@ use crate::memory_core::palace::PalaceId;
 use crate::memory_core::palace_emptiness::{
     LegacyProbe, PalaceNotEmpty, check_palace_empty, conservative_legacy_probe,
 };
+use crate::memory_core::store::palace_format::mirror_to_preserve;
 use crate::memory_core::store::palace_store::PalaceStore;
 use crate::palace_alias::{AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent};
 
@@ -189,9 +190,11 @@ impl PalaceRegistry {
     /// (`NotFound`), an `old` that is an alias, a `new` that is a live alias of
     /// a palace other than `old` (`new` aliasing `old` — a reversed rename — is
     /// allowed), and an existing `new` that is not empty, or that is empty
-    /// without `replace_empty`. Takes the open-locks of the ids `old` and `new`
-    /// resolve to, deduplicated and in sorted order, then releases their
-    /// cached handles if nothing else references them; a lock or handle still
+    /// without `replace_empty`, and a source in a newer on-disk format (`Io`,
+    /// before any write). Takes the open-locks of the ids `old` and `new`
+    /// resolve to, deduplicated and in sorted order, then releases the cached
+    /// handles of those ids and of the literal `old` and `new` if nothing else
+    /// references them; a lock or handle still
     /// held after `busy_wait` is
     /// `Busy` with nothing changed. Then, in order: the alias write
     /// ([`PalaceAliasStore::rename_target_with_undo`]); for `replace_empty`, the empty
@@ -218,6 +221,7 @@ impl PalaceRegistry {
     /// `rename_palace_resumes_after_alias_written_but_dir_unmoved`,
     /// `rename_palace_resumes_after_dir_moved_but_id_unwritten`,
     /// `rename_palace_failed_move_rolls_back_alias_keys`,
+    /// `rename_palace_refuses_a_newer_format_source_and_changes_nothing`,
     /// `rename_palace_allows_the_reverse_rename`,
     /// `rename_palace_refuses_a_target_with_chat_sessions`.
     pub fn rename_palace(
@@ -277,7 +281,15 @@ impl PalaceRegistry {
                     .ok_or_else(|| busy(key, "its open-lock is held"))?,
             );
         }
-        self.release_all(&keys, opts.busy_wait)?;
+        // #9544: the handle cache keys by the id in `palace.json`, not the
+        // directory. Half-done (dir at `new`, json id still `old`), a handle
+        // of that palace sits under `old`, which no longer resolves to a lock
+        // key; release the literal ids too.
+        let mut cached = keys.clone();
+        cached.extend([old.to_string(), new.to_string()]);
+        cached.sort_unstable();
+        cached.dedup();
+        self.release_all(&cached, opts.busy_wait)?;
         let outcome = self.rename_locked(data_root, old, new, opts, mover)?;
         // #9544: drop per-id caches the old id no longer owns.
         let old_id = PalaceId::new(old);
@@ -342,6 +354,10 @@ impl PalaceRegistry {
             });
         }
         outcome.resumed = aliased_to_new;
+        // #9544: `save_palace` refuses a newer-format palace, so check before
+        // anything moves; otherwise the rename sticks half-done.
+        mirror_to_preserve(&old_dir, old)
+            .map_err(|e| PalaceRenameError::io(format!("rename palace {old:?}"), e))?;
         let replace = if present(&new_dir)? {
             self.check_target(&new_dir, new, opts)?;
             true
