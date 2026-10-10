@@ -17,7 +17,7 @@ use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
-use trusty_common::memory_core::palace::{PalaceId, RoomType};
+use trusty_common::memory_core::palace::{DrawerType, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::{admit_tier_c, RememberOptions, TierCAdmission};
 use trusty_common::memory_core::timeouts::{self, OpBudget};
 use uuid::Uuid;
@@ -274,6 +274,32 @@ pub(crate) fn resolve_tier_c(args: &Value, tool: &str) -> Result<TierCAdmission>
         expires_at,
         chrono::Utc::now(),
     ))
+}
+
+/// Resolve `memory_remember`'s optional drawer `type` argument (#9144).
+///
+/// Why: a write that names a type must store that type or fail. An unknown
+/// name that fell back to `Unknown` or to the heuristic classifier would store
+/// a drawer the caller believes is typed, and ranking would treat it wrongly
+/// with no error anywhere.
+/// What: absent or JSON `null` gives `Ok(None)`, which leaves `classify_as`
+/// unset — exactly the untyped write path. A string goes through
+/// [`DrawerType::parse_write_type`] (the five writable names, any ASCII case);
+/// its error becomes `Err("{tool}: <message>")`. Any other JSON value is an
+/// `Err` too. There is no lenient branch.
+/// Test: `dispatch_remember_stores_requested_type_and_list_round_trips_it`,
+/// `dispatch_remember_rejects_unknown_type_and_writes_nothing`,
+/// `dispatch_remember_bad_type_beats_content_gate`.
+pub(crate) fn resolve_type_arg(args: &Value, tool: &str) -> Result<Option<DrawerType>> {
+    match args.get("type") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => DrawerType::parse_write_type(name)
+            .map(Some)
+            .map_err(|e| anyhow!("{tool}: {e}")),
+        Some(other) => Err(anyhow!(
+            "{tool}: 'type' must be a string naming a drawer type, got {other}"
+        )),
+    }
 }
 
 /// Fold an admission decision into the write options and the response envelope.
