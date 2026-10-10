@@ -239,14 +239,36 @@ impl Restarted {
             "precondition: the restarted server reused the pane id"
         );
         assert_ne!(now.1, old_server, "precondition: a new server instance");
-        Some(Self {
+        let restarted = Self {
             server,
             f,
             name,
             _second: second,
             pane,
             old_server,
-        })
+        };
+        restarted.wait_until_printed();
+        Some(restarted)
+    }
+
+    /// Why: #9587: the pane prints asynchronously, so a single read right
+    /// after the spawn loses the race on a loaded host.
+    /// What: polls the new pane every 50 ms for up to 5 s until it shows
+    /// [`LIVE_TEXT`]; panics with the last screen on a real timeout.
+    /// Test: `restarted_returns_only_once_the_pane_has_printed`.
+    fn wait_until_printed(&self) {
+        let mut screen = self.screen();
+        for _ in 0..100 {
+            if screen.contains(LIVE_TEXT) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            screen = self.screen();
+        }
+        assert!(
+            screen.contains(LIVE_TEXT),
+            "precondition: the restarted pane never printed {LIVE_TEXT:?} within 5s: {screen:?}"
+        );
     }
 
     /// A stale record in `state`, captured on the server before the restart.
