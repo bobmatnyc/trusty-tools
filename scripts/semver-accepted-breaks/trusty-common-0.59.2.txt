@@ -1,0 +1,6 @@
+crate   trusty-common
+version 0.59.2
+reason  Recorded from semver-checks.yml workflow_dispatch run 38067718759; approved by the Architect 2026-10-10 under Bob's 2026-09-26 versioning ruling: a public-API break never forces a major version. Refs #9542.
+accept  function_missing function trusty_common::port::bind_with_auto_port
+accept  function_missing function trusty_common::bind_with_auto_port
+accept  module_missing mod trusty_common::port
