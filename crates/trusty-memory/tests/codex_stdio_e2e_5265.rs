@@ -210,7 +210,11 @@ async fn bare_serve_completes_a_clean_mcp_session() {
     let library = trusty_memory::tools::tool_definitions();
     let expected = library["tools"].as_array().map_or(0, Vec::len);
     eprintln!("#9144 binary tools/list: {} tools", tools.len());
-    assert_eq!(tools.len(), expected, "served roster must match the library");
+    assert_eq!(
+        tools.len(),
+        expected,
+        "served roster must match the library"
+    );
     let remember = tools
         .iter()
         .find(|t| t["name"] == "memory_remember")
