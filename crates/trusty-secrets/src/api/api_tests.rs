@@ -262,3 +262,65 @@ fn api_request_constructors_match_the_wire_shape() {
     assert_eq!(narrowed.keys, vec![key]);
     assert_eq!(round_trip(&narrowed), narrowed);
 }
+
+/// A stand-in grant token, asserted absent from every `Debug` rendering.
+const FAKE_TOKEN: &str = "tok-fake-4b8e1f0a9c7d";
+
+/// Why: #9070 AC 6 — a token or a value never reaches `Debug` output.
+/// Test: itself.
+#[test]
+fn api_exec_grant_types_redact_tokens_and_values() {
+    use super::methods::{ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest};
+    let key = SecretKey::new("API_KEY").unwrap();
+    let granted: ExecGrantResponse = serde_json::from_str(&format!(
+        r#"{{"token":"{FAKE_TOKEN}","expires_at":7,"ttl_secs":60}}"#
+    ))
+    .unwrap();
+    let resolve = ResolveRequest::new(FAKE_TOKEN, key);
+    let revoke = RevokeRequest::new(FAKE_TOKEN);
+    let answer: ResolveResponse =
+        serde_json::from_str(&format!(r#"{{"key":"API_KEY","value":"{FAKE_VALUE}"}}"#)).unwrap();
+    assert_eq!(answer.value.expose(), FAKE_VALUE, "the wire carries it");
+    let shown = format!("{granted:?} {granted:#?} {resolve:?} {revoke:#?} {answer:?} {answer:#?}");
+    assert!(!shown.contains(FAKE_TOKEN), "{shown}");
+    assert!(!shown.contains(FAKE_VALUE), "{shown}");
+    assert!(shown.contains("API_KEY"), "{shown}");
+}
+
+/// Why: #9070 — the clients build these requests through constructors, so
+/// `new` must equal what the wire decodes and decode on a server that denies
+/// unknown fields; an omitted `one_shot` means reusable.
+/// Test: itself.
+#[test]
+fn api_exec_grant_requests_match_the_wire_shape() {
+    use super::methods::{ExecGrantRequest, ResolveRequest, RevokeRequest};
+    let key = SecretKey::new("API_KEY").unwrap();
+    let wire: ExecGrantRequest =
+        serde_json::from_str(r#"{"child_pid":4242,"keys":["API_KEY"],"ttl_secs":60}"#).unwrap();
+    let built = ExecGrantRequest::new(4242, [key.clone()], 60);
+    assert_eq!(built, wire);
+    let back: ExecGrantRequest =
+        serde_json::from_value(serde_json::to_value(built.one_shot()).unwrap()).unwrap();
+    assert!(back.one_shot);
+    let resolve = ResolveRequest::new(FAKE_TOKEN, key);
+    let back: ResolveRequest =
+        serde_json::from_value(serde_json::to_value(&resolve).unwrap()).unwrap();
+    assert_eq!(back, resolve);
+    let revoke = RevokeRequest::new(FAKE_TOKEN);
+    let back: RevokeRequest =
+        serde_json::from_value(serde_json::to_value(&revoke).unwrap()).unwrap();
+    assert_eq!(back, revoke);
+    for extra in [
+        r#"{"token":"t","key":"K","project":"/repo"}"#,
+        r#"{"token":"t","pid":1}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ResolveRequest>(extra).is_err(),
+            "{extra}"
+        );
+        assert!(
+            serde_json::from_str::<RevokeRequest>(extra).is_err(),
+            "{extra}"
+        );
+    }
+}

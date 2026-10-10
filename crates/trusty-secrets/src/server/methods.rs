@@ -38,15 +38,45 @@ use crate::store::{Capabilities, SecretBackend, SecretStore, swept_backends};
 /// The params field naming the project directory.
 pub const PROJECT_FIELD: &str = "project";
 
-/// A method body: state and raw params in, a JSON result or a fixed kind out.
-// #9073: crate-private; S8 passes the caller pid into the body.
-pub(crate) type MethodFn = fn(&State, Value) -> Result<Value, ErrorKind>;
+/// Who sent the request, as the kernel reported it (#9070).
+///
+/// Why: `secrets.grant` and `secrets.resolve` decide on the caller's
+/// process, and every audit record names it. The pid comes from the socket
+/// peer (`trusty_common::uds::server::request_peer_pid`), never from the
+/// request body. That task-local does not cross onto the blocking pool, so
+/// the router reads it before it spawns the body and passes it in here.
+/// What: the peer pid, or `None` when the kernel reported none (a direct
+/// dispatch in a test, or a target without a peer-pid option). A method that
+/// grants on it treats `None` as a refusal.
+/// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
+/// `audit_value_never_reaches_the_audit_file`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Caller {
+    pid: Option<u32>,
+}
+
+impl Caller {
+    /// A caller with the peer pid `pid`.
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    /// The peer pid, when the kernel reported one.
+    pub(crate) fn pid(self) -> Option<u32> {
+        self.pid
+    }
+}
+
+/// A method body: state, the caller and raw params in, a JSON result or a
+/// fixed kind out.
+// #9070: the caller is the router's, read before the body leaves the task.
+pub(crate) type MethodFn = fn(&State, Caller, Value) -> Result<Value, ErrorKind>;
 
 /// Split `params` into the project directory and the remaining fields.
 ///
 /// What: `params` must be an object whose `project` is a string; anything
 /// else is [`ErrorKind::InvalidParams`]. The rest is returned untouched.
-fn split_project(params: Value) -> Result<(PathBuf, Map<String, Value>), ErrorKind> {
+pub(crate) fn split_project(params: Value) -> Result<(PathBuf, Map<String, Value>), ErrorKind> {
     let Value::Object(mut fields) = params else {
         return Err(ErrorKind::InvalidParams);
     };
@@ -59,7 +89,7 @@ fn split_project(params: Value) -> Result<(PathBuf, Map<String, Value>), ErrorKi
 /// Decode the non-project fields as `T`, discarding the serde error.
 ///
 /// Why: a serde message can quote the rejected input — for `set`, the value.
-fn decode<T: DeserializeOwned>(fields: Map<String, Value>) -> Result<T, ErrorKind> {
+pub(crate) fn decode<T: DeserializeOwned>(fields: Map<String, Value>) -> Result<T, ErrorKind> {
     serde_json::from_value(Value::Object(fields)).map_err(|_| ErrorKind::InvalidParams)
 }
 
@@ -70,7 +100,7 @@ pub(crate) fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 /// `secrets.scopes`: the project scope, then the owner scope.
 ///
 /// Test: `server_scopes_round_trip_over_a_real_socket`.
-pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn scopes(state: &State, _caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     if !rest.is_empty() {
         return Err(ErrorKind::InvalidParams);
@@ -92,26 +122,34 @@ pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// `server_list_lists_flags_off_when_the_backend_does_not_open`,
 /// `server_corrupt_index_is_a_fixed_error`,
 /// `audit_list_records_only_denials_and_scopes_doctor_none`.
-pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    audited(state, AuditMethod::List, Recording::DenyOnly, |gate| {
-        let (dir, rest) = split_project(params)?;
-        let request: ListRequest = decode(rest)?;
-        gate.name(&request.vault, None);
-        let project = ProjectContext::resolve(state, &dir)?;
-        gate.project(&project);
-        project.require_in_scope(&request.vault)?;
-        // #9070: the flag is the backend's. A backend that does not open
-        // vouches for no flag, so the index listing stands with every flag
-        // OFF; a list that worked before the flag moved keeps working.
-        let keys = match project.backend(state) {
-            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
-            Err(_) => state.index.list(&request.vault)?,
-        };
-        to_json(&ListResponse {
-            vault: request.vault,
-            keys,
-        })
-    })
+pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    audited(
+        state,
+        caller,
+        AuditMethod::List,
+        Recording::DenyOnly,
+        |gate| {
+            let (dir, rest) = split_project(params)?;
+            let request: ListRequest = decode(rest)?;
+            gate.name(&request.vault, None);
+            let project = ProjectContext::resolve(state, &dir)?;
+            gate.project(&project);
+            project.require_in_scope(&request.vault)?;
+            // #9070: the flag is the backend's. A backend that does not open
+            // vouches for no flag, so the index listing stands with every flag
+            // OFF; a list that worked before the flag moved keeps working.
+            let keys = match project.backend(state) {
+                Ok(backend) => {
+                    SecretStore::new(backend, state.index.clone()).list(&request.vault)?
+                }
+                Err(_) => state.index.list(&request.vault)?,
+            };
+            to_json(&ListResponse {
+                vault: request.vault,
+                keys,
+            })
+        },
+    )
 }
 
 /// `secrets.set`: upsert one key; answer S1's masked confirmation once.
@@ -126,8 +164,8 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// `audit_set_and_delete_write_one_record_per_call`,
 /// `server_set_writes_file_only_when_the_machine_config_selects_it`,
 /// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
-pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    audited(state, AuditMethod::Set, Recording::Once, |gate| {
+pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    audited(state, caller, AuditMethod::Set, Recording::Once, |gate| {
         let (dir, rest) = split_project(params)?;
         let request: SetRequest = decode(rest)?;
         gate.name(&request.vault, Some(&request.key));
@@ -157,26 +195,33 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`,
 /// `server_delete_refuses_when_the_account_config_does_not_parse`,
 /// `audit_set_and_delete_write_one_record_per_call`.
-pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    audited(state, AuditMethod::Delete, Recording::Once, |gate| {
-        let (dir, rest) = split_project(params)?;
-        let request: DeleteRequest = decode(rest)?;
-        gate.name(&request.vault, Some(&request.key));
-        let project = ProjectContext::resolve(state, &dir)?;
-        gate.project(&project);
-        project.require_in_scope(&request.vault)?;
-        // #7519: a missing account file skips 1Password; an unreadable one
-        // refuses, since a 1Password copy from when it was readable may remain.
-        let account = sweep_machine(state)?;
-        let store = SecretStore::new(project.backend(state)?, state.index.clone());
-        // #7519: a backend switch or a copy leaves values in other backends.
-        // Ruling 74: the CLI backends swept are the ones the factory opens,
-        // so enablement comes from the account's file, not the spawner's.
-        let others = other_backends(state, &project.resolved_config().backend, account.as_ref())?;
-        gate.admit()?;
-        let response = store.delete_across(&request.vault, &request.key, &others)?;
-        to_json(&response)
-    })
+pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    audited(
+        state,
+        caller,
+        AuditMethod::Delete,
+        Recording::Once,
+        |gate| {
+            let (dir, rest) = split_project(params)?;
+            let request: DeleteRequest = decode(rest)?;
+            gate.name(&request.vault, Some(&request.key));
+            let project = ProjectContext::resolve(state, &dir)?;
+            gate.project(&project);
+            project.require_in_scope(&request.vault)?;
+            // #7519: a missing account file skips 1Password; an unreadable one
+            // refuses, since a 1Password copy from when it was readable may remain.
+            let account = sweep_machine(state)?;
+            let store = SecretStore::new(project.backend(state)?, state.index.clone());
+            // #7519: a backend switch or a copy leaves values in other backends.
+            // Ruling 74: the CLI backends swept are the ones the factory opens,
+            // so enablement comes from the account's file, not the spawner's.
+            let others =
+                other_backends(state, &project.resolved_config().backend, account.as_ref())?;
+            gate.admit()?;
+            let response = store.delete_across(&request.vault, &request.key, &others)?;
+            to_json(&response)
+        },
+    )
 }
 
 /// The account machine config whose CLI backends a delete sweeps (#7519).
@@ -280,69 +325,75 @@ impl CopySelection {
 /// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
 /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
-pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    audited(state, AuditMethod::Copy, Recording::PerKey, |gate| {
-        let (dir, rest) = split_project(params)?;
-        let request: CopyRequest = decode(rest)?;
-        gate.backend(&request.to_backend);
-        if request.from_backend == request.to_backend {
-            return Err(ErrorKind::SameBackend);
-        }
-        let project = ProjectContext::resolve(state, &dir)?;
-        gate.project(&project);
-        let vault = project.scopes().project().clone();
-        gate.name(&vault, None);
-        // #7524 H1: the destination's posture check runs before any backend
-        // opens; `tm secrets copy --to file` moved Keychain values to files.
-        let destination = project.open_for_write(state, &request.to_backend)?;
-        let source = (state.backends)(&request.from_backend)?;
-        if !source.capabilities().contains(Capabilities::READ)
-            || !destination.capabilities().contains(Capabilities::WRITE)
-        {
-            return Err(ErrorKind::Unsupported);
-        }
-        let keys = match CopySelection::of(&request) {
-            CopySelection::Keys(keys) => keys,
-            CopySelection::All => state
-                .index
-                .list(&vault)?
-                .into_iter()
-                .map(|meta| meta.name)
-                .collect(),
-        };
-        // #9065: write through `set`'s index lock and compensation, never around it.
-        let store = SecretStore::new(destination, state.index.clone());
-        let mut response = CopyResponse {
-            copied: Vec::new(),
-            failed: Vec::new(),
-        };
-        gate.admit()?;
-        for key in keys {
-            gate.ready()?;
-            // #7524 P2-M1: no key starts after the deadline, so the reply
-            // reaches the client and names everything that was copied.
-            let outcome = if crate::store::deadline::passed() {
-                Err(ErrorKind::DeadlineExceeded)
-            } else {
-                match source.get(&vault, &key) {
-                    Ok(Some(value)) => store
-                        .set(&vault, &key, &value)
-                        .map(drop)
-                        .map_err(ErrorKind::from),
-                    Ok(None) => Err(ErrorKind::NotFound),
-                    Err(e) => Err(ErrorKind::from(e)),
-                }
-            };
-            gate.record_key(&key, outcome)?;
-            match outcome {
-                Ok(()) => response.copied.push(key),
-                // #9065: an orphan is never folded into `failed`; it aborts the copy.
-                Err(ErrorKind::OrphanedBackendEntry) => {
-                    return Err(ErrorKind::OrphanedBackendEntry);
-                }
-                Err(_) => response.failed.push(key),
+pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    audited(
+        state,
+        caller,
+        AuditMethod::Copy,
+        Recording::PerKey,
+        |gate| {
+            let (dir, rest) = split_project(params)?;
+            let request: CopyRequest = decode(rest)?;
+            gate.backend(&request.to_backend);
+            if request.from_backend == request.to_backend {
+                return Err(ErrorKind::SameBackend);
             }
-        }
-        to_json(&response)
-    })
+            let project = ProjectContext::resolve(state, &dir)?;
+            gate.project(&project);
+            let vault = project.scopes().project().clone();
+            gate.name(&vault, None);
+            // #7524 H1: the destination's posture check runs before any backend
+            // opens; `tm secrets copy --to file` moved Keychain values to files.
+            let destination = project.open_for_write(state, &request.to_backend)?;
+            let source = (state.backends)(&request.from_backend)?;
+            if !source.capabilities().contains(Capabilities::READ)
+                || !destination.capabilities().contains(Capabilities::WRITE)
+            {
+                return Err(ErrorKind::Unsupported);
+            }
+            let keys = match CopySelection::of(&request) {
+                CopySelection::Keys(keys) => keys,
+                CopySelection::All => state
+                    .index
+                    .list(&vault)?
+                    .into_iter()
+                    .map(|meta| meta.name)
+                    .collect(),
+            };
+            // #9065: write through `set`'s index lock and compensation, never around it.
+            let store = SecretStore::new(destination, state.index.clone());
+            let mut response = CopyResponse {
+                copied: Vec::new(),
+                failed: Vec::new(),
+            };
+            gate.admit()?;
+            for key in keys {
+                gate.ready()?;
+                // #7524 P2-M1: no key starts after the deadline, so the reply
+                // reaches the client and names everything that was copied.
+                let outcome = if crate::store::deadline::passed() {
+                    Err(ErrorKind::DeadlineExceeded)
+                } else {
+                    match source.get(&vault, &key) {
+                        Ok(Some(value)) => store
+                            .set(&vault, &key, &value)
+                            .map(drop)
+                            .map_err(ErrorKind::from),
+                        Ok(None) => Err(ErrorKind::NotFound),
+                        Err(e) => Err(ErrorKind::from(e)),
+                    }
+                };
+                gate.record_key(&key, outcome)?;
+                match outcome {
+                    Ok(()) => response.copied.push(key),
+                    // #9065: an orphan is never folded into `failed`; it aborts the copy.
+                    Err(ErrorKind::OrphanedBackendEntry) => {
+                        return Err(ErrorKind::OrphanedBackendEntry);
+                    }
+                    Err(_) => response.failed.push(key),
+                }
+            }
+            to_json(&response)
+        },
+    )
 }

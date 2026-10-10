@@ -88,3 +88,7 @@ libc = { workspace = true, optional = true }
 tempfile = { workspace = true }
 # The api tests decode wire JSON even when only `api` is enabled.
 serde_json = { workspace = true }
+# #9070: the resolve sentinel test captures every tracing event. Both are
+# already in the graph through trusty-common, with the same features.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

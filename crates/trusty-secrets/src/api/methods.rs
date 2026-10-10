@@ -5,8 +5,9 @@
 //! share one definition and one set of validation rules.
 //! What: one request/response pair per S1-shaped method. Name fields use the
 //! validated newtypes, so a bad name fails at deserialization. Requests deny
-//! unknown fields. `secrets.resolve` (S8) and `secrets.doctor` are not here.
-//! The server side is S2.
+//! unknown fields. `secrets.doctor` is not here. The server side is S2; the
+//! exec-grant methods `secrets.grant`, `secrets.resolve` and
+//! `secrets.revoke` are S8 (#9070), in `exec.rs` beside this file.
 //!
 //! Every request, every response, [`ScopeKind`] and [`SetOutcome`] are
 //! `#[non_exhaustive]`. Build a request with its `new` constructor, read a
@@ -22,6 +23,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{BackendId, SecretKey, SecretValue, VaultName};
 
+// #9070: the exec-grant request and response types.
+#[path = "exec.rs"]
+mod exec;
+pub use exec::{
+    ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
+    RevokeResponse,
+};
+
 /// Method names.
 pub mod method {
     /// List the owner and project scopes a caller can pick.
@@ -34,6 +43,13 @@ pub mod method {
     pub const DELETE: &str = "secrets.delete";
     /// Copy keys between backends inside one project.
     pub const COPY: &str = "secrets.copy";
+    /// Register an exec grant and return its token (DOC-74 §15.8, #9070).
+    pub const GRANT: &str = "secrets.grant";
+    /// Return one value to an exec-granted caller; the only value-returning
+    /// method (DOC-74 §15.2).
+    pub const RESOLVE: &str = "secrets.resolve";
+    /// Remove an exec grant.
+    pub const REVOKE: &str = "secrets.revoke";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

@@ -64,6 +64,15 @@ pub enum AuditMethod {
     /// `secrets.list`, denials only.
     #[serde(rename = "secrets.list")]
     List,
+    /// `secrets.grant`, one record per granted key, or one deny (#9070).
+    #[serde(rename = "secrets.grant")]
+    Grant,
+    /// `secrets.resolve`, one record per key resolved or refused (#9070).
+    #[serde(rename = "secrets.resolve")]
+    Resolve,
+    /// `secrets.revoke`, one record per call (#9070).
+    #[serde(rename = "secrets.revoke")]
+    Revoke,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -113,7 +122,8 @@ impl From<ErrorKind> for AuditReason {
 /// Why: see the module docs. Every field is typed; none can carry a value.
 /// What: `vault`, `key`, `backend` and `project_root` are `None` when the
 /// call was refused before the server knew them (an undecodable request has
-/// none). `caller_pid` is `None` until S8 passes the peer pid in. Unknown
+/// none). `caller_pid` is the socket peer's pid as the kernel reported it
+/// (#9070), `None` when the kernel reported none. Unknown
 /// fields are ignored and missing optional fields default, so old and new
 /// readers and writers interoperate.
 /// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`.
@@ -143,7 +153,7 @@ pub struct AuditRecord {
     /// The project's checkout root, once resolved.
     #[serde(default)]
     pub project_root: Option<PathBuf>,
-    /// The calling process, once S8 reports it.
+    /// The calling process: the socket peer's pid (#9070).
     #[serde(default)]
     pub caller_pid: Option<u32>,
 }

@@ -10,15 +10,20 @@
 //! - [`settings`] — socket, index and config paths, and the idle window.
 //! - `router` — bind, uid-checked serve loop, unlink on exit.
 //! - [`project`] — a request's project directory to scopes and a backend.
-//! - `methods` and `doctor` — the six method bodies. None returns a secret
-//!   value.
+//! - `methods` and `doctor` — the six S2 method bodies. None returns a
+//!   secret value.
+//! - `exec` — `secrets.grant`, `secrets.resolve` and `secrets.revoke`
+//!   (S8 slice 2, #9070). `secrets.resolve` is the one method that returns
+//!   a value, and only to a caller inside a live exec grant.
 //! - [`audit`] and `gate` — the credential access audit trail (#4567):
-//!   one record per `set`/`delete` call, per `copy` key, per denied `list`.
+//!   one record per `set`/`delete` call, per `copy` key, per denied `list`,
+//!   per granted key, per `resolve` and per `revoke`, each naming the
+//!   caller's pid.
 //! - [`errors`] — the fixed error text every failure is reported with.
 //! - [`client`] — the minimal spawn-on-first-call helper.
 //! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
-//!   process-ancestry check `secrets.resolve` will use (S8 slice 1, #9070).
-//!   No method reaches them yet.
+//!   process-ancestry checks `secrets.grant` and `secrets.resolve` use (S8,
+//!   #9070).
 //!
 //! `router` and `methods` are private (#9073): S8 changes the method table
 //! and the body signature, so only the re-exports below are public.
@@ -30,7 +35,7 @@
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
-// #9070: S8 slice 1 — exec grants and process ancestry, library only.
+// #9070: S8 — exec grants and process ancestry.
 pub mod ancestry;
 pub mod audit;
 pub mod client;
@@ -38,6 +43,8 @@ pub mod client;
 mod deadline;
 mod doctor;
 pub mod errors;
+// #9070: S8 slice 2, the exec-grant method bodies.
+mod exec;
 mod gate;
 pub mod grant;
 #[cfg(test)]
@@ -48,7 +55,10 @@ mod router;
 pub mod settings;
 mod tools;
 
-pub use ancestry::{OsProcessTable, ProcessError, ProcessTable, StartTime, is_self_or_descendant};
+pub use ancestry::{
+    OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
+    is_self_or_descendant,
+};
 pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use doctor::{
@@ -56,8 +66,8 @@ pub use doctor::{
 };
 pub use errors::ErrorKind;
 pub use grant::{
-    Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantToken,
-    MAX_LIVE_GRANTS, MintedGrant, SystemClock,
+    Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
+    GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
 };
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
