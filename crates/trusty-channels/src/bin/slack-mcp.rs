@@ -9,8 +9,9 @@
 //! (issue #2639), search + reactions (issue #2640), and the
 //! claude.ai-connector-parity batch added by epic #3611 (issues
 //! #3612-#3618) all make real Slack Web API calls through `BaseClient`. See
-//! `crates/trusty-channels/README.md` for the full tool table and required
-//! OAuth scopes.
+//! `crates/trusty-channels/docs/slack-mcp.md` for the full tool table and
+//! required OAuth scopes. #8454: no route check, so this binary needs the
+//! `unrouted-slack-mcp` feature.
 //! Test: Manual via `claude mcp add` / direct stdin piping; the tool bodies
 //! themselves are covered by `cargo test -p trusty-channels`
 //! (`tests/tools_http.rs`).
