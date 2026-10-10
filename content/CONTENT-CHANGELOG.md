@@ -30,6 +30,13 @@ Sections are rolled up from `content/changelog.d/` by
 ### Documentation
 
 - The `tm-capabilities` doctor reference says the `content` row names the manual install (`gh release download <tag>`, then `tm content install --from <dir>/<tag>.tar.gz`) and never fetches the release itself (#9396).
+- The `tm-capabilities` CLI reference says `tm memory forget` deletes a drawer by id or by slot (`--fact-key`) ([#9340](https://github.com/bobmatnyc/trusty-tools/issues/9340))
+- The `tm-capabilities` CLI reference lists `tm memory forget` ([#9340](https://github.com/bobmatnyc/trusty-tools/issues/9340))
+- The `tm-capabilities` CLI reference gives `tm services url` an example on port 7880, not trusty-search's retired 7878 ([#9543](https://github.com/bobmatnyc/trusty-tools/issues/9543))
+- `tm-cli-operations` says `tm services` probes trusty-search by calling `search.health` on its Unix socket (`TRUSTY_SEARCH_SOCKET`, else the data directory): UP only when the socket answers, DOWN with the dial error otherwise. `tm services port|url trusty-search` exit 1 naming the socket, and an old static port-7878 `services.yaml` entry is read as the socket probe with one `WARN` ([#9543](https://github.com/bobmatnyc/trusty-tools/issues/9543))
+- `tm-doctor` names the trusty-search check as reached over its Unix socket, not port 7878 ([#9543](https://github.com/bobmatnyc/trusty-tools/issues/9543))
+- `tm-circuit-breaker` shows a raw socket probe, not a `curl` to port 7878, as the forbidden PM Bash example ([#9543](https://github.com/bobmatnyc/trusty-tools/issues/9543))
+- `tm-epic`, `version-control`, `tm-workflow` and `tm-ticketing` state the phase PR title format `<type>(<scope>): [EPIC_N PHASE_M] <subject>`, with the tag after the conventional prefix, and that `tm pr open` applies the tag itself ([#9571](https://github.com/bobmatnyc/trusty-tools/issues/9571))
 
 ## [2.1.1] — 2026-10-05
 
