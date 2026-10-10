@@ -528,6 +528,15 @@ pub(crate) async fn serve_state(
     Ok(ServeExit::from_uds(exit))
 }
 
+/// Run `future` on `runtime` to completion, then shut the runtime down.
+///
+/// Why: #9572 — the binary's exit path, in the crate so a test can drive it.
+/// What: `block_on`, then the runtime is dropped.
+/// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`.
+pub fn run_to_exit<T>(runtime: tokio::runtime::Runtime, future: impl Future<Output = T>) -> T {
+    runtime.block_on(future)
+}
+
 /// Remove stale template directories under `root`, reporting on stderr.
 ///
 /// What: [`crate::store::cli::sweep_stale_templates`]; the report names the

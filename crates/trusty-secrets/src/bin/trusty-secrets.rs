@@ -45,7 +45,10 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(onepassword_token, search_path)),
+        // #9572: the runtime's shutdown is the crate's, so a test drives it.
+        Ok(runtime) => {
+            trusty_secrets::server::run_to_exit(runtime, run(onepassword_token, search_path))
+        }
         Err(e) => {
             eprintln!("trusty-secrets: cannot start the runtime: {e}");
             ExitCode::FAILURE

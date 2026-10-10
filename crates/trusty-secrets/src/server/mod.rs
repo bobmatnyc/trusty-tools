@@ -49,8 +49,8 @@ pub use errors::ErrorKind;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{
-    BackendFactory, ServeError, ServeExit, StartEnv, State, backends_for, default_backends, serve,
-    serve_with,
+    BackendFactory, ServeError, ServeExit, StartEnv, State, backends_for, default_backends,
+    run_to_exit, serve, serve_with,
 };
 pub use settings::{
     AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,

@@ -2149,3 +2149,50 @@ async fn server_request_admitted_past_its_deadline_never_runs_the_body() {
     assert_eq!(RAN_LATE.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(admission.available_permits(), 1, "the permit was kept");
 }
+
+/// Why: #9572 fix round — with a stuck call answered, the server idles out
+/// and then waited, with no limit, in the runtime's drop for the stuck
+/// thread, so one hung process was left behind per idle cycle.
+/// What: the binary's exit path, [`router::run_to_exit`], serves until idle
+/// on its own runtime while a [`StuckBackend`] call is still held, and must
+/// return within a bound; a watchdog fails the test instead of hanging it.
+/// Test: itself.
+#[test]
+fn server_process_exit_is_bounded_while_a_call_is_stuck() {
+    let fx = fixture_with_idle(Duration::from_secs(1));
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let socket = fx.settings.socket.clone();
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "STUCK_1", "value": VALUE});
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let exit = router::run_to_exit(runtime, async move {
+            let server = tokio::spawn(router::serve_state(state, std::future::pending()));
+            wait_serving(&socket).await;
+            let answer = call(&socket, method::SET, params).await;
+            (answer, server.await)
+        });
+        let _ = tx.send(exit);
+    });
+    let bound = Duration::from_secs(20);
+    let (answer, served) = match rx.recv_timeout(bound) {
+        Ok(exit) => exit,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the server did not exit within {bound:?} while a call was stuck")
+        }
+        Err(e) => panic!("the server thread ended without an answer: {e}"),
+    };
+    assert_eq!(
+        fixed_error(&answer, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+    assert!(matches!(served, Ok(Ok(ServeExit::Idle))), "{served:?}");
+    drop(release);
+}
