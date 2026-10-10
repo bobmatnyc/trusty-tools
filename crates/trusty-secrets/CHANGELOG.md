@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.5] — 2026-10-10
+
+### Added
+
+- `GrantRegistry::check_scoped`, which runs `authorize_scoped`'s checks without spending a one-shot grant, and `GrantRegistry::spend`, which spends one use after the caller's own checks passed (#9621).
+
+### Fixed
+
+- A one-shot exec grant is spent only after every `secrets.resolve` check passed and the allow record was written. An unreadable caller ancestry, an audit failure or a backend failure no longer uses it up (#9621).
+- Grants whose child process has exited are dropped at the next mint or idle check. They no longer keep the server from its idle exit or hold one of the 1024 grant slots, and their tokens are refused (#9621).
+- An npm-installed Claude Code (`node .../@anthropic-ai/claude-code/cli.js`) counts as an agent ancestor. A `node` process is judged on argv[0] and its script operand only, read from `/proc/<pid>/cmdline` on Linux and `KERN_PROCARGS2` on macOS: a `claude-code` path segment, or a basename exactly `claude`, matches. The argument after a node option the matcher does not know is judged as a possible script, and the search for the script goes on past it, so `node --env-file .env /usr/local/bin/claude` counts. A plain `node` does not count, even when a later argument mentions Claude (`node lint.js CLAUDE.md`). A `node` whose argv cannot be read refuses (#9621).
+- `secrets.set_agents_may_use` writes its allow record under the key's index lock, after the row check. Records and flag changes for one key land in the same order, and an unindexed key leaves one `not_found` deny with no allow record (#9621).
+- The `audit_unavailable` text no longer says the requested change "may already have been applied"; it says a change was made only if the record failed after the backend call (#9621).
+- `secrets.resolve` writes its allow audit record before it opens or reads the backend. When the audit log cannot be opened or written, the call answers `audit_unavailable` and reads nothing, so no value is read without a record. A failure after the record (the agents flag, the backend, a spent grant) adds a deny record with its kind (#9621).
+
 ## [0.1.4] — 2026-10-10
 
 ### Added

@@ -1,2 +1,0 @@
-Added
-- `memory_remember` accepts an optional `type` (`Ruling`, `Decision`, `Status`, `Turn` or `Reference`, any case). The drawer is stored with that type and `memory_list` reports it as `drawer_type`; without `type` the heuristic classifier runs as before. Any other value, including `UserFact` or a non-string, is an error and nothing is written. `memory_note`, `memory.remember_async` and HTTP create-drawer are unchanged (#9144).
