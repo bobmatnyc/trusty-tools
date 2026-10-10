@@ -1875,3 +1875,133 @@ fn settings_template_root_follows_the_index_flag_only() {
     );
     assert_eq!(built.template_root, PathBuf::from("/x/tmp"));
 }
+
+/// A backend whose every value call blocks until the test drops the sender
+/// [`StuckBackend::new`] returns (#9572), then goes to an in-memory store.
+///
+/// Why: a backend call that never returns (a file backend on a hung mount)
+/// must not hold its request past the deadline. A panicking test drops the
+/// sender while it unwinds, so the blocked threads end and the test binary
+/// exits instead of hanging.
+#[derive(Debug)]
+struct StuckBackend {
+    inner: MemoryBackend,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl StuckBackend {
+    fn new() -> (Arc<Self>, std::sync::mpsc::Sender<()>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let backend = Self {
+            inner: MemoryBackend::new(),
+            release: std::sync::Mutex::new(rx),
+        };
+        (Arc::new(backend), tx)
+    }
+
+    /// Block until the test drops its sender; nothing is ever sent.
+    fn wait(&self) {
+        if let Ok(rx) = self.release.lock() {
+            let _ = rx.recv();
+        }
+    }
+}
+
+impl SecretBackend for StuckBackend {
+    fn id(&self) -> BackendId {
+        self.inner.id()
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.wait();
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.wait();
+        self.inner.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.wait();
+        self.inner.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.wait();
+        self.inner.delete(vault, key)
+    }
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.wait();
+        self.inner.agents_may_use(vault, key)
+    }
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        self.wait();
+        self.inner.set_agents_may_use(vault, key, allowed)
+    }
+}
+
+/// The request deadline the stuck-backend tests run under (#9572).
+const STUCK_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How late past its deadline a reply may arrive and still pass (#9572).
+const REPLY_MARGIN: Duration = Duration::from_secs(2);
+
+/// The fixture's factory with `keychain`, the project's backend, mapped to
+/// `stuck`.
+fn stuck_factory(fx: &Fixture, stuck: &Arc<StuckBackend>) -> BackendFactory {
+    let base = fx.backends();
+    let stuck = Arc::clone(stuck);
+    Arc::new(move |id: &BackendId| match id.as_str() {
+        "keychain" => Ok(Arc::clone(&stuck) as Arc<dyn SecretBackend>),
+        _ => base(id),
+    })
+}
+
+/// Call `method` and fail the test, rather than hang it, when no reply comes
+/// within the deadline plus [`REPLY_MARGIN`] (#9572).
+async fn call_within_deadline(fx: &Fixture, method: &str, params: Value) -> RpcResponse {
+    let watchdog = STUCK_DEADLINE + REPLY_MARGIN;
+    tokio::time::timeout(watchdog, call(&fx.settings.socket, method, params))
+        .await
+        .unwrap_or_else(|_| panic!("no reply to {method} within {watchdog:?}"))
+}
+
+/// A `secrets.set` of `name` into the project vault, under the watchdog.
+async fn set_within_deadline(fx: &Fixture, name: &str) -> RpcResponse {
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": name, "value": VALUE});
+    call_within_deadline(fx, method::SET, params).await
+}
+
+/// Why: #9572 — the router awaited a blocking body with no bound, so a
+/// backend call that never returns held its request forever.
+/// What: (a) a request to a stuck backend answers `deadline_exceeded` within
+/// its deadline plus a margin.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_stuck_backend_calls_do_not_starve_a_later_request() {
+    let fx = fixture();
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(STUCK_DEADLINE);
+    let server = fx.start_state(state).await;
+
+    // (a) the stuck call's request answers at its deadline.
+    let started = std::time::Instant::now();
+    let first = set_within_deadline(&fx, "STUCK_1").await;
+    assert!(started.elapsed() < STUCK_DEADLINE + REPLY_MARGIN);
+    assert_eq!(
+        fixed_error(&first, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+
+    drop(release);
+    server.stop().await;
+}
