@@ -260,6 +260,11 @@ mod tests {
             assert_eq!(value.unwrap().unwrap().expose(), "unknown");
         }
         assert_eq!(reads, 2, "unknown settings were served from the cache");
+        // #7520 S2 (LOW on #9660): the unknown reads stored nothing — B's
+        // entry still answers, and it is the only one.
+        let still_b = cache.read_through(&op, Some(&b), &web, &name, || panic!("read on a hit"));
+        assert_eq!(still_b.unwrap().unwrap().expose(), "b-value");
+        assert_eq!(cache.count(), 1, "an unknown-settings read was stored");
         let back = cache.read_through(&op, Some(&a), &web, &name, || found("a-again"));
         assert_eq!(back.unwrap().unwrap().expose(), "a-again");
         assert_eq!(cache.count(), 1, "account B's entry outlived the switch");
