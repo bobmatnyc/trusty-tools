@@ -522,8 +522,8 @@ async fn exec_leaves_terminal_output_unscrubbed() {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )
     };
     assert_eq!(rc, 0, "openpty");
@@ -537,7 +537,10 @@ async fn exec_leaves_terminal_output_unscrubbed() {
     };
     let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", r#"echo "$FOO""#]);
     cmd.stdout(slave);
-    let out = cmd.output().await.expect("tm output");
+    let child = cmd.spawn().expect("spawn tm");
+    // Close this side's copy of the slave, so the master sees the end.
+    drop(cmd);
+    let out = child.wait_with_output().await.expect("tm output");
     assert!(out.status.success(), "{}", text(&out.stderr));
     let shown = tokio::task::spawn_blocking(move || {
         use std::io::Read;
