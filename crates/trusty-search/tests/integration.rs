@@ -47,6 +47,7 @@ mod port_dashboard_no_http_9214;
 mod registry_isolation;
 mod reindex_quantize_env_conflict_8737;
 mod residency_cold_park;
+mod serve_no_http_9542;
 mod src_bin_coverage_7694;
 mod typeahead;
 mod warm_boot_corpus_open_failure;
