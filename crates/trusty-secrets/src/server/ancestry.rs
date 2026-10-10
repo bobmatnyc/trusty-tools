@@ -168,10 +168,10 @@ pub(crate) fn names_node(label: &str) -> bool {
 /// its executable path names it.
 /// What: `true` when any label (short name, executable path) passes
 /// [`names_agent`]. Otherwise, when a label passes [`names_node`], `argv` is
-/// read and only two entries are judged by [`names_claude_entry`]: argv[0]
-/// (Claude Code sets `process.title`) and the script operand
-/// ([`script_operand`]). Arguments after the script operand never count, so
-/// `node lint.js CLAUDE.md` is not an agent. A non-`node` process never
+/// read and only argv[0] (Claude Code sets `process.title`) and the possible
+/// script operands ([`script_candidates`]) are judged by
+/// [`names_claude_entry`]. Arguments after a confident script operand never
+/// count, so `node lint.js CLAUDE.md` is not an agent. A non-`node` process never
 /// reads its argv. An argv that cannot be read is returned as the error, so
 /// the caller refuses (fail-closed, like [`ProcessTable::is_agent`]'s
 /// default).
@@ -188,12 +188,12 @@ pub(crate) fn agent_verdict(
     if !labels.iter().any(|label| names_node(label)) {
         return Ok(false);
     }
-    // #9621 fix round: argv[0] and the script operand only.
+    // #9621 fix round: argv[0] and the possible script operands only.
     let argv = argv()?;
     let first = argv.first().map(String::as_str);
     Ok(first
         .into_iter()
-        .chain(script_operand(&argv))
+        .chain(script_candidates(&argv))
         .any(names_claude_entry))
 }
 
@@ -224,33 +224,52 @@ const NODE_VALUE_OPTIONS: &[&str] = &[
 /// Node options that run code with no script operand.
 const NODE_INLINE_OPTIONS: &[&str] = &["-e", "--eval", "-p", "--print", "-"];
 
-/// The script operand of a `node` argv: the first argument after argv[0]
-/// that is not one of node's own options (or an option's value).
+/// The arguments of a `node` argv that may be its script operand.
 ///
-/// What: `--` ends the options. An option listed in [`NODE_VALUE_OPTIONS`]
+/// Why: #9621, Architect ruling 16:41Z — node has too many value-taking
+/// options to list, and a missed one must never hide a Claude Code launch
+/// (`node --env-file .env /usr/local/bin/claude`).
+/// What: walks the arguments after argv[0]. `--` ends the options and the
+/// next argument is the operand. An option listed in [`NODE_VALUE_OPTIONS`]
 /// consumes the next argument; `--opt=value` is one argument. An inline
-/// program option ([`NODE_INLINE_OPTIONS`]) means there is no script.
-/// Known limit: an unlisted option given its value as a separate argument
-/// makes that value the operand.
+/// program option ([`NODE_INLINE_OPTIONS`]) means there is no script. An
+/// unlisted option may or may not take the next argument as its value, so
+/// that argument is a candidate and the walk goes on past it. The walk stops
+/// at the first non-option argument that no unlisted option precedes: that
+/// is the confident operand, and nothing after it is returned.
+/// Every candidate is judged, so an unlisted option can only widen the
+/// judged set (an extra agent verdict, the refusing side), never hide the
+/// script.
 /// Test: `agent_verdict_judges_only_argv0_and_the_script_operand`.
-fn script_operand(argv: &[String]) -> Option<&str> {
+fn script_candidates(argv: &[String]) -> Vec<&str> {
+    let mut candidates = Vec::new();
     let mut args = argv.iter().skip(1).map(String::as_str);
     while let Some(arg) = args.next() {
         if arg == "--" {
-            return args.next();
+            candidates.extend(args.next());
+            break;
         }
         if NODE_INLINE_OPTIONS.contains(&arg) {
-            return None;
+            break;
         }
         if NODE_VALUE_OPTIONS.contains(&arg) {
             args.next();
             continue;
         }
         if !arg.starts_with('-') {
-            return Some(arg);
+            candidates.push(arg);
+            break;
+        }
+        // #9621: an unlisted option without `=` may own the next argument.
+        if !arg.contains('=') {
+            let mut peek = args.clone();
+            if let Some(next) = peek.next().filter(|next| !next.starts_with('-')) {
+                candidates.push(next);
+                args = peek;
+            }
         }
     }
-    None
+    candidates
 }
 
 /// The arguments in a Linux `/proc/<pid>/cmdline`: NUL-separated, with a

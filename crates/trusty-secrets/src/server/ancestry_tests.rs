@@ -218,7 +218,9 @@ fn agent_verdict_reads_argv_of_node_only() {
 /// and only a `claude-code` segment or a basename exactly `claude` matches,
 /// so a plain `node` whose arguments merely mention Claude is not an agent.
 /// Red against a338dca398's matcher (every argument through `names_agent`):
-/// `CLAUDE.md` and `claude-mpm` were judged agents.
+/// `CLAUDE.md` and `claude-mpm` were judged agents. The unlisted-option rows
+/// (Architect ruling 16:41Z) were red against 005b97f240, where an unlisted
+/// option's separate value (`.env`) was taken as the script.
 /// Test: itself.
 #[test]
 fn agent_verdict_judges_only_argv0_and_the_script_operand() {
@@ -229,6 +231,7 @@ fn agent_verdict_judges_only_argv0_and_the_script_operand() {
         &["node", "build.js", "--name", "claude"],
         &["node", "-e", "require('/x/claude-code/cli.js')"],
         &["node", "app.js", "/x/@anthropic-ai/claude-code/cli.js"],
+        &["node", "--no-warnings", "server.js", "--port", "3000"],
     ] {
         assert_eq!(judge(plain), Ok(false), "{plain:?}");
     }
@@ -247,6 +250,29 @@ fn agent_verdict_judges_only_argv0_and_the_script_operand() {
         ],
         &["node", "-r", "dotenv/config", "/usr/local/bin/claude"],
         &["node", "--", "/usr/local/bin/claude"],
+        // #9621 Architect ruling 16:41Z: an unlisted option's separate value
+        // must not hide the script that follows it.
+        &["node", "--env-file", ".env", "/usr/local/bin/claude"],
+        &[
+            "node",
+            "--inspect-port",
+            "9229",
+            "/x/@anthropic-ai/claude-code/cli.js",
+        ],
+        &[
+            "node",
+            "--some-future-flag",
+            "value",
+            "/x/claude-code/cli.js",
+        ],
+        &[
+            "node",
+            "--input-type",
+            "module",
+            "--env-file-if-exists",
+            ".e",
+            "/usr/local/bin/claude",
+        ],
     ] {
         assert_eq!(judge(agent), Ok(true), "{agent:?}");
     }
