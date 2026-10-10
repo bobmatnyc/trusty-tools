@@ -220,14 +220,9 @@ impl DrawerType {
         }
     }
 
-    /// Every variant a caller may name at write time, in definition order.
-    /// `Unknown` is absent: it is the decode default, not a type to write.
-    const WRITABLE: [DrawerType; 10] = [
-        DrawerType::UserFact,
-        DrawerType::SessionEvent,
-        DrawerType::AgentNote,
-        DrawerType::Commit,
-        DrawerType::Task,
+    /// The five variants a caller may name at write time (#9144 ruling Q9).
+    /// The older variants and `Unknown` stay readable but are not writable.
+    const WRITABLE: [DrawerType; 5] = [
         DrawerType::Ruling,
         DrawerType::Decision,
         DrawerType::Status,
@@ -241,8 +236,9 @@ impl DrawerType {
     /// [`Self::from_tag`] maps an unrecognised tag to `Unknown`, which is right
     /// for stored data and wrong for input: a typo would store an unlabelled
     /// drawer with no error.
-    /// What: matches `name` against every variant name except `Unknown`,
-    /// ignoring ASCII case and nothing else (no trimming, no `_` forms).
+    /// What: matches `name` against exactly `Ruling`, `Decision`, `Status`,
+    /// `Turn` and `Reference` (ruling Q9), ignoring ASCII case and nothing
+    /// else (no trimming, no `_` forms).
     /// Returns [`ParseDrawerTypeError`] for any other input.
     /// Test: `write_type_accepts_every_name_case_insensitively`,
     /// `write_type_error_arm_rejects_unknown_blank_and_garbage`,
@@ -280,7 +276,7 @@ impl DrawerType {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "unknown drawer type {name:?}; expected one of: ruling, decision, status, turn, \
-     reference, userfact, sessionevent, agentnote, commit, task (any case)"
+     reference (any case)"
 )]
 pub struct ParseDrawerTypeError {
     name: String,
@@ -711,20 +707,21 @@ mod tests {
         }
     }
 
-    /// #9144: the strict parser takes every writable name in any ASCII case.
+    /// #9144: the strict parser takes each of the five Q9 names in any ASCII
+    /// case.
     #[test]
     fn write_type_accepts_every_name_case_insensitively() {
         let cases = [
             ("ruling", DrawerType::Ruling),
+            ("RULING", DrawerType::Ruling),
             ("DECISION", DrawerType::Decision),
+            ("decision", DrawerType::Decision),
             ("Status", DrawerType::Status),
+            ("sTATUS", DrawerType::Status),
             ("tUrN", DrawerType::Turn),
+            ("Turn", DrawerType::Turn),
             ("reference", DrawerType::Reference),
-            ("userfact", DrawerType::UserFact),
-            ("SessionEvent", DrawerType::SessionEvent),
-            ("AGENTNOTE", DrawerType::AgentNote),
-            ("commit", DrawerType::Commit),
-            ("Task", DrawerType::Task),
+            ("REFERENCE", DrawerType::Reference),
         ];
         for (name, want) in cases {
             assert_eq!(DrawerType::parse_write_type(name), Ok(want), "{name}");
@@ -735,7 +732,8 @@ mod tests {
     /// naming the input, never a silent `Unknown`.
     #[test]
     fn write_type_error_arm_rejects_unknown_blank_and_garbage() {
-        for name in [
+        // Every name is refused before any message is checked.
+        let errors = [
             "Unknown",
             "unknown",
             "",
@@ -743,12 +741,24 @@ mod tests {
             "ruling ",
             "user_fact",
             "rule",
-        ] {
-            let err = DrawerType::parse_write_type(name).expect_err(name);
+            // #9144 Q9: the read-only variants are refused in any case.
+            "userfact",
+            "SessionEvent",
+            "AGENTNOTE",
+            "commit",
+            "Task",
+        ]
+        .map(|name| (name, DrawerType::parse_write_type(name).expect_err(name)));
+        for (name, err) in errors {
             assert_eq!(err.name(), name);
             let msg = err.to_string();
-            assert!(msg.contains("ruling"), "{msg}");
             assert!(msg.contains(&format!("{name:?}")), "{msg}");
+            let listed = msg.split_once("expected one of: ").map(|(_, l)| l);
+            assert_eq!(
+                listed,
+                Some("ruling, decision, status, turn, reference (any case)"),
+                "{msg}"
+            );
         }
     }
 
