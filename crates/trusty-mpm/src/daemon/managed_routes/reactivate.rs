@@ -20,7 +20,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::daemon::orphan_gc::{ChildLivenessProbe, PaneInfo, ProcessTreeProbe};
+use crate::core::own_binary_names::OWN_BINARY_NAMES;
+use crate::daemon::orphan_gc::{ChildLivenessProbe, PaneInfo, ProcessTreeProbe, is_idle_shell};
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::runtime_reap::{find_runtime_exited, session_has_live_pane};
 use crate::daemon::state::DaemonState;
@@ -160,12 +161,19 @@ pub(crate) async fn reactivate_core(
 /// restarted tmux server reuses `%N` ids, so a stale record's id can match
 /// the caller's pane in an unrelated session. The client summary carries no
 /// server identity, so the daemon, which holds the record, decides.
+/// #9566: a bare `tm` run by a live agent's Bash tool also sits in the
+/// record's pane, so the pane id alone cannot tell a dead agent from a live
+/// one. A Stopped record is reactivated with no liveness check, so this gate
+/// also reads the pane's foreground command.
 /// What: `None` when no `caller_pane_id` was sent, the record cannot be read
 /// (`mark_reactivated` answers that), or the caller names another pane than
-/// `record.pane_id`. Otherwise `SessionManager::owned_pane`'s refusal text,
-/// or `None` when it proves the pane is the record's on the live server.
+/// `record.pane_id`. Otherwise `SessionManager::owned_pane`'s refusal text;
+/// then a refusal unless the owned pane's foreground command reads idle per
+/// [`caller_pane_is_idle`], an unreadable command included.
 /// Test: `a_stale_record_after_a_server_restart_is_never_reactivated_in_place`,
-/// `an_unreadable_pane_identity_refuses_the_in_place_reactivate`.
+/// `an_unreadable_pane_identity_refuses_the_in_place_reactivate`,
+/// `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`,
+/// `a_stopped_record_whose_pane_runs_tm_is_still_reactivated_in_place`.
 async fn caller_pane_refusal(
     mgr: &SessionManager,
     id: &ManagedSessionId,
@@ -176,7 +184,39 @@ async fn caller_pane_refusal(
     if record.pane_id.as_deref() != Some(caller) {
         return None;
     }
-    mgr.owned_pane(id, &record).err().map(|e| e.to_string())
+    let pane = match mgr.owned_pane(id, &record) {
+        Ok(pane) => pane,
+        Err(e) => return Some(e.to_string()),
+    };
+    // #9566: a live agent in the foreground means this caller is its child.
+    match mgr.pane_foreground_command(&pane) {
+        Ok(command) if caller_pane_is_idle(&command) => None,
+        Ok(command) => Some(format!(
+            "refusing to reactivate session {id} in place: pane {pane} runs `{command}` \
+             in the foreground, so its agent is still live"
+        )),
+        Err(e) => Some(format!(
+            "refusing to reactivate session {id} in place: the foreground command of \
+             pane {pane} could not be read: {e}"
+        )),
+    }
+}
+
+/// True when a caller pane whose foreground is `command` holds no live agent
+/// (#9566).
+///
+/// Why: the in-place relaunch client runs `tm` as its pane's foreground once
+/// the agent exited, but a live agent's Bash tool runs `tm` as a background
+/// child, leaving the agent in the foreground. Only the first may be read as
+/// idle.
+/// What: `true` for one of this crate's own binary names or an idle shell
+/// ([`is_idle_shell`]); `false` for anything else — `claude`, `node`, the
+/// version string Claude Code sets as its process title, or any other program.
+/// Test: `should_reconcile_stale_active_false_when_caller_pane_runs_a_live_agent`,
+/// `should_reconcile_stale_active_true_when_only_caller_pane_busy`.
+fn caller_pane_is_idle(command: &str) -> bool {
+    let command = command.trim();
+    OWN_BINARY_NAMES.contains(&command) || is_idle_shell(command)
 }
 
 /// #2453: reconcile a stale-`Active` record before refusing a reactivate.
@@ -259,11 +299,14 @@ async fn reconcile_stale_active_then_reactivate(
 /// the pane being relaunched, so tmux reports that pane as running `tm` (a
 /// non-shell command, and its shell PID has `tm` as a live child) — which the
 /// unmodified liveness check reads as "runtime still alive", refusing the
-/// reconcile with a 409 and stranding the operator in a bare shell. Because a
-/// pane cannot simultaneously run `tm` in the foreground AND a live interactive
-/// `claude`, treating the caller's own pane as idle is SOUND, not merely a
-/// trust assumption — while every OTHER (sibling) pane is checked unchanged, so
-/// a genuinely live sibling window still blocks the reconcile.
+/// reconcile with a 409 and stranding the operator in a bare shell. A pane
+/// whose foreground is `tm` holds no live interactive `claude`, so treating it
+/// as idle is sound. #9566: the caller's pane can still run a live agent — a
+/// live claude's Bash tool runs `tm` as a background child, leaving claude in
+/// the foreground — so only a pane whose foreground reads idle per
+/// [`caller_pane_is_idle`] is neutralized. Every OTHER (sibling) pane is
+/// checked unchanged, so a genuinely live sibling window still blocks the
+/// reconcile.
 /// #2794: `caller_pane_confirmed_dead` (from
 /// [`ReactivateQuery::pane_confirmed_dead`]) is the CLI's self-asserted claim
 /// — NOT independently verified by the daemon (no process/ancestry check) —
@@ -345,11 +388,14 @@ pub(crate) fn should_reconcile_stale_active(
 /// (never reused across panes), so exactly one pane can match.
 /// What: when `caller_pane_id` is `None`/blank, or no pane matches it, returns
 /// the panes unchanged (behaviorally identical to the pre-#2789 path). When a
-/// pane matches, that entry's `pane_current_command` becomes a bare shell and
-/// its `pane_pid` becomes `None` (so [`ChildLivenessProbe`] reports no live
-/// child); all other panes are copied verbatim.
-/// Test: exercised via `should_reconcile_stale_active_true_when_only_caller_pane_busy`
-/// and `..._false_when_sibling_pane_live_despite_caller`.
+/// pane matches and its foreground reads idle per [`caller_pane_is_idle`]
+/// (#9566), that entry's `pane_current_command` becomes a bare shell and its
+/// `pane_pid` becomes `None` (so [`ChildLivenessProbe`] reports no live
+/// child); a matching pane running a live agent, and all other panes, are
+/// copied verbatim.
+/// Test: exercised via `should_reconcile_stale_active_true_when_only_caller_pane_busy`,
+/// `should_reconcile_stale_active_false_when_sibling_pane_live_despite_caller`
+/// and `should_reconcile_stale_active_false_when_caller_pane_runs_a_live_agent`.
 fn neutralize_caller_pane(panes: &[PaneInfo], caller_pane_id: Option<&str>) -> Vec<PaneInfo> {
     let Some(caller) = caller_pane_id.filter(|s| !s.is_empty()) else {
         return panes.to_vec();
@@ -357,7 +403,9 @@ fn neutralize_caller_pane(panes: &[PaneInfo], caller_pane_id: Option<&str>) -> V
     panes
         .iter()
         .map(|p| {
-            if p.pane_id.as_deref() == Some(caller) {
+            // #9566: a live agent in the caller's pane is never rewritten idle.
+            if p.pane_id.as_deref() == Some(caller) && caller_pane_is_idle(&p.pane_current_command)
+            {
                 PaneInfo {
                     pane_current_command: "zsh".to_string(),
                     pane_pid: None,
