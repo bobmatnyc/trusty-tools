@@ -373,14 +373,29 @@ pub fn config_write(
 /// with [`trusty_common::crate_config::save_at`] and returns the merged
 /// config as JSON. A file that cannot be read or parsed is an error and is
 /// never written: a save over defaults would replace every section in it.
-/// Test: `config_write_refuses_a_file_it_cannot_parse`.
+/// The refusal names the path only, never the parser message or file content.
+/// Test: `config_write_refuses_a_file_it_cannot_parse`,
+/// `config_write_refusal_never_echoes_file_content`.
 pub(crate) fn config_write_at(
     path: &Path,
     merge: impl FnOnce(&mut TrustyToolsConfig) -> Result<(), String>,
 ) -> Result<Value, String> {
+    use trusty_common::crate_config::ConfigError;
     // #8454 Q2: the erroring loader, never load_or_default.
     let mut config: TrustyToolsConfig = trusty_common::crate_config::load_at(path)
-        .map_err(|e| format!("refusing to save trusty-mpm config: {e}; fix the file first"))?
+        .map_err(|e| match e {
+            // #8454: serde_yaml quotes the scalar it rejects, which can be a token.
+            ConfigError::Yaml { path, .. } => format!(
+                "refusing to save trusty-mpm config: {} does not parse; fix the file first \
+                 (tm doctor names the fault)",
+                path.display()
+            ),
+            ConfigError::Io { path, source } => format!(
+                "refusing to save trusty-mpm config: cannot read {}: {}; fix the file first",
+                path.display(),
+                source.kind()
+            ),
+        })?
         .unwrap_or_default();
     merge(&mut config)?;
     trusty_common::crate_config::save_at(path, &config)

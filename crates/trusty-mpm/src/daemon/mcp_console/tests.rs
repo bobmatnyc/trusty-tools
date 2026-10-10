@@ -670,3 +670,42 @@ fn config_write_refuses_a_file_it_cannot_parse() {
         String::from_utf8_lossy(&after)
     );
 }
+
+/// Why (#8454 S2c): serde_yaml quotes the scalar it could not read, and
+/// `log_drain.secrets` holds plaintext site tokens, so echoing the parse error
+/// leaked a token to the MCP caller, the console log and agent transcripts.
+/// What: [`config_write_at`] over a file whose `log_drain.secrets` is a scalar
+/// canary must refuse, leave the file byte-for-byte unchanged, and keep the
+/// canary out of the error string.
+/// Test: this is the test.
+#[test]
+fn config_write_refusal_never_echoes_file_content() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "log_drain: { secrets: canary-ghp-123 }\nchannels:\n  version: 1\n  slack:\n    \
+                    enabled: true\n    connection: { bot_ref: slack, app_ref: slack-app }\n    \
+                    projects: [/abs/proj]\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let result = config_write_at(&path, |config| {
+        config.default_model = Some("opus".into());
+        Ok(())
+    });
+
+    let after = std::fs::read(&path).expect("read config");
+    assert_eq!(
+        after,
+        original.as_bytes(),
+        "the refused save must leave the file unchanged:\n{}",
+        String::from_utf8_lossy(&after)
+    );
+    let err = result.expect_err("a save over an unparseable file must be refused");
+    assert!(
+        !err.contains("canary-ghp-123"),
+        "the refusal must not echo file content: {err}"
+    );
+    assert!(
+        err.contains(&path.display().to_string()),
+        "the refusal must name the config path: {err}"
+    );
+}
