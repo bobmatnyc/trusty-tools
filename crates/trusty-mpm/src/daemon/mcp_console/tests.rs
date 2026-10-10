@@ -589,3 +589,51 @@ fn supervisor_metrics_merge_flags_a_stale_snapshot() {
          re-create the silent zero one layer out: {block}"
     );
 }
+
+/// Why (#8454 S2c): the console Config save re-serialises
+/// [`TrustyToolsConfig`]; a `channels:` host ceiling it drops is data loss.
+/// What: the `config_write` sequence (load, [`apply_config_write`], save)
+/// against a temp `config.yaml`; the saved `channels` value must equal the
+/// original.
+/// Test: this is the test.
+#[test]
+fn config_save_preserves_channels_section() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "default_model: sonnet\nchannels:\n  version: 1\n  rate_limit: { limit: 50, \
+                    window_secs: 60 }\n  slack:\n    enabled: true\n    connection: { bot_ref: \
+                    slack, app_ref: slack-app }\n    projects: [/abs/proj]\n  gchat:\n    \
+                    enabled: false\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let mut config: TrustyToolsConfig = trusty_common::crate_config::load_at(&path)
+        .expect("load")
+        .expect("present");
+    apply_config_write(
+        &mut config,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("merge");
+    trusty_common::crate_config::save_at(&path, &config).expect("save");
+
+    let before: serde_yaml::Value = serde_yaml::from_str(original).expect("yaml");
+    let saved_text = std::fs::read_to_string(&path).expect("read saved");
+    let after: serde_yaml::Value = serde_yaml::from_str(&saved_text).expect("saved yaml");
+    assert_eq!(
+        after.get("channels"),
+        before.get("channels"),
+        "the console save must keep the channels section unchanged:\n{saved_text}"
+    );
+    assert_eq!(after["auto_resume"], serde_yaml::Value::Bool(true));
+}

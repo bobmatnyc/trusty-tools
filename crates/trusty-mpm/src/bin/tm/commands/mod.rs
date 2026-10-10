@@ -43,6 +43,8 @@ pub(crate) mod build_lease;
 // #9239: the read-only `status` and `--census` views of `tm build-lease`.
 pub(crate) mod build_lease_status;
 pub(crate) mod doctor_builder_cap;
+// #8454 S2c: the read-only channel route policy rows.
+pub(crate) mod doctor_channels;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
