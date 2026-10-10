@@ -82,8 +82,16 @@ pub trait ProcessTable: Send + Sync {
     /// The start time of `pid`.
     fn start_time(&self, pid: u32) -> Result<StartTime, ProcessError>;
     /// Whether `pid` is a Claude Code process.
-    // #9070: judged on the process's own name or executable path.
-    fn is_agent(&self, pid: u32) -> Result<bool, ProcessError>;
+    ///
+    /// Why: #9070 slice 3 — a table written before this method existed must
+    /// keep compiling, and must never vouch that a process is not an agent.
+    /// What: judged on the process's own name or executable path. The
+    /// default answers [`ProcessError::Unreadable`] for every pid, so
+    /// [`has_agent_ancestor`] fails closed for a table that does not judge.
+    /// Test: `agent_check_fails_closed_on_a_table_without_is_agent`.
+    fn is_agent(&self, pid: u32) -> Result<bool, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
 }
 
 /// Whether `pid`, or any process above it, is a Claude Code process.

@@ -19,7 +19,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{SecretKey, SecretValue};
+use crate::api::{SecretKey, SecretValue, VaultName};
 
 /// `secrets.grant` request, beside `project`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,4 +149,46 @@ impl fmt::Debug for RevokeRequest {
 pub struct RevokeResponse {
     /// Whether a live grant matched the token.
     pub revoked: bool,
+}
+
+/// `secrets.set_agents_may_use` request, beside `project` (#9070 slice 3).
+///
+/// Why: DOC-74 §15.8 — the "agents may use" flag is set through the socket,
+/// so the server can judge the caller's ancestry and audit the change.
+/// What: the same shape as `secrets.set`, with `allowed` in place of the
+/// value. It carries no secret.
+/// Test: `api_set_agents_may_use_request_matches_the_wire_shape`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SetAgentsMayUseRequest {
+    /// The vault that holds the key.
+    pub vault: VaultName,
+    /// The key whose flag changes.
+    pub key: SecretKey,
+    /// `true` turns the flag on, `false` off.
+    pub allowed: bool,
+}
+
+impl SetAgentsMayUseRequest {
+    /// A request to set `key`'s flag in `vault` to `allowed`.
+    pub fn new(vault: VaultName, key: SecretKey, allowed: bool) -> Self {
+        Self {
+            vault,
+            key,
+            allowed,
+        }
+    }
+}
+
+/// `secrets.set_agents_may_use` response: the flag as set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SetAgentsMayUseResponse {
+    /// The vault that holds the key.
+    pub vault: VaultName,
+    /// The key whose flag changed.
+    pub key: SecretKey,
+    /// The flag's value now.
+    pub allowed: bool,
 }

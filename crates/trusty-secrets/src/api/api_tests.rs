@@ -324,3 +324,31 @@ fn api_exec_grant_requests_match_the_wire_shape() {
         );
     }
 }
+
+/// Why: #9070 slice 3 — the flag request decodes the documented shape, its
+/// constructor builds the same value, and a `pid` param is refused, so a
+/// caller can never name the process the server judges.
+/// Test: itself.
+#[test]
+fn api_set_agents_may_use_request_matches_the_wire_shape() {
+    use super::methods::SetAgentsMayUseRequest;
+    let wire: SetAgentsMayUseRequest =
+        serde_json::from_str(r#"{"vault":"trusty/acme/web","key":"API_KEY","allowed":true}"#)
+            .unwrap();
+    let built = SetAgentsMayUseRequest::new(
+        VaultName::new("trusty/acme/web").unwrap(),
+        SecretKey::new("API_KEY").unwrap(),
+        true,
+    );
+    assert_eq!(built, wire);
+    for bad in [
+        r#"{"vault":"trusty/acme/web","key":"API_KEY","allowed":true,"pid":1}"#,
+        r#"{"vault":"trusty/acme/web","key":"API_KEY"}"#,
+        r#"{"vault":"trusty/acme/web","key":"bad key","allowed":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<SetAgentsMayUseRequest>(bad).is_err(),
+            "{bad}"
+        );
+    }
+}

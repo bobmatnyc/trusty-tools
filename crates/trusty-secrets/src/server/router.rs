@@ -29,6 +29,7 @@ use trusty_common::uds::server::{
 };
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
+use super::agents_flag;
 use super::audit::AuditSink;
 use super::deadline::{BODY_GRACE, request_deadline};
 use super::doctor;
@@ -306,7 +307,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 9] = [
+pub(crate) const METHODS: [(&str, MethodFn); 10] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -317,6 +318,8 @@ pub(crate) const METHODS: [(&str, MethodFn); 9] = [
     (method::GRANT, exec::grant),
     (method::RESOLVE, exec::resolve),
     (method::REVOKE, exec::revoke),
+    // #9070: S8 slice 3, the agents flag.
+    (method::SET_AGENTS_MAY_USE, agents_flag::set_agents_may_use),
 ];
 
 /// The `secrets.*` router over `state`.

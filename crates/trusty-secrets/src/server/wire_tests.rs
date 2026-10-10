@@ -17,6 +17,10 @@ use super::*;
 use crate::server::grant_fakes::{FakeClock, FakeProcs};
 use crate::server::router::serving_ends;
 
+// #9070: S8 slice 3, the agents flag; it shares this module's helpers.
+#[path = "flag_tests.rs"]
+mod flag_tests;
+
 /// The project vault of the fixture's `Acme/Web` remote.
 const PROJECT_VAULT: &str = "trusty/acme/web";
 /// A value whose text appears nowhere else in the crate.
@@ -428,4 +432,128 @@ async fn resolve_sentinel_never_reaches_the_audit_file_or_logs() {
         ]
     );
     assert!(all.iter().all(|r| r.caller_pid == Some(me())));
+}
+
+/// Why: #9070 slice 3, the #9629 review's finding (A) — a non-agent may
+/// register a grant for an agent's pid. The resolving caller's own ancestry
+/// counts too, so that agent reads no unflagged key.
+/// Red when `resolve` uses only the grant's `agent_parent`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_by_agent_descendant_of_unflagged_grant_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    let (state, _grants) = state_with(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    let token = granted(&fx, me(), &["API_KEY"]).await;
+    procs.set_agent(10);
+    let response = call(
+        &fx.settings.socket,
+        method::RESOLVE,
+        resolve_params(&token, "API_KEY"),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&response, method::RESOLVE),
+        ErrorKind::AgentUseRefused
+    );
+    assert_no_value(&response);
+    let resolves: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Resolve)
+        .collect();
+    assert_eq!(resolves.len(), 1, "{resolves:?}");
+    assert_eq!(resolves[0].agent_parent, Some(true));
+}
+
+/// Why: #9070 slice 3, the #9629 QA finding — a grant record says whether
+/// the registrar had an agent ancestor, so a live check observes the
+/// decision instead of inferring it.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grant_records_carry_the_agent_parent_verdict() {
+    let fx = fixture();
+    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+    let procs = procs_with_me();
+    let (state, _grants) = state_with(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    granted(&fx, me(), &["OPEN_KEY"]).await;
+    procs.set_agent(10);
+    granted(&fx, me(), &["OPEN_KEY"]).await;
+    server.stop().await;
+
+    let verdicts: Vec<_> = records(&fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Grant)
+        .map(|r| (r.decision, r.agent_parent))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            (AuditDecision::Allow, Some(false)),
+            (AuditDecision::Allow, Some(true))
+        ]
+    );
+}
+
+/// Why: #9629 review, MEDIUM — the token check, proven where no other check
+/// would refuse: the caller is the granted process itself and the key is
+/// seeded, so only the wrong token stands between it and the value.
+/// Red when `authorize_scoped` accepts any token.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_with_wrong_token_from_inside_the_tree_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    let token = granted(&fx, me(), &["API_KEY"]).await;
+    let wrong: String = token
+        .chars()
+        .map(|c| if c == '0' { '1' } else { '0' })
+        .collect();
+    let response = call(
+        &fx.settings.socket,
+        method::RESOLVE,
+        resolve_params(&wrong, "API_KEY"),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&response, method::RESOLVE),
+        ErrorKind::GrantRefused
+    );
+    assert_no_value(&response);
+}
+
+/// Why: #9629 review, MEDIUM — the key check, proven on a key that is
+/// seeded in the project vault, so a missing check would return its value
+/// instead of failing with `not_found`.
+/// Red when `authorize_scoped` skips the key-in-grant check.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_of_seeded_key_outside_the_grant_is_refused() {
+    let fx = fixture();
+    seed(&fx, "OTHER_KEY", OPEN_VALUE, false);
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    let token = granted(&fx, me(), &["OTHER_KEY"]).await;
+    let response = call(
+        &fx.settings.socket,
+        method::RESOLVE,
+        resolve_params(&token, "API_KEY"),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&response, method::RESOLVE),
+        ErrorKind::GrantRefused
+    );
+    assert_no_value(&response);
 }
