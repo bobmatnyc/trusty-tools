@@ -253,6 +253,65 @@ content = "ctrl-from-project-disk"
     assert!(matches!(cfg.agent.role.as_str(), "controller" | "ctrl"));
 }
 
+/// Why: #3990 — `resolve_agent_config_falls_back_to_project_ctrl_toml` reads
+/// `$HOME` (via `dirs::home_dir()`, step 2 of `resolve_agent_config`) but took
+/// no `HOME_LOCK`, so it raced every sibling that swaps `$HOME`. A flaky
+/// symptom is a poor regression signal; this makes the race deterministic.
+/// What: a writer thread takes `HOME_LOCK`, points `$HOME` at a dir holding a
+/// foreign user-level `ctrl.toml` (role `foreign-role`), and holds both until
+/// released. A reader thread runs the target test. A test that honours
+/// `HOME_LOCK` must block on the writer and cannot finish within the window;
+/// one that does not finishes at once, having read the foreign `$HOME`.
+/// Test: itself.
+#[test]
+fn project_ctrl_fallback_test_waits_for_a_concurrent_home_writer() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (held_tx, held_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let writer = std::thread::spawn(move || {
+        with_sandboxed_home(|home| {
+            let agents = home.join(".trusty-agents/agents");
+            std::fs::create_dir_all(&agents).unwrap();
+            std::fs::write(
+                agents.join("ctrl.toml"),
+                "[agent]\nname = \"ctrl\"\nrole = \"foreign-role\"\n\
+                 model = \"anthropic/claude-sonnet-4-6\"\ndescription = \"foreign\"\n\n\
+                 [llm]\ntemperature = 0.7\nmax_tokens = 2048\n\n\
+                 [system_prompt]\ncontent = \"foreign-home\"\n",
+            )
+            .unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    held_rx.recv().expect("writer acquired HOME_LOCK");
+
+    let (done_tx, done_rx) = mpsc::channel::<bool>();
+    let reader = std::thread::spawn(move || {
+        let outcome =
+            std::panic::catch_unwind(resolve_agent_config_falls_back_to_project_ctrl_toml);
+        let _ = done_tx.send(outcome.is_ok());
+    });
+    // #3990: finishing inside the window means the test never waited for the
+    // writer's HOME_LOCK, i.e. it reads `$HOME` unguarded.
+    let finished_early = done_rx.recv_timeout(Duration::from_millis(500));
+
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert!(
+        finished_early.is_err(),
+        "the target test finished while a writer held HOME_LOCK and a foreign $HOME \
+         (passed: {finished_early:?}); it reads $HOME without taking HOME_LOCK"
+    );
+    assert!(
+        done_rx.recv().unwrap(),
+        "the target test must pass once the writer releases HOME_LOCK"
+    );
+}
+
 #[tokio::test]
 // Why: `crate::test_env::HOME_LOCK` is held intentionally across the
 // `.await` below so this test doesn't race other `$HOME`-sandboxing tests
