@@ -1801,9 +1801,14 @@ fn settings_reject_unknown_and_incomplete_flags() {
 /// Test: itself.
 #[test]
 fn client_wait_exceeds_the_server_deadline_for_every_method() {
-    use super::deadline::{client_wait, request_deadline};
+    use super::deadline::{BODY_GRACE, client_wait, request_deadline};
     for (name, _) in router::METHODS {
-        assert!(client_wait(name) > request_deadline(name), "{name}");
+        // #9572: the router's last answer, at the deadline plus its grace,
+        // still reaches a waiting client.
+        assert!(
+            client_wait(name) > request_deadline(name) + BODY_GRACE,
+            "{name}"
+        );
     }
     for name in [method::SET, method::DELETE, method::COPY] {
         assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
@@ -1950,8 +1955,9 @@ impl SecretBackend for StuckBackend {
 /// The request deadline the stuck-backend tests run under (#9572).
 const STUCK_DEADLINE: Duration = Duration::from_secs(2);
 
-/// How late past its deadline a reply may arrive and still pass (#9572).
-const REPLY_MARGIN: Duration = Duration::from_secs(2);
+/// How late past its deadline a reply may arrive and still pass (#9572):
+/// the router's grace plus slack for a loaded host.
+const REPLY_MARGIN: Duration = Duration::from_secs(4);
 
 /// The fixture's factory with `keychain`, the project's backend, mapped to
 /// `stuck`.

@@ -28,7 +28,7 @@ use trusty_common::uds::server::{
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::audit::AuditSink;
-use super::deadline::request_deadline;
+use super::deadline::{BODY_GRACE, request_deadline};
 use super::doctor;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
@@ -345,7 +345,8 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
 /// threads such calls could hold.
 /// What: waits for a permit from `admission` until `deadline`, then spawns
 /// the body with the permit moved into its closure, and waits for it until
-/// `deadline`. Past the deadline, at either wait, the answer is
+/// `deadline` plus [`BODY_GRACE`], so a body that stops at the deadline still
+/// gives its own answer. Past either wait the answer is
 /// [`ErrorKind::DeadlineExceeded`]; a closed semaphore or a panicking body
 /// is [`ErrorKind::Internal`]. Neither is ever a success.
 /// Test: `server_stuck_backend_calls_do_not_starve_a_later_request`,
@@ -370,10 +371,11 @@ pub(crate) async fn run_blocking(
         let _permit = permit;
         crate::store::deadline::within(deadline, || body(&state, params))
     });
-    // See #9572: past the deadline the request answers `DeadlineExceeded`,
-    // but the body's thread cannot be cancelled. It keeps running, and keeps
-    // its permit, until the backend call returns; the cap bounds such threads.
-    match tokio::time::timeout_at(until, task).await {
+    // See #9572: past the deadline and its grace the request answers
+    // `DeadlineExceeded`, but the body's thread cannot be cancelled. It keeps
+    // running, and keeps its permit, until the backend call returns; the cap
+    // bounds such threads.
+    match tokio::time::timeout_at(until + BODY_GRACE, task).await {
         Ok(joined) => joined.unwrap_or(Err(ErrorKind::Internal)),
         Err(_elapsed) => Err(ErrorKind::DeadlineExceeded),
     }

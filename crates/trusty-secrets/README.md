@@ -153,8 +153,8 @@ stopped: its thread stays blocked until the prompt ends, and a write it
 started may still land then. Until it ends, every later call on the same
 Keychain item fails at once with `backend_timeout`, so that late write cannot
 replace a newer one. A file call is not bounded by the deadline, but the
-request is: past its deadline it answers `deadline_exceeded` while the call
-keeps its thread until it returns (#9572). At most 64 method calls run at
+request is: 2 s past its deadline it answers `deadline_exceeded` while the
+call keeps its thread until it returns (#9572). At most 64 method calls run at
 once; a request that waits for a free slot past its deadline also answers
 `deadline_exceeded`, so calls that never return hold at most 64 threads.
 
