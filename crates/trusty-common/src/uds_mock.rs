@@ -14,8 +14,8 @@
 //! rather than through production discovery. The handler answers a `result`
 //! value directly, or an [`RpcError`] to make the daemon refuse.
 //!
-//! This is a `#[cfg(test)]` module, so it never ships. [`BlockingMockDaemon`]
-//! and [`spawn_blocking_at`] are further gated on `search-index` (#7765):
+//! This is a `#[cfg(test)]` module, so it never ships. [`BlockingMockDaemon`],
+//! [`spawn_blocking_at`] and [`hang_up`] are further gated on `search-index` (#7765):
 //! they exist only for `search_index`'s synchronous rigs, so under
 //! `memory-rpc` alone (which pulls in this module via `uds` but not
 //! `search-index`) they would otherwise be unconstructed dead code.
@@ -167,6 +167,25 @@ impl Drop for BlockingMockDaemon {
             let _ = thread.join();
         }
     }
+}
+
+/// Drop the current connection without writing a reply frame (#9125).
+///
+/// Why: a rig that simulates a daemon hanging up used to `panic!` inside its
+/// handler. A `panic!` runs the process-global panic hook on the mock's only
+/// runtime thread, and under full-suite load that hook can stall for seconds —
+/// `install_panic_logger`'s wrapper takes std's global backtrace lock, which a
+/// concurrent backtrace symbolization holds. While it stalls, the mock serves
+/// no registry read, so the confirm poll under test ran out its deadline.
+/// What: unwinds with [`std::panic::resume_unwind`], which skips the hook.
+/// Tokio's task harness still catches the unwind, so the server drops the
+/// connection unanswered exactly as a `panic!` did and the client still sees
+/// `UdsRpcError::NoResponse`.
+/// Test: `a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry`,
+/// `an_unanswered_create_the_registry_confirms_emits_no_warning`.
+#[cfg(feature = "search-index")]
+pub fn hang_up(reason: &'static str) -> ! {
+    std::panic::resume_unwind(Box::new(reason))
 }
 
 /// Start a [`BlockingMockDaemon`] at `socket`, returning only once it is bound.

@@ -2103,10 +2103,11 @@ fn an_unconfirmed_registration_fires_no_reindex() {
 /// `Timeout` (`uds::rpc::send_framed_request_capped`). `NoResponse` is reached
 /// only when the read sees the peer's end gone, so the DAEMON closed the socket
 /// and the fix has to cover both silences, not just the client-side one.
-/// What: a daemon whose create handler records the registration and then panics,
-/// which drops its connection task without writing a frame — the same close
-/// `search_rpc`'s `call_blocking_reports_a_panicking_handler_rather_than_hanging`
-/// pins. Asserts the registration still comes back `Confirmed`, carrying the id
+/// What: a daemon whose create handler records the registration and then
+/// unwinds through `uds_mock::hang_up`, which drops its connection task without
+/// writing a frame — the same close `search_rpc`'s
+/// `call_blocking_reports_a_panicking_handler_rather_than_hanging` pins, minus
+/// the panic hook (#9125). Asserts the registration still comes back `Confirmed`, carrying the id
 /// the REGISTRY names. Against `origin/main` this fails with `NotConfirmed`.
 /// Test: this test.
 #[test]
@@ -2136,7 +2137,10 @@ fn a_create_the_daemon_hung_up_on_is_confirmed_by_polling_the_registry() {
                     *registered.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
                     // The registration landed; the connection dies before the
                     // reply is written, which is what the client saw live.
-                    panic!("the mock daemon dropped the create connection after registering");
+                    // #9125: hook-free, so a slow panic hook cannot stall the mock.
+                    crate::uds_mock::hang_up(
+                        "the mock daemon dropped the create connection after registering",
+                    );
                 }
                 if method == METHOD_INDEXES_LIST {
                     let listed = registered.lock().unwrap_or_else(|e| e.into_inner()).clone();
