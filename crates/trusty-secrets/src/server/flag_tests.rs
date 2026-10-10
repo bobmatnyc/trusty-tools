@@ -151,7 +151,8 @@ async fn set_flag_off_by_agent_ancestor_is_allowed() {
 
     assert_eq!(answer["allowed"], false);
     assert!(!flagged(&fx, "OPEN_KEY"), "the flag went OFF");
-    let shapes: Vec<_> = flag_records(&fx).iter().map(shape).collect();
+    let flags = flag_records(&fx);
+    let shapes: Vec<_> = flags.iter().map(shape).collect();
     assert_eq!(
         shapes,
         [(
@@ -262,7 +263,8 @@ async fn set_flag_backend_failure_leaves_a_deny_after_the_allow_record() {
         ErrorKind::NotFound
     );
     use AuditDecision::{Allow, Deny};
-    let shapes: Vec<_> = flag_records(&fx).iter().map(shape).collect();
+    let flags = flag_records(&fx);
+    let shapes: Vec<_> = flags.iter().map(shape).collect();
     assert_eq!(
         shapes,
         [
