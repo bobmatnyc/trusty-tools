@@ -53,7 +53,7 @@ pub(crate) struct StubArgs {
 }
 
 /// Take ownership of an inherited fd; `None` for stdio or a closed fd.
-fn inherited(fd: i32) -> Option<File> {
+pub(super) fn inherited(fd: i32) -> Option<File> {
     if fd <= 2 {
         return None;
     }
