@@ -22,6 +22,8 @@ pub mod core_recall;
 pub mod helpers;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;
+// #9544: `palace_rename`, kept out of `core.rs` for the SLOC cap.
+pub mod rename;
 pub mod types;
 pub mod user_config;
 
@@ -49,6 +51,10 @@ mod recall_stream_tests;
 #[cfg(test)]
 #[path = "recall_scope_tests.rs"]
 mod recall_scope_tests;
+// #9544: the daemon half of `palace_rename`.
+#[cfg(test)]
+#[path = "rename_tests.rs"]
+mod rename_tests;
 
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former

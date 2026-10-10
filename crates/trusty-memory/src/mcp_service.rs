@@ -87,8 +87,8 @@ mod tests {
         let tools = svc.tools();
         assert_eq!(
             tools.len(),
-            52,
-            "expected 52 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple + #5000 palace_verify_embedded and palace_embed_sweep + #7370 chat_asset_capabilities, chat_asset_put and chat_asset_get), got {}",
+            53,
+            "expected 53 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects + kg_retract_triple + #5000 palace_verify_embedded and palace_embed_sweep + #7370 chat_asset_capabilities, chat_asset_put and chat_asset_get + #9544 palace_rename), got {}",
             tools.len()
         );
     }
@@ -112,12 +112,15 @@ mod tests {
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");
         // #7654: #7370 added three chat-asset tools; the count tracks them.
-        assert_eq!(svc.tools().len(), 52);
+        // #9544: `palace_rename`.
+        assert_eq!(svc.tools().len(), 53);
         assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
         // #5005: the repair deletes vector keys, so it must classify as a write.
         assert_eq!(svc.scopes_for("palace_unalias"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_delete"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_update"), vec!["memory.write"]);
+        // #9544: moving a palace is a write.
+        assert_eq!(svc.scopes_for("palace_rename"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_list"), vec!["memory.read"]);
     }
 }

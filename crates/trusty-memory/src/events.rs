@@ -83,6 +83,8 @@ impl InjectionKind {
 /// mutation, and asserts the frame arrives.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// #9544: new variants (PalaceRenamed) must not break downstream matchers again.
+#[non_exhaustive]
 pub enum DaemonEvent {
     PalaceCreated {
         id: String,
@@ -140,6 +142,12 @@ pub enum DaemonEvent {
         total_vectors: usize,
         total_kg_triples: usize,
     },
+    /// A palace moved to a new id (#9544); `old` now resolves to `new`.
+    ///
+    /// Why: a dashboard keyed by palace id would otherwise keep a dead row for
+    /// `old` and never learn about `new`.
+    /// Test: `rename_emits_palace_renamed_event`.
+    PalaceRenamed { old: String, new: String },
     /// A Claude Code hook completed and rendered (or attempted to render) an
     /// injection block.
     ///
@@ -204,6 +212,7 @@ impl DaemonEvent {
             Self::DreamCompleted { .. } => "dream_completed",
             Self::StatusChanged { .. } => "status_changed",
             Self::HookFired { .. } => "hook_fired",
+            Self::PalaceRenamed { .. } => "palace_renamed",
         }
     }
 
@@ -223,6 +232,7 @@ impl DaemonEvent {
             }
             Self::DreamCompleted { palace_id, .. } => palace_id.as_deref(),
             Self::HookFired { palace_id, .. } => palace_id.as_deref(),
+            Self::PalaceRenamed { new, .. } => Some(new),
             Self::StatusChanged { .. } => None,
         }
     }
@@ -241,7 +251,7 @@ impl DaemonEvent {
             | Self::DrawerDeleted { source, .. }
             | Self::DreamCompleted { source, .. }
             | Self::HookFired { source, .. } => Some(*source),
-            Self::StatusChanged { .. } => None,
+            Self::StatusChanged { .. } | Self::PalaceRenamed { .. } => None,
         }
     }
 }

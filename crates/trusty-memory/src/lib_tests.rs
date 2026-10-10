@@ -106,7 +106,8 @@ async fn tools_list_returns_all_tools() {
     // #5000 / #4786 add `palace_verify_embedded` and `palace_embed_sweep`.
     // #7370 adds `chat_asset_capabilities`, `chat_asset_put`, `chat_asset_get`
     // — #7654: the count was left at 49 when they landed.
-    assert_eq!(tools.len(), 52);
+    // #9544 adds `palace_rename`.
+    assert_eq!(tools.len(), 53);
 }
 
 #[tokio::test]

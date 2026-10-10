@@ -179,11 +179,16 @@ impl JsonRpcResponse {
     /// genuine-absence error (`PalaceRegistry::open_error_is_absent`, the same
     /// test `api_error::open_handle` uses), `REFUSED` when it carries a
     /// `LiveAliasError` (#9544: a create refused because the id is a live
-    /// alias), `INTERNAL_ERROR` otherwise; message = `format!("{e:#}")` always.
+    /// alias), the error's own code when it carries a `RenameError` (#9544:
+    /// `palace_rename`'s table, including `NOT_FOUND` for a missing source),
+    /// `INTERNAL_ERROR` otherwise; message = `format!("{e:#}")` always.
     /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`,
-    /// `from_anyhow_maps_live_alias_to_refused`.
+    /// `from_anyhow_maps_live_alias_to_refused`,
+    /// `from_anyhow_maps_palace_rename_errors`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
-        let code = if e
+        let code = if let Some(rename) = e.downcast_ref::<crate::service::rename::RenameError>() {
+            rename.rpc_code()
+        } else if e
             .downcast_ref::<trusty_common::palace_alias::LiveAliasError>()
             .is_some()
         {
@@ -250,6 +255,8 @@ const TOOL_METHODS: &[&str] = &[
     "palace_info",
     "palace_list",
     "palace_reembed",
+    // #9544: `tm memory rename` calls it by raw name.
+    "palace_rename",
     "palace_unalias",
     "palace_update",
     "palace_verify_embedded",
@@ -727,6 +734,7 @@ mod tests {
             "kg_list_subjects",
             "kg_retract_triple",
             "palace_dream",
+            "palace_rename",
             "palace_update",
             "room_create",
             "room_list",

@@ -230,6 +230,8 @@ pub mod memory_reachable;
 pub mod memory_verbs;
 // #9340: `tm memory forget` — the forget-specific half of `memory_verbs`.
 pub mod memory_forget;
+// #9544: `tm memory rename` — trusty-memory's `palace_rename` over the socket.
+pub mod memory_rename;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;

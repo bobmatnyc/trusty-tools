@@ -151,6 +151,34 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             // clap enforces exactly one; this arm only guards a parser change.
             _ => anyhow::bail!("pass exactly one of <DRAWER_ID> and --fact-key"),
         },
+        // #9544: move a palace to a new id over the socket.
+        MemoryAction::Rename {
+            old,
+            new,
+            replace_empty,
+            json,
+            memory_socket,
+        } => {
+            let out = trusty_mpm::core::memory_rename::rename_palace(
+                &old,
+                &new,
+                replace_empty,
+                memory_socket,
+            )
+            .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).context("serialise rename answer")?
+                );
+            } else {
+                println!("renamed palace {old} -> {new}; {old} now resolves to {new}");
+                if let Some(trashed) = out["trashed_target"].as_str() {
+                    println!("replaced empty palace moved to {trashed}");
+                }
+            }
+            Ok(())
+        }
     }
 }
 

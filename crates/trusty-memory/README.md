@@ -248,7 +248,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **52 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **53 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -291,6 +291,7 @@ this table is generated from it, not maintained by hand.
 | `palace_info` | `palace?` | Get metadata and stats for a single palace. |
 | `palace_list` | — | List all palaces on this machine. |
 | `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
+| `palace_rename` | `palace_id`, `new_id`, `replace_empty?` | Move a palace to a new id. |
 | `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
 | `palace_update` | `palace_id`, `name` | Update the display name of an existing palace. |
 | `palace_verify_embedded` | `drawer_ids`, `palace?` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |

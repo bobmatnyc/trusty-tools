@@ -153,6 +153,30 @@ pub(crate) enum MemoryAction {
         memory_socket: Option<PathBuf>,
     },
 
+    /// Move a palace to a new id — trusty-memory's `palace_rename` (#9544).
+    ///
+    /// Drawers, vectors, the knowledge graph and chat sessions move with it.
+    /// The old id becomes an alias of the new one, so it keeps working.
+    /// Refuses an alias source, and an existing target unless it is empty and
+    /// `--replace-empty` is passed (the empty target moves to
+    /// `<data root>/.trash`). Exits non-zero on any refusal, with the daemon's
+    /// reason.
+    Rename {
+        /// Current palace id.
+        old: String,
+        /// New palace id.
+        new: String,
+        /// Replace an existing, empty palace at `<NEW>`.
+        #[arg(long)]
+        replace_empty: bool,
+        /// Print the daemon's JSON answer instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
     /// Bulk-import a directory of memory `.md` files into a palace.
     ///
     /// Reads every `*.md` file directly inside `<DIR>` (non-recursive), maps

@@ -92,6 +92,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `note` — Store a short curated fact — the no-MCP `memory_note` (#8352)
   - `recall` — Recall memories from the palace — the no-MCP `memory_recall` (#8352)
   - `remember` — Store a memory in the palace — the no-MCP `memory_remember` (#8352)
+  - `rename` — Move a palace to a new id — trusty-memory's `palace_rename` (#9544)
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer
