@@ -171,7 +171,22 @@ pub fn load<T: DeserializeOwned>(crate_name: &str) -> Result<Option<T>, ConfigEr
 /// framing) and downgraded to defaults so the process still starts.
 /// Test: `load_or_default_on_missing` (absent → default).
 pub fn load_or_default<T: DeserializeOwned + Default>(crate_name: &str) -> T {
-    match load::<T>(crate_name) {
+    match crate_config_path(crate_name) {
+        Some(path) => load_or_default_at(path.as_path(), crate_name),
+        None => T::default(),
+    }
+}
+
+/// Load the config at an explicit path, falling back to `Default`.
+///
+/// Why: the hermetic core for [`load_or_default`], so the warn-and-default
+/// failure branch is testable against a temp dir instead of the real home.
+/// What: [`load_at`], with absent → `T::default()` and any error logged at
+/// `warn` (naming `crate_name`) then downgraded to `T::default()`.
+/// Test: `a_parse_failure_falls_back_to_default_and_warns_once_9603`,
+/// `a_type_error_on_a_secret_field_never_reaches_the_log_9603`.
+pub fn load_or_default_at<T: DeserializeOwned + Default>(path: &Path, crate_name: &str) -> T {
+    match load_at::<T>(path) {
         Ok(Some(value)) => value,
         Ok(None) => T::default(),
         Err(e) => {
@@ -256,6 +271,10 @@ pub fn save<T: Serialize>(crate_name: &str, value: &T) -> Result<PathBuf, Config
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "crate_config_redaction_tests.rs"]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {
