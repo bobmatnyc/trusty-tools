@@ -18,6 +18,6 @@ This checks:
 - Agent deployment (~/.claude/agents/)
 - Skill deployment (~/.claude/skills/)
 - Memory service (trusty-memory on :3038)
-- Search service (trusty-search on :7878) and trusty-mpm index
+- Search service (trusty-search, reached over its Unix socket) and trusty-mpm index
 
 Report any Fail or Warn items to the user with suggested fixes.
