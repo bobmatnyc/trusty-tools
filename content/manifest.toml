@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.2.0"
+version = "2.2.1"
 schema_major = 1
 
 [[member]]

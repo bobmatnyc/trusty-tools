@@ -260,7 +260,7 @@ impl Drop for CountingListener {
 /// What: a socket-only mock daemon; `http_addr` and `daemon.port` name a live
 /// listener that counts connections (the address the old fallback chain
 /// resolves to), and `daemon.lock` names this test's own pid so nothing is
-/// spawned. Asserts a non-zero exit naming the socket and `--no-http`, no
+/// spawned. Asserts a non-zero exit naming the socket and trusty-console, no
 /// "Opening" line, and zero connections to the listener.
 /// Test: this function.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -306,7 +306,7 @@ async fn dashboard_never_dials_a_default_port() {
         socket.display()
     );
     assert!(run.combined.contains(&expected), "{}", run.combined);
-    assert!(run.combined.contains("--no-http"), "{}", run.combined);
+    assert!(run.combined.contains("trusty-console"), "{}", run.combined);
     assert!(
         !run.combined.contains("Opening"),
         "no browser may open: {}",

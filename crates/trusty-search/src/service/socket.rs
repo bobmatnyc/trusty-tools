@@ -45,7 +45,7 @@
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
 //! the axum router was built on — see
-//! [`crate::service::server::build_router_on`]. A second `Arc::new` would give
+//! `crate::service::server::build_router_on`. A second `Arc::new` would give
 //! the socket its own registry and its own tickers, and the two transports
 //! would disagree about which indexes exist.
 //!

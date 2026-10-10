@@ -354,15 +354,19 @@ pub fn print_index_breakdown(
 
 /// The daemon's HTTP listener as `search.health` reports it.
 ///
-/// Why: the listener serves only the dashboard now (#9214); every CLI path uses
-/// the socket, so a socket-only daemon is healthy, not an error.
-/// What: reports the address the daemon says it bound, or that it binds none.
-/// It dials nothing.
+/// Why (#9214): the daemon serves its socket only, so "no listener" is the
+/// healthy answer. A daemon that still reports one is an older build — the
+/// binary on disk was upgraded but the running process was not.
+/// What: `Ok` for a socket-only daemon; `Warn` naming the address and the
+/// restart for one that still binds HTTP. It dials nothing.
 /// Test: `check_http_listener_reports_the_bound_address_or_socket_only`.
 pub fn check_http_listener(running: bool, http_addr: Option<&str>) -> CheckResult {
     match (running, http_addr) {
         (false, _) => CheckResult::Warn("HTTP listener: skipped (daemon not running)".into()),
-        (true, Some(addr)) => CheckResult::Ok(format!("HTTP listener: {addr} (dashboard)")),
+        (true, Some(addr)) => CheckResult::Warn(format!(
+            "HTTP listener: {addr} — an older daemon is running; restart it to serve \
+             the socket only (#9214)"
+        )),
         (true, None) => CheckResult::Ok("HTTP listener: none (socket-only daemon)".into()),
     }
 }

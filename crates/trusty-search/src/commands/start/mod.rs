@@ -21,7 +21,7 @@
 //! Test: `start/tests.rs` — all 14 unit tests pass.
 
 // #9214: the `start` flags, moved out of `main.rs` (frozen line-cap budget).
-mod args;
+pub(crate) mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;

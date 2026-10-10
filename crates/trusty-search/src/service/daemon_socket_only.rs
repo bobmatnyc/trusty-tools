@@ -1,4 +1,4 @@
-//! How a socket-only daemon (`--no-http`, #9214) waits for its stop.
+//! How the daemon, which serves its socket only (#9214), waits for its stop.
 //!
 //! Why: split out of `daemon.rs`, which sits near the 500-SLOC cap, so the
 //! wait is one function a test can drive with both of its inputs ready.
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Wait until the daemon is told to stop, or until its RPC serve loop ends.
 ///
-/// Why (#9214): with no HTTP listener the socket is the only door, so a serve
+/// Why (#9214): the socket is the daemon's only door, so a serve
 /// loop that ends on its own leaves a daemon that answers nothing — that is an
 /// error. But a normal stop cancels the drain and ALSO ends the serve loop, so
 /// both futures can be ready at once. An unbiased `select!` then picked the

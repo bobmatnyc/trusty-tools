@@ -16,7 +16,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{http::StatusCode, Json};
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
+use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -347,6 +350,7 @@ fn warm_targets(state: &SearchAppState) -> Vec<String> {
 }
 
 /// `POST /warm` — start warming every registered index, or join the running warm.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn warm_start_handler(
     State(state): State<Arc<SearchAppState>>,
     body: Option<Json<WarmStartRequest>>,
@@ -357,6 +361,7 @@ pub(super) async fn warm_start_handler(
 }
 
 /// `GET /warm/status` — per-index warm state and totals.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn warm_status_handler(State(state): State<Arc<SearchAppState>>) -> Json<Value> {
     Json(warm_status_report(&state))
 }

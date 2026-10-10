@@ -3,34 +3,32 @@
 # sandbox_search_daemon.sh — start an isolated `trusty-search` daemon for a live
 # check or an RSS measurement (issues #8275, #9121).
 #
-# Why: a hand-built "sandbox" daemon with its own port and HOME still inherits
+# Why: a hand-built "sandbox" daemon with its own data dir and HOME still inherits
 #   every exported credential, and the Keychain belongs to the OS user, not to
 #   HOME (#9121). `scripts/sandbox_daemon.sh` solves this for `tm daemon`; this
 #   script does the same for `trusty-search`, which has its own flags and data
 #   directory variable. The #8275 RSS measurement and the live checks of #8176,
 #   #8149, #8659, #8686, #8777 and #8958 need a daemon that cannot reach the
-#   live one (port 7878, `com.trusty.search`) or its data.
+#   live one (`com.trusty.search`, its socket) or its data.
 # What: validates, then runs in the foreground:
 #     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
 #            TRUSTY_DATA_DIR=<dir>/data \
 #            [FASTEMBED_CACHE_DIR=<model cache>] [<KNOBS the caller set>] \
 #            <bin> start --foreground [--no-auto-discover] \
-#                  --data-dir <dir>/data --port <N>
+#                  --data-dir <dir>/data
 #   No other variable reaches the daemon: no token, no API key, no OPENROUTER*,
 #   ANTHROPIC*, GITHUB* or SLACK* name. KNOBS (pass through only when the
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
-#   TRUSTY_EMBEDDERD_BIN, TRUSTY_SEARCH_NO_HTTP (#9214: socket only, no port file).
+#   TRUSTY_EMBEDDERD_BIN.
 #   Auto-discovery: `--no-auto-discover` is passed unless `--auto-discover` is
 #   given, which omits it so a live check of #8176 can see the daemon's own
 #   default on an explicit data dir. It does NOT pass the daemon's
 #   `--auto-discover` opt-in. The scan roots come from `dirs::home_dir()` (HOME,
 #   so <dir>/home: `Projects`, `code`, `src`, or `scan_paths` in a config.yaml
 #   under <dir>/home), never the real home. A fresh <dir>/home holds none, so
-#   the scan returns before it contacts any daemon. Do not create such a root
-#   under <dir>/home: the scan registers what it finds through the daemon
-#   address read from <dir>/data, which falls back to the live port if that
-#   file is not readable yet (`DaemonAddrLayout::resolve_base_url`).
+#   the scan returns before it contacts any daemon. A root created under
+#   <dir>/home is registered into this sandbox's own daemon, over its socket.
 #   Working directory: the daemon runs with cwd <dir>/home. At startup it walks
 #   up from its cwd for a `.env.local` and loads it (`load_env_local_once`,
 #   crates/trusty-common/src/credentials/dotenv.rs). The script refuses a
@@ -42,12 +40,15 @@
 #   only as a sibling of the `--bin` executable or through TRUSTY_EMBEDDERD_BIN.
 #   `--bin` therefore needs a sibling `trusty-embedderd`, or export
 #   TRUSTY_EMBEDDERD_BIN before calling.
-#   Port: 7814..7878 is refused, because the daemon walks forward up to 64 ports
-#   from the one requested (`bind_with_auto_port`) and could land on the live
-#   daemon's 7878. The default is the first free port from 17900. The bound port
-#   can still differ from the requested one: callers MUST read
-#   <dir>/data/daemon.port. The script waits up to 60 s for that file and prints
-#   the actual port, or says it timed out.
+#   Socket (#9214): the daemon binds no TCP port; it serves the Unix socket
+#   <dir>/data/trusty-search.sock only, so the script passes no `--port` and
+#   takes none. It removes a stale socket file before the start, refusing
+#   while sandbox.pid names a live daemon of this dir, while the socket accepts
+#   a connection (a daemon sandbox.pid does not record), or when a python3
+#   connect probe cannot tell either way. It waits up to 60 s
+#   (SANDBOX_SOCKET_WAIT_SECS) for the socket to appear, and prints its path,
+#   or says it timed out. Clients reach the sandbox with
+#   `TRUSTY_DATA_DIR=<dir>/data` or `TRUSTY_SEARCH_SOCKET=<that path>`.
 #   Model cache: a fresh HOME makes the embedder download its ONNX model into
 #   <dir>/home/.cache/fastembed. `--model-cache PATH` (or an exported
 #   FASTEMBED_CACHE_DIR) forwards that one directory as FASTEMBED_CACHE_DIR;
@@ -71,13 +72,11 @@
 #   Output names variables and the paths this script chose; it prints a value
 #   only for the names this script pins or the knobs above.
 #
-# Usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--port N] [--dir DIR]
+# Usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--dir DIR]
 #                                         [--model-cache PATH] [--auto-discover]
 #                                         [--dry-run]
 #        scripts/sandbox_search_daemon.sh --stop DIR
 #   --bin PATH          the trusty-search binary (default: on PATH)
-#   --port N            requested loopback port (default: a free port from 17900;
-#                       7814..7878 is refused)
 #   --dir DIR           an existing sandbox directory (default: a new `mktemp -d`);
 #                       must not be, or resolve to, the real home
 #   --model-cache PATH  an existing fastembed cache directory to reuse
@@ -97,13 +96,11 @@ set -euo pipefail
 
 # Passed through from the caller only when exported — tuning knobs, never a credential.
 KNOBS="TRUSTY_WARMBOOT_MAX_INDEXES TRUSTY_MAX_RESIDENT_INDEXES TRUSTY_REDB_CACHE_MB \
-TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN TRUSTY_SEARCH_NO_HTTP"
+TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN"
 SANDBOX_PATH="/usr/bin:/bin"
-LIVE_PORT=7878
-# The daemon walks forward up to 64 ports from the requested one.
-LIVE_LOW=$((LIVE_PORT - 64))
-PORT_WAIT_SECS="${SANDBOX_PORT_WAIT_SECS:-60}"
-FIRST_PORT=17900
+# #9214: the daemon serves this socket under its data dir; it binds no port.
+SOCKET_NAME="trusty-search.sock"
+SOCKET_WAIT_SECS="${SANDBOX_SOCKET_WAIT_SECS:-60}"
 
 die() {
   echo "sandbox_search_daemon: refused: $*" >&2
@@ -111,7 +108,7 @@ die() {
 }
 
 usage() {
-  echo "usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--port N] [--dir DIR]" >&2
+  echo "usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--dir DIR]" >&2
   echo "                                        [--model-cache PATH] [--auto-discover] [--dry-run]" >&2
   echo "       scripts/sandbox_search_daemon.sh --stop DIR" >&2
   exit 2
@@ -119,8 +116,8 @@ usage() {
 
 # Path audit (#9121): a `$(...)` strips trailing newlines, so a path feeding a
 # security decision never goes through one. Paths are produced by `resolve`
-# into $RESOLVED, and the ancestor walk uses parameter expansion. The pid and
-# port files hold digits only; `ps` argv and the mktemp name (random suffix)
+# into $RESOLVED, and the ancestor walk uses parameter expansion. The pid file
+# holds digits only; `ps` argv and the mktemp name (random suffix)
 # cannot end in a newline that matters.
 # CDPATH is deliberately not unset: `resolve` runs `cd` on caller-supplied
 # values, and a CDPATH hit could only redirect a relative one (below the bar).
@@ -150,20 +147,6 @@ resolve() {
   RESOLVED="${out%$'\n'}"
 }
 
-# port_busy N: succeeds when something already listens on 127.0.0.1:N.
-port_busy() {
-  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
-}
-
-# free_port: the first unused port from FIRST_PORT; empty when none of 100 is.
-free_port() {
-  local p="$FIRST_PORT"
-  while [ "$p" -lt $((FIRST_PORT + 100)) ]; do
-    if ! port_busy "$p"; then echo "$p"; return 0; fi
-    p=$((p + 1))
-  done
-}
-
 # owned_pid PID DIR: succeeds only when PID is a plain pid above 1 and its argv
 # holds the token `--data-dir DIR/data` followed by a space or the end of argv.
 # A negative, zero, group-shaped or reused pid, and a sibling dir such as
@@ -183,6 +166,25 @@ is_alive() {
   kill -0 "$1" 2>/dev/null || return 1
   st="$(ps -p "$1" -o stat= 2>/dev/null || true)"
   case "$st" in ''|Z*) return 1 ;; *) return 0 ;; esac
+}
+
+# socket_accepts PATH (#9214): one python3 connect to the Unix socket PATH,
+# 1 s timeout, nothing sent. Returns 0 when it is accepted (live), 3 when it is
+# refused or PATH is not a socket (stale), anything else when it cannot tell:
+# no python3, a timeout, or any other error. Stale is 3, not 1, so a python3
+# that dies on its own reads as "cannot tell", never as stale.
+socket_accepts() {
+  local py
+  py="$(command -v python3 || true)"
+  [ -n "$py" ] || return 2
+  "$py" -c 'import errno, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    sys.exit(3 if e.errno in (errno.ECONNREFUSED, errno.ENOENT, errno.ENOTSOCK) else 2)
+s.close()' "$1"
 }
 
 # wait_dead PID TENTHS: poll for up to TENTHS tenths of a second; succeeds when dead.
@@ -237,7 +239,6 @@ stop_recorded() {
 }
 
 BIN=""
-PORT=""
 DIR=""
 MODEL_CACHE=""
 STOP_DIR=""
@@ -246,7 +247,6 @@ DRY_RUN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bin) [ "$#" -ge 2 ] || usage; BIN="$2"; shift 2 ;;
-    --port) [ "$#" -ge 2 ] || usage; PORT="$2"; shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --model-cache) [ "$#" -ge 2 ] || usage; MODEL_CACHE="$2"; shift 2 ;;
     --stop) [ "$#" -ge 2 ] || usage; STOP_DIR="$2"; shift 2 ;;
@@ -263,19 +263,6 @@ if [ -n "$STOP_DIR" ]; then
   [ -n "$STOP_RESOLVED" ] || die "--stop is not an existing directory: $STOP_DIR"
   stop_recorded "$STOP_RESOLVED" || exit 1
   exit 0
-fi
-
-if [ -n "$PORT" ]; then
-  case "$PORT" in
-    *[!0-9]*) echo "sandbox_search_daemon: --port must be a number" >&2; usage ;;
-  esac
-  if [ "$PORT" -ge "$LIVE_LOW" ] && [ "$PORT" -le "$LIVE_PORT" ]; then
-    die "port $PORT is within 64 of the live daemon's port $LIVE_PORT; the daemon walks forward on a busy port"
-  fi
-  [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "--port is out of range: $PORT"
-else
-  PORT="$(free_port)"
-  [ -n "$PORT" ] || die "no free port from $FIRST_PORT; pass --port"
 fi
 
 if [ -z "$BIN" ]; then
@@ -361,13 +348,14 @@ for name in $KNOBS; do
 done
 # #8176: --auto-discover leaves the flag off; the daemon's own default decides.
 if [ "$AUTO_DISCOVER" -eq 1 ]; then
-  ARGV=("$BIN" start --foreground --data-dir "$SANDBOX/data" --port "$PORT")
+  ARGV=("$BIN" start --foreground --data-dir "$SANDBOX/data")
 else
-  ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data" --port "$PORT")
+  ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data")
 fi
+SOCKET="$SANDBOX/data/$SOCKET_NAME"
 
 echo "sandbox_search_daemon: sandbox dir: $SANDBOX"
-echo "sandbox_search_daemon: port: $PORT"
+echo "sandbox_search_daemon: socket: $SOCKET"
 if [ -z "$MODEL_CACHE" ]; then
   echo "sandbox_search_daemon: no model cache given; the embedder downloads into $SANDBOX/home/.cache/fastembed" \
     "(pass --model-cache PATH to reuse one)"
@@ -382,6 +370,27 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
+
+# #9214: a socket file left by an earlier run must not pass for ours, but a
+# live sandbox daemon of this dir owns its socket; refuse rather than unlink it.
+if [ -f "$SANDBOX/sandbox.pid" ]; then
+  prev=""
+  read -r prev < "$SANDBOX/sandbox.pid" || true
+  if is_alive "$prev" && owned_pid "$prev" "$SANDBOX"; then
+    die "pid $prev is a running sandbox daemon of this dir; stop it with --stop $SANDBOX first"
+  fi
+fi
+# #9214: a daemon of <dir>/data that sandbox.pid does not record still owns
+# its socket; unlink only a file nothing accepts on.
+if [ -e "$SOCKET" ] || [ -L "$SOCKET" ]; then
+  accepts=0
+  socket_accepts "$SOCKET" || accepts=$?
+  case "$accepts" in
+    0) die "$SOCKET accepts connections: a daemon sandbox.pid does not record serves it; stop that daemon first" ;;
+    3) rm -f "$SOCKET" ;;
+    *) die "cannot tell whether $SOCKET is live (no python3, or the connect was neither accepted nor refused); remove it by hand once no daemon serves it" ;;
+  esac
+fi
 
 CHILD=""
 # teardown: end only the pid this script spawned, and only while its argv still
@@ -400,8 +409,6 @@ trap teardown EXIT
 trap 'teardown; exit 130' INT
 trap 'teardown; exit 143' TERM
 
-# A stale port file from an earlier run in this dir must not pass for ours.
-rm -f "$SANDBOX/data/daemon.port"
 # cwd <dir>/home: see the Working directory note in the header.
 cd "$SANDBOX/home"
 env -i "${ENV_WORDS[@]}" "${ARGV[@]}" &
@@ -409,19 +416,18 @@ CHILD=$!
 echo "$CHILD" > "$SANDBOX/sandbox.pid"
 echo "sandbox_search_daemon: started pid $CHILD (stop with: scripts/sandbox_search_daemon.sh --stop $SANDBOX)"
 
-# The daemon walks forward from the requested port; the port file is the truth.
-PORT_FILE="$SANDBOX/data/daemon.port"
+# #9214: the socket is the daemon's only listener; its appearance is readiness.
 waited=0
-while [ "$waited" -lt $((PORT_WAIT_SECS * 5)) ] && [ ! -s "$PORT_FILE" ] && is_alive "$CHILD"; do
+while [ "$waited" -lt $((SOCKET_WAIT_SECS * 5)) ] && [ ! -S "$SOCKET" ] && is_alive "$CHILD"; do
   sleep 0.2
   waited=$((waited + 1))
 done
-if [ -s "$PORT_FILE" ]; then
-  echo "sandbox_search_daemon: bound port: $(tr -d ' \n' < "$PORT_FILE") (from $PORT_FILE; requested $PORT)"
+if [ -S "$SOCKET" ]; then
+  echo "sandbox_search_daemon: serving socket: $SOCKET"
 elif is_alive "$CHILD"; then
-  echo "sandbox_search_daemon: no $PORT_FILE after ${PORT_WAIT_SECS}s; the bound port is unknown (requested $PORT); read that file once it appears" >&2
+  echo "sandbox_search_daemon: no socket at $SOCKET after ${SOCKET_WAIT_SECS}s; the daemon is not serving yet" >&2
 else
-  echo "sandbox_search_daemon: the daemon exited before writing $PORT_FILE" >&2
+  echo "sandbox_search_daemon: the daemon exited before binding $SOCKET" >&2
 fi
 STATUS=0
 wait "$CHILD" || STATUS=$?

@@ -7,9 +7,11 @@
 //! `index_status_handler`, `graph_handler`, `graph_stats_handler`.
 //! Test: `index_disk_and_mtime_handles_missing_dir`,
 //! `graph_handler_exports_nodes_and_edges`, etc.
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -211,6 +213,7 @@ pub(super) fn first_existing_mtime_rfc3339(
 /// Test: `status_404_only_when_absent_from_every_store`,
 /// `cold_parked_index_status_is_503_not_404`, and
 /// `cold_parked_status_503_body_names_search_as_the_restore_path`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn index_status_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -564,6 +567,7 @@ fn node_type_for_symbol(symbol: &str) -> &'static str {
 /// `{ nodes, edges, stats, generated_at }`. A 1-hour `Cache-Control` header is
 /// attached since the graph only changes on reindex.
 /// Test: covered by `test_graph_handler_*` in `tests/integration_tests.rs`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn graph_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -707,6 +711,7 @@ fn unknown_index(index_id: &IndexId) -> (StatusCode, serde_json::Value) {
 /// returns `{ node_count, edge_count, edge_kinds: { CallsFunction: …, … } }`.
 /// Returns 404 when the index id is unknown.
 /// Test: covered by `graph_stats_handler_returns_breakdown` in this module.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn graph_stats_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

@@ -48,7 +48,6 @@ else's guard test too).
 |------|------------------|------------------------------|----------------------|
 | 7700 | `trusty-common` symgraph HTTP server (optional library feature, not a standalone daemon) | `trusty-common/src/symgraph/server.rs::DEFAULT_PORT` | No |
 | 7788 | `trusty-console` | `trusty-console/src/lib.rs::DEFAULT_PORT` | Yes |
-| 7878 | `trusty-search` (still bound; also serves `<data dir>/trusty-search.sock` since #6285 slice 1) | `trusty-search/src/service/constants.rs::DEFAULT_PORT` | Yes |
 | 7880 | `trusty-mpm` daemon (`trusty-mpmd` / `tm`) | `trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR` | No |
 | 7882 | `trusty-code` (`tcode serve --http`) | `trusty-code/src/serve/mod.rs::DEFAULT_HTTP_PORT` (mirrored by `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`) | No (#3364 follow-up) |
 | 8080 | `trusty-agents` API server | `trusty-agents/src/runtime/mode_dispatch.rs` / `trusty-agents/src/service/mod.rs::DEFAULT_SERVICE_PORT` | No |
@@ -137,14 +136,12 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   exists) is part of bringing the stack up. `com.trusty.analyze` is evicted by
   `tctl install` and `tctl upgrade`, through the same `RETIRED_SERVICES`
   mechanism that clears `com.trusty.review` — one eviction path, two rows.
-- **#6285** — `trusty-search` has NOT left this table. It binds
-  `<data dir>/trusty-search.sock` as of slice 1 and keeps 7878 bound alongside
-  it, because its HTTP surface is ~35 routes with eleven consumer crates
-  dialling the port. A single-PR cutover is not viable, so it migrates the way
-  #6288 migrated `trusty-mpm`: the socket is added first, route families move
-  onto it one slice at a time, and the retire slice deletes the axum surface,
-  moves the consumers, and removes this row. Until then 7878 is still bound and
-  `tctl`'s port guard is still correct to reserve it.
+- **#6285, #9214** — `trusty-search` left this table in #9214 PR-A. It bound
+  `<data dir>/trusty-search.sock` from #6285 slice 1 and kept 7878 bound
+  alongside it while route families moved onto the socket one slice at a
+  time. PR-A removed the bind: the daemon serves the socket only, and
+  `--port` is accepted for one release and ignored. 7878 is not reserved by
+  anything now.
 - **#6287** — `trusty-analyze` left this table the same way, on the same
   reasoning: it binds `<data dir>/trusty-analyze/trusty-analyze.sock` and has
   no `DEFAULT_PORT`. Four consumers dialled 7879 rather than two, so all four

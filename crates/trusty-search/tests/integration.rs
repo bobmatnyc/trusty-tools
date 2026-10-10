@@ -31,6 +31,7 @@ mod config_mount;
 mod corpus_corruption_quarantine_4227;
 mod corpus_open_quarantine_4122;
 mod daemon_env_precedence;
+mod daemon_no_tcp_9214;
 mod data_dir_forward;
 // #9450: compaction cost at 150K (ignored measurement).
 mod hnsw_compact_9450;

@@ -1,6 +1,5 @@
 //! Handler for `trusty-search stop`.
 
-use super::daemon_utils::daemon_port_path;
 // #2936: one `pid_alive` for the crate. This file used to carry a byte-identical
 // private copy of `service::daemon::pid_alive`; adding a third caller in
 // `core::store::staging_reap` would have made that two copies to keep in step.
@@ -41,7 +40,9 @@ pub async fn handle_stop() -> Result<()> {
     } else {
         dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.lock"))
     };
-    let port_path = daemon_port_path();
+    // #9214: a current daemon writes no port file; an older one did, beside
+    // its lockfile.
+    let port_path = lock_path.as_ref().map(|p| p.with_file_name("daemon.port"));
 
     let primary_pid = lock_path
         .as_ref()

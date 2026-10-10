@@ -404,70 +404,23 @@ fn socket_path_follows_trusty_data_dir_not_home() {
     );
 }
 
-/// Why (#9214): auto-discover registers projects over HTTP, and a `--no-http`
-/// daemon publishes no HTTP address; before B2(a) the resolver then guessed
-/// `:7878` and registered into whatever held that port. This is the Fail-Open Check for that path: the scan must
-/// be withheld, not redirected.
-/// What: a granted scan stops running once the listener is absent, and says
-/// why; the warm-boot colocated scan and the flag forwarded to the child do
-/// not move. A refused scan stays refused either way.
+/// Why (#9214): auto-discover registers projects over the daemon's socket,
+/// and the daemon is socket-only, so a granted scan runs. The `--no-http`
+/// gate that withheld it went with the HTTP listener.
+/// What: a granted scan runs and logs no skip; a refused scan logs the
+/// `--no-auto-discover` reason, and no reason names `--no-http`.
 /// Test: this function IS the test.
 #[test]
-fn auto_discover_needs_the_http_listener() {
+fn auto_discover_skip_reason_names_its_cause() {
     let granted = StartPlan::resolve(None, None, false, false)
         .expect("must resolve")
         .discovery;
-    assert!(
-        granted.runs_auto_discover(),
-        "precondition: the default scans"
-    );
-
-    let socket_only = granted.with_http_listener(false);
-    assert!(
-        !socket_only.runs_auto_discover(),
-        "a daemon with no HTTP listener must not run auto-discover"
-    );
-    assert!(socket_only.withheld_for_no_http());
-    assert_eq!(
-        socket_only.warm_boot_skips_colocated(),
-        granted.warm_boot_skips_colocated(),
-        "the in-process colocated scan does not use HTTP"
-    );
-    assert_eq!(socket_only.spawn_arg(), granted.spawn_arg());
-
-    let with_http = granted.with_http_listener(true);
-    assert!(with_http.runs_auto_discover() && !with_http.withheld_for_no_http());
+    assert!(granted.runs_auto_discover(), "the default scans");
+    assert_eq!(granted.skip_reason(), None);
 
     let refused = StartPlan::resolve(None, None, true, false)
         .expect("must resolve")
         .discovery
-        .with_http_listener(false);
-    assert!(!refused.runs_auto_discover() && !refused.withheld_for_no_http());
-}
-
-/// Why (#9214): the `--no-http` skip was logged before tracing existed, so it
-/// never reached the log, and the post-boot line named only the older reasons.
-/// What: the reason `handle_start` logs names `--no-http` exactly when the
-/// missing listener withheld a granted scan, keeps the older wording for a
-/// refused scan, and is absent when the scan runs.
-/// Test: this function IS the test.
-#[test]
-fn auto_discover_skip_reason_names_no_http() {
-    let granted = StartPlan::resolve(None, None, false, false)
-        .expect("must resolve")
-        .discovery;
-    assert_eq!(granted.with_http_listener(true).skip_reason(), None);
-
-    let no_http = granted.with_http_listener(false).skip_reason();
-    assert!(
-        no_http.is_some_and(|r| r.contains("--no-http")),
-        "the logged reason must name --no-http: {no_http:?}"
-    );
-
-    let refused = StartPlan::resolve(None, None, true, false)
-        .expect("must resolve")
-        .discovery
-        .with_http_listener(false)
         .skip_reason();
     assert!(
         refused.is_some_and(|r| r.contains("--no-auto-discover") && !r.contains("--no-http")),

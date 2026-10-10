@@ -7,9 +7,11 @@
 //! (`RoutingMode`, `compute_context_weights`) and `search_similar_handler`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
@@ -24,6 +26,7 @@ use super::status::index_last_indexed;
 
 // Re-export global fan-out handler so the router in `mod.rs` can reach it
 // through the `search` path without knowing about `search_global`.
+#[cfg(test)]
 pub(super) use super::search_global::global_search_handler;
 
 /// Query parameters for `DELETE /indexes/{id}` (issue #4123).
@@ -82,6 +85,7 @@ pub(crate) struct DeleteIndexParams {
 /// `delete_of_an_allowlist_excluded_registration_removes_the_row`,
 /// `delete_of_an_id_in_no_store_and_no_registry_is_404`,
 /// `a_failed_indexes_toml_rewrite_is_reported_not_swallowed`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -663,6 +667,7 @@ pub(super) async fn unregister_index(
     }
 }
 
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn search_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

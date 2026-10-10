@@ -10,16 +10,20 @@
 //! Test: `logs_tail_returns_recent_lines`, `admin_stop_returns_ok`, and
 //! `patch_config_partial_update` in `super::tests`; the socket halves in
 //! `service::rpc::admin`'s `admin_tests.rs`.
+use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
+#[cfg(test)]
 use futures::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+#[cfg(test)]
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::state::SearchAppState;
@@ -76,6 +80,7 @@ impl Default for LogsTailParams {
 /// where `total` is the number of lines currently buffered (so callers can
 /// tell whether the ring has wrapped).
 /// Test: `logs_tail_returns_recent_lines` and `logs_tail_clamps_n`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn logs_tail_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<LogsTailParams>,
@@ -126,6 +131,7 @@ pub(crate) fn logs_tail_report(
 /// socket's `search.admin.stop` cannot answer a different thing.
 /// Test: `admin_stop_triggers_graceful_shutdown` in `tests_829.rs` verifies
 /// that the channel fires without calling `process::exit`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn admin_stop_handler(State(state): State<Arc<SearchAppState>>) -> Response {
     match admin_stop_report(&state) {
         Ok(body) => Json(body).into_response(),
@@ -237,6 +243,7 @@ where
 /// What: snapshots `memory_limit_mb()` and `index_memory_limit_mb()` and
 /// returns them as JSON. `null` means "no limit configured".
 /// Test: `tests::get_config_returns_current_values`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn get_config_handler(
     State(_state): State<Arc<SearchAppState>>,
 ) -> Json<ConfigResponse> {
@@ -269,6 +276,7 @@ pub(crate) fn config_report() -> ConfigResponse {
 /// corresponding limit. Always returns `200 OK` with a `ConfigResponse`.
 /// Test: `tests::patch_config_partial_update` and
 /// `tests::patch_config_disables_limit_with_null`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn patch_config_handler(
     State(_state): State<Arc<SearchAppState>>,
     Json(req): Json<PatchConfigRequest>,
@@ -366,6 +374,7 @@ pub(super) async fn collect_status_counts(state: &SearchAppState) -> (usize, usi
 /// cadence is supplied by the background ticker spawned in `build_router`.
 /// Test: `curl -N http://127.0.0.1:7878/status/stream` shows a `connected`
 /// frame immediately and a `status_changed` frame every ~2s.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn status_stream_handler(
     State(state): State<Arc<SearchAppState>>,
 ) -> impl IntoResponse {

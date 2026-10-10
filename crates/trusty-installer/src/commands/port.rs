@@ -4,7 +4,9 @@
 //! bound (its auto-walked port) without parsing logs. `tctl` does NOT host its
 //! own HTTP server (DOC-7); it reports a *member* daemon's address by reading
 //! that member's `http_addr` discovery file via
-//! `trusty_common::read_daemon_addr`, mirroring `trusty-search port`.
+//! `trusty_common::read_daemon_addr`, mirroring `trusty-search port`. A member
+//! that serves a Unix socket — trusty-search since #9214 — has no port, so
+//! `tctl port` names its socket and exits 1 rather than reading a stale file.
 //!
 //! ## Flag precedence
 //!
@@ -103,20 +105,45 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// Test: `tests::default_member_is_search`.
 const DEFAULT_MEMBER: &str = "trusty-search";
 
+/// The refusal `tctl port` prints for a member that binds no TCP port.
+///
+/// Why (#9214): trusty-search, like trusty-analyze and trusty-memory before
+/// it, serves a Unix socket only. Its `http_addr` file can outlive the build
+/// that wrote it, and printing that port sends a script to a dead port or to
+/// a stranger holding it.
+/// What: `Some(message naming the socket)` when `binary` serves a socket
+/// (`probe_http::uds_socket_for`); `None` for a member still on TCP.
+/// Test: `tests::socket_members_name_their_socket_instead_of_a_port`.
+pub fn socket_only_refusal(binary: &str) -> Option<String> {
+    let socket = super::probe_http::uds_socket_for(binary)?;
+    Some(format!(
+        "tctl port: `{binary}` serves a Unix socket only and binds no TCP port; \
+         its socket is {}",
+        socket.display()
+    ))
+}
+
 /// Handle `tctl port [<member>] [--addr] [--json-port]`.
 ///
 /// Why: Phase-2 implementation reporting a managed member daemon's bound port.
 ///
-/// What: Resolves the member (defaults to `trusty-search`), reads its
-/// `http_addr` via `read_daemon_addr`, and prints the address in the format
-/// chosen by `select_format`. Returns exit code 1 when no address is recorded
-/// (daemon not running) or the recorded address is unparseable, 0 on success.
+/// What: Resolves the member (defaults to `trusty-search`). A member that
+/// serves a Unix socket gets [`socket_only_refusal`] and exit 1 (#9214).
+/// Otherwise it reads the member's `http_addr` via `read_daemon_addr` and
+/// prints the address in the format chosen by `select_format`. Returns exit
+/// code 1 when no address is recorded (daemon not running) or the recorded
+/// address is unparseable, 0 on success.
 ///
 /// Test: side-effecting (reads the discovery file); the formatting and
 /// precedence are covered by the pure-helper tests.
 pub fn run(member: Option<&str>, addr: bool, json_port: bool, _json: bool) -> i32 {
     let binary = member.unwrap_or(DEFAULT_MEMBER);
     let format = select_format(addr, json_port);
+    // #9214: a socket-only member has no port; never print a stale one.
+    if let Some(refusal) = socket_only_refusal(binary) {
+        eprintln!("{refusal}");
+        return 1;
+    }
 
     let address = match trusty_common::read_daemon_addr(binary) {
         Ok(Some(a)) if !a.is_empty() => a,
@@ -151,6 +178,26 @@ pub fn run(member: Option<&str>, addr: bool, json_port: bool, _json: bool) -> i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#9214): trusty-search serves a socket only, so `tctl port` must
+    /// name it and never read a stale `http_addr`; a TCP member is untouched.
+    /// What: the refusal for trusty-search names its resolved socket; a TCP
+    /// member gets none.
+    /// Test: This is the test.
+    #[test]
+    fn socket_members_name_their_socket_instead_of_a_port() {
+        // Both resolutions read `TRUSTY_DATA_DIR_OVERRIDE`, which sibling tests
+        // set under this lock.
+        let _guard = crate::commands::test_support::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let refusal = socket_only_refusal("trusty-search").expect("search serves a socket");
+        let socket = crate::commands::probe_http::uds_socket_for("trusty-search")
+            .expect("search resolves a socket");
+        assert!(refusal.contains("binds no TCP port"), "{refusal}");
+        assert!(refusal.contains(&socket.display().to_string()), "{refusal}");
+        assert_eq!(socket_only_refusal("trusty-console"), None);
+    }
 
     /// Why: precedence is load-bearing — `--json-port` must win over `--addr`.
     /// What: asserts each flag combination resolves to the right format.

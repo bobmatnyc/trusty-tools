@@ -12,9 +12,9 @@
 #     allowlist   a dry run and a real (stubbed) run show only the allowlisted
 #                 names; the fake GITHUB_TOKEN / OPENROUTER_API_KEY and a
 #                 *_KEY lookalike never reach the stub or the output
-#     argv        --foreground, --no-auto-discover and a --data-dir under the
-#                 sandbox dir are present
-#     port        the default port is never 7878 and an explicit 7878 refuses
+#     argv        exactly --foreground, --no-auto-discover and a --data-dir
+#                 under the sandbox dir; no --port (#9214)
+#     no-port     `--port` is refused as an unknown argument (#9214)
 #     stop-owned  `--stop DIR` kills the recorded pid when its argv holds DIR
 #     stop-decoy  `--stop DIR` refuses a recorded pid whose argv lacks DIR and
 #                 leaves that process alive
@@ -22,10 +22,11 @@
 #     stop-sibling a decoy whose argv names `<dir>-other` or `<dir>/data-old`
 #                 is refused and survives (the match is a whole token)
 #     signal      TERM to the launcher kills the child it spawned, removes
-#                 sandbox.pid, and the launcher reported the port the daemon
-#                 wrote to <dir>/data/daemon.port
-#     ignore-term a child that ignores TERM is ended by KILL, and a missing
-#                 daemon.port is reported as unknown, not as the requested port
+#                 sandbox.pid, and the launcher reported the socket the daemon
+#                 bound at <dir>/data/trusty-search.sock
+#     ignore-term a child that ignores TERM is ended by KILL, and a socket file
+#                 an earlier run left is removed first, so a child that binds
+#                 nothing is reported as not serving
 #     cwd         the child runs under <dir>/home, never the caller's cwd, and
 #                 no ancestor of that cwd holds a `.env.local`; a --dir under
 #                 an ancestor `.env.local` refuses
@@ -35,7 +36,13 @@
 #                 `.env.local` refuses; a <dir>/home that exists but cannot be
 #                 resolved (a dangling symlink) dies
 #     stop-dead   --stop on a pid already dead says so and removes sandbox.pid
-#     port-range  --port 7850 (within 64 of 7878) refuses
+#     live-dir    a start refuses while sandbox.pid names a live daemon of the
+#                 same dir, and leaves that daemon and its socket alone
+#     live-socket a start refuses while <dir>/data's socket accepts a
+#                 connection that sandbox.pid does not record, and leaves the
+#                 listener and its socket alone (#9214)
+#     no-python3  with no python3 on PATH, a start refuses on a stale socket
+#                 file ("cannot tell") and leaves that file alone (#9214)
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
 #                 directory refuses
 #
@@ -48,6 +55,14 @@ if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A holder stub binds a socket under $TRUSTY_DATA_DIR; never the caller's.
+unset TRUSTY_DATA_DIR
+# #9214: the holder stub stands in for a daemon by binding a real Unix socket.
+PYTHON="$(command -v python3 || true)"
+if [ -z "$PYTHON" ]; then
+  echo "sandbox_search_daemon selftest: python3 is required to bind a stub socket" >&2
+  exit 1
+fi
 LAUNCHER="$SCRIPT_DIR/sandbox_search_daemon.sh"
 PASSED=0
 FAILED=0
@@ -75,17 +90,18 @@ pwd -P > "$HOME/stub-pwd"
 STUB_EOF
 chmod +x "$STUB"
 
-# Long-lived stub: the same record, then it stays up until signalled.
+# Long-lived stub: the same record, binds the daemon's socket, then stays up
+# until signalled.
 HOLD="$TMP_ROOT/stub-ts-hold"
-cat > "$HOLD" <<'STUB_EOF'
+cat > "$HOLD" <<STUB_EOF
 #!/bin/sh
-env | cut -d= -f1 | sort > "$HOME/stub-env-names"
-[ -z "${TRUSTY_DATA_DIR:-}" ] || echo 17777 > "$TRUSTY_DATA_DIR/daemon.port"
+env | cut -d= -f1 | sort > "\$HOME/stub-env-names"
+[ -z "\${TRUSTY_DATA_DIR:-}" ] || "$PYTHON" -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "\$TRUSTY_DATA_DIR/trusty-search.sock"
 while :; do sleep 1; done
 STUB_EOF
 chmod +x "$HOLD"
 
-# Long-lived stub that ignores TERM and never writes daemon.port.
+# Long-lived stub that ignores TERM and never binds a socket.
 IGNORE="$TMP_ROOT/stub-ts-ignore"
 cat > "$IGNORE" <<'STUB_EOF'
 #!/bin/sh
@@ -145,7 +161,7 @@ else
   pass allowlist-dry-run
 fi
 
-# 2. allowlist (real run) + argv + port: a stubbed start.
+# 2. allowlist (real run) + argv: a stubbed start.
 DIR2="$TMP_ROOT/case2"
 mkdir -p "$DIR2"
 set +e
@@ -166,29 +182,16 @@ else
     pass allowlist-real-run
   fi
   ARGS2="$(tr '\n' ' ' < "$DIR2/home/stub-args" 2>/dev/null || true)"
-  case "$ARGS2" in
-    "start --foreground --no-auto-discover --data-dir $DIR2/data --port "*) pass argv ;;
-    *) fail argv "stub argv was [$ARGS2]" ;;
-  esac
-  PORT2="${ARGS2##*--port }"
-  PORT2="${PORT2%% *}"
-  if [ -z "$PORT2" ] || [ "$PORT2" = "7878" ]; then
-    fail port "default port was [$PORT2]"
+  if [ "$ARGS2" = "start --foreground --no-auto-discover --data-dir $DIR2/data " ]; then
+    pass argv
   else
-    pass port-default
+    fail argv "stub argv was [$ARGS2]"
   fi
 fi
 
-# 3. port: an explicit 7878 refuses.
-set +e
-OUT3="$(run_launcher --bin "$STUB" --dir "$DIR1" --port 7878 --dry-run 2>&1)"
-STATUS3=$?
-set -e
-if [ "$STATUS3" -eq 1 ] && printf '%s' "$OUT3" | grep -qF "live daemon's port"; then
-  pass port-7878-refused
-else
-  fail port "explicit 7878: exit $STATUS3"
-fi
+# 3. no-port (#9214): the daemon binds no TCP port, so `--port` is unknown.
+expect_refusal no-port 2 "unknown argument: --port" \
+  --bin "$STUB" --dir "$DIR1" --port 17999 --dry-run
 
 # 4. stop-owned: --stop kills the recorded pid when its argv holds DIR.
 DIR4="$TMP_ROOT/case4"
@@ -249,13 +252,13 @@ LAUNCH_PID=$!
 i=0
 while [ "$i" -lt 50 ] && [ ! -s "$DIR7/sandbox.pid" ]; do sleep 0.2; i=$((i + 1)); done
 i=0
-while [ "$i" -lt 50 ] && ! grep -q "bound port: 17777" "$TMP_ROOT/case7.out" 2>/dev/null; do
+while [ "$i" -lt 50 ] && ! grep -qF "serving socket: $DIR7/data/trusty-search.sock" "$TMP_ROOT/case7.out" 2>/dev/null; do
   sleep 0.2; i=$((i + 1))
 done
-if grep -q "bound port: 17777" "$TMP_ROOT/case7.out"; then
-  pass port-reported
+if grep -qF "serving socket: $DIR7/data/trusty-search.sock" "$TMP_ROOT/case7.out"; then
+  pass socket-reported
 else
-  fail port-reported "no 'bound port: 17777' in launcher output"
+  fail socket-reported "no 'serving socket: $DIR7/data/trusty-search.sock' in: $(cat "$TMP_ROOT/case7.out")"
 fi
 CHILD7="$(tr -d ' \n' < "$DIR7/sandbox.pid" 2>/dev/null || true)"
 if [ -z "$CHILD7" ] || ! kill -0 "$CHILD7" 2>/dev/null; then
@@ -314,21 +317,24 @@ for decoy_arg in "$DIR9-other/data" "$DIR9/data-old"; do
   DECOY_PID=""
 done
 
-# 10. ignore-term: KILL ends a TERM-ignoring child; no daemon.port is "unknown".
+# 10. ignore-term: KILL ends a TERM-ignoring child; a stale socket file from an
+# earlier run is removed first, so a child that binds nothing is not serving.
 DIR10="$TMP_ROOT/case10"
-mkdir -p "$DIR10"
-(exec env -i PATH="$PATH" SANDBOX_PORT_WAIT_SECS=1 bash "$LAUNCHER" \
+mkdir -p "$DIR10/data"
+"$PYTHON" -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
+  "$DIR10/data/trusty-search.sock"
+(exec env -i PATH="$PATH" SANDBOX_SOCKET_WAIT_SECS=1 bash "$LAUNCHER" \
   --bin "$IGNORE" --dir "$DIR10") > "$TMP_ROOT/case10.out" 2>&1 &
 LAUNCH10=$!
 i=0
-while [ "$i" -lt 50 ] && ! grep -q "bound port is unknown" "$TMP_ROOT/case10.out" 2>/dev/null; do
+while [ "$i" -lt 50 ] && ! grep -q "no socket at" "$TMP_ROOT/case10.out" 2>/dev/null; do
   sleep 0.2; i=$((i + 1))
 done
 CHILD10="$(tr -d ' \n' < "$DIR10/sandbox.pid" 2>/dev/null || true)"
-if ! grep -q "bound port is unknown" "$TMP_ROOT/case10.out"; then
-  fail ignore-term "no 'bound port is unknown' report: $(cat "$TMP_ROOT/case10.out")"
-elif grep -q "bound port: " "$TMP_ROOT/case10.out"; then
-  fail ignore-term "reported a bound port that no daemon wrote"
+if ! grep -q "no socket at" "$TMP_ROOT/case10.out"; then
+  fail ignore-term "no 'no socket at' report: $(cat "$TMP_ROOT/case10.out")"
+elif grep -q "serving socket: " "$TMP_ROOT/case10.out"; then
+  fail ignore-term "reported a stale socket file as serving"
 fi
 kill -TERM "$LAUNCH10" 2>/dev/null || true
 set +e
@@ -422,8 +428,82 @@ else
   fail stop-dead "exit $S15: $OUT15"
 fi
 
-# 12. port-range: within 64 of the live port refuses.
-expect_refusal port-range 1 "within 64" --bin "$STUB" --dir "$DIR1" --port 7850 --dry-run
+# 12. live-dir (#9214): a start refuses while sandbox.pid names a live daemon
+# of this dir, and leaves that daemon and its socket in place.
+DIR12="$TMP_ROOT/case12"
+mkdir -p "$DIR12/data"
+cp "$HOLD" "$DIR12/holder"
+"$DIR12/holder" --data-dir "$DIR12/data" &
+DECOY_PID=$!
+sleep 0.3
+echo "$DECOY_PID" > "$DIR12/sandbox.pid"
+touch "$DIR12/data/trusty-search.sock"
+set +e
+OUT12="$(run_launcher --bin "$STUB" --dir "$DIR12" 2>&1)"
+S12=$?
+set -e
+if [ "$S12" -eq 1 ] && printf '%s' "$OUT12" | grep -qF "running sandbox daemon of this dir" \
+    && kill -0 "$DECOY_PID" 2>/dev/null && [ -e "$DIR12/data/trusty-search.sock" ]; then
+  pass live-dir
+else
+  fail live-dir "exit $S12: $OUT12"
+fi
+kill "$DECOY_PID" 2>/dev/null || true
+DECOY_PID=""
+
+# 13. live-socket (#9214): no sandbox.pid, but a listener accepts on
+# <dir>/data's socket. The start refuses and unlinks nothing.
+DIR18="$TMP_ROOT/case18"
+SOCK18="$DIR18/data/trusty-search.sock"
+mkdir -p "$DIR18/data"
+"$PYTHON" -c 'import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(8)
+open(sys.argv[2], "w").close()
+time.sleep(120)' "$SOCK18" "$DIR18/listening" &
+DECOY_PID=$!
+i=0
+while [ "$i" -lt 50 ] && [ ! -e "$DIR18/listening" ]; do sleep 0.1; i=$((i + 1)); done
+set +e
+OUT18="$(run_launcher --bin "$STUB" --dir "$DIR18" 2>&1)"
+S18=$?
+set -e
+if [ ! -e "$DIR18/listening" ]; then
+  fail live-socket "the listener never bound $SOCK18"
+elif [ "$S18" -eq 1 ] && printf '%s' "$OUT18" | grep -qF "$SOCK18 accepts connections" \
+    && [ -S "$SOCK18" ] && kill -0 "$DECOY_PID" 2>/dev/null && [ ! -e "$DIR18/home/stub-args" ]; then
+  pass live-socket
+else
+  fail live-socket "exit $S18, socket kept: $([ -S "$SOCK18" ] && echo yes || echo no): $OUT18"
+fi
+kill "$DECOY_PID" 2>/dev/null || true
+DECOY_PID=""
+
+# 14. no-python3 (#9214): with no python3 on PATH the launcher cannot tell a
+# stale socket from a live one. It refuses and leaves the socket file alone.
+# NOPY holds links to every other tool the launcher runs before that check.
+DIR19="$TMP_ROOT/case19"
+SOCK19="$DIR19/data/trusty-search.sock"
+NOPY="$TMP_ROOT/nopy-bin"
+mkdir -p "$DIR19/data" "$NOPY"
+for tool in bash env id uname dscl getent cut sed tr ps mkdir rm; do
+  t="$(command -v "$tool" || true)"
+  [ -z "$t" ] || ln -s "$t" "$NOPY/$tool"
+done
+"$PYTHON" -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK19"
+set +e
+OUT19="$(env -i PATH="$NOPY" "$NOPY/bash" "$LAUNCHER" --bin "$STUB" --dir "$DIR19" 2>&1)"
+S19=$?
+set -e
+if [ -n "$(env -i PATH="$NOPY" "$NOPY/bash" -c 'command -v python3' || true)" ]; then
+  fail no-python3 "python3 is reachable on the restricted PATH $NOPY"
+elif [ "$S19" -eq 1 ] && printf '%s' "$OUT19" | grep -qF "cannot tell whether $SOCK19 is live" \
+    && [ -S "$SOCK19" ] && [ ! -e "$DIR19/home/stub-args" ]; then
+  pass no-python3
+else
+  fail no-python3 "exit $S19, socket kept: $([ -S "$SOCK19" ] && echo yes || echo no): $OUT19"
+fi
 
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

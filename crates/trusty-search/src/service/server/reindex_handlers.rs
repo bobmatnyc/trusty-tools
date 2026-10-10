@@ -6,22 +6,29 @@
 //! What: `ReindexRequest`, `reindex_handler`, `reindex_stream_handler`.
 //! Test: `reindex_handler_rejects_within_cooldown` and
 //! `reindex_status_aborted_memory_serializes_lowercase`.
+use axum::http::StatusCode;
+use serde::Deserialize;
+use std::sync::Arc;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::StatusCode,
     response::Response,
     Json,
 };
+#[cfg(test)]
 use futures::stream::{self, StreamExt};
-use serde::Deserialize;
-use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
+#[cfg(test)]
+use crate::service::reindex::ReindexStatus;
 use crate::service::reindex::{
-    root_gate, spawn_claimed_reindex, ReindexClaimError, ReindexProgress, ReindexStatus,
+    root_gate, spawn_claimed_reindex, ReindexClaimError, ReindexProgress,
 };
 
 use super::degraded::write_quarantine_refusal;
@@ -45,6 +52,7 @@ pub struct ReindexRequest {
     pub background: Option<bool>,
 }
 
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn reindex_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -571,10 +579,12 @@ pub(super) fn claim_refusal(
 /// What: used by `reindex_stream_handler` to pace the `IntervalStream`.
 /// Test: covered indirectly by the full reindex path; the interval fires even
 /// when no real events are produced.
+#[cfg(test)] // #9214 (D1): only the SSE route uses it.
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 /// SSE keep-alive heartbeat frame (SSE comment — ignored by all spec-compliant
 /// clients including `eventsource-stream`).
+#[cfg(test)] // #9214 (D1): only the SSE route sends it.
 const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 
 /// SSE stream of reindex progress events.
@@ -600,6 +610,7 @@ const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 /// independently of real events so it cannot be blocked by a stalled sidecar.
 /// `service::reindex::progress_race_tests` covers the #6386 exactly-once open
 /// both surfaces now share.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn reindex_stream_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

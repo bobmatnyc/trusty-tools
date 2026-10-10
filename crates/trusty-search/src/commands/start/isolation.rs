@@ -138,8 +138,6 @@ pub(crate) fn spawn_auto_discover_arg(discover: bool, auto_discover: bool) -> Op
 pub(crate) struct Discovery {
     granted: bool,
     opted_in: bool,
-    // #9214: auto-discover talks to the daemon over HTTP.
-    http_listener: bool,
 }
 
 impl Discovery {
@@ -149,50 +147,24 @@ impl Discovery {
     }
 
     /// Whether to spawn `auto_discover_and_index` after warm boot.
-    pub(crate) fn runs_auto_discover(self) -> bool {
-        self.granted && self.http_listener
-    }
-
-    /// This decision for a daemon that does (or, with `--no-http`, does not)
-    /// bind its HTTP listener.
     ///
-    /// Why (#9214): withholds auto-discover from a socket-only daemon. The
-    /// scan registered projects over HTTP when this gate was added; it now
-    /// uses the socket, so the gate is kept only until the `--no-http`
-    /// default flips. The warm-boot colocated scan runs in process and is
-    /// unaffected, as is the flag forwarded to the child.
-    /// What: records whether the listener exists; [`Self::runs_auto_discover`]
-    /// then requires it.
-    /// Test: `auto_discover_needs_the_http_listener`.
-    pub(crate) fn with_http_listener(self, http_listener: bool) -> Self {
-        Self {
-            http_listener,
-            ..self
-        }
-    }
-
-    /// True when the scan was granted and only the missing HTTP listener
-    /// withholds it.
-    pub(crate) fn withheld_for_no_http(self) -> bool {
-        self.granted && !self.http_listener
+    /// #9214: the scan registers projects over the daemon's socket, so the
+    /// gate that withheld it from a socket-only daemon went with the HTTP
+    /// listener.
+    pub(crate) fn runs_auto_discover(self) -> bool {
+        self.granted
     }
 
     /// The line `handle_start` logs when it does not spawn auto-discover, or
     /// `None` when it does.
     ///
     /// Why (#9214): the skip used to be logged before tracing was initialised,
-    /// so it was dropped; the post-boot log line named only the older reasons.
-    /// What: names `--no-http` when the missing listener is what withheld a
-    /// granted scan; otherwise the pre-#9214 wording.
-    /// Test: `auto_discover_skip_reason_names_no_http`.
+    /// so it was dropped. It is logged at the spawn site instead.
+    /// What: `None` when the scan runs; otherwise the reason it does not.
+    /// Test: `auto_discover_skip_reason_names_its_cause`.
     pub(crate) fn skip_reason(self) -> Option<&'static str> {
         if self.runs_auto_discover() {
             None
-        } else if self.withheld_for_no_http() {
-            Some(
-                "auto-discover: skipped — it registers projects over HTTP and --no-http \
-                 binds no HTTP listener (#9214)",
-            )
         } else {
             Some(
                 "auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, \
@@ -265,7 +237,6 @@ impl StartPlan {
             discovery: Discovery {
                 granted,
                 opted_in: auto_discover,
-                http_listener: true,
             },
         })
     }

@@ -6,7 +6,10 @@
 //! What: `GlobalSearchRequest` and `global_search_handler`. Per-index search
 //! lives in `search.rs`; routing helpers live in `routing.rs`.
 //! Test: `test_global_search_fans_out_and_merges` in `server.rs#tests`.
-use axum::{extract::State, http::StatusCode, Json};
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -142,6 +145,7 @@ fn default_global_top_k() -> usize {
 /// indexes a file into each, and asserts both contribute results tagged with
 /// the right `index_id`. `test_global_search_surfaces_cold_indexes_skipped`
 /// asserts the count is > 0 when cold indexes exist.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn global_search_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<GlobalSearchRequest>,

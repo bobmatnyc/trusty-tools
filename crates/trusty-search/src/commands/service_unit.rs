@@ -24,6 +24,10 @@
 //!    (`ProgramArguments`, `EnvironmentVariables`).
 //! 3. [`resolve_auto_discover`] / [`resolve_persisted_env`] — what the
 //!    regenerated unit should carry forward.
+//! 4. [`unit_program_args`] / [`without_retired_env`] — the unit's
+//!    `ProgramArguments`, and the #9214 filter that keeps a retired input out
+//!    of it. Gated `any(macos, test)`, so the filter is tested on every
+//!    platform while Linux builds carry no dead code.
 //!
 //! Items 2 and 3 are `#[cfg(target_os = "macos")]`: launchd is the only
 //! service manager this crate generates units for, so their sole consumers
@@ -47,8 +51,46 @@ use crate::service::PERSISTED_ENV_VARS;
 pub const NO_AUTO_DISCOVER_ENV: &str = "TRUSTY_NO_AUTO_DISCOVER";
 
 /// The CLI spelling written into the generated plist's `ProgramArguments`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub const NO_AUTO_DISCOVER_ARG: &str = "--no-auto-discover";
+
+/// Unit env keys #9214 retired. A regenerated unit never carries one.
+///
+/// Why: the daemon ignores `TRUSTY_SEARCH_NO_HTTP` and warns on every boot
+/// that it is set. Regeneration carries forward every key an installed unit
+/// had (#4868), so without this list an old unit's value would outlive the
+/// release that retires it.
+#[cfg(any(target_os = "macos", test))]
+pub const RETIRED_UNIT_ENV: &[&str] = &["TRUSTY_SEARCH_NO_HTTP"];
+
+/// The `ProgramArguments` the generated unit runs, after the executable.
+///
+/// Why (#4823, #9214): the auto-discovery choice travels as a flag, never as
+/// an env value (see [`resolve_persisted_env`]). The unit carries no `--port`
+/// and no `--no-http`: the daemon binds no TCP port, and a unit an older
+/// build or claude-mpm wrote with either is replaced, not extended.
+/// What: `start --foreground`, plus [`NO_AUTO_DISCOVER_ARG`] when
+/// `suppress_auto_discover`.
+/// Test: `generated_unit_carries_no_retired_port_input`.
+#[cfg(any(target_os = "macos", test))]
+pub fn unit_program_args(suppress_auto_discover: bool) -> Vec<String> {
+    let mut args = vec!["start".to_string(), "--foreground".to_string()];
+    if suppress_auto_discover {
+        args.push(NO_AUTO_DISCOVER_ARG.to_string());
+    }
+    args
+}
+
+/// `pairs` without any [`RETIRED_UNIT_ENV`] key (#9214).
+///
+/// Test: `generated_unit_carries_no_retired_port_input`.
+#[cfg(any(target_os = "macos", test))]
+pub fn without_retired_env(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+    pairs
+        .into_iter()
+        .filter(|(key, _)| !RETIRED_UNIT_ENV.contains(&key.as_str()))
+        .collect()
+}
 
 /// Parse a boolean written the way operators actually write booleans.
 ///
@@ -434,3 +476,7 @@ mod launchd_unit_tests;
 #[cfg(test)]
 #[path = "service_unit_cli_tests.rs"]
 mod cli_tests;
+
+#[cfg(test)]
+#[path = "service_unit_9214_tests.rs"]
+mod retired_unit_tests;

@@ -1,23 +1,20 @@
 //! No workspace client reaches the trusty-search daemon over TCP (#9214).
 //!
-//! Why: ADR-0032 makes trusty-search UDS-only, delivered in phases. This phase
-//! moves every in-workspace client onto the daemon's Unix socket; the last
-//! phase removes the daemon's `:7878` bind. A client that still builds
-//! `http://127.0.0.1:7878`, or still resolves the daemon's HTTP address, works
-//! until that bind goes and then fails only on a host running the new build.
-//! A sweep over the source sees such a call site before it ships.
+//! Why: ADR-0032 makes trusty-search UDS-only. Every in-workspace client uses
+//! the daemon's Unix socket, and the daemon binds no `:7878` listener
+//! (#9214 PR-A). A client that still builds `http://127.0.0.1:7878`, or still
+//! resolves the daemon's HTTP address, fails on every host. A sweep over the
+//! source sees such a call site before it ships.
 //!
 //! What: walks every workspace crate's production source — `crates/*/src/**`
 //! `.rs` files, minus test files and inline `#[cfg(test)] mod` blocks — and
 //! the console's UI sources (`crates/*/ui*/src/**` `.js`/`.ts`/`.svelte`, and
 //! each `vite.config.js`), skipping built `*-dist` bundles, `node_modules` and
 //! `*.test.js`. A non-comment line that carries one of [`FORBIDDEN`] fails,
-//! named by file and line, unless [`EXEMPT`] names that file and needle.
+//! named by file and line. Nothing is exempt: #9214 PR-A deleted the last
+//! rows, which covered the daemon's own bind.
 //! Out of scope: `crates/*/tests/**` (test rigs, not clients), `scripts/`,
 //! `docker/` and docs.
-//!
-//! Every [`EXEMPT`] row must still match, so a row whose call site moved fails
-//! the sweep until it is deleted. The last #9214 phase empties the list.
 //!
 //! Test: this file IS the test. `sweep_sees_the_workspace` guards against a
 //! scan that silently reads nothing; `the_needles_catch_each_spelling` and
@@ -36,26 +33,6 @@ const FORBIDDEN: &[&str] = &[
     "resolve_daemon_base_url(\"trusty-search\")",
     "read_daemon_addr(\"trusty-search\")",
     "DaemonAddrLayout::TRUSTY_SEARCH",
-];
-
-/// `(workspace-relative file, needle, reason)` rows allowed to keep a needle
-/// until the last #9214 phase. Each row must still match.
-const EXEMPT: &[(&str, &str, &str)] = &[
-    (
-        "crates/trusty-search/src/commands/daemon_utils.rs",
-        "DaemonAddrLayout::TRUSTY_SEARCH",
-        "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",
-    ),
-    (
-        "crates/trusty-search/src/service/constants.rs",
-        "DaemonAddrLayout::TRUSTY_SEARCH",
-        "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",
-    ),
-    (
-        "crates/trusty-search/src/service/daemon.rs",
-        "DaemonAddrLayout::TRUSTY_SEARCH",
-        "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",
-    ),
 ];
 
 /// The workspace root, two levels above this crate.
@@ -172,12 +149,11 @@ fn hits(text: &str) -> Vec<(usize, &'static str, String)> {
     out
 }
 
-/// The sweep: no unexempted hit, and no exemption without a hit.
+/// The sweep: no hit anywhere.
 #[test]
 fn no_workspace_client_dials_the_search_daemon_over_tcp() {
     let root = workspace_root();
     let mut violations = Vec::new();
-    let mut used = vec![false; EXEMPT.len()];
     for file in swept_files(&root) {
         let rel = file
             .strip_prefix(&root)
@@ -186,13 +162,7 @@ fn no_workspace_client_dials_the_search_daemon_over_tcp() {
             .replace('\\', "/");
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         for (line, needle, code) in hits(&text) {
-            match EXEMPT
-                .iter()
-                .position(|(f, n, _)| *f == rel && *n == needle)
-            {
-                Some(i) => used[i] = true,
-                None => violations.push(format!("{rel}:{line}: `{needle}`: {code}")),
-            }
+            violations.push(format!("{rel}:{line}: `{needle}`: {code}"));
         }
     }
     assert!(
@@ -200,16 +170,6 @@ fn no_workspace_client_dials_the_search_daemon_over_tcp() {
         "these lines reach the trusty-search daemon over TCP; use its Unix socket \
          (`trusty_common::search_rpc`) instead (#9214, ADR-0032):\n{}",
         violations.join("\n")
-    );
-    let stale: Vec<String> = EXEMPT
-        .iter()
-        .zip(&used)
-        .filter(|(_, u)| !**u)
-        .map(|((f, n, _), _)| format!("{f} `{n}`"))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "these EXEMPT rows no longer match; delete them: {stale:?}"
     );
 }
 
