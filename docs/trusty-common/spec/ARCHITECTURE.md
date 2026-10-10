@@ -36,7 +36,7 @@ idempotent tracing subscriber and the process-wide shared `FastEmbedder`
                        trusty-common (rlib, edition 2021, ELv2)
  ┌──────────────────────────────────────────────────────────────────────────┐
  │  ALWAYS-ON CORE (default = [])                                            │
- │   lib.rs        bind_with_auto_port · resolve_data_dir · daemon-addr ·    │
+ │   lib.rs        resolve_data_dir · daemon-addr ·                          │
  │                 check_already_running · init_tracing · chat re-exports    │
  │   chat.rs       ChatProvider · OpenRouter · Ollama · tool-use             │
  │   log_buffer.rs · sys_metrics.rs · claude_config.rs · project_discovery   │
@@ -167,8 +167,8 @@ These are enforced by the root `CLAUDE.md` and visible throughout the source:
    are imported as a library API define structured error enums
    (`embedder_client::EmbedderError`, the symgraph error types). `anyhow::Result`
    appears in the binary shims (`tickets-mcp`, `candle_metal_bench`) and in the
-   handful of daemon-glue free functions in `lib.rs` (`bind_with_auto_port`,
-   `resolve_data_dir`, `write_daemon_addr`) where the caller is always a binary.
+   handful of daemon-glue free functions in `lib.rs` (`resolve_data_dir`,
+   `write_daemon_addr`) where the caller is always a binary.
 
 5. **No global state.** Free functions and small structs. The only permitted
    `OnceCell`/`Lazy` are the idempotent tracing subscriber and the process-wide
