@@ -24,6 +24,8 @@
 #   ci.yml `changes` job: that every gate verdict comes from a diff, never from
 #                        the PR activity type, and that the push path's
 #                        no-before-SHA arms still fail closed (#5407).
+#   ci.yml concurrency:  `edited` and `ready_for_review` never cancel an
+#                        in-flight run, and the group stays ref-keyed (#9189).
 #   check-red-main-coverage: which trigger shapes count as push-to-main, the
 #                        fail-closed answer for a trigger block it cannot parse,
 #                        and that the live repo leaves no push-to-main workflow
@@ -1327,6 +1329,62 @@ assert_eq "semver-checks runs its self-tests when the gate itself changed" "4" \
   "$(grep -c "have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" .github/workflows/semver-checks.yml || true)"
 assert_eq "semver-checks classifies its own machinery from the diff" "1" \
   "$(grep -c 'bash scripts/detect-semver-gate-inputs.sh' .github/workflows/semver-checks.yml || true)"
+
+# ---------------------------------------------------------------------------
+# ci.yml top-level concurrency (#4179, #9189)
+#
+# A `ready_for_review` run on an unchanged SHA must queue behind the in-flight
+# run, never cancel it: a push then `gh pr ready` otherwise leaves the
+# cancelled sync run's checks in the PR rollup (#9189). The group must stay
+# keyed on `github.ref` for pull requests, so a later push still cancels the
+# stale run — a PR-number-plus-head-SHA key would stop that.
+# CI_WF lets a mutation proof point the assertions at a scratch copy.
+# ---------------------------------------------------------------------------
+echo
+echo "ci.yml concurrency (#9189):"
+ci_conc="$(awk '
+  /^concurrency:/ { inblk = 1; next }
+  inblk && /^[^[:space:]]/ { exit }
+  inblk { print }
+' "${CI_WF:-.github/workflows/ci.yml}")"
+assert_eq "ready_for_review never cancels an in-flight run (#9189)" "1" \
+  "$(grep -cE "^  cancel-in-progress: .*github\.event\.action != 'ready_for_review'" <<<"${ci_conc}" || true)"
+assert_eq "edited still never cancels an in-flight run" "1" \
+  "$(grep -cE "^  cancel-in-progress: .*github\.event\.action != 'edited'" <<<"${ci_conc}" || true)"
+assert_eq "the PR concurrency group stays keyed on the ref" "1" \
+  "$(grep -cE '^  group: .*github\.ref' <<<"${ci_conc}" || true)"
+assert_eq "the group carries no head-SHA or PR-number key" "0" \
+  "$(grep -cE '^  group: .*(head\.sha|pull_request\.number)' <<<"${ci_conc}" || true)"
+
+# The same rule for EVERY pull_request workflow with a top-level
+# `cancel-in-progress:` (#9189): the live check found line-cap.yml's required
+# check still cancelled by the ready event after ci.yml alone was fixed. One
+# case per file, so a workflow added later without the exclusion goes red and
+# is named. A literal `false` passes; anything else must carry the exclusion.
+# CI_WF_DIR lets a mutation proof point the loop at a scratch copy.
+echo
+echo "pull_request workflows: ready_for_review never cancels (#9189):"
+pr_conc_checked=0
+for wf in "${CI_WF_DIR:-.github/workflows}"/*.yml; do
+  grep -qE '^[[:space:]]+pull_request:' "${wf}" || continue
+  wf_cancel="$(awk '
+    /^concurrency:/ { inblk = 1; next }
+    inblk && /^[^[:space:]]/ { exit }
+    inblk && /^  cancel-in-progress:/ { print }
+  ' "${wf}")"
+  [ -n "${wf_cancel}" ] || continue
+  pr_conc_checked=$((pr_conc_checked + 1))
+  wf_ok=no
+  if grep -qE "^  cancel-in-progress: (false|.*github\.event\.action != 'ready_for_review')" <<<"${wf_cancel}"; then
+    wf_ok=yes
+  fi
+  assert_eq "$(basename "${wf}"): ready_for_review never cancels" "yes" "${wf_ok}"
+done
+pr_conc_found=no
+if [ "${pr_conc_checked}" -gt 0 ]; then
+  pr_conc_found=yes
+fi
+assert_eq "the loop found pull_request workflows to check" "yes" "${pr_conc_found}"
 
 # ---------------------------------------------------------------------------
 # ci-website-relevance.sh, and website-tests.yml's use of it

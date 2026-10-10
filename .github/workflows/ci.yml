@@ -172,6 +172,16 @@ on:
 # edit; throws away no completed work. Observed on this PR: two body edits
 # produced two extra runs and the in-flight run completed `success` regardless.
 #
+# `ready_for_review` is excluded for the same reason (#9189). A push followed by
+# `gh pr ready` fires `synchronize` then `ready_for_review` on one SHA, in one
+# group; cancelling on the second killed the first, and its cancelled checks
+# stayed in the PR rollup (PRs #9177, #9183). Excluded, the ready run queues
+# behind the in-flight one. Cost: one duplicate full run per `gh pr ready` on an
+# unchanged SHA. The group stays keyed on `github.ref`, not on the head SHA, so
+# a later push (`synchronize`) still cancels the stale running or queued run.
+# Every pull_request workflow carries the same exclusion, asserted per file by
+# scripts/check-ci-helpers-selftest.sh.
+#
 # That extra run has to be a REAL one. Uncancelled, it shares every context
 # name with the run it coexists with, and GitHub surfaces only the
 # later-completing check-run per name — so anything that lets the edit-run
@@ -179,7 +189,7 @@ on:
 # a skip keyed on `github.event.action` in the `changes` job below; see #5407.
 concurrency:
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
 
 # SKIP_UI_BUILD=1 prevents the four build.rs Svelte pipelines from invoking pnpm.
 env:

@@ -88,7 +88,7 @@ on:
 # still supersedes the superseded run. Matches ci.yml / token-drift.yml.
 concurrency:
   group: website-tests-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
 
 jobs:
   # No job-level `if:` keyed on the pull_request ACTIVITY TYPE in any job here
