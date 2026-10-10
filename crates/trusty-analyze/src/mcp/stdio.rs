@@ -4,9 +4,12 @@
 //! and exchange one JSON object per line. Notification responses are silently
 //! dropped. Parse errors are reported with id=null per the JSON-RPC spec.
 
-use anyhow::Result;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::sync::Arc;
 
+use anyhow::Result;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+
+use super::daemon_gate::DaemonGate;
 use super::{error_codes, AnalyzerMcpServer, JsonRpcError, Request, Response};
 
 /// Default maximum response size in bytes before the size guard activates.
@@ -93,9 +96,58 @@ pub fn guard_response_size(bytes: Vec<u8>, ceiling: usize) -> Vec<u8> {
 /// write to prevent session-killing oversized payloads (#917).
 /// Test: the size guard is unit-tested via `guard_response_size` directly.
 pub async fn run(server: AnalyzerMcpServer) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
+    serve(
+        server,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+/// [`run`] for the `trusty-analyze mcp` bridge, with the daemon auto-start
+/// guard in `gate` (#1078, #8279).
+///
+/// Test: see [`serve_with_daemon_gate`].
+pub async fn run_with_daemon_gate(server: AnalyzerMcpServer, gate: Arc<DaemonGate>) -> Result<()> {
+    serve_with_daemon_gate(
+        server,
+        gate,
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+/// Serve the stdio loop on `reader`/`writer` while the auto-start guard runs.
+///
+/// Why: #8279 — awaiting the guard before the loop let a slow daemon start
+/// time out the console's `initialize`, and a guard error exited the bridge.
+/// What: starts `gate` in the background and serves at once; daemon calls
+/// await the same run and report its failure in-band.
+/// Test: `initialize_answers_while_the_daemon_guard_never_returns`,
+/// `a_failed_daemon_guard_is_an_in_band_error_and_the_bridge_keeps_serving`.
+pub async fn serve_with_daemon_gate<R, W>(
+    server: AnalyzerMcpServer,
+    gate: Arc<DaemonGate>,
+    reader: R,
+    writer: W,
+) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    // #8279: start the guard, do not await it; the handshake needs no daemon.
+    gate.start_in_background();
+    serve(server.with_daemon_gate(gate), reader, writer).await
+}
+
+/// The stdio loop over any line reader and writer.
+async fn serve<R, W>(server: AnalyzerMcpServer, reader: R, mut stdout: W) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut reader = reader.lines();
     let ceiling = response_size_ceiling();
 
     while let Some(line) = reader.next_line().await? {

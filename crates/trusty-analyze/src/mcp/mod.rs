@@ -27,6 +27,9 @@
 
 pub mod stdio;
 
+// #8279: the auto-start guard runs off the handshake path, once per bridge.
+pub mod daemon_gate;
+
 // Why (#610): the `tools/list` JSON-Schema payload was extracted into its own
 // module to keep this file under its frozen line-cap budget while the `review`
 // feature (#630) adds new tools. `descriptors::base_tool_descriptors()` is the
@@ -54,6 +57,7 @@ mod helpers;
 mod rpc_client;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,6 +150,8 @@ impl Response {
 #[derive(Clone)]
 pub struct AnalyzerMcpServer {
     socket: PathBuf,
+    /// #8279: awaited by the first daemon call, never by the handshake.
+    gate: Option<Arc<daemon_gate::DaemonGate>>,
 }
 
 impl AnalyzerMcpServer {
@@ -167,7 +173,16 @@ impl AnalyzerMcpServer {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            gate: None,
         }
+    }
+
+    /// Make every daemon call wait for `gate` first (#8279).
+    ///
+    /// Test: `concurrent_daemon_calls_run_the_guard_once`.
+    pub fn with_daemon_gate(mut self, gate: Arc<daemon_gate::DaemonGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// The socket this dispatcher dials.
