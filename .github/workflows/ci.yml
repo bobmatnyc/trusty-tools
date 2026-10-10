@@ -571,6 +571,13 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-secrets --all-targets --features cli-backends -- -D warnings
 
+      # #8454: no crate enables trusty-channels' `unrouted-slack-mcp`, so the
+      # `--workspace` run above never compiles `slack::server`, `slack::handlers`
+      # or `slack-mcp`. This step lints them; `affected-test` runs their tests.
+      - name: cargo clippy -p trusty-channels --features unrouted-slack-mcp -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-channels --all-targets --features unrouted-slack-mcp -- -D warnings
+
   # --------------------------------------------------------------------------
   # rustdoc-links: broken intra-doc links, on the PR that writes them (#5973).
   #
@@ -1664,6 +1671,13 @@ jobs:
       - name: cargo test -p trusty-secrets --features cli-backends
         if: contains(format(' {0} ', matrix.crates), ' trusty-secrets ')
         run: cargo test -p trusty-secrets --features cli-backends --no-fail-fast
+
+      # #8454: a default `cargo test -p trusty-channels` leaves
+      # `unrouted-slack-mcp` off, so the Slack server and handler tests run only
+      # in this step. The `clippy` job lints the same feature set.
+      - name: cargo test -p trusty-channels --features unrouted-slack-mcp
+        if: contains(format(' {0} ', matrix.crates), ' trusty-channels ')
+        run: cargo test -p trusty-channels --all-targets --no-fail-fast --features unrouted-slack-mcp
 
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.

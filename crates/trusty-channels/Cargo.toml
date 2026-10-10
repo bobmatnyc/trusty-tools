@@ -17,6 +17,10 @@ readme = "README.md"
 # into CHANGELOG.md at release), and `docs/` (one workspace's Slack app
 # manifest, not a usage document).
 include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
+# #8454 (ruling Q7): every binary is listed below, so a new `src/bin/*.rs`
+# cannot build by default without passing `tests/publish_surface.rs`.
+autobins = false
+autoexamples = false
 
 [features]
 default = []
@@ -42,6 +46,20 @@ path = "src/bin/telegram-mcp.rs"
 [[bin]]
 name = "gchat-mcp"
 path = "src/bin/gchat-mcp.rs"
+
+# #8454: these drive `slack::handlers` / `slack::server`, which exist only
+# with `unrouted-slack-mcp`.
+[[test]]
+name = "tools_http"
+required-features = ["unrouted-slack-mcp"]
+
+[[test]]
+name = "slack_list_http"
+required-features = ["unrouted-slack-mcp"]
+
+[[test]]
+name = "canvas_push_http"
+required-features = ["unrouted-slack-mcp"]
 
 [dependencies]
 # #8454 S2b: crate-config locates the host config.yaml.
