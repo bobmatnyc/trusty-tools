@@ -302,25 +302,46 @@ impl SearchAppState {
     /// Test: Covered by `chat_provider_endpoint_returns_payload` in this crate.
     pub async fn chat_provider(&self) -> Option<Arc<dyn ChatProvider>> {
         self.chat_provider
-            .get_or_init(|| async {
-                if self.local_model.enabled {
-                    if let Some(mut p) =
-                        trusty_common::auto_detect_local_provider(&self.local_model.base_url).await
-                    {
-                        p.model = self.local_model.model.clone();
-                        return Some(Arc::new(p) as Arc<dyn ChatProvider>);
-                    }
-                }
-                if !self.openrouter_api_key.is_empty() {
-                    return Some(Arc::new(trusty_common::OpenRouterProvider::new(
-                        self.openrouter_api_key.clone(),
-                        self.openrouter_model.clone(),
-                    )) as Arc<dyn ChatProvider>);
-                }
-                None
-            })
+            .get_or_init(|| self.detect_chat_provider())
             .await
             .clone()
+    }
+
+    /// Whether `search.chat` would find a provider, without deciding it.
+    ///
+    /// Why: `/health` polled at boot, before Ollama is up, filled the
+    /// daemon-lifetime cell with `None` (or with OpenRouter over a local
+    /// server that came up a moment later) and chat answered 503 until restart
+    /// (#9030).
+    /// What: reads the cell when it is already filled; when it is empty,
+    /// runs the same detection as [`Self::chat_provider`] and discards the
+    /// result, so only a chat request ever writes the cell.
+    /// Test: `a_health_call_before_the_provider_exists_does_not_decide_it`,
+    /// `health_reads_a_provider_the_cell_already_holds`.
+    pub async fn chat_provider_available(&self) -> bool {
+        match self.chat_provider.get() {
+            Some(resolved) => resolved.is_some(),
+            None => self.detect_chat_provider().await.is_some(),
+        }
+    }
+
+    /// Pick a provider from config and a local probe; caches nothing.
+    async fn detect_chat_provider(&self) -> Option<Arc<dyn ChatProvider>> {
+        if self.local_model.enabled {
+            if let Some(mut p) =
+                trusty_common::auto_detect_local_provider(&self.local_model.base_url).await
+            {
+                p.model = self.local_model.model.clone();
+                return Some(Arc::new(p) as Arc<dyn ChatProvider>);
+            }
+        }
+        if !self.openrouter_api_key.is_empty() {
+            return Some(Arc::new(trusty_common::OpenRouterProvider::new(
+                self.openrouter_api_key.clone(),
+                self.openrouter_model.clone(),
+            )) as Arc<dyn ChatProvider>);
+        }
+        None
     }
 
     /// Builder-style: record the actual port the daemon bound. Used by
