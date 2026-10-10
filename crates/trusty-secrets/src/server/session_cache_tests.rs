@@ -252,7 +252,11 @@ fn cache_debug_never_prints_value() {
 
     for debug in [format!("{state:?}"), format!("{state:#?}")] {
         assert!(!debug.contains(SENTINEL_VALUE), "{debug}");
-        let compact: String = debug.split_whitespace().collect();
+        // `{:#?}` adds a trailing comma before each closing brace.
+        let compact = debug
+            .split_whitespace()
+            .collect::<String>()
+            .replace(",}", "}");
         assert!(compact.contains("SecretCache{entries:1}"), "{debug}");
     }
 }

@@ -158,8 +158,10 @@ pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value
 /// and is dropped with the request. Neither the request nor the response is
 /// logged or formatted here. #4567: one audit record per call; the audit log
 /// is opened before the backend is touched (see `gate`). #7524 H1: the
-/// backend opens through [`ProjectContext::open_for_write`].
+/// backend opens through [`ProjectContext::open_for_write`]. #7520: after
+/// the write, the key is evicted from the session cache.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `set_delete_copy_evict_cached_value`,
 /// `server_malformed_set_never_echoes_its_value`,
 /// `audit_set_and_delete_write_one_record_per_call`,
 /// `server_set_writes_file_only_when_the_machine_config_selects_it`,
@@ -176,8 +178,11 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
         let backend = project.open_for_write(state, &project.resolved_config().backend)?;
         let store = SecretStore::new(backend, state.index.clone());
         gate.admit()?;
-        let response = store.set(&request.vault, &request.key, &request.value)?;
-        to_json(&response)
+        let response = store.set(&request.vault, &request.key, &request.value);
+        // #7520: after the write, success or not, so no read that raced it
+        // keeps the old value.
+        state.cache.evict(&request.vault, &request.key);
+        to_json(&response?)
     })
 }
 
@@ -188,8 +193,9 @@ pub(crate) fn set(state: &State, caller: Caller, params: Value) -> Result<Value,
 /// the delete before any backend is touched, and the index row stays
 /// (#7519). The key is then deleted from the configured backend and from
 /// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
-/// #4567 — audited like [`set`].
+/// #4567 — audited like [`set`]. #7520: evicts the key like [`set`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `set_delete_copy_evict_cached_value`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`,
@@ -218,8 +224,10 @@ pub(crate) fn delete(state: &State, caller: Caller, params: Value) -> Result<Val
             let others =
                 other_backends(state, &project.resolved_config().backend, account.as_ref())?;
             gate.admit()?;
-            let response = store.delete_across(&request.vault, &request.key, &others)?;
-            to_json(&response)
+            let response = store.delete_across(&request.vault, &request.key, &others);
+            // #7520: as in `set`; a failed sweep may still have removed it.
+            state.cache.evict(&request.vault, &request.key);
+            to_json(&response?)
         },
     )
 }
@@ -316,8 +324,10 @@ impl CopySelection {
 /// then the audit log is opened before the first key, and each key leaves
 /// one record — allow when copied, deny with its kind when it lands in
 /// `failed` or orphans. A record that cannot be written stops the copy
-/// before its next key with [`ErrorKind::AuditUnavailable`].
+/// before its next key with [`ErrorKind::AuditUnavailable`]. #7520: each
+/// key the loop starts is evicted from the session cache after its write.
 /// Test: `server_copy_moves_keys_between_backends_in_one_project`,
+/// `set_delete_copy_evict_cached_value`,
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
@@ -374,14 +384,17 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
                 let outcome = if crate::store::deadline::passed() {
                     Err(ErrorKind::DeadlineExceeded)
                 } else {
-                    match source.get(&vault, &key) {
+                    let written = match source.get(&vault, &key) {
                         Ok(Some(value)) => store
                             .set(&vault, &key, &value)
                             .map(drop)
                             .map_err(ErrorKind::from),
                         Ok(None) => Err(ErrorKind::NotFound),
                         Err(e) => Err(ErrorKind::from(e)),
-                    }
+                    };
+                    // #7520: the destination may now hold a new value.
+                    state.cache.evict(&vault, &key);
+                    written
                 };
                 gate.record_key(&key, outcome)?;
                 match outcome {
