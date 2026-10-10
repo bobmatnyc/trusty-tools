@@ -41,3 +41,36 @@ async fn chat_availability_fails_closed_when_resolution_does_not_finish() {
     assert!(!hung.await);
     assert!(resolve_chat_available(async { true }, Duration::from_millis(20)).await);
 }
+
+/// #9030: a `/health` call made before the provider exists never decides it.
+///
+/// Why: `chat_provider` fills a daemon-lifetime `OnceCell`; an early health
+/// poll at boot, before Ollama is up, locked in `None` and `search.chat`
+/// answered 503 until restart.
+/// What: points the local probe at a closed port, calls `health_report`
+/// (`chat_available` is false), then brings a `/v1/models` server up on that
+/// port and asserts a later `chat_provider()` resolves it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    state.local_model.enabled = true;
+    state.local_model.base_url = format!("http://{addr}");
+    let state = std::sync::Arc::new(state);
+
+    let early = health_report(state.clone()).await;
+    assert_eq!(early["chat_available"], serde_json::json!(false), "{early}");
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let app = axum::Router::new().route("/v1/models", axum::routing::get(|| async { "{}" }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let later = state.chat_provider().await;
+    server.abort();
+    assert!(
+        later.is_some(),
+        "an early /health poll must not lock the chat provider in as None"
+    );
+}
