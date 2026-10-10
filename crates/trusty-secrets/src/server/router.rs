@@ -554,12 +554,21 @@ pub const EXIT_GRACE: Duration = Duration::from_secs(2);
 /// result. A write that call started may or may not land.
 /// `shutdown_timeout` rather than `shutdown_background`: the short wait lets
 /// a call that is about to finish complete instead of being cut off.
-/// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`.
+/// If `future` panics, the same bounded shutdown runs and the panic then
+/// resumes in the caller.
+/// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`,
+/// `server_process_exit_is_bounded_when_the_served_future_panics`.
 pub fn run_to_exit<T>(runtime: tokio::runtime::Runtime, future: impl Future<Output = T>) -> T {
-    let result = runtime.block_on(future);
+    // #9572: a panic unwinding out of `block_on` dropped the runtime, which
+    // waits with no limit for a stuck thread; catch it, shut down, re-raise.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(future)));
     // See #9572: no stuck thread can hold the process past this bound.
     runtime.shutdown_timeout(EXIT_GRACE);
-    result
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 /// Remove stale template directories under `root`, reporting on stderr.

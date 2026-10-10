@@ -2196,3 +2196,54 @@ fn server_process_exit_is_bounded_while_a_call_is_stuck() {
     assert!(matches!(served, Ok(Ok(ServeExit::Idle))), "{served:?}");
     drop(release);
 }
+
+/// Why: #9572 review — a panic in the served future (an `eprintln!` on a
+/// broken stderr) unwound out of `block_on` and dropped the runtime with no
+/// limit, so the process hung on a stuck call after unlinking its socket.
+/// What: [`router::run_to_exit`] runs a future that panics while a
+/// [`StuckBackend`] call is held; it must still return within a bound, and
+/// the panic must reach the caller rather than be swallowed.
+/// Test: itself.
+#[test]
+fn server_process_exit_is_bounded_when_the_served_future_panics() {
+    const PANIC: &str = "the served future panicked";
+    let fx = fixture_with_idle(Duration::from_secs(60));
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let socket = fx.settings.socket.clone();
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "STUCK_1", "value": VALUE});
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a test runtime");
+        let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            router::run_to_exit(runtime, async move {
+                let _server = tokio::spawn(router::serve_state(state, std::future::pending()));
+                wait_serving(&socket).await;
+                let answer = call(&socket, method::SET, params).await;
+                // The call answered at its deadline; its thread is still held.
+                if fixed_error(&answer, method::SET) == ErrorKind::DeadlineExceeded {
+                    std::panic::panic_any(PANIC);
+                }
+            })
+        }));
+        let _ = tx.send(exit.map_err(|p| p.downcast_ref::<&str>().copied()));
+    });
+    let bound = Duration::from_secs(20);
+    let exit = match rx.recv_timeout(bound) {
+        Ok(exit) => exit,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!(
+                "run_to_exit did not return within {bound:?} after a panic while a call was stuck"
+            )
+        }
+        Err(e) => panic!("the server thread ended without an answer: {e}"),
+    };
+    assert_eq!(exit, Err(Some(PANIC)), "the panic must surface");
+    drop(release);
+}
