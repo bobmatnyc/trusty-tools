@@ -77,6 +77,36 @@ pub fn socket_path() -> Result<PathBuf> {
         .context("tcode serve: resolve the daemon socket path")
 }
 
+/// The socket a daemon serving `project` binds when the shared socket is held
+/// by a daemon serving a different project (#4600).
+///
+/// Why: one shared socket per user meant a second project could not run at
+/// all — its TUI refused the first project's daemon (correctly, #4512) and had
+/// nowhere else to start its own. A per-project sibling gives each project a
+/// home while the first daemon keeps the shared path `trusty-code-gui` dials.
+/// What: `<shared dir>/<shared stem>-<key>.sock`, where `key` is the first 12
+/// hex digits of SHA-256 over the canonical project root, or `projectless`.
+/// Deterministic, so every client and the daemon itself derive the same path
+/// with nothing recorded on disk. A collision is not trusted: clients still
+/// check the binding the daemon reports before attaching. 12 digits keep the
+/// path inside macOS' 104-byte `sun_path` under a temp data directory.
+/// Test: `uds_tests::project_socket_path_is_per_project_and_stable`.
+pub fn project_socket_path(shared: &Path, project: Option<&Path>) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let key = match project {
+        Some(root) => {
+            let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+            digest[..6].iter().map(|b| format!("{b:02x}")).collect()
+        }
+        None => "projectless".to_string(),
+    };
+    let stem = shared
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| SOCKET_APP_NAME.to_string());
+    shared.with_file_name(format!("{stem}-{key}.sock"))
+}
+
 /// Mounts [`crate::jsonrpc::Router`] as the socket router's catch-all.
 ///
 /// Why: see the module docs — the dispatcher already owns the method surface,
@@ -177,6 +207,33 @@ async fn open_workstream(
 /// `uds_tests::session_events_stream_stays_open_under_idle_window`.
 pub async fn run_daemon(binding: ProjectBinding, http_port: Option<u16>) -> Result<()> {
     let socket = socket_path()?;
+    run_daemon_on(
+        binding,
+        &socket,
+        None,
+        http_port,
+        trusty_common::shutdown_signal(),
+    )
+    .await
+}
+
+/// [`run_daemon`] on this binding's own socket, [`project_socket_path`],
+/// instead of the shared one (#4600, `tcode serve --project-socket`).
+///
+/// Why: `tcode tui` starts a daemon here when the shared socket already serves
+/// another project. The daemon derives the path from its own binding rather
+/// than taking a path argument, so it can only ever land on the path a client
+/// of the same project will probe, and never hardens an arbitrary directory.
+///
+/// # Errors
+///
+/// As [`run_daemon`].
+///
+/// Test: `uds_tests::project_socket_path_is_per_project_and_stable` (the path);
+/// `tests/cli_e2e.rs::tui_starts_its_own_daemon_beside_another_projects` (the
+/// real daemon binding it).
+pub async fn run_project_daemon(binding: ProjectBinding, http_port: Option<u16>) -> Result<()> {
+    let socket = project_socket_path(&socket_path()?, binding.root());
     run_daemon_on(
         binding,
         &socket,

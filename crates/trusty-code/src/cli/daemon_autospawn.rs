@@ -20,19 +20,32 @@
 //! live PM or agent work, so this module signals the daemon on exit under NO
 //! circumstance — not even one it started itself.
 //!
-//! What: [`ensure_daemon`] resolves the daemon's socket
-//! (`trusty_code::serve::uds::socket_path`) and returns it:
+//! What: [`ensure_daemon`] picks between two sockets — the shared one
+//! (`trusty_code::serve::uds::socket_path`) and this project's own sibling
+//! (`trusty_code::serve::uds::project_socket_path`, #4600) — and returns the
+//! one to drive. It never attaches to a socket whose daemon has not reported
+//! this TUI's own project ([`check_binding`]):
 //!
-//! * **Live daemon, serving the SAME project** -> attach. Nothing is spawned
-//!   and nothing is owned.
-//! * **Live daemon, serving a DIFFERENT project** -> hard error naming both
-//!   projects (see [`check_binding`]). We neither attach — that would silently
-//!   operate against the wrong repository — nor start a competing daemon on a
-//!   socket that is already bound.
-//! * **Nothing answering** -> spawn `<current_exe> serve --http [--project
-//!   <path>]` as a child in its own session and wait for the SOCKET to answer.
-//!   The child handle is dropped once it is up; the daemon outlives this
-//!   process, and a terminal hangup to the TUI's group never reaches it.
+//! * **Own socket live** -> attach if it serves the SAME project; otherwise a
+//!   hard error naming both projects. Probed first, so a daemon an earlier
+//!   launch started there is reused rather than duplicated.
+//! * **Shared socket live, SAME project** -> attach. Nothing is spawned.
+//! * **Shared socket live, DIFFERENT project** -> do not attach, and do not
+//!   compete for that socket: start this project's daemon on its own socket
+//!   (`serve --project-socket`). Before #4600 this was a hard error, so a
+//!   second project could not run at all.
+//! * **Shared socket live, project UNREPORTED** (no binding, or `health`
+//!   failed) -> hard error naming that socket. It may already serve this
+//!   project, so neither an attach nor a second daemon is safe.
+//! * **Nothing answering** -> start the daemon on the shared socket. If that
+//!   start fails, or another daemon answers first (two TUIs starting at once),
+//!   the shared socket is probed again and decided by the three rows above.
+//!
+//! A started daemon is `<current_exe> serve --http --port 0 [--project-socket]
+//! [--project <path>]`, a child in its own session; `--port 0` because a fixed
+//! port made the second project's daemon die on bind (#4600). The child handle
+//! is dropped once its socket answers AND reports this project; the daemon
+//! outlives this process, and a terminal hangup never reaches it.
 //!
 //! **The `TCODE_DAEMON_URL` branch is gone (#6637).** It existed so an operator
 //! could point the TUI at a daemon on another port, and its refuse-to-spawn arm
@@ -161,24 +174,130 @@ pub async fn ensure_daemon(project: Option<&Path>) -> Result<PathBuf> {
     ensure_daemon_with(project, &tcode_exe, &socket).await
 }
 
-/// [`ensure_daemon`] with the binary and socket path injected.
+/// [`ensure_daemon`] with the binary and the shared socket path injected.
 ///
 /// Why: mirrors `cli_client::StdioRpcClient::spawn`'s established shape — the
 /// library half takes explicit paths so it stays testable with a stub, and the
 /// `current_exe`/well-known-path policy lives in the one CLI wrapper above.
+/// What: the decision table in the module docs; `socket` is the shared path
+/// and this project's own path is derived from it.
+/// Test: `daemon_autospawn_tests::{a_second_project_starts_its_own_daemon_beside_the_first,
+/// a_second_project_reuses_its_own_running_daemon,
+/// refuses_another_projects_daemon_on_this_projects_own_socket,
+/// refuses_an_unverifiable_shared_daemon_without_spawning,
+/// a_cold_start_race_lost_to_another_project_starts_our_own_daemon}`.
 async fn ensure_daemon_with(
     project: Option<&Path>,
     tcode_exe: &Path,
     socket: &Path,
 ) -> Result<PathBuf> {
-    if socket_is_serving(socket, PROBE_TIMEOUT).await {
-        // #4512: a daemon answering is not the same as a daemon serving the
-        // project we mean to work in.
-        let reported = reported_binding(socket).await;
-        check_binding(socket, &reported, project)?;
-        return Ok(socket.to_path_buf());
+    // #4600: this project's own socket first, so a daemon an earlier launch
+    // put there is reused instead of a second one starting on the shared path.
+    let own = trusty_code::serve::uds::project_socket_path(socket, project);
+    if socket_is_serving(&own, PROBE_TIMEOUT).await {
+        let reported = reported_binding(&own).await;
+        check_binding(&own, &reported, project)?;
+        return Ok(own);
     }
-    spawn_and_wait(project, tcode_exe, socket).await
+    if !socket_is_serving(socket, PROBE_TIMEOUT).await {
+        let spawned = spawn_and_wait(project, tcode_exe, socket, false).await;
+        // #4600: cold-start race. Another TUI's daemon can take the shared
+        // socket between our probe and our child's bind, so whatever answers
+        // there now decides — ours or not. Only a silent socket keeps the
+        // spawn's own error.
+        if let Err(e) = spawned
+            && !socket_is_serving(socket, PROBE_TIMEOUT).await
+        {
+            return Err(e);
+        }
+    }
+    use_shared_socket(project, tcode_exe, socket, &own).await
+}
+
+/// Decide what to do about a LIVE shared socket (#4600).
+///
+/// Why: since #4600 a project can run on its own socket, but only a daemon
+/// PROVEN to serve another project may be passed over. An unreported one may
+/// already serve this project, and a second daemon per project is never
+/// started.
+/// What: same project -> the shared socket; a different project -> start this
+/// project's daemon on `own` and verify its binding (fails closed); unreported
+/// or failed `health` -> [`unverified_shared_daemon`].
+/// Test: `daemon_autospawn_tests::{refuses_an_unverifiable_shared_daemon_without_spawning,
+/// a_cold_start_race_lost_to_another_project_starts_our_own_daemon,
+/// a_cold_start_race_lost_to_an_unverifiable_daemon_is_refused,
+/// a_cold_start_race_lost_to_our_own_project_attaches}`.
+async fn use_shared_socket(
+    project: Option<&Path>,
+    tcode_exe: &Path,
+    shared: &Path,
+    own: &Path,
+) -> Result<PathBuf> {
+    // #4512: a daemon answering is not the same as a daemon serving the
+    // project we mean to work in.
+    let reported = reported_binding(shared).await;
+    match binding_fit(&reported, project) {
+        BindingFit::Same => Ok(shared.to_path_buf()),
+        BindingFit::Other => {
+            spawn_and_wait(project, tcode_exe, own, true).await?;
+            // #4600: verify before attaching — the own socket's answer need
+            // not have come from our child.
+            let reported = reported_binding(own).await;
+            check_binding(own, &reported, project)?;
+            Ok(own.to_path_buf())
+        }
+        BindingFit::Unverified => Err(unverified_shared_daemon(shared, project)),
+    }
+}
+
+/// How a live daemon's reported binding relates to the project wanted (#4600).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingFit {
+    /// Both name the same project, or both are projectless.
+    Same,
+    /// The daemon reported a different project (projectless counts as one).
+    Other,
+    /// The daemon reported no project, or its `health` call failed.
+    Unverified,
+}
+
+/// Classify `reported` against `wanted`; see [`check_binding`] for why
+/// projectless and bound never fit each other.
+fn binding_fit(reported: &ReportedBinding, wanted: Option<&Path>) -> BindingFit {
+    match (reported, wanted) {
+        (ReportedBinding::Projectless, None) => BindingFit::Same,
+        (ReportedBinding::Bound(root), Some(wanted)) if root == wanted => BindingFit::Same,
+        (ReportedBinding::Unreported, _) => BindingFit::Unverified,
+        _ => BindingFit::Other,
+    }
+}
+
+/// The refusal for a shared-socket daemon whose project cannot be verified.
+///
+/// Why (#4600): that daemon may already serve this project, so starting a
+/// daemon beside it could give the project two. It may also be another
+/// project's live work, which this TUI must not ask anyone to end (owner
+/// directive 2026-08-01), so the remedy is a retry or a daemon on this
+/// project's own socket, never a stop.
+/// Test: `daemon_autospawn_tests::refuses_an_unverifiable_shared_daemon_without_spawning`.
+fn unverified_shared_daemon(socket: &Path, wanted: Option<&Path>) -> anyhow::Error {
+    let (wanted_label, project_arg) = match wanted {
+        Some(root) => (
+            root.display().to_string(),
+            format!(" --project {}", root.display()),
+        ),
+        None => ("<projectless>".to_string(), String::new()),
+    };
+    anyhow!(
+        "the tcode daemon on {socket} answered but did not report which project it \
+         serves (it predates #4512, or its `health` call failed), so `tcode tui` \
+         cannot tell whether it already serves {wanted_label}. It will not attach to \
+         it, and will not start a second daemon for this project beside it. If it is \
+         still starting up, run `tcode tui` again in a moment. If you know it serves \
+         another project, start this project's own daemon with `tcode serve --http \
+         --port 0 --project-socket{project_arg}`, then run `tcode tui` again.",
+        socket = socket.display(),
+    )
 }
 
 /// Ask a live daemon which project it serves.
@@ -229,7 +348,7 @@ async fn reported_binding(socket: &Path) -> ReportedBinding {
 /// repository now WANTS that repository, so an operator who never typed
 /// `--project` can meet this refusal against a projectless daemon. The message
 /// therefore names the flag that resolves it — see [`rematch_hint`].
-/// Test: `daemon_autospawn_tests::{refuses_a_daemon_bound_to_another_project,
+/// Test: `daemon_autospawn_tests::{refuses_another_projects_daemon_on_this_projects_own_socket,
 /// refuses_a_project_bound_client_against_a_projectless_daemon,
 /// refuses_a_daemon_that_cannot_report_its_binding,
 /// refusal_against_a_projectless_daemon_names_the_projectless_flag,
@@ -239,16 +358,15 @@ fn check_binding(socket: &Path, reported: &ReportedBinding, wanted: Option<&Path
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<projectless>".to_string());
     let socket = socket.display();
-    match (reported, wanted) {
-        (ReportedBinding::Projectless, None) => Ok(()),
-        (ReportedBinding::Bound(root), Some(wanted)) if root == wanted => Ok(()),
-        (ReportedBinding::Unreported, _) => Err(anyhow!(
+    match binding_fit(reported, wanted) {
+        BindingFit::Same => Ok(()),
+        BindingFit::Unverified => Err(anyhow!(
             "the tcode daemon on {socket} does not report which project it serves, \
              so `tcode tui` cannot confirm it is bound to {wanted_label} — and \
              attaching to the wrong project would run every session against the \
              wrong repository. Stop it and let `tcode tui` start a current one."
         )),
-        _ => Err(anyhow!(
+        BindingFit::Other => Err(anyhow!(
             "the tcode daemon on {socket} serves a different project than this TUI: \
              daemon = {daemon}, requested = {wanted_label}. `tcode tui` will not \
              attach to it (every session would run against the wrong project) and \
@@ -274,7 +392,7 @@ fn check_binding(socket: &Path, reported: &ReportedBinding, wanted: Option<&Path
 /// falls back to the generic phrasing rather than naming a flag that would
 /// not help.
 /// Test: `daemon_autospawn_tests::refusal_against_a_projectless_daemon_names_the_projectless_flag`,
-/// `daemon_autospawn_tests::refuses_a_daemon_bound_to_another_project`.
+/// `daemon_autospawn_tests::refuses_another_projects_daemon_on_this_projects_own_socket`.
 fn rematch_hint(reported: &ReportedBinding) -> String {
     match reported {
         ReportedBinding::Projectless => "run `tcode tui --projectless`".to_string(),
@@ -298,13 +416,21 @@ fn rematch_hint(reported: &ReportedBinding) -> String {
 /// failure paths leave it alone — a half-started daemon may still be binding
 /// its socket, and killing it would be the same "client tears down a shared
 /// service" mistake at a worse moment. The error names the log file instead.
+///
+/// #4600: `Ok` means only that the socket answers while our child runs, not
+/// that our child answered. Two TUIs can both find the shared socket free and
+/// both spawn; the loser's child is still starting when the winner's socket
+/// answers. Every caller therefore checks the binding before attaching.
+/// `project_socket` selects `serve --project-socket` (see [`spawn_daemon`]).
+/// Test: `daemon_autospawn_tests::a_cold_start_race_lost_to_another_project_starts_our_own_daemon`.
 async fn spawn_and_wait(
     project: Option<&Path>,
     tcode_exe: &Path,
     socket: &Path,
-) -> Result<PathBuf> {
+    project_socket: bool,
+) -> Result<()> {
     let log_path = daemon_log_path();
-    let mut child = spawn_daemon(tcode_exe, project, log_path.as_deref())?;
+    let mut child = spawn_daemon(tcode_exe, project, project_socket, log_path.as_deref())?;
 
     // Race readiness against the child dying: a daemon whose socket is already
     // held exits in milliseconds, and spinning out the full budget to then
@@ -326,7 +452,7 @@ async fn spawn_and_wait(
                     log_path.as_deref(),
                 ));
             }
-            Ok(socket.to_path_buf())
+            Ok(())
         }
         Outcome::Ready(Err(e)) => Err(e),
         Outcome::Exited(status) => {
@@ -364,12 +490,20 @@ enum Outcome {
     Exited(std::io::Result<String>),
 }
 
-/// Build and spawn `<tcode_exe> serve --http [--project <path>]`.
+/// Build and spawn `<tcode_exe> serve --http --port 0 [--project-socket]
+/// [--project <path>]`.
 ///
 /// `--http` is unchanged from before #6637 and is not a contradiction: the
 /// persistent-daemon mode binds the socket first and fatally, and the flag now
-/// selects only whether the transient TCP listener `trusty-code-gui` still
-/// needs comes up beside it. PR 2 drops the flag with the listener.
+/// selects only whether the transient TCP listener comes up beside it. PR 2
+/// drops the flag with the listener.
+///
+/// `--port 0` (#4600): that listener used to take the fixed default port, so
+/// a second project's daemon — or any daemon while a stray test daemon held
+/// the port — died on bind even though its socket was free. No in-tree client
+/// dials the listener any more (`trusty-code-gui` bridges the socket), so an
+/// OS-assigned port costs nothing. `project_socket` adds `--project-socket`,
+/// which makes the daemon bind its project's own socket.
 ///
 /// There is deliberately no `kill_on_drop(true)`: the spawned daemon must
 /// survive this process, so the one thing the `Child` handle must NOT do is
@@ -378,14 +512,19 @@ enum Outcome {
 /// (`daemon_guard::start_in_new_session`, #8783): otherwise closing the
 /// terminal SIGHUPs the TUI's foreground group and the daemon with it.
 ///
-/// Test: `daemon_autospawn_tests::the_spawned_daemon_leads_its_own_session`.
+/// Test: `daemon_autospawn_tests::the_spawned_daemon_leads_its_own_session`,
+/// `daemon_autospawn_tests::a_second_project_starts_its_own_daemon_beside_the_first`.
 fn spawn_daemon(
     tcode_exe: &Path,
     project: Option<&Path>,
+    project_socket: bool,
     log_path: Option<&Path>,
 ) -> Result<Child> {
     let mut cmd = std::process::Command::new(tcode_exe);
-    cmd.arg("serve").arg("--http");
+    cmd.arg("serve").arg("--http").arg("--port").arg("0");
+    if project_socket {
+        cmd.arg("--project-socket");
+    }
     if let Some(project) = project {
         cmd.arg("--project").arg(project);
     }

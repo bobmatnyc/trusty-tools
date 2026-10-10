@@ -649,13 +649,13 @@ fn tui_help_documents_the_projectless_opt_out() {
 /// unrelated, and it is precisely the "the TUI exited" moment a teardown
 /// would have fired at.
 ///
-/// The survival half is CONDITIONAL on the child actually binding: the
-/// spawned daemon uses the well-known default port, so a foreign daemon
-/// already holding it makes ours die on bind (its own reported error). The
-/// isolated `http_addr` file is written only by OUR child, so its presence is
-/// the exact "our daemon came up" signal — when it is absent the test still
-/// asserts everything that does not depend on a free port. This test kills
-/// the daemon it caused to start; nothing else will.
+/// The survival half is CONDITIONAL on the child writing its `http_addr`.
+/// Before #4600 the spawned daemon took the fixed default port, so a foreign
+/// daemon holding it made ours die on bind; it now binds an OS-assigned port,
+/// and the guard stays only for an unwritable data directory. The isolated
+/// `http_addr` file is written only by OUR child, so its presence is the
+/// exact "our daemon came up" signal. This test kills the daemon it caused to
+/// start; nothing else will.
 ///
 /// `--projectless` is passed explicitly since #8205: a bare `tcode tui` now
 /// homes on the repository enclosing its launch directory, which here is the
@@ -691,7 +691,7 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     else {
-        // The default port was already taken; see this test's docs.
+        // No discovery file was written; see this test's docs.
         return;
     };
 
@@ -744,20 +744,20 @@ async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     }
 }
 
-/// A daemon bound to a DIFFERENT project must be refused, not attached to:
-/// auto-attach picks daemons up off a well-known path, so without this check a
-/// TUI launched in project B drives project A's daemon and every session lands
-/// in the wrong repository (#4512).
+/// A second project runs beside the first (#4600): `tcode tui --project B`
+/// while project A's daemon holds the shared socket must neither attach to A's
+/// daemon (#4512) nor refuse — it starts B's own daemon on B's own socket, and
+/// A's daemon keeps running.
 ///
 /// Driven end-to-end against the REAL binary on both sides — a genuine
 /// `tcode serve --project A` daemon and a real `tcode tui --project B` — with
 /// ONE shared data directory, because that is what makes both processes
-/// resolve the same socket. #6637 removed `TCODE_DAEMON_URL`, so pointing the
-/// TUI at a specific daemon is no longer possible or needed; the token dance
-/// this test used to perform went with it, since a UDS peer is authenticated
-/// by its uid rather than by a bearer credential.
+/// resolve the same shared socket. The TUI itself still fails afterwards for
+/// want of a TTY (see `tui_auto_spawns_a_daemon_that_outlives_it`); its daemon
+/// is found on B's own socket, asked for its binding and pid, and stopped by
+/// this test, which caused it to start.
 #[tokio::test]
-async fn tui_refuses_a_daemon_bound_to_a_different_project() {
+async fn tui_starts_its_own_daemon_beside_another_projects() {
     use std::io::BufRead;
 
     let their_project = tempfile::tempdir().expect("their project");
@@ -796,33 +796,50 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
         .stdin(std::process::Stdio::null())
         .output()
         .expect("spawn tcode tui");
-    daemon.kill().expect("stop the test daemon");
-    daemon.wait().expect("reap the test daemon");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-    assert!(
-        !output.status.success(),
-        "must exit nonzero on a binding mismatch: {output:?}"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let theirs = their_project
-        .path()
-        .canonicalize()
-        .expect("canonicalize theirs");
     let ours = our_project
         .path()
         .canonicalize()
         .expect("canonicalize ours");
+    let shared = shared_data.path().join("trusty-code/trusty-code.sock");
+    let own = trusty_code::serve::uds::project_socket_path(&shared, Some(&ours));
+    let health = trusty_code::tui_client::uds_rpc::UdsRpcClient::new(&own)
+        .call("health", serde_json::json!({}))
+        .await;
+    // Stop B's daemon before any assertion can strand it.
+    if let Some(pid) = health.as_ref().ok().and_then(|h| h["pid"].as_u64()) {
+        // SAFETY: `pid` was just reported by the daemon this test caused to
+        // start; `kill` has no memory-safety effects.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    let first_still_running = matches!(daemon.try_wait(), Ok(None));
+    daemon.kill().expect("stop the test daemon");
+    daemon.wait().expect("reap the test daemon");
+
     assert!(
-        stderr.contains(&theirs.display().to_string())
-            && stderr.contains(&ours.display().to_string()),
-        "error must name BOTH projects: {stderr}"
+        !stderr.contains("serves a different project"),
+        "a second project must not be refused: {stderr}"
+    );
+    let health = health.unwrap_or_else(|e| {
+        let log = std::fs::read_to_string(
+            shared_data
+                .path()
+                .join("trusty-code/tui-spawned-daemon.log"),
+        )
+        .unwrap_or_default();
+        panic!("no daemon of B's own on {own:?}: {e:?}\nstderr: {stderr}\nlog: {log}")
+    });
+    assert_eq!(
+        health["binding"]["root"],
+        ours.display().to_string(),
+        "B's own socket must serve B: {health}"
     );
     assert!(
-        !shared_data
-            .path()
-            .join("trusty-code/tui-spawned-daemon.log")
-            .exists(),
-        "must not start a competing daemon: {stderr}"
+        first_still_running,
+        "starting B's daemon must leave A's daemon running"
     );
 }
 

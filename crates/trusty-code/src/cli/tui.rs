@@ -28,8 +28,9 @@
 //! communication, and a TUI is one attached client among possibly several,
 //! so a client exit must not end live work (owner directive, 2026-08-01).
 //! There is correspondingly NO teardown step here. A daemon bound to a
-//! DIFFERENT project than this TUI is refused rather than attached to, since
-//! every session would otherwise run against the wrong repository. See
+//! DIFFERENT project than this TUI is never attached to, since every session
+//! would otherwise run against the wrong repository; since #4600 this TUI
+//! starts its own project's daemon on a per-project socket instead. See
 //! `super::daemon_autospawn` for the whole policy — none of it lives here.
 //!
 //! Daemon resolution deliberately runs BEFORE `trusty_code_tui::run::run` enters
@@ -42,7 +43,7 @@
 //! `tests/cli_e2e.rs::{tui_subcommand_is_listed_in_help,
 //! tui_auto_spawns_a_daemon_that_outlives_it,
 //! tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url,
-//! tui_refuses_a_daemon_bound_to_a_different_project}` cover the CLI surface
+//! tui_starts_its_own_daemon_beside_another_projects}` cover the CLI surface
 //! against the REAL binary. The launch path past daemon resolution needs a
 //! real TTY (`trusty_code_tui::TerminalGuard::enter`), so it is verified by
 //! running `tcode tui` by hand; the engine half is already covered
