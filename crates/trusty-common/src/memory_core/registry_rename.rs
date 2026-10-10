@@ -189,9 +189,10 @@ impl PalaceRegistry {
     /// (`NotFound`), an `old` that is an alias, a `new` that is a live alias of
     /// a palace other than `old` (`new` aliasing `old` — a reversed rename — is
     /// allowed), and an existing `new` that is not empty, or that is empty
-    /// without `replace_empty`. Takes the open-locks of both ids, deduplicated
-    /// and in sorted order, then releases both cached handles if nothing else
-    /// references them; a lock or handle still held after `busy_wait` is
+    /// without `replace_empty`. Takes the open-locks of the ids `old` and `new`
+    /// resolve to, deduplicated and in sorted order, then releases their
+    /// cached handles if nothing else references them; a lock or handle still
+    /// held after `busy_wait` is
     /// `Busy` with nothing changed. Then, in order: the alias write
     /// ([`PalaceAliasStore::rename_target`]); for `replace_empty`, the empty
     /// target moves to `<root>/.trash/<new>-replaced-<UTC>/`; the directory
@@ -251,14 +252,12 @@ impl PalaceRegistry {
                 "not a valid palace id ([a-z0-9][a-z0-9-]{0,62})",
             ));
         }
-        // #9544: lock by every id a request for `old` or `new` can reach, so a
-        // concurrent `open_palace` of either waits. Sorted and deduplicated:
-        // a reversed rename resolves both names to one palace, and taking that
-        // mutex twice would wait on ourselves.
-        let mut keys = vec![old.to_string(), new.to_string()];
-        for id in [old, new] {
-            keys.push(canonical(data_root, id)?);
-        }
+        // #9544: `open_palace` locks the id a request resolves to, so holding
+        // the resolved ids of `old` and `new` makes a concurrent open of either
+        // wait. Sorted and deduplicated: a reversed rename (or a resumed one)
+        // resolves both names to one palace, and taking that mutex twice would
+        // wait on ourselves.
+        let mut keys = vec![canonical(data_root, old)?, canonical(data_root, new)?];
         keys.sort_unstable();
         keys.dedup();
         let mutexes: Vec<Arc<Mutex<()>>> = keys
