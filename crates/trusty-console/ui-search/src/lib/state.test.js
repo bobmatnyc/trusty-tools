@@ -16,13 +16,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const listIndexesDetailed = vi.fn();
 const listIndexes = vi.fn();
 const indexStatus = vi.fn();
+const health = vi.fn(() => Promise.resolve({}));
 
 vi.mock('./api.js', () => ({
   api: {
     listIndexesDetailed: (...a) => listIndexesDetailed(...a),
     listIndexes: (...a) => listIndexes(...a),
     indexStatus: (...a) => indexStatus(...a),
-    health: () => Promise.resolve({})
+    health: () => health()
   }
 }));
 
@@ -58,6 +59,10 @@ beforeEach(() => {
   listIndexesDetailed.mockReset();
   listIndexes.mockReset();
   indexStatus.mockReset();
+  health.mockReset();
+  health.mockResolvedValue({});
+  delete window.__SEARCH_BASE__;
+  delete window.__OPENROUTER_ENABLED__;
 });
 
 describe('refreshIndexes (#6699)', () => {
@@ -111,5 +116,69 @@ describe('refreshIndexes (#6699)', () => {
 
     expect(getIndexes()).toEqual([]);
     expect(getError()).toBe('daemon unreachable');
+  });
+});
+
+// #9030: chat availability follows the daemon's own `chat_available`.
+describe('getChatAvailable (#9030)', () => {
+  const CONSOLE_BASE = '/api/search/';
+
+  it('is true on a console-served page when /health says chat_available: true', async () => {
+    window.__SEARCH_BASE__ = CONSOLE_BASE;
+    health.mockResolvedValue({ status: 'ok', chat_available: true });
+    const { refreshHealth, getChatAvailable } = await loadState();
+    await refreshHealth();
+    expect(getChatAvailable()).toBe(true);
+  });
+
+  it.each([
+    ['false', { status: 'ok', chat_available: false }],
+    ['missing', { status: 'ok' }],
+    ['non-boolean', { status: 'ok', chat_available: 'true' }]
+  ])('is false on a console-served page when chat_available is %s', async (_n, body) => {
+    window.__SEARCH_BASE__ = CONSOLE_BASE;
+    window.__OPENROUTER_ENABLED__ = true; // never trusted through the console
+    health.mockResolvedValue(body);
+    const { refreshHealth, getChatAvailable } = await loadState();
+    await refreshHealth();
+    expect(getChatAvailable()).toBe(false);
+  });
+
+  it('is false on a console-served page before any health payload', async () => {
+    window.__SEARCH_BASE__ = CONSOLE_BASE;
+    const { getChatAvailable } = await loadState();
+    expect(getChatAvailable()).toBe(false);
+  });
+
+  it('daemon-served: chat_available from /health wins over the boot global', async () => {
+    window.__OPENROUTER_ENABLED__ = true;
+    health.mockResolvedValue({ status: 'ok', chat_available: false });
+    const { refreshHealth, getChatAvailable } = await loadState();
+    expect(getChatAvailable()).toBe(true); // boot global until /health lands
+    await refreshHealth();
+    expect(getChatAvailable()).toBe(false);
+  });
+
+  it('keeps chat_available when a status_changed SSE frame replaces the health body', async () => {
+    window.__SEARCH_BASE__ = CONSOLE_BASE;
+    health.mockResolvedValue({ status: 'ok', chat_available: true });
+    let source;
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        constructor() {
+          source = this;
+        }
+        close() {}
+      }
+    );
+    const { refreshHealth, subscribeStatusStream, getChatAvailable } = await loadState();
+    await refreshHealth();
+    subscribeStatusStream();
+    source.onmessage({
+      data: JSON.stringify({ type: 'status_changed', indexes: 1, total_chunks: 2, uptime_secs: 3, version: '1' })
+    });
+    expect(getChatAvailable()).toBe(true);
+    vi.unstubAllGlobals();
   });
 });
