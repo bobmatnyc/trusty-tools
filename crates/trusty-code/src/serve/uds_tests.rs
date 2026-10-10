@@ -398,6 +398,38 @@ fn socket_path_sits_in_the_daemon_data_dir() {
     );
 }
 
+/// #4600: two projects get two sockets, one project always gets the same one,
+/// projectless gets its own, and every one sits beside the shared socket so a
+/// data-dir override isolates them all.
+#[test]
+fn project_socket_path_is_per_project_and_stable() {
+    let shared = Path::new("/data/trusty-code/trusty-code.sock");
+    let a = super::project_socket_path(shared, Some(Path::new("/work/a")));
+    let b = super::project_socket_path(shared, Some(Path::new("/work/b")));
+    let none = super::project_socket_path(shared, None);
+
+    assert_ne!(a, b, "two projects must not share a socket");
+    assert_eq!(
+        a,
+        super::project_socket_path(shared, Some(Path::new("/work/a"))),
+        "one project must always derive the same socket"
+    );
+    assert_eq!(
+        none,
+        Path::new("/data/trusty-code/trusty-code-projectless.sock")
+    );
+    for path in [&a, &b, &none] {
+        assert_ne!(path.as_path(), shared, "never the shared socket itself");
+        assert_eq!(path.parent(), shared.parent(), "beside the shared socket");
+    }
+    let name = a.file_name().and_then(|n| n.to_str()).expect("utf-8 name");
+    assert_eq!(
+        name.len(),
+        "trusty-code-".len() + 12 + ".sock".len(),
+        "{name}"
+    );
+}
+
 /// A name nothing serves must be refused with `method_not_found`, not
 /// swallowed — the fallback answers for every unregistered name, so it is the
 /// only thing that can report an unknown one.
