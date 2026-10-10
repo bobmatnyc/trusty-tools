@@ -66,6 +66,16 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok.success(), "git {args:?}");
 }
 
+/// A run's exit status (signal included), stdout and stderr, for a message.
+fn report(out: &std::process::Output) -> String {
+    format!(
+        "status {}; stdout {:?}; stderr {:?}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 /// A real trusty-secrets server over `backend`, under a scratch `$HOME`.
 struct Live {
     home: tempfile::TempDir,
@@ -258,6 +268,14 @@ async fn live_keychain_flag_on_write_proof() {
     std::fs::create_dir(&bin).expect("bin");
     let claude = bin.join("claude");
     std::fs::copy("/bin/bash", &claude).expect("copy bash");
+    // #9621: macOS SIGKILLs a copy of a platform binary at exec; an ad-hoc
+    // signature makes the copy an ordinary binary. No Keychain is involved.
+    let signed = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&claude)
+        .output()
+        .expect("codesign");
+    assert!(signed.status.success(), "codesign: {}", report(&signed));
     let script = r#"printf %s "$A" | wc -c"#;
     let flagged = live
         .exec(
@@ -284,17 +302,14 @@ async fn live_keychain_flag_on_write_proof() {
         "a detached caller could not turn the flag on"
     );
     assert!(flag_off.is_ok(), "the flag was not set back OFF");
-    assert!(
-        flagged.status.success(),
-        "{}",
-        String::from_utf8_lossy(&flagged.stderr)
-    );
+    // #9621: a run that dies on a signal prints nothing; name its status.
+    assert!(flagged.status.success(), "flagged: {}", report(&flagged));
     assert_eq!(
         String::from_utf8_lossy(&flagged.stdout).trim(),
         VALUE.len().to_string()
     );
     let refused = String::from_utf8_lossy(&plain.stderr);
-    assert_eq!(plain.status.code(), Some(1), "{refused}");
+    assert_eq!(plain.status.code(), Some(1), "plain: {}", report(&plain));
     assert!(refused.contains("nothing ran"), "{refused}");
     let records = live.audit();
     assert!(
