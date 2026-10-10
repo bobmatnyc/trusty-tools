@@ -1540,10 +1540,19 @@ async fn palace_write_lock_follows_a_live_alias() {
     );
     let dead = state.palace_write_lock("lock-dead-alias");
     let unknown = state.palace_write_lock("lock-unknown");
-    assert!(!Arc::ptr_eq(&dead, &canonical), "a dead alias keeps its own key");
-    assert!(!Arc::ptr_eq(&unknown, &canonical), "an unknown id keeps its own key");
+    assert!(
+        !Arc::ptr_eq(&dead, &canonical),
+        "a dead alias keeps its own key"
+    );
+    assert!(
+        !Arc::ptr_eq(&unknown, &canonical),
+        "an unknown id keeps its own key"
+    );
     assert!(!Arc::ptr_eq(&dead, &unknown), "distinct ids stay distinct");
-    assert!(Arc::ptr_eq(&dead, &state.palace_write_lock("lock-dead-alias")));
+    assert!(Arc::ptr_eq(
+        &dead,
+        &state.palace_write_lock("lock-dead-alias")
+    ));
 }
 
 /// Why (#9544): `session_store` keyed its cache and its directory on the raw

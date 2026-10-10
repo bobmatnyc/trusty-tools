@@ -397,8 +397,7 @@ impl MemoryService {
     /// Per-palace dream stats snapshot.
     pub async fn dream_status_for_palace(&self, id: &str) -> ServiceResult<DreamStatusPayload> {
         // #9544: a live alias has no directory of its own; read its target's.
-        let canonical =
-            trusty_common::palace_alias::canonical_palace_id(&self.state.data_root, id);
+        let canonical = trusty_common::palace_alias::canonical_palace_id(&self.state.data_root, id);
         let data_dir = self.state.data_root.join(canonical);
         if !data_dir.exists() {
             return Err(ServiceError::not_found(format!("palace not found: {id}")));
