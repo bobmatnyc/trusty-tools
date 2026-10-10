@@ -63,25 +63,19 @@ fn slack_bot_and_app_ref_parse() {
     let yaml = slack("{ bot_ref: slack, app_ref: slack-app }");
     let ceiling = host(&yaml).expect("bot and app refs");
     let s = ceiling.channel(Channel::Slack).expect("slack");
-    assert_eq!(s.bot_ref().map(|r| r.to_string()).as_deref(), Some("slack"));
-    assert_eq!(
-        s.app_ref().map(|r| r.to_string()).as_deref(),
-        Some("slack-app")
-    );
+    assert_eq!(s.bot_ref(), Some("slack"));
+    assert_eq!(s.app_ref(), Some("slack-app"));
 
     // Outbound only: app_ref is optional.
     let ceiling = host(HOST_ALL).expect("bot ref only");
     let s = ceiling.channel(Channel::Slack).expect("slack");
-    assert_eq!(s.bot_ref().map(|r| r.to_string()).as_deref(), Some("slack"));
+    assert_eq!(s.bot_ref(), Some("slack"));
     assert!(s.app_ref().is_none());
 
     let yaml = telegram("{ bot_ref: telegram }");
     let ceiling = host(&yaml).expect("telegram bot ref");
     let t = ceiling.channel(Channel::Telegram).expect("telegram");
-    assert_eq!(
-        t.bot_ref().map(|r| r.to_string()).as_deref(),
-        Some("telegram")
-    );
+    assert_eq!(t.bot_ref(), Some("telegram"));
     assert!(t.app_ref().is_none());
 
     let report = merge(host(&yaml), vec![input(PROJ_A, A_V2), input(PROJ_B, B_V1)]);

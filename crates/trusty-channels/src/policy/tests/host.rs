@@ -276,14 +276,8 @@ channels:
         "trailing slash compares equal"
     );
     let slack = ceiling.channel(Channel::Slack).expect("slack");
-    assert_eq!(
-        slack.bot_ref().map(|r| r.to_string()).as_deref(),
-        Some("slack")
-    );
-    assert_eq!(
-        slack.app_ref().map(|r| r.to_string()).as_deref(),
-        Some("slack-app")
-    );
+    assert_eq!(slack.bot_ref(), Some("slack"));
+    assert_eq!(slack.app_ref(), Some("slack-app"));
     assert_eq!(slack.kinds().len(), 1, "slack defaults to question only");
     let telegram = ceiling.channel(Channel::Telegram).expect("telegram");
     assert!(!telegram.enabled());
