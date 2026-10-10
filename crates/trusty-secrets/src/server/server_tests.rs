@@ -1980,10 +1980,19 @@ async fn set_within_deadline(fx: &Fixture, name: &str) -> RpcResponse {
     call_within_deadline(fx, method::SET, params).await
 }
 
+/// A `secrets.scopes` call, which touches no backend, under the watchdog.
+async fn scopes_within_deadline(fx: &Fixture) -> RpcResponse {
+    call_within_deadline(fx, method::SCOPES, json!({"project": fx.project()})).await
+}
+
 /// Why: #9572 — the router awaited a blocking body with no bound, so a
-/// backend call that never returns held its request forever.
-/// What: (a) a request to a stuck backend answers `deadline_exceeded` within
-/// its deadline plus a margin.
+/// backend call that never returns held its request forever, and nothing
+/// capped how many threads such calls could hold.
+/// What: with a cap of 6, (a) a request to a stuck backend answers
+/// `deadline_exceeded` within its deadline plus a margin; (b) with 6 calls
+/// stuck, a 7th request that needs no backend waits for admission until its
+/// deadline, then answers `deadline_exceeded`; (c) once the stuck calls are
+/// released, a later request to the now working backend completes.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_stuck_backend_calls_do_not_starve_a_later_request() {
@@ -1991,6 +2000,7 @@ async fn server_stuck_backend_calls_do_not_starve_a_later_request() {
     let (stuck, release) = StuckBackend::new();
     let mut state = fx.state(stuck_factory(&fx, &stuck));
     state.deadline_override = Some(STUCK_DEADLINE);
+    state.admission_cap_override = Some(6);
     let server = fx.start_state(state).await;
 
     // (a) the stuck call's request answers at its deadline.
@@ -2002,6 +2012,94 @@ async fn server_stuck_backend_calls_do_not_starve_a_later_request() {
         ErrorKind::DeadlineExceeded
     );
 
+    // Five more stuck calls fill the cap of 6; each answers at its deadline.
+    let more = tokio::join!(
+        set_within_deadline(&fx, "STUCK_2"),
+        set_within_deadline(&fx, "STUCK_3"),
+        set_within_deadline(&fx, "STUCK_4"),
+        set_within_deadline(&fx, "STUCK_5"),
+        set_within_deadline(&fx, "STUCK_6"),
+    );
+    for response in [more.0, more.1, more.2, more.3, more.4] {
+        assert_eq!(
+            fixed_error(&response, method::SET),
+            ErrorKind::DeadlineExceeded
+        );
+    }
+
+    // (b) a 7th request is not admitted and gives up at its own deadline.
+    let started = std::time::Instant::now();
+    let seventh = scopes_within_deadline(&fx).await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= STUCK_DEADLINE - Duration::from_millis(50),
+        "{waited:?}"
+    );
+    assert!(waited < STUCK_DEADLINE + REPLY_MARGIN, "{waited:?}");
+    assert_eq!(
+        fixed_error(&seventh, method::SCOPES),
+        ErrorKind::DeadlineExceeded
+    );
+
+    // (c) released, the stuck threads finish and a later request completes.
     drop(release);
+    let later = ok(set_within_deadline(&fx, "WORKING").await);
+    assert_eq!(later["outcome"], json!("new"), "{later}");
+    let stored = stuck.inner.get(&vault("trusty/acme/web"), &key("WORKING"));
+    assert_eq!(stored.unwrap().unwrap().expose(), VALUE);
     server.stop().await;
+}
+
+/// Why: #9572 — the permit must be the stuck thread's, not the request's;
+/// were it released when the request timed out, every timed-out request
+/// would free a slot and stuck threads would pile up without bound.
+/// What: with a cap of 1, a request to a stuck backend times out; a request
+/// that needs no backend then still waits until its own deadline, because
+/// the first request's thread holds the only permit; once the stuck call is
+/// released, the same request is admitted and answers.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_timed_out_request_keeps_its_permit_until_its_call_returns() {
+    let fx = fixture();
+    let (stuck, release) = StuckBackend::new();
+    let mut state = fx.state(stuck_factory(&fx, &stuck));
+    state.deadline_override = Some(STUCK_DEADLINE);
+    state.admission_cap_override = Some(1);
+    let server = fx.start_state(state).await;
+
+    let timed_out = set_within_deadline(&fx, "STUCK_1").await;
+    assert_eq!(
+        fixed_error(&timed_out, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+    // The request has answered; its thread, still stuck, holds the permit.
+    let refused = scopes_within_deadline(&fx).await;
+    assert_eq!(
+        fixed_error(&refused, method::SCOPES),
+        ErrorKind::DeadlineExceeded
+    );
+
+    drop(release);
+    let admitted = ok(scopes_within_deadline(&fx).await);
+    assert_eq!(admitted["scopes"][0]["vault"], json!("trusty/acme/web"));
+    server.stop().await;
+}
+
+/// A method body that records that it ran.
+fn body_that_runs(_: &State, _: Value) -> Result<Value, ErrorKind> {
+    Ok(json!("ran"))
+}
+
+/// Why: #9572 Fail-Open Check — an admission failure is never a success: a
+/// closed semaphore answers `internal` and the body never runs.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_closed_admission_is_internal_and_never_runs_the_body() {
+    let fx = fixture();
+    let state = Arc::new(fx.state(fx.backends()));
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    admission.close();
+    let deadline = std::time::Instant::now() + STUCK_DEADLINE;
+    let answer = router::run_blocking(state, admission, deadline, body_that_runs, json!({})).await;
+    assert_eq!(answer, Err(ErrorKind::Internal));
 }

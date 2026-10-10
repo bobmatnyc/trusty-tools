@@ -1,0 +1,3 @@
+Fixed
+- A server request whose backend call never returns (for example the file backend on a hung mount) now answers `deadline_exceeded` (-32079) at its deadline instead of never answering ([#9572](https://github.com/bobmatnyc/trusty-tools/issues/9572)). The stuck call cannot be cancelled: its thread keeps running until the call returns, and a write it started may still land then.
+- At most 64 method calls run on the server at once. A call holds its slot until its thread finishes, so calls that never return hold at most 64 threads; a request that waits for a slot past its deadline answers `deadline_exceeded`, never a success or an empty result.

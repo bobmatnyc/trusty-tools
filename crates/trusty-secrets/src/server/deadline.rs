@@ -12,6 +12,7 @@
 //! covers the connect, the index publish and the audit record that follow
 //! the last CLI call. The router sets the deadline on the thread a body runs
 //! on (`store::deadline`); the CLI runner refuses or stops a call past it.
+//! #9572: the router also stops waiting for the body at the deadline.
 //! Test: `client_wait_exceeds_the_server_deadline_for_every_method`,
 //! `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`.
 
