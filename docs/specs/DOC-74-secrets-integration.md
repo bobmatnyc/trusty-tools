@@ -13,7 +13,8 @@ spec_refs:
 
 # DOC-74 — Secrets Integration: External Vaults (1Password, Keeper) and the OS Keychain Behind `tm secrets`
 
-**Status:** Accepted — partly implemented. S1 and S2 have shipped in `trusty-secrets`; S8 is in progress under [#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070) (its wire methods `secrets.grant`, `secrets.resolve` and `secrets.revoke` are slice 2). §15.9 lists every slice. Section IDs stay `~draft` until each section is frozen (DOC-38 §4.4).
+**Status:** Accepted
+**Cross-ref:** Implementation progress — S1 and S2 have shipped in `trusty-secrets`; S8 is in progress under [#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070) (its wire methods `secrets.grant`, `secrets.resolve` and `secrets.revoke` are slice 2); `tm secrets exec` tier 1 is [#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621) (§10.5). §15.9 lists every slice. Section IDs stay `~draft` until each section is frozen (DOC-38 §4.4).
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
 **Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
@@ -99,7 +100,11 @@ the one hand-rolled case in `trusty-agents`' task runner.
 6. **G-6** A resolved value reaches a subprocess's environment or stdin, or an
    in-process HTTP client, and **never** reaches: the LLM context, a hook
    payload, a `tm` log line, argv visible to `ps`, or captured child
-   output that gets echoed back to a caller.
+   output that gets echoed back to a caller. Captured output is output that
+   does not go to a terminal (owner amendment 3, 2026-09-11: "echoed values
+   are scrubbed from **captured** output"): `tm secrets exec` scrubs the
+   command's stdout and stderr only when its stdout is not a terminal, and
+   passes terminal output through unchanged (§10.5).
 7. **G-7** `tm secrets doctor` / first `configure` reports, without unlocking
    anything, which secret-management tools are actually present on the
    machine, so a user is offered real choices instead of guessing.
@@ -158,7 +163,7 @@ behave.
 
 | Point | Mechanism | Precedent |
 |---|---|---|
-| Subprocess stdout/stderr captured and echoed to a caller (`tm secrets exec`, §10.5) | `scrub_secrets` against every value the session cache holds, applied line-by-line **before** truncation | `task_runner.rs:249,299` — proven pattern, extended to the session's full secret set |
+| Subprocess stdout/stderr captured and echoed to a caller (`tm secrets exec`, §10.5) | Every value the command was given, 8 characters or more, removed from stdout and stderr as bytes, with a value split across reads still caught — **only when stdout is not a terminal**; terminal output is not captured and passes through | `tm secrets exec` (#9621), the same rule as `scrub_secrets`, `task_runner.rs:249,299` |
 | A hook's `tool_input`/`tool_output` payload | The `PreToolUse`/`PostToolUse` hook body is JSON the daemon logs and may forward; it is scrubbed with the same `scrub_secrets` call before it is written anywhere, and `tm secrets exec`'s injected values are never placed in `tool_input.command` text in the first place (§10.5 — env/stdin only) | New; extends the redaction discipline `pm_guard_secret_read.rs` already applies to file reads |
 | `Debug`/`Display` of any in-memory type holding a value | Every type in this module implements `Debug` the way `Secret<T>` and `KeyringStore` do: either a constant redacted string or (for `KeyringStore`, stateless) nothing to leak | `secret.rs:105-126`, `keyring_store.rs:48` (`derive(Debug)` is safe only because the struct is stateless) |
 | A `tm` log line | Never logs a resolved value; logs only the reference and the backend name | Same posture as `resolve_key`'s existing "never logs the (absent) value" contract (`mod.rs:163`) |
@@ -663,11 +668,13 @@ clipboard, never a session prompt.
 password" seam the owner asked for.** It is the CLI-level sibling of §9.5's
 daemon-side `secret://` env-map resolution: the CLI form is for an
 interactive or scripted shell; the daemon form is for a spawn issued
-programmatically (a workflow step, an MCP tool). Both terminate in the same
-`SessionSecretCache::resolve` call and the same T-3 redaction of anything the
-child echoes back. Amended 2026-10-01: `exec` resolves in-process, so values
-never cross a socket; under a Claude Code parent it injects only keys flagged
-"agents may use" (§15.8).
+programmatically (a workflow step, an MCP tool). Amended 2026-10-10
+([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621)): `exec` does
+not resolve in-process. It is grant-by-pid: tm spawns a helper, calls
+`secrets.grant` for the helper's pid, and the helper reads each value with
+`secrets.resolve` and then execs the command in place (§10.5, §15.8). Under a
+Claude Code parent the server grants only keys flagged "agents may use"
+(§15.8).
 
 ### 9.5 Daemon-side: `secret://` in a subprocess env map
 
@@ -684,6 +691,11 @@ spawning and applies `scrub_secrets` to every line of captured stdout/stderr
 before it is returned to *any* caller — daemon-side workflow output included,
 not just `tm secrets exec`'s — closing the same leak class `task_runner.rs`
 already closed for the flat credential store.
+
+The CLI form does not resolve this way (amended 2026-10-10, #9621). It is
+grant-by-pid: the grant names the pid of the process that becomes the
+command, the server checks every `secrets.resolve` against that pid and its
+descendants, and tm revokes the grant when the command exits (§10.5).
 
 ---
 
@@ -744,6 +756,77 @@ disk, dropped when the session ends, and never serialized into a session
 snapshot (`.trusty-mpm/sessions/*.md` files were tracked in git when this was
 written; the owner ruling of 2026-09-13 gitignores them instead, and a cache
 entry must never reach one either way).
+
+### 10.5 `tm secrets exec`: grant-by-pid, scrubbing and revoke
+
+Amended 2026-10-10 ([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621),
+Architect rulings Q1–Q4). This PR ships tier 1 of §15.8 — `--env NAME=KEY` and
+`--stdin KEY`; `--dotenv` (tier 2) is a later slice.
+
+**Steps.**
+
+1. tm spawns itself as a hidden helper, `tm secrets __exec-stub`, in a new
+   process group. The helper inherits two pipes by fd number: the token pipe
+   and the report pipe. Its argv holds names and fd numbers only.
+2. tm calls `secrets.grant` with the project, the helper's pid (never tm's
+   own), every named key and a TTL of 3600 s.
+3. tm writes the token to the token pipe and closes it. The helper waits on
+   that pipe, so it cannot resolve or exec before the grant exists.
+4. The helper calls `secrets.resolve` once per key; its socket peer pid is
+   the granted pid. It sends every value back to tm on the report pipe (for
+   the scrubber), puts the token on a fresh pipe whose fd number goes in
+   `TRUSTY_SECRETS_TOKEN_FD`, and execs the command in place with each
+   `--env` value set. The pid, and so the grant, does not change.
+5. tm writes the `--stdin` value to the command's stdin and closes it, then
+   waits for the command.
+6. tm calls `secrets.revoke` and exits with the command's status, or 128 +
+   the signal that ended it.
+
+Each key is resolved once and leaves one audit record.
+
+**Fails closed.** A refused grant (including `agent_use_refused`), a missing
+or malformed token, a helper that dies before exec, and any key that does
+not resolve all end the same way: tm kills the helper's process group, runs
+nothing, revokes a grant that exists, and exits 1 with fixed text that names
+at most a key, never a value.
+
+**Revoke.** tm revokes on a normal exit, when the command is killed by a
+signal, when the helper dies before exec, and when tm itself gets SIGINT,
+SIGTERM or SIGHUP. tm forwards such a signal to the command's group, waits,
+and sends SIGKILL to the group on a second signal or after 5 s. When tm owns
+the terminal it hands it to the command's group, so terminal keys reach the
+command, and takes it back afterwards.
+
+**Scrubbing.** When stdout is not a terminal, tm pipes the command's stdout
+and stderr and removes every injected value of 8 characters or more, as
+`[REDACTED]`. It works on bytes and holds back a tail that could still grow
+into a value, so a value split across two reads is still removed. When
+stdout is a terminal, both streams are inherited and nothing is scrubbed:
+terminal output is not captured (§3 G-6).
+
+**Known limits.**
+
+- Tier 1 puts values in the command's environment by design. Any process of
+  the same user can read it, through `ps eww` on macOS or
+  `/proc/<pid>/environ` on Linux, for as long as the command runs.
+- Output on a terminal is not scrubbed, and a value under 8 characters is
+  never scrubbed.
+- The grant lasts at most 3600 s (the server's cap) and is not renewed. Its
+  expiry affects only tier-3 resolves the command makes after exec; values
+  already in its environment stay.
+- When tm is killed with SIGKILL, it cannot revoke. The server's dead-child
+  prune ([#9645](https://github.com/bobmatnyc/trusty-tools/pull/9645)) and
+  the TTL remove the grant. The same holds for a grant that completes on the
+  server after tm was stopped mid-grant.
+- The token fd is inherited by the command's descendants; they share its
+  grant, within the same keys.
+- Ctrl-Z stops the command, not tm.
+- tm waits for end of stream on the scrubbed pipes, so a background process
+  that keeps them open keeps tm waiting. The grant is revoked before that
+  wait, and tm takes the terminal back from the command's group once the
+  command exits, so a terminal Ctrl-C reaches tm. SIGINT (a terminal Ctrl-C
+  included), SIGTERM or SIGHUP still ends tm during the wait: tm sends the
+  signal to the command's process group and exits with 128 + the signal.
 
 ---
 
@@ -1170,8 +1253,11 @@ with the project, the child pid, the allowed keys and a TTL. The server
 mints the random token and returns it (Architect ruling 2026-10-10); it
 keeps only the token's SHA-256, in memory. So `tm secrets exec` runs in four
 steps: spawn the child, call `secrets.grant` for it, pass the token to the
-child in its env, then exec the command
-([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621)). Any
+child over an inherited pipe, then exec the command
+([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621), §10.5).
+The token never goes in an argv or an environment: the command inherits a
+second pipe that holds it, and only that pipe's fd number goes in
+`TRUSTY_SECRETS_TOKEN_FD` (Architect ruling 2026-10-10). Any
 same-uid process may call `secrets.grant`. While any grant is unexpired, the
 60 s idle exit (ruling 31) waits; `secrets.revoke` removes a grant early.
 `secrets.resolve` answers only when all three hold:
