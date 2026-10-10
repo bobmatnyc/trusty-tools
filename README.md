@@ -14,7 +14,7 @@ from `cargo metadata`; the human-readable map is
 | [trusty-memory](#trusty-memory--memory-palace-storage-engine) | Long-term memory storage with semantic search and an embedded UI | `cargo run -p trusty-memory -- serve` |
 | [trusty-search](#trusty-search--hybrid-code-search) | Machine-wide hybrid code search — BM25 + vector + KG fusion, MCP server | `cargo install trusty-search && trusty-search start` |
 | [trusty-review](#trusty-review--llm-backed-pr-review) | LLM-backed review of GitHub PRs and diffs via AWS Bedrock or OpenRouter | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked && trusty-review run owner repo 123` |
-| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- start` |
+| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start` |
 
 ## Flagship Crates
 
@@ -91,7 +91,7 @@ trusty-search index ~/Projects/myproj --name myproj
 trusty-search query "fn authenticate" --index myproj
 ```
 
-**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `console_metrics`
+**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `console_metrics`, `add_root`
 
 See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full documentation.
 
@@ -150,7 +150,7 @@ over a Unix socket, and exposes MCP over stdio.
 cargo run -p trusty-search -- start
 
 # 2. start the analyze sidecar
-cargo run -p trusty-analyze -- start
+cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start
 
 # 3. analyze a named index
 cargo run -p trusty-analyze -- analyze <index-id> --top-k 20
