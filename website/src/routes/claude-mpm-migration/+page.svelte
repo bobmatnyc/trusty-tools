@@ -280,7 +280,7 @@ tm --version</pre>
 						</tr>
 						<tr>
 							<td><code class="whitespace-nowrap">trusty-search</code></td>
-							<td><code class="whitespace-nowrap">127.0.0.1:7878</code></td>
+							<td><code class="whitespace-nowrap">Unix socket</code></td>
 							<td class="text-foundry-secondary"
 								>Named code indexes, one per project, kept fresh by a file watcher. One install per
 								machine.</td

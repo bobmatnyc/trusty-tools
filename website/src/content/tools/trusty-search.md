@@ -58,6 +58,9 @@ the diff pays for embedding.
   detected system RAM at startup rather than guessed at compile time. Below
   16 GB the daemon warns once and runs on a reduced tier rather than refusing
   to start.
+- Clients reach the daemon over its Unix socket. `query`, `doctor` and
+  `monitor` dial it, and `start --socket <absolute path>` binds a socket of your
+  choosing.
 
 ## Nothing is indexed until you say so
 

@@ -123,7 +123,7 @@ export const TOOLS: Tool[] = [
 		lede: 'Three retrieval lanes over one corpus, fused into a single ranking, served by one daemon for every project on the machine.',
 		facts: [
 			{ label: 'Package', value: 'trusty-search' },
-			{ label: 'Default port', value: '7878' },
+			{ label: 'Transport', value: 'Unix socket (HTTP optional)' },
 			{ label: 'Languages parsed', value: '14 tree-sitter grammars' },
 			{ label: 'MCP tools', value: '20' }
 		],
@@ -195,7 +195,7 @@ export const TOOLS: Tool[] = [
 			{ label: 'Package', value: 'trusty-analyze' },
 			{ label: 'Transport', value: 'Unix socket; dashboard via trusty-console' },
 			{ label: 'Languages', value: '14 tree-sitter adapters' },
-			{ label: 'Requires', value: 'trusty-search on 7878' }
+			{ label: 'Requires', value: 'trusty-search daemon' }
 		],
 		install: { via: 'tctl', target: 'trusty-analyze' },
 		released: true,

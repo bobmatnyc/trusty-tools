@@ -10,11 +10,11 @@ from `cargo metadata`; the human-readable map is
 
 | Crate | What it is | Install / run |
 |---|---|---|
-| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked && tm start` |
+| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install trusty-mpm --version 1.8.0 --locked && tm start` |
 | [trusty-memory](#trusty-memory--memory-palace-storage-engine) | Long-term memory storage with semantic search and an embedded UI | `cargo run -p trusty-memory -- serve` |
 | [trusty-search](#trusty-search--hybrid-code-search) | Machine-wide hybrid code search — BM25 + vector + KG fusion, MCP server | `cargo install trusty-search && trusty-search start` |
 | [trusty-review](#trusty-review--llm-backed-pr-review) | LLM-backed review of GitHub PRs and diffs via AWS Bedrock or OpenRouter | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked && trusty-review run owner repo 123` |
-| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start` |
+| [trusty-analyze](#trusty-analyze--code-analysis-sidecar) | Sidecar code-analysis daemon for trusty-search: complexity, smells, quality, facts | `cargo run -p trusty-analyze -- start` |
 
 ## Flagship Crates
 
@@ -33,7 +33,7 @@ delegating coding tasks to `trusty-code`.
 
 **Quick start:**
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
+cargo install trusty-mpm --version 1.8.0 --locked
 tm start
 tm launch
 ```
@@ -150,7 +150,7 @@ over a Unix socket, and exposes MCP over stdio.
 cargo run -p trusty-search -- start
 
 # 2. start the analyze sidecar
-cargo run -p trusty-analyze -- --search-url http://127.0.0.1:7878 start
+cargo run -p trusty-analyze -- start
 
 # 3. analyze a named index
 cargo run -p trusty-analyze -- analyze <index-id> --top-k 20

@@ -53,6 +53,13 @@ required dependencies, verify downloaded artifacts, and run a post-operation
 health tail. `ensure` patches project MCP configuration and establishes the
 project's search and memory resources.
 
+`ensure` reaches trusty-search over its Unix socket only and reads no stale
+`http_addr` file. It writes the trusty-mpm `.mcp.json` entry as `tm serve
+--stdio`; an existing `trusty-mpm` entry keeps working and is rewritten on the
+next `tctl ensure`. `install` and `upgrade` run `tm content update` after every
+member finishes whenever trusty-mpm was installed or upgraded, and a failure
+there exits non-zero with `tm content update` as the remedy.
+
 Other supported surfaces include `start`, `stop`, `config`, `config keys`,
 `port`, `doctor`, `ui`, `self-update`, and macOS `sign`. Run `tctl <command>
 --help` for the authoritative flags. Generic `<tool> <verb>` passthrough is
