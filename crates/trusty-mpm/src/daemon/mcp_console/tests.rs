@@ -589,3 +589,123 @@ fn supervisor_metrics_merge_flags_a_stale_snapshot() {
          re-create the silent zero one layer out: {block}"
     );
 }
+
+/// Why (#8454 S2c): the console Config save re-serialises
+/// [`TrustyToolsConfig`]; a `channels:` host ceiling it drops is data loss.
+/// What: the `config_write` sequence (load, [`apply_config_write`], save)
+/// against a temp `config.yaml`; the saved `channels` value must equal the
+/// original.
+/// Test: this is the test.
+#[test]
+fn config_save_preserves_channels_section() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "default_model: sonnet\nchannels:\n  version: 1\n  rate_limit: { limit: 50, \
+                    window_secs: 60 }\n  slack:\n    enabled: true\n    connection: { bot_ref: \
+                    slack, app_ref: slack-app }\n    projects: [/abs/proj]\n  gchat:\n    \
+                    enabled: false\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let mut config: TrustyToolsConfig = trusty_common::crate_config::load_at(&path)
+        .expect("load")
+        .expect("present");
+    apply_config_write(
+        &mut config,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("merge");
+    trusty_common::crate_config::save_at(&path, &config).expect("save");
+
+    let before: serde_yaml::Value = serde_yaml::from_str(original).expect("yaml");
+    let saved_text = std::fs::read_to_string(&path).expect("read saved");
+    let after: serde_yaml::Value = serde_yaml::from_str(&saved_text).expect("saved yaml");
+    assert_eq!(
+        after.get("channels"),
+        before.get("channels"),
+        "the console save must keep the channels section unchanged:\n{saved_text}"
+    );
+    assert_eq!(after["auto_resume"], serde_yaml::Value::Bool(true));
+}
+
+/// Why (#8454 S2c, Q2): a config file with one ill-typed field parsed as all
+/// defaults, so a console save overwrote the whole file, `channels:` included.
+/// What: [`config_write_at`] over a file with `auto_resume: maybe` and a
+/// `channels:` block must return an error and leave the file byte-for-byte
+/// unchanged.
+/// Test: this is the test.
+#[test]
+fn config_write_refuses_a_file_it_cannot_parse() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "auto_resume: maybe\ndefault_model: sonnet\nchannels:\n  version: 1\n  slack:\n    \
+                    enabled: true\n    connection: { bot_ref: slack, app_ref: slack-app }\n    \
+                    projects: [/abs/proj]\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let result = config_write_at(&path, |config| {
+        config.default_model = Some("opus".into());
+        Ok(())
+    });
+
+    let after = std::fs::read(&path).expect("read config");
+    assert!(
+        result.is_err(),
+        "a save over an unparseable file must be refused, got {result:?}"
+    );
+    assert_eq!(
+        after,
+        original.as_bytes(),
+        "the refused save must leave the file unchanged:\n{}",
+        String::from_utf8_lossy(&after)
+    );
+}
+
+/// Why (#8454 S2c): serde_yaml quotes the scalar it could not read, and
+/// `log_drain.secrets` holds plaintext site tokens, so echoing the parse error
+/// leaked a token to the MCP caller, the console log and agent transcripts.
+/// What: [`config_write_at`] over a file whose `log_drain.secrets` is a scalar
+/// canary must refuse, leave the file byte-for-byte unchanged, and keep the
+/// canary out of the error string.
+/// Test: this is the test.
+#[test]
+fn config_write_refusal_never_echoes_file_content() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "log_drain: { secrets: canary-ghp-123 }\nchannels:\n  version: 1\n  slack:\n    \
+                    enabled: true\n    connection: { bot_ref: slack, app_ref: slack-app }\n    \
+                    projects: [/abs/proj]\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let result = config_write_at(&path, |config| {
+        config.default_model = Some("opus".into());
+        Ok(())
+    });
+
+    let after = std::fs::read(&path).expect("read config");
+    assert_eq!(
+        after,
+        original.as_bytes(),
+        "the refused save must leave the file unchanged:\n{}",
+        String::from_utf8_lossy(&after)
+    );
+    let err = result.expect_err("a save over an unparseable file must be refused");
+    assert!(
+        !err.contains("canary-ghp-123"),
+        "the refusal must not echo file content: {err}"
+    );
+    assert!(
+        err.contains(&path.display().to_string()),
+        "the refusal must name the config path: {err}"
+    );
+}

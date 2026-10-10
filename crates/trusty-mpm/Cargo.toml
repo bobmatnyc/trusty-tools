@@ -178,7 +178,11 @@ autotests = false
 default = ["cli", "daemon"]
 
 # `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram + slack).
-cli = ["daemon", "tui", "telegram", "slack"]
+cli = ["daemon", "tui", "telegram", "slack", "channels"]
+
+# `channels` gates the trusty-channels route policy, read only by the
+# `tm doctor` channel rows (#8454 S2c). No enforcement and no sending.
+channels = ["dep:trusty-channels"]
 
 # `daemon` gates the daemon library module and the `daemon` subcommand.
 # Activating `daemon` also pulls in `mcp` (the daemon implements OrchestratorBackend).
@@ -404,6 +408,8 @@ toml.workspace = true
 # (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
 # (`parse_dotenv` for `import`) and `api` (the method types).
 trusty-secrets = { workspace = true, features = ["server"] }
+# #8454 S2c: `tm doctor` loads the channel route policy read-only.
+trusty-channels = { workspace = true, optional = true }
 # #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
 # unrelated keys; already in this crate's graph through trusty-common.
 toml_edit.workspace = true
