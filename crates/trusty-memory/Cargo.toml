@@ -65,7 +65,8 @@ name = "trusty-memory"
 # 0.29.6 (Refs #9433): patch — trusty-common floor moves 0.54.4 -> 0.54.5 so a locked install carries the #9433 fix. No source change.
 # 0.31.1 (Refs #9340): patch — memory_list reports a read-only `fact_key` per drawer; 0.31.0 is live on crates.io. Additive only.
 # 0.32.0 (Refs #9274): minor — palace format gate; trusty-common floor moves 0.57 -> 0.58; 0.31.1 is live on crates.io.
-version = "0.32.0"
+# 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
+version = "0.32.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true

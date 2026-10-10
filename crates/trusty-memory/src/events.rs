@@ -83,6 +83,8 @@ impl InjectionKind {
 /// mutation, and asserts the frame arrives.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// #9544: new variants (PalaceRenamed) must not break downstream matchers again.
+#[non_exhaustive]
 pub enum DaemonEvent {
     PalaceCreated {
         id: String,
