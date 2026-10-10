@@ -24,7 +24,10 @@ const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 /// `$HOME/.trusty-agents/`, and a test must never write that into the
 /// developer's real home.
 fn help_output(dir: &Path, flag: &str) -> (Option<i32>, String, String) {
-    let out = Command::new(BIN)
+    let mut cmd = Command::new(BIN);
+    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+    trusty_common::parent_death::exit_with_parent(&mut cmd);
+    let out = cmd
         .arg(flag)
         .current_dir(dir)
         .env("HOME", dir)

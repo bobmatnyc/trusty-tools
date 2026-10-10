@@ -140,7 +140,10 @@ impl ApiServer {
         // two binds was the TOCTOU. The actual port is read back below from
         // the `http_addr` discovery file the child writes right after it
         // binds.
-        let mut child = Command::new(&binary)
+        let mut cmd = Command::new(&binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        let mut child = cmd
             .current_dir(root.path())
             .env("HOME", home.path())
             .env("TAGENT_PROJECT_DIR", root.path())

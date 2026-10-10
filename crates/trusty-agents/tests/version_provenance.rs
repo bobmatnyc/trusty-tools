@@ -32,7 +32,10 @@ const GIT_HASH: &str = env!("GIT_COMMIT_HASH");
 /// Run `tagent --version` in `dir` with an isolated `$HOME` and no ambient
 /// project hint (#4826), returning stdout.
 fn version_stdout(dir: &Path) -> String {
-    let out = Command::new(BIN)
+    let mut cmd = Command::new(BIN);
+    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+    trusty_common::parent_death::exit_with_parent(&mut cmd);
+    let out = cmd
         .arg("--version")
         .current_dir(dir)
         .env("HOME", dir)
