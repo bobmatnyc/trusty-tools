@@ -193,3 +193,30 @@ async fn dispatch_remember_bad_type_beats_content_gate() {
         );
     }
 }
+
+/// Why (#9144 criterion 1): clients learn the argument from the schema; the
+/// property is spliced in after the main `json!` literal, so pin that it lands.
+/// What: `memory_remember` advertises `type` as an optional string with the five
+/// writable names; `memory_note` advertises none.
+#[test]
+fn memory_remember_schema_advertises_the_type_enum() {
+    let defs = tool_definitions();
+    let tools = defs["tools"].as_array().expect("tools array");
+    let schema = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} listed"))["inputSchema"]
+            .clone()
+    };
+    let remember = schema("memory_remember");
+    let ty = &remember["properties"]["type"];
+    assert_eq!(ty["type"], "string", "{ty}");
+    assert_eq!(
+        ty["enum"],
+        json!(["Ruling", "Decision", "Status", "Turn", "Reference"])
+    );
+    let required = remember["required"].as_array().expect("required array");
+    assert!(!required.contains(&json!("type")), "{required:?}");
+    assert!(schema("memory_note")["properties"].get("type").is_none());
+}

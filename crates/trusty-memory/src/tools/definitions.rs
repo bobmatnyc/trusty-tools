@@ -118,8 +118,6 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "room":    {"type": "string", "description": "Room type (optional)"},
                         "wing":    {"type": "string", "description": "ADR-0027: optional wing (scope/ownership) id or label that OWNS this room — e.g. an agent type such as `engineer`. Omit for the palace's default wing, which is the pre-wing behaviour. With it, `engineer`+`Planning` and `pm`+`Planning` are two distinct rooms. Errors if the wing does not exist; create it with wing_create or list wings with wing_list."},
                         "tags":    {"type": "array", "items": {"type": "string"}},
-                        // #9144: optional typed write; omitted keeps the heuristic classifier.
-                        "type":    {"type": "string", "enum": ["Ruling", "Decision", "Status", "Turn", "Reference"], "description": "#9144: optional drawer type, matched case-insensitively. Ruling = a standing rule that holds until revoked; Decision = a choice made for a piece of work; Status = a point-in-time state report a newer one replaces; Turn = a record of one conversational turn; Reference = a pointer to an external source of truth. Recall treats Ruling and Decision as rulings, and weights Status by 0.8 and Turn by 0.7 unless the drawer holds a live `fact_key` slot. Omit it for the heuristic classifier (today's behaviour). Any other value, including UserFact, is an error and nothing is written."},
                         "force":   {"type": "boolean", "description": "Explicit operator override: bypasses the content-QUALITY gates for this write — the blocklist (auto-capture noise patterns), the short-content check, the dedup window, and the noise-pattern filter. Issue #2520: does NOT bypass secret/credential detection — a force=true write of secret-shaped content (API keys, tokens) is still rejected. Use sparingly; intended for app-managed writers (e.g. session/turn recorders) that need deterministic storage regardless of heuristic false positives.", "default": false},
                         "allow_secret_like": {"type": "boolean", "description": "DANGEROUS, rarely needed: bypasses the secret/credential heuristic gate specifically, on top of whatever `force` already bypasses. Only set this when you are DELIBERATELY storing content that looks like a credential (e.g. a redacted example or test fixture) and have confirmed it contains no real secret. Automated writers (turn recorders, auto-capture hooks) must NOT set this — it exists for rare, explicit human/operator overrides only.", "default": false},
                         "context": {"type": "string", "description": "Optional surrounding context. When supplied alongside very short content (< 4 words), the context is prepended (separated by `---`) so the stored memory has standalone meaning; without it, short content is dropped (issue #215)."},
@@ -494,6 +492,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         .position(|t| t["name"] == "palace_update")
         .map_or(tools.len(), |i| i + 1);
     tools.insert(at, palace_rename_definition());
+    // #9144: `memory_remember`'s `type`, from its own `json!` for the recursion limit.
+    if let Some(remember) = tools.iter_mut().find(|t| t["name"] == "memory_remember") {
+        remember["inputSchema"]["properties"]["type"] = remember_type_property();
+    }
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
     tools.extend(super::chat_assets::definitions());
@@ -511,6 +513,22 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // advertised. Applied after the splices so a spliced group is covered too.
     super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
+}
+
+/// The `type` property of `memory_remember`'s input schema (#9144).
+///
+/// Why: its own `json!` call, because the enum array in the main literal trips
+/// the macro recursion limit (the same reason [`palace_rename_definition`]
+/// splits).
+/// What: an optional string, enum of the five writable drawer types, matched
+/// case-insensitively by `helpers::resolve_type_arg`.
+/// Test: `memory_remember_schema_advertises_the_type_enum`.
+fn remember_type_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["Ruling", "Decision", "Status", "Turn", "Reference"],
+        "description": "#9144: optional drawer type, matched case-insensitively. Ruling = a standing rule that holds until revoked; Decision = a choice made for a piece of work; Status = a point-in-time state report a newer one replaces; Turn = a record of one conversational turn; Reference = a pointer to an external source of truth. Recall treats Ruling and Decision as rulings, and weights Status by 0.8 and Turn by 0.7 unless the drawer holds a live `fact_key` slot. Omit it for the heuristic classifier (today's behaviour). Any other value, including UserFact, is an error and nothing is written."
+    })
 }
 
 /// The `palace_rename` schema (#9544).
