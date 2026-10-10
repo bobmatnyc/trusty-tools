@@ -99,7 +99,9 @@ fn a_palace_locked_by_another_process_is_refused_with_nothing_written() {
     let v0 = build_v0("v0-locked-elsewhere");
     let before = hash_tree(v0.dir());
     let other = std::fs::File::open(v0.dir()).expect("open the palace directory");
-    other.try_lock().expect("stand in for another process's lock");
+    other
+        .try_lock()
+        .expect("stand in for another process's lock");
 
     let err = open_gate(v0.dir(), v0.palace.id.as_str(), OpenIntent::Writer)
         .expect_err("a held migration lock refuses the open");
@@ -112,7 +114,10 @@ fn a_palace_locked_by_another_process_is_refused_with_nothing_written() {
     );
     assert!(format!("{err:#}").contains("another process"), "{err:#}");
     assert_eq!(before, hash_tree(v0.dir()), "a palace byte changed");
-    assert!(!v0.dir().join(MIGRATION_RECORD).exists(), "a record was written");
+    assert!(
+        !v0.dir().join(MIGRATION_RECORD).exists(),
+        "a record was written"
+    );
     assert!(!v0.backups().exists(), "a backup was started");
 
     drop(other);

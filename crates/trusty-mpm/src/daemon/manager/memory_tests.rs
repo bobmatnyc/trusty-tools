@@ -205,7 +205,9 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
 fn an_existing_format_0_portfolio_palace_migrates_at_open() {
     use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
     use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
-    use trusty_common::memory_core::store::palace_format::{MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED};
+    use trusty_common::memory_core::store::palace_format::{
+        MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
+    };
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -219,5 +221,8 @@ fn an_existing_format_0_portfolio_palace_migrates_at_open() {
         serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
             .expect("palace.json");
     assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
-    assert!(!palace_dir.join(MIGRATION_RECORD).exists(), "migration left its record");
+    assert!(
+        !palace_dir.join(MIGRATION_RECORD).exists(),
+        "migration left its record"
+    );
 }

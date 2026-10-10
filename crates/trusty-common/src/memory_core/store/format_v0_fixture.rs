@@ -10,7 +10,9 @@
 //! crate's tests and under the `memory-core-test-support` feature.
 //! Test: `a_format_0_palace_migrates_at_first_writer_open`.
 
-use super::kg_store::{ACTIVE_SUBJECT_COUNTS, DRAWERS, TRIPLES, TripleValue, encode_u64, encode_value};
+use super::kg_store::{
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, TRIPLES, TripleValue, encode_u64, encode_value,
+};
 use anyhow::Context;
 use serde::Serialize;
 use std::collections::BTreeMap;

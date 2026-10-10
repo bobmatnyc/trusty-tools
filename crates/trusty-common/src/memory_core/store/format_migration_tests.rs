@@ -16,10 +16,10 @@
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
+use crate::memory_core::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
 pub(super) use crate::memory_core::store::format_v0_fixture::{
     FORMAT_0_TRIPLES as ROWS, legacy_triple_key, write_format_0_palace_with,
 };
-use crate::memory_core::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, TripleValue, decode_value,
