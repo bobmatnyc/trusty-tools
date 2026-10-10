@@ -6,6 +6,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.0] — 2026-10-10
+
+### Breaking
+
+- Tool calls render as cards in the scrollback: a `⏺ <tool>(<args>)` header, then the result with its line breaks intact, so `read_file` and `cargo test` output no longer collapses onto one line. A call and its result share one card, matched on `ReplEvent::ToolInvocation`'s `id`, and a delegated sub-agent's card stays inside its block (#4596).
+- `ChatLine` gained a `tool: Option<ToolCard>` field, so a `ChatLine { role, text }` literal must now supply it. New public items: `ToolCard`, `ReplApp::tool_cards`, and `widgets::tool_card::tool_card_lines`.
+- `ReplEvent::ToolInvocation` gained `failed: bool` and `ToolCard` gained `collapsed: bool` and `failed: bool`, so a literal of either must now supply them. The one in-workspace producer (`trusty-code`) is updated in the same change, and 0.2.0 is not yet on crates.io, so no released consumer is affected. New public items: `ToolCard::is_error`, `ReplApp::toggle_last_tool_card` (#4596).
+
+### Added
+
+- A permission prompt blocks the turn until it is answered (#3422): a `permission_requested` event opens a modal prompt naming the tool, the redacted subject and the matched rule; `y` allows once, `a` allows for the session, `n`/Esc denies, and every other key — Enter included — leaves the prompt pending; the answer is relayed to the backend through the new `TuiEngine::respond_permission`, and `permission_resolved` closes the prompt. A relay that fails reopens the prompt with an inline retry line instead of losing it, so the answer can be sent again. Both the request and the decision are recorded in the scrollback.
+- `ReplEvent::DelegationStarted`/`DelegationFinished` (with `DelegationOutcome`) and `ReplEvent::AgentOutput` — the engine-agnostic seam for rendering a delegated sub-agent's block, and for streaming output keyed by `(agent_id, turn_id)` so a primary agent and a sub-agent streaming at once no longer interleave into one chat bubble (#7940).
+- `ChatRole::Delegation`/`ChatRole::Delegated` and their scrollback rendering: a `▶ <agent> — <task>` header, gutter-prefixed sub-agent output and tool notices, and a `└ <agent> — <outcome>` footer. The status line names the working sub-agent while a delegation is open and reverts when it closes, with no engine push either way.
+- `ReplEvent::ToolInvocation` gained `agent_id`, so a delegated agent's tool calls render inside its block instead of at top level.
+- `ReplEvent::SplashUpdated` and `ReplApp::splash`: engine-supplied startup splash lines that replace the banner's generic `{banner_title} v{version}` identity row, so a product can state its own launch facts once. Splash rows word-wrap to the banner's right column instead of being clipped. (#8164)
+- `text::elide_middle`: shortens a string to a column budget, eliding whole path components so an over-long path keeps its deepest components whole, and falling back to head-and-tail character elision otherwise. (#8164)
+
+### Fixed
+
+- `text::elide_middle` keeps the repository directory name when it shortens a path. A worktree path under `<repo>/.claude/worktrees/<name>` used to lose the repo name at the banner's 54-column budget while leaving columns unused, so the one name identifying the checkout was the first thing dropped; the deepest-components run is now replaced by `…/<repo>/…/<tail>` when it does not reach the repository, and the repo name is the last thing surrendered. (#8205)
+- The chat pane no longer clips the tail of any line it wraps. Its height was computed from logical line count while the pane renders through a wrapping `Paragraph`, so a line wider than the pane was under-reserved by a row and ratatui dropped the continuation — at 80 columns the connect line lost `home <path>`, the home directory the launch line exists to name. Height, bottom-pinning and the published scroll cap now all come from ratatui's own `Paragraph::line_count`, which measures through the same wrapper the renderer wraps with, so a double-width CJK glyph, a run of interior spaces and a leading indent each cost what they are drawn at. (#8205)
+- The startup banner's pane is now sized for the rows the banner actually wraps onto below 40 columns, and for the blank row drawn after it, so it no longer loses its top rule to a one-row scroll at any width; what a short terminal cannot show is still scrolled away. It is built at a floor of 40 columns, so every row wraps below that, and the pane was sized by counting its lines — a count that also omitted the blank row drawn after it. Both the banner and the chat are now sized by the one measurement of what the pane actually draws. (#8205)
+- Cancelling a turn now shows `cancelling…` until the backend confirms the run has stopped, instead of printing `cancelled` and reopening input on request. A prompt typed during that window queues in the composer exactly as it does during a live turn, so it can no longer reach a daemon that still has a task running — the `-32003 already has a task running` error the operator used to see (#8207).
+- A backend that answers "accepted, but not stopped yet" renders as a plain `still cancelling` sentence and keeps input closed; a cancel that fails to land renders as `cancel failed` and never claims the run stopped. No cancel path prints a JSON-RPC code.
+- `TuiEngine` gains `cancel_session_reply`, defaulted over `cancel_session`, so an engine with a one-state cancel needs no change.
+- the scrollback permission line folds a multi-line subject the same way the boxed prompt does, so a multi-statement `bash` command no longer renders as `echo oneecho two` (refs [#8237](https://github.com/bobmatnyc/trusty-tools/issues/8237))
+- Enter pressed while a turn is in flight now records the newline it stands for instead of being dropped, so type-ahead queued across several lines submits byte-identical to what was typed rather than welded together (`echo twoecho three`); the composer shows each queued break as `⏎` (refs [#8240](https://github.com/bobmatnyc/trusty-tools/issues/8240))
+- the event loop applies every event already queued behind the one it received before redrawing, instead of one full frame per event — a streaming turn no longer outruns the render path and leaves the pane minutes behind the daemon (refs [#8240](https://github.com/bobmatnyc/trusty-tools/issues/8240))
+
+### Changed
+
+- ratatui and crossterm moved from local `0.30`/`0.29` pins to `{ workspace = true }` (#2872). This crate adopted ratatui 0.30 ahead of the rest of the workspace in slice 2 (#3414), which put two ratatui majors in the build graph by design; the workspace pins are now 0.30/0.29, so that migration window is closed and there is one ratatui major. The resolved versions are unchanged, so no `trusty-code-tui` source changed.
+- A completed tool-call card collapses to a one-line summary — `⏺ read_file(src/lib.rs) · ok · 3 lines` — instead of printing its whole result body into the scrollback. **Ctrl-O** expands or collapses the newest card, and `/help` now lists it under a `Keys:` section. No duration is shown: `ReplEvent::ToolInvocation` carries no timing, and timing the TUI's own event arrival would measure the wrong thing (#4596).
+- A card the backend reported as failed renders expanded with a red glyph, so the error text never needs a keystroke to read. That verdict is read from `ReplEvent::ToolInvocation`'s new `failed` flag, never from the result text: the `FAILED: ` / `ERROR: ` prefixes trusty-code writes are display text, and rewording them no longer changes how a card renders (#4596).
+- Up/Down arrows walk the whole session's prompt history in the input line, instead of Up recalling only the single most recent submission and Down doing nothing. Up steps older, Down steps newer, and stepping past the newest entry hands back the draft that was in progress. Consecutive duplicate submissions are stored once (readline's `ignoredups`). The input is a single line, so readline's "history only from the first/last line" rule is satisfied unconditionally — Up/Down are always history. History is per TUI process: persisting it across launches would need a store this crate cannot reach (it must not depend on `trusty_common` and owns no state directory), so a product that wants cross-launch history seeds `ReplApp::history` at construction (#8181).
+
+### Documentation
+
+- `text::elide_middle`'s stated guarantee now matches its behaviour: the whole-trailing-components promise holds when `…/` plus the last two components fit the width (the prefix costs two columns of the budget), and a width of 0 still yields the one-character `…`. (#8205)
+
 ## [0.1.1] — 2026-09-02
 
 ### Added
