@@ -314,9 +314,13 @@ fn connection_refs(
     channel: Channel,
     conn: RawBotConnection,
 ) -> Result<(CredentialRef, Option<CredentialRef>), HostError> {
-    // RED: no legacy-key arm, no missing-bot_ref arm (the next commit adds them).
-    let _ = conn.credential_ref;
-    let bot = check_ref(channel, BOT_REF, &conn.bot_ref.unwrap_or_default())?;
+    if conn.credential_ref {
+        return Err(HostError::LegacyCredentialRef { channel });
+    }
+    let Some(bot) = conn.bot_ref else {
+        return Err(HostError::MissingBotRef { channel });
+    };
+    let bot = check_ref(channel, BOT_REF, &bot)?;
     let app = conn
         .app_ref
         .map(|app| check_ref(channel, APP_REF, &app))
@@ -335,10 +339,20 @@ fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<Credenti
         key,
         fault,
     };
-    // RED: grammar only; no role, secret:// or allowlist arm (the next
-    // commit adds them).
     let allowed = allowed_refs(channel, key);
-    CredentialRef::parse(text).map_err(|_| fail(RefFault::NotAName { allowed }))
+    if allowed.is_empty() {
+        return Err(fail(RefFault::NoSuchRole));
+    }
+    // #8454 S2c: a trusty-secrets reference is a later, additive change.
+    let scheme = text.trim_start().as_bytes().get(..9);
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case(b"secret://")) {
+        return Err(fail(RefFault::SecretScheme { allowed }));
+    }
+    let parsed = CredentialRef::parse(text).map_err(|_| fail(RefFault::NotAName { allowed }))?;
+    if !allowed.contains(&text) {
+        return Err(fail(RefFault::NotAllowed { allowed }));
+    }
+    Ok(parsed)
 }
 
 /// Parse and validate the host ceiling from `config.yaml` text.
