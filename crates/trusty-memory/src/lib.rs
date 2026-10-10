@@ -1341,18 +1341,23 @@ impl AppState {
     /// and evicts cold, *unused* stores once more than the cap are resident.
     /// Callers keep the returned `Arc` for as long as they need it — eviction
     /// never closes a store someone still holds. A live alias resolves to its
-    /// target first (#9544), so it shares the target's store and directory.
+    /// target first (#9544), so it shares the target's store and directory; a
+    /// store stranded under the alias dir is reported once, never opened (#9612).
     /// Test: `session_store_cache::tests::open_handles_are_bounded_by_cap`,
     /// `session_store_cache::tests::in_use_store_is_never_evicted`,
-    /// `session_store_follows_a_live_alias_and_creates_no_alias_dir`.
+    /// `session_store_follows_a_live_alias_and_creates_no_alias_dir`,
+    /// `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir`.
     pub fn session_store(&self, palace_id: &str) -> Result<Arc<ChatSessionStore>> {
         // #9544: canonicalise before both the cache key and the path, or an
         // alias opens a second `chat_sessions.redb` under `<root>/<alias>/`.
-        let palace_id =
+        let canonical =
             trusty_common::palace_alias::canonical_palace_id(&self.data_root, palace_id);
+        // #9612: warn once about a pre-redirect store left under the alias dir.
+        self.session_stores
+            .flag_stranded_alias_store(&self.data_root, palace_id, &canonical);
         // #4639: bounded cache replaces the unbounded, never-evicting DashMap.
         self.session_stores
-            .get_or_open(&palace_id, &self.data_root.join(&palace_id))
+            .get_or_open(&canonical, &self.data_root.join(&canonical))
     }
 
     /// Builder-style setter for the default palace name.
