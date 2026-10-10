@@ -57,11 +57,20 @@ pub(crate) const RULING_TAGS: &[&str] = &[
 ///
 /// Why: `status` and `resume-target` are the two snapshot tags the review
 /// measured in one project palace (1,482 and 1,318 drawers, almost none keyed).
+/// #9391: `checkpoint` marks the same kind of point-in-time record.
 /// What: compared exactly against each stored tag.
 /// Test: `a_stale_snapshot_loses_score_and_a_fresh_one_does_not`,
-/// `tags_match_exactly_never_by_substring`.
-pub(crate) const SNAPSHOT_TAGS: &[&str] =
-    &["status", "resume-target", "snapshot", "session-snapshot"];
+/// `tags_match_exactly_never_by_substring`,
+/// `a_checkpoint_tagged_drawer_is_a_snapshot`,
+/// `checkpoint_near_miss_tags_are_not_snapshots`.
+pub(crate) const SNAPSHOT_TAGS: &[&str] = &[
+    "status",
+    "resume-target",
+    "snapshot",
+    "session-snapshot",
+    // #9391: an unkeyed checkpoint was never demoted by age.
+    "checkpoint",
+];
 
 /// Score multiplier a snapshot approaches as it ages.
 ///
