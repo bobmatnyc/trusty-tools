@@ -56,7 +56,8 @@ async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
-    let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
+        .with_openrouter_api_key("");
     state.local_model.enabled = true;
     state.local_model.base_url = format!("http://{addr}");
     let state = std::sync::Arc::new(state);
