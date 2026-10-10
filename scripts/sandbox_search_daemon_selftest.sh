@@ -41,6 +41,8 @@
 #     live-socket a start refuses while <dir>/data's socket accepts a
 #                 connection that sandbox.pid does not record, and leaves the
 #                 listener and its socket alone (#9214)
+#     no-python3  with no python3 on PATH, a start refuses on a stale socket
+#                 file ("cannot tell") and leaves that file alone (#9214)
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
 #                 directory refuses
 #
@@ -477,6 +479,31 @@ else
 fi
 kill "$DECOY_PID" 2>/dev/null || true
 DECOY_PID=""
+
+# 14. no-python3 (#9214): with no python3 on PATH the launcher cannot tell a
+# stale socket from a live one. It refuses and leaves the socket file alone.
+# NOPY holds links to every other tool the launcher runs before that check.
+DIR19="$TMP_ROOT/case19"
+SOCK19="$DIR19/data/trusty-search.sock"
+NOPY="$TMP_ROOT/nopy-bin"
+mkdir -p "$DIR19/data" "$NOPY"
+for tool in bash env id uname dscl getent cut sed tr ps mkdir rm; do
+  t="$(command -v "$tool" || true)"
+  [ -z "$t" ] || ln -s "$t" "$NOPY/$tool"
+done
+"$PYTHON" -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK19"
+set +e
+OUT19="$(env -i PATH="$NOPY" "$NOPY/bash" "$LAUNCHER" --bin "$STUB" --dir "$DIR19" 2>&1)"
+S19=$?
+set -e
+if [ -n "$(env -i PATH="$NOPY" "$NOPY/bash" -c 'command -v python3' || true)" ]; then
+  fail no-python3 "python3 is reachable on the restricted PATH $NOPY"
+elif [ "$S19" -eq 1 ] && printf '%s' "$OUT19" | grep -qF "cannot tell whether $SOCK19 is live" \
+    && [ -S "$SOCK19" ] && [ ! -e "$DIR19/home/stub-args" ]; then
+  pass no-python3
+else
+  fail no-python3 "exit $S19, socket kept: $([ -S "$SOCK19" ] && echo yes || echo no): $OUT19"
+fi
 
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
