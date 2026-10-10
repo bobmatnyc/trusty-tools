@@ -83,7 +83,7 @@ pub struct DoctorRow {
     pub recipient: String,
     /// Allowed kinds, schema spelling.
     pub kinds: Vec<&'static str>,
-    /// The routes file passed the load gate (committed at `HEAD`).
+    /// The routes file passed the load gate (committed on the default branch).
     pub gate: Cell,
     /// The key file exists, has mode 0600 and parses.
     pub key_file: Cell,
@@ -321,7 +321,10 @@ fn load_cell(project_dir: &Path, routes: &Result<RouteTable, RouteError>) -> Cel
             "no routes file at {}",
             routes_path(project_dir).display()
         )),
-        Ok(t) => Cell::ok(format!("{} route(s), committed at HEAD", t.routes.len())),
+        Ok(t) => Cell::ok(format!(
+            "{} route(s), committed on the default branch",
+            t.routes.len()
+        )),
         Err(e) => Cell::failed(e.to_string()),
     }
 }
@@ -364,7 +367,7 @@ fn build(
                 route: r.name.clone(),
                 recipient: r.recipient.clone(),
                 kinds: r.kinds.iter().map(|k| k.as_str()).collect(),
-                gate: Cell::ok("committed at HEAD"),
+                gate: Cell::ok("committed on the default branch"),
                 key_file: key_file.clone(),
                 token: token.clone(),
                 space,
