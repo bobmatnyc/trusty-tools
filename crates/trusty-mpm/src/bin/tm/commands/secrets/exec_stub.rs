@@ -34,7 +34,7 @@ use trusty_secrets::SecretKey;
 use trusty_secrets::api::methods::{ResolveRequest, ResolveResponse, method};
 use trusty_secrets::server::OnDemandSecrets;
 
-use super::exec_proc::clear_cloexec;
+use super::exec_proc::{clear_cloexec, set_cloexec};
 use super::exec_wire::{self, ExecSpec, TOKEN_FD_ENV};
 
 /// How long the stub waits for tm to write the token.
@@ -52,15 +52,21 @@ pub(crate) struct StubArgs {
     pub(crate) spec: ExecSpec,
 }
 
-/// Take ownership of an inherited fd; `None` for stdio or a closed fd.
-fn inherited(fd: i32) -> Option<File> {
+/// Take ownership of an inherited fd, close-on-exec again; `None` for
+/// stdio or a closed fd.
+///
+/// Why: tm cleared `FD_CLOEXEC` so the stub would inherit the fd. Left
+/// clear, a server the stub's first `secrets.resolve` auto-spawns inherits
+/// the report pipe's write end, and tm never sees EOF on it.
+/// What: refuses fds 0-2; otherwise sets `FD_CLOEXEC` (a failure is
+/// `None`, so the stub runs nothing) and takes ownership.
+/// Test: `stub_inherited_fd_is_close_on_exec`.
+pub(super) fn inherited(fd: i32) -> Option<File> {
     if fd <= 2 {
         return None;
     }
-    // SAFETY: `fcntl(F_GETFD)` only reads the fd's flags.
-    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-        return None;
-    }
+    // #9621: an invalid fd fails here too, so no separate validity check.
+    set_cloexec(fd).ok()?;
     // SAFETY: tm passed this fd for the stub alone, and nothing else in this
     // process owns it, so taking ownership here closes it exactly once.
     Some(File::from(unsafe { OwnedFd::from_raw_fd(fd) }))

@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, Once};
 
 use trusty_common::uds::server::ServeExit as UdsServeExit;
@@ -465,8 +466,26 @@ async fn resolve_by_agent_descendant_of_unflagged_grant_is_refused() {
         .into_iter()
         .filter(|r| r.method == AuditMethod::Resolve)
         .collect();
-    assert_eq!(resolves.len(), 1, "{resolves:?}");
-    assert_eq!(resolves[0].agent_parent, Some(true));
+    // #9621: the allow record precedes the read; the flag refusal follows.
+    let shapes: Vec<_> = resolves.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            (
+                AuditMethod::Resolve,
+                AuditDecision::Allow,
+                None,
+                Some("API_KEY")
+            ),
+            (
+                AuditMethod::Resolve,
+                AuditDecision::Deny,
+                Some("agent_use_refused"),
+                Some("API_KEY")
+            ),
+        ]
+    );
+    assert!(resolves.iter().all(|r| r.agent_parent == Some(true)));
 }
 
 /// Why: #9070 slice 3, the #9629 QA finding — a grant record says whether
@@ -658,11 +677,34 @@ async fn one_shot_grant_survives_a_backend_failure() {
 
 /// The fixture's keychain, wrapped so its first `get` spends the armed
 /// token through the shared registry: a racing caller that used the
-/// one-shot grant between `check_scoped` and `spend`.
+/// one-shot grant between `check_scoped` and `spend`. It also counts every
+/// value or flag read (#9621).
 #[derive(Debug)]
 struct RacingGet {
     inner: Arc<MemoryBackend>,
     armed: Mutex<Option<(Arc<GrantRegistry>, String)>>,
+    reads: AtomicUsize,
+}
+
+/// The fixture's state over one shared [`RacingGet`], with a fake-table
+/// grant registry; the wrapper and the registry.
+fn racing_state(fx: &Fixture) -> (State, Arc<RacingGet>, Arc<GrantRegistry>) {
+    let racing = Arc::new(RacingGet {
+        inner: Arc::clone(&fx.keychain),
+        armed: Mutex::new(None),
+        reads: AtomicUsize::new(0),
+    });
+    let shared = Arc::clone(&racing);
+    let factory: BackendFactory =
+        Arc::new(move |_: &BackendId| Ok(Arc::clone(&shared) as Arc<dyn SecretBackend>));
+    let mut state = fx.state(factory);
+    let grants = Arc::new(GrantRegistry::new(
+        procs_with_me(),
+        Arc::new(FakeClock::at(T0)),
+        DEFAULT_MAX_TTL,
+    ));
+    state.grants = Arc::clone(&grants);
+    (state, racing, grants)
 }
 
 impl SecretBackend for RacingGet {
@@ -673,6 +715,7 @@ impl SecretBackend for RacingGet {
         self.inner.capabilities()
     }
     fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         if let Some((grants, token)) = self.armed.lock().unwrap().take() {
             // Never panic in the server's thread; the test reads the outcome.
             let _ = grants.spend(&GrantToken::from_wire(token));
@@ -691,6 +734,7 @@ impl SecretBackend for RacingGet {
         self.inner.delete(vault, key)
     }
     fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.agents_may_use(vault, key)
     }
     fn set_agents_may_use(
@@ -713,20 +757,7 @@ impl SecretBackend for RacingGet {
 async fn resolve_that_loses_the_one_shot_race_returns_no_value() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
-    let racing = Arc::new(RacingGet {
-        inner: Arc::clone(&fx.keychain),
-        armed: Mutex::new(None),
-    });
-    let shared = Arc::clone(&racing);
-    let factory: BackendFactory =
-        Arc::new(move |_: &BackendId| Ok(Arc::clone(&shared) as Arc<dyn SecretBackend>));
-    let mut state = fx.state(factory);
-    let grants = Arc::new(GrantRegistry::new(
-        procs_with_me(),
-        Arc::new(FakeClock::at(T0)),
-        DEFAULT_MAX_TTL,
-    ));
-    state.grants = Arc::clone(&grants);
+    let (state, racing, grants) = racing_state(&fx);
     let server = fx.start_state(state).await;
     let token = granted_once(&fx, &["API_KEY"]).await;
     *racing.armed.lock().unwrap() = Some((grants, token.clone()));
@@ -758,6 +789,37 @@ async fn resolve_that_loses_the_one_shot_race_returns_no_value() {
             ),
         ]
     );
+}
+
+/// Why: #9621 — the audit log is written before the backend is read, so an
+/// unwritable log refuses the resolve with no value, no backend read, and
+/// the one-shot grant unspent.
+/// Red when the backend read runs before the allow record (one read).
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_with_unwritable_audit_never_reads_the_backend() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, racing, _grants) = racing_state(&fx);
+    let server = fx.start_state(state).await;
+    let token = granted_once(&fx, &["API_KEY"]).await;
+    let before = racing.reads.load(Ordering::SeqCst);
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    set_mode(&dir, 0o755);
+    let restore = RestoreMode(dir);
+    let refused = resolve_now(&fx, &token, "API_KEY").await;
+    let reads = racing.reads.load(Ordering::SeqCst) - before;
+    drop(restore);
+    let retry = resolve_now(&fx, &token, "API_KEY").await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&refused, method::RESOLVE),
+        ErrorKind::AuditUnavailable
+    );
+    assert_no_value(&refused);
+    assert_eq!(reads, 0, "the backend was read with no audit record");
+    assert_eq!(ok(retry)["value"], SENTINEL_VALUE);
 }
 
 /// Why: #9621 — once the granted child exits, its grant is refused and

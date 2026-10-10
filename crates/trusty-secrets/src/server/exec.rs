@@ -157,15 +157,17 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// [`has_agent_ancestor`] on the caller's own ancestry (#9070 slice 3); a
 /// read error refuses. The key then resolves in the grant's own project,
 /// through `resolve_reference` with that `agent_parent`, so the agents flag
-/// is checked again before the read. #9621: the allow record is then
-/// written ahead of the reply ([`Recording::WriteAhead`]); if the log cannot
+/// is checked again before the read. #9621: the allow record is written
+/// ahead of the backend read ([`Recording::WriteAhead`]); if the log cannot
 /// be opened or the record appended, the reply is
-/// [`ErrorKind::AuditUnavailable`] and carries no value. Only then is the
+/// [`ErrorKind::AuditUnavailable`], the backend is never opened or read, and
+/// no value leaves. A failure after it (the agents flag, the backend, the
+/// spend) adds a deny record with its kind. Only after the read is the
 /// grant spent ([`GrantRegistry::spend`]); a grant revoked, expired or spent
-/// by a racing caller since the check answers [`ErrorKind::GrantRefused`],
-/// with a deny record after the allow. So a one-shot grant is never spent
-/// by a refusal, an audit failure or a backend failure. A refusal before the
-/// read leaves one deny record, best-effort.
+/// by a racing caller since the check answers [`ErrorKind::GrantRefused`].
+/// So a one-shot grant is never spent by a refusal, an audit failure or a
+/// backend failure. A refusal before the allow record leaves one deny
+/// record, best-effort.
 ///
 /// [`GrantRegistry::check_scoped`]: super::grant::GrantRegistry::check_scoped
 /// [`GrantRegistry::spend`]: super::grant::GrantRegistry::spend
@@ -174,6 +176,7 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// `resolve_with_unreadable_caller_ancestry_is_refused`,
 /// `resolve_from_sibling_with_valid_token_is_refused`,
 /// `resolve_allow_with_unwritable_audit_returns_no_value`,
+/// `resolve_with_unwritable_audit_never_reads_the_backend`,
 /// `resolve_sentinel_never_reaches_the_audit_file_or_logs`,
 /// `one_shot_grant_survives_unreadable_caller_ancestry`,
 /// `one_shot_grant_survives_an_audit_failure`,
@@ -206,14 +209,15 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             gate.agent_parent(agent_parent);
             let project = ProjectContext::resolve(state, &scope.project)?;
             gate.project(&project);
+            // #9621: the allow record before the backend is opened or read,
+            // so an audit log that cannot be written refuses with no read;
+            // it also precedes the spend, so an audit failure spends nothing.
+            gate.write_ahead()?;
             let store = SecretStore::new(project.backend(state)?, state.index.clone());
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),
             };
             let value = resolve_reference(&store, project.scopes(), &reference, agent_parent)?;
-            // #9621: the record before the spend, so an audit failure spends
-            // nothing; the value is withheld on either failure.
-            gate.write_ahead()?;
             if !state.grants.spend(&token).map_err(grant_kind)? {
                 return Err(ErrorKind::GrantRefused);
             }
