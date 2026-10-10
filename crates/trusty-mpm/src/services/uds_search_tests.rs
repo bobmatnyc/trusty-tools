@@ -124,6 +124,23 @@ fn default_manifest_declares_trusty_search_by_socket() {
     }
 }
 
+/// Why (#9536): `trusty-search start` rejects `--no-http` and `--port`, so a
+/// default manifest that still passed one would make `tm services start` fail.
+/// What: the embedded trusty-search start and restart commands carry neither.
+/// Test: this test.
+#[test]
+fn default_manifest_starts_trusty_search_without_removed_flags() {
+    let m = ServicesManifest::default_manifest();
+    let ts = &m.services[SEARCH];
+    for cmd in [&ts.start_cmd, &ts.restart_cmd] {
+        let cmd = cmd.as_deref().expect("trusty-search declares the command");
+        assert!(
+            !cmd.contains("--no-http") && !cmd.contains("--port"),
+            "#9536: `{cmd}` passes a flag `start` rejects"
+        );
+    }
+}
+
 /// Why: the UP arm — a socket-only daemon answering `search.health` is
 /// healthy and running, with no port, no PID and no HTTP.
 /// What: a mock daemon on a temp socket that `TRUSTY_SEARCH_SOCKET` names,
@@ -408,4 +425,116 @@ fn other_trusty_search_shapes_are_left_alone() {
     assert_eq!(ts.health_probe, HealthProbe::Http);
     assert_eq!(ts.default_port, Some(7900));
     assert!(warn.is_empty(), "no WARN for a non-legacy entry");
+}
+
+/// The trusty-search and trusty-analyze entries `tm services init` wrote on
+/// trusty-mpm 1.8.0–1.8.2 (`git show trusty-mpm-v1.8.0:…/default-services.yaml`).
+const TM_1_8_YAML: &str = r#"version: 1
+services:
+  trusty-search:
+    description: "Hybrid BM25 + vector + KG code search daemon (Unix socket)"
+    health_probe: uds_search
+    default_port: null
+    port_discovery: static
+    health_url: null
+    log_path: "~/Library/Logs/trusty-search/stderr.log"
+    version_cmd: "trusty-search --version"
+    process_match: "trusty-search start"
+    start_cmd: "trusty-search start --no-http"
+    stop_cmd: "trusty-search stop"
+    restart_cmd: "trusty-search stop && trusty-search start --no-http"
+  trusty-analyze:
+    description: "Code analysis sidecar daemon (complexity, smells, quality)"
+    default_port: 7879
+    port_discovery: static
+    health_url: "http://localhost:{port}/health"
+    log_path: "~/.trusty-analyze/logs/stderr.log"
+    version_cmd: "trusty-analyze --version"
+    process_match: "trusty-analyze"
+    start_cmd: "trusty-analyze start"
+    stop_cmd: "trusty-analyze stop"
+    restart_cmd: "trusty-analyze stop && trusty-analyze start"
+"#;
+
+/// Load `yaml` from a temp `services.yaml`; returns the manifest, the warn
+/// text, and whether the file bytes were unchanged by the load.
+fn load_yaml(yaml: &str) -> (ServicesManifest, String, PathBuf, bool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("services.yaml");
+    std::fs::write(&path, yaml).expect("write manifest");
+    let before = std::fs::read(&path).expect("read manifest");
+    let mut warn = Vec::new();
+    let m = load_user_manifest(&path, &mut warn).expect("load");
+    let unchanged = std::fs::read(&path).expect("reread") == before;
+    (m, String::from_utf8(warn).expect("utf8"), path, unchanged)
+}
+
+/// Why: trusty-search 0.60.0 rejects `start --no-http` with exit 2, so the
+/// 1.8.x manifest's `restart_cmd` would stop the daemon and fail to start it
+/// (#9536). The load strips the flag, warns once, and never writes the file.
+/// Test: this test.
+#[test]
+fn tm_1_8_search_start_no_http_is_stripped_on_load_and_the_file_is_untouched() {
+    let (m, warn, path, unchanged) = load_yaml(TM_1_8_YAML);
+
+    let ts = &m.services[SEARCH];
+    assert_eq!(ts.start_cmd.as_deref(), Some("trusty-search start"));
+    assert_eq!(
+        ts.restart_cmd.as_deref(),
+        Some("trusty-search stop && trusty-search start")
+    );
+    assert_eq!(ts.stop_cmd.as_deref(), Some("trusty-search stop"));
+    let analyze = &m.services["trusty-analyze"];
+    assert_eq!(
+        analyze.restart_cmd.as_deref(),
+        Some("trusty-analyze stop && trusty-analyze start")
+    );
+
+    assert_eq!(warn.lines().count(), 1, "exactly one WARN line: {warn:?}");
+    assert!(warn.starts_with("WARN"), "{warn}");
+    assert!(warn.contains(&path.display().to_string()), "{warn}");
+    assert!(warn.contains("--no-http"), "{warn}");
+    assert!(unchanged, "the file is never written");
+}
+
+/// Why: `--port <n>` and `--port=<n>` are rejected too (#9536); the strip is
+/// token-wise and only on a `trusty-search start` invocation, so another
+/// service's `--port` and an argument that merely contains "port" survive.
+/// Test: this test.
+#[test]
+fn search_start_port_is_stripped_in_both_spellings_and_nothing_else_is() {
+    let yaml = TM_1_8_YAML
+        .replace(
+            "start_cmd: \"trusty-search start --no-http\"",
+            "start_cmd: \"trusty-search start --port 7878 --data-dir /srv/port-data\"",
+        )
+        .replace(
+            "restart_cmd: \"trusty-search stop && trusty-search start --no-http\"",
+            "restart_cmd: \"trusty-search stop --port=1 && trusty-search start --port=7878 \
+             --foreground\"",
+        )
+        .replace(
+            "start_cmd: \"trusty-analyze start\"",
+            "start_cmd: \"trusty-analyze start --port 7879 --no-http\"",
+        );
+    let (m, warn, _path, unchanged) = load_yaml(&yaml);
+
+    let ts = &m.services[SEARCH];
+    assert_eq!(
+        ts.start_cmd.as_deref(),
+        Some("trusty-search start --data-dir /srv/port-data")
+    );
+    assert_eq!(
+        ts.restart_cmd.as_deref(),
+        Some("trusty-search stop --port=1 && trusty-search start --foreground")
+    );
+    assert_eq!(
+        m.services["trusty-analyze"].start_cmd.as_deref(),
+        Some("trusty-analyze start --port 7879 --no-http"),
+        "another service keeps its args"
+    );
+    assert_eq!(warn.lines().count(), 1, "exactly one WARN line: {warn:?}");
+    assert!(warn.contains("--port 7878"), "{warn}");
+    assert!(warn.contains("--port=7878"), "{warn}");
+    assert!(unchanged, "the file is never written");
 }

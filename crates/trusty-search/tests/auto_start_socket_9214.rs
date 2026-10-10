@@ -83,7 +83,6 @@ async fn auto_start_binds_the_socket_the_client_resolved() {
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &home)
         .env("TRUSTY_NO_AUTO_DISCOVER", "1")
-        .env_remove("TRUSTY_SEARCH_NO_HTTP")
         .env("TRUSTY_EMBEDDER", "stdio")
         .env("TRUSTY_SKIP_RAM_CHECK", "1")
         .env("RUST_LOG", "warn")

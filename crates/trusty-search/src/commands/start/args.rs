@@ -1,25 +1,20 @@
 //! The arguments of `trusty-search start`.
 //!
-//! Why (#9214): `main.rs` sits at its frozen `check_line_cap` budget, and
-//! `--no-http` adds a field. The fields moved here verbatim; `main.rs` keeps
-//! the subcommand's help text and flattens this struct into it.
-//! What: one `clap::Args` struct, read by [`super::handle_start`], and
-//! [`retired_flag_warnings`], the one-release bridge for the flags the
-//! socket-only daemon no longer uses.
-//! Test: `bare_flag_still_means_true`, `retired_flags_still_parse` and
-//! `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`
-//! parse `start` through the real `Cli`; `retired_flags_warn_and_change_nothing`
+//! Why (#9214): `main.rs` sits at its frozen `check_line_cap` budget, so the
+//! fields live here; `main.rs` keeps the subcommand's help text and flattens
+//! this struct into it.
+//! What: one `clap::Args` struct, read by [`super::handle_start`]. #9536
+//! removed `--port` and `--no-http`, so clap rejects both as unknown
+//! arguments.
+//! Test: `bare_flag_still_means_true`, `removed_start_flags_are_unknown_arguments`
+//! and `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`
+//! parse `start` through the real `Cli`; `removed_start_inputs_are_refused_or_unread`
 //! drives the binary.
 
 /// Every flag `trusty-search start` accepts.
 #[derive(clap::Args, Debug, Clone)]
 pub struct StartArgs {
-    /// Ignored (#9214): the daemon binds no TCP port. Accepted for one
-    /// release so an existing launchd unit or script still starts; a value
-    /// prints a warning on stderr.
-    #[arg(long, value_name = "PORT")]
-    pub(crate) port: Option<u16>,
-
+    // #9536: `--port` is gone — the daemon binds no TCP port (#9214).
     /// Run in the foreground instead of forking a background daemon.
     ///
     /// Default (`trusty-search start`): self-spawns a detached child with
@@ -128,15 +123,8 @@ pub struct StartArgs {
     #[arg(long, default_value_t = false)]
     pub(crate) serial: bool,
 
-    /// Ignored (#9214): the daemon serves its RPC socket only, always.
-    ///
-    /// Accepted for one release, with a warning on stderr, so a unit that
-    /// still passes it starts. Any value is accepted: a retired flag must not
-    /// stop the daemon. `TRUSTY_SEARCH_NO_HTTP` is read and ignored the same
-    /// way, by [`retired_flag_warnings`].
-    #[arg(long, value_name = "BOOL", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
-    pub(crate) no_http: Option<String>,
-
+    // #9536: `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are gone — the daemon
+    // serves its RPC socket only (#9214).
     /// Bind the RPC socket at exactly this path (#9214).
     ///
     /// Without it the daemon binds `<TRUSTY_DATA_DIR>/trusty-search.sock`, or
@@ -165,46 +153,4 @@ pub(crate) fn parse_socket_path(raw: &str) -> Result<std::path::PathBuf, String>
     } else {
         Err(format!("--socket must be an absolute path (got: {raw:?})"))
     }
-}
-
-/// The environment variable that turned the HTTP listener off before #9214.
-pub(crate) const RETIRED_NO_HTTP_ENV: &str = "TRUSTY_SEARCH_NO_HTTP";
-
-/// One stderr warning per retired `start` input that is present (#9214).
-///
-/// Why: ruling D2 keeps `--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP`
-/// working for one release, so a launchd unit, a claude-mpm-written plist or
-/// a script that still passes them starts instead of failing to parse. A
-/// silent no-op would hide that the setting does nothing now.
-/// What: a warning naming each input that is set, in the order `--port`,
-/// `--no-http`, `TRUSTY_SEARCH_NO_HTTP`; empty when none is. Pure — the
-/// caller prints them and changes nothing else.
-/// Test: `retired_flag_warnings_name_each_input`,
-/// `retired_flags_warn_and_change_nothing`.
-pub(crate) fn retired_flag_warnings(
-    port: Option<u16>,
-    no_http: Option<&str>,
-    no_http_env: Option<&std::ffi::OsStr>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(port) = port {
-        out.push(format!(
-            "trusty-search: warning: --port {port} is ignored; the daemon serves its Unix socket \
-             only and binds no TCP port (#9214). Remove it; it will be rejected in a later release."
-        ));
-    }
-    if no_http.is_some() {
-        out.push(
-            "trusty-search: warning: --no-http is ignored; the daemon never binds HTTP now \
-             (#9214). Remove it; it will be rejected in a later release."
-                .to_string(),
-        );
-    }
-    if no_http_env.is_some() {
-        out.push(format!(
-            "trusty-search: warning: {RETIRED_NO_HTTP_ENV} is ignored; the daemon never binds \
-             HTTP now (#9214). Unset it."
-        ));
-    }
-    out
 }

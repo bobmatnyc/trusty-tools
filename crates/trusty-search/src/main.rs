@@ -442,8 +442,8 @@ enum Commands {
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
     ///
     /// #9214: the daemon serves its Unix socket only and binds no TCP port.
-    /// `--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are accepted for one
-    /// release and ignored, each with a warning on stderr.
+    /// #9536: `--port` and `--no-http` are unknown arguments now, and
+    /// `TRUSTY_SEARCH_NO_HTTP` is not read.
     ///
     /// #8176: an isolated instance started against an explicit data directory
     /// (`--data-dir` or `TRUSTY_DATA_DIR`) does NOT auto-discover, on its first

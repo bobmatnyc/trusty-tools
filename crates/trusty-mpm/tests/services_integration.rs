@@ -9,7 +9,7 @@
 //! the daemon's data directory), then calls `Discoverer::list()` and
 //! `Discoverer::health()` and asserts the socket-only shape: running, healthy,
 //! no TCP port and no URL.
-//! Test: start a socket-only daemon (`trusty-search start --no-http`), then run:
+//! Test: start a socket-only daemon (`trusty-search start`), then run:
 //!   cargo test -p trusty-mpm --test integration services_integration:: -- --include-ignored --nocapture
 
 use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};

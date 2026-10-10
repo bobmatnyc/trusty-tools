@@ -1552,9 +1552,10 @@ The daemon serves every method on its Unix socket and binds no TCP port
   lockfile pid;
 - runs auto-discovery over the socket.
 
-`--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are accepted for one
-release and ignored, each with a warning on stderr (ruling D2). A unit
-`service install` regenerates carries none of them. The axum router compiles
+#9536 removed `--port` and `--no-http` from `start`: clap rejects either as
+an unknown argument (exit 2), and `TRUSTY_SEARCH_NO_HTTP` is not read. A unit
+that still passes a flag fails to start; `service install` regenerates it
+without them. The axum router compiles
 only under `cfg(test)` until PR-B deletes it (ruling D1), so `/ui`,
 `/upgrade`, `/metrics` and `/api/chat/providers` are unavailable; the search
 dashboard is served by trusty-console.
