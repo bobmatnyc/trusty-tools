@@ -52,6 +52,7 @@ mod indexes;
 mod indexes_relocate;
 // #7434: `POST /indexes/:id/roots` — the multi-root mutation.
 mod indexes_roots;
+mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 mod quantize_handlers;
 mod reindex_handlers;
@@ -229,6 +230,8 @@ mod tests_dropped_results;
 // #7675: a search whose top hit was decided by the exact-match floor must say so.
 #[cfg(test)]
 mod tests_exact_match_7675;
+#[cfg(test)]
+mod tests_lexical_lane_9258;
 // #5917: a search over an index whose corpus cannot be read must be refused.
 #[cfg(test)]
 mod tests_corpus_read_5917;

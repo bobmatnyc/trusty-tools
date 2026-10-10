@@ -251,6 +251,9 @@ pub struct SearchAppState {
     /// OpenRouter API key resolved at startup. May be empty when the user
     /// only configured a local model; the chat handler returns 503 in that case.
     pub openrouter_api_key: String,
+    /// `[search]` lexical-lane defaults from `config.toml` (#9258); a
+    /// per-query value wins. Default: ripgrep lane on, no lexical limit.
+    pub lexical_defaults: crate::core::indexer::LexicalLaneDefaults,
     /// Lazily-initialised active chat provider. Auto-detection happens on the
     /// first chat call and the result is cached for the daemon's lifetime.
     pub chat_provider: Arc<OnceCell<Option<Arc<dyn ChatProvider>>>>,
