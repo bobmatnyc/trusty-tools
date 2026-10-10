@@ -144,7 +144,7 @@ pub use migration_state::{
 pub use search::drops::SearchDrops;
 pub use search::exact::ExactMatchReport;
 pub use search::lexical_lane::{
-    check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT,
+    check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT, ORIGIN_CONFIG,
 };
 pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};

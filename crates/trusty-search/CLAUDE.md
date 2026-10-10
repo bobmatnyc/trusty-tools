@@ -637,7 +637,9 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
   - `lexical_limit` (optional, `1..=10000`, #9258): candidate depth of each
     lexical lane (BM25, grep, exact-match). Omitted: `[search].lexical_limit`,
     else `top_k × 4`. Out of range answers `400 invalid_lexical_limit`, never a
-    clamp; a bad config value is refused the same way and the message names it.
+    clamp. A bad `[search]` value in `config.toml` (wrong type, negative, `0`,
+    above `10000`, or a file that declares `[search]` but is not valid TOML)
+    stops `trusty-search start`; the error names the key, never the value.
     `POST /search` carries both fields too.
 - **Response 200**:
   ```json
