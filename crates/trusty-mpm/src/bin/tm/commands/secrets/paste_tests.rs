@@ -11,11 +11,15 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use super::paste::{CLIPBOARD_MAX_BYTES, CLIPBOARD_READ_TIMEOUT, ClipboardError};
-use super::value::{SystemClipboard, ValueSource};
+use super::value::{PASTE_TOOLS, SystemClipboard, ValueSource};
 use crate::test_support::hermetic_temp_dir;
 
 /// The limit a test gives a tool it expects to hang.
 const SHORT: Duration = Duration::from_millis(200);
+
+/// The limits a hung-tool test tries in turn, so a slow fork on a loaded
+/// host retries with a longer limit instead of failing (#7524 P2-L6).
+const HUNG_LIMITS: [Duration; 3] = [SHORT, Duration::from_secs(1), Duration::from_secs(5)];
 
 /// How long a test waits for `read` before calling the wait unbounded.
 const UNBOUNDED: Duration = Duration::from_secs(10);
@@ -57,49 +61,98 @@ fn gone(pid: libc::pid_t) -> bool {
 
 /// Why: #7524 P2-L6, the Fail-Open Check — a hung paste tool blocked
 /// `tm secrets set` forever and was never killed.
-/// What: a script that backgrounds a grandchild and waits on it, with a
-/// 200 ms limit and a second tool behind it. The read must end in `Timeout`,
-/// never `Ok` and never the second tool's answer, and both PIDs must be gone.
+/// What: two scripts that background a grandchild holding stdout: one waits
+/// on it, one exits and leaves it behind. Each runs with a second tool
+/// behind it. The read must end in `Timeout`, never `Ok` and never the second
+/// tool's answer, and the script and grandchild PIDs must both be gone. The
+/// script publishes its PIDs with a rename; a run killed before the rename
+/// retries with the next of [`HUNG_LIMITS`].
 /// Test: itself.
 #[test]
 fn a_hung_paste_tool_times_out_and_its_whole_process_group_is_killed() {
-    let dir = hermetic_temp_dir();
-    let pids = dir.path().join("pids");
-    let next_ran = dir.path().join("next-ran");
-    let hung = script(
-        dir.path(),
-        "hung.sh",
-        &format!("sleep 20 &\necho \"$$ $!\" > '{}'\nwait\n", pids.display()),
-    );
-    let next = script(
-        dir.path(),
-        "next.sh",
-        &format!(": > '{}'\nprintf next\n", next_ran.display()),
-    );
+    for (case, tail) in [("waits", "wait\n"), ("exits", "exit 0\n")] {
+        let dir = hermetic_temp_dir();
+        let pids = dir.path().join("pids");
+        let next_ran = dir.path().join("next-ran");
+        let body = format!(
+            "sleep 20 &\necho \"$$ $!\" > '{p}.tmp'\nmv '{p}.tmp' '{p}'\n{tail}",
+            p = pids.display()
+        );
+        let hung = script(dir.path(), "hung.sh", &body);
+        let next = script(
+            dir.path(),
+            "next.sh",
+            &format!(": > '{}'\nprintf next\n", next_ran.display()),
+        );
 
-    let err = read_within(SystemClipboard::with_tools(vec![hung, next], SHORT))
-        .expect_err("a hung tool must be an error, never Ok");
-
-    assert!(
-        matches!(
-            err.downcast_ref::<ClipboardError>(),
-            Some(ClipboardError::Timeout { .. })
-        ),
-        "expected ClipboardError::Timeout, got: {err:#}"
-    );
-    assert!(
-        !next_ran.exists(),
-        "a timeout must stop the read, not fall through to the next tool"
-    );
-    let text = std::fs::read_to_string(&pids).expect("the hung script wrote its PIDs");
-    let pids: Vec<libc::pid_t> = text
-        .split_whitespace()
-        .map(|p| p.parse().expect("a PID"))
-        .collect();
-    assert_eq!(pids.len(), 2, "the script and its grandchild: {text:?}");
-    for pid in pids {
-        assert!(gone(pid), "PID {pid} survived the timeout");
+        let mut published = None;
+        for limit in HUNG_LIMITS {
+            let tools = vec![hung.clone(), next.clone()];
+            let err = read_within(SystemClipboard::with_tools(tools, limit))
+                .expect_err("a hung tool must be an error, never Ok");
+            assert!(
+                matches!(
+                    err.downcast_ref::<ClipboardError>(),
+                    Some(ClipboardError::Timeout { .. })
+                ),
+                "{case}: expected ClipboardError::Timeout, got: {err:#}"
+            );
+            assert!(
+                !next_ran.exists(),
+                "{case}: a timeout must stop the read, not fall through to the next tool"
+            );
+            if let Ok(text) = std::fs::read_to_string(&pids) {
+                published = Some(text);
+                break;
+            }
+        }
+        let text = published.unwrap_or_else(|| {
+            panic!("{case}: the script never published its PIDs within {HUNG_LIMITS:?}")
+        });
+        let pids: Vec<libc::pid_t> = text
+            .split_whitespace()
+            .map(|p| p.parse().expect("a PID"))
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "{case}: the script and its grandchild: {text:?}"
+        );
+        for pid in pids {
+            assert!(gone(pid), "{case}: PID {pid} survived the timeout");
+        }
     }
+}
+
+/// Why: #7524 P2-L6, critic finding — only the no-reader path of
+/// [`SystemClipboard::in_dirs`] was covered, so a wrong join or a bare name
+/// would fail every production read while the suite stayed green.
+/// What: installs an executable script under the platform's first paste
+/// tool name in a temp dir and reads through `in_dirs`. The read must be
+/// `Ok` with the script's output for that tool's arguments. A child `cp`
+/// writes the executable, so no thread of this process ever holds it open
+/// for writing (`ETXTBSY`). Not a `/bin/echo` symlink: a multicall
+/// coreutils dispatches on the link's name.
+/// Test: itself.
+#[test]
+fn in_dirs_runs_the_tool_it_finds_in_a_search_directory() {
+    let dir = hermetic_temp_dir();
+    let (name, args) = PASTE_TOOLS[0];
+    let staged = dir.path().join("tool.src");
+    std::fs::write(&staged, "#!/bin/sh\nprintf 'found %s' \"$*\"\n").expect("stage the tool");
+    let search = dir.path().join("search");
+    std::fs::create_dir(&search).expect("search dir");
+    let installed = Command::new("/bin/sh")
+        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
+        .arg(&staged)
+        .arg(search.join(name))
+        .status()
+        .expect("install the tool");
+    assert!(installed.success(), "install the tool: {installed}");
+
+    let clipboard = SystemClipboard::in_dirs(std::slice::from_ref(&search), CLIPBOARD_READ_TIMEOUT);
+    let text = read_within(clipboard).expect("the tool found in the search directory answers");
+    assert_eq!(text, format!("found {}", args.join(" ")));
 }
 
 /// The env var that turns [`a_paste_tool_planted_on_path_never_runs`] into

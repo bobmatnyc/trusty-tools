@@ -26,9 +26,9 @@ pub(crate) trait ValueSource {
 
 /// The paste tools tried in order; the first one present answers.
 #[cfg(target_os = "macos")]
-const PASTE_TOOLS: &[(&str, &[&str])] = &[("pbpaste", &[])];
+pub(crate) const PASTE_TOOLS: &[(&str, &[&str])] = &[("pbpaste", &[])];
 #[cfg(not(target_os = "macos"))]
-const PASTE_TOOLS: &[(&str, &[&str])] = &[
+pub(crate) const PASTE_TOOLS: &[(&str, &[&str])] = &[
     ("wl-paste", &["--no-newline"]),
     ("xclip", &["-selection", "clipboard", "-o"]),
     ("xsel", &["--clipboard", "--output"]),
