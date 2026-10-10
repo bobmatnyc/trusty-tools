@@ -223,3 +223,28 @@ fn scrubber_passes_short_values_and_binary_through() {
     );
     assert_eq!(scrub(&[] as &[&str], &[binary]), binary);
 }
+
+/// Why: #9621 — tm clears `FD_CLOEXEC` on the report pipe so the stub
+/// inherits it; the stub must set it again, or a server its first resolve
+/// auto-spawns holds the write end and tm never sees EOF.
+/// Red when `inherited` leaves the flag clear (the child sees the fd).
+/// Test: itself.
+#[test]
+fn stub_inherited_fd_is_close_on_exec() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    let (_read, write) = std::io::pipe().expect("pipe");
+    let fd = write.into_raw_fd();
+    super::exec_proc::clear_cloexec(fd).expect("clear the flag, as tm does");
+    let report = super::exec_stub::inherited(fd).expect("an open fd is taken");
+    assert_eq!(report.as_raw_fd(), fd);
+    // SAFETY: `fcntl(F_GETFD)` only reads the flags of an fd we own.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "flags {flags}");
+    let status = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("[ -e /dev/fd/{fd} ]"))
+        .status()
+        .expect("spawn sh");
+    assert!(!status.success(), "a spawned child inherited fd {fd}");
+}
