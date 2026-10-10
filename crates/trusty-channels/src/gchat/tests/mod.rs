@@ -13,10 +13,12 @@
 
 mod auth;
 mod client_send;
+mod default_branch;
 mod doctor;
 mod egress;
 mod inbound;
 mod ledger;
+mod rate_limit;
 mod routes_load;
 mod server;
 mod space_routes;
@@ -250,12 +252,19 @@ impl Project {
         project
     }
 
-    /// A project in a fresh git repo with `routes` written but untracked.
+    /// A project in a fresh git repo on `main`, with one empty root commit
+    /// and `routes` written but untracked.
     pub(super) fn uncommitted(routes: &str) -> Self {
         let root = tempfile::tempdir().expect("project dir");
         let key_dir = tempfile::tempdir().expect("key dir");
         let key = write_key_file(key_dir.path(), 0o600);
-        git(root.path(), &["init", "-q"]);
+        // #8454 Db1: on a default branch whatever `init.defaultBranch` says;
+        // the root commit makes `main` exist before routes are committed.
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        git(
+            root.path(),
+            &["commit", "-q", "--allow-empty", "-m", "root"],
+        );
         let config = root.path().join(".trusty-channels");
         std::fs::create_dir_all(&config).expect("config dir");
         let text = routes.replace("{KEY}", &key.display().to_string());

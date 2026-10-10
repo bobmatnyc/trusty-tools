@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use crate::gchat::api::error::GchatError;
+use crate::policy::GateError;
 
 /// Why `routes.toml` was refused. Any of these refuses every send.
 ///
@@ -21,6 +22,7 @@ use crate::gchat::api::error::GchatError;
 /// What: duplicate-name and duplicate-recipient errors name both entries.
 /// Test: `load_rules_refuse_each_invalid_file`, `duplicates_name_both_entries`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RouteError {
     /// The file exists but could not be read.
     #[error("cannot read {path}: {reason}")]
@@ -65,13 +67,20 @@ pub enum RouteError {
         /// The shared value.
         value: String,
     },
-    /// The load gate (E1): the file is untracked, modified, or staged.
-    #[error("routes file {path} is not committed and clean: {reason}")]
-    NotCommitted {
+    /// The load gate refused the file (#9448 E1, #8454 Db1/G2/G3).
+    ///
+    /// Why: #8454 Q4: a neutral variant, since the gate refuses for more
+    /// than an uncommitted edit (wrong branch, detached `HEAD`, unknown
+    /// default branch, git failure).
+    /// What: `reason` is the gate's typed refusal; its text names the rule.
+    /// Test: `feature_branch_refuses_load_and_every_send`,
+    /// `untracked_and_dirty_arms_refuse_load_and_every_send`.
+    #[error("routes file {path} refused by the load gate: {reason}")]
+    Gate {
         /// The routes-file path.
         path: PathBuf,
-        /// What the gate saw.
-        reason: String,
+        /// Which gate rule refused the file.
+        reason: GateError,
     },
 }
 
@@ -86,6 +95,7 @@ pub enum RouteError {
 /// `review_notice_without_https_url_is_refused`,
 /// `unlearned_space_is_refused_without_fallback`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SendError {
     /// `routes.toml` was refused at load, so every send is refused.
     #[error("routes are unavailable, every send is refused: {reason}")]
@@ -174,6 +184,7 @@ impl SendError {
 
 /// A `state/` file could not be read or written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StateError {
     /// I/O on a state file failed.
     #[error("state file {path}: {reason}")]
@@ -225,6 +236,7 @@ impl StateError {
 
 /// Why one pulled batch could not be fully processed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum InboundError {
     /// Every event in the batch lacks `type`: the Chat app delivers the
     /// Workspace add-on event format, which this layer does not read.

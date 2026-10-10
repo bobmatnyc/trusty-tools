@@ -12,22 +12,50 @@
 //! Test: `src/gchat/tests/egress.rs`, `src/gchat/tests/inbound.rs`,
 //! `health_reports_each_route_and_the_load_status`.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::gchat::api::client::{Endpoints, GchatClient};
 use crate::gchat::error::{RouteError, SendError, StateError};
+use crate::gchat::inbound::LimitBucket;
 use crate::gchat::routes::{load_routes, RouteTable};
 use crate::gchat::state::audit::{AuditEvent, AuditLog, AuditRecord};
 use crate::gchat::state::ledger::{Ledger, Question};
 use crate::gchat::state::spaces::SpaceBook;
 use crate::gchat::state::{self, StateLock, AUDIT_FILE, QUESTIONS_FILE, SPACES_FILE};
+use crate::policy::{Clock, MonotonicClock, RateLimit, RateLimiter};
 
-/// Mutable state guarded by one lock: learned spaces and the ledger.
+/// Mutable state guarded by one lock: learned spaces, the ledger, and the
+/// inbound rate limiter.
 #[derive(Debug)]
 pub(crate) struct Inner {
     pub(crate) spaces: SpaceBook,
     pub(crate) ledger: Ledger,
+    /// #8454: the inbound windows, under the same lock as the state they
+    /// guard, so a poisoned lock has no path that skips the take.
+    pub(crate) limiter: RateLimiter<DynClock>,
+    /// #8454 Q2: when each bucket's last `rate_limited` audit line was
+    /// written, so one window writes one line per bucket.
+    pub(crate) limit_audited: HashMap<LimitBucket, Duration>,
+}
+
+/// The boxed [`Clock`] a channel's limiter reads: [`MonotonicClock`] in
+/// production, a test clock through [`GchatChannel::open_with_clock`].
+pub(crate) struct DynClock(Box<dyn Clock + Send>);
+
+impl Clock for DynClock {
+    fn now(&self) -> Duration {
+        self.0.now()
+    }
+}
+
+impl fmt::Debug for DynClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DynClock")
+    }
 }
 
 /// One project's Google Chat channel.
@@ -118,6 +146,23 @@ impl GchatChannel {
     /// `second_open_on_one_state_dir_is_refused_until_the_first_drops`,
     /// `torn_final_ledger_line_is_quarantined_and_the_channel_opens`.
     pub fn open_with(project_dir: &Path, endpoints: Endpoints) -> Result<Self, StateError> {
+        Self::open_with_clock(project_dir, endpoints, Box::new(MonotonicClock::new()))
+    }
+
+    /// Open the channel with explicit API hosts and limiter clock.
+    ///
+    /// Why: rate-limit tests set the time instead of sleeping (#8454 S3b).
+    /// What: [`GchatChannel::open_with`] with `clock` as the inbound
+    /// limiter's time source. Every window starts empty, so a reopen resets
+    /// them. Every route and the shared unknown-sender window use
+    /// [`RateLimit::DEFAULT`] (#8454 Q4).
+    /// Test: `restart_resets_the_windows`,
+    /// `backwards_clock_drops_and_leaves_state_unchanged`.
+    pub(crate) fn open_with_clock(
+        project_dir: &Path,
+        endpoints: Endpoints,
+        clock: Box<dyn Clock + Send>,
+    ) -> Result<Self, StateError> {
         let routes = load_routes(project_dir);
         if let Err(e) = &routes {
             tracing::warn!(error = %e, "gchat routes refused; every send is refused");
@@ -137,6 +182,8 @@ impl GchatChannel {
         let inner = Inner {
             spaces: SpaceBook::open(&dir.join(SPACES_FILE))?,
             ledger: Ledger::open(&dir.join(QUESTIONS_FILE))?,
+            limiter: RateLimiter::new(RateLimit::DEFAULT, DynClock(clock)),
+            limit_audited: HashMap::new(),
         };
         let quarantined = inner.ledger.quarantined_bytes();
         let channel = Self {

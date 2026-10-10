@@ -8,7 +8,7 @@ use std::process::{Command, ExitStatus, Output};
 use std::time::Duration;
 
 use super::repo::{mkfifo, release_fifo, slack_routes, tempdir, within, Repo};
-use crate::policy::gate::{check_committed_at_head, object_id, run, with_git_timeout};
+use crate::policy::gate::{object_id, run, with_git_timeout};
 use crate::policy::{check_default_branch, GateError};
 
 fn gate(repo: &Repo) -> Result<crate::policy::BranchState, GateError> {
@@ -180,16 +180,26 @@ fn default_branch_without_a_local_commit_refused() {
 }
 
 #[test]
-fn gchat_gate_behaviour_unchanged() {
-    // #8454 G1: gchat stays HEAD-only in S2b. A file committed on a feature
-    // branch passes gchat's gate; the policy loader's Db1 gate refuses it.
+fn gchat_gate_applies_db1() {
+    // #8454 G1, S3a: gchat's gate is the Db1 gate. A file committed only on
+    // a feature branch is refused by gchat and the policy loader alike, for
+    // the same named reason.
     let repo = Repo::init("main");
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.commit_routes(&routes());
     let bytes = std::fs::read(repo.routes_file()).expect("read");
-    crate::gchat::load_gate::check_committed(&repo.routes_file(), &bytes)
-        .expect("gchat's HEAD-only gate accepts a HEAD commit");
-    assert!(check_default_branch(repo.dir(), &bytes).is_err());
+    let want = GateError::NotOnDefaultBranch {
+        head: "feature".into(),
+        default: "main".into(),
+    };
+    assert_eq!(check_default_branch(repo.dir(), &bytes), Err(want.clone()));
+    assert_eq!(
+        crate::gchat::load_gate::check_committed(repo.dir(), &bytes),
+        Err(crate::gchat::error::RouteError::Gate {
+            path: repo.routes_file(),
+            reason: want,
+        })
+    );
 }
 
 #[test]
@@ -238,23 +248,29 @@ fn git_blocked_on_a_fifo_config_include_times_out() {
     let mut text = std::fs::read_to_string(&config).expect("read config");
     text.push_str(&format!("[include]\n\tpath = {}\n", fifo.display()));
     std::fs::write(&config, text).expect("write config");
-    let (dir, file) = (repo.dir().to_path_buf(), repo.routes_file());
+    let dir = repo.dir().to_path_buf();
     let got = within(Duration::from_secs(30), move || {
         with_git_timeout(Duration::from_secs(1), || {
             (
                 check_default_branch(&dir, &bytes),
-                check_committed_at_head(&file, &bytes),
+                crate::gchat::load_gate::check_committed(&dir, &bytes),
             )
         })
     });
-    let Some((db1, head)) = got else {
+    let Some((db1, gchat)) = got else {
         release_fifo(&fifo);
         panic!("a git call blocked on the FIFO past 30s");
     };
     assert!(matches!(db1, Err(GateError::GitTimedOut { .. })), "{db1:?}");
     assert!(
-        matches!(head, Err(GateError::GitTimedOut { .. })),
-        "{head:?}"
+        matches!(
+            gchat,
+            Err(crate::gchat::error::RouteError::Gate {
+                reason: GateError::GitTimedOut { .. },
+                ..
+            })
+        ),
+        "{gchat:?}"
     );
 }
 
