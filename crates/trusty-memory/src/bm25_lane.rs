@@ -366,11 +366,42 @@ impl Bm25Lane {
     /// flushed when it was evicted.
     /// Test: `flush_persists_a_pending_write`.
     pub async fn flush(&self, palace: &str) -> Result<()> {
+        // #9544: the same key `with_index` stored the index under.
+        let palace = trusty_common::palace_alias::canonical_palace_id(&self.data_root, palace);
         let mut resident = self.resident.lock().await;
-        match resident.get_mut(palace) {
+        match resident.get_mut(&palace) {
             Some(idx) => idx.flush(),
             None => Ok(()),
         }
+    }
+
+    /// Drop one palace's resident index, flushing it first only if its
+    /// directory is still there.
+    ///
+    /// Why (#9544): a palace rename moves `<root>/<old>` away. A resident index
+    /// keyed by either id would otherwise keep serving the pre-move corpus, and
+    /// a flush after the move must never recreate `<root>/<old>/bm25`.
+    /// What: keyed by the literal `palace` (never canonicalised — after a rename
+    /// the old id resolves to the new one). Flushes a dirty index when
+    /// `<root>/<palace>` exists, then pops it. Returns `true` when the popped
+    /// index still held unflushed documents (no directory, or a failed flush);
+    /// the caller queues the palace for BM25 repair.
+    /// Test: `evict_palace_flushes_then_drops_a_dirty_index`,
+    /// `evict_palace_never_recreates_a_moved_palace_dir`.
+    pub async fn evict_palace(&self, palace: &str) -> bool {
+        let mut resident = self.resident.lock().await;
+        let Some(idx) = resident.peek_mut(palace) else {
+            return false;
+        };
+        let dir_present = matches!(self.data_root.join(palace).try_exists(), Ok(true));
+        if idx.is_dirty() && dir_present {
+            if let Err(e) = idx.flush() {
+                tracing::warn!(palace = %palace, "bm25 flush before eviction failed: {e:#}");
+            }
+        }
+        let dropped_unflushed = idx.is_dirty();
+        resident.pop(palace);
+        dropped_unflushed
     }
 
     /// Flush every resident palace, logging rather than propagating failures.
@@ -451,6 +482,10 @@ impl Bm25Lane {
         palace: &str,
         f: impl FnOnce(&mut PalaceBm25Index) -> R,
     ) -> Result<R> {
+        // #9544: key and load by the id the palace answers to now, or a request
+        // queued under a renamed palace's old id recreates `<root>/<old>/bm25`.
+        let canonical = trusty_common::palace_alias::canonical_palace_id(&self.data_root, palace);
+        let palace = canonical.as_str();
         let mut resident = self.resident.lock().await;
         if let Some(idx) = resident.get_mut(palace) {
             return Ok(f(idx));

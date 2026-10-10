@@ -787,3 +787,71 @@ fn bm25_hit_round_trips() {
     assert_eq!(back.doc_id, "drawer-1");
     assert!((back.score - 0.42).abs() < 1e-6);
 }
+
+/// Stop a lane's flush ticker without flushing, so a test owns every flush.
+fn stop_ticker(lane: &Bm25Lane) {
+    if let Some(handle) = lane.flusher.lock().take() {
+        handle.abort();
+    }
+}
+
+/// Why (#9544): a rename drops both ids' resident indexes before the move; a
+/// dirty index must reach disk first or its documents are lost to the move.
+/// What: indexes a document, evicts with the directory present, and asserts
+/// the snapshot holds the document, nothing was reported dropped, and the
+/// palace is no longer resident.
+/// Test: this test itself.
+#[tokio::test]
+async fn evict_palace_flushes_then_drops_a_dirty_index() {
+    let dir = tempdir();
+    let lane = Bm25Lane::with_limits(dir.path().to_path_buf(), 3, None);
+    stop_ticker(&lane);
+    lane.index("alpha", "d1", "flushed before eviction")
+        .await
+        .unwrap();
+
+    assert!(!lane.evict_palace("alpha").await, "nothing may be dropped");
+    assert_eq!(lane.resident_count().await, 0);
+    let snapshot = lane
+        .data_dir_for_palace("alpha")
+        .join(crate::bm25_index::SNAPSHOT_FILENAME);
+    let raw = std::fs::read_to_string(&snapshot).expect("evict must flush a dirty index");
+    assert!(raw.contains("flushed before eviction"), "got: {raw}");
+    assert!(!lane.evict_palace("never-touched").await);
+}
+
+/// Why (#9544): after a rename moves `<root>/<old>` away, the lane must not
+/// write `<root>/<old>/bm25` back — neither the post-move eviction nor a later
+/// request still addressed to the old id.
+/// What: a dirty `old` index whose directory is then moved away is evicted —
+/// the call reports the unflushed documents and recreates nothing. With
+/// `old -> new` aliased, a search through `old` reads `new`'s corpus and still
+/// creates no `old` directory.
+/// Test: this test itself.
+#[tokio::test]
+async fn evict_palace_never_recreates_a_moved_palace_dir() {
+    let dir = tempdir();
+    let root = dir.path().to_path_buf();
+    let lane = Bm25Lane::with_limits(root.clone(), 3, None);
+    stop_ticker(&lane);
+    lane.index("old", "d1", "written before the move")
+        .await
+        .unwrap();
+    std::fs::rename(root.join("old"), root.join("new")).expect("move the palace dir");
+
+    assert!(
+        lane.evict_palace("old").await,
+        "an unflushable dirty index must be reported dropped"
+    );
+    assert!(!root.join("old").exists(), "eviction recreated the old dir");
+
+    std::fs::write(root.join("new").join("palace.json"), "{}").expect("target palace.json");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(&root, "old", "new")
+        .expect("register alias");
+    lane.index("new", "d2", "lexical lane follows the alias")
+        .await
+        .unwrap();
+    let hits = lane.search("old", "lexical", 5).await.unwrap();
+    assert_eq!(hits.len(), 1, "a search through the old id reads new: {hits:?}");
+    assert!(!root.join("old").exists(), "a search recreated the old dir");
+}

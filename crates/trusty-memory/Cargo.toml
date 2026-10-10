@@ -154,8 +154,8 @@ trusty-mcp = { workspace = true, optional = true }
 # `axum-server`, which was here for the retired HTTP listener.
 # #9269: only the engine's `memory-core` is unconditional; every feature the
 # serving surface needs is switched on by `server` below (`config-cli` is what
-# pulls in clap).
-trusty-common = { path = "../trusty-common", version = "0.59", default-features = false, features = ["memory-core"] }
+# pulls in clap). #9544: 0.59.2 is the first release with `PalaceRegistry::rename_palace`.
+trusty-common = { path = "../trusty-common", version = "0.59.2", default-features = false, features = ["memory-core"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -251,7 +251,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.59", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.59.2", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 # #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
 # the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real
