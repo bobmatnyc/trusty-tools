@@ -179,6 +179,8 @@ on:
 # behind the in-flight one. Cost: one duplicate full run per `gh pr ready` on an
 # unchanged SHA. The group stays keyed on `github.ref`, not on the head SHA, so
 # a later push (`synchronize`) still cancels the stale running or queued run.
+# Every pull_request workflow carries the same exclusion, asserted per file by
+# scripts/check-ci-helpers-selftest.sh.
 #
 # That extra run has to be a REAL one. Uncancelled, it shares every context
 # name with the run it coexists with, and GitHub surfaces only the

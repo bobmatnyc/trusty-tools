@@ -65,7 +65,7 @@ on:
 # still supersedes the superseded run. Matches ci.yml.
 concurrency:
   group: token-drift-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' && github.event.action != 'ready_for_review' }}
 
 jobs:
   token-drift:

@@ -1356,6 +1356,36 @@ assert_eq "the PR concurrency group stays keyed on the ref" "1" \
 assert_eq "the group carries no head-SHA or PR-number key" "0" \
   "$(grep -cE '^  group: .*(head\.sha|pull_request\.number)' <<<"${ci_conc}" || true)"
 
+# The same rule for EVERY pull_request workflow with a top-level
+# `cancel-in-progress:` (#9189): the live check found line-cap.yml's required
+# check still cancelled by the ready event after ci.yml alone was fixed. One
+# case per file, so a workflow added later without the exclusion goes red and
+# is named. A literal `false` passes; anything else must carry the exclusion.
+# CI_WF_DIR lets a mutation proof point the loop at a scratch copy.
+echo
+echo "pull_request workflows: ready_for_review never cancels (#9189):"
+pr_conc_checked=0
+for wf in "${CI_WF_DIR:-.github/workflows}"/*.yml; do
+  grep -qE '^[[:space:]]+pull_request:' "${wf}" || continue
+  wf_cancel="$(awk '
+    /^concurrency:/ { inblk = 1; next }
+    inblk && /^[^[:space:]]/ { exit }
+    inblk && /^  cancel-in-progress:/ { print }
+  ' "${wf}")"
+  [ -n "${wf_cancel}" ] || continue
+  pr_conc_checked=$((pr_conc_checked + 1))
+  wf_ok=no
+  if grep -qE "^  cancel-in-progress: (false|.*github\.event\.action != 'ready_for_review')" <<<"${wf_cancel}"; then
+    wf_ok=yes
+  fi
+  assert_eq "$(basename "${wf}"): ready_for_review never cancels" "yes" "${wf_ok}"
+done
+pr_conc_found=no
+if [ "${pr_conc_checked}" -gt 0 ]; then
+  pr_conc_found=yes
+fi
+assert_eq "the loop found pull_request workflows to check" "yes" "${pr_conc_found}"
+
 # ---------------------------------------------------------------------------
 # ci-website-relevance.sh, and website-tests.yml's use of it
 #
