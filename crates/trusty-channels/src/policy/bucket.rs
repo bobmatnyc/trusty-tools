@@ -149,8 +149,8 @@ impl SlidingWindow {
 ///
 /// Why: one window per binding, so one flooding route cannot spend
 /// another's admits, and one separate window for unknown senders (Q6).
-/// What: [`RateLimiter::take_route`] uses the window keyed by the route's
-/// (channel, name), created empty on first use with the route's limit;
+/// What: [`RateLimiter::take_route`] and [`RateLimiter::take_binding`] use
+/// the window keyed by (channel, name), created empty on first use;
 /// [`RateLimiter::take_unknown_sender`] uses the unknown-sender window.
 /// Restarting the process resets every window.
 /// Test: `unknown_sender_bucket_is_separate`,
@@ -184,13 +184,35 @@ impl<C: Clock> RateLimiter<C> {
     /// Test: `bucket_101st_in_a_minute_exhausted`,
     /// `rebuilt_lower_route_limit_keeps_the_log_and_refuses`.
     pub fn take_route(&mut self, route: &Route) -> BucketDecision {
+        self.take_binding(route.channel(), route.name(), route.rate_limit())
+    }
+
+    /// Record one admit in the window of the binding (`channel`, `name`).
+    ///
+    /// Why: gchat keeps its own route table, with no policy [`Route`], and
+    /// still needs the per-binding window (#8454 S3b).
+    /// What: the window is created empty on first use with `limit`; a later
+    /// call with a different `limit` retunes it and keeps its admit log.
+    /// [`RateLimiter::take_route`] is this call with the route's fields.
+    /// Test: `take_binding_matches_take_route`.
+    pub fn take_binding(
+        &mut self,
+        channel: Channel,
+        name: &str,
+        limit: RateLimit,
+    ) -> BucketDecision {
         let now = self.clock.now();
-        let by_name = self.routes.entry(route.channel()).or_default();
+        let by_name = self.routes.entry(channel).or_default();
         let window = by_name
-            .entry(route.name().to_string())
-            .or_insert_with(|| SlidingWindow::new(route.rate_limit(), now));
-        window.retune(route.rate_limit());
+            .entry(name.to_string())
+            .or_insert_with(|| SlidingWindow::new(limit, now));
+        window.retune(limit);
         window.take(now)
+    }
+
+    /// The limiter's clock, so a caller reads the same time its windows use.
+    pub fn clock(&self) -> &C {
+        &self.clock
     }
 
     /// Record one admit in the unknown-sender window.

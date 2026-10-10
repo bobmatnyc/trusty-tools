@@ -6,9 +6,8 @@
 //! `git status` is not that check: `--assume-unchanged`, `--skip-worktree`, a
 //! clean filter or `core.fsmonitor` each hide an edit from it, and a file
 //! read before the check can change between the read and the check.
-//! What: two gates over the caller's bytes. [`check_committed_at_head`] is
-//! gchat's #9448 gate: the bytes equal the blob at `HEAD`. [`check_default_branch`]
-//! is the #8454 Db1 gate for the policy loader: the project dir is its
+//! What: [`check_default_branch`] is the #8454 Db1 gate, shared by the
+//! policy loader and gchat's load gate (S3a): the project dir is its
 //! repo's top level, `HEAD` is a symbolic ref to the default branch, and the
 //! bytes equal the blob at that branch's commit, resolved once. Each git call
 //! has every `GIT_*` variable removed and `core.fsmonitor` off; bytes are
@@ -16,8 +15,9 @@
 //! unexpected git output or a step that outlasts [`GIT_TIMEOUT`] refuses, as
 //! does one that outlasts a caller's load deadline ([`with_deadline`]).
 //! Test: `src/policy/tests/gate.rs`, and gchat's
-//! `load_gate_refuses_untracked_modified_and_staged`.
+//! `feature_branch_refuses_load_and_every_send`.
 
+#[cfg(test)]
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -117,9 +117,6 @@ fn step_deadline() -> Instant {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum GateError {
-    /// The route path has no parent directory or file name.
-    #[error("path has no parent directory")]
-    NoParent,
     /// git could not be started.
     #[error("cannot run git: {reason}")]
     GitUnavailable {
@@ -171,50 +168,15 @@ pub enum GateError {
     /// The file is absent from the reviewed commit.
     #[error("not committed at {at} (commit it through a reviewed PR)")]
     NotCommitted {
-        /// `HEAD` or the default branch name.
+        /// The default branch name.
         at: String,
     },
     /// The bytes read differ from the reviewed commit's blob.
     #[error("content differs from the version committed at {at}")]
     ContentDiffers {
-        /// `HEAD` or the default branch name.
+        /// The default branch name.
         at: String,
     },
-}
-
-/// Refuse unless `bytes` equal the blob committed at `HEAD` for `path`.
-///
-/// Why: gchat's #9448 gate, kept HEAD-only until S3 applies Db1 to
-/// gchat-mcp (#8454 G1). The caller passes the bytes it will parse, so the
-/// check and the parse see the same content.
-/// What: runs git in the file's directory. No commit, a path absent from
-/// `HEAD`, bytes that differ from the committed blob, or git missing each
-/// refuse. `--no-filters` hashes the raw bytes.
-/// Test: `load_gate_refuses_untracked_modified_and_staged`,
-/// `load_gate_refuses_edits_hidden_by_assume_unchanged_or_skip_worktree`,
-/// `load_gate_checks_the_bytes_read_not_the_file_after`.
-pub fn check_committed_at_head(path: &Path, bytes: &[u8]) -> Result<(), GateError> {
-    let (dir, file) = match (path.parent(), path.file_name()) {
-        (Some(d), Some(f)) => (d, f),
-        _ => return Err(GateError::NoParent),
-    };
-    let mut spec = OsString::from("HEAD:./");
-    spec.push(file);
-    let committed = run(
-        git(dir)
-            .args(["rev-parse", "--verify", "--quiet"])
-            .arg(&spec),
-        "rev-parse",
-    )?;
-    let at = || "HEAD".to_string();
-    if !committed.status.success() {
-        return Err(GateError::NotCommitted { at: at() });
-    }
-    let read = hash_bytes(dir, bytes)?;
-    if object_id(&committed, "rev-parse")? != object_id(&read, "hash-object")? {
-        return Err(GateError::ContentDiffers { at: at() });
-    }
-    Ok(())
 }
 
 /// Where a project repo's `HEAD` and default branch point, read locally.
