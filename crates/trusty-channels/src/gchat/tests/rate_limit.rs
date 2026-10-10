@@ -418,7 +418,16 @@ async fn rate_limited_audit_line_has_expected_fields_and_no_text() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["event", "length", "message_id", "reason", "route", "sender", "space", "ts"]
+        [
+            "event",
+            "length",
+            "message_id",
+            "reason",
+            "route",
+            "sender",
+            "space",
+            "ts"
+        ]
     );
     assert_eq!(line["reason"], "route_rate_limit");
     assert_eq!(line["route"], "janet");
@@ -481,7 +490,11 @@ async fn second_limited_drop_in_a_window_writes_no_audit_line() {
     assert_eq!(report.outcomes, [route_limited("janet")]);
     assert_eq!(report.ack_ids, ["over2"]);
     assert_eq!(report.rate_limited, 1);
-    assert_eq!(limited_lines(&project).len(), 1, "a second line was written");
+    assert_eq!(
+        limited_lines(&project).len(),
+        1,
+        "a second line was written"
+    );
 
     // Another bucket writes its own first line.
     let strangers: Vec<PulledMessage> = (0..101)
