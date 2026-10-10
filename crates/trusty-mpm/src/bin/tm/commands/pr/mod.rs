@@ -39,6 +39,8 @@ pub(crate) mod metadata;
 pub(crate) mod metadata_apply;
 pub(crate) mod missing_label;
 pub(crate) mod open;
+// #9571: the `[EPIC_N PHASE_M]` tag on a phase PR's title.
+pub(crate) mod phase_title;
 pub(crate) mod queue_check;
 // #8638: one latest-run rule for every rollup reader (queue-check, wait).
 pub(crate) mod rollup;

@@ -26,6 +26,7 @@ use trusty_mpm::core::issue_audit_gh::view_argv;
 
 use super::metadata::{self, ChangedPaths, PrMetadata, RefKind, RefsIssue, RefsLookup};
 use super::open::{self, Preflight};
+use super::phase_title::{self, TitleDecision};
 use super::{GhRunner, argv};
 use crate::cli::PrOpenArgs;
 
@@ -59,7 +60,8 @@ impl ApplyOutcome {
     }
 }
 
-/// Derive and apply the PR's component labels, milestone and projects.
+/// Derive and apply the PR's component labels, milestone, projects and phase
+/// title tag.
 ///
 /// Why (#7274): the standard is one rule over issues and PRs, and a PR's share
 /// of it is entirely derived — labels from its own diff, project and milestone
@@ -67,10 +69,12 @@ impl ApplyOutcome {
 /// the CREATE over, which is why it runs after the PR exists.
 /// What: reads the diff and the link target, calls [`metadata::plan`], then
 /// [`apply_plan`]. Prints what applied and one line per thing the standard
-/// wanted and this PR could not get.
+/// wanted and this PR could not get. The phase tag ([`phase_title::decide`],
+/// #9571) joins the same edit; an issue too unreadable to decide it is missing.
 /// Test: `open_applies_pr_metadata`, `open_without_refs_says_so`,
 /// `open_survives_a_failed_metadata_edit`, `open_notes_an_unreadable_diff`,
-/// `open_notes_an_unreadable_refs_issue`.
+/// `open_notes_an_unreadable_refs_issue`, `pr_9571_open_tags_a_phase_pr_title`,
+/// `pr_9571_an_unreadable_issue_reports_the_title_missing`.
 pub(crate) fn apply<R: GhRunner, P: Preflight>(
     gh: &R,
     args: &PrOpenArgs,
@@ -96,12 +100,29 @@ pub(crate) fn apply<R: GhRunner, P: Preflight>(
         (Some(n), None) => RefsLookup::Unreadable(n),
         (None, None) => RefsLookup::Absent,
     };
-    let meta = metadata::plan(refs, changed, &pre.ownership());
+    // #9571: the phase tag is decided from the same read, before `plan` takes it.
+    let title = phase_title::decide(&args.title, &refs);
+    let mut meta = metadata::plan(refs, changed, &pre.ownership());
+    let mut unknown = None;
+    match title {
+        TitleDecision::Unchanged => {}
+        TitleDecision::Retitle(t) => meta.title = Some(t),
+        TitleDecision::Warn(w) => eprintln!("  warning: {w}"),
+        TitleDecision::Unknown(what) => unknown = Some(what),
+    }
     let outcome = apply_plan(gh, args, pr, &meta);
     for note in &meta.notes {
         println!("  {note}");
     }
-    outcome
+    // #9571 Fail-Open Check: an unknown tag is a missing field, never a success.
+    match unknown {
+        None => outcome,
+        Some(what) => {
+            let mut missing = outcome.missing();
+            missing.push(what);
+            ApplyOutcome::Partial(missing)
+        }
+    }
 }
 
 /// Read the link target's milestone and projects through `gh`.
@@ -242,6 +263,21 @@ fn steps(meta: &PrMetadata) -> Vec<(String, PrMetadata)> {
         .map(|n| format!(" (inherited from #{n})"))
         .unwrap_or_default();
     let mut out = Vec::new();
+    // #9571: the description opens with `title`, the field the caller names.
+    if let Some(title) = &meta.title {
+        out.push((
+            format!(
+                "title \"{title}\"{}",
+                meta.inherited_from
+                    .map(|n| format!(" (tag from #{n})"))
+                    .unwrap_or_default()
+            ),
+            PrMetadata {
+                title: Some(title.clone()),
+                ..PrMetadata::default()
+            },
+        ));
+    }
     if !meta.labels.is_empty() {
         out.push((
             format!("component labels {}", meta.labels.join(", ")),
@@ -274,6 +310,9 @@ fn steps(meta: &PrMetadata) -> Vec<(String, PrMetadata)> {
 
 /// Print what the edit actually applied.
 fn report_applied(meta: &PrMetadata) {
+    if let Some(title) = &meta.title {
+        println!("  title: {title}");
+    }
     if !meta.labels.is_empty() {
         println!("  component labels: {}", meta.labels.join(", "));
     }

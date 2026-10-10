@@ -48,10 +48,11 @@ use crate::core::trusty_tools_config::ResolvedTicketing;
 /// the list once is what keeps them in agreement.
 /// What: the seven fields the requirements read, plus the three relationship
 /// fields. `gh` 2.98 serves `parent`, `blockedBy` and `subIssues` from both
-/// verbs, so the audit needs no separate `gh api` call for them.
+/// verbs, so the audit needs no separate `gh api` call for them. `title` is
+/// read by `tm pr open` for a phase issue's `[EPIC_N PHASE_M]` tag (#9571).
 /// Test: `json_fields_cover_every_audited_requirement`.
-pub const AUDIT_JSON_FIELDS: &str =
-    "number,milestone,projectItems,labels,comments,state,createdAt,parent,blockedBy,subIssues";
+pub const AUDIT_JSON_FIELDS: &str = "number,title,milestone,projectItems,labels,comments,state,\
+     createdAt,parent,blockedBy,subIssues";
 
 /// The comment prefix that excuses an unset milestone (#7067's escape hatch).
 pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
@@ -150,6 +151,9 @@ pub struct IssueFacts {
     /// Issue number.
     #[serde(default)]
     pub number: u64,
+    /// Issue title; `tm pr open` reads its phase tag (#9571).
+    #[serde(default)]
+    pub title: String,
     /// The single milestone, or `None` when unset.
     #[serde(default)]
     pub milestone: Option<TitleRef>,

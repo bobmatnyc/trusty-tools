@@ -163,7 +163,9 @@ less and does not drift.
 `<epic#>` is the tracker's own issue number, so the tracker is created FIRST
 titled `[EPIC] <outcome>`, its number read back, and the title renamed in
 place before phase issues are filed — they cannot go in the same batch. Full
-grammar and the manual `gh` sequence: `tm-epic`. Phase issues are native
+grammar and the manual `gh` sequence: `tm-epic`, which also states the phase
+PR title format `<type>(<scope>): [EPIC_<epic#> PHASE_<n>] <subject>` — a PR
+title, so version control's. Phase issues are native
 GitHub sub-issues of the tracker, never a markdown task list — the link
 survives body regeneration and stays queryable.
 

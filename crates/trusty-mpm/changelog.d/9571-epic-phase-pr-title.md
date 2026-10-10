@@ -1,0 +1,3 @@
+Added
+- `tm pr open` tags a phase PR's title: when the body's first link line names a phase issue titled `[EPIC_N PHASE_M] …`, the post-create edit retitles `feat(x): add X` to `feat(x): [EPIC_N PHASE_M] add X`. A title already carrying `[EPIC_` is left alone; a non-conventional title, or one the tag would push past 256 characters, is left alone with a warning; a linked issue that cannot be read, or a failed title edit, names `title` missing and exits 3 ([#9571](https://github.com/bobmatnyc/trusty-tools/issues/9571))
+- `trusty_mpm::core::issue_audit::IssueFacts` gains `title`, and `AUDIT_JSON_FIELDS` requests it ([#9571](https://github.com/bobmatnyc/trusty-tools/issues/9571))

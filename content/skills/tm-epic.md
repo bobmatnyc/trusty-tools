@@ -91,6 +91,17 @@ need this pattern. It fits one issue with a task list, or one PR.
 tracker with a placeholder title, read its number back, edit the number into
 the title. Phases cannot go in the same batch as the tracker.
 
+A PR that implements a phase carries the phase tag after its conventional
+prefix, so the squash subject on main names the phase:
+
+```
+<type>(<scope>): [EPIC_<epic#> PHASE_<n>] <subject>
+```
+
+The tag never leads the title: `cliff.toml` drops a subject that opens with a
+bracket from the release notes. `tm pr open` adds the tag itself when the
+body's first link line names a phase issue.
+
 Every issue — tracker and phases alike — carries `ws/<session>`, its component
 label(s), a project and a milestone, per "The Labels, Project, Milestone
 Standard" in `tm-ticketing`. The tracker's type label is `epic`. Each phase
@@ -142,7 +153,9 @@ by prefix: a state `status:in-progress` whose label is `in-progress` still
 renders `in-progress`, and a `status:*` label no state issues renders `open`.
 
 **Not on PR open, merge, commit or review.** Those are phase-issue events and
-belong on the phase issue or its PR. A finding discovered mid-execution is a
+belong on the phase issue or its PR. This governs tracker updates only; the
+phase PR's own title still carries its tag (see "Titles, labels, milestone,
+project"). A finding discovered mid-execution is a
 fifth kind of event and goes to the `followups` block, below.
 
 ## Deferred vs. follow-ups — two blocks, two rules

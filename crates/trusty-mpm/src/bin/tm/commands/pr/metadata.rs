@@ -68,6 +68,9 @@ pub(crate) struct RefsIssue {
     pub(crate) milestone: Option<String>,
     /// That artifact's project titles, in the order `gh` reported them.
     pub(crate) projects: Vec<String>,
+    /// #9571: the issue's title, read for its `[EPIC_N PHASE_M]` tag; empty for
+    /// a pull request, whose view does not ask for it.
+    pub(crate) title: String,
 }
 
 impl RefsIssue {
@@ -96,6 +99,7 @@ impl RefsIssue {
                 .map(|p| p.title.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect(),
+            title: facts.title.trim().to_string(),
         }
     }
 }
@@ -163,12 +167,17 @@ pub(crate) struct PrMetadata {
     /// recover it.
     /// Test: `pr_7646_a_failed_edit_names_the_field_and_retries_per_field`.
     pub(crate) inherited_from: Option<u64>,
+    /// #9571: the phase-tagged title, set by the caller after [`plan`].
+    pub(crate) title: Option<String>,
 }
 
 impl PrMetadata {
     /// Whether anything at all would be applied.
     pub(crate) fn is_empty(&self) -> bool {
-        self.labels.is_empty() && self.milestone.is_none() && self.projects.is_empty()
+        self.labels.is_empty()
+            && self.milestone.is_none()
+            && self.projects.is_empty()
+            && self.title.is_none()
     }
 }
 
@@ -251,14 +260,20 @@ pub(crate) fn plan<S: AsRef<str>>(
 /// point of view — either the PR ends up carrying the standard or the one
 /// warning names what failed. `gh pr edit` takes `--add-label`, `--milestone`
 /// and `--add-project` together (gh 2.98), so the split would buy nothing.
-/// What: `gh pr edit <pr> [--repo r] [--add-label l]… [--milestone m]
-/// [--add-project p]…`. Callers must not call it on an empty plan.
+/// What: `gh pr edit <pr> [--repo r] [--title t] [--add-label l]…
+/// [--milestone m] [--add-project p]…`. Callers must not call it on an empty
+/// plan.
 /// Test: `metadata_edit_argv_carries_every_field`.
 pub(crate) fn edit_argv(pr: &str, repo: Option<&str>, meta: &PrMetadata) -> Vec<String> {
     let mut out = argv(&["pr", "edit", pr]);
     if let Some(repo) = repo.map(str::trim).filter(|r| !r.is_empty()) {
         out.push("--repo".to_string());
         out.push(repo.to_string());
+    }
+    // #9571: the phase tag rides the same post-create edit as the metadata.
+    if let Some(title) = &meta.title {
+        out.push("--title".to_string());
+        out.push(title.clone());
     }
     for label in &meta.labels {
         out.push("--add-label".to_string());
