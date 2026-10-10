@@ -243,8 +243,9 @@ pub struct HostChannel {
     kinds: BTreeSet<MessageKind>,
     projects: Vec<PathBuf>,
     gchat_connection: Option<Connection>,
-    bot_ref: Option<CredentialRef>,
-    app_ref: Option<CredentialRef>,
+    // #8454 S2c: the allowlisted key itself, so `CredentialRef` stays internal.
+    bot_ref: Option<&'static str>,
+    app_ref: Option<&'static str>,
 }
 
 impl HostChannel {
@@ -273,14 +274,16 @@ impl HostChannel {
         self.gchat_connection.as_ref()
     }
 
-    /// Slack and Telegram: the provider key of the token that posts.
-    pub fn bot_ref(&self) -> Option<&CredentialRef> {
-        self.bot_ref.as_ref()
+    /// Slack and Telegram: the provider key of the token that posts, e.g.
+    /// `"slack"`. Test: `slack_bot_and_app_ref_parse`.
+    pub fn bot_ref(&self) -> Option<&str> {
+        self.bot_ref
     }
 
-    /// Slack only: the provider key of the Socket Mode token. It cannot post.
-    pub fn app_ref(&self) -> Option<&CredentialRef> {
-        self.app_ref.as_ref()
+    /// Slack only: the provider key of the Socket Mode token, `"slack-app"`.
+    /// It cannot post. Test: `slack_bot_and_app_ref_parse`.
+    pub fn app_ref(&self) -> Option<&str> {
+        self.app_ref
     }
 }
 
@@ -313,7 +316,7 @@ pub(super) fn allowed_refs(channel: Channel, key: &str) -> &'static [&'static st
 fn connection_refs(
     channel: Channel,
     conn: RawBotConnection,
-) -> Result<(CredentialRef, Option<CredentialRef>), HostError> {
+) -> Result<(&'static str, Option<&'static str>), HostError> {
     if conn.credential_ref {
         return Err(HostError::LegacyCredentialRef { channel });
     }
@@ -329,11 +332,11 @@ fn connection_refs(
 }
 
 /// One reference: the role exists, no `secret://` scheme, the DOC-45
-/// provider-key grammar, then the role's allowlist. The error never holds
-/// `text`.
+/// provider-key grammar, then the role's allowlist. Returns the allowlisted
+/// key; the error never holds `text`.
 /// Test: `secret_scheme_and_pasted_token_refused_without_echo`,
 /// `slack_user_ref_refused_in_either_slot`, `telegram_app_ref_refused`.
-fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<CredentialRef, HostError> {
+fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<&'static str, HostError> {
     let fail = |fault| HostError::CredentialRef {
         channel,
         key,
@@ -348,11 +351,12 @@ fn check_ref(channel: Channel, key: &'static str, text: &str) -> Result<Credenti
     if scheme.is_some_and(|s| s.eq_ignore_ascii_case(b"secret://")) {
         return Err(fail(RefFault::SecretScheme { allowed }));
     }
-    let parsed = CredentialRef::parse(text).map_err(|_| fail(RefFault::NotAName { allowed }))?;
-    if !allowed.contains(&text) {
-        return Err(fail(RefFault::NotAllowed { allowed }));
-    }
-    Ok(parsed)
+    CredentialRef::parse(text).map_err(|_| fail(RefFault::NotAName { allowed }))?;
+    allowed
+        .iter()
+        .copied()
+        .find(|k| *k == text)
+        .ok_or_else(|| fail(RefFault::NotAllowed { allowed }))
 }
 
 /// Parse and validate the host ceiling from `config.yaml` text.
