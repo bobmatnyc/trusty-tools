@@ -4,14 +4,14 @@
 //! has to leave every existing (unstamped, format 0) palace opening exactly as
 //! before. Both halves are proven here against real redb files.
 //! What: fixtures are stamped through a raw `Database`, bypassing the gate.
-//! A raised supported format is injected through `gate_palace_with`; no test
-//! treats a real format-0 palace as one behind.
+//! A raised supported format is injected through `classify_with`. The 0 → 1
+//! migration itself is tested in format_migration_tests.rs.
 //! Test: this file.
 
 use super::*;
 use crate::memory_core::palace::{Drawer, Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::{OpenIntent, ReadOnlyRedb};
+use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_store::encode_value;
 use crate::memory_core::store::palace_store::PalaceStore;
@@ -110,11 +110,9 @@ fn n_plus_one_palace_is_refused_and_bytes_unchanged() {
         assert!(
             matches!(
                 store_error(&err),
-                PalaceStoreError::FormatTooNew {
-                    found: 1,
-                    supported: 0,
-                    ..
-                }
+                PalaceStoreError::FormatTooNew { found, supported, .. }
+                    if *found == PALACE_FORMAT_SUPPORTED + 1
+                        && *supported == PALACE_FORMAT_SUPPORTED
             ),
             "{intent:?}: {err:#}"
         );
@@ -141,7 +139,7 @@ fn n_plus_one_in_palace_json_mirror_is_refused_before_redb_opens() {
     assert!(
         matches!(
             store_error(&err),
-            PalaceStoreError::FormatTooNew { found: 1, .. }
+            PalaceStoreError::FormatTooNew { found, .. } if *found == PALACE_FORMAT_SUPPORTED + 1
         ),
         "{err:#}"
     );
@@ -152,39 +150,69 @@ fn n_plus_one_in_palace_json_mirror_is_refused_before_redb_opens() {
     );
 }
 
-/// Supervisor ruling Q5 (#9274): an unstamped palace opens read-write and
-/// read-only exactly as on main, keeps its data, and gains no stamp.
+/// #9274: a new palace is born at the supported format — the KG marker in its
+/// init transaction, the mirror at the writer open — and reopens under both
+/// intents with its data.
 #[test]
-fn an_unstamped_palace_opens_read_write_and_read_only_as_before() {
+fn a_new_palace_is_stamped_at_the_supported_format() {
     let root = tempdir().expect("tempdir");
-    let palace = saved_palace(root.path(), "legacy");
-    let drawer = Drawer::new(
-        uuid::Uuid::new_v4(),
-        "an unstamped palace keeps this drawer",
-    );
+    let palace = saved_palace(root.path(), "fresh");
+    let drawer = Drawer::new(uuid::Uuid::new_v4(), "a new palace keeps this drawer");
     {
         let h = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer).expect("rw open");
         h.kg.upsert_drawer_sync(&drawer).expect("write a drawer");
     }
     for intent in [OpenIntent::ReadOnlyClient, OpenIntent::Writer] {
         let h = PalaceHandle::open_with_intent(&palace, intent)
-            .unwrap_or_else(|e| panic!("{intent:?}: an unstamped palace must open: {e:#}"));
+            .unwrap_or_else(|e| panic!("{intent:?}: a new palace must reopen: {e:#}"));
         assert!(
             h.drawers.read().iter().any(|d| d.id == drawer.id),
             "{intent:?}: the drawer written before must be loaded"
         );
     }
-    let json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(palace.data_dir.join(PALACE_JSON)).expect("read"))
-            .expect("json");
-    assert!(json.get("format_version").is_none(), "PR2 stamps no mirror");
-    let ro = ReadOnlyRedb::open(&palace.data_dir.join(KG_FILE)).expect("read-only kg");
-    let rtx = ro.begin_read().expect("read txn");
-    let t = rtx.open_table(KG_SCHEMA).expect("kg_schema exists");
-    assert!(
-        t.get(KG_SCHEMA_PALACE_FORMAT).expect("get").is_none(),
-        "PR2 stamps no marker"
+    assert_eq!(
+        read_mirror(&palace.data_dir).expect("mirror"),
+        Some(PALACE_FORMAT_SUPPORTED)
     );
+    assert_eq!(
+        read_marker_without_writing(&palace.data_dir.join(KG_FILE)).expect("marker"),
+        KgMarker::Stamped(PALACE_FORMAT_SUPPORTED)
+    );
+    assert!(!palace.data_dir.join(MIGRATION_RECORD).exists());
+}
+
+/// ADR-0067 D1: an older binary dropped the mirror, so it is below the
+/// marker. The marker wins; a read-only open writes nothing and a writer
+/// open rewrites the mirror, keeping fields this binary does not know.
+#[test]
+fn a_lower_mirror_is_repaired_by_a_writer_and_the_marker_wins() {
+    let root = tempdir().expect("tempdir");
+    let palace = saved_palace(root.path(), "lower-mirror");
+    populate(&palace);
+    let path = palace.data_dir.join(PALACE_JSON);
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    let obj = v.as_object_mut().expect("object");
+    obj.remove("format_version");
+    obj.insert("added_by_a_later_1x".into(), serde_json::json!("kept"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&v).expect("encode")).expect("write");
+    let before = std::fs::read(&path).expect("read");
+
+    drop(PalaceHandle::open_with_intent(&palace, OpenIntent::ReadOnlyClient).expect("ro open"));
+    assert_eq!(
+        before,
+        std::fs::read(&path).expect("reread"),
+        "read-only wrote"
+    );
+
+    drop(PalaceHandle::open_with_intent(&palace, OpenIntent::Writer).expect("rw open"));
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    assert_eq!(
+        after["format_version"],
+        serde_json::json!(PALACE_FORMAT_SUPPORTED)
+    );
+    assert_eq!(after["added_by_a_later_1x"], serde_json::json!("kept"));
 }
 
 /// ADR-0067 D3 rule 2 with an injected supported format of 2: a palace stamped
@@ -197,7 +225,7 @@ fn read_only_open_of_n_minus_1_is_refused_with_migration_hint() {
     stamp_marker(&palace.data_dir, 1);
     stamp_mirror(&palace.data_dir, 1);
 
-    let err = gate_palace_with(&palace.data_dir, "behind", 2).expect_err("N-1 is refused");
+    let err = gate_read_only_with(&palace.data_dir, "behind", 2).expect_err("N-1 is refused");
     assert!(
         matches!(
             err,
@@ -224,7 +252,7 @@ fn markers_that_disagree_refuse_the_palace() {
     stamp_marker(&palace.data_dir, 1);
     stamp_mirror(&palace.data_dir, 2);
 
-    let err = gate_palace_with(&palace.data_dir, "split", 2).expect_err("disagreement");
+    let err = classify_with(&palace.data_dir, "split", 2).expect_err("disagreement");
     assert!(
         matches!(
             err,
@@ -297,7 +325,7 @@ fn a_held_kg_is_checked_after_open_and_refused() {
 
     assert_eq!(
         read_marker_without_writing(&kg).expect("read"),
-        None,
+        KgMarker::Deferred,
         "anti-vacuous: a held file must defer to the post-open check"
     );
     let err = KgStoreRedb::open_with_intent(&kg, OpenIntent::ReadOnlyClient)
@@ -338,6 +366,12 @@ fn format_errors_are_not_retried() {
         PalaceStoreError::FormatMarkerUnreadable {
             palace: p(),
             path: PathBuf::from("kg.redb"),
+            reason: "x".into(),
+        },
+        PalaceStoreError::FormatMigrationFailed {
+            palace: p(),
+            from: 0,
+            to: 1,
             reason: "x".into(),
         },
     ];
@@ -398,6 +432,12 @@ fn every_new_error_arm_names_its_variant() {
         PalaceStoreError::FormatMarkerUnreadable {
             palace: p(),
             path: PathBuf::from("k"),
+            reason: "r".into(),
+        },
+        PalaceStoreError::FormatMigrationFailed {
+            palace: p(),
+            from: 0,
+            to: 1,
             reason: "r".into(),
         },
         PalaceStoreError::BackupFailed {
@@ -463,8 +503,8 @@ fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
     let palace = saved_palace(root.path(), "chat-newer");
     populate(&palace);
     let chat = palace.data_dir.join("chat_sessions.db");
-    // An unstamped (format 0) palace opens its chat store as before.
-    let store = ChatSessionStore::open(&chat).expect("format 0 chat store opens");
+    // A current palace opens its chat store as before.
+    let store = ChatSessionStore::open(&chat).expect("current chat store opens");
     store
         .create_session(Some("kept".into()))
         .expect("seed a session");
@@ -483,11 +523,9 @@ fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
     assert!(
         matches!(
             store_error(&err),
-            PalaceStoreError::FormatTooNew {
-                found: 1,
-                supported: 0,
-                ..
-            }
+            PalaceStoreError::FormatTooNew { found, supported, .. }
+                if *found == PALACE_FORMAT_SUPPORTED + 1
+                    && *supported == PALACE_FORMAT_SUPPORTED
         ),
         "{err:#}"
     );
@@ -497,4 +535,95 @@ fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
         hash_tree(&palace.data_dir),
         "the refused chat open changed a byte or a file under the palace"
     );
+}
+
+/// PR2 critic MEDIUM (#9274): the marker is read again on the opened file. A
+/// test seam stamps a newer marker between the pre-open read (which accepted
+/// the file) and the open; the open must still refuse it before writing.
+#[test]
+fn the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker() {
+    use crate::memory_core::store::kg_redb::AFTER_PRE_OPEN;
+    let root = tempdir().expect("tempdir");
+    let palace = saved_palace(root.path(), "post-open");
+    populate(&palace);
+    let kg = palace.data_dir.join(KG_FILE);
+    assert_eq!(
+        read_marker_without_writing(&kg).expect("read"),
+        KgMarker::Stamped(PALACE_FORMAT_SUPPORTED),
+        "anti-vacuous: the pre-open read accepts the file"
+    );
+
+    AFTER_PRE_OPEN.with(|h| h.set(Some(|p| stamp_marker(p.parent().expect("dir"), 9))));
+    let result = KgStoreRedb::open_with_intent(&kg, OpenIntent::Writer);
+    AFTER_PRE_OPEN.with(|h| h.set(None));
+    let err = result
+        .err()
+        .expect("the opened file is newer and must be refused");
+    assert!(
+        matches!(
+            store_error(&err),
+            PalaceStoreError::FormatTooNew { found: 9, .. }
+        ),
+        "{err:#}"
+    );
+}
+
+/// #9274: `doctor` reads a palace's format state without writing; a format-0
+/// palace is "needs migration", and an interrupted one says so.
+#[test]
+fn status_reports_needs_migration_for_a_format_0_palace() {
+    let root = tempdir().expect("tempdir");
+    let palace = saved_palace(root.path(), "status");
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::Current,
+        "a palace with no KG yet is new, not behind"
+    );
+    populate(&palace);
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::Current
+    );
+    // Make it format 0: drop both markers, keep a drawer so the KG is not new.
+    PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
+        .expect("open")
+        .kg
+        .upsert_drawer_sync(&Drawer::new(uuid::Uuid::new_v4(), "data"))
+        .expect("drawer");
+    {
+        let db = crate::redb_cache::create_palace_db(&palace.data_dir.join(KG_FILE)).expect("kg");
+        let wtx = db.begin_write().expect("txn");
+        wtx.open_table(KG_SCHEMA)
+            .expect("schema")
+            .remove(KG_SCHEMA_PALACE_FORMAT)
+            .expect("remove");
+        wtx.commit().expect("commit");
+    }
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace.data_dir.join(PALACE_JSON)).expect("read"))
+            .expect("json");
+    v.as_object_mut().expect("obj").remove("format_version");
+    std::fs::write(
+        palace.data_dir.join(PALACE_JSON),
+        serde_json::to_vec_pretty(&v).expect("encode"),
+    )
+    .expect("write");
+    let before = hash_tree(&palace.data_dir);
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::NeedsMigration {
+            found: 0,
+            interrupted: false
+        }
+    );
+    std::fs::write(palace.data_dir.join(MIGRATION_RECORD), b"{}").expect("record");
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::NeedsMigration {
+            found: 0,
+            interrupted: true
+        }
+    );
+    std::fs::remove_file(palace.data_dir.join(MIGRATION_RECORD)).expect("rm");
+    assert_eq!(before, hash_tree(&palace.data_dir), "status wrote a byte");
 }

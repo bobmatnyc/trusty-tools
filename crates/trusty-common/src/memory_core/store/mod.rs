@@ -11,6 +11,8 @@ pub mod concurrent_open;
 // #4906: durable record of drawers whose embed permanently failed.
 pub mod embed_ledger;
 pub mod format_backup;
+// #9274: the palace format 0 -> 1 migration, run at a writer-intent open.
+pub(crate) mod format_migration;
 pub mod hnsw_store;
 pub mod kg;
 pub mod kg_redb;

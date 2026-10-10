@@ -12,8 +12,7 @@
 //! written last, inside a `.tmp` directory that is then renamed into place, so
 //! a backup without a manifest is incomplete and never trusted. Two complete
 //! backups per palace are kept (ADR-0067 D7): the one just written and the
-//! newest other. This release calls it
-//! from no migration; the 0 → 1 migration does (#9274 PR3).
+//! newest other. The 0 → 1 migration (`format_migration.rs`) calls it.
 //! Test: format_backup_tests.rs, starting with
 //! `a_verified_backup_is_byte_identical_and_reused`.
 
@@ -101,16 +100,36 @@ pub fn backup_root(data_root: &Path, palace_id: &str) -> PathBuf {
         .join(palace_id)
 }
 
+/// The data root a palace's migration backups live under (#9274).
+///
+/// Why: ADR-0067 D3 rule 3 puts backups at `<data_root>/backups/`. The
+/// daemon's palace root is `<data_root>/palaces/`, so its parent is the data
+/// root. In the flat layout the palace root IS the data root, and a visible
+/// `backups/` there would read as an orphan palace directory to
+/// `palace reclaim`, which skips only hidden entries.
+/// What: the parent of the palace root when that root is named `palaces`;
+/// otherwise the hidden `<palace root>/.trusty-memory`. [`backup_root`] then
+/// appends `backups/format-migration/<palace>`.
+/// Test: `backups_land_beside_the_palaces_directory`.
+pub fn backup_data_root(palace_dir: &Path) -> PathBuf {
+    let palaces = palace_dir.parent().unwrap_or(palace_dir);
+    match (palaces.file_name(), palaces.parent()) {
+        (Some(name), Some(data_root)) if name == "palaces" => data_root.to_path_buf(),
+        _ => palaces.join(".trusty-memory"),
+    }
+}
+
 /// Ensure a verified backup of `palace_dir` exists for a `from` → `to` move.
 ///
 /// Why: see the module doc; the caller must not begin a write until this
 /// returns `Ok`.
 /// What: reuses a complete backup for the same move whose files still match
-/// its manifest (a re-run after a crash, ADR-0067 D3 rule 4); removes an
-/// incomplete one; otherwise writes a new backup and prunes to
-/// [`BACKUP_KEEP`]. Returns the backup directory.
+/// its manifest AND the palace's current files (a re-run after a crash before
+/// any write, ADR-0067 D3 rule 4); removes an incomplete one; otherwise writes
+/// a new backup and prunes to [`BACKUP_KEEP`]. Returns the backup directory.
 /// Test: `a_verified_backup_is_byte_identical_and_reused`,
-/// `incomplete_backup_without_manifest_is_not_trusted`.
+/// `incomplete_backup_without_manifest_is_not_trusted`,
+/// `a_backup_of_an_older_source_is_not_reused`.
 pub fn ensure_format_backup(
     data_root: &Path,
     palace_id: &str,
@@ -133,6 +152,7 @@ pub(crate) fn ensure_with(
     let root = backup_root(data_root, palace_id);
     std::fs::create_dir_all(&root).map_err(|e| failed(&root, e))?;
     let prefix = format!("{from}-to-{to}-");
+    let sources = present_sources(palace_dir)?;
     for dir in list_dirs(&root)? {
         let name = file_name(&dir);
         if !name.starts_with(&prefix) {
@@ -141,12 +161,13 @@ pub(crate) fn ensure_with(
         if name.ends_with(TMP_SUFFIX) || !has_manifest(&dir)? {
             // #9274: a backup without a manifest never finished; replace it.
             std::fs::remove_dir_all(&dir).map_err(|e| failed(&dir, e))?;
-        } else if verify_backup(&dir).is_ok() {
+        } else if let Ok(manifest) = verify_backup(&dir)
+            && matches_sources(&manifest, &sources)?
+        {
             return Ok(dir);
         }
     }
 
-    let sources = present_sources(palace_dir)?;
     check_space(&root, &sources, seams)?;
 
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
@@ -191,6 +212,27 @@ pub fn verify_backup(dir: &Path) -> Result<BackupManifest> {
         }
     }
     Ok(manifest)
+}
+
+/// Whether a manifest records exactly the current bytes of `sources`.
+///
+/// Why: a complete backup of an older state of the palace is not a backup of
+/// the palace about to be migrated (PR2 critic MEDIUM, #9274).
+/// Test: `a_backup_of_an_older_source_is_not_reused`.
+fn matches_sources(manifest: &BackupManifest, sources: &[(&str, PathBuf)]) -> Result<bool> {
+    if manifest.files.len() != sources.len() {
+        return Ok(false);
+    }
+    for (entry, (name, src)) in manifest.files.iter().zip(sources) {
+        if entry.name != *name {
+            return Ok(false);
+        }
+        let (len, sha) = hash_file(src)?;
+        if len != entry.len || sha != entry.sha256 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The primary files that exist in `palace_dir`, with their paths.

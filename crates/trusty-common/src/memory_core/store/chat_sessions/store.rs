@@ -55,8 +55,9 @@ impl ChatSessionStore {
     ///    `chat_sessions.redb` next to it; other extensions are kept as-is.
     /// 2. Refuses a palace directory whose format is newer than this binary
     ///    (`palace_format::gate_palace`); the `PalaceStoreError` is the root
-    ///    of the returned error, so `is_format_refusal` matches it. An
-    ///    unstamped directory, or one that does not exist yet, is format 0.
+    ///    of the returned error, so `is_format_refusal` matches it. #9274:
+    ///    a format-0 palace still opens it — the 0 → 1 migration does not
+    ///    change this file — and the daemon migrates the palace itself.
     /// 3. Creates parent directories if missing.
     /// 4. Opens (or creates) the redb database and touches the SESSIONS
     ///    table in a write transaction so range scans on a fresh file

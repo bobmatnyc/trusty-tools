@@ -291,6 +291,31 @@ pub fn try_open_or_snapshot(
     path: &Path,
     intent: OpenIntent,
 ) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    open_with_policy(path, intent, true)
+}
+
+/// [`try_open_or_snapshot`] for a palace primary file (ADR-0067 D5, #9274).
+///
+/// Why: the #702 recovery renames an unreadable file aside and substitutes an
+/// empty database. For `kg.redb`, which holds every drawer, that is apparent
+/// total data loss behind a "degraded" flag, so a primary file is refused
+/// under every intent and its bytes stay where they are.
+/// What: [`try_open_or_snapshot`] with the recreate arm replaced by the typed
+/// refusal, which the open retry loops already stop on.
+/// Test: `a_writer_open_refuses_an_incompatible_kg_with_bytes_unchanged`.
+pub(crate) fn try_open_primary_or_snapshot(
+    path: &Path,
+    intent: OpenIntent,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    open_with_policy(path, intent, false)
+}
+
+/// The body of both opens; `recreate` allows the #702 recovery for a writer.
+fn open_with_policy(
+    path: &Path,
+    intent: OpenIntent,
+    recreate: bool,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
     // #7106: every palace-scoped open goes through the bounded page-cache
     // builder — a bare `Database::create` here takes redb's 1 GiB ceiling.
     match create_palace_db(path) {
@@ -301,7 +326,9 @@ pub fn try_open_or_snapshot(
         // receives `OpenMode::Recreated` and must surface degraded status —
         // never report this store as `ready`.
         Err(e) if super::redb_open::is_incompatible_format(&e) => match intent {
-            OpenIntent::Writer => recreate_incompatible_file(path, &e),
+            // #9274: never for a primary file (ADR-0067 D5).
+            OpenIntent::Writer if recreate => recreate_incompatible_file(path, &e),
+            OpenIntent::Writer => Err(refuse_incompatible_primary(path, &e)),
             // #4911: this recovery relocates the caller's store, so it belongs
             // to the writer that owns the file, not to a read-only client.
             OpenIntent::ReadOnlyClient => Err(refuse_incompatible_file(path, &e)),
@@ -386,6 +413,25 @@ fn refuse_incompatible_file(path: &Path, err: &DatabaseError) -> anyhow::Error {
              declared read-only intent, so the file was left exactly as it is rather than being \
              renamed aside and replaced with an empty database. Re-open with OpenIntent::Writer \
              (the trusty-memory daemon) to run that recovery, or migrate the file out of band.",
+            path.display()
+        ),
+    })
+}
+
+/// Refuse a primary file in an incompatible format under writer intent (#9274).
+///
+/// Why: ADR-0067 D5 retires the recreate-empty recovery for primary files; the
+/// palace is refused and the error names the file and the cause.
+/// Test: `a_writer_open_refuses_an_incompatible_kg_with_bytes_unchanged`.
+fn refuse_incompatible_primary(path: &Path, err: &DatabaseError) -> anyhow::Error {
+    tracing::error!(path = %path.display(), error = %err,
+        "#9274: palace primary file is in an incompatible on-disk format; refusing the palace \
+         and leaving the file untouched (ADR-0067 D5)");
+    anyhow::Error::new(IncompatibleFormatRefused {
+        message: format!(
+            "palace primary file {} is in an incompatible on-disk format ({err}); the palace is \
+             refused and the file was left exactly as it is (ADR-0067 D5). Restore it from a \
+             backup or open it with the release that wrote it.",
             path.display()
         ),
     })

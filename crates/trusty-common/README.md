@@ -202,7 +202,7 @@ library slot. Enable it in at most one crate per build graph (typically
 
 ### Palace format guard (`memory-core`)
 
-`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch` and `FormatMarkerUnreadable` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm. The `memory_core::store::format_backup` module copies a palace's primary files into a verified backup before a migration; trusty-common 0.58.0 stamps no marker yet.
+`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 1. A writer-intent `PalaceHandle` open migrates a format-0 palace at its first open, behind a verified backup under `<data_root>/backups/format-migration/<palace>/`; a read-only open of a format-0 palace is refused until the daemon has migrated it. `palace_format::palace_format_status` reads a palace's state without writing. `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
 
 ## Migrations (`migrations` feature)
 
