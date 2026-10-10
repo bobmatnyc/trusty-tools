@@ -89,8 +89,8 @@ pub struct AliasChange {
     pub after: Option<String>,
 }
 
-/// What [`PalaceAliasStore::rename_target`] changed, so a failed palace move
-/// can put those keys back (#9544).
+/// What [`PalaceAliasStore::rename_target_with_undo`] changed, so a failed
+/// palace move can put those keys back (#9544).
 ///
 /// Why: a rollback that rewrites the whole map from a snapshot would also undo
 /// every alias another writer registered in between. Recording only the
@@ -281,21 +281,31 @@ impl PalaceAliasStore {
     /// `old <-> new` cycle when a rename is reversed), repoints every
     /// `x -> old` to `x -> new`, and inserts `old -> new`. A corrupt alias file
     /// is an error and is left unchanged, since rewriting it would drop every
-    /// alias it holds. Returns an [`AliasUndo`] naming every key it changed.
+    /// alias it holds. [`Self::rename_target_with_undo`] is the same write,
+    /// returning what it changed.
     ///
     /// Caller contract (#9544): `old -> new` is inert while `old` still has a
     /// `palace.json`, so the write may precede the directory move. The
     /// retargeted `x -> new` entries are NOT inert: until `new` has a
     /// `palace.json`, `x` resolves to nothing (its old redirect to `old` is
     /// gone). So the caller must hold the palace open-locks for `old` and `new`
-    /// across the write and the move, and on a failed move must pass the
-    /// returned undo to [`Self::undo`], which restores exactly those keys.
+    /// across the write and the move, and on a failed move must undo it: call
+    /// [`Self::rename_target_with_undo`] and pass its result to [`Self::undo`],
+    /// which restores exactly the keys the write changed.
     /// Test: `rename_retargets_aliases_pointing_at_the_old_id`,
     /// `rename_drops_the_alias_keyed_by_the_new_id`,
     /// `rename_target_rejects_empty_or_equal_ids`,
     /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`,
     /// `rename_target_returns_the_touched_keys_and_undo_restores_them`.
-    pub fn rename_target(registry_dir: &Path, old: &str, new: &str) -> Result<AliasUndo> {
+    pub fn rename_target(registry_dir: &Path, old: &str, new: &str) -> Result<()> {
+        // #9544: the signature 0.59.1 shipped; the undo data is additive.
+        Self::rename_target_with_undo(registry_dir, old, new).map(drop)
+    }
+
+    /// [`Self::rename_target`], returning an [`AliasUndo`] naming every key it
+    /// changed (#9544), so a failed palace move can restore exactly those.
+    /// Test: `rename_target_returns_the_touched_keys_and_undo_restores_them`.
+    pub fn rename_target_with_undo(registry_dir: &Path, old: &str, new: &str) -> Result<AliasUndo> {
         let old = old.trim();
         let new = new.trim();
         if old.is_empty() || new.is_empty() {
@@ -326,7 +336,7 @@ impl PalaceAliasStore {
         Ok(AliasUndo { changes })
     }
 
-    /// Put back the keys a [`Self::rename_target`] changed (#9544).
+    /// Put back the keys a [`Self::rename_target_with_undo`] changed (#9544).
     ///
     /// Why: a palace move that fails after the alias write must leave the map
     /// as it was for those keys, without clobbering aliases another writer set
@@ -698,7 +708,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         PalaceAliasStore::register_alias(tmp.path(), "older", "old-id").unwrap();
         PalaceAliasStore::register_alias(tmp.path(), "unrelated", "elsewhere").unwrap();
-        let _ = PalaceAliasStore::rename_target(tmp.path(), "old-id", "new-id").unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "old-id", "new-id").unwrap();
         let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
         assert_eq!(all.get("old-id").map(String::as_str), Some("new-id"));
         assert_eq!(all.get("older").map(String::as_str), Some("new-id"));
@@ -718,8 +728,8 @@ mod tests {
     #[test]
     fn rename_drops_the_alias_keyed_by_the_new_id() {
         let tmp = tempdir().unwrap();
-        let _ = PalaceAliasStore::rename_target(tmp.path(), "first", "second").unwrap();
-        let _ = PalaceAliasStore::rename_target(tmp.path(), "second", "first").unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "first", "second").unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "second", "first").unwrap();
         let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
         assert_eq!(all.get("second").map(String::as_str), Some("first"));
         assert_eq!(
@@ -854,7 +864,7 @@ mod tests {
             }));
             let (d, t) = (dir.clone(), tx.clone());
             workers.push(std::thread::spawn(move || {
-                let _ = PalaceAliasStore::rename_target(&d, "old-id", "new-id").unwrap();
+                PalaceAliasStore::rename_target(&d, "old-id", "new-id").unwrap();
                 t.send("rename").unwrap();
             }));
             rx.recv_timeout(Duration::from_millis(200))
@@ -890,7 +900,7 @@ mod tests {
         PalaceAliasStore::register_alias(dir, "older", "old-id").unwrap();
         PalaceAliasStore::register_alias(dir, "new-id", "elsewhere").unwrap();
         PalaceAliasStore::register_alias(dir, "unrelated", "kept").unwrap();
-        let undo = PalaceAliasStore::rename_target(dir, "old-id", "new-id").unwrap();
+        let undo = PalaceAliasStore::rename_target_with_undo(dir, "old-id", "new-id").unwrap();
         let change = |key: &str, before: Option<&str>, after: Option<&str>| AliasChange {
             key: key.to_string(),
             before: before.map(str::to_string),

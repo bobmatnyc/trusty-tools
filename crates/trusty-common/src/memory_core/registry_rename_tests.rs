@@ -265,7 +265,7 @@ fn rename_palace_resumes_after_alias_written_but_dir_unmoved() {
     let root = tmp.path();
     let reg = PalaceRegistry::new();
     drop(create(&reg, root, "old-p"));
-    let _ = PalaceAliasStore::rename_target(root, "old-p", "new-p").unwrap();
+    PalaceAliasStore::rename_target(root, "old-p", "new-p").unwrap();
 
     let out = reg
         .rename_palace(root, "old-p", "new-p", &opts())
@@ -284,7 +284,7 @@ fn rename_palace_resumes_after_dir_moved_but_id_unwritten() {
     let root = tmp.path();
     let reg = PalaceRegistry::new();
     drop(create(&reg, root, "old-p"));
-    let _ = PalaceAliasStore::rename_target(root, "old-p", "new-p").unwrap();
+    PalaceAliasStore::rename_target(root, "old-p", "new-p").unwrap();
     reg.remove(&PalaceId::new("old-p"));
     std::fs::rename(root.join("old-p"), root.join("new-p")).unwrap();
     assert_eq!(json_id(root, "new-p").0, "old-p");

@@ -194,7 +194,7 @@ impl PalaceRegistry {
     /// cached handles if nothing else references them; a lock or handle still
     /// held after `busy_wait` is
     /// `Busy` with nothing changed. Then, in order: the alias write
-    /// ([`PalaceAliasStore::rename_target`]); for `replace_empty`, the empty
+    /// ([`PalaceAliasStore::rename_target_with_undo`]); for `replace_empty`, the empty
     /// target moves to `<root>/.trash/<new>-replaced-<UTC>/`; the directory
     /// move `<root>/<old>` -> `<root>/<new>`; and `palace.json` is rewritten
     /// (id and data dir; the name only when it was `old`). A failed trash or
@@ -357,7 +357,7 @@ impl PalaceRegistry {
             }
         };
 
-        let undo = PalaceAliasStore::rename_target(data_root, old, new)
+        let undo = PalaceAliasStore::rename_target_with_undo(data_root, old, new)
             .map_err(|e| PalaceRenameError::io("write the palace alias map", e))?;
         if replace {
             let trash = trash_path(data_root, new);
