@@ -225,6 +225,36 @@ fn alive(pid: i64) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+/// `TIOCSCTTY`, which the libc crate does not export for macOS.
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
+#[cfg(not(target_os = "macos"))]
+use libc::TIOCSCTTY;
+
+/// A fresh pty: (master, slave).
+fn open_pty() -> (std::fs::File, std::fs::File) {
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two fds into the out-params.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty");
+    // SAFETY: both fds were just opened and are owned here.
+    unsafe {
+        use std::os::fd::FromRawFd;
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    }
+}
+
 /// Why: tier 1 end to end — the value reaches the env, output is scrubbed,
 /// one resolve per key, and the grant is revoked on a normal exit.
 #[tokio::test(flavor = "multi_thread")]
@@ -483,6 +513,57 @@ async fn exec_drain_after_exit_answers_sigterm() {
     assert_eq!(fx.seen().revokes, [TOKEN], "revoked once");
 }
 
+/// Why: #9621 — with stdin on a terminal and stdout piped, a background job
+/// keeps tm draining after the command exits. tm must hold the terminal
+/// again by then, so a terminal Ctrl-C ends tm with 130 instead of reaching
+/// only the job, which ignores SIGINT.
+/// What: tm runs as a session leader whose controlling terminal is a pty;
+/// after the revoke, `\x03` goes to the master every 200 ms until tm exits.
+/// A Ctrl-C that lands before the handback reaches the ignoring job only.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
+    use std::io::Write;
+    let fx = Fixture::new(Script::new()).await;
+    let (mut master, slave) = open_pty();
+    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", "sleep 30 &"]);
+    cmd.stdin(slave).kill_on_drop(true);
+    // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the slave.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn tm");
+    drop(cmd);
+    let start = Instant::now();
+    while fx.seen().revokes.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(20), "never revoked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let exited = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            master.write_all(b"\x03").expect("write Ctrl-C");
+            tokio::select! {
+                status = child.wait() => break status,
+                () = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+    })
+    .await;
+    // The background sleep holds the pty; end it whatever the verdict.
+    let group = fx.seen().grants[0]["child_pid"].as_i64().unwrap();
+    // SAFETY: plain syscall to the group this test's tm created.
+    unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
+    let status = exited
+        .expect("tm exited after a terminal Ctrl-C while draining")
+        .expect("tm status");
+    assert_eq!(status.code(), Some(128 + libc::SIGINT));
+    assert_eq!(fx.seen().revokes, [TOKEN], "revoked once");
+}
+
 /// Why: a command killed by a signal reports 128 + signal and is revoked.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_reports_a_sigkilled_command_and_revokes() {
@@ -546,26 +627,7 @@ async fn exec_argv_never_carries_a_value_or_token() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_leaves_terminal_output_unscrubbed() {
     let fx = Fixture::new(Script::new()).await;
-    let (mut master, mut slave) = (0, 0);
-    // SAFETY: openpty writes two fds into the out-params.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(rc, 0, "openpty");
-    // SAFETY: both fds were just opened and are owned here.
-    let (master, slave) = unsafe {
-        use std::os::fd::FromRawFd;
-        (
-            std::fs::File::from_raw_fd(master),
-            std::fs::File::from_raw_fd(slave),
-        )
-    };
+    let (master, slave) = open_pty();
     let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", r#"echo "$FOO""#]);
     cmd.stdout(slave);
     let child = cmd.spawn().expect("spawn tm");

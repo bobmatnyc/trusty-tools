@@ -16,8 +16,9 @@
 //!    and stderr through [`Scrubber`]; wait, forwarding SIGINT, SIGTERM and
 //!    SIGHUP to the group, and SIGKILL it on a second signal or after
 //!    [`GRACE`].
-//! 6. `secrets.revoke` the grant, then drain the pumps; a signal during the
-//!    drain goes to the group and ends tm with 128 + the signal.
+//! 6. `secrets.revoke` the grant, take the terminal back, then drain the
+//!    pumps; a signal during the drain (a terminal Ctrl-C included) goes to
+//!    the group and ends tm with 128 + the signal.
 //!
 //! Every failure before the command runs kills the stub's group, revokes a
 //! grant that exists, and exits 1 with fixed text. Known limits are in the
@@ -65,7 +66,8 @@ const PREFIX: &str = "tm secrets exec";
 /// Test: `exec_runs_the_command_with_the_value_and_revokes`,
 /// `exec_grant_names_the_stub_pid_not_tm`,
 /// `exec_kills_the_stub_group_when_the_grant_is_refused`,
-/// `exec_drain_after_exit_answers_sigterm`.
+/// `exec_drain_after_exit_answers_sigterm`,
+/// `exec_drain_after_exit_answers_terminal_ctrl_c`.
 pub(crate) async fn run(
     client: &OnDemandSecrets,
     project: &Path,
@@ -108,7 +110,7 @@ pub(crate) async fn run(
     let pid = child
         .id()
         .ok_or_else(|| anyhow!("{PREFIX}: the helper has no pid"))?;
-    let _terminal = Foreground::hand_to(pid);
+    let terminal = Foreground::hand_to(pid);
 
     // #9621: the grant names the stub — the child pid — never tm's own.
     let granted = tokio::select! {
@@ -142,6 +144,9 @@ pub(crate) async fn run(
     // #9621: every path that holds a token revokes it.
     revoke(client, &token).await;
     let (code, pumps) = supervised?;
+    // #9621: the command has exited; a terminal Ctrl-C during the drain must
+    // reach tm, not a background job that ignores SIGINT.
+    drop(terminal);
     // #9621: a background job can hold the pipes past the command's exit;
     // a signal still ends tm. The group id stays reserved while that job is
     // in it; an empty group answers ESRCH, which kill_group ignores.
@@ -159,7 +164,8 @@ pub(crate) async fn run(
 /// for as long as it does.
 /// What: `None` once every pump reached end of stream; `Some(sig)` when a
 /// signal came first. The pumps left running end with tm.
-/// Test: `exec_drain_after_exit_answers_sigterm`.
+/// Test: `exec_drain_after_exit_answers_sigterm`,
+/// `exec_drain_after_exit_answers_terminal_ctrl_c`.
 async fn drain(pumps: Vec<JoinHandle<()>>, signals: &mut Signals) -> Option<i32> {
     let all = async {
         for pump in pumps {

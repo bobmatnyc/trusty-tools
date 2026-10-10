@@ -10,7 +10,8 @@
 //! [`Foreground`] (the terminal handoff, undone on drop) and
 //! [`clear_cloexec`] (keep one fd across exec).
 //! Test: `tests/tm_secrets_exec.rs` — `exec_forwards_sigterm_and_revokes`,
-//! `exec_kills_the_stub_group_when_the_grant_is_refused`.
+//! `exec_kills_the_stub_group_when_the_grant_is_refused`,
+//! `exec_drain_after_exit_answers_terminal_ctrl_c` ([`Foreground`]'s drop).
 
 use std::io;
 use std::os::fd::RawFd;
