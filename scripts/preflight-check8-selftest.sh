@@ -131,6 +131,14 @@
 #                               RERUN still walks back and recovers the commit
 #                               attempt 1 recorded.
 #
+# THE THIRD HALF drives check8_prepublish_gate whole, with gh and git stubbed
+#   (#9626): the run LISTING that feeds the two halves above.
+#     30. HEAD past the cap     45 newer runs gated other commits; the green run
+#                               for HEAD comes from the head_sha listing. [PASS].
+#                               Against the pre-fix script this stops at the cap.
+#     31. head_sha list fails   an unreadable listing is [FAIL], never a pass.
+#     32. red via head_sha      a red run found by head_sha is still red.
+#
 # Usage: bash scripts/preflight-check8-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
 #
@@ -532,6 +540,91 @@ fx "$(jobs_path "$RERUN_RUN")"      "$(jobs_body "$RERUN_JOB_A2" success 2)"
 fx "$(jobs_path "$RERUN_RUN" 1)"    "$(jobs_body "$RERUN_JOB_A1" success 1)"
 fx "$(ann_path "$RERUN_JOB_A1")"    "$(ann_body "$RERUN_SHA")"
 assert_eq "29 annotations fetch fails hard on rerun: walks back" "$RERUN_SHA" "$(run_target "$RERUN_RUN")"
+
+# ===========================================================================
+# check8_prepublish_gate — the run LISTING (#9626)
+# ===========================================================================
+# The 0.59.1 release train: more than GATE_SCAN_CAP newer runs gated other
+# commits, and the green run for HEAD sat past the cap. Pre-fix, the scan
+# stopped at the cap and the check failed as unverified.
+
+# gh_stub — stands in for `gh`. `gh api repos/<owner>/<repo>/<path> [--jq e]`
+# serves the fixture for <path>, filtered through jq when --jq is given (the
+# pre-#9626 listing used --jq). An unrecorded path exits 22.
+# shellcheck disable=SC2329  # called through the gh() stand-in in run_check8
+gh_stub() {
+  local path="${2#repos/*/*/}" body
+  body="$(fixture_api "$path")" || return 22
+  if [ "${3:-}" = "--jq" ]; then printf '%s' "$body" | jq -r "$4"; else printf '%s' "$body"; fi
+}
+
+# runs_body <id>... — a workflow-runs list body, newest first.
+runs_body() {
+  local id sep="" out='{"total_count":'"$#"',"workflow_runs":['
+  for id in "$@"; do
+    out="${out}${sep}{\"id\":${id},\"created_at\":\"2026-10-10T09:00:00Z\",\"status\":\"completed\",\"conclusion\":\"${RUN_CONCL:-success}\",\"html_url\":\"https://gh/run/${id}\"}"
+    sep=","
+  done
+  printf '%s]}' "$out"
+}
+
+# attributed <run-id> <sha> — record that run's resolve job naming <sha>.
+attributed() {
+  fx "$(jobs_path "$1")" "$(jobs_body "${1}1" success 1)"
+  fx "$(ann_path "${1}1")" "$(ann_body "$2")"
+}
+
+LIST_PATH="actions/workflows/pre-publish.yml/runs"
+
+# run_check8 — the whole check, every gate_* function and constant extracted
+# from the script under test; gh and git are the only stand-ins.
+run_check8() {
+  local out rc
+  out="$(
+    set +e
+    # shellcheck disable=SC2034  # read by the eval'd functions
+    PKG_NAME="trusty-selftest"
+    eval "$(grep -E '^GATE_[A-Z_]+=' "$UNDER_TEST")"
+    for f in gate_unverified gate_decide gate_api gate_pick_job gate_annotation_sha \
+      gate_attempt_target gate_run_target gate_list_runs check8_prepublish_gate; do
+      eval "$(awk "/^${f}\\(\\) \\{/,/^\\}/" "$UNDER_TEST")"
+    done
+    gh() { gh_stub "$@"; }
+    git() { if [ "$1" = "rev-parse" ]; then printf '%s\n' "$HEAD_SHA"; else return 1; fi; }
+    check8_prepublish_gate 2>&1 >/dev/null
+    printf '\nEXIT=%s' "$?"
+  )"
+  rc="$(printf '%s' "$out" | sed -n 's/^EXIT=//p' | tail -n1)"
+  out="$(printf '%s' "$out" | grep -v '^EXIT=' | tr '\n' ' ' | tr -s ' ')"
+  printf '%s|%s' "${rc:-?}" "$out"
+}
+
+echo "check8_prepublish_gate — the run listing (#9626):"
+
+# --- 30. THE #9626 DEFECT: HEAD's green run sits past the scan cap ----------
+fx_reset
+window=()
+for i in $(seq 9000 9044); do window+=("$i"); attributed "$i" "$OTHER_SHA"; done
+attributed 8000 "$HEAD_SHA"
+fx "${LIST_PATH}?per_page=100&page=1" "$(runs_body "${window[@]}" 8000)"
+fx "${LIST_PATH}?per_page=100" "$(runs_body "${window[@]}" 8000)"   # pre-#9626 path
+fx "${LIST_PATH}?head_sha=${HEAD_SHA}&per_page=100&page=1" "$(runs_body 8000)"
+raw="$(run_check8)"
+assert_eq "30 HEAD run past the cap: publish permitted" "0" "$(status_of "$raw")"
+assert_contains "30 HEAD run past the cap: label" "[PASS]" "$(text_of "$raw")"
+
+# --- 31. the head_sha listing failing is not a pass --------------------------
+rm -f "${FIXTURE_DIR}/$(fixture_key "${LIST_PATH}?head_sha=${HEAD_SHA}&per_page=100&page=1")"
+raw="$(run_check8)"
+assert_eq "31 head_sha listing unreadable: stops" "1" "$(status_of "$raw")"
+assert_contains "31 head_sha listing unreadable: label" "[FAIL]" "$(text_of "$raw")"
+
+# --- 32. a red run for HEAD found by head_sha is still red -------------------
+fx "${LIST_PATH}?head_sha=${HEAD_SHA}&per_page=100&page=1" "$(RUN_CONCL=failure runs_body 8000)"
+fx "${LIST_PATH}?per_page=100&page=1" "$(runs_body)"
+raw="$(run_check8)"
+assert_eq "32 red HEAD run via head_sha: stops" "1" "$(status_of "$raw")"
+assert_contains "32 red HEAD run via head_sha: red label" "HAS run against" "$(text_of "$raw")"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
