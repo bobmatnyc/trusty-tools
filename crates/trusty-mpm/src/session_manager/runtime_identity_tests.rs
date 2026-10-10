@@ -42,6 +42,13 @@ struct FakeTmux {
     /// #9004: what the pane-identity `display-message` prints, or `None` to
     /// exit 1.
     identity: Option<&'static str>,
+    /// #9566: what a `display-message` for `#{pane_current_command}` prints,
+    /// or `None` for the fake's empty answer.
+    /// The default `None` makes the caller-pane read fail, so a reactivate
+    /// success-path test must set it.
+    pane_command: Option<&'static str>,
+    /// #9566: that `display-message` exits 1 instead, over `pane_command`.
+    pane_command_fails: bool,
     /// What tmux answers once a `send-keys` reached it — the state the
     /// post-grace re-check sees — or `None` to keep the answers above.
     after_signal: Option<AfterSignal>,
@@ -54,6 +61,8 @@ impl Default for FakeTmux {
             sessions_fail: false,
             panes: Some("%9:1"),
             identity: Some(LIVE_IDENTITY),
+            pane_command: None,
+            pane_command_fails: false,
             after_signal: None,
         }
     }
@@ -153,11 +162,22 @@ impl Fixture {
         // #9004: only the pane-identity read asks for `session_id`; the pid
         // probe's `#{pane_pid}` read keeps its empty answer.
         let identity = identity_answer(fake.identity);
+        // #9566: only the foreground-command read is a `display-message` for
+        // `pane_current_command`; `list-panes -a -F` also names it.
+        let answer = match (fake.pane_command_fails, fake.pane_command) {
+            (true, _) => Some("echo 'lost server' >&2; exit 1".to_string()),
+            (false, Some(cmd)) => Some(format!("echo '{cmd}'; exit 0")),
+            (false, None) => None,
+        };
+        let command = answer.map_or(String::new(), |answer| {
+            format!("case \"$*\" in *display-message*pane_current_command*) {answer};; esac")
+        });
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{log}'\n\
              if [ \"$1\" = send-keys ]; then touch '{signalled}'; fi\n\
              if [ -f '{signalled}' ]; then :; {after}\nfi\n\
              if [ \"$1\" = list-sessions ]; then {sessions}; fi\n\
+             {command}\n\
              case \"$*\" in *session_id*) {identity};; esac\n\
              if [ \"$1\" = list-panes ]; then {panes}; fi\nexit 0\n",
             log = log.display(),
