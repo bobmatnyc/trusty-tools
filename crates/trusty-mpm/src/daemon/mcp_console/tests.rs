@@ -637,3 +637,36 @@ fn config_save_preserves_channels_section() {
     );
     assert_eq!(after["auto_resume"], serde_yaml::Value::Bool(true));
 }
+
+/// Why (#8454 S2c, Q2): a config file with one ill-typed field parsed as all
+/// defaults, so a console save overwrote the whole file, `channels:` included.
+/// What: [`config_write_at`] over a file with `auto_resume: maybe` and a
+/// `channels:` block must return an error and leave the file byte-for-byte
+/// unchanged.
+/// Test: this is the test.
+#[test]
+fn config_write_refuses_a_file_it_cannot_parse() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("config.yaml");
+    let original = "auto_resume: maybe\ndefault_model: sonnet\nchannels:\n  version: 1\n  slack:\n    \
+                    enabled: true\n    connection: { bot_ref: slack, app_ref: slack-app }\n    \
+                    projects: [/abs/proj]\n";
+    std::fs::write(&path, original).expect("write config");
+
+    let result = config_write_at(&path, |config| {
+        config.default_model = Some("opus".into());
+        Ok(())
+    });
+
+    let after = std::fs::read(&path).expect("read config");
+    assert!(
+        result.is_err(),
+        "a save over an unparseable file must be refused, got {result:?}"
+    );
+    assert_eq!(
+        after,
+        original.as_bytes(),
+        "the refused save must leave the file unchanged:\n{}",
+        String::from_utf8_lossy(&after)
+    );
+}
