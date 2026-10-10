@@ -16,6 +16,7 @@
 
 use std::io::{BufRead, Write};
 
+use crate::claude_temperature::accepts_temperature;
 use crate::credentials::{
     KeyStore, env_local_value, redact_secret, resolve_key_with, scrub_secrets,
 };
@@ -387,11 +388,7 @@ pub async fn probe(
         }
     };
 
-    // Minimal, cheap 1-token request as the auth probe.
-    let mut req = ChatRequest::new(caps.default_model, vec![ChatMessage::user("ping")]);
-    req.max_tokens = Some(1);
-    req.temperature = Some(0.0);
-    match adapter.chat(&req).await {
+    match adapter.chat(&probe_request(caps.default_model)).await {
         Ok(_) => Ok(ProbeOutcome::Ok),
         Err(InferenceError::Api {
             status: 401 | 403, ..
@@ -404,6 +401,21 @@ pub async fn probe(
             std::slice::from_ref(&resolved_key),
         ))),
     }
+}
+
+/// The minimal, cheap 1-token request the auth probe sends to `model`.
+///
+/// Why: the probe must succeed for any model that accepts the key, so it
+/// carries nothing a model could reject.
+/// What: one `ping` user turn, `max_tokens = 1`, and `temperature = 0.0`
+/// unless `model` is one [`accepts_temperature`] rejects.
+/// Test: `probe_request_omits_temperature_only_for_claude_5_5`.
+fn probe_request(model: &str) -> ChatRequest {
+    let mut req = ChatRequest::new(model, vec![ChatMessage::user("ping")]);
+    req.max_tokens = Some(1);
+    // #9318: Claude 5.5 models reject `temperature`; omit it for them.
+    req.temperature = accepts_temperature(model).then_some(0.0);
+    req
 }
 
 /// Write a probe outcome as a value-free status line.
@@ -548,5 +560,27 @@ mod tests {
     #[test]
     fn probe_scrub_is_noop_for_empty_key() {
         assert_eq!(scrub_secrets("some message", &[""]), "some message");
+    }
+
+    /// Why (#9318): the probe's request must not carry `temperature` to a
+    /// Claude 5.5 model, which rejects it, or a working key reports as
+    /// failed; older models keep `temperature = 0.0`.
+    /// What: serializes `probe_request` for each id in the shared 5.5 and
+    /// older-model lists; asserts the `temperature` key is absent for a 5.5
+    /// id and `0.0` otherwise, with `max_tokens = 1` either way.
+    /// Test: itself.
+    #[test]
+    fn probe_request_omits_temperature_only_for_claude_5_5() {
+        use crate::claude_temperature::tests::{CLAUDE_5_5_IDS, TEMPERATURE_IDS};
+        for model in CLAUDE_5_5_IDS {
+            let body = serde_json::to_value(probe_request(model)).expect("serialize");
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+            assert_eq!(body["max_tokens"], 1, "{model}: {body}");
+        }
+        for model in TEMPERATURE_IDS {
+            let body = serde_json::to_value(probe_request(model)).expect("serialize");
+            assert_eq!(body["temperature"], 0.0, "{model}: {body}");
+            assert_eq!(body["max_tokens"], 1, "{model}: {body}");
+        }
     }
 }

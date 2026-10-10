@@ -1,0 +1,2 @@
+Fixed
+- Requests to Claude 5.5 models (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, in Anthropic, Bedrock profile and Bedrock ARN forms) no longer send `temperature`, which those models reject. This covers the Bedrock inference adapter, the Anthropic adapter, the `config keys test` auth probe and the chat Bedrock provider. Older models still receive `temperature` when it is set (#9318).

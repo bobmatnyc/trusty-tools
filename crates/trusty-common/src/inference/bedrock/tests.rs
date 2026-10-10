@@ -1503,6 +1503,41 @@ fn build_converse_parts_omits_tool_config_without_tools() {
     assert_eq!(parts.inference.max_tokens(), None);
 }
 
+/// The Converse `inferenceConfig` omits `temperature` for a Claude 5.5 model
+/// and keeps it for every other model.
+///
+/// Why (#9318): Claude 5.5 models reject a request that carries
+/// `temperature`, so every 5.5 call through this adapter failed.
+/// What: builds the parts for each id in the shared 5.5 and older-model lists
+/// with `temperature = 0.25`; asserts the `InferenceConfiguration` Converse
+/// sends has no temperature for a 5.5 id, `0.25` otherwise, and the same
+/// `max_tokens` either way.
+/// Test: this test.
+#[test]
+fn build_converse_parts_omits_temperature_only_for_claude_5_5() {
+    use crate::claude_temperature::tests::{CLAUDE_5_5_IDS, TEMPERATURE_IDS};
+    let cases = CLAUDE_5_5_IDS
+        .iter()
+        .map(|id| (id, None))
+        .chain(TEMPERATURE_IDS.iter().map(|id| (id, Some(0.25))));
+    for (model, expected) in cases {
+        let mut req = minimal_request(vec![ChatMessage::user("hi")]);
+        req.model = (*model).into();
+        req.temperature = Some(0.25);
+        let parts = build_converse_parts(&req).expect("parts must build");
+        assert_eq!(
+            parts.inference.temperature(),
+            expected,
+            "temperature for {model}"
+        );
+        assert_eq!(
+            parts.inference.max_tokens(),
+            Some(256),
+            "max_tokens for {model}"
+        );
+    }
+}
+
 // ─── Live integration test ──────────────────────────────────────────────────
 
 /// Live integration test: send a trivial prompt to Bedrock via Converse.
