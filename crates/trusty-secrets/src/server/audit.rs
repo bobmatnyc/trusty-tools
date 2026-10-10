@@ -73,6 +73,10 @@ pub enum AuditMethod {
     /// `secrets.revoke`, one record per call (#9070).
     #[serde(rename = "secrets.revoke")]
     Revoke,
+    /// `secrets.set_agents_may_use`: one allow record before the backend
+    /// call, then a deny if that call fails; one deny for a refusal (#9070).
+    #[serde(rename = "secrets.set_agents_may_use")]
+    SetAgentsMayUse,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -123,10 +127,14 @@ impl From<ErrorKind> for AuditReason {
 /// What: `vault`, `key`, `backend` and `project_root` are `None` when the
 /// call was refused before the server knew them (an undecodable request has
 /// none). `caller_pid` is the socket peer's pid as the kernel reported it
-/// (#9070), `None` when the kernel reported none. Unknown
-/// fields are ignored and missing optional fields default, so old and new
-/// readers and writers interoperate.
-/// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`.
+/// (#9070), `None` when the kernel reported none. #9070 slice 3:
+/// `agents_allowed` is the flag value a `secrets.set_agents_may_use` call
+/// asked for, and `agent_parent` whether the caller's ancestry has a Claude
+/// Code process, on `grant`, `resolve` and flag-set records once judged.
+/// Unknown fields are ignored and missing optional fields default, so old
+/// and new readers and writers interoperate.
+/// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`,
+/// `audit_flag_record_round_trips_and_an_older_record_decodes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuditRecord {
@@ -156,6 +164,12 @@ pub struct AuditRecord {
     /// The calling process: the socket peer's pid (#9070).
     #[serde(default)]
     pub caller_pid: Option<u32>,
+    /// The "agents may use" value a flag-set call asked for (#9070).
+    #[serde(default)]
+    pub agents_allowed: Option<bool>,
+    /// Whether the caller had a Claude Code ancestor, once judged (#9070).
+    #[serde(default)]
+    pub agent_parent: Option<bool>,
 }
 
 impl AuditRecord {
@@ -176,6 +190,8 @@ impl AuditRecord {
             backend: None,
             project_root: None,
             caller_pid: None,
+            agents_allowed: None,
+            agent_parent: None,
         }
     }
 

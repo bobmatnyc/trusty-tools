@@ -35,6 +35,8 @@
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
+// #9070: S8 slice 3, the flag-set method body.
+mod agents_flag;
 // #9070: S8 — exec grants and process ancestry.
 pub mod ancestry;
 pub mod audit;

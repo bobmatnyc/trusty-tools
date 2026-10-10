@@ -46,11 +46,14 @@ pub(crate) const BODY_GRACE: Duration = Duration::from_secs(2);
 /// The whole-operation deadline the server gives one request of `name`.
 pub(crate) fn request_deadline(name: &str) -> Duration {
     match name {
-        // #9070: `resolve` reads a value and `grant` may read agents flags,
-        // both through a CLI-backed backend.
-        method::SET | method::DELETE | method::COPY | method::GRANT | method::RESOLVE => {
-            WRITE_DEADLINE
-        }
+        // #9070: `resolve` reads a value, `grant` may read agents flags and
+        // `set_agents_may_use` writes one, all through the backend.
+        method::SET
+        | method::DELETE
+        | method::COPY
+        | method::GRANT
+        | method::RESOLVE
+        | method::SET_AGENTS_MAY_USE => WRITE_DEADLINE,
         _ => READ_DEADLINE,
     }
 }
