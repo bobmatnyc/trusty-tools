@@ -16,7 +16,7 @@ readme = "README.md"
 # out: `tests/` (fake tokens, wiremock fixtures), `changelog.d/` (assembled
 # into CHANGELOG.md at release), and `docs/` (one workspace's Slack app
 # manifest, not a usage document).
-include = ["src/**/*", "README.md", "CHANGELOG.md"]
+include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 
 [features]
 default = []
