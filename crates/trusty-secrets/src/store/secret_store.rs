@@ -352,11 +352,30 @@ impl SecretStore {
         admit: impl FnOnce(&VaultName, &KeyMeta) -> Result<(), SecretsError>,
     ) -> Result<SecretValue, SecretsError> {
         self.require(Capabilities::READ, "read")?;
+        let (vault, row) = self.locate_flagged(reference, scopes)?;
+        admit(&vault, &row)?;
+        self.read_located(&vault, reference.key())
+    }
+
+    /// [`Self::locate_row`], with the row's agents flag from the backend.
+    ///
+    /// Why: #9070 — `secrets.grant` judges the flag of every key it grants
+    /// to an agent-parented registrar without reading a value, through the
+    /// same lookup the read path's gate uses.
+    /// What: the located vault and row; `agents_may_use` is the backend's
+    /// flag item, never the index row's field. A failed flag lookup is an
+    /// error, never ON. No value is read.
+    /// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`,
+    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
+    pub(crate) fn locate_flagged(
+        &self,
+        reference: &SecretRef,
+        scopes: &ScopeSet,
+    ) -> Result<(VaultName, KeyMeta), SecretsError> {
         let (vault, mut row) = self.locate_row(reference, scopes)?;
         // #9070: the gate judges the backend's flag item, never the index row.
         row.agents_may_use = self.backend.agents_may_use(&vault, &row.name)?;
-        admit(&vault, &row)?;
-        self.read_located(&vault, reference.key())
+        Ok((vault, row))
     }
 
     /// The uncached backend read of a located key; a miss is `NotFound`.

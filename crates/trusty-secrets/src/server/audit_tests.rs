@@ -88,7 +88,8 @@ async fn audit_value_never_reaches_the_audit_file() {
     assert_eq!(record.key, Some(key("API_KEY")));
     assert_eq!(record.backend, Some(BackendId::keychain()));
     assert!(record.project_root.as_ref().unwrap().ends_with("repo"));
-    assert_eq!(record.caller_pid, None);
+    // #9070: the socket peer, this test process, as the kernel reported it.
+    assert_eq!(record.caller_pid, Some(std::process::id()));
     assert!(record.ts > 0);
     assert!(text.contains(&format!("\"stream\":\"{AUDIT_STREAM}\"")));
 }

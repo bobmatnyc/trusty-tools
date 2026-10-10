@@ -30,6 +30,7 @@ use serde_json::Value;
 
 use super::audit::{AuditFile, AuditMethod, AuditRecord};
 use super::errors::ErrorKind;
+use super::methods::Caller;
 use super::project::ProjectContext;
 use super::router::State;
 use crate::api::{BackendId, SecretKey, VaultName};
@@ -91,6 +92,7 @@ impl Admitted {
 /// One audited call's state.
 pub(crate) struct Gate<'a> {
     state: &'a State,
+    caller: Caller,
     method: AuditMethod,
     recording: Recording,
     suppressed: bool,
@@ -107,17 +109,21 @@ pub(crate) struct Gate<'a> {
 /// record. After admission, a [`Recording::Once`] call appends its one
 /// record; an append failure turns an `Ok` into
 /// [`ErrorKind::AuditUnavailable`] (fail-closed) and leaves an `Err` as it
-/// was. [`Recording::PerKey`] records were written by the body.
+/// was. [`Recording::PerKey`] records were written by the body. #9070:
+/// every record carries `caller`'s pid, the socket peer the router read.
 /// Test: `audit_set_and_delete_write_one_record_per_call`,
-/// `audit_unwritable_sink_still_returns_the_deny_reply`.
+/// `audit_unwritable_sink_still_returns_the_deny_reply`,
+/// `audit_value_never_reaches_the_audit_file`.
 pub(crate) fn audited(
     state: &State,
+    caller: Caller,
     method: AuditMethod,
     recording: Recording,
     body: impl FnOnce(&mut Gate<'_>) -> Result<Value, ErrorKind>,
 ) -> Result<Value, ErrorKind> {
     let mut gate = Gate {
         state,
+        caller,
         method,
         recording,
         suppressed: suppressed_by_machine(state),
@@ -136,6 +142,11 @@ impl Gate<'_> {
     pub(crate) fn name(&mut self, vault: &VaultName, key: Option<&SecretKey>) {
         self.vault = Some(vault.clone());
         self.key = key.cloned();
+    }
+
+    /// The key the request names, when it names no vault (#9070).
+    pub(crate) fn key(&mut self, key: &SecretKey) {
+        self.key = Some(key.clone());
     }
 
     /// The backend the call writes to.
@@ -209,8 +220,9 @@ impl Gate<'_> {
 
     /// A record of this call's subject, allowed or denied with `denied`.
     fn record(&self, denied: Option<ErrorKind>) -> AuditRecord {
-        // #4567: S8 passes the caller pid; until then it is unknown.
-        let mut record = AuditRecord::new(now_unix(), self.method, denied).with_caller_pid(None);
+        // #9070: the socket peer's pid, read by the router, never a param.
+        let mut record =
+            AuditRecord::new(now_unix(), self.method, denied).with_caller_pid(self.caller.pid());
         record.vault = self.vault.clone();
         record.key = self.key.clone();
         record.backend = self.backend.clone();

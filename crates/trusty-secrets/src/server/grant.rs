@@ -18,6 +18,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -130,6 +131,34 @@ impl fmt::Debug for GrantToken {
     }
 }
 
+/// What a grant pins besides its keys, child and expiry (#9070 slice 2).
+///
+/// Why: `secrets.resolve` names only a token and a key, so the project its
+/// keys resolve in, and whether the registrar ran under Claude Code, are
+/// fixed when the grant is minted and never taken from the resolver.
+/// What: the project directory `secrets.grant` resolved, and `agent_parent`,
+/// which `secrets.resolve` passes to `resolve_reference` so the "agents may
+/// use" flag is checked again before each read.
+/// Test: `authorize_scoped_returns_the_minted_scope`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GrantScope {
+    /// The project directory the grant's keys resolve in.
+    pub project: PathBuf,
+    /// Whether the registrar had a Claude Code ancestor.
+    pub agent_parent: bool,
+}
+
+impl GrantScope {
+    /// A scope for `project`, with `agent_parent` as judged at mint.
+    pub fn new(project: impl Into<PathBuf>, agent_parent: bool) -> Self {
+        Self {
+            project: project.into(),
+            agent_parent,
+        }
+    }
+}
+
 /// What a grant allows, as the spawner asks for it.
 ///
 /// Test: `mint_rejects_invalid_requests`.
@@ -144,6 +173,8 @@ pub struct GrantRequest {
     pub ttl: Duration,
     /// Remove the grant on its first successful use.
     pub one_shot: bool,
+    /// The project and agent judgement the grant carries (#9070 slice 2).
+    pub scope: GrantScope,
 }
 
 impl GrantRequest {
@@ -154,12 +185,19 @@ impl GrantRequest {
             child_pid,
             ttl,
             one_shot: false,
+            scope: GrantScope::default(),
         }
     }
 
     /// The same request, refused after its first successful use.
     pub fn one_shot(mut self) -> Self {
         self.one_shot = true;
+        self
+    }
+
+    /// The same request, carrying `scope`.
+    pub fn with_scope(mut self, scope: GrantScope) -> Self {
+        self.scope = scope;
         self
     }
 }
@@ -185,6 +223,7 @@ struct Grant {
     minted_at: Duration,
     expires_at: Duration,
     one_shot: bool,
+    scope: GrantScope,
 }
 
 /// The in-memory registry of exec grants.
@@ -228,6 +267,14 @@ impl GrantRegistry {
             Arc::new(SystemClock),
             DEFAULT_MAX_TTL,
         )
+    }
+
+    /// The process table the registry checks ancestry against.
+    ///
+    /// Why: `secrets.grant` judges its registrar's agent ancestry on the same
+    /// table, so a test fakes one table for both checks.
+    pub fn processes(&self) -> &dyn ProcessTable {
+        self.procs.as_ref()
     }
 
     // #9070: a poisoned lock denies; it is never recovered with `into_inner`.
@@ -275,6 +322,7 @@ impl GrantRegistry {
             minted_at: now,
             expires_at,
             one_shot: request.one_shot,
+            scope: request.scope,
         });
         Ok(MintedGrant {
             token,
@@ -300,6 +348,21 @@ impl GrantRegistry {
         keys: &[SecretKey],
         peer_pid: u32,
     ) -> Result<(), GrantError> {
+        self.authorize_scoped(token, keys, peer_pid).map(drop)
+    }
+
+    /// [`Self::authorize`], returning the [`GrantScope`] the grant was
+    /// minted with.
+    ///
+    /// Why: `secrets.resolve` (#9070 slice 2) resolves the key in the
+    /// grant's project, never in one the resolver names.
+    /// Test: `authorize_scoped_returns_the_minted_scope`.
+    pub fn authorize_scoped(
+        &self,
+        token: &GrantToken,
+        keys: &[SecretKey],
+        peer_pid: u32,
+    ) -> Result<GrantScope, GrantError> {
         if keys.is_empty() {
             return Err(GrantError::InvalidRequest("no keys"));
         }
@@ -328,10 +391,11 @@ impl GrantRegistry {
         )? {
             return Err(GrantError::Refused);
         }
+        let scope = grant.scope.clone();
         if grant.one_shot {
             grants.swap_remove(index);
         }
-        Ok(())
+        Ok(scope)
     }
 
     /// Remove the grant `token` names. `Ok(false)` when none matched.

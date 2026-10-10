@@ -13,11 +13,11 @@ spec_refs:
 
 # DOC-74 — Secrets Integration: External Vaults (1Password, Keeper) and the OS Keychain Behind `tm secrets`
 
-**Status:** Draft
+**Status:** Accepted — partly implemented. S1 and S2 have shipped in `trusty-secrets`; S8 is in progress under [#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070) (its wire methods `secrets.grant`, `secrets.resolve` and `secrets.revoke` are slice 2). §15.9 lists every slice. Section IDs stay `~draft` until each section is frozen (DOC-38 §4.4).
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
 **Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
-**Last-updated:** 2026-10-06
+**Last-updated:** 2026-10-10
 **PRD:** [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) — the WHAT and WHY of the console secrets service. This document is the HOW.
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation.
@@ -956,11 +956,14 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.delete` | Removes one key | Confirmation |
 | `secrets.copy` | Copies keys between backends inside one project (§13 Q6) | Names copied, names failed |
 | `secrets.doctor` | Runs `detect_backends` (§7) | The detection table |
+| `secrets.grant` | Registers an exec grant for a child process (§15.8, S8) | The grant token, its expiry and TTL |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
+| `secrets.revoke` | Removes an exec grant (§15.8, S8) | Whether a live grant matched |
 
 **Request deadline and client wait (#7524 P2-M1).** The server gives each
 request one whole-operation deadline, counted from its arrival: 120 s for
-`secrets.set`, `secrets.delete` and `secrets.copy`, which reach vendor CLIs,
+`secrets.set`, `secrets.delete`, `secrets.copy`, `secrets.grant` and
+`secrets.resolve`, which reach vendor CLIs (#9070),
 and 15 s for every other method. Every CLI call the request makes is bounded
 by the time left; none starts after the deadline, and one still running then
 is killed with its process group. A request that runs out answers
@@ -1158,10 +1161,18 @@ Tiers 1 and 2 are built into `tm` and need no per-language package. Tier 2 is
 not a per-language library, because a library would need a value-returning
 method.
 
-**Exec grant (tier 3).** `tm secrets exec` mints a random token and registers
-it on the trusty-secrets socket, next to `secrets.resolve`. tm, the spawner, is the client and registers it by calling `secrets.grant` (S8, #9070; the method name is final per S8; ruling 34, 2026-10-05), with the child pid, the allowed keys and an expiry. The
-child receives the token in its env. `secrets.resolve` answers only when all
-three hold:
+**Exec grant (tier 3).** The grant lives on the trusty-secrets socket, next
+to `secrets.resolve`, and tm, the spawner, is its client (ruling 34,
+2026-10-05). tm calls `secrets.grant` (S8, #9070; the method name is final)
+with the project, the child pid, the allowed keys and a TTL. The server
+mints the random token and returns it (Architect ruling 2026-10-10); it
+keeps only the token's SHA-256, in memory. So `tm secrets exec` runs in four
+steps: spawn the child, call `secrets.grant` for it, pass the token to the
+child in its env, then exec the command
+([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621)). Any
+same-uid process may call `secrets.grant`. While any grant is unexpired, the
+60 s idle exit (ruling 31) waits; `secrets.revoke` removes a grant early.
+`secrets.resolve` answers only when all three hold:
 
 1. The token is valid and unexpired.
 2. The key is in the grant.
@@ -1171,11 +1182,17 @@ three hold:
 
 `secrets.resolve` has no console route (501) and no MCP tool.
 
-**"Agents may use" flag.** Each key carries the flag, set in the console,
-default OFF (owner answer 2026-10-01). `exec` never injects a key into a
-process whose parent chain includes Claude Code unless that key carries the
-flag. The rule covers env injection (tiers 1 and 2) and grant contents
-(tier 3). It is enforced from the day each `exec` path ships. The backend
+**"Agents may use" flag.** Each key carries the flag, default OFF (owner
+answer 2026-10-01). No socket method sets it yet: the flag-set wire path is
+S8 slice 3 ([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)),
+and the console toggle that calls it is
+[#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). `exec` never
+injects a key into a process whose parent chain includes Claude Code unless
+that key carries the flag. The rule covers env injection (tiers 1 and 2) and
+grant contents (tier 3). It is enforced from the day each `exec` path ships.
+For tier 3, `secrets.grant` judges the registrar's own parent chain, from its
+socket peer pid, and refuses an unflagged key with `agent_use_refused`;
+`secrets.resolve` checks the flag again before each read. The backend
 holds the flag as its own item per key (on the Keychain, service
 `trusty-secrets.agents`, account `<vault>/<key>`), never the names-only index,
 which any same-uid process can edit
@@ -1229,7 +1246,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S5 | `secrets-manager` agent and `tm-secrets` skill text: `set`, console path | 3 | S4 |
 | S6+ | One PR per integration: 1Password, Vercel, GitHub Actions, Keeper | 4 each | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
-| S8 | `secrets.resolve`, the grant registry, the ancestry check | 5 | Gated on [#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524) |
+| S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
 | S9 | Rust `client` feature | 4 | S8 |
 | S10 | Python and npm clients, plus their publish workflows | 3 each | S8 |
 
