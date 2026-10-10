@@ -246,13 +246,17 @@ jobs:
           set -euo pipefail
           echo "Looking for a CI workflow run against ${SHA}"
 
-          # `--json` over the runs for this head SHA. `-q` filters to the CI
-          # workflow by name; the shard aggregate row is "Rust tests
-          # (pre-publish gate)" inside that run, so the run's own conclusion is
-          # what we read (it is `failure` if any shard failed).
-          runs="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&per_page=100" \
-            --jq '[.workflow_runs[] | select(.name == "CI") | {id, status, conclusion, event}]')"
+          # The CI workflow's own runs for this head SHA, every page. The
+          # shard aggregate row is "Rust tests (pre-publish gate)" inside that
+          # run, so the run's own conclusion is what we read (it is `failure`
+          # if any shard failed).
+          # #9626: scoped to ci.yml, not the repo-wide runs list. A release
+          # commit carries 100+ tag-triggered runs, and the repo-wide first
+          # page missed the CI run. A failed read exits nonzero under `set -e`.
+          runs="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
+            --jq '.workflow_runs[] | select(.name == "CI") | {id, status, conclusion, event}' \
+            | jq -s '.')"
 
           echo "CI runs for this SHA: ${runs}"
 

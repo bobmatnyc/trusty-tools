@@ -1682,8 +1682,41 @@ gate_decide() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# gate_list_runs <query-prefix> [<max-pages>] — the pre-publish.yml runs
+# matching the query, one "<id>|<created>|<status>|<conclusion>|<url>" line
+# each, newest first. <query-prefix> is empty or ends in `&`.
+#
+# Reads up to <max-pages> pages (default GATE_LIST_PAGE_CAP), stopping at the
+# first short page (#9626). A failed or unparseable page exits nonzero, and so
+# does a full last page under the default — a partial list is not an answer.
+# ---------------------------------------------------------------------------
+GATE_LIST_PAGE_CAP=10
+gate_list_runs() {
+  local query="$1" max="${2:-}" page=1 body rows n
+  while [ "$page" -le "${max:-$GATE_LIST_PAGE_CAP}" ]; do
+    body="$(gate_api "actions/workflows/pre-publish.yml/runs?${query}per_page=100&page=${page}")" || return 1
+    rows="$(printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    runs = json.load(sys.stdin)["workflow_runs"]
+    assert isinstance(runs, list)
+except Exception:
+    sys.exit(3)
+for r in runs:
+    print("|".join([str(r["id"]), r.get("created_at") or "", r.get("status") or "", r.get("conclusion") or "", r.get("html_url") or ""]))
+' 2>/dev/null)" || return 1
+    [ -z "$rows" ] || printf '%s\n' "$rows"
+    n="$(printf '%s' "$rows" | grep -c '|' || true)"
+    [ "$n" -ge 100 ] || return 0
+    page=$((page + 1))
+  done
+  # An explicit page budget is the caller's own bound; the default one is not.
+  [ -n "$max" ]
+}
+
 check8_prepublish_gate() {
-  local sha runs cutoff head_date table="" capped=0 examined=0 rc=0
+  local sha runs="" prio="" cutoff head_date table="" capped=0 examined=0 rc=0
   local run_id created status concl url target
 
   if ! command -v gh >/dev/null 2>&1; then
@@ -1693,15 +1726,30 @@ check8_prepublish_gate() {
 
   sha="$(git rev-parse HEAD)"
 
+  # #9626: the runs whose head_sha is HEAD go first and are exempt from the
+  # cap. On a release day the newest runs are tag runs for OTHER commits, and
+  # the green run for HEAD fell past GATE_SCAN_CAP. head_sha only orders the
+  # scan; attribution still comes from each run's resolve-sha report (#5755).
   # `|| rc=$?` rather than a bare call: a network failure must reach the
   # unverified path below, not abort the script under `set -e`.
-  runs="$(gh api "repos/${GATE_REPO}/actions/workflows/pre-publish.yml/runs?per_page=100" \
-    --jq '.workflow_runs[] | [(.id|tostring), .created_at, .status, (.conclusion // ""), .html_url] | join("|")' 2>/dev/null)" || rc=$?
+  prio="$(gate_list_runs "head_sha=${sha}&")" || rc=$?
+  # The window scan keeps its one newest page; GATE_SCAN_CAP bounds it anyway.
+  [ "$rc" -ne 0 ] || runs="$(gate_list_runs "" 1)" || rc=$?
 
   if [ "$rc" -ne 0 ]; then
-    gate_unverified "the GitHub Actions API could not be reached (gh exited ${rc})"
+    gate_unverified "the GitHub Actions API could not be read (exit ${rc})"
     return $?
   fi
+
+  while IFS='|' read -r run_id created status concl url; do
+    [ -n "$run_id" ] || continue
+    target="$(gate_run_target "$run_id")"
+    table="${table}${target}|${status}|${concl}|${url}"$'\n'
+    if [ "$target" = "$sha" ] && [ "$status" = "completed" ] && [ "$concl" = "success" ]; then
+      gate_decide "$sha" 0 <<< "$table"
+      return $?
+    fi
+  done <<< "$prio"
 
   # A run cannot have gated a commit that did not exist when it started, so
   # anchor the window to HEAD's own date. An unparseable date yields an empty
@@ -1716,6 +1764,8 @@ print((d - datetime.timedelta(days=int(sys.argv[2]))).strftime("%Y-%m-%dT%H:%M:%
   while IFS='|' read -r run_id created status concl url; do
     [ -n "$run_id" ] || continue
     if [ -n "$cutoff" ] && [[ "$created" < "$cutoff" ]]; then continue; fi
+    # Already attributed in the head_sha pass above.
+    case $'\n'"$prio" in *$'\n'"${run_id}|"*) continue ;; esac
     if [ "$examined" -ge "$GATE_SCAN_CAP" ]; then capped=1; break; fi
     examined=$((examined + 1))
     target="$(gate_run_target "$run_id")"
