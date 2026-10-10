@@ -417,7 +417,7 @@ pub(crate) struct ConverseParts {
 pub(crate) fn build_converse_parts(request: &ChatRequest) -> Result<ConverseParts, InferenceError> {
     let (system, messages) = convert::build_converse_messages(request)?;
 
-    // #9318: Claude 5.5 models reject `temperature`; omit it for them.
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
     let temperature = request
         .temperature
         .filter(|_| accepts_temperature(&request.model));

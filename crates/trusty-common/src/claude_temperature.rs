@@ -1,9 +1,10 @@
 //! Which Claude models reject a `temperature` sampling parameter (#9318).
 //!
-//! Why: Claude 5.5 models reject `temperature` ("`temperature` is deprecated
-//! for this model"), so every request trusty-common built for one failed. Four
-//! request builders set the field: the Bedrock inference adapter, the Anthropic
-//! adapter, the `config keys test` auth probe, and the chat Bedrock provider.
+//! Why: Claude Opus 5.5 and Sonnet 5.5 reject `temperature` ("`temperature`
+//! is deprecated for this model"), so every request trusty-common built for
+//! one failed. Four request builders set the field: the Bedrock inference
+//! adapter, the Anthropic adapter, the `config keys test` auth probe, and the
+//! chat Bedrock provider.
 //! One predicate here keeps them in agreement.
 //! What: [`accepts_temperature`], read with the same model-id parse
 //! trusty-review's Bedrock client uses for #9304.
@@ -15,16 +16,16 @@
 
 /// Model families that reject `temperature`, after [`model_family`] has
 /// reduced an id to its family.
-const NO_TEMPERATURE_FAMILIES: &[&str] =
-    &["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// #9318: haiku-5-5 omitted to match #9307; add back on evidence
+const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-opus-5-5", "claude-sonnet-5-5"];
 
 /// Routing prefixes a trusty slug may carry ahead of the provider's own id.
 const ROUTING_PREFIXES: &[&str] = &["bedrock/", "anthropic/"];
 
 /// Whether a request to `model` may carry a `temperature` field.
 ///
-/// Why: a 5.5-family model rejects the whole request when `temperature` is
-/// present (#9318); every older model honours it.
+/// Why: Opus 5.5 or Sonnet 5.5 rejects the whole request when `temperature`
+/// is present (#9318); every other model honours it.
 /// What: `false` only when [`model_family`] reduces `model` to a family in
 /// [`NO_TEMPERATURE_FAMILIES`]. The family must match exactly, so an id that
 /// only contains `5-5` elsewhere (`claude-sonnet-4-5-20250505`) keeps it.
@@ -111,25 +112,29 @@ fn strip_version_suffix(model: &str) -> &str {
 pub(crate) mod tests {
     use super::accepts_temperature;
 
-    /// Every id form a 5.5-family model arrives in: Anthropic API ids, dated
-    /// ids, routing-prefixed slugs, Bedrock profiles, and Bedrock ARNs.
+    /// Every id form Opus 5.5 or Sonnet 5.5 arrives in: Anthropic API ids,
+    /// dated ids, routing-prefixed slugs, Bedrock profiles, and Bedrock ARNs.
     pub(crate) const CLAUDE_5_5_IDS: &[&str] = &[
         "claude-opus-5-5",
         "claude-sonnet-5-5",
-        "claude-haiku-5-5",
         "claude-opus-5-5-20260901",
         "anthropic/claude-sonnet-5-5",
-        "anthropic.claude-haiku-5-5",
+        "anthropic.claude-opus-5-5",
         "us.anthropic.claude-opus-5-5",
         "global.anthropic.claude-sonnet-5-5",
-        "apac.anthropic.claude-haiku-5-5-20260901-v1:0",
+        "apac.anthropic.claude-sonnet-5-5-20260901-v1:0",
         "bedrock/us.anthropic.claude-sonnet-5-5",
         "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-opus-5-5",
         "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5-5-20260901-v1:0",
     ];
 
-    /// Older models, and ids that merely contain `5-5` outside the family.
+    /// Older models, `claude-haiku-5-5` in every id form, and ids that merely
+    /// contain `5-5` outside the family.
     pub(crate) const TEMPERATURE_IDS: &[&str] = &[
+        "claude-haiku-5-5",
+        "anthropic/claude-haiku-5-5",
+        "us.anthropic.claude-haiku-5-5",
+        "apac.anthropic.claude-haiku-5-5-20260901-v1:0",
         "claude-sonnet-4-5",
         "claude-opus-4-8",
         "claude-sonnet-4-5-20250505",
@@ -144,8 +149,8 @@ pub(crate) mod tests {
         "openai/gpt-4o-mini",
     ];
 
-    /// Why: the 5.5 families reject `temperature` (#9318); no other model
-    /// may lose it.
+    /// Why: the Opus and Sonnet 5.5 families reject `temperature` (#9318);
+    /// no other model may lose it.
     /// What: every 5.5 id form is `false`; every older or look-alike id is
     /// `true`.
     /// Test: itself.

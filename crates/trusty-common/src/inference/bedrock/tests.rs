@@ -1503,10 +1503,10 @@ fn build_converse_parts_omits_tool_config_without_tools() {
     assert_eq!(parts.inference.max_tokens(), None);
 }
 
-/// The Converse `inferenceConfig` omits `temperature` for a Claude 5.5 model
-/// and keeps it for every other model.
+/// The Converse `inferenceConfig` omits `temperature` for an Opus or Sonnet
+/// 5.5 model and keeps it for every other model.
 ///
-/// Why (#9318): Claude 5.5 models reject a request that carries
+/// Why (#9318): Opus 5.5 and Sonnet 5.5 reject a request that carries
 /// `temperature`, so every 5.5 call through this adapter failed.
 /// What: builds the parts for each id in the shared 5.5 and older-model lists
 /// with `temperature = 0.25`; asserts the `InferenceConfiguration` Converse

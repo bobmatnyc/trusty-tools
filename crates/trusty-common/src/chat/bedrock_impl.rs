@@ -361,7 +361,7 @@ impl ChatProvider for BedrockProvider {
 /// `bedrock_stream_omits_temperature_only_for_claude_5_5`.
 fn build_inference_config(model: &str, sampling: &SamplingParams) -> InferenceConfiguration {
     let stop_sequences = (!sampling.stop.is_empty()).then(|| sampling.stop.clone());
-    // #9318: Claude 5.5 models reject `temperature`; omit it for them.
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
     let temperature = sampling.temperature.filter(|_| accepts_temperature(model));
     InferenceConfiguration::builder()
         .max_tokens(sampling.max_tokens.unwrap_or(4096) as i32)
@@ -912,11 +912,11 @@ mod tests {
         assert!(inference.stop_sequences().is_empty());
     }
 
-    /// `build_inference_config` omits `temperature` for a Claude 5.5 model and
-    /// forwards it for every other model.
+    /// `build_inference_config` omits `temperature` for an Opus or Sonnet 5.5
+    /// model and forwards it for every other model.
     ///
-    /// Why (#9318): Claude 5.5 models reject a `ConverseStream` request that
-    /// carries `temperature`, so every streamed 5.5 turn failed.
+    /// Why (#9318): Opus 5.5 and Sonnet 5.5 reject a `ConverseStream` request
+    /// that carries `temperature`, so every streamed turn to them failed.
     /// What: builds the `InferenceConfiguration` the stream sends for each id
     /// in the shared 5.5 and older-model lists with `temperature = 0.2`;
     /// asserts it is absent for a 5.5 id and `0.2` otherwise, with

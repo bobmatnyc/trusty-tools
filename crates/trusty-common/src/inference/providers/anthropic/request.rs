@@ -137,7 +137,7 @@ pub fn build_body(request: &ChatRequest, default_max_tokens: u32) -> Value {
             body.insert("system".into(), json!(joined));
         }
     }
-    // #9318: Claude 5.5 models reject `temperature`; omit it for them.
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
     if let Some(t) = request
         .temperature
         .filter(|_| accepts_temperature(&request.model))
@@ -490,7 +490,7 @@ mod tests {
         );
     }
 
-    /// Why (#9318): Claude 5.5 models reject a body that carries
+    /// Why (#9318): Opus 5.5 and Sonnet 5.5 reject a body that carries
     /// `temperature`; every other model must still receive it.
     /// What: serializes the body for each id in the shared 5.5 and
     /// older-model lists with `temperature = 0.3`; asserts the key is absent

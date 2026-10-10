@@ -413,7 +413,7 @@ pub async fn probe(
 fn probe_request(model: &str) -> ChatRequest {
     let mut req = ChatRequest::new(model, vec![ChatMessage::user("ping")]);
     req.max_tokens = Some(1);
-    // #9318: Claude 5.5 models reject `temperature`; omit it for them.
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
     req.temperature = accepts_temperature(model).then_some(0.0);
     req
 }
@@ -562,8 +562,8 @@ mod tests {
         assert_eq!(scrub_secrets("some message", &[""]), "some message");
     }
 
-    /// Why (#9318): the probe's request must not carry `temperature` to a
-    /// Claude 5.5 model, which rejects it, or a working key reports as
+    /// Why (#9318): the probe's request must not carry `temperature` to
+    /// an Opus or Sonnet 5.5 model, which rejects it, or a working key reports as
     /// failed; older models keep `temperature = 0.0`.
     /// What: serializes `probe_request` for each id in the shared 5.5 and
     /// older-model lists; asserts the `temperature` key is absent for a 5.5
