@@ -260,6 +260,9 @@ async fn the_fan_out_skips_a_parked_index_that_is_still_resident() {
 }
 
 const OTHER: &str = "apex-b";
+// Not `WT`: the fixture tests' deletes write the process-wide data dir this
+// test isolates, by id.
+const RECREATE: &str = "apex-recreate-9169";
 
 async fn dispatch(router: &RpcRouter, method: &str, params: serde_json::Value) -> RpcResponse {
     let frame = serde_json::to_vec(&serde_json::json!({
@@ -365,7 +368,7 @@ async fn a_deleted_parked_index_recreated_at_its_root_is_served() {
     state.install_embedder(embedder).await;
     let state = Arc::new(state);
     let create = || -> super::CreateIndexRequest {
-        serde_json::from_value(serde_json::json!({ "id": WT, "root_path": wt }))
+        serde_json::from_value(serde_json::json!({ "id": RECREATE, "root_path": wt }))
             .expect("create request")
     };
     super::create_index_report(&state, create())
@@ -377,7 +380,7 @@ async fn a_deleted_parked_index_recreated_at_its_root_is_served() {
     let parked = dispatch(
         &router,
         project_map::METHOD_PROJECT_PARK,
-        serde_json::json!({ "index_id": WT }),
+        serde_json::json!({ "index_id": RECREATE }),
     )
     .await;
     assert!(parked.error.is_none(), "{:?}", parked.error);
@@ -385,7 +388,7 @@ async fn a_deleted_parked_index_recreated_at_its_root_is_served() {
         delete_data: false,
         expected_root_path: None,
     };
-    super::delete_index_report(&state, WT, params)
+    super::delete_index_report(&state, RECREATE, params)
         .await
         .map_err(|(status, body)| format!("{status}: {body}"))
         .expect("delete");
@@ -397,7 +400,7 @@ async fn a_deleted_parked_index_recreated_at_its_root_is_served() {
     let response = dispatch(
         &router,
         queries::METHOD_QUERY,
-        serde_json::json!({ "index_id": WT, "body": { "text": "authenticate" } }),
+        serde_json::json!({ "index_id": RECREATE, "body": { "text": "authenticate" } }),
     )
     .await;
     assert!(
