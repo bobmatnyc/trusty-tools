@@ -1644,7 +1644,10 @@ async fn session_store_flags_a_chat_store_stranded_in_a_live_alias_dir() {
         flag.contains("stranded-target"),
         "the flag names the target palace: {flag}"
     );
-    assert!(flag.contains("back up"), "the flag tells the operator what to do: {flag}");
+    assert!(
+        flag.contains("back up the file"),
+        "the flag tells the operator what to do: {flag}"
+    );
     let clean_dir = state.data_root.join("a2").display().to_string();
     assert!(
         !flags.iter().any(|l| l.contains(&clean_dir)),

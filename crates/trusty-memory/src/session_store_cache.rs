@@ -44,6 +44,7 @@
 use anyhow::Result;
 use lru::LruCache;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use trusty_common::memory_core::store::ChatSessionStore;
@@ -102,6 +103,9 @@ pub struct SessionStoreCache {
     /// invariant (1) exists to prevent.
     inner: Mutex<LruCache<String, Arc<ChatSessionStore>>>,
     capacity: usize,
+    /// Aliases already checked by [`SessionStoreCache::flag_stranded_alias_store`].
+    /// Bounded by the number of registered aliases, not by traffic.
+    checked_aliases: Mutex<HashSet<String>>,
 }
 
 impl SessionStoreCache {
@@ -116,6 +120,7 @@ impl SessionStoreCache {
         Self {
             inner: Mutex::new(LruCache::unbounded()),
             capacity: max_open.max(1),
+            checked_aliases: Mutex::new(HashSet::new()),
         }
     }
 
@@ -170,6 +175,55 @@ impl SessionStoreCache {
         cache.put(palace_id.to_string(), store.clone());
         Self::trim(&mut cache, self.capacity);
         Ok(store)
+    }
+
+    /// Warn once per alias about a chat store left in the alias's own directory.
+    ///
+    /// Why (#9612): before #9544 a chat call through an alias opened
+    /// `<root>/<alias>/chat_sessions.redb`. The redirect now opens the target's
+    /// store, so sessions in that file are no longer read, and nothing said so.
+    /// Approved fix: a warning only; no write and no migration.
+    /// What: a no-op when `requested == canonical`. Otherwise the first call for
+    /// `requested` stats `chat_sessions.redb` and `chat_sessions.db` under
+    /// `data_root/requested`, and emits one warn naming each regular file found,
+    /// its size, the target palace and the operator remedy. It never creates,
+    /// opens or writes either file or the directory. A stat error other than
+    /// NotFound is logged at warn and skipped: the check is advisory, so it
+    /// fails open and never blocks the redirect. Every later call for the same
+    /// alias returns at once, whatever the first call found.
+    /// Test: `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir`,
+    /// `session_store_fails_open_when_the_alias_dir_store_cannot_be_read`.
+    pub fn flag_stranded_alias_store(&self, data_root: &Path, requested: &str, canonical: &str) {
+        if requested == canonical || !self.checked_aliases.lock().insert(requested.to_string()) {
+            return;
+        }
+        let alias_dir = data_root.join(requested);
+        let mut stranded = Vec::new();
+        for name in ["chat_sessions.redb", "chat_sessions.db"] {
+            let path = alias_dir.join(name);
+            match std::fs::metadata(&path) {
+                Ok(md) if md.is_file() => {
+                    stranded.push(format!("{} ({} bytes)", path.display(), md.len()));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    alias = requested,
+                    "#9612: could not stat {}: {e}; skipping the stranded chat-store check",
+                    path.display()
+                ),
+            }
+        }
+        if !stranded.is_empty() {
+            tracing::warn!(
+                alias = requested,
+                target = canonical,
+                "#9612: palace alias {requested:?} resolves to palace {canonical:?}, so chat \
+                 sessions written through the alias before the redirect are no longer read: \
+                 {}; back up the file, then merge it into {canonical:?} by hand or delete it",
+                stranded.join(", ")
+            );
+        }
     }
 
     /// Drop the cached handle for `palace_id`, closing its fd if unused.
