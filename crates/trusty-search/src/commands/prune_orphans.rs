@@ -110,6 +110,8 @@ pub(crate) fn handle_prune_orphans_at(
     if let Some(filter) = repo_identity {
         return report_repo_identity(&entries, &filter);
     }
+    // #9169: a parked index is never pruned; an unreadable map prunes nothing.
+    let entries = crate::service::project_map_state::retain_unparked(toml_path, entries)?;
 
     // 2. Classify: orphaned (root_path missing) vs. live.
     let (orphans, live): (Vec<PersistedIndex>, Vec<PersistedIndex>) =

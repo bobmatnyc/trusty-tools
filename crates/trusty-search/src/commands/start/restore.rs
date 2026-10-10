@@ -217,12 +217,16 @@ pub(super) async fn restore_indexes(
     // dead entries are re-read, re-warned, and re-skipped on every single boot
     // and never leave `indexes.toml`. Colocated entries are left for the
     // relocation scan; unmounted volumes are spared by `is_reapable_orphan`.
-    let legacy_entries = crate::service::orphan_reaper::heal_boot_orphans(collect_legacy_entries());
+    // #9169: parked indexes skip the heal and the warm-load; the scan still
+    // sees them, so it never re-adds their roots.
+    let boot_map = crate::service::project_map_boot::BootMap::load(state).await;
+    let (parked_entries, legacy_entries) = boot_map.split(collect_legacy_entries());
+    let legacy_entries = boot_map.heal(legacy_entries);
     let mut seen_ids: HashSet<String> = HashSet::new();
     // Issue #860: track canonicalized root_paths from legacy entries so that
     // colocated scan suppresses entries for the same root.
     let mut seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
-    for e in &legacy_entries {
+    for e in legacy_entries.iter().chain(&parked_entries) {
         seen_ids.insert(e.id.clone());
         seen_root_paths.insert(crate::service::warm_boot::canonicalize_best_effort(
             &e.root_path,
@@ -260,6 +264,7 @@ pub(super) async fn restore_indexes(
         .into_iter()
         .chain(colocated_entries)
         .collect();
+    let all_entries = boot_map.without_parked(all_entries);
 
     // Issue #2305: collapse entries that resolve to the SAME on-disk redb corpus
     // (colocated indexes sharing a root_path) down to one handle BEFORE the

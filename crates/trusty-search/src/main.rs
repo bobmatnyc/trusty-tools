@@ -856,6 +856,19 @@ enum Commands {
         action: commands::config::ConfigAction,
     },
 
+    /// Show or change which index each project resolves to (#9169)
+    ///
+    /// `map` prints `project-map.toml`; `pin` chooses a project's index;
+    /// `park` sets a duplicate index aside without deleting it; `unpark`
+    /// undoes that and queues a reindex; `rebuild-map` (operator only) moves a
+    /// damaged map aside and rebuilds it from the registry.
+    ///
+    /// Examples:
+    ///   trusty-search project map
+    ///   trusty-search project park apex-feat-x
+    ///   trusty-search project pin apex-9a4a584b
+    Project(commands::project::ProjectCommand),
+
     /// Monitor the trusty-search daemon via web UI or terminal dashboard
     ///
     /// `monitor web` prints the admin panel URL of the running daemon (and
@@ -1330,6 +1343,7 @@ async fn run() -> Result<()> {
         Commands::Config { action } => {
             commands::config::handle_config(action).await?;
         }
+        Commands::Project(cmd) => commands::project::handle_project(cmd).await?,
 
         Commands::Monitor { target } => match target {
             MonitorTarget::Web => {

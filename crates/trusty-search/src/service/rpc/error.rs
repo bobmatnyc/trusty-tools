@@ -201,7 +201,9 @@ pub fn rpc_error_from_http(status: axum::http::StatusCode, body: &serde_json::Va
     let rpc_error = RpcError::new(code, message);
     // #6285: the INDEX_UNAVAILABLE fields must survive the move off HTTP. A
     // string `error` implies an object body — `get` on anything else is `None`.
-    if status == axum::http::StatusCode::SERVICE_UNAVAILABLE && error.is_some() {
+    // #9169: a parked index's `-32009` carries `{parked, canonical_index_id, key}`.
+    let parked = body.get("parked") == Some(&serde_json::Value::Bool(true));
+    if (status == axum::http::StatusCode::SERVICE_UNAVAILABLE && error.is_some()) || parked {
         return rpc_error.with_data(body.clone());
     }
     rpc_error

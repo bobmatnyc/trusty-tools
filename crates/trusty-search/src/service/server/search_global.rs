@@ -207,7 +207,8 @@ pub(crate) async fn global_search_report(
         state.cold_store.len()
     };
 
-    let all_ids = state.registry.list();
+    // #9169: a parked index is never part of the fan-out.
+    let all_ids = super::project_park::without_parked(state, state.registry.list());
     // Issue #110: when caller supplies `indexes`, restrict fan-out to that
     // set. Unknown ids are dropped here (the per-index branch below would
     // emit a 404; we'd rather silently skip so a stale caller doesn't
