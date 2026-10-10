@@ -431,3 +431,28 @@ fn construct_on_unwritable_root_is_error() {
         ),
     }
 }
+
+/// #9274 (PR3 critic HIGH 2): the SM registry is the sole owner of its root,
+/// so an existing format-0 SM palace migrates at open. Under read-only intent
+/// it was refused with `FormatNeedsMigration` forever, since no daemon ever
+/// opens this root.
+/// Test: this is the test.
+#[test]
+fn an_existing_format_0_sm_palace_migrates_at_open() {
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::palace_format::{MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED};
+
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    let palace_dir = dir.path().join(&cfg.palace);
+    write_format_0_palace(&palace_dir, &cfg.palace).expect("format-0 palace");
+
+    let mem = SmMemory::open(dir.path(), &cfg).expect("a format-0 SM palace opens");
+    assert_eq!(mem.palace_id().as_str(), cfg.palace);
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
+            .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    assert!(!palace_dir.join(MIGRATION_RECORD).exists(), "migration left its record");
+}

@@ -13,6 +13,11 @@ pub mod embed_ledger;
 pub mod format_backup;
 // #9274: the palace format 0 -> 1 migration, run at a writer-intent open.
 pub(crate) mod format_migration;
+// #9274: one format migration of a palace at a time, in-process and across processes.
+pub(crate) mod format_migration_lock;
+// #9274: a format-0 palace written from the old shapes, for consumer tests.
+#[cfg(any(test, feature = "memory-core-test-support"))]
+pub mod format_v0_fixture;
 pub mod hnsw_store;
 pub mod kg;
 pub mod kg_redb;

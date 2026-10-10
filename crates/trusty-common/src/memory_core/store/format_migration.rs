@@ -1,23 +1,25 @@
 //! The palace format 0 → 1 migration, run lazily at a writer-intent open (#9274).
 //!
-//! Why: ADR-0067 D3 rules 2–4. A format-0 palace is migrated by the first
-//! writer-intent open, never by a startup sweep. The migration may not write
+//! Why: ADR-0067 D3 rules 2–4. A format-0 palace is migrated by its first
+//! writer-intent open — the daemon's startup hydration opens every palace
+//! that way (ADR-0067 Consequences). The migration may not write
 //! until a verified backup exists, and a crash or error at any step must leave
 //! the palace either at format 0 or at format 1 — never opened half-done.
 //! What: [`open_gate`] classifies the palace (`palace_format::classify_with`).
 //! A current palace opens; a writer also rewrites a missing or lower mirror.
 //! A palace one behind is refused under read-only intent and migrated under
-//! writer intent, in idempotent steps:
+//! writer intent, in idempotent steps, one migration of a palace at a time
+//! (`format_migration_lock`):
 //! 1. backup — free-space check, copy, verify, manifest written last
 //!    (`format_backup`); reused only when it matches the current source;
-//! 2. the migration record, naming that backup, fsynced and renamed into place;
-//!    `kg.redb` is then opened and its marker read, so a newer or unreadable
-//!    file fails here and the fresh record is removed again;
+//! 2. `kg.redb` is opened exclusively and its marker read, so a newer,
+//!    unreadable or held file fails here with no record written; then the
+//!    migration record, naming that backup, fsynced and renamed into place;
 //! 3. the `palace.json` mirror, written before the marker so an older binary
 //!    refuses the palace from the moment the first palace byte changes;
 //! 4. the `kg.redb` step — key rewrite plus both markers in one redb
 //!    transaction, the commit point (`kg_redb::migrate`);
-//! 5. the record is removed.
+//! 5. the record is removed, then `kg.redb` is released.
 //!
 //! A record on disk means "resume": the next writer open re-runs steps 3–5 on
 //! the files as they are, behind the backup the record names, after checking
@@ -26,8 +28,9 @@
 //! Test: format_migration_tests.rs, starting with
 //! `a_format_0_palace_migrates_at_first_writer_open`.
 
-use super::concurrent_open::{OpenIntent, OpenMode, try_open_primary_or_snapshot};
+use super::concurrent_open::{OpenIntent, OpenMode, SnapshotGuard, try_open_primary_or_snapshot};
 use super::format_backup::{self, backup_data_root, verify_backup};
+use super::format_migration_lock::{MigrationLock, PalaceTurn};
 use super::kg_redb::KgStoreRedb;
 use super::kg_redb::migrate::migrate_kg_to_format;
 use super::palace_format::{
@@ -106,6 +109,10 @@ pub(crate) fn open_gate(data_dir: &Path, palace: &str, intent: OpenIntent) -> an
 }
 
 /// [`open_gate`] with explicit [`Seams`].
+///
+/// What: a writer runs the gate under this process's [`PalaceTurn`] for the
+/// palace, and a migration also under the cross-process [`MigrationLock`],
+/// classifying again once each is held (#9274, PR3 critic HIGH 1).
 pub(crate) fn open_gate_with(
     data_dir: &Path,
     palace: &str,
@@ -113,31 +120,50 @@ pub(crate) fn open_gate_with(
     seams: Seams,
 ) -> anyhow::Result<()> {
     let to = PALACE_FORMAT_SUPPORTED;
-    let writer = intent == OpenIntent::Writer;
+    if intent != OpenIntent::Writer {
+        return match classify_with(data_dir, palace, to)? {
+            FormatState::Behind { found } => Err(PalaceStoreError::FormatNeedsMigration {
+                palace: palace.to_string(),
+                found,
+                supported: to,
+            }
+            .into()),
+            // A deferred marker is read by the KG's own post-open gate.
+            FormatState::Current { .. } | FormatState::Unverified => Ok(()),
+        };
+    }
+    // #9274: a second writer gate of this palace waits here, then sees the
+    // first one's result.
+    let _turn = PalaceTurn::acquire(data_dir);
+    if !writer_must_migrate(data_dir, palace, to)? {
+        return Ok(());
+    }
+    // #9274: another process may migrate this palace; fail before any write,
+    // and classify again in case it finished before the lock was free.
+    let _lock = MigrationLock::try_acquire(data_dir, palace, to.saturating_sub(1), to)?;
+    if writer_must_migrate(data_dir, palace, to)? {
+        migrate(data_dir, palace, to, seams)?;
+    }
+    Ok(())
+}
+
+/// Classify for a writer: `true` when the palace must be migrated.
+///
+/// What: current → `false`, after rewriting a missing or lower mirror;
+/// unverified → the marker read on an exclusive open, unless this process
+/// already holds the KG (it was gated when it was opened); behind → `true`.
+fn writer_must_migrate(data_dir: &Path, palace: &str, to: u32) -> anyhow::Result<bool> {
+    let kg_path = data_dir.join(KG_FILE);
     match classify_with(data_dir, palace, to)? {
         FormatState::Current { repair_mirror } => {
-            if repair_mirror && writer {
+            if repair_mirror {
                 write_mirror(data_dir, to)?;
             }
-            Ok(())
+            Ok(false)
         }
-        // A KG this process holds was gated when it was opened.
-        FormatState::Unverified if !writer || KgStoreRedb::is_cached(&data_dir.join(KG_FILE)) => {
-            Ok(())
-        }
-        FormatState::Unverified => {
-            if verify_kg_for_writer(&data_dir.join(KG_FILE), palace, to)? {
-                migrate(data_dir, palace, to, seams)?;
-            }
-            Ok(())
-        }
-        FormatState::Behind { found } if !writer => Err(PalaceStoreError::FormatNeedsMigration {
-            palace: palace.to_string(),
-            found,
-            supported: to,
-        }
-        .into()),
-        FormatState::Behind { .. } => Ok(migrate(data_dir, palace, to, seams)?),
+        FormatState::Unverified if KgStoreRedb::is_cached(&kg_path) => Ok(false),
+        FormatState::Unverified => verify_kg_for_writer(&kg_path, palace, to),
+        FormatState::Behind { .. } => Ok(true),
     }
 }
 
@@ -166,12 +192,13 @@ fn verify_kg_for_writer(kg_path: &Path, palace: &str, to: u32) -> anyhow::Result
 
 /// Run (or resume) the migration to `to`; see the module doc for the steps.
 ///
-/// What: the KG is opened, and its marker read, before the mirror is written,
-/// so a newer or unreadable `kg.redb` fails the migration while nothing under
-/// the palace has changed; a fresh record is then removed again, leaving the
-/// palace exactly at format 0.
+/// What: runs under the caller's [`MigrationLock`]. The record is read under
+/// it; `kg.redb` is opened exclusively before the record is written (or, on a
+/// resume, before anything is written) and held until the record is removed,
+/// so a newer, unreadable or held KG fails the migration with no record left.
 /// Test: `a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes`,
-/// `a_blocked_backup_aborts_before_any_palace_byte_changes`.
+/// `a_blocked_backup_aborts_before_any_palace_byte_changes`,
+/// `two_writer_opens_in_one_process_migrate_a_palace_once`.
 fn migrate(data_dir: &Path, palace: &str, to: u32, seams: Seams) -> Result<()> {
     let from = to.saturating_sub(1);
     let failed = |reason: String| PalaceStoreError::FormatMigrationFailed {
@@ -182,17 +209,21 @@ fn migrate(data_dir: &Path, palace: &str, to: u32, seams: Seams) -> Result<()> {
     };
     let fault =
         |step: Step| (seams.after)(step).map_err(|e| failed(format!("after {step:?}: {e}")));
+    let kg_path = data_dir.join(KG_FILE);
 
-    let (backup, resumed) = match read_record(data_dir)? {
+    let (backup, kg) = match read_record(data_dir)? {
         Some(record) => {
             check_resume(&record, palace, from, to).map_err(failed)?;
-            (record.backup, true)
+            (record.backup, open_kg(&kg_path, palace, to, &failed)?)
         }
         None => {
             let root = backup_data_root(data_dir);
             let backup =
                 format_backup::ensure_with(&root, palace, data_dir, from, to, seams.backup)?;
             fault(Step::Backup)?;
+            // #9274: held from before the record exists until it is removed;
+            // the backup is taken first so it keeps the unopened KG bytes.
+            let kg = open_kg(&kg_path, palace, to, &failed)?;
             let record = MigrationRecord {
                 palace: palace.to_string(),
                 from,
@@ -201,70 +232,79 @@ fn migrate(data_dir: &Path, palace: &str, to: u32, seams: Seams) -> Result<()> {
             };
             write_record(data_dir, &record)?;
             fault(Step::Record)?;
-            (backup, false)
-        }
-    };
-
-    let kg_path = data_dir.join(KG_FILE);
-    let kg = match open_kg(&kg_path, palace, to, &failed) {
-        Ok(kg) => kg,
-        Err(e) => {
-            // #9274: nothing under the palace changed but the record; drop it
-            // so the palace is plainly at format `from` again.
-            if !resumed {
-                remove_record(data_dir)?;
-            }
-            return Err(e);
+            (backup, kg)
         }
     };
 
     write_mirror(data_dir, to)?;
     fault(Step::Mirror)?;
 
-    let rows = match kg {
-        Some(db) => migrate_kg_to_format(&db, to).map_err(|e| failed(format!("{e:#}")))?,
-        None => 0,
+    let rows = match &kg {
+        Some(held) if held.migrate => {
+            migrate_kg_to_format(&held.db, to).map_err(|e| failed(format!("{e:#}")))?
+        }
+        _ => 0,
     };
     fault(Step::Kg)?;
 
     remove_record(data_dir)?;
+    drop(kg);
     tracing::info!(palace, from, to, rows, backup = %backup.display(),
         "#9274: migrated palace format");
     Ok(())
 }
 
-/// Open `kg.redb` for the KG step and refuse a newer file.
+/// `kg.redb`, opened exclusively for the migration.
+struct HeldKg {
+    db: std::sync::Arc<redb::Database>,
+    /// `false` when the file already names the target format (a resume).
+    migrate: bool,
+    _guard: SnapshotGuard,
+}
+
+/// Open `kg.redb` exclusively for the migration and refuse a newer file.
 ///
 /// Why: the pre-open read can be deferred (a held or crash-repair file), so
 /// the marker is read again on the opened database before anything is
 /// written (ADR-0067 D3 rule 1). An incompatible file is refused, never
-/// recreated (ADR-0067 D5).
-/// What: `None` when there is no file or it already names `to`.
+/// recreated (ADR-0067 D5). The open is the KG half of the cross-process
+/// exclusion: another process's open of the file fails while it is held.
+/// What: `None` when there is no file. A readable marker above `to` is refused
+/// before the open writes a byte.
 fn open_kg(
     kg_path: &Path,
     palace: &str,
     to: u32,
     failed: &dyn Fn(String) -> PalaceStoreError,
-) -> Result<Option<std::sync::Arc<redb::Database>>> {
-    if read_marker_without_writing(kg_path)? == KgMarker::Stamped(to)
-        || matches!(kg_path.try_exists(), Ok(false))
-    {
+) -> Result<Option<HeldKg>> {
+    let too_new = |found| PalaceStoreError::FormatTooNew {
+        palace: palace.to_string(),
+        found,
+        supported: to,
+    };
+    if matches!(kg_path.try_exists(), Ok(false)) {
         return Ok(None);
     }
-    let (db, _guard, mode) = try_open_primary_or_snapshot(kg_path, OpenIntent::Writer)
+    if let KgMarker::Stamped(v) = read_marker_without_writing(kg_path)?
+        && v > to
+    {
+        return Err(too_new(v));
+    }
+    let (db, guard, mode) = try_open_primary_or_snapshot(kg_path, OpenIntent::Writer)
         .map_err(|e| failed(format!("open {}: {e:#}", kg_path.display())))?;
     if mode != OpenMode::ReadWrite {
         return Err(failed(format!("{} opened as {mode:?}", kg_path.display())));
     }
-    match read_marker(&*db, kg_path)? {
-        KgMarker::Stamped(v) if v > to => Err(PalaceStoreError::FormatTooNew {
-            palace: palace.to_string(),
-            found: v,
-            supported: to,
-        }),
-        KgMarker::Stamped(v) if v == to => Ok(None),
-        _ => Ok(Some(db)),
-    }
+    let migrate = match read_marker(&*db, kg_path)? {
+        KgMarker::Stamped(v) if v > to => return Err(too_new(v)),
+        KgMarker::Stamped(v) => v != to,
+        _ => true,
+    };
+    Ok(Some(HeldKg {
+        db,
+        migrate,
+        _guard: guard,
+    }))
 }
 
 /// A resumed migration must name this palace, this move, and a backup that
@@ -360,21 +400,41 @@ pub(crate) fn write_mirror(data_dir: &Path, format: u32) -> Result<()> {
     write_atomic(data_dir, &path, &out)
 }
 
-/// Write `bytes` to `path` via `<path>.tmp`, fsynced, renamed, dir fsynced.
+/// Write `bytes` to `path` via a temp file, fsynced, renamed, dir fsynced.
 fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     let io = |p: &Path, source| PalaceStoreError::Io {
         path: p.to_path_buf(),
         source,
     };
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".format.tmp");
-    let tmp = PathBuf::from(tmp);
-    let mut f = std::fs::File::create(&tmp).map_err(|e| io(&tmp, e))?;
-    f.write_all(bytes).map_err(|e| io(&tmp, e))?;
-    f.sync_all().map_err(|e| io(&tmp, e))?;
-    drop(f);
-    std::fs::rename(&tmp, path).map_err(|e| io(path, e))?;
+    let tmp = tmp_path(path);
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| io(&tmp, e))?;
+        f.write_all(bytes).map_err(|e| io(&tmp, e))?;
+        f.sync_all().map_err(|e| io(&tmp, e))?;
+        drop(f);
+        std::fs::rename(&tmp, path).map_err(|e| io(path, e))
+    })();
+    if let Err(e) = written {
+        if let Err(rm) = std::fs::remove_file(&tmp)
+            && rm.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(tmp = %tmp.display(), "#9274: temp file left behind: {rm}");
+        }
+        return Err(e);
+    }
     sync_dir(dir)
+}
+
+/// A temp name no other writer in any process uses: `<path>.<pid>.<n>.format.tmp`.
+///
+/// Why: a fixed name let two openers write one temp file (PR3 critic HIGH 1).
+/// Test: `temp_names_never_repeat`.
+fn tmp_path(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.{n}.format.tmp", std::process::id()));
+    PathBuf::from(tmp)
 }
 
 /// fsync a directory so a rename inside it is durable (no-op off unix).
@@ -397,3 +457,7 @@ mod tests;
 #[cfg(test)]
 #[path = "format_migration_fault_tests.rs"]
 mod fault_tests;
+
+#[cfg(test)]
+#[path = "format_migration_lock_tests.rs"]
+mod lock_tests;

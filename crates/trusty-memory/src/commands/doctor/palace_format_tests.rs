@@ -55,3 +55,22 @@ fn palace_format_check_names_a_palace_that_needs_migration() {
     assert!(shown.contains("FormatTooNew"), "{shown}");
     assert!(shown.contains("old (format 0)"), "{shown}");
 }
+
+/// #9274 (PR3 critic MEDIUM): a palace whose `kg.redb` is held — as the
+/// running daemon holds it — cannot be read without writing, so the check
+/// warns that it could not verify the format instead of passing it.
+#[test]
+fn palace_format_check_warns_on_a_palace_it_cannot_verify() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let dir = palace(root.path(), "held", Some(PALACE_FORMAT_SUPPORTED));
+    let holder = redb::Database::create(dir.join("kg.redb")).expect("hold kg");
+    let r = palace_format_verdict(root.path());
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+    let shown = format!("{r:?}");
+    assert!(shown.contains("could not be verified"), "{shown}");
+    assert!(shown.contains("stop the daemon"), "{shown}");
+    assert!(shown.contains("held"), "{shown}");
+    drop(holder);
+    let r = palace_format_verdict(root.path());
+    assert_eq!(r.status, CheckStatus::Pass, "{r:?}");
+}

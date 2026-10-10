@@ -627,3 +627,26 @@ fn status_reports_needs_migration_for_a_format_0_palace() {
     std::fs::remove_file(palace.data_dir.join(MIGRATION_RECORD)).expect("rm");
     assert_eq!(before, hash_tree(&palace.data_dir), "status wrote a byte");
 }
+
+/// #9274 (PR3 critic MEDIUM): a `kg.redb` that cannot be read without
+/// writing — here held, as a running daemon holds it — is `Unverified`, not
+/// `Current`, and the read writes nothing.
+#[test]
+fn status_reports_a_held_kg_as_unverified() {
+    let root = tempdir().expect("tempdir");
+    let palace = saved_palace(root.path(), "held-status");
+    populate(&palace);
+    let kg = palace.data_dir.join(KG_FILE);
+    let holder = crate::redb_cache::create_palace_db(&kg).expect("hold kg.redb");
+    let before = hash_tree(&palace.data_dir);
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::Unverified
+    );
+    assert_eq!(before, hash_tree(&palace.data_dir), "status wrote a byte");
+    drop(holder);
+    assert_eq!(
+        palace_format_status(&palace.data_dir).expect("status"),
+        PalaceFormatStatus::Current
+    );
+}

@@ -5,10 +5,12 @@
 //! The operator needs that state by name, apart from a palace the binary
 //! refuses outright (newer, split, or a failed migration).
 //! What: one pass over the palace root, reading each palace's format state
-//! through `palace_format_status`, which writes nothing. Needs migration →
-//! `Warn`; a refusal → `Fail`; otherwise `Pass`.
+//! through `palace_format_status`, which writes nothing. Needs migration, or a
+//! format that could not be verified → `Warn`; a refusal → `Fail`; otherwise
+//! `Pass`.
 //! Test: palace_format_tests.rs —
-//! `palace_format_check_names_a_palace_that_needs_migration`.
+//! `palace_format_check_names_a_palace_that_needs_migration`,
+//! `palace_format_check_warns_on_a_palace_it_cannot_verify`.
 
 use std::path::Path;
 
@@ -31,7 +33,8 @@ pub fn check_palace_formats() -> CheckResult {
 
 /// The verdict for every palace one level under `root`.
 ///
-/// Test: `palace_format_check_names_a_palace_that_needs_migration`.
+/// Test: `palace_format_check_names_a_palace_that_needs_migration`,
+/// `palace_format_check_warns_on_a_palace_it_cannot_verify`.
 pub(super) fn palace_format_verdict(root: &Path) -> CheckResult {
     let Ok(entries) = std::fs::read_dir(root) else {
         return CheckResult::pass(LABEL, format!("no palace root at {}", root.display()));
@@ -43,7 +46,7 @@ pub(super) fn palace_format_verdict(root: &Path) -> CheckResult {
         .filter(|p| p.join("palace.json").is_file())
         .collect();
     names.sort();
-    let (mut needs, mut refused) = (Vec::new(), Vec::new());
+    let (mut needs, mut unverified, mut refused) = (Vec::new(), Vec::new(), Vec::new());
     for dir in names {
         let name = dir
             .file_name()
@@ -57,23 +60,35 @@ pub(super) fn palace_format_verdict(root: &Path) -> CheckResult {
                     format!("{name} (format {found})")
                 })
             }
+            // #9274: a held or crash-repair kg.redb is not known to be current.
+            Ok(PalaceFormatStatus::Unverified) => unverified.push(name),
             Ok(_) => {}
             Err(e) => refused.push(format!("{name}: {e}")),
         }
     }
-    let needs_line = format!(
-        "needs migration by the daemon, at its next open of the palace: {}",
-        needs.join(", ")
-    );
+    let mut warnings = Vec::new();
+    if !needs.is_empty() {
+        warnings.push(format!(
+            "needs migration by the daemon, at its next open of the palace: {}",
+            needs.join(", ")
+        ));
+    }
+    if !unverified.is_empty() {
+        warnings.push(format!(
+            "format could not be verified (kg.redb is held by a running daemon or needs crash \
+             repair; stop the daemon and re-run doctor to read it): {}",
+            unverified.join(", ")
+        ));
+    }
     if !refused.is_empty() {
         let mut detail = format!("refused: {}", refused.join("; "));
-        if !needs.is_empty() {
+        for w in &warnings {
             detail.push_str("; ");
-            detail.push_str(&needs_line);
+            detail.push_str(w);
         }
         CheckResult::fail(LABEL, detail)
-    } else if !needs.is_empty() {
-        CheckResult::warn(LABEL, needs_line)
+    } else if !warnings.is_empty() {
+        CheckResult::warn(LABEL, warnings.join("; "))
     } else {
         CheckResult::pass(
             LABEL,

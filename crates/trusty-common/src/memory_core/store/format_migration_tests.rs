@@ -5,26 +5,28 @@
 //! must be completed by the next writer open, and the three branches that used
 //! to fail open (`migrate.rs` wrapper, skipped rows, the #702 recreate) must
 //! refuse the palace instead.
-//! What: the v0 fixture is written from the OLD on-disk shapes by hand —
-//! `palace.json` without `format_version`, legacy-shape drawer rows, the
-//! pre-#4810 triple key, no `kg_schema` table — never copied from a real
-//! palace. Every test drives the public open paths (`PalaceHandle`,
-//! `KgStoreRedb`) and reads the result through raw redb and JSON, so the file
-//! uses no PR3-only item.
+//! What: the v0 fixture (`format_v0_fixture`) is written from the OLD on-disk
+//! shapes by hand — `palace.json` without `format_version`, legacy-shape
+//! drawer rows, the pre-#4810 triple key, no `kg_schema` table — never copied
+//! from a real palace. Every test drives the public open paths
+//! (`PalaceHandle`, `KgStoreRedb`) and reads the result through raw redb and
+//! JSON.
 //! Test: this file.
 
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
+pub(super) use crate::memory_core::store::format_v0_fixture::{
+    FORMAT_0_TRIPLES as ROWS, legacy_triple_key, write_format_0_palace_with,
+};
 use crate::memory_core::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES,
-    TripleValue, decode_value, encode_triple_key, encode_u64, encode_value,
+    KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, TripleValue, decode_value,
+    encode_triple_key, encode_value,
 };
 use crate::memory_core::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, is_format_refusal};
 use redb::ReadableDatabase;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,24 +34,6 @@ use tempfile::TempDir;
 
 /// The record a migration leaves while it runs.
 const RECORD: &str = "format_migration.json";
-
-/// The triples every v0 fixture carries: two active, one closed.
-pub(super) const ROWS: [(&str, &str, &str, Option<i64>); 3] = [
-    ("room:General", "contains", "drawer:a", None),
-    ("alice", "knows", "bob", None),
-    ("alice", "knows", "carol", Some(1_700_000_100_000)),
-];
-
-/// The pre-#61 drawer row shape (`LegacyDrawerRecord`), field for field.
-#[derive(Serialize)]
-struct V0Drawer {
-    room_id: String,
-    content: String,
-    importance: f32,
-    tags: Vec<String>,
-    source_file: Option<String>,
-    created_at_ms: i64,
-}
 
 /// A v0 palace under `<root>/palaces/<id>`.
 pub(super) struct V0 {
@@ -69,92 +53,14 @@ impl V0 {
     }
 }
 
-/// The pre-#4810 triple key: `[subject_len][subject][predicate]`.
-pub(super) fn legacy_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&(subject.len() as u16).to_be_bytes());
-    out.extend_from_slice(subject.as_bytes());
-    out.extend_from_slice(predicate.as_bytes());
-    out
-}
-
-/// Build a format-0 palace from the old on-disk shapes.
+/// Build a format-0 palace under `<root>/palaces/<id>` (`format_v0_fixture`).
 ///
 /// `extra` runs inside the KG write transaction, so a test can add a
 /// malformed row or a marker the old code wrote.
 pub(super) fn build_v0_with(id: &str, extra: fn(&redb::WriteTransaction)) -> V0 {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = root.path().join("palaces").join(id);
-    std::fs::create_dir_all(&dir).expect("palace dir");
-    let json = serde_json::json!({
-        "id": id,
-        "name": id,
-        "description": null,
-        "created_at": "2025-06-01T00:00:00Z",
-        "data_dir": dir,
-        "schema_version": 1,
-    });
-    std::fs::write(
-        dir.join("palace.json"),
-        serde_json::to_vec_pretty(&json).expect("encode"),
-    )
-    .expect("palace.json");
-    std::fs::write(dir.join("identity.txt"), b"v0 identity").expect("identity");
-
-    let db = redb::Database::create(dir.join("kg.redb")).expect("create v0 kg");
-    let wtx = db.begin_write().expect("txn");
-    {
-        let mut drawers = wtx.open_table(DRAWERS).expect("drawers");
-        for content in ["first v0 drawer", "second v0 drawer"] {
-            let row = V0Drawer {
-                room_id: uuid::Uuid::new_v4().to_string(),
-                content: content.into(),
-                importance: 0.5,
-                tags: vec!["v0".into()],
-                source_file: None,
-                created_at_ms: 1_700_000_000_000,
-            };
-            let bytes = encode_value(&row).expect("encode drawer");
-            drawers
-                .insert(uuid::Uuid::new_v4().as_bytes().as_slice(), bytes.as_slice())
-                .expect("insert drawer");
-        }
-        let mut triples = wtx.open_table(TRIPLES).expect("triples");
-        let mut counts = wtx.open_table(ACTIVE_SUBJECT_COUNTS).expect("counts");
-        let mut per_subject: BTreeMap<&str, u64> = BTreeMap::new();
-        for (s, p, o, valid_to_ms) in ROWS {
-            let value = TripleValue {
-                object: o.to_string(),
-                valid_from_ms: 1_700_000_000_000,
-                valid_to_ms,
-                confidence: 1.0,
-                provenance: None,
-            };
-            let core = legacy_triple_key(s, p);
-            let key = if valid_to_ms.is_some() {
-                let mut k = b"hist:".to_vec();
-                k.extend_from_slice(&core);
-                k.extend_from_slice(&value.valid_from_ms.to_be_bytes());
-                k
-            } else {
-                *per_subject.entry(s).or_insert(0) += 1;
-                core
-            };
-            let bytes = encode_value(&value).expect("encode triple");
-            triples
-                .insert(key.as_slice(), bytes.as_slice())
-                .expect("insert triple");
-        }
-        for (s, n) in per_subject {
-            counts
-                .insert(s.as_bytes(), encode_u64(n).as_slice())
-                .expect("count");
-        }
-    }
-    extra(&wtx);
-    wtx.commit().expect("commit v0 kg");
-    drop(db);
-
+    write_format_0_palace_with(&dir, id, extra).expect("write v0 palace");
     let palace = Palace {
         id: PalaceId::new(id),
         name: id.to_string(),

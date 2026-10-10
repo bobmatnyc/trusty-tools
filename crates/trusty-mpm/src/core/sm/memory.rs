@@ -121,20 +121,26 @@ impl SmMemory {
     /// erroring when it already exists (the SM may restart against a populated
     /// store). Calling this twice — in one process or across restarts — must
     /// leave EXACTLY ONE palace on disk, never duplicate or wipe it.
-    /// What: derives `palace_id` from `cfg.palace`, then: if
+    /// What: opens the registry with writer intent (it is the sole owner of
+    /// `data_root`, so an existing format-0 palace migrates, #9274), derives
+    /// `palace_id` from `cfg.palace`, then: if
     /// `<data_root>/<id>/palace.json` already exists, opens it from disk;
     /// otherwise creates and persists a fresh palace. Both paths register the
     /// handle in the registry. Any failure is wrapped in
     /// [`SmMemoryError::Palace`].
     /// Test: `palace_create_is_idempotent` (two `open` calls → one palace),
-    /// `data_survives_fresh_construction` (restart survival).
+    /// `data_survives_fresh_construction` (restart survival),
+    /// `an_existing_format_0_sm_palace_migrates_at_open`.
     pub fn open(data_root: impl Into<PathBuf>, cfg: &SmMemoryConfig) -> SmMemoryResult<Self> {
         let data_root = data_root.into();
         let palace_id = PalaceId::new(cfg.palace.clone());
         let recall_top_k = cfg.recall_top_k as usize;
 
-        let registry =
-            PalaceRegistry::open(&data_root).map_err(|source| SmMemoryError::Palace {
+        // #9274: this registry is the sole owner of its root, so it opens with
+        // writer intent; a format-0 palace there migrates instead of being refused.
+        let registry = PalaceRegistry::open(&data_root)
+            .map(PalaceRegistry::with_writer_intent)
+            .map_err(|source| SmMemoryError::Palace {
                 palace: palace_id.to_string(),
                 source,
             })?;

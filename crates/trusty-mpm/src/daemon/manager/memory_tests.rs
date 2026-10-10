@@ -194,3 +194,30 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
         "a remembered portfolio observation must be recallable"
     );
 }
+
+/// #9274 (PR3 critic HIGH 2): the portfolio registry is the sole owner of its
+/// root, so an existing format-0 portfolio palace migrates at open. Under
+/// read-only intent it was refused with `FormatNeedsMigration` forever, since
+/// no daemon ever opens this root.
+/// Test: this is the test.
+#[cfg(feature = "manager-memory")]
+#[test]
+fn an_existing_format_0_portfolio_palace_migrates_at_open() {
+    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::palace_format::{MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED};
+
+    seed_shared_embedder_with_mock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_root = dir.path().join("palace");
+    let palace_dir = data_root.join(PORTFOLIO_PALACE_ID);
+    write_format_0_palace(&palace_dir, PORTFOLIO_PALACE_ID).expect("format-0 palace");
+
+    let mem = PortfolioMemory::open(&data_root).expect("a format-0 portfolio palace opens");
+    assert_eq!(mem.persisted_palace_count().expect("count"), 1);
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
+            .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    assert!(!palace_dir.join(MIGRATION_RECORD).exists(), "migration left its record");
+}

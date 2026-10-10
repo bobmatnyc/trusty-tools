@@ -88,6 +88,9 @@ pub enum PalaceFormatStatus {
     /// Behind; the daemon migrates it at its next writer-intent open.
     /// `interrupted` is set when a migration record is present.
     NeedsMigration { found: u32, interrupted: bool },
+    /// `kg.redb` cannot be read without writing — a running daemon holds it,
+    /// or it needs crash repair — so the format is not known (#9274).
+    Unverified,
 }
 
 /// Compare a palace's format with the one this binary supports.
@@ -324,8 +327,10 @@ pub(crate) fn gate_palace(data_dir: &Path, palace: &str) -> Result<()> {
 /// Why: `trusty-memory doctor` reports a palace the daemon has yet to migrate
 /// as its own state (#9274), apart from one it refuses.
 /// What: [`classify_with`] at [`PALACE_FORMAT_SUPPORTED`]. A refusal is the
-/// `Err` arm, so the caller can print its message.
-/// Test: `status_reports_needs_migration_for_a_format_0_palace`.
+/// `Err` arm, so the caller can print its message. A deferred marker read is
+/// `Unverified`, never `Current`: the daemon may refuse that palace.
+/// Test: `status_reports_needs_migration_for_a_format_0_palace`,
+/// `status_reports_a_held_kg_as_unverified`.
 pub fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus> {
     let label = data_dir.file_name().map_or_else(
         || data_dir.display().to_string(),
@@ -333,7 +338,9 @@ pub fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus> {
     );
     Ok(
         match classify_with(data_dir, &label, PALACE_FORMAT_SUPPORTED)? {
-            FormatState::Current { .. } | FormatState::Unverified => PalaceFormatStatus::Current,
+            FormatState::Current { .. } => PalaceFormatStatus::Current,
+            // #9274: a held or crash-repair KG is not known to be current.
+            FormatState::Unverified => PalaceFormatStatus::Unverified,
             FormatState::Behind { found } => PalaceFormatStatus::NeedsMigration {
                 found,
                 interrupted: data_dir.join(MIGRATION_RECORD).exists(),

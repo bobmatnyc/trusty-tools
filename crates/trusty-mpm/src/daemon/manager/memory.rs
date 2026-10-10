@@ -346,20 +346,25 @@ mod live {
         /// populated store). Calling this twice — in one process or across
         /// restarts — must leave EXACTLY ONE palace on disk, never duplicate or
         /// wipe it.
-        /// What: opens the registry at `data_root`, binds [`PORTFOLIO_PALACE_ID`],
+        /// What: opens the registry at `data_root` with writer intent (it is the
+        /// sole owner of that root, so an existing format-0 palace migrates,
+        /// #9274), binds [`PORTFOLIO_PALACE_ID`],
         /// then eagerly materialises the palace via the race-safe open-or-create
         /// [`Self::ensure_palace`]. Any failure is wrapped in
         /// [`PortfolioMemoryError::Palace`].
-        /// Test: `portfolio_palace_provisions_and_is_idempotent`.
+        /// Test: `portfolio_palace_provisions_and_is_idempotent`,
+        /// `an_existing_format_0_portfolio_palace_migrates_at_open`.
         pub fn open(data_root: impl Into<PathBuf>) -> PortfolioMemoryResult<Self> {
             let data_root = data_root.into();
             let palace_id = PalaceId::new(PORTFOLIO_PALACE_ID.to_string());
-            let registry = PalaceRegistry::open(&data_root).map_err(|source| {
-                PortfolioMemoryError::Palace {
+            // #9274: this registry is the sole owner of its root, so it opens
+            // with writer intent; a format-0 palace there migrates on open.
+            let registry = PalaceRegistry::open(&data_root)
+                .map(PalaceRegistry::with_writer_intent)
+                .map_err(|source| PortfolioMemoryError::Palace {
                     palace: palace_id.to_string(),
                     source,
-                }
-            })?;
+                })?;
             let me = Self {
                 registry,
                 data_root,

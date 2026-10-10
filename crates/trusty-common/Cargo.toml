@@ -738,6 +738,13 @@ embedder-coreml = ["embedder"]
 # the mock only when one of its own features turns `embedder` or `memory-core`
 # on — trusty-mpm's `sm-memory` does (owner ruling 2026-09-27).
 embedder-test-support = []
+# #9274: exposes `memory_core::store::format_v0_fixture`, a format-0 palace
+# written from the old on-disk shapes, so a `PalaceRegistry` consumer can test
+# that its existing palaces migrate. Like `embedder-test-support` it implies
+# nothing: the module sits inside `memory_core`, so it compiles only when the
+# consumer's own feature turns `memory-core` on. List it in
+# `[dev-dependencies]` only.
+memory-core-test-support = []
 # Issue #54: opt-in Candle BERT backend (all-MiniLM-L6-v2 on Metal/CPU). Does
 # NOT replace the fastembed/ORT default — operators select it at runtime via
 # `TRUSTY_EMBEDDER=candle` on builds that compiled this feature in. The
