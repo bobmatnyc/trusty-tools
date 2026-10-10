@@ -452,6 +452,37 @@ async fn exec_forwards_sigterm_and_revokes() {
     assert!(!alive(seen.grants[0]["child_pid"].as_i64().unwrap()));
 }
 
+/// Why: #9621 — a background job holding the scrubbed stdout keeps tm
+/// draining after the command exits; SIGTERM must still end tm.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_drain_after_exit_answers_sigterm() {
+    let fx = Fixture::new(Script::new()).await;
+    let child = fx
+        .tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", "sleep 30 &"])
+        .spawn()
+        .expect("spawn tm");
+    let tm_pid = child.id().expect("tm pid") as libc::pid_t;
+    // The revoke runs after the command exits and before the drain.
+    let start = Instant::now();
+    while fx.seen().revokes.is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(20), "never revoked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // SAFETY: plain syscall to the tm this test spawned.
+    unsafe { libc::kill(tm_pid, libc::SIGTERM) };
+    let out = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("tm exited after SIGTERM while draining")
+        .expect("tm output");
+    assert_eq!(
+        out.status.code(),
+        Some(128 + libc::SIGTERM),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fx.seen().revokes, [TOKEN], "revoked once");
+}
+
 /// Why: a command killed by a signal reports 128 + signal and is revoked.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_reports_a_sigkilled_command_and_revokes() {

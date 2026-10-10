@@ -823,7 +823,8 @@ terminal output is not captured (§3 G-6).
 - Ctrl-Z stops the command, not tm.
 - tm waits for end of stream on the scrubbed pipes, so a background process
   that keeps them open keeps tm waiting. The grant is revoked before that
-  wait.
+  wait. SIGINT, SIGTERM or SIGHUP still ends tm during it: tm sends the
+  signal to the command's process group and exits with 128 + the signal.
 
 ---
 

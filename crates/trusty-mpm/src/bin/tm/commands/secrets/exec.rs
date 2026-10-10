@@ -16,7 +16,8 @@
 //!    and stderr through [`Scrubber`]; wait, forwarding SIGINT, SIGTERM and
 //!    SIGHUP to the group, and SIGKILL it on a second signal or after
 //!    [`GRACE`].
-//! 6. `secrets.revoke` the grant, then drain the pumps.
+//! 6. `secrets.revoke` the grant, then drain the pumps; a signal during the
+//!    drain goes to the group and ends tm with 128 + the signal.
 //!
 //! Every failure before the command runs kills the stub's group, revokes a
 //! grant that exists, and exits 1 with fixed text. Known limits are in the
@@ -63,7 +64,8 @@ const PREFIX: &str = "tm secrets exec";
 /// Why/What: see the module doc.
 /// Test: `exec_runs_the_command_with_the_value_and_revokes`,
 /// `exec_grant_names_the_stub_pid_not_tm`,
-/// `exec_kills_the_stub_group_when_the_grant_is_refused`.
+/// `exec_kills_the_stub_group_when_the_grant_is_refused`,
+/// `exec_drain_after_exit_answers_sigterm`.
 pub(crate) async fn run(
     client: &OnDemandSecrets,
     project: &Path,
@@ -140,10 +142,34 @@ pub(crate) async fn run(
     // #9621: every path that holds a token revokes it.
     revoke(client, &token).await;
     let (code, pumps) = supervised?;
-    for pump in pumps {
-        let _ = pump.await;
+    // #9621: a background job can hold the pipes past the command's exit;
+    // a signal still ends tm. The group id stays reserved while that job is
+    // in it; an empty group answers ESRCH, which kill_group ignores.
+    if let Some(sig) = drain(pumps, &mut signals).await {
+        kill_group(pid, sig);
+        return Ok(128 + sig);
     }
     Ok(code)
+}
+
+/// Await every output pump; the first signal tm gets ends the wait early.
+///
+/// Why: a background job of the command can hold stdout open after the
+/// command exits, and tm's handlers would swallow SIGINT, SIGTERM and SIGHUP
+/// for as long as it does.
+/// What: `None` once every pump reached end of stream; `Some(sig)` when a
+/// signal came first. The pumps left running end with tm.
+/// Test: `exec_drain_after_exit_answers_sigterm`.
+async fn drain(pumps: Vec<JoinHandle<()>>, signals: &mut Signals) -> Option<i32> {
+    let all = async {
+        for pump in pumps {
+            let _ = pump.await;
+        }
+    };
+    tokio::select! {
+        () = all => None,
+        sig = signals.next() => Some(sig),
+    }
 }
 
 /// `secrets.grant` every key of `spec` to `pid`; the token.
