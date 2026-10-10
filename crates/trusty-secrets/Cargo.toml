@@ -1,6 +1,6 @@
 [package]
 name = "trusty-secrets"
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -25,7 +25,7 @@ readme = "README.md"
 default = ["api", "store", "server"]
 api = ["dep:serde", "dep:thiserror"]
 store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc"]
-server = ["store", "dep:tokio", "dep:trusty-common"]
+server = ["store", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
 # #7519: the blocking runner and template-file guard the CLI-backed backends
 # (1Password, Keeper) share. std plus `store`'s libc only — owner ruling
 # 2026-10-07, "no common dependencies"; pinned by
@@ -43,6 +43,9 @@ serde_yaml = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 trusty-common = { workspace = true, optional = true, features = ["uds-supervisor"] }
+# #9070: exec-grant tokens — 256 bits from the OS CSPRNG, kept only as SHA-256.
+sha2 = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
 
 [[bin]]
 name = "trusty-secrets"
