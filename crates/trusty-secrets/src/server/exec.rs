@@ -178,6 +178,7 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// `one_shot_grant_survives_unreadable_caller_ancestry`,
 /// `one_shot_grant_survives_an_audit_failure`,
 /// `one_shot_grant_survives_a_backend_failure`,
+/// `resolve_that_loses_the_one_shot_race_returns_no_value`,
 /// `resolve_against_a_dead_childs_grant_is_refused`.
 pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(

@@ -168,12 +168,15 @@ pub(crate) fn names_node(label: &str) -> bool {
 /// its executable path names it.
 /// What: `true` when any label (short name, executable path) passes
 /// [`names_agent`]. Otherwise, when a label passes [`names_node`], `argv` is
-/// read and the answer is whether any argument passes [`names_agent`] — a
-/// `claude-code` or `claude` path segment. A non-`node` process never reads
-/// its argv. An argv that cannot be read is returned as the error, so the
-/// caller refuses (fail-closed, like [`ProcessTable::is_agent`]'s default).
-/// A false positive (`node build.js --name claude`) only narrows a grant.
+/// read and only two entries are judged by [`names_claude_entry`]: argv[0]
+/// (Claude Code sets `process.title`) and the script operand
+/// ([`script_operand`]). Arguments after the script operand never count, so
+/// `node lint.js CLAUDE.md` is not an agent. A non-`node` process never
+/// reads its argv. An argv that cannot be read is returned as the error, so
+/// the caller refuses (fail-closed, like [`ProcessTable::is_agent`]'s
+/// default).
 /// Test: `agent_verdict_reads_argv_of_node_only`,
+/// `agent_verdict_judges_only_argv0_and_the_script_operand`,
 /// `agent_verdict_fails_closed_on_unreadable_node_argv`.
 pub(crate) fn agent_verdict(
     labels: &[&str],
@@ -185,7 +188,69 @@ pub(crate) fn agent_verdict(
     if !labels.iter().any(|label| names_node(label)) {
         return Ok(false);
     }
-    Ok(argv()?.iter().any(|arg| names_agent(arg)))
+    // #9621 fix round: argv[0] and the script operand only.
+    let argv = argv()?;
+    let first = argv.first().map(String::as_str);
+    Ok(first
+        .into_iter()
+        .chain(script_operand(&argv))
+        .any(names_claude_entry))
+}
+
+/// Whether one argv entry names the Claude Code entry point.
+///
+/// What: a `/`-separated segment equal to `claude-code` (the npm package,
+/// `@anthropic-ai/claude-code/cli.js`), or a last segment exactly `claude`
+/// (the npm bin link, or `process.title`). `claude-mpm` and `CLAUDE.md` do
+/// not match.
+/// Test: `agent_verdict_judges_only_argv0_and_the_script_operand`.
+fn names_claude_entry(arg: &str) -> bool {
+    arg.split('/').any(|segment| segment == "claude-code")
+        || arg.rsplit('/').next() == Some("claude")
+}
+
+/// Node options whose value is the next argument, not the script.
+const NODE_VALUE_OPTIONS: &[&str] = &[
+    "-r",
+    "--require",
+    "--import",
+    "--loader",
+    "--experimental-loader",
+    "-C",
+    "--conditions",
+    "--title",
+];
+
+/// Node options that run code with no script operand.
+const NODE_INLINE_OPTIONS: &[&str] = &["-e", "--eval", "-p", "--print", "-"];
+
+/// The script operand of a `node` argv: the first argument after argv[0]
+/// that is not one of node's own options (or an option's value).
+///
+/// What: `--` ends the options. An option listed in [`NODE_VALUE_OPTIONS`]
+/// consumes the next argument; `--opt=value` is one argument. An inline
+/// program option ([`NODE_INLINE_OPTIONS`]) means there is no script.
+/// Known limit: an unlisted option given its value as a separate argument
+/// makes that value the operand.
+/// Test: `agent_verdict_judges_only_argv0_and_the_script_operand`.
+fn script_operand(argv: &[String]) -> Option<&str> {
+    let mut args = argv.iter().skip(1).map(String::as_str);
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args.next();
+        }
+        if NODE_INLINE_OPTIONS.contains(&arg) {
+            return None;
+        }
+        if NODE_VALUE_OPTIONS.contains(&arg) {
+            args.next();
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
 }
 
 /// The arguments in a Linux `/proc/<pid>/cmdline`: NUL-separated, with a
