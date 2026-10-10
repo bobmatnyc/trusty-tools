@@ -582,6 +582,11 @@ async fn remove_over_report(
 /// reindex.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+// #9630: `reindex` takes the process-global memory limit, so a `#[serial]`
+// writer's 1 MB limit memory-aborts it (batches skipped, staged hash rows
+// rolled back); `parallel` keeps it out of that window, as this file's other
+// reindex tests already are.
+#[serial_test::parallel]
 async fn remove_file_forgets_the_hash_so_a_reindex_restores_it_9236() {
     let id = "remove-file-hash-9236";
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -642,6 +647,11 @@ async fn remove_file_forgets_the_hash_so_a_reindex_restores_it_9236() {
 /// row, and the next reindex indexes `a.rs` again.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+// #9630: `reindex` takes the process-global memory limit, so a `#[serial]`
+// writer's 1 MB limit memory-aborts it (batches skipped, staged hash rows
+// rolled back); `parallel` keeps it out of that window, as this file's other
+// reindex tests already are.
+#[serial_test::parallel]
 async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
     let id = "remove-file-forget-fail-9236";
     let tmp = tempfile::tempdir().expect("tempdir");
