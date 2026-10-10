@@ -263,7 +263,11 @@ pub(crate) fn handle_prune_at(
         "--max-idle-days must be at least 1 (0 would make every tracked index eligible)"
     );
 
-    let entries = load_index_registry_at(toml_path)?;
+    // #9169: a parked index is never pruned; an unreadable map prunes nothing.
+    let entries = crate::service::project_map_state::retain_unparked(
+        toml_path,
+        load_index_registry_at(toml_path)?,
+    )?;
 
     if entries.is_empty() {
         println!("Registry is empty — nothing to prune.");

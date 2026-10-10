@@ -54,6 +54,10 @@ mod indexes_relocate;
 mod indexes_roots;
 mod lexical_lane;
 // #6822: the scalar-precision backfill route.
+// #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
+mod project_park;
+#[cfg(test)]
+mod project_park_tests;
 mod quantize_handlers;
 mod reindex_handlers;
 // #9236: maps a remove-file path onto the stored index-relative key.
@@ -369,6 +373,8 @@ pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
 pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
+// #9169 PR-B1: the socket's project-map methods drive these.
+pub(crate) use project_park::{detach_parked, reindex_after_unpark, with_map_parked};
 pub(crate) use reindex_handlers::reindex_report;
 #[cfg(test)]
 pub(crate) use reindex_handlers::start_release_catch_up;

@@ -432,16 +432,23 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
 /// One orphan-reaper pass: unregister every index whose root was deleted.
 ///
 /// What: see [`spawn_orphan_reaper_ticker`]; returns how many were reaped.
-/// #9027: also drops each reaped index's warm-all pin.
-/// Test: `the_orphan_reaper_unpins_a_warmed_index`.
+/// #9027: also drops each reaped index's warm-all pin. #9169: skips
+/// map-parked ids, and reaps nothing when the map cannot be read.
+/// Test: `the_orphan_reaper_unpins_a_warmed_index`,
+/// `the_reaper_never_reaps_a_parked_index_and_reaps_nothing_without_the_map`.
 pub(super) async fn reap_orphans_once(state: &Arc<SearchAppState>) -> usize {
     use crate::service::orphan_reaper::is_reapable_orphan;
+    // #9169: a parked index is never reaped; an unreadable map reaps nothing.
+    let Some(parked) = super::project_park::parked_ids_fail_closed(state) else {
+        return 0;
+    };
     // Snapshot (id, root_path) and run existence checks off the async
     // runtime — a stat-per-index is blocking filesystem I/O.
     let candidates: Vec<(String, std::path::PathBuf)> = state
         .registry
         .list_handles()
         .into_iter()
+        .filter(|h| !parked.contains(&h.id.0))
         .map(|h| (h.id.0.clone(), h.root_path.clone()))
         .collect();
     let reapable: Vec<String> = tokio::task::spawn_blocking(move || {
@@ -463,7 +470,7 @@ pub(super) async fn reap_orphans_once(state: &Arc<SearchAppState>) -> usize {
         // #6380: no expectation. The reaper reads the registration and
         // deletes it in the same pass, so it has no earlier census whose
         // root could have gone stale.
-        if super::search::unregister_index(state, &id, false, None)
+        if super::project_park::unregister_with_map(state, &id, false, None)
             .await
             .removed
         {

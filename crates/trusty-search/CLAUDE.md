@@ -245,6 +245,61 @@ List every registered index.
     `indeterminate`). Also on `?details=true`; a `?repo_identity=` filter
     narrows it to that repo's rows. Omitted when nothing is
     parked, so a consumer must treat it as optional.
+  - A row with `parked: true` (#9169) is an index parked in
+    `project-map.toml` (below). It also carries `reason`, `key` and
+    `canonical_index_id`.
+
+##### Project map — `project-map.toml` (#9169)
+
+Socket-only, free lane. The map sits next to `indexes.toml` (with a
+`project-map.toml.lock` sidecar) and names one index per project.
+
+- **Schema 1.** `[[projects]] {key, index_id, root_path, pinned_by =
+  migration|create|operator, pinned_unix}` and `[[parked]] {index_id, key,
+  root_path, reason = worktree|orphaned|operator, parked_unix}`. `key` is the
+  resolver's group key: the repo identity, or `root:<path>` for a
+  subdirectory index.
+- **Migration.** The first boot with no map pins every group to the index
+  `search.project.resolve` returned before the map existed, parks nothing,
+  and writes once. `indexes.toml` and `projects.json` are not changed. An
+  unreadable `indexes.toml` writes no map.
+- **Fail closed.** A map that cannot be parsed, names a schema other than 1,
+  or cannot be read is never rewritten. `search.project.resolve` and
+  `search.project.map` answer `CODE_INTERNAL_ERROR` naming the file and the
+  remedy; a resolve by an exact index id still answers. Requests that name
+  an index id do not read parks from an unreadable map, prune deletes
+  nothing, the boot orphan heal and relocation salvage are skipped, the
+  runtime orphan reaper reaps nothing, and `search.index.delete` is refused
+  with `500 project_map_unreadable`.
+  `trusty-search project rebuild-map --yes` moves the file to
+  `project-map.toml.corrupt-<unix>` and migrates again.
+- `search.project.resolve` answers from the map: a group's pin wins, a parked
+  index never wins, and the answer carries `pinned_by` (`null` when derived).
+  Each duplicate carries `parked`.
+- `search.project.map` → `{path, schema, projects, parked}`.
+- `search.project.park {index_id}` → `{index_id, parked, key, reason,
+  canonical_index_id, unpinned, unloaded}`. A pin naming the parked index is
+  dropped; `unpinned` lists the group keys it held. Only a worktree, an orphaned root, or an
+  index sharing its root with another registration (not the group's live
+  index) parks. A main checkout is refused with `-32009`
+  `data.error = "park_refused"`. A parked index keeps its corpus and its
+  `indexes.toml` row; it is unloaded and is not warm-loaded, watched,
+  reindexed, or searched by `search.query.all`.
+- `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
+  reindex | reindex_error}`: clears the row, reloads the index, queues a
+  reindex.
+- `search.project.pin {index_id}` → `{index_id, key, pinned_by, previous}`.
+  A worktree, orphaned or parked index is refused.
+- A request naming a parked index (`search.query`, reindex, file reads and
+  writes) answers `409 index_parked` — socket `-32009` with `data`
+  `{parked: true, canonical_index_id, key, reason}`. It never redirects and
+  never returns empty hits. `canonical_index_id` is the group's live answer
+  under the map (`null` when it has none), never a parked or unregistered id.
+- Deleting an index drops its park row and pins from the map, so an index
+  registered again at the same root is not parked.
+- `search.index.create` pins a new index's group when it has no pin
+  (`pinned_by = create`); a pin that cannot be written is reported as
+  `project_map_error` and the index stays registered.
 
 ##### `POST /indexes`
 
@@ -1476,6 +1531,7 @@ trusty-search doctor [--fix]                         # 6-check diagnostic + auto
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search
 trusty-search serve                                  # MCP stdio (#9542: no HTTP/SSE)
+trusty-search project map|park <id>|unpark <id>|pin <id>|rebuild-map --yes   # #9169 project map
 # Aliases preserved for backward compatibility:
 trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
