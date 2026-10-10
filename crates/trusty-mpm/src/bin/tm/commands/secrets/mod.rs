@@ -25,6 +25,8 @@ use crate::cli::SecretsAction;
 #[cfg(unix)]
 mod doctor;
 #[cfg(unix)]
+mod paste;
+#[cfg(unix)]
 mod session;
 #[cfg(unix)]
 mod value;
@@ -48,10 +50,11 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
     let client = trusty_secrets::server::OnDemandSecrets::new()
         .map_err(|e| anyhow::anyhow!("tm secrets: {e}"))?;
     let project = std::env::current_dir()?;
+    let clipboard = SystemClipboard::system();
     let ctx = Ctx {
         client: &client,
         project: &project,
-        clipboard: &SystemClipboard,
+        clipboard: &clipboard,
         stdin: &StdinSource,
         ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
@@ -104,5 +107,7 @@ pub(crate) async fn dispatch(
     }
 }
 
+#[cfg(all(test, unix))]
+mod paste_tests;
 #[cfg(all(test, unix))]
 mod tests;

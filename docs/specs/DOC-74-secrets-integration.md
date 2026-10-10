@@ -620,6 +620,8 @@ tm secrets import <path> [group]               # bulk-load a dotenv file's KEY=V
                                                # a key that fails is named and the rest continue; any failure exits non-zero
 tm secrets set KEY [group] [--value -]         # upsert one key; value from the clipboard by default, or stdin with `--value -`; never argv
                                                # an empty clipboard is an error: non-zero exit, nothing stored
+                                               # the paste tool runs from fixed system directories, never PATH; past 5 s
+                                               # it and its process group are killed, and text over 1 MiB is refused (#7524)
                                                # confirms "(new)" or "(updated)", KEY, the first 8 characters and the length;
                                                # a value of 8 characters or fewer shows only its length (mask_secret, §15.6)
 tm secrets list                                # key NAMES, length and updated_at per scope — never values (mirrors KeyStore::list, mod.rs:171)
