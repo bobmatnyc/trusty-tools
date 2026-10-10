@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use crate::gchat::api::error::GchatError;
+use crate::policy::GateError;
 
 /// Why `routes.toml` was refused. Any of these refuses every send.
 ///
@@ -65,13 +66,20 @@ pub enum RouteError {
         /// The shared value.
         value: String,
     },
-    /// The load gate (E1): the file is untracked, modified, or staged.
-    #[error("routes file {path} is not committed and clean: {reason}")]
-    NotCommitted {
+    /// The load gate refused the file (#9448 E1, #8454 Db1/G2/G3).
+    ///
+    /// Why: #8454 Q4: a neutral variant, since the gate refuses for more
+    /// than an uncommitted edit (wrong branch, detached `HEAD`, unknown
+    /// default branch, git failure).
+    /// What: `reason` is the gate's typed refusal; its text names the rule.
+    /// Test: `feature_branch_refuses_load_and_every_send`,
+    /// `untracked_and_dirty_arms_refuse_load_and_every_send`.
+    #[error("routes file {path} refused by the load gate: {reason}")]
+    Gate {
         /// The routes-file path.
         path: PathBuf,
-        /// What the gate saw.
-        reason: String,
+        /// Which gate rule refused the file.
+        reason: GateError,
     },
 }
 

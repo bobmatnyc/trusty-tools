@@ -53,10 +53,7 @@ fn load_gate_refuses_untracked_modified_and_staged() {
     let dir = project.dir();
     let refused = |what: &str| {
         let err = load_routes(dir).expect_err(what);
-        assert!(
-            matches!(err, RouteError::NotCommitted { .. }),
-            "{what}: {err:?}"
-        );
+        assert!(matches!(err, RouteError::Gate { .. }), "{what}: {err:?}");
     };
     refused("untracked");
     git(dir, &["add", ".trusty-channels/routes.toml"]);
@@ -81,7 +78,7 @@ fn load_gate_refuses_untracked_modified_and_staged() {
     std::fs::create_dir_all(&config).expect("mkdir");
     std::fs::copy(project.routes_file(), config.join("routes.toml")).expect("copy");
     let err = load_routes(bare.path()).expect_err("no repo");
-    assert!(matches!(err, RouteError::NotCommitted { .. }), "{err:?}");
+    assert!(matches!(err, RouteError::Gate { .. }), "{err:?}");
 }
 
 #[tokio::test]
@@ -281,10 +278,7 @@ fn load_gate_refuses_edits_hidden_by_assume_unchanged_or_skip_worktree() {
         std::fs::write(project.routes_file(), with_mallory(&project)).expect("edit");
         assert_eq!(porcelain(dir), "", "{flag} did not hide the edit");
         let err = load_routes(dir).expect_err(flag);
-        assert!(
-            matches!(err, RouteError::NotCommitted { .. }),
-            "{flag}: {err:?}"
-        );
+        assert!(matches!(err, RouteError::Gate { .. }), "{flag}: {err:?}");
     }
 }
 
@@ -297,11 +291,11 @@ fn load_gate_checks_the_bytes_read_not_the_file_after() {
     let dirty = std::fs::read(&path).expect("read dirty");
     // The file is reverted between the read and the gate.
     git(dir, &["checkout", "--", ".trusty-channels/routes.toml"]);
-    let err = check_committed(&path, &dirty)
+    let err = check_committed(dir, &dirty)
         .expect_err("the gate passed while the caller holds uncommitted bytes");
-    assert!(matches!(err, RouteError::NotCommitted { .. }), "{err:?}");
+    assert!(matches!(err, RouteError::Gate { .. }), "{err:?}");
     let clean = std::fs::read(&path).expect("read clean");
-    check_committed(&path, &clean).expect("the committed bytes pass");
+    check_committed(dir, &clean).expect("the committed bytes pass");
 }
 
 /// #8454 S2a golden: every fixture above gets the same verdict, and every

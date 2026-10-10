@@ -193,7 +193,7 @@ pub fn load_routes(project_dir: &Path) -> Result<RouteTable, RouteError> {
     }
     let bytes = std::fs::read(&path).map_err(|e| read_error(&path, &e))?;
     // #9448 review: gate and parse see the same bytes.
-    load_gate::check_committed(&path, &bytes)?;
+    load_gate::check_committed(project_dir, &bytes)?;
     let text = String::from_utf8(bytes).map_err(|_| RouteError::Read {
         path: path.clone(),
         reason: "not valid UTF-8".into(),
