@@ -408,6 +408,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
             .with_local_model(cfg.local_model)
             .with_openrouter_model(cfg.openrouter_model)
             .with_openrouter_api_key(cfg.openrouter_api_key)
+            .with_lexical_defaults(cfg.lexical_defaults)
             .with_log_buffer(log_buffer);
     if let Some(m) = metrics_state {
         state = state.with_metrics(m);

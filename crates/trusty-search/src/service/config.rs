@@ -11,11 +11,15 @@
 //! `anthropic/claude-haiku-4.5`). Unknown keys are ignored to keep forward
 //! compatibility.
 //!
-//! Test: `load_user_config_returns_defaults_when_missing` and
-//! `parses_local_model_section`.
+//! `[search]` (#9258) sets the lexical-lane defaults; a per-query value wins.
+//!
+//! Test: `parses_local_model_section`,
+//! `search_section_sets_the_lexical_lane_defaults`.
 
 use serde::Deserialize;
 use trusty_common::LocalModelConfig;
+
+use crate::core::indexer::LexicalLaneDefaults;
 
 /// Default OpenRouter model when the user hasn't specified one.
 fn default_openrouter_model() -> String {
@@ -28,6 +32,20 @@ struct UserConfigFile {
     openrouter: OpenRouterSection,
     #[serde(default)]
     local_model: LocalModelSection,
+    #[serde(default)]
+    search: SearchSection,
+}
+
+/// `[search]`: daemon defaults for the lexical lane (#9258). Both optional,
+/// so a file written before #9258 parses unchanged.
+#[derive(Deserialize, Default, Clone)]
+struct SearchSection {
+    #[serde(default)]
+    ripgrep_fallback: Option<bool>,
+    /// Carried as written: an out-of-range value is refused per query, with
+    /// an error naming this key, never clamped or dropped here.
+    #[serde(default)]
+    lexical_limit: Option<usize>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -86,6 +104,8 @@ pub struct LoadedUserConfig {
     pub openrouter_api_key: String,
     pub openrouter_model: String,
     pub local_model: LocalModelConfig,
+    /// `[search]` lexical-lane defaults (#9258).
+    pub lexical_defaults: LexicalLaneDefaults,
 }
 
 impl Default for LoadedUserConfig {
@@ -95,6 +115,18 @@ impl Default for LoadedUserConfig {
                 .unwrap_or_default(),
             openrouter_model: default_openrouter_model(),
             local_model: LocalModelConfig::default(),
+            lexical_defaults: LexicalLaneDefaults::default(),
+        }
+    }
+}
+
+impl SearchSection {
+    /// The runtime defaults; an absent key keeps today's behaviour.
+    fn lexical_defaults(&self) -> LexicalLaneDefaults {
+        let base = LexicalLaneDefaults::default();
+        LexicalLaneDefaults {
+            ripgrep_fallback: self.ripgrep_fallback.unwrap_or(base.ripgrep_fallback),
+            lexical_limit: self.lexical_limit.or(base.lexical_limit),
         }
     }
 }
@@ -153,6 +185,7 @@ pub fn load_user_config() -> LoadedUserConfig {
             base_url: parsed.local_model.base_url,
             model: parsed.local_model.model,
         },
+        lexical_defaults: parsed.search.lexical_defaults(),
     }
 }
 
@@ -176,6 +209,21 @@ mod tests {
         assert_eq!(parsed.local_model.base_url, "http://localhost:1234");
         assert_eq!(parsed.local_model.model, "qwen2.5-coder");
         assert_eq!(parsed.openrouter.model, "anthropic/claude-3-5-sonnet");
+    }
+
+    #[test]
+    fn search_section_sets_the_lexical_lane_defaults() {
+        let src = "[search]\nripgrep_fallback = false\nlexical_limit = 25\n";
+        let parsed: UserConfigFile = toml::from_str(src).unwrap();
+        let d = parsed.search.lexical_defaults();
+        assert!(!d.ripgrep_fallback);
+        assert_eq!(d.lexical_limit, Some(25));
+        // A file written before #9258 has no `[search]` and keeps today's lane.
+        let old: UserConfigFile = toml::from_str("[openrouter]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(
+            old.search.lexical_defaults(),
+            LexicalLaneDefaults::default()
+        );
     }
 
     #[test]

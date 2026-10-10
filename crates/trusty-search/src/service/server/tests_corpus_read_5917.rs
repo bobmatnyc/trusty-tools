@@ -150,6 +150,8 @@ fn search_query(text: &str) -> crate::core::indexer::SearchQuery {
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     }
 }
 

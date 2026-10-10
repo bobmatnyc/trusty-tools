@@ -630,6 +630,15 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `git diff --name-only <base>..HEAD` inside the index `root_path` to
     derive the file list. Failure is non-fatal: a `tracing::warn!` is logged
     and search proceeds with no boost. Issue #122.
+  - `ripgrep_fallback` (optional bool, #9258): `false` stops the
+    content-scan lanes (grep fallback, exact-match injection) from adding
+    rows, so no result carries `fallback:ripgrep`. Omitted: the daemon's
+    `[search].ripgrep_fallback` from `~/.trusty-search/config.toml`, else on.
+  - `lexical_limit` (optional, `1..=10000`, #9258): candidate depth of each
+    lexical lane (BM25, grep, exact-match). Omitted: `[search].lexical_limit`,
+    else `top_k × 4`. Out of range answers `400 invalid_lexical_limit`, never a
+    clamp; a bad config value is refused the same way and the message names it.
+    `POST /search` carries both fields too.
 - **Response 200**:
   ```json
   {
@@ -1139,12 +1148,12 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
-| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
-| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
-| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
 | `typeahead` | `query`, `index_id?`, `limit?`, `mode?`, `project?` | Fast per-keystroke autocomplete suggestions for an index. |
 <!-- END GENERATED: mcp-tools -->

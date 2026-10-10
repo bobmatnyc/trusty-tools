@@ -1,0 +1,3 @@
+Added
+- Search can now measure the BM25 lane alone (#9258). Two new optional request fields on `POST /indexes/:id/search`, `search.query`, `POST /search` and the MCP search tools: `ripgrep_fallback: false` stops the content-scan lanes (grep fallback and exact-match injection) from adding rows, so no hit is labelled `fallback:ripgrep`; `lexical_limit` sets each lexical lane's candidate depth (1..=10000, default `top_k × 4`). An out-of-range limit answers `400 invalid_lexical_limit` instead of being clamped.
+- `~/.trusty-search/config.toml` accepts a `[search]` section with the same two keys as daemon defaults; a per-query value wins. A config without `[search]` behaves as before.

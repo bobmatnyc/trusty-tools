@@ -99,6 +99,13 @@ pub struct GlobalSearchRequest {
     /// `deadline_indexes_skipped`. Clamped to `>= 1`.
     #[serde(default)]
     pub per_index_deadline_ms: Option<u64>,
+
+    /// Forwarded to every per-index search (#9258); see
+    /// `SearchQuery::ripgrep_fallback` / `SearchQuery::lexical_limit`.
+    #[serde(default)]
+    pub ripgrep_fallback: Option<bool>,
+    #[serde(default)]
+    pub lexical_limit: Option<usize>,
 }
 
 fn default_global_top_k() -> usize {
@@ -318,7 +325,7 @@ pub(crate) async fn global_search_report(
     // oversample per-index by passing the user's top_k unchanged: each lane
     // contributes up to top_k candidates, then RRF picks the best top_k
     // overall.
-    let per_index_query = SearchQuery {
+    let mut per_index_query = SearchQuery {
         text: req.query.clone(),
         top_k: req.top_k,
         expand_graph: true,
@@ -342,7 +349,11 @@ pub(crate) async fn global_search_report(
         // Issue #3401: forward path/repo scoping to every per-index search.
         path_prefix: req.path_prefix.clone(),
         repos: req.repos.clone(),
+        ripgrep_fallback: req.ripgrep_fallback,
+        lexical_limit: req.lexical_limit,
     };
+    // #9258: same config defaults and refusal as the per-index route.
+    super::lexical_lane::resolve(state, &mut per_index_query)?;
 
     // Run the per-index searches with *bounded* concurrency (issue #2845).
     // An unbounded `join_all` over ~150+ indexes issued every per-index search

@@ -188,6 +188,19 @@ pub struct SearchQuery {
     /// `path_prefix`; composes with it via AND.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+
+    /// `false` stops every content-scan lane (the grep lanes and the #7675
+    /// exact-match lane) from adding candidates, so a hit labelled
+    /// `fallback:ripgrep` cannot appear (#9258). `None` takes the daemon
+    /// default, which is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ripgrep_fallback: Option<bool>,
+
+    /// Candidate depth of each lexical lane — BM25, grep and exact-match —
+    /// in `1..=MAX_LEXICAL_LIMIT` (#9258). `None` keeps `top_k ×
+    /// HNSW_OVERSAMPLE`. An out-of-range value is an error, never a clamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lexical_limit: Option<usize>,
 }
 
 impl SearchQuery {
@@ -219,6 +232,8 @@ impl Default for SearchQuery {
             refine_query: None,
             path_prefix: None,
             repos: Vec::new(),
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }
     }
 }

@@ -455,6 +455,8 @@ pub fn tool_descriptors() -> Value {
     // #9168: the read tools that take one index also accept `project`, from the
     // same list the dispatcher resolves it for.
     super::project::annotate_project_tools(&mut defs);
+    // #9258: the lexical-lane pair on every search tool.
+    super::lexical_args::annotate(&mut defs);
     // #7434: the multi-root mutation's descriptor lives beside its arm.
     if let Some(list) = defs.as_array_mut() {
         list.push(super::index::add_root_descriptor());
