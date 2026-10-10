@@ -352,7 +352,12 @@ fn a_checkpoint_tagged_drawer_is_a_snapshot() {
 #[test]
 fn checkpoint_near_miss_tags_are_not_snapshots() {
     let now = Utc::now();
-    for tag in ["checkpointed", "pre-checkpoint", "Checkpoint", "checkpoints"] {
+    for tag in [
+        "checkpointed",
+        "pre-checkpoint",
+        "Checkpoint",
+        "checkpoints",
+    ] {
         let d = drawer("x", &[tag], Duration::days(30), now);
         assert_eq!(temporal_weight(&d, now), 1.0, "tag {tag} is not a snapshot");
     }
@@ -370,7 +375,10 @@ fn a_typed_checkpoint_takes_both_the_type_factor_and_the_decay() {
         let mut old = drawer("c", &["checkpoint"], Duration::days(365), now);
         old.drawer_type = t;
         let w = temporal_weight(&old, now);
-        assert!((w - SNAPSHOT_FLOOR * factor).abs() < 1e-6, "{t:?} floor {w}");
+        assert!(
+            (w - SNAPSHOT_FLOOR * factor).abs() < 1e-6,
+            "{t:?} floor {w}"
+        );
         let mut day = drawer("c", &["checkpoint"], Duration::hours(24), now);
         day.drawer_type = t;
         let w = temporal_weight(&day, now);
@@ -401,7 +409,10 @@ fn a_live_keyed_checkpoint_is_exempt() {
 #[test]
 fn a_stale_checkpoint_ranks_below_a_fresher_lower_scoring_drawer() {
     let now = Utc::now();
-    let checkpoint = hit(drawer("ckpt", &["checkpoint"], Duration::days(20), now), 0.80);
+    let checkpoint = hit(
+        drawer("ckpt", &["checkpoint"], Duration::days(20), now),
+        0.80,
+    );
     let fresh = hit(drawer("fresh", &["kg"], Duration::days(1), now), 0.60);
     let mut results = vec![checkpoint, fresh];
     demote_stale_snapshots(&mut results, now, &Supersessions::new());
