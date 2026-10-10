@@ -324,5 +324,49 @@ where
     Ok(bound)
 }
 
+/// Every console listener, bound and serving.
+pub struct ConsoleListeners {
+    /// Bound addresses, in the requested order; the first is the primary.
+    pub bound: Vec<SocketAddr>,
+    primary: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl ConsoleListeners {
+    /// Wait until the primary listener stops: graceful shutdown, or an error.
+    pub async fn wait_primary(self) -> anyhow::Result<()> {
+        self.primary
+            .await
+            .context("primary listener task failed")?
+            .context("server error")
+    }
+}
+
+/// Bind every address in `addrs` and serve `router` on each.
+pub async fn serve_listeners<S, F>(
+    addrs: &[SocketAddr],
+    router: &Router,
+    resolver: Arc<dyn PeerResolver>,
+    shutdown: S,
+) -> anyhow::Result<ConsoleListeners>
+where
+    S: Fn() -> F,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let (&primary_addr, rest) = addrs.split_first().context("bind address list is empty")?;
+    let listener = crate::bind::bind_listener(primary_addr).await?;
+    let primary_local = listener.local_addr().context("get local addr")?;
+    tracing::info!("trusty-console listening on http://{primary_local}");
+    let app = router.clone();
+    let stop = shutdown();
+    let primary = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stop)
+            .await
+    });
+    let mut bound = vec![primary_local];
+    bound.extend(spawn_tailnet_listeners(rest, router, resolver, &shutdown).await?);
+    Ok(ConsoleListeners { bound, primary })
+}
+
 #[cfg(test)]
 mod tests;

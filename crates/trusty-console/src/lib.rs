@@ -586,23 +586,19 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     }
 
-    // ── bind primary listener ───────────────────────────────────────────────
-    let primary_addr = *addrs.first().context("bind address list is empty")?;
-    let primary_listener = bind::bind_listener(primary_addr).await?;
-    let primary_local = primary_listener.local_addr().context("get local addr")?;
-    let addr_string = primary_local.to_string();
-    info!("trusty-console listening on http://{primary_local}");
-
-    // ── bind additional listeners (Tailscale mode: secondary addr) ──────────
-    // #9035: each serves only nodes owned by this machine's own Tailscale
-    // login, addressed to itself by exact Host/Origin; loopback is not gated.
-    tailnet_peer::spawn_tailnet_listeners(
-        addrs.get(1..).unwrap_or(&[]),
+    // ── bind and serve every listener ───────────────────────────────────────
+    let listeners = tailnet_peer::serve_listeners(
+        &addrs,
         &router,
         Arc::new(tailnet_peer::TailscaleCliResolver),
         shutdown_signal,
     )
     .await?;
+    let primary_local = *listeners
+        .bound
+        .first()
+        .context("bind address list is empty")?;
+    let addr_string = primary_local.to_string();
 
     // ── write discovery file (primary address) ──────────────────────────────
     // Best-effort: log a warning on failure but do not abort the serve.
@@ -618,10 +614,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         let _ = open::that(&console_url);
     }
 
-    axum::serve(primary_listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    listeners.wait_primary().await?;
 
     // Best-effort removal of the discovery file on clean shutdown.
     // Only remove the file if it still points to our address; another

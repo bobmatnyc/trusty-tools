@@ -545,3 +545,88 @@ async fn spawn_tailnet_listeners_gates_every_listener() {
         403
     );
 }
+
+// ── #7524: every non-loopback listener is gated, whatever its position ──────
+
+const WILDCARD: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+/// Serve the console router on `addrs` through `serve_listeners`, the
+/// production path `run_serve` uses, and return the bound addresses.
+async fn serve_all(addrs: &[SocketAddr], resolver: Arc<Scripted>) -> Vec<SocketAddr> {
+    serve_listeners(addrs, &console_router(), resolver, || {
+        std::future::pending::<()>()
+    })
+    .await
+    .expect("serve listeners")
+    .bound
+}
+
+/// The loopback address that reaches `bound`, which may be a wildcard bind.
+fn via_loopback(bound: SocketAddr) -> SocketAddr {
+    SocketAddr::new(LOOPBACK_PEER, bound.port())
+}
+
+/// An Explicit-mode listener on a non-loopback address is the only, primary
+/// listener. Both the `--http` flag and `TRUSTY_CONSOLE_BIND` resolve to it.
+#[tokio::test]
+async fn explicit_non_loopback_listener_is_gated_7524() {
+    let default = crate::DEFAULT_HTTP;
+    let flag = crate::bind::BindMode::from_flags_and_bind_env("0.0.0.0:0", default, false, None);
+    let env =
+        crate::bind::BindMode::from_flags_and_bind_env(default, default, false, Some("0.0.0.0:0"));
+    for (source, mode) in [("--http", flag), ("TRUSTY_CONSOLE_BIND", env)] {
+        assert_eq!(
+            mode,
+            crate::bind::BindMode::Explicit("0.0.0.0:0".to_owned()),
+            "{source}"
+        );
+        let addrs = crate::bind::resolve_bind_addrs(&mode, crate::DEFAULT_PORT, || {
+            panic!("Explicit mode must not detect a tailnet address")
+        });
+        assert_eq!(addrs.len(), 1, "{source}: Explicit mode binds one listener");
+        // An empty script: no peer resolves, so the gate authorizes no one.
+        let bound = serve_all(&addrs, Scripted::new(&[])).await;
+        assert_eq!(
+            status_of(via_loopback(bound[0]), "GET", "/health", None).await,
+            403,
+            "{source}: a non-loopback primary listener served an unauthorized peer"
+        );
+        assert_every_probe_forbidden(via_loopback(bound[0])).await;
+    }
+}
+
+/// The gate follows the bound IP: a non-loopback listener is gated first or
+/// second in the list, and a loopback listener is served ungated either way.
+#[tokio::test]
+async fn listener_gating_follows_the_ip_not_the_position_7524() {
+    let wildcard = SocketAddr::new(WILDCARD, 0);
+    let loopback = SocketAddr::new(LOOPBACK_PEER, 0);
+    for addrs in [[wildcard, loopback], [loopback, wildcard]] {
+        let bound = serve_all(&addrs, Scripted::new(&[])).await;
+        for local in bound {
+            let want = if local.ip().is_loopback() { 200 } else { 403 };
+            assert_eq!(
+                status_of(via_loopback(local), "GET", "/health", None).await,
+                want,
+                "listener {local} in {addrs:?}"
+            );
+        }
+    }
+}
+
+/// A wildcard bind has no tailnet address of its own, so no host login exists
+/// to compare against: the gate refuses without a lookup, even for a resolver
+/// that would answer the owner's login for every address.
+#[tokio::test]
+async fn wildcard_host_address_fails_closed_7524() {
+    let owner_everywhere = Scripted::new(&[
+        (WILDCARD, Answer::Login(OWNER)),
+        (LOOPBACK_PEER, Answer::Login(OWNER)),
+    ]);
+    let gate = TailnetPeerGate::new(owner_everywhere.clone(), WILDCARD);
+    assert!(matches!(
+        gate.authorize(LOOPBACK_PEER).await,
+        PeerVerdict::Unresolved(_)
+    ));
+    assert_eq!(owner_everywhere.calls(), 0, "refused without a lookup");
+}
