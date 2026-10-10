@@ -8,10 +8,14 @@
 mod bucket;
 mod build;
 mod egress;
+mod gate;
 mod host;
 mod inbound;
+mod load;
 mod merge;
 mod project_file;
+mod reload;
+mod repo;
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
