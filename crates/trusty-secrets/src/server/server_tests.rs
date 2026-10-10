@@ -2091,8 +2091,21 @@ async fn server_timed_out_request_keeps_its_permit_until_its_call_returns() {
     server.stop().await;
 }
 
-/// A method body that records that it ran.
-fn body_that_runs(_: &State, _: Value) -> Result<Value, ErrorKind> {
+/// Runs of [`body_counted_closed`]; only its one test reads it.
+static RAN_CLOSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Runs of [`body_counted_late`]; only its one test reads it.
+static RAN_LATE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A method body that counts its runs in [`RAN_CLOSED`].
+fn body_counted_closed(_: &State, _: Value) -> Result<Value, ErrorKind> {
+    RAN_CLOSED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Ok(json!("ran"))
+}
+
+/// A method body that counts its runs in [`RAN_LATE`].
+fn body_counted_late(_: &State, _: Value) -> Result<Value, ErrorKind> {
+    RAN_LATE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Ok(json!("ran"))
 }
 
@@ -2106,6 +2119,33 @@ async fn server_closed_admission_is_internal_and_never_runs_the_body() {
     let admission = Arc::new(tokio::sync::Semaphore::new(1));
     admission.close();
     let deadline = std::time::Instant::now() + STUCK_DEADLINE;
-    let answer = router::run_blocking(state, admission, deadline, body_that_runs, json!({})).await;
+    let answer =
+        router::run_blocking(state, admission, deadline, body_counted_closed, json!({})).await;
     assert_eq!(answer, Err(ErrorKind::Internal));
+    assert_eq!(RAN_CLOSED.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Why: #9572 fix round — `Timeout` polls its future before its timer, so a
+/// free permit was granted to a request whose deadline had already passed,
+/// and its body ran with no time left (a `file` set would commit).
+/// What: a deadline already past and a free permit answer
+/// `deadline_exceeded`, the body never runs, and the permit comes back.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_request_admitted_past_its_deadline_never_runs_the_body() {
+    let fx = fixture();
+    let state = Arc::new(fx.state(fx.backends()));
+    let admission = Arc::new(tokio::sync::Semaphore::new(1));
+    let deadline = std::time::Instant::now();
+    let answer = router::run_blocking(
+        state,
+        Arc::clone(&admission),
+        deadline,
+        body_counted_late,
+        json!({}),
+    )
+    .await;
+    assert_eq!(answer, Err(ErrorKind::DeadlineExceeded));
+    assert_eq!(RAN_LATE.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(admission.available_permits(), 1, "the permit was kept");
 }
