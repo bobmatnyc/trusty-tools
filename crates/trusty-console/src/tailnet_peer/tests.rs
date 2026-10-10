@@ -520,33 +520,11 @@ async fn missing_connect_info_is_refused_without_a_lookup() {
     assert_eq!(resolver.calls(), 0, "no lookup without a peer address");
 }
 
-#[tokio::test]
-async fn spawn_tailnet_listeners_gates_every_listener() {
-    let any_port: SocketAddr = "127.0.0.1:0".parse().expect("addr");
-    let never = || std::future::pending::<()>();
-
-    // Host and peer are the same loopback address here, so an unresolvable
-    // identity is what a plain `axum::serve` would answer 200 to.
-    let failing = Scripted::new(&[(LOOPBACK_PEER, Answer::Fail)]);
-    let bound = spawn_tailnet_listeners(&[any_port], &console_router(), failing.clone(), never)
-        .await
-        .expect("spawn");
-    assert_eq!(status_of(bound[0], "GET", "/health", None).await, 403);
-    assert!(failing.calls() > 0, "the gate consulted the resolver");
-
-    let owner = Scripted::new(&[(LOOPBACK_PEER, Answer::Login(OWNER))]);
-    let bound = spawn_tailnet_listeners(&[any_port], &console_router(), owner, never)
-        .await
-        .expect("spawn");
-    assert_eq!(status_of(bound[0], "GET", "/health", None).await, 200);
-    let foreign = format!("http://evil.example:{}", bound[0].port());
-    assert_eq!(
-        status_of(bound[0], "GET", "/health", Some(&foreign)).await,
-        403
-    );
-}
-
 // ── #7524: every non-loopback listener is gated, whatever its position ──────
+// These replace `spawn_tailnet_listeners_gates_every_listener`: a loopback
+// listener is now ungated by design, so the serve path is proven on a wildcard
+// bind. The allowed-peer path is proven on `serve_tailnet` directly
+// (`same_login_peer_is_served`, `self_origin_is_served`).
 
 const WILDCARD: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 

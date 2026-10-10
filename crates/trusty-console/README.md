@@ -22,10 +22,11 @@ trusty-console serve --http 127.0.0.1:9000 --open
 
 # Expose on both localhost AND the machine's Tailscale IPv4 (tailnet + loopback)
 trusty-console serve --tailscale
-
-# Expose on all interfaces (LAN + tailnet); use only if you understand the exposure
-trusty-console serve --http 0.0.0.0:7788
 ```
+
+Do not bind `0.0.0.0` (ADR-0018). A wildcard listener has no tailnet address
+of its own, so the peer gate (below) refuses every request on it, local ones
+included. Use `--tailscale` for tailnet access.
 
 ## Tailscale / tailnet exposure
 
@@ -41,8 +42,18 @@ console:
    `100.x.y.z`).
 2. Binds **two** TCP listeners on the configured port:
    - `127.0.0.1:<port>` — loopback, for local tooling.
-   - `<ts-ip>:<port>` — Tailscale IP, reachable from any tailnet client.
+   - `<ts-ip>:<port>` — Tailscale IP, behind the tailnet peer gate.
 3. Serves the same router on both listeners.
+
+### Access model
+
+Loopback listeners are served ungated. Every other listener — the
+`--tailscale` address, or any non-loopback `--http` / `TRUSTY_CONSOLE_BIND`
+address — goes through the tailnet peer gate, on every route. The gate serves
+a request only when the peer node belongs to this machine's own Tailscale login
+and is untagged, the `Host` header names that listener exactly, and any
+`Origin` is that same address. Anything else, including a peer whose identity
+`tailscale whois` cannot determine, gets `403`.
 
 Only the primary (loopback) address is written to the discovery file.
 
@@ -62,14 +73,15 @@ or `tailscale ip -4`).
 
 | Priority | Mechanism | Example |
 |---|---|---|
-| 1 | `--http <addr>` (non-default value) | `--http 0.0.0.0:9000` |
+| 1 | `--http <addr>` (non-default value) | `--http 127.0.0.1:9000` |
 | 2 | `TRUSTY_CONSOLE_BIND` env var | `TRUSTY_CONSOLE_BIND=tailscale` |
 | 3 | `--tailscale` flag | `trusty-console serve --tailscale` |
 | 4 | Default | `127.0.0.1:7788` (local only) |
 
 `TRUSTY_CONSOLE_BIND` accepts:
 - `tailscale` — dual-listener mode (loopback + Tailscale IP).
-- Any `<host>:<port>` string — explicit bind (same as `--http`).
+- Any `<host>:<port>` string — explicit bind (same as `--http`); a
+  non-loopback address is served behind the peer gate.
 - Empty / unset — no effect; falls through to next priority level.
 
 ### Durable tailnet exposure via launchd (macOS)

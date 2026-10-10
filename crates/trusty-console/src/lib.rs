@@ -326,10 +326,12 @@ pub fn run_port(args: PortArgs) -> Result<()> {
 /// `TRUSTY_CONSOLE_BIND`), builds the router, binds TCP listener(s), writes
 /// the discovery file, starts the background health-poll task, optionally opens
 /// a browser, then serves until SIGTERM/SIGINT with graceful shutdown.
-/// Additional addresses beyond the primary get their own spawned `axum::serve`
-/// task that runs concurrently until the shared shutdown signal fires.
+/// Every address is served by `tailnet_peer::serve_listeners`, which gates
+/// each non-loopback listener behind the tailnet peer gate (#7524); all run
+/// until the shared shutdown signal fires.
 /// Test: Server integration tests in `server.rs` cover the router directly
-/// without exercising this function (to avoid real TCP binding in unit tests).
+/// without exercising this function (to avoid real TCP binding in unit tests);
+/// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`.
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // ── resolve bind mode ───────────────────────────────────────────────────
     let mode = bind::BindMode::from_env_and_flags(&args.http, DEFAULT_HTTP, args.tailscale);
@@ -587,6 +589,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     }
 
     // ── bind and serve every listener ───────────────────────────────────────
+    // #7524: the gate is chosen per listener by IP, so an Explicit non-loopback
+    // primary (`--http 0.0.0.0:7788`) is gated too; loopback is not.
     let listeners = tailnet_peer::serve_listeners(
         &addrs,
         &router,
