@@ -307,6 +307,13 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(ManagedError::TmuxUnavailable)
     }
 
+    /// #9566: one `display-message -t %N '#{pane_current_command}'`.
+    fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
+        self.driver
+            .pane_current_command(pane_id)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     /// #9004: `kill-session -t $N`, after the floor answers for `name`.
     fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
         let floor = self.driver.supervisor_floor();

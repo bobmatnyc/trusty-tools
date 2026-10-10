@@ -2,7 +2,8 @@
 //!
 //! Why: `tmux.rs` sits at the 500-SLOC cap; a child module can still reach
 //! the driver's private binary path and runner.
-//! What: [`TmuxDriver::pane_identity_line`] and [`TmuxDriver::kill_session_id`].
+//! What: [`TmuxDriver::pane_identity_line`], [`TmuxDriver::pane_current_command`]
+//! (#9566) and [`TmuxDriver::kill_session_id`].
 //! Test: `the_real_driver_reads_a_live_pane_identity`,
 //! `live_a_record_on_its_own_server_is_killed_by_session_id`.
 
@@ -19,6 +20,30 @@ impl TmuxDriver {
     ///
     /// [`PANE_IDENTITY_FORMAT`]: crate::session_manager::pane_identity::PANE_IDENTITY_FORMAT
     pub fn pane_identity_line(&self, pane_id: &str) -> Result<String> {
+        self.pane_display_line(
+            pane_id,
+            crate::session_manager::pane_identity::PANE_IDENTITY_FORMAT,
+        )
+    }
+
+    /// The process tmux reports in the foreground of pane `pane_id` (#9566).
+    ///
+    /// What: `display-message -t %N -p '#{pane_current_command}'`, trimmed;
+    /// `Err` as [`Self::pane_identity_line`] does, and on an empty answer.
+    /// Test: `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`.
+    pub fn pane_current_command(&self, pane_id: &str) -> Result<String> {
+        let line = self.pane_display_line(pane_id, "#{pane_current_command}")?;
+        let command = line.trim();
+        if command.is_empty() {
+            return Err(Error::Protocol(format!(
+                "tmux reported no foreground command for pane {pane_id}"
+            )));
+        }
+        Ok(command.to_owned())
+    }
+
+    /// `display-message -t %N -p <format>` for a `%N` `pane_id`, raw.
+    fn pane_display_line(&self, pane_id: &str, format: &str) -> Result<String> {
         if !(pane_id.starts_with('%') && trusty_common::tmux::is_immutable_id(pane_id)) {
             return Err(Error::Protocol(format!(
                 "{pane_id:?} is not a tmux pane id"
@@ -27,10 +52,7 @@ impl TmuxDriver {
         // #9004: a pane id is exact without a session, so the session part of
         // the target is never rendered.
         let target = TmuxTarget::pane("", pane_id);
-        let argv = crate::core::tmux::display_message_argv(
-            Some(&target),
-            crate::session_manager::pane_identity::PANE_IDENTITY_FORMAT,
-        );
+        let argv = crate::core::tmux::display_message_argv(Some(&target), format);
         let output = crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?;
         if !output.status.success() {
             return Err(Error::Protocol(format!(

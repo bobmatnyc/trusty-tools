@@ -491,6 +491,20 @@ pub trait ManagedTmuxDriver: Send + Sync {
         )))
     }
 
+    /// The process in the foreground of pane `pane_id` (#9566).
+    ///
+    /// Why: an in-place reactivate may proceed only from a pane whose agent is
+    /// gone; a pane id proves where the caller is, not what still runs there.
+    /// What: the default is `Err`, so a driver that cannot read the command
+    /// never lets an in-place reactivate through.
+    /// [`super::real_tmux::RealTmuxDriver`] runs one `display-message -t %N`.
+    /// Test: `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`.
+    fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot read the foreground command of pane {pane_id}"
+        )))
+    }
+
     /// Kill the session whose `$N` id is `session_id`, which carries `name`,
     /// unless the [`Self::supervisor_floor`] refuses `name` (#9004).
     ///

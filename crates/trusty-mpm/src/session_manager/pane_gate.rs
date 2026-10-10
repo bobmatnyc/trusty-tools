@@ -85,6 +85,13 @@ impl SessionManager {
             )),
         }
     }
+
+    /// The process in the foreground of pane `pane_id`, from the manager's own
+    /// tmux driver (#9566).
+    /// Test: `a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place`.
+    pub(crate) fn pane_foreground_command(&self, pane_id: &str) -> Result<String, ManagedError> {
+        self.tmux.pane_foreground_command(pane_id)
+    }
 }
 
 /// The recovery an operator runs for a record whose session the gate cannot
