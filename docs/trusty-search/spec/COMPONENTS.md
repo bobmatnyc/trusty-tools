@@ -261,7 +261,7 @@ diagnostics; testable handlers split out of `main()`.
 - Per-subcommand handlers (`src/commands/`): `start`, `stop`, `index`, `query`,
   `status`, `doctor`, `ui`, `convert`, `serve`, plus `init`/`reindex` aliases,
   `discover`, `monitor`, `dashboard`, `setup`, `integrate`, `cleanup`, `migrate`.
-- Shared helpers: `daemon_utils`, `format`, `index_resolve`, `reindex_engine`,
+- Shared helpers: `format`, `index_resolve`, `reindex_engine`,
   `doctor_checks`, `doctor_pipeline`, `log_rotation`.
 
 **Current state.** ✅ `index` auto-detects `./trusty-search.yaml`; `doctor --fix`

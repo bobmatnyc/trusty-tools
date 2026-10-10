@@ -930,14 +930,7 @@ pub mod redb_cache;
 
 // ─── Focused submodules (split from lib.rs in issue #1108) ────────────────
 
-/// TCP port auto-walking helper.
-///
-/// Why: Running multiple daemon instances shouldn't produce noisy failures
-/// when a port is already occupied.
-/// What: Exposes [`bind_with_auto_port`] which walks forward to the next free
-/// port within `max_attempts`.
-/// Test: `cargo test -p trusty-common --features unconditional-only -- port::tests`.
-pub mod port;
+// #9542: `port` (`bind_with_auto_port`) is deleted; it had no caller after #9214.
 
 /// Canonical project-slug derivation (issue #1348).
 ///
@@ -1517,9 +1510,6 @@ pub use chat::{
     OllamaProvider, OpenRouterProvider, SamplingParams, ToolCall, ToolDef,
     auto_detect_local_provider,
 };
-
-// Port
-pub use port::bind_with_auto_port;
 
 // Data directory
 pub use data_dir::{DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, sanitize_data_root};

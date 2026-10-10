@@ -225,7 +225,7 @@ async fn probe_daemon_health_is_none_when_the_socket_is_absent() {
 /// directly (the #3673/#3686 fix). An audit for #3697 confirmed every other
 /// `TRUSTY_DATA_DIR`-mutating test in this ~314-test binary already carries
 /// the same bare `#[serial]` tag (`commands/migrate_storage/*`,
-/// `commands/start/tests.rs`, `commands/daemon_utils.rs`,
+/// `commands/start/tests.rs`,
 /// `service/data_dir.rs`, `service/daemon_tests.rs`,
 /// `service/server/*_tests.rs`, `service/reindex/root_hijack_tests.rs`,
 /// `service/warm_boot/warm_boot_tests.rs`) — so that logical race was
