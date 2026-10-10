@@ -328,7 +328,8 @@ pub fn config_read() -> Result<Value, String> {
 /// Test: `config_write_merges_and_persists` covers `apply_config_write`
 /// directly (no real filesystem I/O against the operator's real config file —
 /// see that function's own doc for why `config_write` itself is not unit
-/// tested against the real file).
+/// tested against the real file); `config_save_preserves_channels_section`
+/// runs the same load, merge and save against a temp file (#8454 S2c).
 #[allow(clippy::too_many_arguments)]
 pub fn config_write(
     workspace_root_template: Option<&str>,

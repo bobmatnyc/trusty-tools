@@ -257,6 +257,16 @@ pub struct TrustyToolsConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<crate::core::build_env::BuildConfig>,
+
+    /// The channel route policy's host ceiling (the `channels:` YAML section,
+    /// #8454 S2c).
+    ///
+    /// Opaque here: trusty-channels parses it strictly
+    /// (`trusty_channels::policy::parse_host`) and `tm doctor` reports that
+    /// parse. Held as a raw value only so a console Config save writes the
+    /// section back unchanged instead of deleting it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<serde_yaml::Value>,
 }
 
 /// The `disk:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#6927).
