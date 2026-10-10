@@ -52,6 +52,10 @@ mod tests_4846;
 #[cfg(test)]
 mod tests_4045;
 
+// #9169: the boot salvage never writes a parked row, nor any row without the map.
+#[cfg(test)]
+mod tests_9169;
+
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A
 // sibling of `tests` rather than folded into it because `tests.rs` is

@@ -43,6 +43,9 @@ pub mod orphan_report;
 pub mod persistence;
 pub mod persistence_loader;
 pub mod persistence_timestamps;
+// #9169 PR-B1: `project-map.toml` — migration, park and pin rules, and boot.
+pub mod project_map_boot;
+pub mod project_map_state;
 // #9169: project (name, owner/repo, path) → its one live index.
 pub mod project_resolve;
 pub mod query_timeout;

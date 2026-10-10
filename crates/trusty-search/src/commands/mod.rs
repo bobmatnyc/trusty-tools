@@ -66,6 +66,8 @@ pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;
 // #6822: the scalar-precision backfill command.
+// #9169 PR-B1: `trusty-search project map|park|unpark|pin|rebuild-map`.
+pub mod project;
 pub mod prune;
 pub mod prune_orphans;
 pub mod quantize;

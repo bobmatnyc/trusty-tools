@@ -314,7 +314,15 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 
     // ---- registry-level lifecycle (axum's `free` group) ---------------------
     let r = free_write!(r, METHOD_INDEX_CREATE, CreateIndexRequest, |s, p| {
-        create_index_report(&s, p).await
+        // #9169: a new index's group gets a `create` pin when it has none.
+        let id = p.id.clone();
+        let mut created = create_index_report(&s, p).await;
+        if let Ok(body) = created.as_mut() {
+            if let Some(e) = super::project_map::pin_after_create(&s, &id).await {
+                body["project_map_error"] = serde_json::json!(e);
+            }
+        }
+        created
     });
     let r = free_write!(r, METHOD_INDEX_DELETE, DeleteIndex, |s, p| {
         delete_index_report(

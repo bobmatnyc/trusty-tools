@@ -126,7 +126,8 @@ pub(crate) async fn delete_index_report(
     if let Some(expected) = params.expected_root_path.as_deref() {
         super::delete_guard::refuse_unless_root_matches(state, id, expected)?;
     }
-    let outcome = unregister_index(
+    // #9169: through the project map, so no park row or pin outlives the id.
+    let outcome = super::project_park::unregister_with_map(
         state,
         id,
         params.delete_data,

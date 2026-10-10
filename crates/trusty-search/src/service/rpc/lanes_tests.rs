@@ -94,7 +94,9 @@ impl Lane {
 /// succeed. What each method ANSWERS is the business of its family's parity
 /// tests; this file reads only whether the limiter or the deadline spoke first.
 fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
-    use crate::service::rpc::{admin, chat, file, project, queries, reads, streams, warm, writes};
+    use crate::service::rpc::{
+        admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+    };
 
     let index = serde_json::json!({ "index_id": INDEX });
     let query = serde_json::json!({ "index_id": INDEX, "body": { "text": "anything" } });
@@ -282,6 +284,19 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::json!({ "project": INDEX }),
         ),
+        // #9169 PR-B1: socket-only; one map read-modify-write per call.
+        (
+            project_map::METHOD_PROJECT_MAP,
+            Lane::Free,
+            serde_json::Value::Null,
+        ),
+        (project_map::METHOD_PROJECT_PIN, Lane::Free, index.clone()),
+        (
+            project_map::METHOD_PROJECT_UNPARK,
+            Lane::Free,
+            index.clone(),
+        ),
+        (project_map::METHOD_PROJECT_PARK, Lane::Free, index.clone()),
         // #9029: socket-only; a file read takes no index lock.
         (
             file::METHOD_FILE_GET,
@@ -309,7 +324,9 @@ fn state_with(permits: usize, deadline: Duration) -> Arc<SearchAppState> {
 
 /// The whole socket router, exactly as `service::socket` assembles it.
 fn router(state: &Arc<SearchAppState>) -> RpcRouter {
-    use crate::service::rpc::{admin, chat, file, project, queries, reads, streams, warm, writes};
+    use crate::service::rpc::{
+        admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+    };
 
     let held = Arc::clone(state);
     let router = RpcRouter::new()
@@ -327,6 +344,7 @@ fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = chat::register(router, state);
     let router = warm::register(router, state);
     let router = project::register(router, state);
+    let router = project_map::register(router, state);
     let router = file::register(router, state);
     streams::register(router, state)
 }

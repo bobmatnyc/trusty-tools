@@ -24,6 +24,9 @@ pub mod migration;
 pub mod mmr;
 pub mod ner;
 pub mod project_config;
+// #9169: the canonical project→index map, `project-map.toml`.
+pub mod project_map;
+pub mod project_map_io;
 pub mod redb_migrate;
 pub mod registry;
 pub mod repo_config;

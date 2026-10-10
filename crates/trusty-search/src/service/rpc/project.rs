@@ -28,8 +28,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INTERNAL_ERROR};
 
+use crate::core::project_map::{ProjectMap, ProjectMapError};
+use crate::service::project_map_state::{ensure_map, MapContext};
 use crate::service::project_resolve::{
-    gather_candidates, resolve, Candidate, LiveDisk, ProjectQuery, ResolveMiss,
+    resolve, resolve_pinned, Candidate, ProjectQuery, ResolveMiss,
 };
 use crate::service::server::SearchAppState;
 
@@ -75,54 +77,83 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 /// Resolve `project` against this daemon's registrations (#9169).
 ///
 /// Why: `indexes.toml` holds every registration with its identity and storage
-/// layout; the hot registry says which are loaded. Both are read once per call.
+/// layout; the hot registry says which are loaded; `project-map.toml` (PR-B1)
+/// pins each project's index and parks duplicates. All three are read once.
 /// What: parses the query (a bad one is `invalid_params`), loads the registry
 /// (an unreadable one is `internal_error`, never an empty map that would turn
 /// every call into a miss), and runs the core on the blocking pool, because it
 /// `stat`s the roots it reports, reads their reindex stamps, and shells out to
-/// `git` for the identity of a path outside every root.
+/// `git` for the identity of a path outside every root. The map is read, or
+/// migrated when absent; an unreadable map fails the resolve closed with the
+/// path and the remedy, except for an exact index id, which resolves without
+/// the map. A success adds `pinned_by` (`null` when the answer is derived)
+/// and marks each parked duplicate `parked: true`.
 /// Test: `resolve_over_the_socket_answers_by_name_identity_and_path`,
-/// `an_unreadable_registry_is_an_internal_error_not_a_miss`.
+/// `an_unreadable_registry_is_an_internal_error_not_a_miss`,
+/// `resolve_with_corrupt_project_map_errors_not_derived`.
 pub async fn resolve_report(
     state: &Arc<SearchAppState>,
     project: &str,
 ) -> Result<serde_json::Value, RpcError> {
     let query = ProjectQuery::parse(project).map_err(RpcError::invalid_params)?;
-    let persisted = match &state.registry_path_override {
-        Some(path) => crate::service::persistence::load_index_registry_at(path),
-        None => crate::service::persistence::load_index_registry(),
-    }
-    .map_err(|e| {
+    let ctx = MapContext::capture(state).map_err(|e| {
         tracing::error!(error = %e, "search.project.resolve: indexes.toml unreadable");
-        RpcError::new(
-            CODE_INTERNAL_ERROR,
-            format!("could not read the index registry: {e}"),
-        )
+        map_error(&e)
     })?;
-    let handles = state.registry.list_handles();
-    let resident: Vec<(String, std::path::PathBuf)> = handles
-        .iter()
-        .map(|h| (h.id.0.clone(), h.root_path.clone()))
-        .collect();
     let project = project.to_string();
     let runtime = tokio::runtime::Handle::current();
     let outcome = tokio::task::spawn_blocking(move || {
         // #9169: no disk read here — `resolve` probes only what it reports.
-        let candidates = gather_candidates(&persisted, &resident);
-        let disk = LiveDisk {
-            names: crate::service::constants::ephemeral_dir_names(),
-            // #9169: a resident corpus's stamp is read through its open store.
-            resident: handles.into_iter().map(|h| (h.id.0.clone(), h)).collect(),
-            runtime: Some(runtime),
-        };
-        resolve(&query, &candidates, &disk)
+        let candidates = ctx.candidates();
+        let disk = ctx.disk(Some(runtime));
+        match ensure_map(&ctx.map_path, &candidates, &disk) {
+            Ok(map) => Ok((resolve_pinned(&query, &candidates, &disk, &map.view()), Some(map))),
+            // #9169 ruling: an explicit index id resolves without the map.
+            Err(e) if matches!(&query, ProjectQuery::Name(n) if candidates.iter().any(|c| c.index_id == *n)) => {
+                tracing::error!(error = %e, "search.project.resolve: answering an exact id without the map");
+                Ok((resolve(&query, &candidates, &disk), None))
+            }
+            Err(e) => Err(e),
+        }
     })
     .await
-    .map_err(|e| RpcError::new(CODE_INTERNAL_ERROR, format!("resolve task failed: {e}")))?;
+    .map_err(|e| RpcError::new(CODE_INTERNAL_ERROR, format!("resolve task failed: {e}")))?
+    .map_err(|e| map_error(&e))?;
     match outcome {
-        Ok(resolution) => super::as_http_body(resolution),
-        Err(miss) => Err(miss_error(&project, miss)),
+        (Ok(resolution), map) => {
+            let mut body = super::as_http_body(resolution)?;
+            annotate(&mut body, map.as_ref());
+            Ok(body)
+        }
+        (Err(miss), _) => Err(miss_error(&project, miss)),
     }
+}
+
+/// Add the map's view of a resolution: `pinned_by` on the answer and
+/// `parked: true` on each parked duplicate (#9169).
+fn annotate(body: &mut serde_json::Value, map: Option<&ProjectMap>) {
+    let Some(map) = map else {
+        return;
+    };
+    let id = body["index_id"].as_str().unwrap_or_default().to_string();
+    let pinned_by = map
+        .projects
+        .iter()
+        .find(|p| p.index_id == id)
+        .map(|p| p.pinned_by);
+    body["pinned_by"] = serde_json::json!(pinned_by);
+    if let Some(serde_json::Value::Array(dups)) = body.get_mut("duplicates") {
+        for dup in dups {
+            let parked = dup["index_id"].as_str().is_some_and(|d| map.is_parked(d));
+            dup["parked"] = serde_json::Value::Bool(parked);
+        }
+    }
+}
+
+/// An unreadable registry or map as an error frame: `CODE_INTERNAL_ERROR`
+/// whose message names the file and, for the map, the remedy.
+pub(crate) fn map_error(e: &ProjectMapError) -> RpcError {
+    RpcError::new(CODE_INTERNAL_ERROR, e.to_string())
 }
 
 /// Render a miss as an error frame whose `data` carries the candidates.

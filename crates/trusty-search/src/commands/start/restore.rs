@@ -217,12 +217,16 @@ pub(super) async fn restore_indexes(
     // dead entries are re-read, re-warned, and re-skipped on every single boot
     // and never leave `indexes.toml`. Colocated entries are left for the
     // relocation scan; unmounted volumes are spared by `is_reapable_orphan`.
-    let legacy_entries = crate::service::orphan_reaper::heal_boot_orphans(collect_legacy_entries());
+    // #9169: parked indexes skip the heal and the warm-load; the scan still
+    // sees them, so it never re-adds their roots.
+    let boot_map = crate::service::project_map_boot::BootMap::load(state).await;
+    let (parked_entries, legacy_entries) = boot_map.split(collect_legacy_entries());
+    let legacy_entries = boot_map.heal(legacy_entries);
     let mut seen_ids: HashSet<String> = HashSet::new();
     // Issue #860: track canonicalized root_paths from legacy entries so that
     // colocated scan suppresses entries for the same root.
     let mut seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
-    for e in &legacy_entries {
+    for e in legacy_entries.iter().chain(&parked_entries) {
         seen_ids.insert(e.id.clone());
         seen_root_paths.insert(crate::service::warm_boot::canonicalize_best_effort(
             &e.root_path,
@@ -260,6 +264,7 @@ pub(super) async fn restore_indexes(
         .into_iter()
         .chain(colocated_entries)
         .collect();
+    let all_entries = boot_map.without_parked(all_entries);
 
     // Issue #2305: collapse entries that resolve to the SAME on-disk redb corpus
     // (colocated indexes sharing a root_path) down to one handle BEFORE the
@@ -287,7 +292,16 @@ pub(super) async fn restore_indexes(
 
     let dedup_outcome =
         crate::service::warm_boot::dedup_entries_by_corpus_path_verbose(all_entries);
-    prune_and_persist_dedup_outcome(&dedup_outcome);
+    // #9169: an unreadable map cannot say which sibling is parked; prune no row.
+    if boot_map.is_readable() {
+        prune_and_persist_dedup_outcome(&dedup_outcome);
+    } else if !dedup_outcome.dropped.is_empty() {
+        tracing::warn!(
+            "warm-boot dedup: project map unreadable — {} same-root duplicate(s) skipped \
+             for this boot, indexes.toml left unchanged (#9169)",
+            dedup_outcome.dropped.len()
+        );
+    }
     let all_entries = dedup_outcome.survivors;
     let total_discovered = all_entries.len();
 
@@ -466,6 +480,9 @@ pub(super) async fn restore_indexes(
     // Runs strictly AFTER both live phases and under its own global ceiling, so
     // however long it takes or however early it gives up, no live index has
     // already lost anything to it.
+    // #9169: the salvage writes registry rows; it never touches a parked one,
+    // and touches none when the map was not read.
+    let missing_roots = boot_map.salvageable(missing_roots);
     if !missing_roots.is_empty() {
         let salvage = salvage_missing_root_entries(state, embedder, missing_roots).await;
         total_ok += salvage.ok;
@@ -716,7 +733,8 @@ async fn salvage_missing_root_entries(
 /// unit-tested in `warm_boot_tests.rs`; this thin IO wrapper mirrors the
 /// already-covered `remove_index_registry_entry` / `upsert_index_registry_entry`
 /// round-trip semantics and is exercised end-to-end by the warm-boot
-/// integration tests.
+/// integration tests. The caller skips it when the project map is unreadable:
+/// `the_boot_dedup_prunes_no_row_without_the_map`.
 fn prune_and_persist_dedup_outcome(outcome: &crate::service::warm_boot::DedupOutcome) {
     if outcome.dropped.is_empty() {
         return;
