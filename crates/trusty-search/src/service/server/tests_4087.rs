@@ -70,6 +70,8 @@ fn probe_query() -> SearchQuery {
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     }
 }
 

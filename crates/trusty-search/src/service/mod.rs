@@ -107,7 +107,7 @@ mod delete_stamp_7434_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 
-pub use config::{load_user_config, LoadedUserConfig};
+pub use config::{load_user_config, LoadedUserConfig, SearchConfigError, UserConfigError};
 // #9214: `DEFAULT_PORT`, `HttpListener`, `run_daemon_with`, `http_addr_path`
 // and `write_http_addr_file` went with the `:7878` bind.
 pub use daemon::{

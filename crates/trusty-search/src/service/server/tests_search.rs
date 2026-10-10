@@ -53,6 +53,8 @@ async fn search_handler_rejects_empty_query() {
                 refine_query: None,
                 path_prefix: None,
                 repos: Vec::new(),
+                ripgrep_fallback: None,
+                lexical_limit: None,
             }),
         )
         .await;
@@ -233,6 +235,8 @@ async fn last_queried_cache_rate_limits_disk_writes() {
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     };
     let _ = search_handler(
         axum::extract::State(Arc::clone(&state)),
@@ -317,6 +321,8 @@ async fn search_handler_meta_includes_stale_index_root_field() {
             refine_query: None,
             path_prefix: None,
             repos: Vec::new(),
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await;
@@ -407,6 +413,8 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await;

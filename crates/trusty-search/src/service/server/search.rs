@@ -708,6 +708,8 @@ pub(crate) async fn search_report(
             serde_json::json!({ "error": "query must not be empty" }),
         ));
     }
+    // #9258: config fills an unset lexical-lane field; a bad limit is a 400.
+    super::lexical_lane::resolve(state, &mut query)?;
     let index_id = IndexId::new(id.to_string());
     // Issue #993: hot registry first, then the cold-store lazy load. #5349 moved
     // that flow into `index_resolve` so the write endpoints drive the identical

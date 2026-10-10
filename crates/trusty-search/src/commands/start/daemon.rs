@@ -204,6 +204,9 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     // #6590: refuse in the PARENT, before the fork below detaches the child's
     // stdio to /dev/null and discards everything it would have said.
     refuse_if_already_running(crate::service::running_daemon_pid())?;
+    // #9258: refuse a bad `[search]` config in the parent too, for the same
+    // reason as above: the detached child's error would never be seen.
+    crate::service::load_user_config()?;
 
     // Background self-spawn path: when invoked without `--foreground`, fork a
     // detached copy of ourselves with `--foreground` and return immediately.
@@ -393,7 +396,8 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     // a background task, and let `run_daemon` bind the socket right away.
     // Handlers that need the embedder return `503 Service Unavailable` until
     // `state.install_embedder()` flips the watch channel.
-    let cfg = crate::service::load_user_config();
+    // #9258: a bad `[search]` section stops startup; see `load_user_config`.
+    let cfg = crate::service::load_user_config()?;
 
     let metrics_state = match crate::service::metrics::install_recorder() {
         Ok(state) => Some(state),
@@ -408,6 +412,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
             .with_local_model(cfg.local_model)
             .with_openrouter_model(cfg.openrouter_model)
             .with_openrouter_api_key(cfg.openrouter_api_key)
+            .with_lexical_defaults(cfg.lexical_defaults)
             .with_log_buffer(log_buffer);
     if let Some(m) = metrics_state {
         state = state.with_metrics(m);

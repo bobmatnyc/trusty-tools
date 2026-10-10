@@ -473,6 +473,8 @@ async fn search_for_context(
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     };
     let indexer = handle.indexer.read().await;
     let results = indexer.search(&q).await.map_err(|e| e.to_string())?;

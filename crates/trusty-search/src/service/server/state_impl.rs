@@ -85,6 +85,7 @@ impl SearchAppState {
             local_model: LocalModelConfig::default(),
             openrouter_model: "anthropic/claude-haiku-4.5".to_string(),
             openrouter_api_key,
+            lexical_defaults: Default::default(),
             chat_provider: Arc::new(OnceCell::new()),
             events: Arc::new(events_tx),
             // Default to an empty buffer — `build_router` callers that have
@@ -271,6 +272,15 @@ impl SearchAppState {
     /// `~/.trusty-search/config.toml`). Replaces the default Ollama address.
     pub fn with_local_model(mut self, cfg: LocalModelConfig) -> Self {
         self.local_model = cfg;
+        self
+    }
+
+    /// Builder-style: install the `[search]` lexical-lane defaults (#9258).
+    pub fn with_lexical_defaults(
+        mut self,
+        defaults: crate::core::indexer::LexicalLaneDefaults,
+    ) -> Self {
+        self.lexical_defaults = defaults;
         self
     }
 

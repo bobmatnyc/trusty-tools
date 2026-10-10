@@ -16,6 +16,7 @@ pub(crate) mod embed_degrade;
 pub(crate) mod exact;
 pub(crate) mod kg;
 pub(crate) mod lanes;
+pub(crate) mod lexical_lane;
 pub(crate) mod materialize;
 pub(crate) mod path_filter;
 
@@ -334,6 +335,10 @@ impl CodeIndexer {
 
         // 2) Run lanes (HNSW + BM25), then inject entity-exact-match.
         let want = query.top_k.saturating_mul(HNSW_OVERSAMPLE).max(query.top_k);
+        // #9258: the lexical lanes' own depth, and whether a content scan may
+        // add candidates. Both default to the behaviour before #9258.
+        let lex_want = query.lexical_want(want)?;
+        let ripgrep_on = query.ripgrep_lane_on();
         // Issue #3401: a single path/repo predicate, threaded into every lane
         // BEFORE that lane's own internal truncation/early-exit — not applied
         // as a `.retain()` afterward. `bm25_search` evaluates it inside
@@ -375,7 +380,7 @@ impl CodeIndexer {
         // itself runs after fusion (#7775) — see below for why.
         let exact_literal = exact::extract_exact_literal(&query.text);
         let exact_re = exact_literal.as_ref().and_then(exact::literal_regex);
-        let bm25_fut = self.bm25_search(&query.text, want, filter);
+        let bm25_fut = self.bm25_search(&query.text, lex_want, filter);
         let hnsw_results = match &embedding {
             Some(v) => self.vector_search_scoped(v, want, query).await?,
             None => Vec::new(),
@@ -390,13 +395,19 @@ impl CodeIndexer {
         if path_filter::is_active(query) {
             bm25_results.retain(|(id, _)| path_pred(id));
         }
+        // #9258: an explicit limit caps the lane, the injected row included.
+        if query.lexical_limit.is_some() {
+            bm25_results.truncate(lex_want);
+        }
 
         // 2a) Issue #75: for Definition intent, run grep as a third RRF lane.
-        let grep_lane: Vec<(String, f32)> = if matches!(intent, QueryIntent::Definition) {
-            self.grep_fallback_search(&query.text, want, filter).await
-        } else {
-            Vec::new()
-        };
+        let grep_lane: Vec<(String, f32)> =
+            if ripgrep_on && matches!(intent, QueryIntent::Definition) {
+                self.grep_fallback_search(&query.text, lex_want, filter)
+                    .await
+            } else {
+                Vec::new()
+            };
 
         // 3) RRF fuse, then MMR diversity pass.
         let fused_raw = rrf_fuse(&hnsw_results, &bm25_results, alpha, beta, RRF_K, want);
@@ -404,8 +415,9 @@ impl CodeIndexer {
 
         // 3a) Issue #75: empty-result fallback — scan chunk corpus for literal
         // substring match.
-        let fused_raw = if fused_raw.is_empty() {
-            self.grep_fallback_search(&query.text, want, filter).await
+        let fused_raw = if fused_raw.is_empty() && ripgrep_on {
+            self.grep_fallback_search(&query.text, lex_want, filter)
+                .await
         } else {
             fused_raw
         };
@@ -466,13 +478,24 @@ impl CodeIndexer {
             let fused: std::collections::HashMap<&str, f32> =
                 all.iter().map(|(id, s)| (id.as_str(), *s)).collect();
             let tie_scores = |id: &str| fused.get(id).copied().unwrap_or(0.0);
-            let lane = match (&exact_literal, &exact_re) {
+            let mut lane = match (&exact_literal, &exact_re) {
                 (Some(lit), Some(re)) => {
-                    self.exact_match_lane(lit, re, want, effective_mode, filter, Some(&tie_scores))
-                        .await
+                    self.exact_match_lane(
+                        lit,
+                        re,
+                        lex_want,
+                        effective_mode,
+                        filter,
+                        Some(&tie_scores),
+                    )
+                    .await
                 }
                 _ => exact::ExactLaneOutcome::default(),
             };
+            // #9258: lane off — the floor may reorder candidates, never add one.
+            if !ripgrep_on {
+                lane.hits.retain(|h| fused.contains_key(h.id.as_str()));
+            }
             let ids: Vec<String> = lane.hits.iter().map(|h| h.id.clone()).collect();
             (lane, ids)
         };
