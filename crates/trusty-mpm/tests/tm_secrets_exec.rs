@@ -255,6 +255,37 @@ fn open_pty() -> (std::fs::File, std::fs::File) {
     }
 }
 
+/// The pty's foreground group and every process in `groups`, for a message.
+///
+/// Why: #9621 — a tm that never answers a terminal Ctrl-C leaves no output;
+/// which group holds the terminal and each process's state and signal sets
+/// (`ps` columns `stat`, `pending`, `blocked`, `wchan`) say why.
+fn pty_state(master: &std::fs::File, groups: &[i64]) -> String {
+    use std::os::fd::AsRawFd;
+    // SAFETY: TIOCGPGRP on an open pty master only reads.
+    let foreground = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+    let columns = "pid=,ppid=,pgid=,tpgid=,stat=,pending=,blocked=,wchan=,command=";
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", columns])
+        .output()
+        .map(|o| text(&o.stdout))
+        .unwrap_or_default();
+    let rows: Vec<&str> = ps
+        .lines()
+        .filter(|row| {
+            let mut fields = row.split_whitespace();
+            let pid = fields.next().and_then(|f| f.parse::<i64>().ok());
+            let pgid = fields.nth(1).and_then(|f| f.parse::<i64>().ok());
+            groups.iter().any(|g| Some(*g) == pid || Some(*g) == pgid)
+        })
+        .collect();
+    format!(
+        "pty foreground group {foreground}; groups {groups:?}\n\
+         pid ppid pgid tpgid stat pending blocked wchan command\n{}",
+        rows.join("\n")
+    )
+}
+
 /// Why: tier 1 end to end — the value reaches the env, output is scrubbed,
 /// one resolve per key, and the grant is revoked on a normal exit.
 #[tokio::test(flavor = "multi_thread")]
@@ -520,11 +551,20 @@ async fn exec_drain_after_exit_answers_sigterm() {
 /// What: tm runs as a session leader whose controlling terminal is a pty;
 /// after the revoke, `\x03` goes to the master every 200 ms until tm exits.
 /// A Ctrl-C that lands before the handback reaches the ignoring job only.
+/// A thread reads the master, as a terminal does: on macOS a session
+/// leader's exit waits for the terminal's output (the echoed `^C`) to drain.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
-    use std::io::Write;
+    use std::io::{Read, Write};
     let fx = Fixture::new(Script::new()).await;
     let (mut master, slave) = open_pty();
+    // #9621: an unread master held tm's exit on macOS (state `E`, Elapsed).
+    // The read ends once every slave fd is closed (EOF on macOS, EIO on Linux).
+    let mut terminal = master.try_clone().expect("clone master");
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        while matches!(terminal.read(&mut buf), Ok(n) if n > 0) {}
+    });
     let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", "sleep 30 &"]);
     cmd.stdin(slave).kill_on_drop(true);
     // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the slave.
@@ -537,6 +577,7 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
         });
     }
     let mut child = cmd.spawn().expect("spawn tm");
+    let tm_pid = i64::from(child.id().expect("tm pid"));
     drop(cmd);
     let start = Instant::now();
     while fx.seen().revokes.is_empty() {
@@ -553,13 +594,33 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
         }
     })
     .await;
-    // The background sleep holds the pty; end it whatever the verdict.
+    // The background sleep holds tm's output pipe; end it whatever the verdict.
     let group = fx.seen().grants[0]["child_pid"].as_i64().unwrap();
+    // #9621: a hung tm says nothing; snapshot the terminal before the kill.
+    let state = exited
+        .is_err()
+        .then(|| pty_state(&master, &[tm_pid, group]));
     // SAFETY: plain syscall to the group this test's tm created.
     unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
-    let status = exited
-        .expect("tm exited after a terminal Ctrl-C while draining")
-        .expect("tm status");
+    let Ok(status) = exited else {
+        let _ = child.start_kill();
+        let mut stderr = Vec::new();
+        // Bounded: a tm stuck in exit never reaps.
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            let _ = child.wait().await;
+            if let Some(mut pipe) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = pipe.read_to_end(&mut stderr).await;
+            }
+        })
+        .await;
+        panic!(
+            "tm exited after a terminal Ctrl-C while draining: no exit in 10 s\n{}\ntm stderr: {}",
+            state.unwrap_or_default(),
+            text(&stderr)
+        );
+    };
+    let status = status.expect("tm status");
     assert_eq!(status.code(), Some(128 + libc::SIGINT));
     assert_eq!(fx.seen().revokes, [TOKEN], "revoked once");
 }
