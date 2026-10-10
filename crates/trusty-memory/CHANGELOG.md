@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.32.0] — 2026-10-10
+
+### Added
+
+- `memory_list` reports a read-only `fact_key` on every drawer: the ADR-0028
+  Tier C slot the drawer holds, or `null` when it holds none. A drawer that a
+  later write to the same slot displaced reads `null`, so a client can resolve
+  a slot to its one current drawer id from the listing (#9340).
+
+### Fixed
+
+- Under redb 4.3, a table iterator keeps returning an error after its first one. Five trusty-memory readers discarded that error and now report it (#8254).
+- `ActivityLog::list` no longer spins forever or returns a truncated feed as success when a row cannot be read.
+- `ActivityLog::prune` no longer collects an empty eviction batch on a read error, which left its loop spinning on an unchanged row count.
+- `backfill-report` records a palace whose room registry cannot be read as failed, instead of listing every drawer under a short id.
+- The no-palace index marks a palace `unreadable` when its wing or room registry cannot be read, instead of reporting zero wings or no rooms.
+- A palace alias and the palace it points at now share one write lock and one chat-session store, so concurrent identical writes through both no longer slip past the duplicate gate, and a chat call through an alias no longer creates a second session database under the alias name (#9544).
+- Creating a palace whose name is a live alias now answers JSON-RPC code `-32006` (refused) instead of `-32603` (internal error); the service layer reports it as a conflict (#9544).
+- Dream status for a palace alias reads the target palace's dream stats instead of answering not-found (#9544).
+
+### Changed
+
+- Opening a palace by id over MCP now reports a palace-format refusal (for example a palace written by a newer release) as a refused error whose message names the variant, such as `FormatTooNew`, instead of an internal error (#9274).
+
 ## [0.31.0] — 2026-10-09
 
 ### Breaking
