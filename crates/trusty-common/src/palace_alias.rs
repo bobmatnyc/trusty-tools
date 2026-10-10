@@ -11,8 +11,10 @@
 //! letting BOTH names resolve to the one on-disk store.
 //!
 //! What: a JSON file `<registry_dir>/palace_aliases.json` mapping
-//! `alias_name -> target_palace`, with atomic (tmp + rename) writes and a
-//! forgiving read (a missing/empty/corrupt file is treated as "no aliases").
+//! `alias_name -> target_palace`. Every write runs under the file's
+//! cross-process lock through [`crate::json_rmw`] and refuses a corrupt file
+//! (#9544); reads are unlocked and forgiving (a missing/empty/corrupt file is
+//! treated as "no aliases").
 //! Resolution is consulted by [`crate::memory_core::registry::PalaceRegistry`]
 //! ONLY when the requested palace has no metadata on disk, so aliases never
 //! shadow a real palace of the same name. This is DISTINCT from the term/KG
@@ -49,7 +51,7 @@ const PALACE_ALIASES_JSON: &str = "palace_aliases.json";
 /// What: `version` (defaulted to 1 for files written before it existed) plus the
 /// `aliases` map. Serialised with `serde_json` pretty output.
 /// Test: `register_then_resolve_round_trips`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PalaceAliasesFile {
     /// Schema version; defaults to 1 when absent so pre-version files still load.
     #[serde(default = "default_alias_schema_version")]
@@ -62,6 +64,123 @@ struct PalaceAliasesFile {
 
 fn default_alias_schema_version() -> u32 {
     1
+}
+
+// #9544: a derived `Default` stamped `version: 0` on the first locked write.
+impl Default for PalaceAliasesFile {
+    fn default() -> Self {
+        Self {
+            version: default_alias_schema_version(),
+            aliases: BTreeMap::new(),
+        }
+    }
+}
+
+/// One alias key a write changed: its value before and after (#9544).
+///
+/// `None` means the key was absent on that side of the write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasChange {
+    /// The alias name.
+    pub key: String,
+    /// The target before the write.
+    pub before: Option<String>,
+    /// The target the write left.
+    pub after: Option<String>,
+}
+
+/// What [`PalaceAliasStore::rename_target_with_undo`] changed, so a failed
+/// palace move can put those keys back (#9544).
+///
+/// Why: a rollback that rewrites the whole map from a snapshot would also undo
+/// every alias another writer registered in between. Recording only the
+/// touched keys lets [`PalaceAliasStore::undo`] restore exactly those.
+/// What: one [`AliasChange`] per key whose value the write changed, in key
+/// order. Empty when the write found the map already in the target state.
+/// Test: `rename_target_returns_the_touched_keys_and_undo_restores_them`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use = "a palace rename rolls back through this on a failed move"]
+pub struct AliasUndo {
+    /// The keys the write changed.
+    pub changes: Vec<AliasChange>,
+}
+
+/// Outcome of one locked alias-map mutation, as the `json_rmw` closure error.
+///
+/// `Unchanged` carries the closure's result out WITHOUT publishing, so a
+/// mutation that changed nothing never creates or rewrites the file.
+enum AliasRmw<R> {
+    Rmw(crate::json_rmw::JsonRmwError),
+    Unchanged(R),
+}
+
+impl<R> From<crate::json_rmw::JsonRmwError> for AliasRmw<R> {
+    fn from(e: crate::json_rmw::JsonRmwError) -> Self {
+        Self::Rmw(e)
+    }
+}
+
+/// Run `f` over the alias map under the alias file's exclusive lock.
+///
+/// Why (#9544): every alias writer must serialise on one cross-process lock,
+/// re-read the map under it, and refuse a corrupt file rather than overwrite
+/// it. Before this, each writer did an unlocked load and a fixed-name tmp
+/// write, so two concurrent writers could lose an update or publish a torn file.
+/// What: [`crate::json_rmw::update_blank_as_absent`] on
+/// `<registry_dir>/palace_aliases.json`: a missing or whitespace-only file
+/// starts empty at `version` 1, a corrupt one is an error with its bytes
+/// unchanged. The map is published only when `f` changed it. Blocks while
+/// another writer holds the lock (bounded by
+/// [`crate::file_lock::DEFAULT_LOCK_TIMEOUT`]).
+/// Test: `alias_writers_block_on_the_alias_lock`,
+/// `register_alias_refuses_a_corrupt_file_and_keeps_its_bytes`,
+/// `whitespace_only_alias_file_still_accepts_a_write`,
+/// `first_write_stamps_version_1`.
+fn mutate_aliases<R>(
+    registry_dir: &Path,
+    f: impl FnOnce(&mut BTreeMap<String, String>) -> R,
+) -> Result<R> {
+    std::fs::create_dir_all(registry_dir)
+        .with_context(|| format!("create registry dir {}", registry_dir.display()))?;
+    let path = registry_dir.join(PALACE_ALIASES_JSON);
+    let outcome = crate::json_rmw::update_blank_as_absent(
+        &path,
+        |file: &mut PalaceAliasesFile| -> std::result::Result<R, AliasRmw<R>> {
+            let before = file.aliases.clone();
+            let result = f(&mut file.aliases);
+            if file.aliases == before {
+                return Err(AliasRmw::Unchanged(result));
+            }
+            file.version = file.version.max(default_alias_schema_version());
+            Ok(result)
+        },
+    );
+    match outcome {
+        Ok(result) | Err(AliasRmw::Unchanged(result)) => Ok(result),
+        Err(AliasRmw::Rmw(e)) => {
+            Err(e).with_context(|| format!("update palace aliases at {}", path.display()))
+        }
+    }
+}
+
+/// Set `key` to `value` (`None` removes it), recording the change if any.
+fn set_alias(
+    aliases: &mut BTreeMap<String, String>,
+    changes: &mut Vec<AliasChange>,
+    key: &str,
+    value: Option<String>,
+) {
+    let before = match &value {
+        Some(v) => aliases.insert(key.to_string(), v.clone()),
+        None => aliases.remove(key),
+    };
+    if before != value {
+        changes.push(AliasChange {
+            key: key.to_string(),
+            before,
+            after: value,
+        });
+    }
 }
 
 /// Stateless namespace for palace-alias persistence.
@@ -83,22 +202,11 @@ impl PalaceAliasStore {
     /// What: reads `<registry_dir>/palace_aliases.json`. Returns an empty map when
     /// the file is absent, empty, or fails to parse (corruption is logged and
     /// treated as "no aliases" so a bad file can never wedge palace resolution).
-    /// Test: `load_missing_is_empty`, `register_then_resolve_round_trips`.
+    /// Unlocked: a reader never waits on a writer, and the atomic publish
+    /// means it sees a whole map. Any read error other than absence is returned.
+    /// Test: `load_missing_is_empty`, `register_then_resolve_round_trips`,
+    /// `corrupt_file_degrades_to_empty`.
     pub fn load_aliases(registry_dir: &Path) -> Result<BTreeMap<String, String>> {
-        Self::read_aliases(registry_dir, false)
-    }
-
-    /// Read the alias map; `strict` turns a parse failure into an error.
-    ///
-    /// Why (#9544): `rename_target` rewrites the whole map, so reading a corrupt
-    /// file as empty would overwrite every alias in it. Other callers keep the
-    /// forgiving read.
-    /// What: a missing or whitespace-only file is an empty map. Any other read
-    /// error is returned. A parse failure is logged and read as empty, or
-    /// returned when `strict` is set.
-    /// Test: `corrupt_file_degrades_to_empty`,
-    /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`.
-    fn read_aliases(registry_dir: &Path, strict: bool) -> Result<BTreeMap<String, String>> {
         let path = registry_dir.join(PALACE_ALIASES_JSON);
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
@@ -113,10 +221,6 @@ impl PalaceAliasStore {
         }
         match serde_json::from_slice::<PalaceAliasesFile>(&bytes) {
             Ok(file) => Ok(file.aliases),
-            // #9544: a rewrite of the map must not run over a corrupt file.
-            Err(e) if strict => {
-                Err(e).with_context(|| format!("parse palace aliases at {}", path.display()))
-            }
             Err(e) => {
                 // A corrupt alias file must not break palace resolution — the
                 // authoritative data is the palaces themselves. Log and degrade
@@ -138,12 +242,13 @@ impl PalaceAliasStore {
     /// resolves. It must be idempotent — relaunching the same session repeatedly
     /// must converge on one entry, not error or duplicate.
     /// What: rejects empty operands and a self-alias (`alias == target`, which
-    /// would be a useless no-op / cycle). Otherwise loads the current map,
-    /// inserts/updates the entry, and atomically writes it back (tmp + rename) so
-    /// a crash mid-write cannot leave a half-written map. Creating an alias that
-    /// already maps to the same target is a cheap no-op write. Returns `Ok(())`.
+    /// would be a useless no-op / cycle). Otherwise inserts/updates the entry
+    /// under the alias file's lock (see [`mutate_aliases`]); a corrupt alias
+    /// file is an error and keeps its bytes (#9544). Re-registering the same
+    /// pair writes nothing. Returns `Ok(())`.
     /// Test: `register_then_resolve_round_trips`, `register_is_idempotent`,
-    /// `register_self_alias_is_rejected`, `register_rejects_empty`.
+    /// `register_self_alias_is_rejected`, `register_rejects_empty`,
+    /// `register_alias_refuses_a_corrupt_file_and_keeps_its_bytes`.
     pub fn register_alias(registry_dir: &Path, alias: &str, target: &str) -> Result<()> {
         let alias = alias.trim();
         let target = target.trim();
@@ -158,9 +263,10 @@ impl PalaceAliasStore {
             );
         }
 
-        let mut aliases = Self::load_aliases(registry_dir)?;
-        aliases.insert(alias.to_string(), target.to_string());
-        Self::write_aliases(registry_dir, aliases)
+        // #9544: locked, fail-closed write; a corrupt file is not overwritten.
+        mutate_aliases(registry_dir, |aliases| {
+            aliases.insert(alias.to_string(), target.to_string());
+        })
     }
 
     /// Point a renamed palace's old id, and every alias of it, at the new id.
@@ -169,19 +275,37 @@ impl PalaceAliasStore {
     /// `old -> new` alone would strand an older alias `x -> old` on a name that
     /// no longer owns a palace, and a separate retarget write would leave a
     /// window where the map names a dead target. One write covers both.
-    /// What: rejects empty operands and `old == new`. Then, in one atomic write:
-    /// drops any entry keyed by `new` (that id becomes a real palace, so an alias
-    /// under it is inert and would form an `old <-> new` cycle when a rename is
-    /// reversed), repoints every `x -> old` to `x -> new`, and inserts
-    /// `old -> new`. The entry takes effect only once `old` has no `palace.json`
-    /// and `new` has one ([`alias_target_if_absent`]), so it is safe to write
-    /// before the directory move. A corrupt alias file is an error and is left
-    /// unchanged, since rewriting it would drop every alias it holds.
+    /// What: rejects empty operands and `old == new`. Then, in one locked write
+    /// (see [`mutate_aliases`]): drops any entry keyed by `new` (that id becomes
+    /// a real palace, so an alias under it is inert and would form an
+    /// `old <-> new` cycle when a rename is reversed), repoints every
+    /// `x -> old` to `x -> new`, and inserts `old -> new`. A corrupt alias file
+    /// is an error and is left unchanged, since rewriting it would drop every
+    /// alias it holds. [`Self::rename_target_with_undo`] is the same write,
+    /// returning what it changed.
+    ///
+    /// Caller contract (#9544): `old -> new` is inert while `old` still has a
+    /// `palace.json`, so the write may precede the directory move. The
+    /// retargeted `x -> new` entries are NOT inert: until `new` has a
+    /// `palace.json`, `x` resolves to nothing (its old redirect to `old` is
+    /// gone). So the caller must hold the palace open-locks for `old` and `new`
+    /// across the write and the move, and on a failed move must undo it: call
+    /// [`Self::rename_target_with_undo`] and pass its result to [`Self::undo`],
+    /// which restores exactly the keys the write changed.
     /// Test: `rename_retargets_aliases_pointing_at_the_old_id`,
     /// `rename_drops_the_alias_keyed_by_the_new_id`,
     /// `rename_target_rejects_empty_or_equal_ids`,
-    /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`.
+    /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`,
+    /// `rename_target_returns_the_touched_keys_and_undo_restores_them`.
     pub fn rename_target(registry_dir: &Path, old: &str, new: &str) -> Result<()> {
+        // #9544: the signature 0.59.1 shipped; the undo data is additive.
+        Self::rename_target_with_undo(registry_dir, old, new).map(drop)
+    }
+
+    /// [`Self::rename_target`], returning an [`AliasUndo`] naming every key it
+    /// changed (#9544), so a failed palace move can restore exactly those.
+    /// Test: `rename_target_returns_the_touched_keys_and_undo_restores_them`.
+    pub fn rename_target_with_undo(registry_dir: &Path, old: &str, new: &str) -> Result<AliasUndo> {
         let old = old.trim();
         let new = new.trim();
         if old.is_empty() || new.is_empty() {
@@ -190,61 +314,74 @@ impl PalaceAliasStore {
         if old == new {
             anyhow::bail!("refusing to alias palace {old:?} to itself");
         }
-        // #9544: strict read, so a corrupt file fails the rename instead of
-        // being overwritten with `{old: new}`.
-        let mut aliases = Self::read_aliases(registry_dir, true)?;
-        // #9544: `new` becomes a real palace; an alias under it is inert and
-        // would close an `old <-> new` cycle when a rename is reversed.
-        aliases.remove(new);
-        for target in aliases.values_mut() {
-            if target == old {
-                *target = new.to_string();
+        // #9544: locked; a corrupt file fails the rename instead of being
+        // overwritten with `{old: new}`.
+        let changes = mutate_aliases(registry_dir, |aliases| {
+            let mut changes = Vec::new();
+            // #9544: `new` becomes a real palace; an alias under it is inert
+            // and would close an `old <-> new` cycle when a rename is reversed.
+            set_alias(aliases, &mut changes, new, None);
+            let retarget: Vec<String> = aliases
+                .iter()
+                .filter(|(_, target)| target.as_str() == old)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in retarget {
+                set_alias(aliases, &mut changes, &key, Some(new.to_string()));
             }
+            set_alias(aliases, &mut changes, old, Some(new.to_string()));
+            changes.sort_by(|a, b| a.key.cmp(&b.key));
+            changes
+        })?;
+        Ok(AliasUndo { changes })
+    }
+
+    /// Put back the keys a [`Self::rename_target_with_undo`] changed (#9544).
+    ///
+    /// Why: a palace move that fails after the alias write must leave the map
+    /// as it was for those keys, without clobbering aliases another writer set
+    /// in between.
+    /// What: under the alias file's lock, restores each change's `before` value
+    /// (removing the key when it was absent), but only where the key still
+    /// holds the change's `after` value. A key someone else changed since is
+    /// left alone and returned, so the caller can report it. A corrupt alias
+    /// file is an error and keeps its bytes.
+    /// Test: `rename_target_returns_the_touched_keys_and_undo_restores_them`.
+    pub fn undo(registry_dir: &Path, undo: &AliasUndo) -> Result<Vec<String>> {
+        if undo.changes.is_empty() {
+            return Ok(Vec::new());
         }
-        aliases.insert(old.to_string(), new.to_string());
-        Self::write_aliases(registry_dir, aliases)
+        mutate_aliases(registry_dir, |aliases| {
+            let mut skipped = Vec::new();
+            for change in &undo.changes {
+                if aliases.get(&change.key) != change.after.as_ref() {
+                    skipped.push(change.key.clone());
+                    continue;
+                }
+                match &change.before {
+                    Some(v) => aliases.insert(change.key.clone(), v.clone()),
+                    None => aliases.remove(&change.key),
+                };
+            }
+            skipped
+        })
     }
 
     /// Remove one alias so its name stops resolving.
     ///
     /// Why (#9544): a renamed palace's old id answers "until removed"; this is
     /// the removal.
-    /// What: loads the map, removes the entry keyed by `alias` (trimmed), and
-    /// writes the map back only when an entry was removed. Returns whether one
-    /// was. The target palace is never touched.
-    /// Test: `alias_remove_stops_old_id_resolving`.
+    /// What: under the alias file's lock (see [`mutate_aliases`]), removes the
+    /// entry keyed by `alias` (trimmed); the file is rewritten only when an
+    /// entry was removed. Returns whether one was. A corrupt alias file is an
+    /// error and keeps its bytes (#9544). The target palace is never touched.
+    /// Test: `alias_remove_stops_old_id_resolving`,
+    /// `remove_alias_errors_on_a_corrupt_file`.
     pub fn remove_alias(registry_dir: &Path, alias: &str) -> Result<bool> {
-        let mut aliases = Self::load_aliases(registry_dir)?;
-        if aliases.remove(alias.trim()).is_none() {
-            return Ok(false);
-        }
-        Self::write_aliases(registry_dir, aliases)?;
-        Ok(true)
-    }
-
-    /// Persist the whole alias map with a tmp + rename write.
-    ///
-    /// Why: every mutation must publish a complete map, never a partial one.
-    /// What: creates `registry_dir`, writes `palace_aliases.json.tmp`, renames
-    /// it over `palace_aliases.json`. The tmp name is fixed, so concurrent
-    /// writers must be serialised by the caller.
-    /// Test: `register_then_resolve_round_trips`.
-    fn write_aliases(registry_dir: &Path, aliases: BTreeMap<String, String>) -> Result<()> {
-        std::fs::create_dir_all(registry_dir)
-            .with_context(|| format!("create registry dir {}", registry_dir.display()))?;
-        let file = PalaceAliasesFile {
-            version: default_alias_schema_version(),
-            aliases,
-        };
-        let bytes = serde_json::to_vec_pretty(&file).context("serialize palace aliases")?;
-
-        let target_path = registry_dir.join(PALACE_ALIASES_JSON);
-        let tmp_path = registry_dir.join(format!("{PALACE_ALIASES_JSON}.tmp"));
-        std::fs::write(&tmp_path, &bytes)
-            .with_context(|| format!("write palace aliases tmp {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &target_path)
-            .with_context(|| format!("rename palace aliases into {}", target_path.display()))?;
-        Ok(())
+        // #9544: locked, fail-closed; a corrupt file is an error, not `false`.
+        mutate_aliases(registry_dir, |aliases| {
+            aliases.remove(alias.trim()).is_some()
+        })
     }
 
     /// Resolve a single alias to its target palace name, if one is registered.
@@ -670,6 +807,150 @@ mod tests {
 
         seed_palace(tmp.path(), "live");
         assert_eq!(canonical_palace_id(tmp.path(), "live"), "live");
+    }
+
+    /// Why (#9544): a register over a corrupt file used to read it as empty
+    /// and overwrite it with one entry, destroying every alias it held.
+    /// Test: itself.
+    #[test]
+    fn register_alias_refuses_a_corrupt_file_and_keeps_its_bytes() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join(PALACE_ALIASES_JSON);
+        let garbage: &[u8] = br#"{"aliases": {"keep": "kept""#;
+        std::fs::write(&path, garbage).unwrap();
+        assert!(
+            PalaceAliasStore::register_alias(tmp.path(), "a", "b").is_err(),
+            "a corrupt alias file must refuse the register"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), garbage);
+    }
+
+    /// Why (#9544): a removal over a corrupt file answered `Ok(false)`, which
+    /// reads as "no such alias" when nothing could be determined.
+    /// Test: itself.
+    #[test]
+    fn remove_alias_errors_on_a_corrupt_file() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join(PALACE_ALIASES_JSON);
+        let garbage: &[u8] = br#"{"aliases": {"keep": "kept""#;
+        std::fs::write(&path, garbage).unwrap();
+        assert!(
+            PalaceAliasStore::remove_alias(tmp.path(), "keep").is_err(),
+            "a corrupt alias file must make the removal fail"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), garbage);
+    }
+
+    /// Why (#9544): two unlocked writers can lose an update. Every writer must
+    /// wait on the alias file's lock while another holder has it.
+    /// What: holds the lock, starts `register_alias` and `rename_target` on
+    /// threads, asserts neither finishes within 200 ms, releases, and asserts
+    /// both finish and both writes landed.
+    /// Test: itself.
+    #[test]
+    fn alias_writers_block_on_the_alias_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let path = dir.join(PALACE_ALIASES_JSON);
+        let (tx, rx) = mpsc::channel::<&'static str>();
+        let mut workers = Vec::new();
+        let held = crate::file_lock::with_exclusive_lock(&path, || {
+            let (d, t) = (dir.clone(), tx.clone());
+            workers.push(std::thread::spawn(move || {
+                PalaceAliasStore::register_alias(&d, "x", "y").unwrap();
+                t.send("register").unwrap();
+            }));
+            let (d, t) = (dir.clone(), tx.clone());
+            workers.push(std::thread::spawn(move || {
+                PalaceAliasStore::rename_target(&d, "old-id", "new-id").unwrap();
+                t.send("rename").unwrap();
+            }));
+            rx.recv_timeout(Duration::from_millis(200))
+        })
+        .expect("take the alias lock");
+        assert!(
+            held.is_err(),
+            "a writer finished while the alias lock was held: {held:?}"
+        );
+        let mut done = vec![
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("first writer"),
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("second writer"),
+        ];
+        done.sort_unstable();
+        assert_eq!(done, ["register", "rename"]);
+        for w in workers {
+            w.join().unwrap();
+        }
+        let all = PalaceAliasStore::load_aliases(&dir).unwrap();
+        assert_eq!(all.get("x").map(String::as_str), Some("y"));
+        assert_eq!(all.get("old-id").map(String::as_str), Some("new-id"));
+    }
+
+    /// Why (#9544): a failed palace move must put back exactly the keys the
+    /// rename changed, and leave a key another writer changed since alone.
+    /// Test: itself.
+    #[test]
+    fn rename_target_returns_the_touched_keys_and_undo_restores_them() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path();
+        PalaceAliasStore::register_alias(dir, "older", "old-id").unwrap();
+        PalaceAliasStore::register_alias(dir, "new-id", "elsewhere").unwrap();
+        PalaceAliasStore::register_alias(dir, "unrelated", "kept").unwrap();
+        let undo = PalaceAliasStore::rename_target_with_undo(dir, "old-id", "new-id").unwrap();
+        let change = |key: &str, before: Option<&str>, after: Option<&str>| AliasChange {
+            key: key.to_string(),
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+        };
+        assert_eq!(
+            undo.changes,
+            vec![
+                change("new-id", Some("elsewhere"), None),
+                change("old-id", None, Some("new-id")),
+                change("older", Some("old-id"), Some("new-id")),
+            ]
+        );
+
+        // Another writer adds a key and changes one the rename touched.
+        PalaceAliasStore::register_alias(dir, "late", "kept").unwrap();
+        PalaceAliasStore::register_alias(dir, "older", "moved-on").unwrap();
+        let skipped = PalaceAliasStore::undo(dir, &undo).unwrap();
+        assert_eq!(skipped, ["older"]);
+
+        let all = PalaceAliasStore::load_aliases(dir).unwrap();
+        assert_eq!(all.get("new-id").map(String::as_str), Some("elsewhere"));
+        assert_eq!(all.get("old-id"), None);
+        assert_eq!(all.get("older").map(String::as_str), Some("moved-on"));
+        assert_eq!(all.get("late").map(String::as_str), Some("kept"));
+        assert_eq!(all.get("unrelated").map(String::as_str), Some("kept"));
+    }
+
+    /// Why (#9544, guard): readers accept a whitespace-only file as empty, so
+    /// the locked writers must too, or a `tm` launch fails on it.
+    /// Test: itself.
+    #[test]
+    fn whitespace_only_alias_file_still_accepts_a_write() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join(PALACE_ALIASES_JSON), b" \n\t\n").unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "a", "b").expect("register over blank");
+        let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
+        assert_eq!(all.get("a").map(String::as_str), Some("b"));
+    }
+
+    /// Why (#9544, guard): the first write must stamp schema version 1, not
+    /// the 0 a derived `Default` would give.
+    /// Test: itself.
+    #[test]
+    fn first_write_stamps_version_1() {
+        let tmp = tempdir().unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "a", "b").unwrap();
+        let raw = std::fs::read(tmp.path().join(PALACE_ALIASES_JSON)).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(json["version"], 1, "{json}");
     }
 
     /// Why: absent a `palaces/` subdir the data dir itself is the registry root

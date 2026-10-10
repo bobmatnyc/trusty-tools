@@ -32,6 +32,8 @@ pub mod maintenance_log;
 #[cfg(test)]
 mod maintenance_log_tests;
 pub mod palace;
+// #9544: the one statement of "this palace is empty" (rename, delete).
+pub mod palace_emptiness;
 pub mod registry;
 // ADR-0027 T1: pure room identity (canonical keys, UUIDv5 minting, the legacy
 // fold kept as the migration oracle). No I/O — see `store::rooms` for storage.
