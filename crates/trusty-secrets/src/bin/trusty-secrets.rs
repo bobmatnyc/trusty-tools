@@ -8,7 +8,8 @@
 //! `TRUSTY_SECRETS_INDEX_DIR` off the default socket only (#7524),
 //! `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`; the audit log has no environment
 //! override), serves
-//! with the real backends, and exits 0 on idle or SIGTERM/SIGINT. A refused
+//! with the real backends, and exits 0 on idle or SIGTERM/SIGINT, within
+//! `EXIT_GRACE` of either however many backend calls are stuck (#9572). A refused
 //! bind — a live instance already serving — exits 1 without touching it.
 //! The git redirect variables are removed from its environment at start.
 //! #7519: on a `cli-backends` build, so is every `OP_*` variable but an
@@ -45,7 +46,10 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(onepassword_token, search_path)),
+        // #9572: the runtime's shutdown is the crate's, so a test drives it.
+        Ok(runtime) => {
+            trusty_secrets::server::run_to_exit(runtime, run(onepassword_token, search_path))
+        }
         Err(e) => {
             eprintln!("trusty-secrets: cannot start the runtime: {e}");
             ExitCode::FAILURE

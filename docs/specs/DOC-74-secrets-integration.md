@@ -975,7 +975,18 @@ blocks, for example on an unanswered Keychain access prompt, answers
 not stopped: its thread stays blocked until the prompt ends, and a write it
 started may still land then. Until it ends, every later call on the same
 Keychain item answers `backend_timeout` at once, so the late write cannot
-replace a newer one. A file backend call is not bounded by the deadline.
+replace a newer one. A file backend call is not bounded by the deadline,
+but the request is (#9572): 2 s past the deadline, a grace that lets a call
+which honours the deadline give its own answer, it answers
+`deadline_exceeded`, and the call, which no thread can cancel, keeps running
+until it returns. Each
+server process runs at most 64 method calls at once. A call holds its slot
+until its thread finishes, not until its request answers, so calls that never
+return hold at most 64 threads per server process; a request that waits for a
+slot past its deadline answers `deadline_exceeded`, and a slot granted after
+the deadline starts no call. At exit, on idle or a signal, the server waits
+at most 2 s for running calls and then abandons any still stuck, so a write
+such a call started may or may not land; the exit itself is never held.
 
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves
