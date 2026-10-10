@@ -7,8 +7,8 @@
 //! `telegram`) without a per-platform crate. See ADR-0014.
 //! What: [`api`] holds the endpoint constants, the typed [`api::error::SlackError`],
 //! and the `BaseClient` HTTP wrapper (auth + 401/429 hardening, issue #2638);
-//! [`server`] is the JSON-RPC dispatcher wired into `bin/slack-mcp.rs`;
-//! [`tools`] is the authoritative `tools/list` registry; [`handlers`] holds the
+//! `server` is the JSON-RPC dispatcher wired into `bin/slack-mcp.rs`;
+//! [`tools`] is the authoritative `tools/list` registry; `handlers` holds the
 //! live `tools/call` bodies for all 20 tools — send/read/list (issue #2639),
 //! search + reactions (issue #2640), the claude.ai-connector-parity batch
 //! (canvases, conversation create/members, reaction reads, file content,
@@ -17,16 +17,21 @@
 //! CommonMark → Slack canvas-markdown translator `slack_canvas_push` runs
 //! caller markdown through before calling `canvases.edit`. The client holds
 //! two tokens: a required bot token and an optional user token that only
-//! `search.messages` consults (issue #2640).
-//! Test: `cargo test -p trusty-channels` covers the `initialize` handshake, the
-//! `tools/list` shape/count, the client's auth/HTTP behaviour
-//! (`tests/client_http.rs`), the tool request paths (`tests/tools_http.rs`),
-//! and the translator's own construct-level unit tests in
-//! [`canvas_markdown`]'s submodules.
+//! `search.messages` consults (issue #2640). `server` and `handlers` exist
+//! only with the `unrouted-slack-mcp` feature (#8454).
+//! Test: `cargo test -p trusty-channels --features unrouted-slack-mcp` covers
+//! the `initialize` handshake, the `tools/list` shape/count, the client's
+//! auth/HTTP behaviour (`tests/client_http.rs`), the tool request paths
+//! (`tests/tools_http.rs`), and the translator's own construct-level unit
+//! tests in [`canvas_markdown`]'s submodules.
 
 pub mod api;
 pub mod canvas_markdown;
+// #8454 (ruling Q7): `handlers::dispatch` runs any Slack tool with no route
+// check, and `server` rebuilds `slack-mcp` from it, so neither is default API.
+#[cfg(feature = "unrouted-slack-mcp")]
 pub mod handlers;
+#[cfg(feature = "unrouted-slack-mcp")]
 pub mod server;
 mod tool_schemas_canvas;
 pub mod tools;

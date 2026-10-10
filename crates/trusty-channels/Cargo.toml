@@ -1,9 +1,34 @@
 [package]
 name = "trusty-channels"
 version = "0.1.0"
+# ADR-0029 lists this crate as an explicit opt-down to 2021.
 edition = "2021"
-description = "Native chat-channel MCP servers (Slack, …) for the Trusty suite — chat-as-tools"
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Chat channels for the trusty-* tools: a deny-by-default route policy, a route-checked Google Chat MCP server, and Slack and Telegram API clients."
+keywords = ["mcp", "slack", "google-chat", "chat", "policy"]
+categories = ["api-bindings", "command-line-utilities"]
+homepage = "https://trustytools.dev"
+readme = "README.md"
+# #8454: ship the library, the binaries and the user-facing docs only. Left
+# out: `tests/` (fake tokens, wiremock fixtures), `changelog.d/` (assembled
+# into CHANGELOG.md at release), and `docs/` (one workspace's Slack app
+# manifest, not a usage document).
+include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
+# #8454 (ruling Q7): every binary is listed below, so a new `src/bin/*.rs`
+# cannot build by default without passing `tests/publish_surface.rs`.
+autobins = false
+autoexamples = false
+
+[features]
+default = []
+# #8454 (ruling Q7): `slack-mcp` posts, schedules, reacts and writes canvases
+# with no route check, so the default build and `cargo install
+# trusty-channels` do not produce it. Opt in knowingly:
+# `cargo install trusty-channels --features unrouted-slack-mcp`.
+unrouted-slack-mcp = []
 
 [lib]
 crate-type = ["rlib"]
@@ -11,6 +36,8 @@ crate-type = ["rlib"]
 [[bin]]
 name = "slack-mcp"
 path = "src/bin/slack-mcp.rs"
+# #8454: unrouted sender; see the `unrouted-slack-mcp` feature above.
+required-features = ["unrouted-slack-mcp"]
 
 [[bin]]
 name = "telegram-mcp"
@@ -19,6 +46,20 @@ path = "src/bin/telegram-mcp.rs"
 [[bin]]
 name = "gchat-mcp"
 path = "src/bin/gchat-mcp.rs"
+
+# #8454: these drive `slack::handlers` / `slack::server`, which exist only
+# with `unrouted-slack-mcp`.
+[[test]]
+name = "tools_http"
+required-features = ["unrouted-slack-mcp"]
+
+[[test]]
+name = "slack_list_http"
+required-features = ["unrouted-slack-mcp"]
+
+[[test]]
+name = "canvas_push_http"
+required-features = ["unrouted-slack-mcp"]
 
 [dependencies]
 # #8454 S2b: crate-config locates the host config.yaml.

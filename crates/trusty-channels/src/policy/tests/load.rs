@@ -29,14 +29,14 @@ fn assert_host_denied(report: &LoadReport, want: &HostError) {
     assert_eq!(host_error(report), Some(want), "{:#?}", report.findings);
 }
 
-fn file_error<'a>(report: &'a LoadReport, file: &Path) -> Option<&'a ProjectFileError> {
+pub(super) fn file_error<'a>(report: &'a LoadReport, file: &Path) -> Option<&'a ProjectFileError> {
     report.findings.iter().find_map(|f| match f {
         Finding::FileRefused { file: f, error } if f == file => Some(error),
         _ => None,
     })
 }
 
-fn file_state(report: &LoadReport, dir: &Path) -> FileState {
+pub(super) fn file_state(report: &LoadReport, dir: &Path) -> FileState {
     report
         .per_file
         .iter()

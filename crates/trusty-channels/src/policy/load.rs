@@ -10,10 +10,11 @@
 //! Test: `src/policy/tests/load.rs`.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::gchat::routes::routes_path;
 use crate::policy::fs::{read_host, read_project, ProjectRead};
-use crate::policy::gate::{check_default_branch, GateError};
+use crate::policy::gate::{check_default_branch, with_deadline, GateError};
 use crate::policy::host::{parse_host, HostCeiling, HostError};
 use crate::policy::merge::{merge_for, ProjectInput};
 use crate::policy::project_file::{parse_project_file, ProjectFile, ProjectFileError};
@@ -71,6 +72,24 @@ pub fn load_effective(req: &LoadRequest) -> LoadReport {
     assemble(prepared, &req.channels)
 }
 
+/// Load the effective policy for `req`, with git bounded by `deadline`.
+///
+/// Why: #8454: a caller with a budget (tm doctor gives a load 30 s on its
+/// own thread) must get the load back, and no git process left running,
+/// by its budget; one blocked step per project can otherwise outlast it.
+/// What: as [`load_effective`], except each git step runs for at most
+/// `min(GIT_TIMEOUT, time left)` and its whole process group is killed
+/// at the deadline. Once the deadline has passed, every project not yet
+/// loaded is refused with [`GateError::GitTimedOut`]; none is effective.
+/// The call returns soon after `deadline`, with no git process left.
+/// Test: `load_with_a_deadline_returns_within_deadline_and_margin`,
+/// `load_deadline_refuses_every_project_not_yet_loaded`,
+/// `no_git_process_survives_a_load_deadline`.
+pub fn load_effective_until(req: &LoadRequest, deadline: Instant) -> LoadReport {
+    let prepared = prepare_until(req, Some(deadline));
+    assemble(prepared, &req.channels)
+}
+
 /// One listed project's route file after the read and the gate.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProject {
@@ -91,6 +110,11 @@ pub(crate) struct Prepared {
 /// Read and gate everything a load needs. No fault is skipped: each one is
 /// a host error or a project file error.
 pub(crate) fn prepare(req: &LoadRequest) -> Prepared {
+    prepare_until(req, None)
+}
+
+/// [`prepare`], with every git step ending by `deadline` when one is set.
+fn prepare_until(req: &LoadRequest, deadline: Option<Instant>) -> Prepared {
     let denied = |e: HostError| Prepared {
         host: Err(e),
         projects: Vec::new(),
@@ -116,7 +140,13 @@ pub(crate) fn prepare(req: &LoadRequest) -> Prepared {
         .into_iter()
         .map(|dir| {
             let file = routes_path(&dir);
-            let parsed = read_gated(&dir, home);
+            let parsed = match deadline {
+                // #8454: past the deadline, a project not yet loaded is refused.
+                Some(d) if Instant::now() >= d => {
+                    Some(Err(gate_error(GateError::GitTimedOut { step: "load" })))
+                }
+                _ => with_deadline(deadline, || read_gated(&dir, home)),
+            };
             PreparedProject { dir, file, parsed }
         })
         .collect();

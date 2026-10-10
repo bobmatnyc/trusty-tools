@@ -7,6 +7,7 @@
 
 mod bucket;
 mod build;
+mod deadline;
 mod egress;
 mod gate;
 mod host;

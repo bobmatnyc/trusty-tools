@@ -13,7 +13,8 @@
 //! bytes equal the blob at that branch's commit, resolved once. Each git call
 //! has every `GIT_*` variable removed and `core.fsmonitor` off; bytes are
 //! hashed with `hash-object --no-filters`. Any git failure, a missing git,
-//! unexpected git output or a step that outlasts [`GIT_TIMEOUT`] refuses.
+//! unexpected git output or a step that outlasts [`GIT_TIMEOUT`] refuses, as
+//! does one that outlasts a caller's load deadline ([`with_deadline`]).
 //! Test: `src/policy/tests/gate.rs`, and gchat's
 //! `load_gate_refuses_untracked_modified_and_staged`.
 
@@ -42,6 +43,17 @@ pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 thread_local! {
     static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    static TEST_PATH: std::cell::RefCell<Option<OsString>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with git steps on this thread started under `PATH=path`, so a
+/// test's git wrapper runs in place of git (#8454).
+#[cfg(test)]
+pub(crate) fn with_git_path<T>(path: OsString, f: impl FnOnce() -> T) -> T {
+    let before = TEST_PATH.with(|p| p.replace(Some(path)));
+    let out = f();
+    TEST_PATH.with(|p| p.replace(before));
+    out
 }
 
 /// Run `f` with git steps on this thread bounded by `limit`.
@@ -60,6 +72,39 @@ fn git_timeout() -> Duration {
         return limit;
     }
     GIT_TIMEOUT
+}
+
+thread_local! {
+    // #8454: the caller's load deadline for git steps on this thread.
+    static LOAD_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with every git step on this thread ending by `deadline`.
+///
+/// Why: #8454: a caller with a budget (tm doctor's 30 s) must not leave a
+/// blocked git step, or its process group, running after it gives up.
+/// What: sets the thread's load deadline for the call and restores the one
+/// before it on return or unwind; `None` leaves only [`GIT_TIMEOUT`].
+/// Test: `load_with_a_deadline_returns_within_deadline_and_margin`,
+/// `no_git_process_survives_a_load_deadline`.
+pub(crate) fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOAD_DEADLINE.with(|d| d.set(self.0));
+        }
+    }
+    let _restore = Restore(LOAD_DEADLINE.with(|d| d.replace(deadline)));
+    f()
+}
+
+/// When a git step started now must end: [`git_timeout`] from now, or the
+/// load deadline when that is sooner (#8454).
+fn step_deadline() -> Instant {
+    let own = Instant::now() + git_timeout();
+    LOAD_DEADLINE
+        .with(std::cell::Cell::get)
+        .map_or(own, |load| load.min(own))
 }
 
 /// Why a route file's bytes were refused by a load gate.
@@ -88,7 +133,8 @@ pub enum GateError {
         /// The git step.
         step: &'static str,
     },
-    /// A git step ran longer than [`GIT_TIMEOUT`] and was killed.
+    /// A git step ran longer than [`GIT_TIMEOUT`], or past the caller's load
+    /// deadline, and was killed; or that deadline passed before it started.
     #[error("git {step} did not finish in time and was stopped")]
     GitTimedOut {
         /// The git step.
@@ -378,23 +424,29 @@ pub(super) fn run(cmd: &mut Command, step: &'static str) -> Result<Output, GateE
 }
 
 /// Run one git step, feeding it `input` (or no stdin) and capturing stdout,
-/// and kill it once [`git_timeout`] has passed.
+/// and kill it at [`step_deadline`].
 ///
 /// Why: #8454: a git that blocks (a FIFO in its config) must not block the
 /// caller; std's `output()` waits forever.
-/// What: stdin and stdout each get a thread, so a full pipe never stalls
+/// What: a step whose deadline has already passed is refused unstarted.
+/// stdin and stdout each get a thread, so a full pipe never stalls
 /// the wait; the child runs in its own process group and is polled until
 /// the deadline, then the group is killed and the child reaped. A stdout
 /// read that outlasts the deadline after git exits kills the group too.
 /// stderr is discarded. A thread that cannot start kills the group.
 /// Test: `git_blocked_on_a_fifo_config_include_times_out`,
-/// `git_timeout_kills_the_whole_process_group`.
+/// `git_timeout_kills_the_whole_process_group`,
+/// `no_git_process_survives_a_load_deadline`.
 fn run_with_input(
     cmd: &mut Command,
     step: &'static str,
     input: Option<&[u8]>,
 ) -> Result<Output, GateError> {
-    let deadline = Instant::now() + git_timeout();
+    let deadline = step_deadline();
+    // #8454: past the load deadline, no further git step starts.
+    if Instant::now() >= deadline {
+        return Err(GateError::GitTimedOut { step });
+    }
     let stdin = if input.is_some() {
         Stdio::piped()
     } else {
@@ -528,6 +580,10 @@ fn git(dir: &Path) -> Command {
         if key.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(key);
         }
+    }
+    #[cfg(test)]
+    if let Some(path) = TEST_PATH.with(|p| p.borrow().clone()) {
+        cmd.env("PATH", path);
     }
     cmd
 }
