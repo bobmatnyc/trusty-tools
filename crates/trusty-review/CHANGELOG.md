@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.38.5] — 2026-10-10
+
+### Fixed
+
+- Spec-docs discovery now reports `unavailable`, naming the index, when that index is listed without a `root_path`; it used to drop every absolute search hit silently and look as if it had found nothing (refs [#9593](https://github.com/bobmatnyc/trusty-tools/issues/9593))
+
 ## [0.38.4] — 2026-10-09
 
 ### Changed

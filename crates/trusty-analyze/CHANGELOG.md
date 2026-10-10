@@ -7,6 +7,49 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.12.7] — 2026-10-10
+
+### Breaking
+
+- `TrustySearchClient::new` takes the trusty-search socket path instead of an HTTP base URL; `TrustySearchClient::from_env` builds one at the standard path (#9214).
+- `TrustySearchClient::base_url()` is removed; `socket_path()` names the socket the client calls (#9214).
+- The `--search-url` flag and the `TRUSTY_SEARCH_URL` environment variable are removed. trusty-analyze reaches trusty-search only over its Unix socket, with no TCP fallback (#9214).
+
+### Added
+
+- `analyze.smells` rows carry a `smells` array naming what the detector found.
+  The method selected chunks by running the detector and then discarded its
+  output, so a row said "this chunk smells" without saying of what — the only
+  other string on it, `match_reason`, is the SEARCH daemon's hit reason and
+  says nothing about code quality. Consumers that group by smell had nothing to
+  group by: the analyze dashboard's Smells view rendered "No smells detected for
+  this index" over a corpus whose own quality card reported thousands.
+  `quality::smelly_chunks_with_smells` keeps the detector output the existing
+  `smelly_chunks` throws away; that function is unchanged, so no caller of it
+  moves ([#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155)).
+
+### Fixed
+
+- `trusty-analyze mcp` now answers `initialize` and `tools/list` at once instead of waiting up to 30 s for the daemon to start, so a loaded host no longer times out the console's handshake. The daemon auto-start runs once in the background; the first tool call waits for it, and an auto-start failure comes back as that call's error instead of exiting the bridge (#8279).
+- `trusty-analyze start` now spawns the daemon through the shared detached helper, so it starts in its own session and survives a group kill or Ctrl-C aimed at the caller (#8783).
+- trusty-analyze now honours `TRUSTY_SEARCH_SOCKET`: every trusty-search call goes to that socket, or the standard path when it is unset. A missing socket is an error naming the path (#9214).
+
+### Removed
+
+- The admin UI is gone from this crate: the `ui/` Svelte tree, the committed
+  `ui/dist/` bundle, `build.rs` and its Vite step, the `build`/`exclude` keys in
+  `Cargo.toml`, and the `rust-embed` and `mime_guess` dependencies. The Svelte
+  source moved to `crates/trusty-console/ui-analyze`, and the console serves the
+  dashboard at `/tools/analyze/` over this daemon's existing `analyze.*` socket
+  methods. Nothing had referenced these assets since #6287 deleted this crate's
+  embed and its HTTP listener, so no public item changes shape and no version
+  bump is owed on that account
+  ([#6155](https://github.com/bobmatnyc/trusty-tools/issues/6155)).
+
+### Documentation
+
+- Retired stale `POST /review/github-pr` mentions in the `GithubPrRequest` doc comment and the PRD/COMPONENTS specs; they now name the `analyze.review_github_pr` JSON-RPC method served over the Unix socket (#5176).
+
 ## [0.12.6] — 2026-09-03
 
 ### Changed

@@ -1,2 +1,0 @@
-Fixed
-- A bare `tm` run inside a live agent's pane, such as from the agent's Bash tool, no longer gets the session reactivated in place, so it never execs a second `claude --resume` of a live session. The daemon now reads the caller pane's foreground command and refuses with 409 unless it is `tm` or an idle shell, for Active and Stopped records alike. Relaunching a dead claude from its own pane still works (#9566).

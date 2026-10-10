@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.59.1] — 2026-10-10
+
+### Breaking
+
+- `memory_core::palace::DrawerType` is now `#[non_exhaustive]`. A crate outside trusty-common that matches on it needs a wildcard arm; no crate in this workspace does (#9144).
+- `crate_config::ConfigError::Yaml { path, message: String }` is now `ConfigError::Yaml { path, detail: YamlErrorDetail }`, and `YamlErrorKind` is `#[non_exhaustive]`. A crate outside trusty-common that reads or builds the `message` field must use `detail` (kind, key path, line, column) instead; no crate in this workspace does (#9603).
+
+### Added
+
+- `memory_core::palace::DrawerType` has five new variants: `Ruling`, `Decision`, `Status`, `Turn` and `Reference`. They follow `Task`, so every existing postcard index and stored `drawer_type` tag decodes as before. None of them gets a default TTL or dream-cycle protection (#9144).
+- `DrawerType::parse_write_type` parses a type a caller names. It accepts exactly `Ruling`, `Decision`, `Status`, `Turn` and `Reference`, in any ASCII case, and returns the new `ParseDrawerTypeError` for anything else. The lenient `DrawerType::from_tag` still decodes an unrecognised stored tag to `Unknown` (#9144).
+- `palace_alias::PalaceAliasStore::rename_target` points a renamed palace's old id, and every alias of that old id, at the new id in one write. It fails, and leaves the file unchanged, when the alias file is corrupt. `PalaceAliasStore::remove_alias` removes one alias. `palace_alias::canonical_palace_id` names the palace id a request reaches through a live alias (#9544).
+
+### Fixed
+
+- The two `search_index` hung-up-create tests no longer fail under full-suite load. Their mock daemon now drops the connection without running the process-global panic hook, which could stall the mock's only thread past the registry-confirm deadline (#9125). Test-only; no runtime behavior changes.
+- The local model server probe (`local_probe::probe_local`, `list_models`, `chat::auto_detect_local_provider`) now holds to its one-second budget even when building the HTTP client stalls, as the macOS system-proxy lookup can. The client is built off the async worker threads, and one deadline covers the build and the request; a missed deadline reports the server as unreachable (#9213).
+- Requests to Claude Opus 5.5 and Sonnet 5.5 (`claude-opus-5-5`, `claude-sonnet-5-5`, in Anthropic, Bedrock profile and Bedrock ARN forms) no longer send `temperature`, which those models reject. This covers the Bedrock inference adapter, the Anthropic adapter, the `config keys test` auth probe and the chat Bedrock provider. Every other model still receives `temperature` when it is set (#9318).
+- A config file that fails to parse no longer writes the offending value to the log or to the error text. `crate_config::ConfigError::Yaml` now carries a `YamlErrorDetail` (error kind, key path, line and column) in place of `serde_yaml`'s message, which quoted the rejected scalar; a type error under trusty-mpm's `log_drain.secrets` had logged the token at warn on every config load (#9603). The warn-and-default fallback of `load_or_default` is unchanged, and the new `load_or_default_at` is its path-taking core.
+
+### Changed
+
+- `PalaceRegistry::create_palace` refuses an id that is a live palace alias with `palace_alias::LiveAliasError`, instead of creating a palace that shadows the alias. It also fails when the alias file exists but cannot be read; a missing alias file still means no aliases. Ids that already own a palace, and aliases whose target is gone, create as before (#9544).
+
 ## [0.58.0] — 2026-10-10
 
 ### Added
