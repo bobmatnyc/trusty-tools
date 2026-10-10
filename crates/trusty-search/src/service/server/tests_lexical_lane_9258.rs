@@ -20,7 +20,8 @@ use crate::core::indexer::{LexicalLaneDefaults, SearchQuery};
 
 const INDEX: &str = "lex-9258";
 
-/// One `=>` chunk only a content scan finds, and eight `widget` chunks BM25 finds.
+/// One `=>` chunk only a content scan finds, eight `widget` chunks BM25 finds,
+/// and an `HNSW` / `HNSWINDEX` pair: BM25 finds the first, only a scan the second.
 async fn state_with(defaults: LexicalLaneDefaults) -> (Arc<SearchAppState>, tempfile::TempDir) {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;
@@ -44,6 +45,16 @@ async fn state_with(defaults: LexicalLaneDefaults) -> (Arc<SearchAppState>, temp
             format!("fn part_{i}() {{ widget }}"),
         ));
     }
+    chunks.push((
+        "src/hnsw.rs:1:1".to_string(),
+        "src/hnsw.rs".to_string(),
+        "let HNSW = 1;".to_string(),
+    ));
+    chunks.push((
+        HNSW_SCAN_ONLY.to_string(),
+        "src/hnsw_index.rs".to_string(),
+        "let HNSWINDEX = 2;".to_string(),
+    ));
     for (id, file, content) in &chunks {
         indexer
             .add_chunk(super::tests_dropped_results::drop_test_chunk(
@@ -214,5 +225,61 @@ async fn an_invalid_lexical_limit_is_rejected_not_clamped() {
             .unwrap_or_default()
             .contains("daemon config"),
         "{body}"
+    );
+}
+
+/// The chunk only a substring scan for `HNSW` finds: BM25 indexes the whole
+/// token `hnswindex`, never `hnsw`.
+const HNSW_SCAN_ONLY: &str = "src/hnsw_index.rs:1:1";
+/// The chunk only the exact-match lane finds for the quoted literal `=>`.
+const ARROW: &str = "src/arrow.rs:1:1";
+
+fn ids(body: &Value) -> Vec<String> {
+    body["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|r| r["id"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// #9258: the Definition-intent grep lane obeys the switch. `HNSW` is a
+/// Definition query, BM25 answers it (so the empty-result fallback never
+/// runs), and only the grep lane adds `HNSWINDEX`.
+#[tokio::test]
+#[serial_test::parallel]
+async fn ripgrep_lane_off_drops_the_definition_grep_lane() {
+    let (state, _tmp) = state_with(LexicalLaneDefaults::default()).await;
+    let on = search(&state, "HNSW", json!({})).await.expect("lane on");
+    assert_eq!(on["intent"], "Definition", "{on}");
+    assert!(ids(&on).iter().any(|i| i == HNSW_SCAN_ONLY), "{on}");
+    let off = search(&state, "HNSW", json!({ "ripgrep_fallback": false }))
+        .await
+        .expect("lane off");
+    assert!(!ids(&off).is_empty(), "BM25 still answers; got {off}");
+    assert!(
+        !ids(&off).iter().any(|i| i == HNSW_SCAN_ONLY),
+        "lane off must drop the grep-lane hit; got {off}"
+    );
+}
+
+/// #9258: the exact-match lane obeys the switch. The quoted literal `=>` is
+/// a token BM25 never indexes, `widget` keeps BM25's page non-empty, and only
+/// the exact-match lane reaches `arrow.rs`.
+#[tokio::test]
+#[serial_test::parallel]
+async fn ripgrep_lane_off_drops_the_exact_match_lane() {
+    let (state, _tmp) = state_with(LexicalLaneDefaults::default()).await;
+    let q = "widget \"=>\"";
+    let on = search(&state, q, json!({})).await.expect("lane on");
+    assert_ne!(on["intent"], "Definition", "{on}");
+    assert!(ids(&on).iter().any(|i| i == ARROW), "{on}");
+    let off = search(&state, q, json!({ "ripgrep_fallback": false }))
+        .await
+        .expect("lane off");
+    assert!(!ids(&off).is_empty(), "BM25 still answers; got {off}");
+    assert!(
+        !ids(&off).iter().any(|i| i == ARROW),
+        "lane off must drop the exact-match hit; got {off}"
     );
 }
