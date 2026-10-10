@@ -1,2 +1,2 @@
 Fixed
-- The Session Manager palace (`sm-memory`) and the portfolio palace (`manager-memory`) open with writer intent, as the sole owners of their roots, so an existing format-0 palace migrates to format 1 at open instead of being refused with `FormatNeedsMigration` on every start (#9274).
+- The daemon (`tm daemon run`) opens the Session Manager palace (`sm-memory`) and the portfolio palace (`manager-memory`) with writer intent, so an existing format-0 palace migrates to format 1 at open instead of being refused with `FormatNeedsMigration` on every start. `tm sm serve --stdio` opens both palaces read-only, so with the daemon running it still reads them through a snapshot and keeps SM recall, the goal store and the portfolio palace (#9274).

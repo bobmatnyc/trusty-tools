@@ -24,6 +24,7 @@ use super::chat_store::ChatStore;
 use super::inference::ManagerInference;
 use super::memory::PortfolioPalace;
 use super::proposal::ProposalStore;
+use crate::daemon::state::PalaceAccess;
 
 /// The daemon-owned state for the `tm manager` (Layer-3) surface.
 ///
@@ -77,12 +78,13 @@ impl ManagerState {
     /// degrades inside [`PortfolioPalace::provision`], and the inference seam
     /// degrades at call time when no provider is configured (§4 degrade bar), so
     /// neither can fail startup.
-    /// What: provisions the portfolio palace rooted at `framework_root`, the
-    /// credential-backed inference seam, and an empty conversation store.
+    /// What: provisions the portfolio palace rooted at `framework_root` with
+    /// `access` (#9274), the credential-backed inference seam, and an empty
+    /// conversation store.
     /// Test: `manager_state_provisions_palace`.
-    pub fn provision(framework_root: &Path) -> Self {
+    pub fn provision(framework_root: &Path, access: PalaceAccess) -> Self {
         Self {
-            palace: PortfolioPalace::provision(framework_root),
+            palace: PortfolioPalace::provision(framework_root, access),
             inference: ManagerInference::provision(),
             conversations: ChatStore::default(),
             proposals: ProposalStore::new(),
@@ -174,7 +176,7 @@ mod tests {
     #[test]
     fn manager_state_provisions_palace() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let state = ManagerState::provision(dir.path());
+        let state = ManagerState::provision(dir.path(), PalaceAccess::Writer);
         assert_eq!(state.palace().id(), super::super::PORTFOLIO_PALACE_ID);
     }
 }

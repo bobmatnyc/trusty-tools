@@ -30,6 +30,8 @@
 
 use std::path::Path;
 
+use crate::daemon::state::PalaceAccess;
+
 /// The fixed palace id for the single portfolio-scoped manager palace.
 ///
 /// Why: DOC-36 §3.4 mandates exactly ONE portfolio palace, distinct from the
@@ -105,13 +107,14 @@ impl PortfolioPalace {
     /// inherited from the underlying open-or-create: calling this across restarts
     /// against the same root converges on exactly one palace.
     /// What: under `manager-memory`, opens (or creates) the single portfolio
-    /// palace at `<framework_root>/manager/palace`; on success stores the live
+    /// palace at `<framework_root>/manager/palace` with `access` (the daemon as
+    /// writer, `tm sm serve` read-only, #9274); on success stores the live
     /// binding and marks available, on failure logs a warning and marks
     /// unavailable with the error string. Without the feature, returns an
     /// unavailable handle whose reason names the missing feature.
     /// Test: `portfolio_palace_reports_unavailable_without_feature`,
     /// `portfolio_palace_provisions_and_is_idempotent`.
-    pub fn provision(framework_root: &Path) -> Self {
+    pub fn provision(framework_root: &Path, access: PalaceAccess) -> Self {
         let id = PORTFOLIO_PALACE_ID.to_string();
 
         #[cfg(feature = "manager-memory")]
@@ -119,7 +122,7 @@ impl PortfolioPalace {
             let data_root = framework_root.join(MANAGER_DATA_SUBDIR).join("palace");
             // #8545: a test binary fences its home; see `core::home_write_fence`.
             crate::core::home_write_fence::check(&data_root);
-            match PortfolioMemory::open(data_root) {
+            match PortfolioMemory::open_with_intent(data_root, access.open_intent()) {
                 Ok(memory) => Self {
                     id,
                     available: true,
@@ -147,7 +150,7 @@ impl PortfolioPalace {
 
         #[cfg(not(feature = "manager-memory"))]
         {
-            let _ = (framework_root, MANAGER_DATA_SUBDIR);
+            let _ = (framework_root, MANAGER_DATA_SUBDIR, access);
             Self {
                 id,
                 available: false,
@@ -315,7 +318,7 @@ mod live {
     use trusty_common::memory_core::retrieval::{
         PalaceHandle, RecallResult, RememberOptions, recall_with_default_embedder,
     };
-    use trusty_common::memory_core::store::PalaceStore;
+    use trusty_common::memory_core::store::{OpenIntent, PalaceStore};
 
     /// Result alias for portfolio memory operations.
     pub type PortfolioMemoryResult<T> = std::result::Result<T, PortfolioMemoryError>;
@@ -346,25 +349,39 @@ mod live {
         /// populated store). Calling this twice — in one process or across
         /// restarts — must leave EXACTLY ONE palace on disk, never duplicate or
         /// wipe it.
-        /// What: opens the registry at `data_root` with writer intent (it is the
-        /// sole owner of that root, so an existing format-0 palace migrates,
-        /// #9274), binds [`PORTFOLIO_PALACE_ID`],
-        /// then eagerly materialises the palace via the race-safe open-or-create
-        /// [`Self::ensure_palace`]. Any failure is wrapped in
-        /// [`PortfolioMemoryError::Palace`].
-        /// Test: `portfolio_palace_provisions_and_is_idempotent`,
-        /// `an_existing_format_0_portfolio_palace_migrates_at_open`.
+        /// What: [`Self::open_with_intent`] with [`OpenIntent::ReadOnlyClient`].
+        /// Test: `portfolio_palace_provisions_and_is_idempotent`.
         pub fn open(data_root: impl Into<PathBuf>) -> PortfolioMemoryResult<Self> {
+            Self::open_with_intent(data_root, OpenIntent::ReadOnlyClient)
+        }
+
+        /// Open the portfolio palace with an explicit redb open intent.
+        ///
+        /// Why: `tm daemon run` and `tm sm serve --stdio` both provision this
+        /// palace (#9274). The daemon holds it as writer, so a format-0 palace
+        /// migrates; `tm sm serve` reads beside it, since a writer open there
+        /// fails while the daemon holds `kg.redb`.
+        /// What: opens the registry at `data_root` with `intent`, binds
+        /// [`PORTFOLIO_PALACE_ID`], then eagerly materialises the palace via the
+        /// race-safe open-or-create [`Self::ensure_palace`]. Any failure is
+        /// wrapped in [`PortfolioMemoryError::Palace`].
+        /// Test: `an_existing_format_0_portfolio_palace_migrates_at_open`.
+        pub fn open_with_intent(
+            data_root: impl Into<PathBuf>,
+            intent: OpenIntent,
+        ) -> PortfolioMemoryResult<Self> {
             let data_root = data_root.into();
             let palace_id = PalaceId::new(PORTFOLIO_PALACE_ID.to_string());
-            // #9274: this registry is the sole owner of its root, so it opens
-            // with writer intent; a format-0 palace there migrates on open.
-            let registry = PalaceRegistry::open(&data_root)
-                .map(PalaceRegistry::with_writer_intent)
-                .map_err(|source| PortfolioMemoryError::Palace {
+            // #9274: the caller picks the intent; the registry defaults to read-only.
+            let mut registry = PalaceRegistry::open(&data_root).map_err(|source| {
+                PortfolioMemoryError::Palace {
                     palace: palace_id.to_string(),
                     source,
-                })?;
+                }
+            })?;
+            if intent == OpenIntent::Writer {
+                registry = registry.with_writer_intent();
+            }
             let me = Self {
                 registry,
                 data_root,
