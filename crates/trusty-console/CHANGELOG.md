@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.4] — 2026-10-10
+
+### Fixed
+
+- Every non-loopback listener is served behind the tailnet peer gate, chosen by IP rather than list position. An Explicit `--http <non-loopback>` or `TRUSTY_CONSOLE_BIND=<non-loopback>` listener no longer serves every route ungated, and a wildcard (`0.0.0.0`) listener refuses every request (Refs #7524).
+
+### Changed
+
+- The ui-search dev proxy routes through the console's `/api/search` socket bridge instead of trusty-search's TCP :7878; the `/facts` and `/admin` proxy entries are dropped (Refs #9214).
+
 ## [0.12.3] — 2026-10-09
 
 ### Changed
