@@ -1,0 +1,2 @@
+Fixed
+- `tm secrets set` no longer hangs on a stuck paste tool or runs one found through `PATH`. It runs `pbpaste`, `wl-paste`, `xclip` or `xsel` only from fixed system directories, kills the tool and its whole process group after 5 seconds, and refuses clipboard text over 1 MiB. A timeout or oversize is an error and stores nothing; when no tool is found, the error names the directories searched and points to `--value -` (#7524).
