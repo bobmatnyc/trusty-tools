@@ -1625,7 +1625,9 @@ async fn session_store_flags_a_chat_store_stranded_in_a_live_alias_dir() {
     let first = state.session_store("a").expect("store via alias");
     let second = state.session_store("a").expect("store via alias again");
     state.session_store("a2").expect("store via clean alias");
-    state.session_store("stranded-target").expect("store via target");
+    state
+        .session_store("stranded-target")
+        .expect("store via target");
 
     assert!(Arc::ptr_eq(&first, &second), "the redirect still proceeds");
     let flags = log.lines_naming("#9612");
@@ -1681,10 +1683,17 @@ async fn session_store_fails_open_when_the_alias_dir_store_cannot_be_read() {
     live_alias(&state, "loop-target", "loop-alias");
 
     let (log, _guard) = crate::service::core_tests::LogCapture::install();
-    let via_alias = state.session_store("loop-alias").expect("redirect proceeds");
-    let via_target = state.session_store("loop-target").expect("store via target");
+    let via_alias = state
+        .session_store("loop-alias")
+        .expect("redirect proceeds");
+    let via_target = state
+        .session_store("loop-target")
+        .expect("store via target");
 
-    assert!(Arc::ptr_eq(&via_alias, &via_target), "the redirect proceeds");
+    assert!(
+        Arc::ptr_eq(&via_alias, &via_target),
+        "the redirect proceeds"
+    );
     let flags = log.lines_naming("#9612");
     assert_eq!(flags.len(), 1, "one warn for the failed stat: {flags:?}");
     assert!(flags[0].contains("WARN"), "logged at warn: {}", flags[0]);
