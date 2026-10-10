@@ -371,15 +371,16 @@ pub fn config_write(
 /// test run the same load and save against a temp file.
 /// What: loads `path` (absent → defaults), applies `merge`, saves atomically
 /// with [`trusty_common::crate_config::save_at`] and returns the merged
-/// config as JSON.
+/// config as JSON. A file that cannot be read or parsed is an error and is
+/// never written: a save over defaults would replace every section in it.
 /// Test: `config_write_refuses_a_file_it_cannot_parse`.
 pub(crate) fn config_write_at(
     path: &Path,
     merge: impl FnOnce(&mut TrustyToolsConfig) -> Result<(), String>,
 ) -> Result<Value, String> {
+    // #8454 Q2: the erroring loader, never load_or_default.
     let mut config: TrustyToolsConfig = trusty_common::crate_config::load_at(path)
-        .ok()
-        .flatten()
+        .map_err(|e| format!("refusing to save trusty-mpm config: {e}; fix the file first"))?
         .unwrap_or_default();
     merge(&mut config)?;
     trusty_common::crate_config::save_at(path, &config)
