@@ -184,9 +184,10 @@ fn stub_binary(dir: &Path, name: &str, body: &str) -> PathBuf {
 struct SleepingStub {
     /// The executable `sh` script `ensure_daemon_with` is pointed at.
     path: PathBuf,
-    /// Where the stub writes `"$@"` — written FIRST, before the pid.
+    /// Where the stub appends `"$@"` — written FIRST, before the pid. One line
+    /// per spawn, so a #4600 race case can see its second spawn.
     argv_log: PathBuf,
-    /// Where the stub writes `$$`.
+    /// Where the stub appends `$$`, one line per spawn.
     pid_log: PathBuf,
 }
 
@@ -203,7 +204,7 @@ impl SleepingStub {
             dir,
             "tcode-sleep",
             &format!(
-                "echo \"$@\" > {}\necho $$ > {}\nsleep 300",
+                "echo \"$@\" >> {}\necho $$ >> {}\nsleep 300",
                 argv_log.display(),
                 pid_log.display()
             ),
@@ -243,12 +244,13 @@ impl Drop for SleepingStub {
     /// spawned, so nothing else will. A panicking assertion used to strand
     /// one five-minute sleeper per failed test, and a flake investigation
     /// re-runs the suite ~10× — the strays pile up. Best-effort by design: a
-    /// test whose stub was never spawned leaves no pid file.
+    /// test whose stub was never spawned leaves no pid file. Every recorded pid
+    /// is reaped, since a #4600 race case spawns the stub twice.
     fn drop(&mut self) {
-        if let Ok(raw) = std::fs::read_to_string(&self.pid_log)
-            && let Ok(pid) = raw.trim().parse::<u32>()
-        {
-            kill(pid);
+        if let Ok(raw) = std::fs::read_to_string(&self.pid_log) {
+            raw.lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .for_each(kill);
         }
     }
 }
@@ -294,11 +296,43 @@ fn bind_socket_after_spawn(stub: &SleepingStub, dir: &Path, binding: serde_json:
 
 /// [`bind_socket_after_spawn`] at an exact socket path (#4600).
 fn bind_at_after_spawn(stub: &SleepingStub, socket: PathBuf, binding: serde_json::Value) {
-    let argv_log = stub.argv_log.clone();
+    bind_once_argv_has(&stub.argv_log, "", socket, Some(binding));
+}
+
+/// Bind `socket` once the stub's `argv_log` contains `needle` — `""` for the
+/// first spawn, `"--project-socket"` for a #4600 second spawn. `binding:
+/// None` binds a daemon that reports no project. Gives up silently after 2s,
+/// so a case that correctly spawns nothing leaves no stray panic behind.
+fn bind_once_argv_has(
+    argv_log: &Path,
+    needle: &'static str,
+    socket: PathBuf,
+    binding: Option<serde_json::Value>,
+) {
+    let argv_log = argv_log.to_path_buf();
     tokio::spawn(async move {
-        wait_for_record(&argv_log, "argv").await;
-        stub_daemon_at(&socket, Some(binding));
+        for _ in 0..200 {
+            if std::fs::read_to_string(&argv_log)
+                .is_ok_and(|raw| !raw.trim().is_empty() && raw.contains(needle))
+            {
+                stub_daemon_at(&socket, binding);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     });
+}
+
+/// A daemon whose `health` fails: it accepts each connection and drops it, so
+/// `socket_is_serving` sees it live but the `health` call reads EOF (#4600).
+fn mute_daemon_at(socket: &Path) {
+    let dir = socket.parent().expect("a socket path has a parent");
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .expect("harden the stub socket directory");
+    let listener = UnixListener::bind(socket).expect("bind the mute socket");
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .expect("harden the mute socket");
+    tokio::spawn(async move { while listener.accept().await.is_ok() {} });
 }
 
 /// A stub that touches `marker` — used to PROVE a branch never spawned it.
@@ -497,14 +531,82 @@ async fn refuses_another_projects_daemon_on_this_projects_own_socket() {
     );
 }
 
-/// **The #4600 fail-open check.** A socket that starts answering after our
-/// spawn, while our child is still alive, is not proof the answer came from
-/// our child: two TUIs for different projects can race for the free shared
-/// socket, and the loser's child is still starting when the winner answers.
-/// Attaching on readiness alone would hand this TUI the other project's
-/// daemon, so the binding is verified before returning.
+/// Assert a #4600 refusal names `socket`, offers a retry, and never tells the
+/// operator to stop a daemon (owner directive 2026-08-01).
+fn assert_unverified_refusal(rendered: &str, socket: &Path) {
+    assert!(
+        rendered.contains(&socket.display().to_string()),
+        "the refusal must name the daemon's socket {socket:?}: {rendered}"
+    );
+    assert!(
+        rendered.contains("run `tcode tui` again"),
+        "the refusal must carry an actionable remedy: {rendered}"
+    );
+    assert!(
+        !rendered.to_lowercase().contains("stop"),
+        "the refusal must never tell the operator to stop a daemon: {rendered}"
+    );
+}
+
+/// **#4600: an unverifiable shared daemon is refused, never passed over.**
+///
+/// Why: a shared daemon that reports no project, or whose `health` fails, may
+/// already serve this project, so starting this project's daemon beside it
+/// could give one project two daemons. 207f12dfde started one anyway.
+/// What: both unverifiable shapes on the shared socket, for a bound and a
+/// projectless client. A daemon matching the client is staged to answer on
+/// the own socket the moment anything is spawned, so a spawn turns the
+/// refusal into an attach and fails the case.
+/// Test: this test.
 #[tokio::test]
-async fn refuses_another_projects_daemon_that_answers_after_our_spawn() {
+async fn refuses_an_unverifiable_shared_daemon_without_spawning() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let ours = project.path().canonicalize().expect("canonicalize");
+
+    for wanted in [Some(ours.as_path()), None] {
+        for health_fails in [false, true] {
+            let sock_dir = tempfile::tempdir().expect("socket dir");
+            let shared = sock_dir.path().join("tcode.sock");
+            if health_fails {
+                mute_daemon_at(&shared);
+            } else {
+                stub_daemon_at(&shared, None);
+            }
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stub = SleepingStub::new(dir.path());
+            bind_at_after_spawn(&stub, own_socket(&shared, wanted), binding_json(wanted));
+
+            let resolved = ensure_daemon_with(wanted, &stub.path, &shared).await;
+            let case = format!("wanted {wanted:?}, health fails: {health_fails}");
+            let rendered = match &resolved {
+                Err(e) => format!("{e:#}"),
+                Ok(path) => panic!("{case}: must refuse, not attach to {path:?}"),
+            };
+            assert_unverified_refusal(&rendered, &shared);
+            let argv = std::fs::read_to_string(&stub.argv_log).unwrap_or_default();
+            assert!(argv.is_empty(), "{case}: nothing may be spawned: {argv}");
+            assert!(
+                !argv.contains("--project-socket"),
+                "{case}: no daemon may start on the own socket: {argv}"
+            );
+        }
+    }
+}
+
+/// **The #4600 cold-start race, lost to another project.**
+///
+/// Why: two TUIs can both find the shared socket free and both spawn. When
+/// the other project's daemon answers first, our child is still starting, so
+/// readiness alone would attach this TUI to the wrong project — and a bare
+/// refusal would leave this project unable to run.
+/// What: the stub stays alive and never binds. The other project answers on
+/// the shared socket after the first spawn; our project answers on its own
+/// socket only after a second spawn carrying `--project-socket`.
+/// Test: this test.
+#[tokio::test]
+async fn a_cold_start_race_lost_to_another_project_starts_our_own_daemon() {
     let _lock = ENV_LOCK.lock().await;
     let _env = EnvGuard::isolated();
     let their_project = tempfile::tempdir().expect("their project");
@@ -513,23 +615,107 @@ async fn refuses_another_projects_daemon_that_answers_after_our_spawn() {
     let ours = our_project.path().canonicalize().expect("canonicalize");
     let sock_dir = tempfile::tempdir().expect("socket dir");
     let shared = sock_dir.path().join("tcode.sock");
+    let own = own_socket(&shared, Some(&ours));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = SleepingStub::new(dir.path());
-    // The stub stays alive and never binds; the OTHER project answers.
-    bind_at_after_spawn(&stub, shared.clone(), binding_json(Some(&theirs)));
+    let theirs_json = binding_json(Some(&theirs));
+    bind_once_argv_has(&stub.argv_log, "", shared.clone(), Some(theirs_json));
+    let ours_json = binding_json(Some(&ours));
+    bind_once_argv_has(
+        &stub.argv_log,
+        "--project-socket",
+        own.clone(),
+        Some(ours_json),
+    );
 
     let resolved = ensure_daemon_with(Some(&ours), &stub.path, &shared).await;
     assert!(
-        resolved.is_err(),
-        "must not attach to another project's daemon that answered after our spawn: \
-         {resolved:?}"
+        matches!(&resolved, Ok(path) if *path == own),
+        "after losing the shared socket to another project, this project must run \
+         on its own socket {own:?}: {resolved:?}"
     );
-    let rendered = format!("{:#}", resolved.expect_err("checked above"));
+    let argv = stub.argv().await;
+    let spawns: Vec<&str> = argv.lines().collect();
     assert!(
-        rendered.contains(&theirs.display().to_string())
-            && rendered.contains(&ours.display().to_string()),
-        "error must name both projects: {rendered}"
+        spawns.len() == 2
+            && !spawns[0].contains("--project-socket")
+            && spawns[1].contains("--project-socket"),
+        "one shared spawn, then one own-socket spawn: {argv}"
+    );
+}
+
+/// The #4600 cold-start race, lost to a daemon that reports no project: the
+/// re-probe refuses it, exactly as a live one found before spawning is
+/// refused, and starts no second daemon.
+/// Test: this test.
+#[tokio::test]
+async fn a_cold_start_race_lost_to_an_unverifiable_daemon_is_refused() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let ours = project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let shared = sock_dir.path().join("tcode.sock");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
+    bind_once_argv_has(&stub.argv_log, "", shared.clone(), None);
+
+    let err = ensure_daemon_with(Some(&ours), &stub.path, &shared)
+        .await
+        .expect_err("an unverifiable daemon must not be attached to");
+    assert_unverified_refusal(&format!("{err:#}"), &shared);
+    let argv = stub.argv().await;
+    assert!(
+        argv.lines().count() == 1 && !argv.contains("--project-socket"),
+        "only the one shared spawn may happen: {argv}"
+    );
+}
+
+/// The #4600 cold-start race, lost to a daemon of OUR project: our child dies
+/// on the taken socket, and the re-probe attaches to the winner instead of
+/// reporting the failed start.
+/// What: the stub records its argv, waits for the socket file to appear, and
+/// exits 1 — what a real daemon does when its singleton bind is refused.
+/// Test: this test.
+#[tokio::test]
+async fn a_cold_start_race_lost_to_our_own_project_attaches() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let ours = project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let shared = sock_dir.path().join("tcode.sock");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let argv_log = dir.path().join("argv");
+    let stub = stub_binary(
+        dir.path(),
+        "tcode-loses",
+        &format!(
+            "echo \"$@\" >> {argv}\ni=0\nwhile [ ! -S {sock} ] && [ $i -lt 500 ]; do \
+             sleep 0.01; i=$((i+1)); done\nexit 1",
+            argv = argv_log.display(),
+            sock = shared.display(),
+        ),
+    );
+    bind_once_argv_has(
+        &argv_log,
+        "",
+        shared.clone(),
+        Some(binding_json(Some(&ours))),
+    );
+
+    let resolved = ensure_daemon_with(Some(&ours), &stub, &shared).await;
+    assert!(
+        matches!(&resolved, Ok(path) if *path == shared),
+        "a race lost to this project's own daemon must attach to it: {resolved:?}"
+    );
+    let argv = std::fs::read_to_string(&argv_log).unwrap_or_default();
+    assert!(
+        argv.lines().count() == 1 && !argv.contains("--project-socket"),
+        "no second daemon may start for this project: {argv}"
     );
 }
 
@@ -633,8 +819,8 @@ async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
 
 /// A daemon too old to report its binding cannot be verified, so it is
 /// refused — failing CLOSED, since "old build" is no evidence that its
-/// project is the right one. Placed on the client's own socket (#4600); on
-/// the shared socket the same daemon is passed over for a daemon of our own.
+/// project is the right one. Placed on the client's own socket (#4600); the
+/// shared-socket case is `refuses_an_unverifiable_shared_daemon_without_spawning`.
 #[tokio::test]
 async fn refuses_a_daemon_that_cannot_report_its_binding() {
     let _lock = ENV_LOCK.lock().await;
