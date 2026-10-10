@@ -149,7 +149,9 @@ name = "trusty-mpm"
 # 1.8.1 (Refs #9566): patch — 1.8.0 is published on crates.io and this PR
 # edits `src/**`, so the "PR version bump vs crates.io" check (#4421)
 # requires the bump. Bug fix, no signature break.
-version = "1.8.2"
+# 1.9.0 (Refs #9621): minor — 1.8.2 is published on crates.io and this PR adds
+# the `tm secrets exec` subcommand (a feature) under `src/**`.
+version = "1.9.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
