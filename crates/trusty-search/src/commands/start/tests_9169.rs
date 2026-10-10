@@ -7,7 +7,8 @@
 //! What: a real `restore_indexes` over a missing-root colocated row with two
 //! relocation candidates, so the salvage would stamp it ambiguous; the row
 //! must come out of the boot unchanged.
-//! Test: the two tests below.
+//! The same-root dedup prune is barred the same way without the map.
+//! Test: the three tests below.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -123,5 +124,57 @@ async fn the_boot_salvage_never_touches_a_parked_row() {
     assert_eq!(
         row.ambiguous_root_since_unix, None,
         "#9169: a parked row was stamped for an ambiguous-root reap"
+    );
+}
+
+/// Why: an unreadable map cannot say which same-root sibling is parked, so
+/// the warm-boot dedup must not prune the losing sibling's registry row.
+/// What: two colocated rows at one root and a garbage map; after one boot
+/// both rows are still in `indexes.toml`.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn the_boot_dedup_prunes_no_row_without_the_map() {
+    let data = tempfile::tempdir().expect("data dir");
+    let work = home_anchored("ts-9169-dedup-");
+    // SAFETY: `#[serial]` with every other env mutator.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", data.path());
+        std::env::set_var("TRUSTY_DISABLE_WATCHER", "1");
+        std::env::set_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV, "0");
+    }
+    let root = work.path().join("shared");
+    std::fs::create_dir_all(root.join(crate::service::colocated_storage::COLOCATED_DIR_NAME))
+        .expect("shared root");
+    let rows: Vec<PersistedIndex> = ["sibling-a-9169", "sibling-b-9169"]
+        .iter()
+        .map(|id| {
+            let mut row = PersistedIndex::new((*id).to_string(), root.clone());
+            row.colocated = true;
+            row
+        })
+        .collect();
+    crate::service::persistence::save_index_registry(&rows).expect("seed indexes.toml");
+    std::fs::write(data.path().join("project-map.toml"), "garbage [[").expect("map");
+
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(16));
+    let state = SearchAppState::new(IndexRegistry::new())
+        .with_allowlist_paths(approving(data.path(), &[root.as_path()]));
+    super::restore::restore_indexes(&state, &embedder, true).await;
+    let mut after: Vec<String> = crate::service::persistence::load_index_registry()
+        .expect("indexes.toml reads")
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    after.sort();
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var("TRUSTY_DISABLE_WATCHER");
+        std::env::remove_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV);
+    }
+    assert_eq!(
+        after,
+        ["sibling-a-9169", "sibling-b-9169"],
+        "#9169: an unreadable map let the boot dedup prune a sibling's row"
     );
 }

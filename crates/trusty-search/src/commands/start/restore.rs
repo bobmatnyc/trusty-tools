@@ -292,7 +292,16 @@ pub(super) async fn restore_indexes(
 
     let dedup_outcome =
         crate::service::warm_boot::dedup_entries_by_corpus_path_verbose(all_entries);
-    prune_and_persist_dedup_outcome(&dedup_outcome);
+    // #9169: an unreadable map cannot say which sibling is parked; prune no row.
+    if boot_map.is_readable() {
+        prune_and_persist_dedup_outcome(&dedup_outcome);
+    } else if !dedup_outcome.dropped.is_empty() {
+        tracing::warn!(
+            "warm-boot dedup: project map unreadable — {} same-root duplicate(s) skipped \
+             for this boot, indexes.toml left unchanged (#9169)",
+            dedup_outcome.dropped.len()
+        );
+    }
     let all_entries = dedup_outcome.survivors;
     let total_discovered = all_entries.len();
 
@@ -724,7 +733,8 @@ async fn salvage_missing_root_entries(
 /// unit-tested in `warm_boot_tests.rs`; this thin IO wrapper mirrors the
 /// already-covered `remove_index_registry_entry` / `upsert_index_registry_entry`
 /// round-trip semantics and is exercised end-to-end by the warm-boot
-/// integration tests.
+/// integration tests. The caller skips it when the project map is unreadable:
+/// `the_boot_dedup_prunes_no_row_without_the_map`.
 fn prune_and_persist_dedup_outcome(outcome: &crate::service::warm_boot::DedupOutcome) {
     if outcome.dropped.is_empty() {
         return;
