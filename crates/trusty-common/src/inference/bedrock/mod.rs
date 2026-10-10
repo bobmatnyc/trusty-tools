@@ -49,6 +49,7 @@ use aws_types::region::Region;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
+use crate::claude_temperature::accepts_temperature;
 use crate::inference::adapter::InferenceAdapter;
 use crate::inference::configurator::{Configurator, ResolvedProvider};
 use crate::inference::error::InferenceError;
@@ -406,17 +407,23 @@ pub(crate) struct ConverseParts {
 /// What: delegates messages/system to [`convert::build_converse_messages`] and
 /// tools to [`convert::build_tool_config`] (only when `request.tools` is set),
 /// and builds the [`InferenceConfiguration`] from `max_tokens`/`temperature`
-/// via `set_*` so an absent knob omits the field rather than sending a default.
+/// via `set_*` so an absent knob omits the field rather than sending a default;
+/// `temperature` is also omitted for a model [`accepts_temperature`] rejects.
 /// Errors propagate from the converters (an unrepresentable message or an
 /// invalid tool schema).
-/// Test: `super::tests::*` (message/tool conversion) and
-/// `super::tests::stream_*`.
+/// Test: `super::tests::*` (message/tool conversion),
+/// `super::tests::stream_*`, and
+/// `super::tests::build_converse_parts_omits_temperature_only_for_claude_5_5`.
 pub(crate) fn build_converse_parts(request: &ChatRequest) -> Result<ConverseParts, InferenceError> {
     let (system, messages) = convert::build_converse_messages(request)?;
 
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
+    let temperature = request
+        .temperature
+        .filter(|_| accepts_temperature(&request.model));
     let inference = InferenceConfiguration::builder()
         .set_max_tokens(request.max_tokens.map(|v| v as i32))
-        .set_temperature(request.temperature)
+        .set_temperature(temperature)
         .build();
 
     let tool_config = match &request.tools {
