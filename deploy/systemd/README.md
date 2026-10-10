@@ -106,7 +106,7 @@ The `--foreground` flag (added alongside issue #534) keeps the daemon in the
 foreground:
 
 ```
-ExecStart=/usr/local/bin/trusty-search start --foreground --no-auto-discover --port 7878
+ExecStart=/usr/local/bin/trusty-search start --foreground --no-auto-discover
 ```
 
 ## Environment variables

@@ -140,7 +140,8 @@ of those bind it; all three go when that client migrates. Whatever you pick:
   `<data dir>/trusty-search.sock` from #6285 slice 1 and kept 7878 bound
   alongside it while route families moved onto the socket one slice at a
   time. PR-A removed the bind: the daemon serves the socket only, and
-  `--port` is accepted for one release and ignored. 7878 is not reserved by
+  `--port` was accepted for one release and ignored; #9536 removed it, so
+  `start --port` is now an unknown-argument error. 7878 is not reserved by
   anything now.
 - **#6287** — `trusty-analyze` left this table the same way, on the same
   reasoning: it binds `<data dir>/trusty-analyze/trusty-analyze.sock` and has

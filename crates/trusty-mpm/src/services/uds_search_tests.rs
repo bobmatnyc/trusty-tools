@@ -124,6 +124,23 @@ fn default_manifest_declares_trusty_search_by_socket() {
     }
 }
 
+/// Why (#9536): `trusty-search start` rejects `--no-http` and `--port`, so a
+/// default manifest that still passed one would make `tm services start` fail.
+/// What: the embedded trusty-search start and restart commands carry neither.
+/// Test: this test.
+#[test]
+fn default_manifest_starts_trusty_search_without_removed_flags() {
+    let m = ServicesManifest::default_manifest();
+    let ts = &m.services[SEARCH];
+    for cmd in [&ts.start_cmd, &ts.restart_cmd] {
+        let cmd = cmd.as_deref().expect("trusty-search declares the command");
+        assert!(
+            !cmd.contains("--no-http") && !cmd.contains("--port"),
+            "#9536: `{cmd}` passes a flag `start` rejects"
+        );
+    }
+}
+
 /// Why: the UP arm — a socket-only daemon answering `search.health` is
 /// healthy and running, with no port, no PID and no HTTP.
 /// What: a mock daemon on a temp socket that `TRUSTY_SEARCH_SOCKET` names,

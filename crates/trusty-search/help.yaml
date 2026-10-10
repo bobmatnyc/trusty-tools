@@ -150,12 +150,8 @@ commands:
     examples:
       - cmd: trusty-search health
   start:
-    description: Start the HTTP daemon
+    description: Start the socket-only daemon
     flags:
-      - name: port
-        type_hint: PORT
-        default: "7878"
-        description: Port to listen on (auto-walks if busy)
       - name: foreground
         description: Run in the foreground instead of forking a background daemon
       - name: device
@@ -164,7 +160,6 @@ commands:
         description: Embedding device (auto|cpu|gpu)
     examples:
       - cmd: trusty-search start
-      - cmd: trusty-search start --port 7878
       - cmd: trusty-search start --foreground
         note: launchd / systemd / Docker
   stop:

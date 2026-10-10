@@ -56,10 +56,9 @@ pub const NO_AUTO_DISCOVER_ARG: &str = "--no-auto-discover";
 
 /// Unit env keys #9214 retired. A regenerated unit never carries one.
 ///
-/// Why: the daemon ignores `TRUSTY_SEARCH_NO_HTTP` and warns on every boot
-/// that it is set. Regeneration carries forward every key an installed unit
-/// had (#4868), so without this list an old unit's value would outlive the
-/// release that retires it.
+/// Why: the daemon no longer reads `TRUSTY_SEARCH_NO_HTTP` (#9536).
+/// Regeneration carries forward every key an installed unit had (#4868), so
+/// without this list an old unit's dead value would outlive its removal.
 #[cfg(any(target_os = "macos", test))]
 pub const RETIRED_UNIT_ENV: &[&str] = &["TRUSTY_SEARCH_NO_HTTP"];
 
@@ -68,7 +67,9 @@ pub const RETIRED_UNIT_ENV: &[&str] = &["TRUSTY_SEARCH_NO_HTTP"];
 /// Why (#4823, #9214): the auto-discovery choice travels as a flag, never as
 /// an env value (see [`resolve_persisted_env`]). The unit carries no `--port`
 /// and no `--no-http`: the daemon binds no TCP port, and a unit an older
-/// build or claude-mpm wrote with either is replaced, not extended.
+/// build or claude-mpm wrote with either is replaced, not extended. #9536:
+/// `start` now rejects both flags, so `service install` is how such a unit
+/// starts again.
 /// What: `start --foreground`, plus [`NO_AUTO_DISCOVER_ARG`] when
 /// `suppress_auto_discover`.
 /// Test: `generated_unit_carries_no_retired_port_input`.

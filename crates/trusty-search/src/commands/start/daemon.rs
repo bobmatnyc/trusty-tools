@@ -127,15 +127,13 @@ pub(super) fn already_running_message(
 /// `data_dir_flag_wins_over_an_inherited_env_value` and
 /// `an_explicit_data_dir_never_auto_discovers_on_any_start` pin the two
 /// resolvers; `handle_start_reads_the_plan_at_every_scan_site` pins the
-/// wiring. #9214: the daemon serves its RPC socket only. `port` and
-/// `no_http` (and `TRUSTY_SEARCH_NO_HTTP`) are retired: each prints a warning
-/// and is neither used nor forwarded (`retired_flags_warn_and_change_nothing`).
-/// `socket` names the RPC socket the daemon binds instead of the data-dir
-/// one, and is forwarded to the background child
-/// (`auto_start_binds_the_socket_the_client_resolved`).
+/// wiring. #9214: the daemon serves its RPC socket only; #9536 removed the
+/// ignored `--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP`
+/// (`removed_start_inputs_are_refused_or_unread`). `socket` names the RPC
+/// socket the daemon binds instead of the data-dir one, and is forwarded to
+/// the background child (`auto_start_binds_the_socket_the_client_resolved`).
 pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     let super::StartArgs {
-        port,
         foreground,
         device,
         data_dir,
@@ -143,16 +141,9 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         auto_discover,
         fanout_concurrency,
         serial,
-        no_http,
         socket,
     } = args;
-    // #9214 (ruling D2): accepted for one release, warned about, then unused.
-    let no_http_env = std::env::var_os(super::args::RETIRED_NO_HTTP_ENV);
-    for warning in
-        super::args::retired_flag_warnings(port, no_http.as_deref(), no_http_env.as_deref())
-    {
-        eprintln!("{}", warning.yellow());
-    }
+    // #9536: no retired-input warnings — clap rejects `--port` / `--no-http`.
     let device = device.as_str();
     let data_dir = data_dir.as_deref();
     // Apply the data-dir override as early as possible so every per-instance

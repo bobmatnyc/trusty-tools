@@ -19,9 +19,10 @@ services:
     # #9543: the daemon only — a bare "trusty-search" also matches every
     # `trusty-search serve` MCP bridge. Matches `start --foreground ...` too.
     process_match: "trusty-search start"
-    start_cmd: "trusty-search start --no-http"
+    # #9536: `start` rejects `--no-http` and `--port`.
+    start_cmd: "trusty-search start"
     stop_cmd: "trusty-search stop"
-    restart_cmd: "trusty-search stop && trusty-search start --no-http"
+    restart_cmd: "trusty-search stop && trusty-search start"
 
   trusty-analyze:
     description: "Code analysis sidecar daemon (complexity, smells, quality)"
