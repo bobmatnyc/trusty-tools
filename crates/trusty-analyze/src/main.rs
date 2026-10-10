@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use trusty_analyze::core::{facts::new_fact, AnalyzerRegistry, FactStore, TrustySearchClient};
+use trusty_analyze::mcp::daemon_gate::DaemonGate;
 use trusty_analyze::mcp::AnalyzerMcpServer;
 
 mod commands;
@@ -668,8 +669,22 @@ async fn main() -> Result<()> {
                 Some(p) => p,
                 None => trusty_analyze::service::socket_path()?,
             };
-            ensure_daemon_running(&socket).await?;
-            trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(socket)).await
+            // #8279: the guard runs in the background and the first daemon
+            // call awaits it, so `initialize` never waits on a daemon start.
+            let guard_socket = socket.clone();
+            let gate = DaemonGate::new(move || {
+                let socket = guard_socket.clone();
+                async move {
+                    ensure_daemon_running(&socket)
+                        .await
+                        .map_err(|e| format!("{e:#}"))
+                }
+            });
+            trusty_analyze::mcp::stdio::run_with_daemon_gate(
+                AnalyzerMcpServer::new(socket),
+                std::sync::Arc::new(gate),
+            )
+            .await
         }
         Cmd::Service { action } => {
             let action = match action {
