@@ -297,12 +297,12 @@ async fn exec_never_execs_before_the_token() {
     let out = fx
         .run(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", &target])
         .await;
-    assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
         fx.seen().marker_in_grant,
         [false, false],
         "ran before the grant answered"
     );
+    assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(mark.exists(), "the command never ran");
 }
 
