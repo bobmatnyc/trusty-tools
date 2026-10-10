@@ -20,29 +20,65 @@ fn test_identity() -> AgentIdentity<'static> {
     }
 }
 
-/// Sandbox `$HOME` to a fresh tempdir for the duration of `f`, holding
-/// `crate::test_env::HOME_LOCK` so parallel tests never observe each other's
-/// redirected `$HOME` (`UserProfile::profile_path` resolves under `$HOME`).
-/// Restores the previous `$HOME` (or removes it) before returning.
-fn with_sandboxed_home<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
-    let _guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: test-only env mutation, serialized by HOME_LOCK.
-    unsafe {
-        std::env::set_var("HOME", dir.path());
-    }
-    let result = f(dir.path());
-    // SAFETY: restoring the pre-test HOME, still under HOME_LOCK.
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+/// RAII sandbox of `$HOME`: holds `crate::test_env::HOME_LOCK`, points `$HOME`
+/// at a fresh tempdir, and restores the previous `$HOME` (or removes it) on
+/// drop, also when the test panics.
+///
+/// Why: `$HOME` is process-global, and `UserProfile::profile_path` and
+/// `resolve_agent_config` both resolve under it, so every test that reads or
+/// writes it must join the one `HOME_LOCK` domain (#3990). A guard, unlike
+/// [`with_sandboxed_home`]'s closure, can span the `.await` of an async test.
+/// What: `lock_home()` marks per-thread ownership and is for single-threaded
+/// runtimes only, which is what `#[tokio::test]` gives by default.
+/// Test: `resolve_agent_config_falls_back_to_project_ctrl_toml`,
+/// `resolve_agent_config_returns_builtin_when_no_disk_config`,
+/// `project_ctrl_fallback_test_waits_for_a_concurrent_home_writer`.
+struct HomeSandbox {
+    dir: tempfile::TempDir,
+    prev_home: Option<std::ffi::OsString>,
+    // Declared last: `Drop::drop` restores `$HOME` first, then fields drop in
+    // order, so the lock is released only after `$HOME` is restored.
+    _lock: crate::test_env::HomeLockGuard,
+}
+
+impl HomeSandbox {
+    fn new() -> Self {
+        let lock = crate::test_env::lock_home();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: test-only env mutation, serialized by HOME_LOCK.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        Self {
+            dir,
+            prev_home,
+            _lock: lock,
         }
     }
-    result
+
+    fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for HomeSandbox {
+    fn drop(&mut self) {
+        // SAFETY: restoring the pre-test HOME while `_lock` is still held.
+        unsafe {
+            match self.prev_home.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
+/// Run `f` with `$HOME` sandboxed to a fresh tempdir under `HOME_LOCK`, so
+/// parallel tests never observe each other's redirected `$HOME`.
+fn with_sandboxed_home<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+    let sandbox = HomeSandbox::new();
+    f(sandbox.path())
 }
 
 #[test]
@@ -225,7 +261,16 @@ content = "pm-from-disk"
 }
 
 #[tokio::test]
+// Why: the `HomeSandbox` guard (holding `HOME_LOCK`) is deliberately held
+// across the `.await` below; same pattern as
+// `resolve_agent_config_returns_builtin_when_no_disk_config`.
+#[allow(clippy::await_holding_lock)]
 async fn resolve_agent_config_falls_back_to_project_ctrl_toml() {
+    // #3990: `resolve_agent_config` consults `$HOME` (user-level ctrl.toml)
+    // before the project-level file this test exercises. Sandbox `$HOME` to an
+    // EMPTY dir, under `HOME_LOCK`, so neither a sibling's `$HOME` nor a real
+    // `~/.trusty-agents/agents/ctrl.toml` can shadow the project file.
+    let _home = HomeSandbox::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     let agents = tmp.path().join(".trusty-agents/agents");
     std::fs::create_dir_all(&agents).unwrap();
@@ -320,37 +365,16 @@ fn project_ctrl_fallback_test_waits_for_a_concurrent_home_writer() {
 #[allow(clippy::await_holding_lock)]
 async fn resolve_agent_config_returns_builtin_when_no_disk_config() {
     // #3465-followup: this test mutates `$HOME` but previously took NO lock
-    // at all (not even this file's own `with_sandboxed_home` helper, which
-    // is sync-only and can't wrap an `.await`), so it raced every other
-    // HOME-sandboxing test in this file (e.g.
-    // `render_user_context_block_includes_location_when_set`) even when run
-    // in isolation from the rest of the crate. Hold the shared
-    // `crate::test_env::HOME_LOCK` across the `.await` below — this crate
+    // at all, so it raced every other HOME-sandboxing test in this file. Hold
+    // `HomeSandbox` (`HOME_LOCK`) across the `.await` below — this crate
     // already holds `std::sync::Mutex` guards across `.await` in other files
     // (`api::server::tests::ctrl_sessions`, `api::server::tests::models`)
-    // without issue.
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    // without issue. #3990: the guard now also restores `$HOME` on panic.
+    let home = HomeSandbox::new();
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: HOME_LOCK held for the entire test body.
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-
-    let (cfg, _path) = resolve_agent_config(tmp.path()).await.unwrap();
+    let (cfg, _path) = resolve_agent_config(home.path()).await.unwrap();
     assert_eq!(cfg.agent.name, "ctrl");
     assert!(cfg.system_prompt.content.contains("Standalone"));
-
-    // SAFETY: HOME_LOCK still held; restore HOME so other tests aren't affected.
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 // -- render_user_datetime / render_user_context_block (#3052 follow-up) --
