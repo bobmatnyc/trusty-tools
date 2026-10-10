@@ -443,21 +443,33 @@ fn unfinished_outcomes_are_unknown() {
     }
     let host = host_row(&Err(Unfinished::TimedOut(Duration::from_secs(30))));
     assert_eq!(host.status, CheckStatus::Unknown, "{host:?}");
+    let none = view_row("channels_gchat", "gchat view", &Ok(Vec::new()));
+    assert_eq!(none.status, CheckStatus::Unknown, "{none:?}");
 }
 
 #[test]
-fn a_stale_file_state_is_not_ok() {
+fn file_faults_and_odd_states_are_not_ok() {
     let home = Home::new();
     let dir = home.home.join("proj");
-    let parsed = parse_project_file(&slack_route("bob-dm", "U0ABCDEF1"), Some(&home.home));
-    let mut report = merged(&home, &slack_host(&[&dir]), vec![input(&dir, parsed)]);
-    assert!(
-        matches!(report.per_file[0].state, FileState::Effective { .. }),
-        "{report:?}"
-    );
-    report.per_file[0].state = FileState::Stale;
+    let host = slack_host(&[&dir]);
+    let parsed = || parse_project_file(&slack_route("bob-dm", "U0ABCDEF1"), Some(&home.home));
+    for state in [FileState::Stale, FileState::Withheld] {
+        let mut report = merged(&home, &host, vec![input(&dir, parsed())]);
+        assert!(
+            matches!(report.per_file[0].state, FileState::Effective { .. }),
+            "{report:?}"
+        );
+        report.per_file[0].state = state;
+        let routes = view_row("channels_routes", "daemon view", &Ok(vec![report]));
+        assert_eq!(routes.status, CheckStatus::Warn, "{state:?}: {routes:?}");
+    }
+    let broken = Err(ProjectFileError::Parse {
+        reason: "expected a table".into(),
+    });
+    let report = merged(&home, &host, vec![input(&dir, broken)]);
     let routes = view_row("channels_routes", "daemon view", &Ok(vec![report]));
     assert_eq!(routes.status, CheckStatus::Warn, "{routes:?}");
+    assert!(routes.message.contains("expected a table"), "{routes:?}");
 }
 
 #[test]
