@@ -115,6 +115,21 @@ async fn health_reports_chat_available_only_with_a_provider() {
     );
 }
 
+/// #9030: an unresolved or timed-out provider lookup reads `false`.
+///
+/// Why: the error arm of `chat_available`; "cannot tell" must never be `true`.
+/// What: a never-completing resolution under a 20 ms budget yields `false`,
+/// and a completed `true` passes through (so the helper is not constant).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn chat_availability_fails_closed_when_resolution_does_not_finish() {
+    use super::health::resolve_chat_available;
+    use std::time::Duration;
+    let hung = resolve_chat_available(std::future::pending::<bool>(), Duration::from_millis(20));
+    assert!(!hung.await);
+    assert!(resolve_chat_available(async { true }, Duration::from_millis(20)).await);
+}
+
 /// Issue #3408 — a network-mounted index root must surface through
 /// `/health`: `indexes_watcher_network_degraded` counts it and the top-level
 /// `status` flips to `"degraded"`, mirroring the existing

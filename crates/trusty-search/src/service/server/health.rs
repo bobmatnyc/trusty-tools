@@ -331,6 +331,38 @@ pub(super) struct HealthResponse {
     /// Test: `run_daemon_health_reports_the_transport_it_bound`,
     /// `health_reports_a_null_transport_when_no_listener_was_bound`.
     pub(super) transport: DaemonTransport,
+    /// #9030: whether `search.chat` can answer, i.e. a chat provider exists.
+    ///
+    /// Why: the console's chat panel gated on nothing and offered a chat that
+    /// answered 503 "no chat provider available" on a daemon with no key and no
+    /// local model server.
+    /// What: `true` only when [`SearchAppState::chat_provider`] resolves to a
+    /// provider (a local Ollama / LM Studio server, or an OpenRouter key) -
+    /// the state the chat path decides on. Fails closed: `false` with no
+    /// provider and when resolution does not finish within
+    /// [`CHAT_PROBE_BUDGET`]. Additive; no existing key changes.
+    /// Test: `health_reports_chat_available_only_with_a_provider`,
+    /// `chat_availability_fails_closed_when_resolution_does_not_finish`.
+    pub(super) chat_available: bool,
+}
+
+/// How long `/health` waits for chat-provider resolution before it reports
+/// `chat_available: false` (the local probe's own budget is 1 s).
+pub(super) const CHAT_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Resolve `chat_available` from a provider-resolution future, failing closed.
+///
+/// Why: a health probe must not hang on a wedged local-model probe, and an
+/// undeterminable answer must never read as `true` (#9030).
+/// What: awaits `resolved` for at most `budget`; a timeout is `false`.
+/// Test: `chat_availability_fails_closed_when_resolution_does_not_finish`.
+pub(super) async fn resolve_chat_available(
+    resolved: impl std::future::Future<Output = bool>,
+    budget: std::time::Duration,
+) -> bool {
+    tokio::time::timeout(budget, resolved)
+        .await
+        .unwrap_or(false)
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38; reworked
@@ -985,6 +1017,12 @@ pub(super) async fn health_handler(
         embedder_bootstrap,
         // #9030: report the listeners bound, never a guessed default.
         transport: state.transport.clone(),
+        // #9030: the same provider resolution `search.chat` decides on.
+        chat_available: resolve_chat_available(
+            async { state.chat_provider().await.is_some() },
+            CHAT_PROBE_BUDGET,
+        )
+        .await,
     })
 }
 

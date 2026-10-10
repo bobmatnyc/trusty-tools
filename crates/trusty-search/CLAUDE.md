@@ -192,6 +192,12 @@ daemon.
     retries it, because a partial walk may have committed chunks and the cause
     that killed the first walk would likely kill the retry. Clear it with
     `POST /indexes/:id/reindex`.
+  - `chat_available` (#9030): `true` only when a chat provider exists - a
+    reachable local Ollama / LM Studio server or an OpenRouter key - the same
+    resolution (`SearchAppState::chat_provider`) that makes `search.chat`
+    answer "no chat provider available". Fails closed: `false` with no
+    provider, and `false` when resolution takes over 2 s. Additive, always
+    present; the console passes the `search.health` body through unchanged.
   - `indexes_stage_failed_ids` (#6688): the ids behind
     `warmboot_summary.indexes_stage_failed`, so a consumer can act on the
     specific index instead of polling `GET /indexes/:id/status` for every
