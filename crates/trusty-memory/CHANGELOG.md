@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.33.0] — 2026-10-10
+
+### Added
+
+- `memory_remember` accepts an optional `type` (`Ruling`, `Decision`, `Status`, `Turn` or `Reference`, any case). The drawer is stored with that type and `memory_list` reports it as `drawer_type`; without `type` the heuristic classifier runs as before. Any other value, including `UserFact` or a non-string, is an error and nothing is written. `memory_note`, `memory.remember_async` and HTTP create-drawer are unchanged (#9144).
+- `trusty-memory doctor` reports a palace the daemon has yet to migrate to this binary's format as "needs migration by the daemon" (a warning), apart from a palace it refuses (#9274).
+- `doctor` warns that a palace's format could not be verified when its `kg.redb` is held by a running daemon or needs crash repair, instead of reporting it current (#9274).
+- The daemon now warns once per alias when a chat store written before the alias redirect (#9544) still sits in the alias's own directory (`<root>/<alias>/chat_sessions.redb`). The warning names the file, its size and the target palace, and tells the operator to back the file up, then merge it by hand or delete it. The file is never opened or changed. Refs [#9612](https://github.com/bobmatnyc/trusty-tools/issues/9612)
+
+### Fixed
+
+- Recall now treats an unkeyed drawer tagged `checkpoint` as a session snapshot: a stale one loses score by age like a `status` drawer, composing with the Status/Turn type factor, and a live fact key still exempts it. Tag matching stays exact (#9391).
+
+### Changed
+
+- Recall ranking reads the drawer type. A `Ruling` or `Decision` drawer counts as a ruling, like a ruling tag, for snapshot demotion and the cross-palace rulings leg. A `Status` drawer's score is multiplied by 0.8 and a `Turn` drawer's by 0.7, on top of any snapshot decay; a drawer holding a live `fact_key` slot is exempt (#9144).
+
 ## [0.32.1] — 2026-10-10
 
 ### Breaking

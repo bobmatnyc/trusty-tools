@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.60.0] — 2026-10-10
+
+### Breaking
+
+- A format-0 palace is refused with `FormatNeedsMigration` on every read-only open — `PalaceHandle::open_with_intent(.., OpenIntent::ReadOnlyClient)` and a `PalaceRegistry` left at its default intent — until a writer-intent open migrates it (ADR-0067 D3 rule 2). A registry that is the sole owner of its root must call `with_writer_intent()`.
+- `KgStoreRedb::open` and `KgStoreRedb::open_with_intent` refuse a format-0 `kg.redb` under every intent; open the palace through a writer-intent `PalaceHandle` first.
+- A `kg.redb` in an incompatible redb format is refused under writer intent, its bytes untouched, instead of being renamed to `*.v2-incompatible` and recreated empty (ADR-0067 D5).
+- A palace at format 1 cannot be downgraded: a binary that reads only format 0 refuses it, and no 1 → 0 migration exists. Restore the format-migration backup under `<data_root>/backups/format-migration/<palace>/` to go back.
+
+### Added
+
+- Palace format 1 and the 0 → 1 migration (ADR-0067, #9274). The first writer-intent `PalaceHandle` open of a format-0 palace migrates it, including the daemon's startup hydration, which opens each palace that way (ADR-0067 Consequences): free-space check, verified backup with its manifest written last, `kg.redb` held exclusively, a `format_migration.json` record naming that backup, the `palace.json` mirror, then the triple-key rewrite and both `kg_schema` markers in one redb transaction. A crash or error at any step is completed by the next writer open; a resume trusts only a backup that still verifies.
+- One migration of a palace runs at a time: a second writer open in the same process waits and then sees the migrated palace, and a second process fails at once with `FormatMigrationFailed`, writing nothing, while another holds the palace directory's migration lock.
+- `palace_format::palace_format_status` and `PalaceFormatStatus`, a no-write read of a palace's format state for `doctor`, with `Unverified` for a `kg.redb` that cannot be read without writing (held by a running daemon, or in need of crash repair); and `format_backup::backup_data_root`.
+- `PalaceStoreError::FormatMigrationFailed`, a format refusal naming the palace, both formats and the failed step.
+- The `memory-core-test-support` feature and `memory_core::store::format_v0_fixture`, a format-0 palace written from the old on-disk shapes, for a downstream test that its registry migrates existing palaces.
+
+### Changed
+
+- `PALACE_FORMAT_SUPPORTED` is now 1. A new KG is stamped at format 1 when it is created.
+- The #4810 triple-key rewrite no longer runs at every KG open and no longer fails open: it is the KG step of the format migration, behind the format backup, and an undecodable legacy row or a triple-key marker above 1 fails the migration instead of being skipped. The `kg.redb.pre-4810.bak` sidecar is no longer written.
+- Derived stores keep the #702 recovery of an incompatible redb file.
+- The KG open re-reads the format marker on the database it opened on every fresh open, not only when the pre-open read was deferred.
+- A format-migration backup is reused only when its manifest matches the palace's current files.
+
 ## [0.59.2] — 2026-10-10
 
 ### Breaking
