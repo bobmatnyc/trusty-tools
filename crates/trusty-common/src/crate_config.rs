@@ -125,7 +125,13 @@ impl YamlErrorKind {
     ];
 
     /// Classify a serde message by its earliest known prefix; the text is not kept.
+    ///
+    /// `unknown field` wins wherever it appears: that kind truncates the key
+    /// path, so a misclassification errs toward hiding a key, never showing one.
     fn classify(message: &str) -> Self {
+        if message.contains("unknown field `") {
+            return Self::UnknownField;
+        }
         Self::MARKERS
             .iter()
             .filter_map(|(marker, kind)| message.find(marker).map(|at| (at, *kind)))
@@ -155,9 +161,13 @@ impl YamlErrorKind {
 /// and `load_or_default` logged it at warn on every load. An operator still
 /// needs to find the bad field, so the kind, the key path and the line survive.
 /// What: built from the `serde_yaml` error without storing its text. The key
-/// path comes from `serde_path_to_error` (map keys and field names, never
-/// values); `None` at the document root. Line and column are 1-based.
+/// path comes from `serde_path_to_error`: the accepted keys leading to the
+/// failing node, never a rejected scalar. For `UnknownField` the rejected key
+/// is itself input, so the path stops at its parent map. Map keys that were
+/// accepted (a `HashMap<String, _>` entry) do appear. `None` at the document
+/// root. Line and column are 1-based.
 /// Test: `a_type_error_on_a_secret_field_never_reaches_the_log_9603`,
+/// `an_unknown_key_never_reaches_the_key_path_9603`,
 /// `no_parse_failure_shape_echoes_the_offending_value_9603`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YamlErrorDetail {
@@ -174,11 +184,18 @@ pub struct YamlErrorDetail {
 impl YamlErrorDetail {
     /// Describe a load failure. `serde_yaml`'s text is read to classify, then dropped.
     fn from_parse(err: serde_path_to_error::Error<serde_yaml::Error>) -> Self {
-        let key_path = err.path().to_string();
+        let kind = YamlErrorKind::classify(&err.inner().to_string());
+        // #9603: an unknown key is the last segment, recorded before the
+        // field visitor rejected it — drop it so the path ends at the parent.
+        let keep = match kind {
+            YamlErrorKind::UnknownField => err.path().iter().len().saturating_sub(1),
+            _ => usize::MAX,
+        };
+        let key_path = render_key_path(err.path().iter().take(keep));
         let inner = err.into_inner();
         Self {
-            key_path: (key_path != ".").then_some(key_path),
-            ..Self::new(YamlErrorKind::classify(&inner.to_string()), &inner)
+            key_path,
+            ..Self::new(kind, &inner)
         }
     }
 
@@ -196,6 +213,22 @@ impl YamlErrorDetail {
             column: location.as_ref().map(serde_yaml::Location::column),
         }
     }
+}
+
+/// Join path segments as `serde_path_to_error::Path` displays them
+/// (`a.b[0].c`); `None` for the document root.
+fn render_key_path<'a>(
+    segments: impl Iterator<Item = &'a serde_path_to_error::Segment>,
+) -> Option<String> {
+    let mut out = String::new();
+    for segment in segments {
+        let is_index = matches!(segment, serde_path_to_error::Segment::Seq { .. });
+        if !out.is_empty() && !is_index {
+            out.push('.');
+        }
+        out.push_str(&segment.to_string());
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 impl std::fmt::Display for YamlErrorDetail {
