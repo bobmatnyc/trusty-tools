@@ -195,6 +195,10 @@ serde_json = "1"
 # trusty-agents and trusty-search were migrated back onto `serde_yaml` in #2991.
 # Do not reintroduce `serde_yml` or `libyml`.
 serde_yaml = "0.9"
+# Key path of a deserialisation failure (`log_drain.secrets`), so
+# `trusty_common::crate_config` can report where a config is wrong without
+# keeping serde's message, which quotes the rejected value (#9603).
+serde_path_to_error = "0.1"
 # Jaro-Winkler / Levenshtein similarity helpers used by the
 # `trusty_common::help` "did you mean?" suggester behind the `cli-help`
 # feature. Pure-Rust, no transitive native deps.

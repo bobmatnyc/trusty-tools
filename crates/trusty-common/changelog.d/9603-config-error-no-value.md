@@ -1,0 +1,2 @@
+Fixed
+- A config file that fails to parse no longer writes the offending value to the log or to the error text. `crate_config::ConfigError::Yaml` now carries a `YamlErrorDetail` (error kind, key path, line and column) in place of `serde_yaml`'s message, which quoted the rejected scalar; a type error under trusty-mpm's `log_drain.secrets` had logged the token at warn on every config load (#9603). The warn-and-default fallback of `load_or_default` is unchanged, and the new `load_or_default_at` is its path-taking core.
