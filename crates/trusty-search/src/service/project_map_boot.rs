@@ -5,7 +5,7 @@
 //! reconcile — and out of the boot orphan heal, which would deregister one.
 //! What: [`BootMap::load`] runs [`super::project_map_state::ensure_map`] once
 //! on the blocking pool; the rest filter the warm-boot entry list.
-//! Test: `service::project_map_state_tests` (`a_parked_index_is_skipped_on_boot`).
+//! Test: `a_parked_index_is_skipped_on_boot` (`project_map_state_tests.rs`).
 
 use std::collections::HashSet;
 

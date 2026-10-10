@@ -1,0 +1,7 @@
+Added
+
+- `project-map.toml`, the canonical project-to-index map, next to `indexes.toml` (refs [#9169](https://github.com/bobmatnyc/trusty-tools/issues/9169)). The first boot with no map pins each project to the index `search.project.resolve` returns today and parks nothing; `indexes.toml` and `projects.json` are not changed. After that, `search.project.resolve` answers from the map and reports `pinned_by`.
+  - A map that cannot be parsed, has a newer schema or cannot be read fails closed: `search.project.resolve` and `search.project.map` return an internal error naming the file and the remedy, and the file is never rewritten. A resolve by an exact index id still works.
+  - New socket methods `search.project.map`, `search.project.park`, `search.project.unpark` and `search.project.pin`, and the CLI `trusty-search project map|park|unpark|pin|rebuild-map`. `rebuild-map` moves the old file to `project-map.toml.corrupt-<unix>` first.
+  - Only a worktree, an orphaned root or a same-root sibling can be parked; a second main checkout is refused. A parked index keeps its corpus and its registration, is not loaded at boot, watched, reindexed or searched by `search.query.all`, and is listed by `search.indexes.list` with `parked: true`. Prune and the boot orphan heal never remove it. A search or reindex naming it answers `-32009` with `data` `{parked, canonical_index_id, key}`.
+  - Unpark clears the row, reloads the index and queues a reindex. A new index for a project with no pin gets a `create` pin.

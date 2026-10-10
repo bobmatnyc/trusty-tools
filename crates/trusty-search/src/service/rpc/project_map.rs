@@ -18,7 +18,7 @@
 //! Free: a registry read, one map read-modify-write, and `stat`s bounded to
 //! the target's group, like `search.project.resolve`.
 //!
-//! Test: `rpc/project_map_tests.rs`.
+//! Test: `project_park_tests.rs` (socket) and `project_map_state_tests.rs` (rules).
 //!
 //! [`register`]: crate::service::rpc::project_map::register
 

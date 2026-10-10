@@ -7,7 +7,7 @@
 //! `rebuild-map` runs in this process against the data dir: it moves the
 //! current map aside to `project-map.toml.corrupt-<unix>` and writes a fresh
 //! migration. It is the one way past a map the daemon refuses to read.
-//! Test: `service::project_map_state_tests` covers the rules these call.
+//! Test: `project_map_state_tests.rs` covers the rules these call.
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};

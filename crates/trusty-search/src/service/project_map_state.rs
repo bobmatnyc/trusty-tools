@@ -9,7 +9,7 @@
 //! [`pin_decision`] apply the park and pin rules; [`retain_unparked`] keeps a
 //! prune off parked indexes. Every function that reads a root or a corpus is
 //! blocking and runs on the blocking pool.
-//! Test: `service::project_map_state_tests`.
+//! Test: `project_map_state_tests.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

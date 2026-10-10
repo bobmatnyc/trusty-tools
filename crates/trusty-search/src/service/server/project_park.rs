@@ -9,7 +9,7 @@
 //! `parked: true` rows to `search.indexes.list`; [`detach_parked`] unloads a
 //! newly parked index; [`reindex_after_unpark`] reloads one and queues its
 //! reindex.
-//! Test: `service::rpc::project_map_tests`.
+//! Test: `project_park_tests.rs`.
 
 use std::sync::Arc;
 
