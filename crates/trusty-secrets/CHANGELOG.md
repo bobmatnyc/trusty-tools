@@ -6,6 +6,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.3] — 2026-10-10
+
+### Fixed
+
+- Every Keychain call (read, write, delete, and the "agents may use" flag item read by `list`) now has a time limit, `KEYCHAIN_CALL_TIMEOUT` (60 s), cut to a server request's deadline when that is sooner ([#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)). A call blocked on an unanswered access prompt no longer holds its caller: past the limit it fails with the new `SecretsError::Timeout`, which names the backend, the operation, the vault and the key, and on the wire with the new kind `backend_timeout` (-32081). A timeout is never a miss, an empty value or a success, and no call starts once the request deadline has passed.
+- The timed-out call is abandoned, not stopped: its thread stays blocked until the OS prompt ends, and a write it started may still land then. Until that thread ends, every later call on the same Keychain item (a key's value, or its flag item) fails at once with `Timeout` and is never started, so the late write cannot land after a newer one; calls on other items are unaffected. Both error texts say so.
+- A 1Password or Keeper CLI call still running when the server exits (idle, `SIGTERM` after its drain, or a panic) no longer outlives the server process ([#9572](https://github.com/bobmatnyc/trusty-tools/issues/9572)). The server now raises a cancel flag when its serve loop ends; the call kills and reaps the CLI's whole process group within one 10 ms poll, and no new CLI call starts after that. Before, the call's thread was abandoned at exit and the CLI, with any child it started, kept running under pid 1 until its own timeout (60 s by default). A write the CLI had started may or may not land.
+- A server request whose backend call never returns (for example the file backend on a hung mount) now answers `deadline_exceeded` (-32079) 2 s after its deadline instead of never answering ([#9572](https://github.com/bobmatnyc/trusty-tools/issues/9572)). The stuck call cannot be cancelled: its thread keeps running until the call returns, and a write it started may still land then.
+- Each server process runs at most 64 method calls at once. A call holds its slot until its thread finishes, so calls that never return hold at most 64 threads per server process; a request that waits for a slot past its deadline, or gets one only after its deadline, answers `deadline_exceeded` and runs nothing, never a success or an empty result.
+- The server process exits within 2 s (`EXIT_GRACE`) of an idle exit or a signal, however many backend calls are stuck. Calls still running then are abandoned, so a write such a call started may or may not land. Before, the exit waited with no limit for every stuck call, leaving one hung server process per idle cycle.
+
+### Security
+
+- The "agents may use" flag is held by the backend as its own item per key, no longer by the 0600 names-only index file, which any same-uid process could edit to make `resolve_reference(.., agent_parent = true)` return a value ([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)). On the Keychain the flag is the item service `trusty-secrets.agents`, account `<vault>/<key>`, present when on; `MemoryBackend` keeps it in memory. A missing item reads off, and a failed lookup is an error, never on.
+- `SecretBackend` gains `agents_may_use` and `set_agents_may_use`, with defaults that read every key off and refuse to turn one on; the file, 1Password and Keeper backends use the defaults, so no key on them can be flagged.
+- `SecretStore::list`, `SecretStore::set_agents_may_use` and the agent gate take the flag from the backend, and `secrets.list` reads it from the project's backend; when that backend does not open, `secrets.list` still answers from the index with every flag off. A delete removes the flag item from every swept backend, and a new key's stale flag item is removed before its value is written; a removal that fails fails the delete (the index row stays) or the set (no value is stored).
+- The index field `agents_may_use` still loads from an existing file but is ignored and no longer written, so every flag set before this release reads off; nothing shipped set one. `NamesIndex::set_agents_may_use` is deprecated: it refuses `true` and never changes the file.
+
 ## [0.1.2] — 2026-10-08
 
 ### Added
