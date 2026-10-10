@@ -86,7 +86,7 @@ export function dashboardTransport(health, win = typeof window === 'undefined' ?
  */
 export function chatUnavailableReason(mode) {
   if (mode === 'console') {
-    return 'Chat is not available through the console: no trusty-search socket method serves /chat (#6285).';
+    return 'Chat is unavailable: no chat provider configured on the daemon (set OPENROUTER_API_KEY or run a local model server such as Ollama or LM Studio).';
   }
   return 'Chat needs OPENROUTER_API_KEY in the daemon environment or a running local model server (Ollama / LM Studio).';
 }

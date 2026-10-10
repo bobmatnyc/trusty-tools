@@ -171,6 +171,7 @@ fn health_response_contains_stall_fields() {
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",
         transport: Default::default(),
+        chat_available: false,
     };
 
     let json: Value = serde_json::to_value(&resp).expect("serialize");
@@ -240,6 +241,7 @@ fn health_response_omits_last_ok_when_none() {
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",
         transport: Default::default(),
+        chat_available: false,
     };
 
     let json: Value = serde_json::to_value(&resp).expect("serialize");

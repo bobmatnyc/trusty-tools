@@ -21,26 +21,20 @@ let _statusSource = null;
 let _statusRefcount = 0;
 
 /**
- * Why: The Chat panel must be hidden when no provider is configured, and the
- * determination must work both before the first /health response arrives (via
- * the server-injected window.__OPENROUTER_ENABLED__ global) and stay reactive
- * once /health has loaded (which now includes a `chat_available` field).
- * What: Returns true when either the injected boot global is truthy OR the
- * most-recent /health response carries `chat_available: true`.
- * Test: Set window.__OPENROUTER_ENABLED__ = true in the browser console; call
- * getChatAvailable() and assert true. Set to false, assert false.
+ * Why: The Chat panel must be hidden when the daemon has no chat provider. The
+ * daemon reports that in `/health` as `chat_available` (#9030), and the console
+ * passes the body through unchanged, so one field answers for both transports.
+ * What: A boolean `chat_available` from the latest /health wins. Console-served
+ * pages decide from it alone and fail closed: a missing or non-boolean field,
+ * or no health payload yet, is false (the boot global is the daemon's own
+ * injection and is not trusted there). Daemon-served pages fall back to the
+ * injected `window.__OPENROUTER_ENABLED__` until /health carries a boolean.
+ * Test: `getChatAvailable (#9030)` in `state.test.js`.
  */
 export function getChatAvailable() {
-  // Through the console `/chat` answers 501 whatever the daemon's provider
-  // setup: no socket method serves it (#6285).
+  const reported = _health?.chat_available;
+  if (typeof reported === 'boolean') return reported;
   if (isConsoleServed()) return false;
-  // Prefer the live /health value (updated by the poll loop) so a daemon
-  // restart with a newly-configured key is picked up without page refresh.
-  if (_health?.chat_available !== undefined) {
-    return Boolean(_health.chat_available);
-  }
-  // Fall back to the server-injected boot global while the first /health
-  // round-trip is still in flight.
   if (typeof window !== 'undefined' && window.__OPENROUTER_ENABLED__ !== undefined) {
     return Boolean(window.__OPENROUTER_ENABLED__);
   }
@@ -93,7 +87,9 @@ export function subscribeStatusStream() {
         _liveStats = payload;
         // Mirror into _health so existing $derived(getHealth()) consumers
         // keep updating live without code changes elsewhere.
+        // #9030: keep the other /health fields (`chat_available`, `transport`).
         _health = {
+          ...(_health ?? {}),
           status: 'ok',
           version: payload.version || _health?.version || '',
           indexes: payload.indexes,

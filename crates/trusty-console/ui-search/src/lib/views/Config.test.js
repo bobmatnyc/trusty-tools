@@ -61,7 +61,7 @@ describe('Daemon details', () => {
     expect(rows['Dashboard reaches the daemon']).toContain("/api/search/ is bridged to the daemon's Unix socket");
     expect(rows['Daemon socket']).toBe('not reported by the daemon');
     expect(rows['Daemon HTTP listener']).toBe('not reported by the daemon');
-    expect(rows['Chat']).toContain('not available through the console');
+    expect(rows['Chat']).toContain('no chat provider configured on the daemon');
     expect(rows['Chat']).not.toContain('restart the daemon');
   });
 
