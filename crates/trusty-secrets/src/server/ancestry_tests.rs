@@ -383,7 +383,9 @@ mod os_table {
 
     /// Spawn `/bin/sh` through a link named `node`, so its Linux `comm` is
     /// `node`, with argv `node <dir>/<script>`: the script operand, a shell
-    /// file whose `sleep; :` keeps the shell alive.
+    /// file whose `sleep; :` keeps the shell alive. Returns once the child's
+    /// `/proc/<pid>/cmdline` shows that argv, and panics if it does not
+    /// within 10 s.
     #[cfg(target_os = "linux")]
     fn spawn_node(dir: &std::path::Path, script: &str) -> std::process::Child {
         use std::os::unix::process::CommandExt;
@@ -394,11 +396,26 @@ mod os_table {
         let path = dir.join(script);
         std::fs::create_dir_all(path.parent().expect("script dir")).expect("mkdir");
         std::fs::write(&path, "sleep 30; :\n").expect("write script");
-        std::process::Command::new(&link)
+        let mut child = std::process::Command::new(&link)
             .arg0("node")
             .arg(&path)
             .spawn()
-            .expect("spawn node-named sh")
+            .expect("spawn node-named sh");
+        // #9621: `spawn` returns mid-execve, when `comm` is already `node` but
+        // the cmdline is still empty, so wait for the exec'd argv first.
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match super::super::os::argv(pid) {
+                Ok(argv) if argv.first().map(String::as_str) == Some("node") => return child,
+                last if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child {pid} argv not readable within 10 s; last read {last:?}");
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
     }
 
     /// Why: #9621, ruling Q2, on the host table — a process named `node`
