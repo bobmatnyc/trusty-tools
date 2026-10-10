@@ -2302,23 +2302,24 @@ jobs:
 
   # --------------------------------------------------------------------------
   # search-daemon-smoke: build the trusty-search binary under the `ci-smoke`
-  # profile and verify that the HTTP daemon starts and answers /health with
-  # status=ok.
+  # profile and verify that the daemon starts and answers `search.health` on
+  # its Unix socket. #9214: the daemon binds no TCP port, so the probe is the
+  # CLI's `monitor status --json`, which dials the socket and never starts a
+  # daemon.
   #
   # Design notes (issue #952):
   #
   # FLAKE AVOIDANCE — issue #865 documented fastembed/ONNX HTTP-429 flake
   # when the model is downloaded at startup. This job avoids that by:
   #   1. TRUSTY_NO_KG=1 — skip knowledge-graph init (no network calls needed).
-  #   2. The /health endpoint returns HTTP 200 with status="ok" immediately
-  #      once the axum server binds, even while the embedder is still
-  #      initialising in the background. The embedder field reports
-  #      "initialising" but the HTTP status is always 200 — the smoke check
-  #      only needs the server to be reachable, not for the model to be ready.
+  #   2. `search.health` answers as soon as the socket is served, even while
+  #      the embedder is still initialising in the background — the smoke
+  #      check only needs the daemon to answer, not for the model to be ready.
   #   3. --no-auto-discover — skip the startup project-scan so the daemon does
   #      not walk ~/Projects or ~/code on the ephemeral runner.
   #   4. --data-dir /tmp/ts-smoke — fully isolated data directory so no
-  #      indexes.toml, lockfile, or port-file collides with any other process.
+  #      indexes.toml, lockfile, or socket collides with any other process.
+  #      The daemon serves /tmp/ts-smoke/trusty-search.sock.
   #
   # REQUIRED, AND ABLE TO FAIL (#4179). This job used to carry
   # `continue-on-error: true` and describe itself as OPTIONAL while branch
@@ -2341,8 +2342,8 @@ jobs:
   #
   # TEARDOWN — the daemon is killed at the end via the stored PID. This is
   # correct CI behaviour: ephemeral runners are discarded after the job
-  # completes, but explicit teardown ensures the port is freed if a later step
-  # reuses the runner.
+  # completes, but explicit teardown ensures the socket is released if a later
+  # step reuses the runner.
   # --------------------------------------------------------------------------
   search-daemon-smoke:
     name: trusty-search daemon smoke test
@@ -2393,7 +2394,7 @@ jobs:
       # The committed ui-dist/ bundle is used as-is; pnpm is not required.
       #
       # `--profile ci-smoke`, not `--release`: this job builds trusty-search
-      # only to start it and assert `/health` returns `status=ok`. The
+      # only to start it and assert `search.health` answers on its socket. The
       # ci-smoke profile drops thin LTO and opt-level 3 (see the profile's
       # comment in the root Cargo.toml, which records the coverage trade this
       # makes). Named profiles are stable since Cargo 1.57; this job pins
@@ -2418,50 +2419,69 @@ jobs:
           TRUSTY_DEVICE: cpu
           RUST_LOG: "info"
           # GitHub ubuntu-latest runners report ~15.6 GB RAM, just below the
-          # 16 GB startup floor. This smoke test only checks HTTP connectivity,
-          # not indexing or embedding, so the RAM floor adds no value here.
+          # 16 GB startup floor. This smoke test only checks that the daemon
+          # answers, not indexing or embedding, so the RAM floor adds no value.
           TRUSTY_SKIP_RAM_CHECK: "1"
         run: |
           mkdir -p /tmp/ts-smoke
           ./target/ci-smoke/trusty-search start \
             --foreground \
-            --port 7999 \
             --data-dir /tmp/ts-smoke \
             --no-auto-discover \
             > /tmp/ts-smoke/daemon.log 2>&1 &
           echo $! > /tmp/ts-smoke/daemon.pid
           echo "Daemon PID: $(cat /tmp/ts-smoke/daemon.pid)"
 
-      - name: Wait for /health (poll up to 30 s)
+      # #9214: the daemon serves only its Unix socket. `monitor status --json`
+      # reads `search.health` and `search.indexes.list` there, exits non-zero
+      # when either fails, and never starts a daemon, so a poll cannot spawn
+      # a second one. `timeout 5` bounds one probe against a stuck accept.
+      - name: Wait for search.health on the socket (poll up to 30 s)
         if: needs.changes.outputs.docs_only != 'true'
+        env:
+          TRUSTY_SEARCH_SOCKET: /tmp/ts-smoke/trusty-search.sock
         run: |
-          PORT=7999
           DEADLINE=$(( $(date +%s) + 30 ))
-          until curl -sf "http://127.0.0.1:${PORT}/health" > /tmp/ts-smoke/health.json 2>/dev/null; do
+          until timeout 5 ./target/ci-smoke/trusty-search monitor status --json > /tmp/ts-smoke/health.json 2> /tmp/ts-smoke/probe.err; do
             if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+              echo "--- last probe stderr ---"
+              cat /tmp/ts-smoke/probe.err || true
               echo "--- daemon log ---"
               cat /tmp/ts-smoke/daemon.log || true
               echo "--- end daemon log ---"
-              echo "ERROR: /health did not respond within 30 s" >&2
+              echo "ERROR: search.health did not answer on ${TRUSTY_SEARCH_SOCKET} within 30 s" >&2
               exit 1
             fi
             sleep 1
           done
-          echo "Daemon is up. Health response:"
+          echo "Daemon is up. Status response:"
           cat /tmp/ts-smoke/health.json
 
-      - name: Assert /health returns status=ok
+      # `status` is "online" only when both socket reads answered. The version
+      # must be this build's, so a different daemon answering cannot pass, and
+      # the fresh data dir must hold no index.
+      - name: Assert search.health reports this build online
         if: needs.changes.outputs.docs_only != 'true'
         run: |
-          # jq is preinstalled on ubuntu-latest; use it instead of python3 for clarity.
           HEALTH_STATUS=$(jq -r '.status // ""' /tmp/ts-smoke/health.json)
-          echo "status field: ${HEALTH_STATUS}"
-          if [ "${HEALTH_STATUS}" != "ok" ]; then
-            echo "ERROR: /health did not return status=ok (got: ${HEALTH_STATUS})"
+          HEALTH_VERSION=$(jq -r '.version // ""' /tmp/ts-smoke/health.json)
+          INDEX_COUNT=$(jq -r '.index_count // ""' /tmp/ts-smoke/health.json)
+          BIN_VERSION=$(./target/ci-smoke/trusty-search --version | awk '{print $NF}')
+          echo "status=${HEALTH_STATUS} version=${HEALTH_VERSION} binary=${BIN_VERSION} index_count=${INDEX_COUNT}"
+          if [ "${HEALTH_STATUS}" != "online" ]; then
+            echo "ERROR: daemon status is not online (got: ${HEALTH_STATUS})"
             cat /tmp/ts-smoke/health.json
             exit 1
           fi
-          echo "OK: status=ok confirmed"
+          if [ -z "${BIN_VERSION}" ] || [ "${HEALTH_VERSION}" != "${BIN_VERSION}" ]; then
+            echo "ERROR: daemon reports version '${HEALTH_VERSION}', binary is '${BIN_VERSION}'"
+            exit 1
+          fi
+          if [ "${INDEX_COUNT}" != "0" ]; then
+            echo "ERROR: fresh data dir reports index_count '${INDEX_COUNT}', expected 0"
+            exit 1
+          fi
+          echo "OK: status=online, version ${HEALTH_VERSION}, 0 indexes"
 
       - name: Tear down daemon
         if: always() && needs.changes.outputs.docs_only != 'true'
