@@ -29,6 +29,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+// #9544: palace rename; a child module so it can hold the private open-locks.
+#[path = "registry_rename.rs"]
+mod rename;
+pub use rename::{DEFAULT_RENAME_BUSY_WAIT, PalaceRenameError, RenameOptions, RenameOutcome};
+
 /// Environment variable overriding the LRU open-handle cap
 /// (`PalaceRegistry::with_max_open`).
 ///

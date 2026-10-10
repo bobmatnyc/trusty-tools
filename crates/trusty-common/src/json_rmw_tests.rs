@@ -134,6 +134,31 @@ fn update_corrupt_file_errors() {
     );
 }
 
+/// #9544: the blank-tolerant variant reads a whitespace-only file as absent,
+/// and plain `update` still refuses it.
+#[test]
+fn update_blank_as_absent_accepts_a_whitespace_only_file() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("doc.json");
+    std::fs::write(&path, b"  \n\t").expect("write blank");
+    assert!(
+        matches!(insert(&path, "a", 1), Err(JsonRmwError::Serialize { .. })),
+        "plain update keeps refusing a blank file"
+    );
+
+    update_blank_as_absent::<Doc, (), JsonRmwError, _>(&path, |doc| {
+        doc.insert("a".to_string(), 1);
+        Ok(())
+    })
+    .expect("a blank file is read as absent");
+    assert_eq!(read_doc(&path).get("a"), Some(&1));
+
+    std::fs::write(&path, b"{ not json").expect("write corrupt");
+    let corrupt = update_blank_as_absent::<Doc, (), JsonRmwError, _>(&path, |_| Ok(()));
+    assert!(matches!(corrupt, Err(JsonRmwError::Serialize { .. })));
+    assert_eq!(std::fs::read(&path).expect("read"), b"{ not json");
+}
+
 /// An unusable lock path is an error — the update must NOT proceed unlocked.
 #[test]
 fn update_lock_path_unopenable_errors() {
