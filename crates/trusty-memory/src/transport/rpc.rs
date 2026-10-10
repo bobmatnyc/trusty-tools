@@ -853,10 +853,8 @@ mod tests {
             crate::transport::CODE_REFUSED
         );
 
-        // SAFETY: every test in this process writes the same idempotent "1".
-        unsafe {
-            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-        }
+        // The alias is `personal`, the one name the project-slug gate always
+        // admits, so the create reaches the registry without an env write.
         let state = test_state();
         let target = trusty_common::memory_core::Palace {
             id: trusty_common::memory_core::PalaceId::new("rpc-target"),
@@ -871,7 +869,7 @@ mod tests {
             .expect("create target");
         trusty_common::palace_alias::PalaceAliasStore::register_alias(
             &state.data_root,
-            "rpc-alias",
+            "personal",
             "rpc-target",
         )
         .expect("register alias");
@@ -879,11 +877,11 @@ mod tests {
             jsonrpc: Some("2.0".to_string()),
             id: Some(json!(10)),
             method: "palace_create".to_string(),
-            params: Some(json!({"name": "rpc-alias"})),
+            params: Some(json!({"name": "personal"})),
         };
         let err = dispatch(&state, req).await.error.expect("error");
         assert_eq!(err.code, error_codes::REFUSED, "{}", err.message);
-        assert!(!state.data_root.join("rpc-alias/palace.json").exists());
+        assert!(!state.data_root.join("personal/palace.json").exists());
     }
 
     /// Why: `initialize` is the first method Claude Code sends over the UDS/
