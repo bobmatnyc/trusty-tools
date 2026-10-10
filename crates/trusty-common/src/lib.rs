@@ -118,6 +118,11 @@ pub mod banner;
 pub mod chat;
 pub mod claude_config;
 
+/// Which Claude models reject `temperature` (#9318); shared by every request
+/// builder that sets it.
+#[cfg(any(feature = "bedrock", feature = "inference-client"))]
+pub(crate) mod claude_temperature;
+
 /// Codex CLI MCP-server registration (`~/.codex/config.toml`).
 ///
 /// Why: a Codex stdio registration with no argument vector launches the bare

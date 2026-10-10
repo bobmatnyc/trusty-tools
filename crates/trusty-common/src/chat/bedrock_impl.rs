@@ -28,6 +28,7 @@
 
 use super::{ChatEvent, ChatProvider, ChatUsage, SamplingParams, ToolDef};
 use crate::ChatMessage;
+use crate::claude_temperature::accepts_temperature;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
@@ -298,7 +299,7 @@ impl ChatProvider for BedrockProvider {
 
         // #3767/#3758 parity: forward the caller's sampling knobs instead of
         // the previous hardcoded `max_tokens(4096)`.
-        let inference = build_inference_config(&self.sampling);
+        let inference = build_inference_config(&self.model, &self.sampling);
 
         let mut req = self
             .client
@@ -353,14 +354,18 @@ impl ChatProvider for BedrockProvider {
 /// `stop` are forwarded via `set_*` so an absent value omits the field
 /// (matches `SamplingParams::stop_slice`'s empty-means-omitted convention —
 /// an empty `stop` array is never sent, since some servers reject `"stop":
-/// []`).
+/// []`). `temperature` is omitted for a `model` [`accepts_temperature`]
+/// rejects (#9318).
 /// Test: `bedrock_stream_forwards_sampling_params`,
-/// `bedrock_stream_sampling_defaults_when_unset`.
-fn build_inference_config(sampling: &SamplingParams) -> InferenceConfiguration {
+/// `bedrock_stream_sampling_defaults_when_unset`,
+/// `bedrock_stream_omits_temperature_only_for_claude_5_5`.
+fn build_inference_config(model: &str, sampling: &SamplingParams) -> InferenceConfiguration {
     let stop_sequences = (!sampling.stop.is_empty()).then(|| sampling.stop.clone());
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
+    let temperature = sampling.temperature.filter(|_| accepts_temperature(model));
     InferenceConfiguration::builder()
         .max_tokens(sampling.max_tokens.unwrap_or(4096) as i32)
-        .set_temperature(sampling.temperature)
+        .set_temperature(temperature)
         .set_stop_sequences(stop_sequences)
         .build()
 }
@@ -889,7 +894,7 @@ mod tests {
             max_tokens: Some(512),
             stop: vec!["STOP".to_string()],
         };
-        let inference = build_inference_config(&sampling);
+        let inference = build_inference_config(DEFAULT_BEDROCK_MODEL, &sampling);
         assert_eq!(inference.max_tokens(), Some(512));
         assert_eq!(inference.temperature(), Some(0.2));
         assert_eq!(inference.stop_sequences(), &["STOP".to_string()][..]);
@@ -901,10 +906,39 @@ mod tests {
     /// sent — some servers reject `"stop": []`).
     #[test]
     fn bedrock_stream_sampling_defaults_when_unset() {
-        let inference = build_inference_config(&SamplingParams::default());
+        let inference = build_inference_config(DEFAULT_BEDROCK_MODEL, &SamplingParams::default());
         assert_eq!(inference.max_tokens(), Some(4096));
         assert_eq!(inference.temperature(), None);
         assert!(inference.stop_sequences().is_empty());
+    }
+
+    /// `build_inference_config` omits `temperature` for an Opus or Sonnet 5.5
+    /// model and forwards it for every other model.
+    ///
+    /// Why (#9318): Opus 5.5 and Sonnet 5.5 reject a `ConverseStream` request
+    /// that carries `temperature`, so every streamed turn to them failed.
+    /// What: builds the `InferenceConfiguration` the stream sends for each id
+    /// in the shared 5.5 and older-model lists with `temperature = 0.2`;
+    /// asserts it is absent for a 5.5 id and `0.2` otherwise, with
+    /// `max_tokens` and `stop` forwarded either way.
+    #[test]
+    fn bedrock_stream_omits_temperature_only_for_claude_5_5() {
+        use crate::claude_temperature::tests::{CLAUDE_5_5_IDS, TEMPERATURE_IDS};
+        let sampling = SamplingParams {
+            temperature: Some(0.2),
+            max_tokens: Some(512),
+            stop: vec!["STOP".to_string()],
+        };
+        let cases = CLAUDE_5_5_IDS
+            .iter()
+            .map(|id| (id, None))
+            .chain(TEMPERATURE_IDS.iter().map(|id| (id, Some(0.2))));
+        for (model, expected) in cases {
+            let inference = build_inference_config(model, &sampling);
+            assert_eq!(inference.temperature(), expected, "temperature for {model}");
+            assert_eq!(inference.max_tokens(), Some(512), "max_tokens for {model}");
+            assert_eq!(inference.stop_sequences(), &["STOP".to_string()][..]);
+        }
     }
 
     /// Helper: a `ContentBlockDelta::Text` event carrying `text`.

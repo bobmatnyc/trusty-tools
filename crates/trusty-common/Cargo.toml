@@ -155,7 +155,7 @@ name = "trusty-common"
 # 0.57.0 (Refs #9214): minor — breaking: the socket-only search clients remove public API (resolve_search_url, SearchClient::base_url and others); subsumes the unpublished 0.56.1 (#9523); 0.56.0 is live on crates.io.
 # 0.58.0 (Refs #9274): minor — palace format gate; PalaceStoreError becomes #[non_exhaustive] with 8 new variants (accepted break, minor per 2026-09-26 ruling); 0.57.0 is live on crates.io.
 # 0.58.1 (Refs #9544): patch — #9544 palace alias rename_target/remove_alias/canonical_palace_id; create refuses a live alias.
-version = "0.59.0"
+version = "0.59.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
