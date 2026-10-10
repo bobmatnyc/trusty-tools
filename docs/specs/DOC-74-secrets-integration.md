@@ -959,11 +959,13 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.grant` | Registers an exec grant for a child process (§15.8, S8) | The grant token, its expiry and TTL |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
 | `secrets.revoke` | Removes an exec grant (§15.8, S8) | Whether a live grant matched |
+| `secrets.set_agents_may_use` | Turns one key's "agents may use" flag on or off (§15.8, S8) | The vault, the key and the flag as set |
 
 **Request deadline and client wait (#7524 P2-M1).** The server gives each
 request one whole-operation deadline, counted from its arrival: 120 s for
-`secrets.set`, `secrets.delete`, `secrets.copy`, `secrets.grant` and
-`secrets.resolve`, which reach vendor CLIs (#9070),
+`secrets.set`, `secrets.delete`, `secrets.copy`, `secrets.grant`,
+`secrets.resolve` and `secrets.set_agents_may_use`, which reach vendor CLIs
+(#9070),
 and 15 s for every other method. Every CLI call the request makes is bounded
 by the time left; none starts after the deadline, and one still running then
 is killed with its process group. A request that runs out answers
@@ -1183,16 +1185,24 @@ same-uid process may call `secrets.grant`. While any grant is unexpired, the
 `secrets.resolve` has no console route (501) and no MCP tool.
 
 **"Agents may use" flag.** Each key carries the flag, default OFF (owner
-answer 2026-10-01). No socket method sets it yet: the flag-set wire path is
-S8 slice 3 ([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)),
-and the console toggle that calls it is
-[#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). `exec` never
+answer 2026-10-01). `secrets.set_agents_may_use` sets it (S8 slice 3,
+[#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)), and the
+console toggle that calls it is
+[#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). A caller
+whose own parent chain includes Claude Code may turn the flag off but not on
+(`agent_use_refused`); an unreadable chain refuses. The allow record is
+written before the backend call, and a backend failure after it adds a deny
+record with its kind, so no flag change exists without a record. Known
+limit: a caller with no agent ancestor that acts for an agent, such as the
+console process serving an agent's `curl`, is not seen by this rule; the
+console route needs its own gate (#9066, #9067). `exec` never
 injects a key into a process whose parent chain includes Claude Code unless
 that key carries the flag. The rule covers env injection (tiers 1 and 2) and
 grant contents (tier 3). It is enforced from the day each `exec` path ships.
 For tier 3, `secrets.grant` judges the registrar's own parent chain, from its
 socket peer pid, and refuses an unflagged key with `agent_use_refused`;
-`secrets.resolve` checks the flag again before each read. The backend
+`secrets.resolve` checks the flag again before each read, when either the
+registrar or the resolving caller has an agent ancestor. The backend
 holds the flag as its own item per key (on the Keychain, service
 `trusty-secrets.agents`, account `<vault>/<key>`), never the names-only index,
 which any same-uid process can edit

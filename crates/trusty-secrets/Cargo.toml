@@ -64,6 +64,12 @@ name = "audit_post_success"
 path = "tests/audit_post_success.rs"
 required-features = ["server"]
 
+# #9070: S8 live checks; spawns the real binary, so it needs `server`.
+[[test]]
+name = "live_flag_peer"
+path = "tests/live_flag_peer.rs"
+required-features = ["server"]
+
 # #9328: imports `store`, so an `api`-only test run must skip it.
 [[test]]
 name = "keychain_roundtrip"

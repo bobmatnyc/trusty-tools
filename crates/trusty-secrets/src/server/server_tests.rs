@@ -1815,13 +1815,15 @@ fn client_wait_exceeds_the_server_deadline_for_every_method() {
             "{name}"
         );
     }
-    // #9070: `resolve` and `grant` reach CLI-backed backends too.
+    // #9070: `resolve`, `grant` and `set_agents_may_use` reach CLI-backed
+    // backends too.
     for name in [
         method::SET,
         method::DELETE,
         method::COPY,
         method::GRANT,
         method::RESOLVE,
+        method::SET_AGENTS_MAY_USE,
     ] {
         assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
         assert!(client_wait(name) > Duration::from_secs(120), "{name}");

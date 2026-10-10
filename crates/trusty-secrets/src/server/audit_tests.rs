@@ -608,6 +608,30 @@ fn audit_record_round_trips_a_pid_and_an_unknown_reason() {
     }
 }
 
+/// Why: #9070 slice 3 — a flag-set record says which value was asked for
+/// and whether the caller had an agent ancestor; a record written before
+/// those fields existed still decodes, with both `None`.
+/// Test: itself.
+#[test]
+fn audit_flag_record_round_trips_and_an_older_record_decodes() {
+    let mut record = AuditRecord::new(7, AuditMethod::SetAgentsMayUse, None);
+    record.agents_allowed = Some(true);
+    record.agent_parent = Some(false);
+    let text = serde_json::to_string(&record).unwrap();
+    let back: AuditRecord = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, record);
+    let wire: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(wire["method"], method::SET_AGENTS_MAY_USE);
+    assert_eq!(wire["agents_allowed"], true);
+    assert_eq!(wire["agent_parent"], false);
+
+    let older = r#"{"ts":9,"stream":"credential_access","method":"secrets.grant",
+        "decision":"allow","caller_pid":17}"#;
+    let read: AuditRecord = serde_json::from_str(older).unwrap();
+    assert_eq!(read.method, AuditMethod::Grant);
+    assert_eq!((read.agents_allowed, read.agent_parent), (None, None));
+}
+
 /// Why: AC5 — the default audit log is
 /// `~/.trusty-tools/trusty-secrets/audit/audit.jsonl`, and a redirected index
 /// takes the audit log with it out of `$HOME`.

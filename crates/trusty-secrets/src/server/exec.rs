@@ -85,6 +85,7 @@ fn decode_object<T: DeserializeOwned>(params: Value) -> Result<T, ErrorKind> {
 /// [`ErrorKind::AuditUnavailable`], so no token leaves unaudited.
 /// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`,
 /// `grant_by_agent_ancestor_may_name_a_flagged_key`,
+/// `grant_records_carry_the_agent_parent_verdict`,
 /// `grant_with_unwritable_audit_returns_no_token`.
 pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
@@ -103,6 +104,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
             // unreadable ancestor refuses, it is never skipped.
             let agent_parent = has_agent_ancestor(state.grants.processes(), registrar)
                 .map_err(|_| ErrorKind::GrantRefused)?;
+            // #9070 slice 3: every grant record says what was judged.
+            gate.agent_parent(agent_parent);
             if agent_parent {
                 let store = SecretStore::new(project.backend(state)?, state.index.clone());
                 for key in &request.keys {
@@ -149,9 +152,11 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// What: params are [`ResolveRequest`]. The caller is the socket peer; with
 /// none, [`ErrorKind::GrantRefused`]. [`GrantRegistry::authorize_scoped`]
 /// checks token, expiry, key and process tree; every refusal is
-/// [`ErrorKind::GrantRefused`]. The key then resolves in the grant's own
-/// project, through `resolve_reference` with the grant's `agent_parent`,
-/// so the agents flag is checked again before the read. The audit log is
+/// [`ErrorKind::GrantRefused`]. `agent_parent` is the grant's, or'd with
+/// [`has_agent_ancestor`] on the caller's own ancestry (#9070 slice 3); a
+/// read error refuses. The key then resolves in the grant's own project,
+/// through `resolve_reference` with that `agent_parent`, so the agents flag
+/// is checked again before the read. The audit log is
 /// opened before the read, and the call's one record (allow, or deny with
 /// its kind) is appended before the reply; if the log cannot be opened or
 /// the record appended, the reply is [`ErrorKind::AuditUnavailable`] and
@@ -160,6 +165,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 ///
 /// [`GrantRegistry::authorize_scoped`]: super::grant::GrantRegistry::authorize_scoped
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
+/// `resolve_by_agent_descendant_of_unflagged_grant_is_refused`,
+/// `resolve_with_unreadable_caller_ancestry_is_refused`,
 /// `resolve_from_sibling_with_valid_token_is_refused`,
 /// `resolve_allow_with_unwritable_audit_returns_no_value`,
 /// `resolve_sentinel_never_reaches_the_audit_file_or_logs`.
@@ -179,6 +186,13 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
                 .grants
                 .authorize_scoped(&token, slice::from_ref(&request.key), peer)
                 .map_err(grant_kind)?;
+            // #9070 slice 3: the caller's own ancestry counts too, so a grant
+            // a non-agent registered for an agent's pid opens no unflagged
+            // key to it. An unreadable ancestor refuses.
+            let agent_parent = scope.agent_parent
+                || has_agent_ancestor(state.grants.processes(), peer)
+                    .map_err(|_| ErrorKind::GrantRefused)?;
+            gate.agent_parent(agent_parent);
             let project = ProjectContext::resolve(state, &scope.project)?;
             gate.project(&project);
             let store = SecretStore::new(project.backend(state)?, state.index.clone());
@@ -186,8 +200,7 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
                 key: request.key.clone(),
             };
             gate.admit()?;
-            let value =
-                resolve_reference(&store, project.scopes(), &reference, scope.agent_parent)?;
+            let value = resolve_reference(&store, project.scopes(), &reference, agent_parent)?;
             to_json(&ResolveResponse {
                 key: request.key,
                 value,

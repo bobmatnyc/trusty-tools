@@ -22,7 +22,7 @@
 
 #![cfg(unix)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{send_framed_request, socket_is_serving};
 use trusty_secrets::server::{BackendFactory, ServeError, ServeExit, ServerSettings, serve};
-use trusty_secrets::store::{Capabilities, SecretBackend};
+use trusty_secrets::store::{Capabilities, NamesIndex, SecretBackend, SecretStore};
 use trusty_secrets::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// The file-size limit for this process, and the pre-filled log's size.
@@ -95,6 +95,8 @@ fn setup() {
 struct Mem {
     id: &'static str,
     values: Mutex<HashMap<String, String>>,
+    // #9070 slice 3: the keys whose "agents may use" flag is ON.
+    flags: Mutex<HashSet<String>>,
 }
 
 impl Mem {
@@ -102,6 +104,7 @@ impl Mem {
         Arc::new(Self {
             id,
             values: Mutex::new(HashMap::new()),
+            flags: Mutex::new(HashSet::new()),
         })
     }
 
@@ -114,6 +117,10 @@ impl Mem {
 
     fn value(&self, key: &str) -> Option<String> {
         self.values.lock().unwrap().get(key).cloned()
+    }
+
+    fn flagged(&self, key: &str) -> bool {
+        self.flags.lock().unwrap().contains(key)
     }
 }
 
@@ -137,6 +144,25 @@ impl SecretBackend for Mem {
 
     fn delete(&self, _: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         Ok(self.values.lock().unwrap().remove(key.as_str()).is_some())
+    }
+
+    fn agents_may_use(&self, _: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Ok(self.flagged(key.as_str()))
+    }
+
+    fn set_agents_may_use(
+        &self,
+        _: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        let mut flags = self.flags.lock().unwrap();
+        if allowed {
+            flags.insert(key.as_str().to_string());
+        } else {
+            flags.remove(key.as_str());
+        }
+        Ok(())
     }
 }
 
@@ -332,6 +358,46 @@ async fn copy_stops_before_the_next_key_after_a_failed_deny_append() {
     assert_eq!(kind(&copy), "audit_unavailable");
     assert!(fx.keychain.value("A").is_none(), "key 2 never started");
     assert_eq!(fx.log_len(), LIMIT);
+    let _ = stop.send(());
+    task.await.unwrap().unwrap();
+}
+
+/// Why: #9070 slice 3, Architect ruling 2026-10-10 — the flag-set allow
+/// record is written before the backend call. When the log opens but that
+/// append fails, the flag is never changed: distinct from an unopenable log,
+/// this catches a gate that only checks the open. The call turns the flag
+/// OFF, which reads no ancestry: the public `serve` judges callers on the
+/// host's real process table, so an ON call would depend on the host.
+/// Red when the record is appended after the backend call.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_flag_append_failure_after_open_changes_nothing() {
+    let fx = fixture();
+    let keychain: Arc<dyn SecretBackend> = fx.keychain.clone();
+    SecretStore::new(keychain, NamesIndex::at(&fx.settings.index_root))
+        .set(
+            &VaultName::new(VAULT).unwrap(),
+            &SecretKey::new("K").unwrap(),
+            &SecretValue::new("v-1234567890"),
+        )
+        .unwrap();
+    fx.keychain
+        .set_agents_may_use(
+            &VaultName::new(VAULT).unwrap(),
+            &SecretKey::new("K").unwrap(),
+            true,
+        )
+        .unwrap();
+    let (task, stop) = fx.start().await;
+    let set = fx
+        .call(
+            "secrets.set_agents_may_use",
+            json!({"vault": VAULT, "key": "K", "allowed": false}),
+        )
+        .await;
+    assert_eq!(kind(&set), "audit_unavailable");
+    assert!(fx.keychain.flagged("K"), "the flag was never changed");
+    assert_eq!(fx.log_len(), LIMIT, "no torn record appended");
     let _ = stop.send(());
     task.await.unwrap().unwrap();
 }

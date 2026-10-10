@@ -28,7 +28,7 @@ use super::{BackendId, SecretKey, SecretValue, VaultName};
 mod exec;
 pub use exec::{
     ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
-    RevokeResponse,
+    RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse,
 };
 
 /// Method names.
@@ -50,6 +50,8 @@ pub mod method {
     pub const RESOLVE: &str = "secrets.resolve";
     /// Remove an exec grant.
     pub const REVOKE: &str = "secrets.revoke";
+    /// Turn one key's "agents may use" flag on or off (DOC-74 §15.8, #9070).
+    pub const SET_AGENTS_MAY_USE: &str = "secrets.set_agents_may_use";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

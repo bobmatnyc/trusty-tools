@@ -67,6 +67,10 @@ pub(crate) enum Recording {
     PerKey,
     /// One per denied call; none when allowed (`list`).
     DenyOnly,
+    /// One allow record written by [`Gate::write_ahead`] before the backend
+    /// call, then one deny if the call fails; one deny for a refusal before
+    /// it (`set_agents_may_use`, #9070).
+    WriteAhead,
 }
 
 /// The audit log, held open from admission to the last record.
@@ -100,6 +104,9 @@ pub(crate) struct Gate<'a> {
     key: Option<SecretKey>,
     backend: Option<BackendId>,
     project_root: Option<PathBuf>,
+    // #9070 slice 3: the requested flag value and the ancestry verdict.
+    agents_allowed: Option<bool>,
+    agent_parent: Option<bool>,
     admitted: Option<Admitted>,
 }
 
@@ -111,7 +118,10 @@ pub(crate) struct Gate<'a> {
 /// [`ErrorKind::AuditUnavailable`] (fail-closed) and leaves an `Err` as it
 /// was. [`Recording::PerKey`] records were written by the body. #9070:
 /// every record carries `caller`'s pid, the socket peer the router read.
+/// #9070 slice 3: a [`Recording::WriteAhead`] call wrote its allow record
+/// in [`Gate::write_ahead`]; an `Err` after it appends a deny, best-effort.
 /// Test: `audit_set_and_delete_write_one_record_per_call`,
+/// `set_flag_backend_failure_leaves_a_deny_after_the_allow_record`,
 /// `audit_unwritable_sink_still_returns_the_deny_reply`,
 /// `audit_value_never_reaches_the_audit_file`.
 pub(crate) fn audited(
@@ -131,6 +141,8 @@ pub(crate) fn audited(
         key: None,
         backend: None,
         project_root: None,
+        agents_allowed: None,
+        agent_parent: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -187,6 +199,47 @@ impl Gate<'_> {
         Ok(())
     }
 
+    /// The flag value a `set_agents_may_use` call asks for (#9070).
+    pub(crate) fn agents_allowed(&mut self, allowed: bool) {
+        self.agents_allowed = Some(allowed);
+    }
+
+    /// Whether the caller has a Claude Code ancestor, once judged (#9070).
+    pub(crate) fn agent_parent(&mut self, agent_parent: bool) {
+        self.agent_parent = Some(agent_parent);
+    }
+
+    /// Open the audit log and append this call's allow record, before the
+    /// backend is touched (write-ahead, #9070).
+    ///
+    /// Why: Architect ruling 2026-10-10 — a flag change is recorded before
+    /// it is made, so no change can land with no record of it.
+    /// What: [`Gate::admit`], then one allow record through the held handle.
+    /// Under [`Recording::WriteAhead`], a later `Err` from the body appends a
+    /// second record, a deny with that kind.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::AuditUnavailable`] when the log cannot be opened or the
+    /// record cannot be appended and [`FAIL_CLOSED_ON_ALLOW`] refuses; the
+    /// caller then makes no change.
+    ///
+    /// Test: `set_flag_with_unwritable_audit_changes_nothing`,
+    /// `set_flag_append_failure_after_open_changes_nothing`,
+    /// `set_flag_allow_record_is_written_before_the_backend_call`.
+    pub(crate) fn write_ahead(&mut self) -> Result<(), ErrorKind> {
+        self.admit()?;
+        let record = self.record(None);
+        let Some(admitted) = self.admitted.as_mut() else {
+            return Err(ErrorKind::Internal);
+        };
+        match admitted.append(&record) {
+            Ok(()) => Ok(()),
+            // #9070: no record, no change.
+            Err(()) => unaudited_allow(),
+        }
+    }
+
     /// Whether another allowed change may start: not after a failed append.
     pub(crate) fn ready(&self) -> Result<(), ErrorKind> {
         match &self.admitted {
@@ -227,6 +280,8 @@ impl Gate<'_> {
         record.key = self.key.clone();
         record.backend = self.backend.clone();
         record.project_root = self.project_root.clone();
+        record.agents_allowed = self.agents_allowed;
+        record.agent_parent = self.agent_parent;
         record
     }
 
@@ -237,13 +292,23 @@ impl Gate<'_> {
             }
             return result;
         };
-        if self.recording != Recording::Once {
-            return result;
-        }
-        let record = self.record(result.as_ref().err().copied());
-        match (admitted.append(&record), result) {
-            (Err(()), Ok(value)) => unaudited_allow().map(|()| value),
-            (_, result) => result,
+        match self.recording {
+            Recording::Once => {
+                let record = self.record(result.as_ref().err().copied());
+                match (admitted.append(&record), result) {
+                    (Err(()), Ok(value)) => unaudited_allow().map(|()| value),
+                    (_, result) => result,
+                }
+            }
+            Recording::WriteAhead => {
+                // #9070: the allow record is already written; a failure after
+                // it leaves a deny with its kind (Architect Q1), best-effort.
+                if let Err(kind) = &result {
+                    let _ = admitted.append(&self.record(Some(*kind)));
+                }
+                result
+            }
+            Recording::PerKey | Recording::DenyOnly => result,
         }
     }
 

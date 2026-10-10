@@ -127,6 +127,30 @@ fn agent_ancestor_check_fails_closed_on_unreadable_table() {
     );
 }
 
+/// A table that implements only the two required reads (#9070 slice 3).
+struct ParentsOnly;
+
+impl ProcessTable for ParentsOnly {
+    fn parent(&self, _pid: u32) -> Result<u32, ProcessError> {
+        Ok(1)
+    }
+
+    fn start_time(&self, _pid: u32) -> Result<StartTime, ProcessError> {
+        Ok(StartTime::from_raw(1))
+    }
+}
+
+/// Why: #9070 slice 3 — `is_agent`'s default body must never vouch that a
+/// process is not an agent; a table that does not judge refuses.
+/// Test: itself.
+#[test]
+fn agent_check_fails_closed_on_a_table_without_is_agent() {
+    assert_eq!(
+        has_agent_ancestor(&ParentsOnly, 42),
+        Err(ProcessError::Unreadable { pid: 42 })
+    );
+}
+
 /// Why: the native binary is `~/.local/share/claude/versions/<v>`; a
 /// `.claude` dot-directory in a build path is not Claude Code.
 /// Test: itself.
