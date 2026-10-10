@@ -8,11 +8,16 @@
 //! (`SPACE` or `GROUP_CHAT`) for a space route, which never takes a DM.
 //! Google documents `messageReplyOption` as named-space only, so a DM reply
 //! may not thread; the visible `[Q-<n>]` token is the fallback binding.
+//! A sender may not flood a question or the audit log (#8454).
 //! What: [`GchatChannel::process_batch`] handles each [`PulledMessage`] and
 //! returns the ack ids it may acknowledge: a message is acked only after its
 //! outcome (answer or audit line) is on disk. [`GchatChannel::poll_once`]
-//! pulls, processes and acknowledges one batch.
-//! Test: `src/gchat/tests/inbound.rs`, `src/gchat/tests/space_routes.rs`.
+//! pulls, processes and acknowledges one batch. After the route lookup and
+//! before any state is touched, a message takes one admit from its route's
+//! window, or from the shared unknown-sender window when it has no route
+//! ([`LimitBucket`]); an exhausted window drops it.
+//! Test: `src/gchat/tests/inbound.rs`, `src/gchat/tests/space_routes.rs`,
+//! `src/gchat/tests/rate_limit.rs`.
 
 use crate::gchat::api::error::EventParseError;
 use crate::gchat::api::events::{ChatEvent, MessageEvent, PulledMessage};
@@ -22,6 +27,7 @@ use crate::gchat::routes::RouteTable;
 use crate::gchat::state::audit::{clip, AuditEvent, AuditRecord};
 use crate::gchat::state::ledger::{question_tokens, Answer, ResolveOutcome};
 use crate::gchat::state::now_rfc3339;
+use crate::policy::{BucketDecision, Channel, Clock, RateLimit};
 
 /// What happened to one pulled message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,8 +121,11 @@ impl GchatChannel {
     /// audit-logged, none is acknowledged, and
     /// [`InboundError::AddOnEventFormat`] is returned. A BOT sender is
     /// dropped before route lookup. A message whose answer cannot be written
-    /// is withheld, not acknowledged.
+    /// is withheld, not acknowledged. A message over its rate limit is
+    /// dropped, counted in [`BatchReport::rate_limited`], and acked once its
+    /// audit line is written (#8454 Q1, Q2).
     /// Test: `unparseable_message_is_audited_before_ack`,
+    /// `route_101st_message_in_a_minute_is_dropped_and_acked`,
     /// `add_on_format_batch_is_a_loud_error`,
     /// `reply_resolves_exactly_that_question`,
     /// `bot_sender_is_dropped_before_route_lookup`,
@@ -151,6 +160,12 @@ impl GchatChannel {
                     Ok(Handled::Dropped { reason, route }) => {
                         let ok = self.audit(&drop_record(reason, route, m, &msg.message_id));
                         (InboundOutcome::Dropped { reason }, ok)
+                    }
+                    Ok(Handled::Limited { bucket }) => {
+                        // #8454 Q1: acked only once its audit line is on disk.
+                        report.rate_limited += 1;
+                        let ok = self.audit_limited(&mut inner, &bucket, m, &msg.message_id);
+                        (InboundOutcome::RateLimited { bucket }, ok)
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "gchat inbound state write failed");
@@ -209,6 +224,45 @@ impl GchatChannel {
         Ok(report)
     }
 
+    /// Record a limited drop; true when it may be acknowledged.
+    ///
+    /// Why: one audit line per bucket per window keeps a flood out of the
+    /// audit log (#8454 Q2), while the first drop is still on disk before
+    /// its ack (Q1).
+    /// What: the first limited drop of `bucket` in a window of
+    /// [`RateLimit::DEFAULT`] writes a `rate_limited` line and returns the
+    /// write's result; a failed write is not remembered, so the next drop
+    /// tries again. A later drop in that window writes nothing and returns
+    /// true.
+    /// Test: `second_limited_drop_in_a_window_writes_no_audit_line`,
+    /// `audit_write_failure_on_rate_limited_withholds_ack`.
+    fn audit_limited(
+        &self,
+        inner: &mut Inner,
+        bucket: &LimitBucket,
+        m: &MessageEvent,
+        message_id: &str,
+    ) -> bool {
+        let now = inner.limiter.clock().now();
+        let window = RateLimit::DEFAULT.window();
+        // A backwards reading counts as inside the window: nothing to add.
+        if inner
+            .limit_audited
+            .get(bucket)
+            .is_some_and(|at| now.saturating_sub(*at) < window)
+        {
+            return true;
+        }
+        let route = bucket.route().map(str::to_string);
+        let mut record = drop_record(bucket.reason(), route, m, message_id);
+        record.event = AuditEvent::RateLimited;
+        let written = self.audit(&record);
+        if written {
+            inner.limit_audited.insert(bucket.clone(), now);
+        }
+        written
+    }
+
     /// Bind one MESSAGE event, learning a DM route's space at bootstrap.
     fn handle_message(&self, inner: &mut Inner, m: &MessageEvent) -> Result<Handled, StateError> {
         // #9448 review: a bot never binds a route or answers a question.
@@ -217,17 +271,30 @@ impl GchatChannel {
             .as_deref()
             .is_some_and(|t| t.eq_ignore_ascii_case("BOT"))
         {
-            return Ok(Handled::drop("sender_is_bot", None));
+            return Ok(unknown_sender(inner, "sender_is_bot"));
         }
         let Ok(table) = self.routes.as_ref() else {
-            return Ok(Handled::drop("routes_unavailable", None));
+            return Ok(unknown_sender(inner, "routes_unavailable"));
         };
         let Some(email) = m.sender.email.as_deref() else {
-            return Ok(Handled::drop("sender_has_no_email", None));
+            return Ok(unknown_sender(inner, "sender_has_no_email"));
         };
         let Some(route) = table.by_recipient(email) else {
-            return Ok(Handled::drop("sender_not_recipient", None));
+            return Ok(unknown_sender(inner, "sender_not_recipient"));
         };
+        // #8454: the route's window, keyed by route name, taken before any
+        // learned space or ledger entry is read or written.
+        match inner
+            .limiter
+            .take_binding(Channel::Gchat, &route.name, RateLimit::DEFAULT)
+        {
+            BucketDecision::Admit => {}
+            BucketDecision::Exhausted => {
+                return Ok(Handled::Limited {
+                    bucket: LimitBucket::Route(route.name.clone()),
+                });
+            }
+        }
         let name = Some(route.name.clone());
         let mut learned = false;
         if let Some(configured) = route.space.as_deref() {
@@ -309,11 +376,32 @@ enum Handled {
         reason: &'static str,
         route: Option<String>,
     },
+    Limited {
+        bucket: LimitBucket,
+    },
 }
 
 impl Handled {
     fn drop(reason: &'static str, route: Option<String>) -> Self {
         Self::Dropped { reason, route }
+    }
+}
+
+/// Drop a sender with no route with `reason`, after a take on the shared
+/// unknown-sender window; an exhausted take makes it a limited drop.
+///
+/// Why: an unrouted sender's drop writes an audit line, and that path must
+/// not be floodable (#8454 Q3, Q6).
+/// What: one window for a BOT sender, a sender with no email, a sender no
+/// route names, and every sender while the routes file is refused.
+/// Test: `unknown_senders_share_one_bucket`,
+/// `bot_sender_counts_against_unknown_bucket`.
+fn unknown_sender(inner: &mut Inner, reason: &'static str) -> Handled {
+    match inner.limiter.take_unknown_sender() {
+        BucketDecision::Admit => Handled::drop(reason, None),
+        BucketDecision::Exhausted => Handled::Limited {
+            bucket: LimitBucket::UnknownSender,
+        },
     }
 }
 
