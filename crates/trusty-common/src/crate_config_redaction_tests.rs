@@ -41,6 +41,20 @@ enum Mode {
     Off,
 }
 
+/// The same section under `deny_unknown_fields`, where a rejected KEY is input.
+#[derive(Debug, Default, PartialEq, Deserialize)]
+struct StrictConfig {
+    #[serde(default)]
+    log_drain: Option<StrictDrain>,
+}
+
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictDrain {
+    #[serde(default)]
+    secrets: Vec<String>,
+}
+
 /// A `tracing` writer that appends every formatted event to a shared buffer.
 #[derive(Clone, Default)]
 struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -133,6 +147,33 @@ fn a_type_error_on_a_secret_field_never_reaches_the_log_9603() {
     }
     for (name, text) in [("log", &logs), ("Display", &display)] {
         assert!(text.contains("line 2"), "{name} lost the line: {text}");
+    }
+}
+
+/// Why: under `deny_unknown_fields` the rejected input is a KEY, and
+/// `serde_path_to_error` records that key as the last path segment, so a token
+/// pasted as a key would reach the log through the key path.
+/// What: loads a `deny_unknown_fields` section whose unknown key is the
+/// sentinel; the sentinel must be absent from the log, `Display` and `Debug`,
+/// and the parent path `log_drain` present in all three.
+/// Test: itself.
+#[test]
+fn an_unknown_key_never_reaches_the_key_path_9603() {
+    let secret = sentinel();
+    let (_home, path) = write_config(&format!("log_drain:\n  {secret}: x\n"));
+
+    let (cfg, logs) = capture_logs(|| load_or_default_at::<StrictConfig>(&path, "trusty-mpm"));
+    let err = load_at::<StrictConfig>(&path).expect_err("an unknown key must not parse");
+    let display = err.to_string();
+    let debug = format!("{err:?}");
+
+    assert_eq!(cfg, StrictConfig::default(), "the fallback is the default");
+    for (name, text) in [("log", &logs), ("Display", &display), ("Debug", &debug)] {
+        assert!(!text.contains(&secret), "{name} leaked the key: {text}");
+        assert!(
+            text.contains("log_drain"),
+            "{name} lost the parent path: {text}"
+        );
     }
 }
 
