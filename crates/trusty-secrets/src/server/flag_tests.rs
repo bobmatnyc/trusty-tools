@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::server::agents_flag;
+use crate::server::gate::{Recording, audited};
 use crate::server::methods::Caller;
 
 /// `set_agents_may_use` params for `name` in the project vault.
@@ -47,6 +48,24 @@ struct ProbeBackend {
     inner: Arc<MemoryBackend>,
     audit_log: PathBuf,
     seen: Mutex<Option<usize>>,
+    /// Fail the flag write with `Unsupported` after counting (#9621).
+    refuse: bool,
+}
+
+impl ProbeBackend {
+    /// A probe over the fixture's keychain, and a factory that serves it.
+    fn serve(fx: &Fixture, refuse: bool) -> (Arc<Self>, BackendFactory) {
+        let probe = Arc::new(ProbeBackend {
+            inner: Arc::clone(&fx.keychain),
+            audit_log: fx.settings.audit_log.clone(),
+            seen: Mutex::new(None),
+            refuse,
+        });
+        let shared = Arc::clone(&probe);
+        let factory: BackendFactory =
+            Arc::new(move |_: &BackendId| Ok(Arc::clone(&shared) as Arc<dyn SecretBackend>));
+        (probe, factory)
+    }
 }
 
 impl SecretBackend for ProbeBackend {
@@ -85,6 +104,12 @@ impl SecretBackend for ProbeBackend {
             .filter(|line| line.contains(method::SET_AGENTS_MAY_USE))
             .count();
         *self.seen.lock().unwrap() = Some(count);
+        if self.refuse {
+            return Err(SecretsError::Unsupported {
+                backend: "probe".to_string(),
+                operation: "agents_may_use",
+            });
+        }
         self.inner.set_agents_may_use(vault, key, allowed)
     }
 }
@@ -173,14 +198,7 @@ async fn set_flag_off_by_agent_ancestor_is_allowed() {
 async fn set_flag_allow_record_is_written_before_the_backend_call() {
     let fx = fixture();
     seed(&fx, "API_KEY", SENTINEL_VALUE, false);
-    let probe = Arc::new(ProbeBackend {
-        inner: Arc::clone(&fx.keychain),
-        audit_log: fx.settings.audit_log.clone(),
-        seen: Mutex::new(None),
-    });
-    let shared = Arc::clone(&probe);
-    let factory: BackendFactory =
-        Arc::new(move |_: &BackendId| Ok(Arc::clone(&shared) as Arc<dyn SecretBackend>));
+    let (probe, factory) = ProbeBackend::serve(&fx, false);
     let mut state = fx.state(factory);
     state.grants = Arc::new(GrantRegistry::new(
         procs_with_me(),
@@ -242,11 +260,63 @@ async fn set_flag_with_unwritable_audit_changes_nothing() {
 
 /// Why: Architect Q1 — a backend call that fails after the allow record
 /// leaves a second record, a deny with the failure's kind, so the trail
-/// shows the intent and its failure. An unindexed key fails in the store.
+/// shows the intent and its failure. The probe backend refuses the write.
 /// Red when the failure leaves only the allow record.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn set_flag_backend_failure_leaves_a_deny_after_the_allow_record() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (probe, factory) = ProbeBackend::serve(&fx, true);
+    let mut state = fx.state(factory);
+    state.grants = Arc::new(GrantRegistry::new(
+        procs_with_me(),
+        Arc::new(FakeClock::at(T0)),
+        DEFAULT_MAX_TTL,
+    ));
+    let server = fx.start_state(state).await;
+    let refused = call(
+        &fx.settings.socket,
+        method::SET_AGENTS_MAY_USE,
+        flag_params(&fx, "API_KEY", true),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&refused, method::SET_AGENTS_MAY_USE),
+        ErrorKind::Unsupported
+    );
+    assert_eq!(
+        *probe.seen.lock().unwrap(),
+        Some(1),
+        "the backend was called"
+    );
+    use AuditDecision::{Allow, Deny};
+    let flags = flag_records(&fx);
+    let shapes: Vec<_> = flags.iter().map(shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            (AuditMethod::SetAgentsMayUse, Allow, None, Some("API_KEY")),
+            (
+                AuditMethod::SetAgentsMayUse,
+                Deny,
+                Some("unsupported"),
+                Some("API_KEY")
+            ),
+        ]
+    );
+}
+
+/// Why: #9621 — the allow record is written under the key's index lock,
+/// after the row check, so a key with no row is refused before any allow
+/// record: one deny, `not_found`.
+/// Red when the write-ahead runs before the row check (an allow record
+/// precedes the deny).
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_flag_on_unindexed_key_leaves_one_deny_and_no_allow() {
     let fx = fixture();
     let (state, _grants) = state_with(&fx, procs_with_me());
     let server = fx.start_state(state).await;
@@ -262,21 +332,68 @@ async fn set_flag_backend_failure_leaves_a_deny_after_the_allow_record() {
         fixed_error(&missing, method::SET_AGENTS_MAY_USE),
         ErrorKind::NotFound
     );
-    use AuditDecision::{Allow, Deny};
     let flags = flag_records(&fx);
     let shapes: Vec<_> = flags.iter().map(shape).collect();
     assert_eq!(
         shapes,
-        [
-            (AuditMethod::SetAgentsMayUse, Allow, None, Some("MISSING")),
-            (
-                AuditMethod::SetAgentsMayUse,
-                Deny,
-                Some("not_found"),
-                Some("MISSING")
-            ),
-        ]
+        [(
+            AuditMethod::SetAgentsMayUse,
+            AuditDecision::Deny,
+            Some("not_found"),
+            Some("MISSING")
+        )]
     );
+}
+
+/// Why: #9621 — `audit_unavailable` is returned before any change on the
+/// write-ahead paths, so its text must not say a change "may already have
+/// been applied"; it says when one was made.
+/// Red on the old text.
+/// Test: itself.
+#[test]
+fn audit_unavailable_text_does_not_claim_a_change_was_applied() {
+    let text = ErrorKind::AuditUnavailable.text();
+    assert!(!text.contains("may already have been applied"), "{text}");
+    assert!(text.contains("only if the record failed after the backend call"));
+}
+
+/// An allowed call that returns Ok without leaving its record (#9621).
+fn unrecorded(fx: &Fixture, recording: Recording, admit: bool) {
+    let state = fx.state(fx.backends());
+    let _ = audited(
+        &state,
+        Caller::new(Some(me())),
+        AuditMethod::Resolve,
+        recording,
+        |gate| {
+            if admit {
+                gate.admit()?;
+            }
+            Ok(Value::Null)
+        },
+    );
+}
+
+/// Why: #9621 — `Gate::finish`'s debug_assert, `Once` arm: a body that
+/// returns Ok without `admit` would leave no record.
+/// Red when the assert is removed (no panic).
+/// Test: itself.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "without its allow record")]
+fn gate_finish_asserts_an_allowed_once_call_admitted() {
+    unrecorded(&fixture(), Recording::Once, false);
+}
+
+/// Why: #9621 — `Gate::finish`'s debug_assert, `WriteAhead` arm: a body that
+/// admits but returns Ok without `write_ahead` would leave no allow record.
+/// Red when the assert is removed (no panic).
+/// Test: itself.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "without its allow record")]
+fn gate_finish_asserts_an_allowed_write_ahead_call_wrote_ahead() {
+    unrecorded(&fixture(), Recording::WriteAhead, true);
 }
 
 /// Why: fail-closed — an ancestry that cannot be read never counts as "no
@@ -312,6 +429,22 @@ async fn set_flag_unreadable_ancestry_refuses_on() {
     );
     assert!(!flagged(&fx, "API_KEY"), "the flag stayed OFF");
     assert_eq!(ok(off)["allowed"], false);
+    // #9621: the refused ON leaves its single deny, then OFF its allow.
+    let shapes: Vec<_> = flag_records(&fx)
+        .iter()
+        .map(|r| (r.decision, r.reason.clone(), r.agents_allowed))
+        .collect();
+    assert_eq!(
+        shapes,
+        [
+            (
+                AuditDecision::Deny,
+                Some(AuditReason::from(ErrorKind::GrantRefused)),
+                Some(true)
+            ),
+            (AuditDecision::Allow, None, Some(false)),
+        ]
+    );
 }
 
 /// Why: the caller is judged from the kernel's peer pid; with none there is

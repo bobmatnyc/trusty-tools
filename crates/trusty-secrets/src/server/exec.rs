@@ -14,7 +14,8 @@
 //! the child's tree, no peer pid) is the one [`ErrorKind::GrantRefused`] and
 //! carries no value. Each call leaves audit records on the #4567 trail:
 //! `grant`, one per granted key or one deny; `resolve`, one per call (one
-//! key), allow or deny; `revoke`, one per call. An allowed `grant` or
+//! key), allow or deny, plus a deny after the allow when the grant is gone
+//! by the time it is spent (#9621); `revoke`, one per call. An allowed `grant` or
 //! `resolve` whose record cannot be written returns no token and no value
 //! (`gate`'s fail-closed rule).
 //! Test: `wire_tests.rs` beside `server_tests.rs`.
@@ -150,41 +151,51 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// Why: DOC-74 §15.8 conditions 1-3 and L957 — the only value-returning
 /// method. It has no console route and no MCP tool (L991, L1170).
 /// What: params are [`ResolveRequest`]. The caller is the socket peer; with
-/// none, [`ErrorKind::GrantRefused`]. [`GrantRegistry::authorize_scoped`]
+/// none, [`ErrorKind::GrantRefused`]. [`GrantRegistry::check_scoped`]
 /// checks token, expiry, key and process tree; every refusal is
 /// [`ErrorKind::GrantRefused`]. `agent_parent` is the grant's, or'd with
 /// [`has_agent_ancestor`] on the caller's own ancestry (#9070 slice 3); a
 /// read error refuses. The key then resolves in the grant's own project,
 /// through `resolve_reference` with that `agent_parent`, so the agents flag
-/// is checked again before the read. The audit log is
-/// opened before the read, and the call's one record (allow, or deny with
-/// its kind) is appended before the reply; if the log cannot be opened or
-/// the record appended, the reply is [`ErrorKind::AuditUnavailable`] and
-/// carries no value. A one-shot grant is spent by the authorization even
-/// then.
+/// is checked again before the read. #9621: the allow record is then
+/// written ahead of the reply ([`Recording::WriteAhead`]); if the log cannot
+/// be opened or the record appended, the reply is
+/// [`ErrorKind::AuditUnavailable`] and carries no value. Only then is the
+/// grant spent ([`GrantRegistry::spend`]); a grant revoked, expired or spent
+/// by a racing caller since the check answers [`ErrorKind::GrantRefused`],
+/// with a deny record after the allow. So a one-shot grant is never spent
+/// by a refusal, an audit failure or a backend failure. A refusal before the
+/// read leaves one deny record, best-effort.
 ///
-/// [`GrantRegistry::authorize_scoped`]: super::grant::GrantRegistry::authorize_scoped
+/// [`GrantRegistry::check_scoped`]: super::grant::GrantRegistry::check_scoped
+/// [`GrantRegistry::spend`]: super::grant::GrantRegistry::spend
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
 /// `resolve_by_agent_descendant_of_unflagged_grant_is_refused`,
 /// `resolve_with_unreadable_caller_ancestry_is_refused`,
 /// `resolve_from_sibling_with_valid_token_is_refused`,
 /// `resolve_allow_with_unwritable_audit_returns_no_value`,
-/// `resolve_sentinel_never_reaches_the_audit_file_or_logs`.
+/// `resolve_sentinel_never_reaches_the_audit_file_or_logs`,
+/// `one_shot_grant_survives_unreadable_caller_ancestry`,
+/// `one_shot_grant_survives_an_audit_failure`,
+/// `one_shot_grant_survives_a_backend_failure`,
+/// `resolve_that_loses_the_one_shot_race_returns_no_value`,
+/// `resolve_against_a_dead_childs_grant_is_refused`.
 pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
         state,
         caller,
         AuditMethod::Resolve,
-        Recording::Once,
+        Recording::WriteAhead,
         |gate| {
             let request: ResolveRequest = decode_object(params)?;
             gate.key(&request.key);
             // #9070: the peer pid is the kernel's, read by the router.
             let peer = caller.pid().ok_or(ErrorKind::GrantRefused)?;
             let token = GrantToken::from_wire(request.token);
+            // #9621: check only; the grant is spent after every later check.
             let scope = state
                 .grants
-                .authorize_scoped(&token, slice::from_ref(&request.key), peer)
+                .check_scoped(&token, slice::from_ref(&request.key), peer)
                 .map_err(grant_kind)?;
             // #9070 slice 3: the caller's own ancestry counts too, so a grant
             // a non-agent registered for an agent's pid opens no unflagged
@@ -199,8 +210,13 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),
             };
-            gate.admit()?;
             let value = resolve_reference(&store, project.scopes(), &reference, agent_parent)?;
+            // #9621: the record before the spend, so an audit failure spends
+            // nothing; the value is withheld on either failure.
+            gate.write_ahead()?;
+            if !state.grants.spend(&token).map_err(grant_kind)? {
+                return Err(ErrorKind::GrantRefused);
+            }
             to_json(&ResolveResponse {
                 key: request.key,
                 value,
@@ -215,8 +231,8 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
 /// working before it expires.
 /// What: params are [`RevokeRequest`]. The grant is removed first: the
 /// fail-closed state is "no grant", so an unwritable audit log never keeps
-/// one alive (the reply is then [`ErrorKind::AuditUnavailable`], whose text
-/// says the change may have been applied). An unknown token answers
+/// one alive (the reply is then [`ErrorKind::AuditUnavailable`]; the grant
+/// is already gone). An unknown token answers
 /// `revoked: false`. One record per call.
 /// Test: `resolve_sentinel_never_reaches_the_audit_file_or_logs`.
 pub(crate) fn revoke(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {

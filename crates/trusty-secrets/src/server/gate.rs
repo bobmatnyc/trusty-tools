@@ -69,7 +69,7 @@ pub(crate) enum Recording {
     DenyOnly,
     /// One allow record written by [`Gate::write_ahead`] before the backend
     /// call, then one deny if the call fails; one deny for a refusal before
-    /// it (`set_agents_may_use`, #9070).
+    /// it (`set_agents_may_use`, #9070; `resolve`, #9621).
     WriteAhead,
 }
 
@@ -79,6 +79,8 @@ struct Admitted {
     file: Option<AuditFile>,
     /// A record failed to append; later allowed changes must stop.
     broken: bool,
+    /// [`Gate::write_ahead`] appended this call's allow record (#9621).
+    wrote_ahead: bool,
 }
 
 impl Admitted {
@@ -195,6 +197,7 @@ impl Gate<'_> {
         self.admitted = Some(Admitted {
             file,
             broken: false,
+            wrote_ahead: false,
         });
         Ok(())
     }
@@ -234,7 +237,10 @@ impl Gate<'_> {
             return Err(ErrorKind::Internal);
         };
         match admitted.append(&record) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                admitted.wrote_ahead = true;
+                Ok(())
+            }
             // #9070: no record, no change.
             Err(()) => unaudited_allow(),
         }
@@ -285,7 +291,19 @@ impl Gate<'_> {
         record
     }
 
+    /// Settle the call's records; see [`audited`].
+    ///
+    /// Test: `gate_finish_asserts_an_allowed_once_call_admitted`,
+    /// `gate_finish_asserts_an_allowed_write_ahead_call_wrote_ahead`.
     fn finish(mut self, result: Result<Value, ErrorKind>) -> Result<Value, ErrorKind> {
+        // #9621: a `Once` body that returns Ok without `admit`, or a
+        // `WriteAhead` body without `write_ahead`, would leave no allow
+        // record. No body does; this keeps it so in debug builds.
+        debug_assert!(
+            result.is_err() || allow_recorded(self.recording, self.admitted.as_ref()),
+            "a {:?} call returned Ok without its allow record",
+            self.recording
+        );
         let Some(mut admitted) = self.admitted.take() else {
             if let Err(kind) = &result {
                 self.deny_best_effort(*kind);
@@ -320,6 +338,17 @@ impl Gate<'_> {
         if let Ok(mut file) = self.state.audit.open() {
             let _ = file.append(&self.record(Some(kind)));
         }
+    }
+}
+
+/// Whether an allowed call of `recording` has its allow record (#9621):
+/// `Once` once admitted (its record is appended by `finish`), `WriteAhead`
+/// once [`Gate::write_ahead`] appended it. The other kinds have none to owe.
+fn allow_recorded(recording: Recording, admitted: Option<&Admitted>) -> bool {
+    match recording {
+        Recording::Once => admitted.is_some(),
+        Recording::WriteAhead => admitted.is_some_and(|a| a.wrote_ahead),
+        Recording::PerKey | Recording::DenyOnly => true,
     }
 }
 

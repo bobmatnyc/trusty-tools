@@ -259,6 +259,33 @@ impl SecretStore {
         })
     }
 
+    /// [`Self::set_agents_may_use`], running `before` under the same index
+    /// lock, after the row check and before the backend call.
+    ///
+    /// Why: #9621 — the server's write-ahead audit record goes in `before`,
+    /// so records and flag changes for one key land in the same order, and
+    /// a key with no row is refused before any allow record is written.
+    /// What: `Ok(Err(e))` when `before` refused (the backend is never
+    /// called); `Ok(Ok(()))` when the flag was written; `Err` for a missing
+    /// row, a lock or index failure, or a backend failure.
+    /// Test: `store_flag_before_hook_runs_under_the_row_check`.
+    #[cfg_attr(
+        not(feature = "server"),
+        allow(dead_code, reason = "only the server's flag method calls it")
+    )]
+    pub(crate) fn set_agents_may_use_after<E>(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+        before: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Result<(), E>, SecretsError> {
+        self.index.with_row(vault, key, || match before() {
+            Ok(()) => self.backend.set_agents_may_use(vault, key, allowed).map(Ok),
+            Err(refused) => Ok(Err(refused)),
+        })
+    }
+
     /// The vault a reference resolves to, by the names-only index.
     ///
     /// Why: DOC-74 §15.3 — `secret://KEY` checks the project vault, then the

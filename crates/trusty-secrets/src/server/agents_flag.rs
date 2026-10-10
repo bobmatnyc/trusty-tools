@@ -35,18 +35,21 @@ use crate::store::SecretStore;
 /// is read on the caller's own ancestry from the registry's process table: a
 /// read error is [`ErrorKind::GrantRefused`], an agent ancestor is
 /// [`ErrorKind::AgentUseRefused`]. Each refusal is one deny record. Then
+/// under the key's index lock (#9621), after its row check,
 /// [`super::gate::Gate::write_ahead`] appends the allow record; if the log
 /// cannot be opened or the record appended, the reply is
-/// [`ErrorKind::AuditUnavailable`] and the backend is never called. A
-/// backend failure after it (an unindexed key is
-/// [`ErrorKind::NotFound`]; a backend with no flag item refuses on with
-/// [`ErrorKind::Unsupported`]) appends a second, deny record.
+/// [`ErrorKind::AuditUnavailable`] and the backend is never called. An
+/// unindexed key is [`ErrorKind::NotFound`] with one deny record and no
+/// allow. A backend failure after the allow record (a backend with no flag
+/// item refuses on with [`ErrorKind::Unsupported`]) appends a second, deny
+/// record.
 /// Test: `set_flag_on_by_agent_ancestor_is_refused_and_audited`,
 /// `set_flag_off_by_agent_ancestor_is_allowed`,
 /// `set_flag_allow_record_is_written_before_the_backend_call`,
 /// `set_flag_with_unwritable_audit_changes_nothing`,
 /// `set_flag_append_failure_after_open_changes_nothing`,
 /// `set_flag_backend_failure_leaves_a_deny_after_the_allow_record`,
+/// `set_flag_on_unindexed_key_leaves_one_deny_and_no_allow`,
 /// `set_flag_unreadable_ancestry_refuses_on`.
 pub(crate) fn set_agents_may_use(
     state: &State,
@@ -79,8 +82,14 @@ pub(crate) fn set_agents_may_use(
             }
             let store = SecretStore::new(project.backend(state)?, state.index.clone());
             // #9070: no record, no change (write-ahead, Architect Q1).
-            gate.write_ahead()?;
-            store.set_agents_may_use(&request.vault, &request.key, request.allowed)?;
+            // #9621: written under the key's index lock, so records and
+            // changes for one key land in the same order.
+            store.set_agents_may_use_after(
+                &request.vault,
+                &request.key,
+                request.allowed,
+                || gate.write_ahead(),
+            )??;
             to_json(&SetAgentsMayUseResponse {
                 vault: request.vault,
                 key: request.key,

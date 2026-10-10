@@ -15,6 +15,10 @@
 //!   refused, and each audit record's `caller_pid` is its caller's real pid.
 //!   The registrar detaches (re-parents away from the test), so it runs
 //!   outside a Claude Code tree on the Mac.
+//! - [`live_dead_child_grant_is_refused_and_pruned`] (EVO and the Mac,
+//!   #9621): a detached registrar grants a real child, the child resolves,
+//!   the registrar kills and reaps it, and the token is refused and then
+//!   found gone from the registry.
 //!
 //! What: each test re-runs this binary in roles chosen by [`ROLE`]. Every
 //! path is under one short temp directory in `/private/tmp` (macOS) or
@@ -54,6 +58,7 @@ const KEY: &str = "API_KEY";
 const VALUE: &str = "live-9070-value-Qm4Tz8";
 const GRANT_TEST: &str = "live_claude_named_ancestor_is_refused_a_grant";
 const PEER_TEST: &str = "live_peer_pid_is_the_kernels";
+const DEAD_TEST: &str = "live_dead_child_grant_is_refused_and_pruned";
 
 /// One temp root with every path the server and the roles use.
 struct Live {
@@ -249,6 +254,64 @@ fn grant(child: u32) -> Result<String, (i64, String)> {
     }
 }
 
+/// `secrets.revoke` of `token`; whether a live grant matched, or the error.
+fn revoke(token: &str) -> Result<bool, (i64, String)> {
+    let socket = PathBuf::from(std::env::var(SOCKET).unwrap());
+    let response = rpc(&socket, "secrets.revoke", json!({"token": token}));
+    match error_of(&response) {
+        Some(error) => Err(error),
+        None => Ok(response.result.unwrap()["revoked"].as_bool().unwrap()),
+    }
+}
+
+/// Block until this process's parent is no longer `DETACH` (bounded).
+fn await_detached() -> u32 {
+    let detach: u32 = std::env::var(DETACH).unwrap().parse().unwrap();
+    let started = Instant::now();
+    while parent_pid() == detach && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    detach
+}
+
+/// Start `test`'s registrar role and return at once, so the registrar
+/// re-parents away from the test (and from any Claude Code above it).
+fn detach_registrar(test: &str) {
+    let me = std::env::current_exe().unwrap();
+    // Never waited on: this process exits at once so the registrar
+    // re-parents; that is the point of the role.
+    #[allow(clippy::zombie_processes)]
+    let _registrar = role(&me, test, "registrar")
+        .env(DETACH, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+}
+
+/// Run `test`'s detach role against `live` and return its registrar's
+/// report, waiting up to 60 s for it.
+fn run_detached(live: &Live, test: &str, out: &Path) -> Value {
+    let me = std::env::current_exe().unwrap();
+    let status = role(&me, test, "detach")
+        .env(SOCKET, live.socket())
+        .env(PROJECT, live.path("repo"))
+        .env(OUT, out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "detach");
+    let started = Instant::now();
+    while !out.join("registrar.json").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the registrar never reported"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    read_report(out, "registrar")
+}
+
 fn parent_pid() -> u32 {
     // SAFETY: `getppid` takes no arguments and cannot fail.
     let ppid = unsafe { libc::getppid() };
@@ -341,24 +404,11 @@ fn live_peer_pid_is_the_kernels() {
         // Start the registrar and exit at once, so it re-parents away from
         // this test (and from any Claude Code above it).
         Ok("detach") => {
-            // Never waited on: this process exits at once so the registrar
-            // re-parents; that is the point of the role.
-            #[allow(clippy::zombie_processes)]
-            let _registrar = role(&me(), PEER_TEST, "registrar")
-                .env(DETACH, std::process::id().to_string())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            detach_registrar(PEER_TEST);
             return;
         }
         Ok("registrar") => {
-            let detach: u32 = std::env::var(DETACH).unwrap().parse().unwrap();
-            let started = Instant::now();
-            while parent_pid() == detach && started.elapsed() < Duration::from_secs(10) {
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            let detach = await_detached();
             let mut child = role(&me(), PEER_TEST, "child")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
@@ -409,22 +459,7 @@ fn live_peer_pid_is_the_kernels() {
     let live = live();
     let out = live.path("out");
     std::fs::create_dir(&out).unwrap();
-    let status = role(&me(), PEER_TEST, "detach")
-        .env(SOCKET, live.socket())
-        .env(PROJECT, live.path("repo"))
-        .env(OUT, &out)
-        .status()
-        .unwrap();
-    assert!(status.success(), "detach");
-    let started = Instant::now();
-    while !out.join("registrar.json").exists() {
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "the registrar never reported"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let registrar = read_report(&out, "registrar");
+    let registrar = run_detached(&live, PEER_TEST, &out);
     let (child, grandchild, sibling) = (
         read_report(&out, "child"),
         read_report(&out, "grandchild"),
@@ -467,4 +502,125 @@ fn live_peer_pid_is_the_kernels() {
     assert_eq!(grants.len(), 1, "{grants:?}");
     assert_eq!(grants[0]["caller_pid"], registrar["pid"]);
     assert_eq!(grants[0]["agent_parent"], false);
+}
+
+/// Why: #9621, Architect ruling 16:41Z — the dead-child prune, end to end on
+/// the host's real process table: a grant whose child was killed is refused
+/// and dropped from the registry, not held until its 120 s expiry.
+/// What: a detached registrar (so it is outside any Claude Code tree on the
+/// Mac) starts two real children of this binary: `holder` and `control`. It
+/// grants `holder`, which resolves the key once while alive. The registrar
+/// SIGKILLs `holder` and reaps it, then resolves with `holder`'s token
+/// itself: `grant_refused`. The registrar was never `holder`'s descendant,
+/// so that refusal alone does not prove the prune. The prune is proved by
+/// the registry: minting `control`'s grant prunes, then `secrets.revoke` of
+/// `holder`'s token answers `revoked: false` while `control`'s answers
+/// `true`. Without the prune `holder`'s reusable, unexpired grant would
+/// still be there and its revoke would answer `true`.
+/// Test: itself.
+#[test]
+#[ignore = "live: spawns the real binary and a detached process tree; run on EVO and the Mac"]
+fn live_dead_child_grant_is_refused_and_pruned() {
+    let me = || std::env::current_exe().unwrap();
+    match std::env::var(ROLE).as_deref() {
+        Ok("detach") => {
+            detach_registrar(DEAD_TEST);
+            return;
+        }
+        Ok("registrar") => {
+            let detach = await_detached();
+            let spawn = |name| {
+                role(&me(), DEAD_TEST, name)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            };
+            let (mut holder, mut control) = (spawn("holder"), spawn("control"));
+            let minted = grant(holder.id());
+            let mut holder_in = holder.stdin.take().unwrap();
+            writeln!(holder_in, "{}", minted.clone().unwrap_or_default()).unwrap();
+            holder_in.flush().unwrap();
+            let out = PathBuf::from(std::env::var(OUT).unwrap());
+            let started = Instant::now();
+            while !out.join("holder.json").exists() && started.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            holder.kill().unwrap();
+            let holder_status = holder.wait().unwrap();
+            let token = minted.clone().unwrap_or_default();
+            let after_kill = resolve_report(&token);
+            let control_minted = grant(control.id());
+            let control_token = control_minted.clone().unwrap_or_default();
+            let revoked_dead = revoke(&token);
+            let revoked_control = revoke(&control_token);
+            drop(control.stdin.take());
+            let control_ok = control.wait().unwrap().success();
+            drop(holder_in);
+            report(
+                "registrar",
+                json!({"pid": std::process::id(), "ppid": parent_pid(), "detach": detach,
+                    "holder": holder.id(), "minted": minted.err(),
+                    "holder_killed": !holder_status.success(),
+                    "after_kill": after_kill, "control_minted": control_minted.err(),
+                    "revoked_dead": revoked_dead, "revoked_control": revoked_control,
+                    "control_ok": control_ok}),
+            );
+            return;
+        }
+        // Resolve once with the token on stdin, then hold until killed.
+        Ok("holder") => {
+            let mut stdin = BufReader::new(std::io::stdin());
+            let mut token = String::new();
+            stdin.read_line(&mut token).unwrap();
+            report("holder", resolve_report(token.trim()));
+            std::io::copy(&mut stdin, &mut std::io::sink()).unwrap();
+            return;
+        }
+        // Stay alive until the registrar closes stdin.
+        Ok("control") => {
+            std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+            return;
+        }
+        _ => {}
+    }
+    let live = live();
+    let out = live.path("out");
+    std::fs::create_dir(&out).unwrap();
+    let registrar = run_detached(&live, DEAD_TEST, &out);
+    let holder = read_report(&out, "holder");
+    println!("registrar {registrar}\nholder {holder}");
+    assert_ne!(
+        registrar["ppid"], registrar["detach"],
+        "the registrar detached"
+    );
+    assert_eq!(registrar["minted"], Value::Null, "the grant was minted");
+    assert_eq!(holder["pid"], registrar["holder"]);
+    assert_eq!(holder["value_ok"], true, "the live child resolved");
+    assert_eq!(registrar["holder_killed"], true);
+    let after = &registrar["after_kill"];
+    assert_eq!(after["value_ok"], false);
+    assert_eq!(after["error"], json!([-32082, "grant_refused"]));
+    assert_eq!(registrar["control_minted"], Value::Null);
+    assert_eq!(registrar["revoked_dead"], json!({"Ok": false}), "pruned");
+    assert_eq!(
+        registrar["revoked_control"],
+        json!({"Ok": true}),
+        "control kept"
+    );
+    assert_eq!(registrar["control_ok"], true);
+
+    let resolves: Vec<(Value, Value)> = live
+        .records()
+        .into_iter()
+        .filter(|r| r["method"] == "secrets.resolve")
+        .map(|r| (r["caller_pid"].clone(), r["decision"].clone()))
+        .collect();
+    assert_eq!(
+        resolves,
+        vec![
+            (holder["pid"].clone(), json!("allow")),
+            (registrar["pid"].clone(), json!("deny")),
+        ]
+    );
 }
