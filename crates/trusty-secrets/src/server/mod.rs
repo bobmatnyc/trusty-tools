@@ -16,6 +16,9 @@
 //!   one record per `set`/`delete` call, per `copy` key, per denied `list`.
 //! - [`errors`] — the fixed error text every failure is reported with.
 //! - [`client`] — the minimal spawn-on-first-call helper.
+//! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
+//!   process-ancestry check `secrets.resolve` will use (S8 slice 1, #9070).
+//!   No method reaches them yet.
 //!
 //! `router` and `methods` are private (#9073): S8 changes the method table
 //! and the body signature, so only the re-exports below are public.
@@ -27,6 +30,8 @@
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
+// #9070: S8 slice 1 — exec grants and process ancestry, library only.
+pub mod ancestry;
 pub mod audit;
 pub mod client;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
@@ -34,18 +39,26 @@ mod deadline;
 mod doctor;
 pub mod errors;
 mod gate;
+pub mod grant;
+#[cfg(test)]
+mod grant_fakes;
 mod methods;
 pub mod project;
 mod router;
 pub mod settings;
 mod tools;
 
+pub use ancestry::{OsProcessTable, ProcessError, ProcessTable, StartTime, is_self_or_descendant};
 pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
 };
 pub use errors::ErrorKind;
+pub use grant::{
+    Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantToken,
+    MAX_LIVE_GRANTS, MintedGrant, SystemClock,
+};
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{
