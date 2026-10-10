@@ -4,10 +4,11 @@
 //! call, it serves until 60 s pass with no answered request, then removes its
 //! socket and exits. No launchd job runs it.
 //! What: parses `serve [--socket P] [--index-dir P] [--machine-config P]
-//! [--audit-log P] [--idle-timeout-secs N]` (env: `TRUSTY_SECRETS_SOCKET`,
-//! `TRUSTY_SECRETS_INDEX_DIR` off the default socket only (#7524),
-//! `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`; the audit log has no environment
-//! override), serves
+//! [--audit-log P] [--idle-timeout-secs N] [--cache-max-age-secs N]` (env:
+//! `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR` off the default
+//! socket only (#7524), `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`,
+//! `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` to shorten only (#7520); the audit
+//! log has no environment override), serves
 //! with the real backends, and exits 0 on idle or SIGTERM/SIGINT, within
 //! `EXIT_GRACE` of either however many backend calls are stuck (#9572). A refused
 //! bind — a live instance already serving — exits 1 without touching it.

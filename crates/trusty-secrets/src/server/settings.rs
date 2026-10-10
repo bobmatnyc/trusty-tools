@@ -23,10 +23,13 @@
 //! beside an index named by `--index-dir`, else under `$HOME`
 //! ([`template_root_beside`]), so no environment variable can put a
 //! value-bearing file in a project tree.
+//! #7520 S2: [`CACHE_MAX_AGE_ENV`] can shorten the session cache's max age
+//! and never lengthen it, for the same reason; `--cache-max-age-secs` may.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
 //! `settings_idle_env_falls_back_on_garbage_and_zero`,
+//! `settings_cache_max_age_flag_env_default`,
 //! `settings_reject_unknown_and_incomplete_flags`,
 //! `settings_index_env_is_ignored_on_the_default_socket`,
 //! `settings_index_override_survives_off_the_default_socket`,
@@ -221,7 +224,7 @@ impl ServerSettings {
             return Err(SettingsError::Usage);
         }
         let (mut socket, mut index_root, mut machine_config, mut idle) = (None, None, None, None);
-        let mut audit_log = None;
+        let (mut audit_log, mut cache_max_age) = (None, None);
         while let Some(flag) = args.next() {
             let flag: &'static str = match flag.to_str() {
                 Some("--socket") => "--socket",
@@ -229,6 +232,7 @@ impl ServerSettings {
                 Some("--machine-config") => "--machine-config",
                 Some("--idle-timeout-secs") => "--idle-timeout-secs",
                 Some("--audit-log") => "--audit-log",
+                Some("--cache-max-age-secs") => "--cache-max-age-secs",
                 _ => return Err(SettingsError::UnknownArgument),
             };
             let value = args.next().ok_or(SettingsError::MissingValue { flag })?;
@@ -237,6 +241,11 @@ impl ServerSettings {
                 "--index-dir" => index_root = Some(PathBuf::from(value)),
                 "--machine-config" => machine_config = Some(PathBuf::from(value)),
                 "--audit-log" => audit_log = Some(PathBuf::from(value)),
+                // #7520 S2: strict like the idle flag; only a flag lengthens.
+                "--cache-max-age-secs" => {
+                    cache_max_age =
+                        Some(positive_secs(&value).ok_or(SettingsError::InvalidCacheMaxAge)?);
+                }
                 _ => idle = Some(parse_idle_flag(&value)?),
             }
         }
@@ -279,7 +288,8 @@ impl ServerSettings {
                 None => under_home(MACHINE_CONFIG_SUBPATH)?,
             },
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
-            cache_max_age: DEFAULT_CACHE_MAX_AGE,
+            cache_max_age: cache_max_age
+                .unwrap_or_else(|| cache_max_age_from_env(env(CACHE_MAX_AGE_ENV).as_deref())),
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
             template_root,
@@ -400,9 +410,26 @@ pub fn template_root_beside(index_root: &Path) -> PathBuf {
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.
 fn parse_idle_flag(value: &OsString) -> Result<Duration, SettingsError> {
+    positive_secs(value).ok_or(SettingsError::InvalidIdleTimeout)
+}
+
+/// A flag value as a positive whole number of seconds, or `None`.
+fn positive_secs(value: &OsString) -> Option<Duration> {
     match value.to_str().map(str::trim).map(str::parse::<u64>) {
-        Some(Ok(secs)) if secs > 0 => Ok(Duration::from_secs(secs)),
-        _ => Err(SettingsError::InvalidIdleTimeout),
+        Some(Ok(secs)) if secs > 0 => Some(Duration::from_secs(secs)),
+        _ => None,
+    }
+}
+
+/// The cache max age from [`CACHE_MAX_AGE_ENV`]'s raw value (#7520 S2).
+///
+/// What: a positive integer up to [`DEFAULT_CACHE_MAX_AGE`] is that many
+/// seconds; anything else is the default. Lenient like [`idle_from_env`].
+/// Test: `settings_cache_max_age_flag_env_default`.
+fn cache_max_age_from_env(raw: Option<&str>) -> Duration {
+    match raw.map(str::trim).map(str::parse::<u64>) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs).min(DEFAULT_CACHE_MAX_AGE),
+        _ => DEFAULT_CACHE_MAX_AGE,
     }
 }
 
