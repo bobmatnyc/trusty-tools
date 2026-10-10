@@ -473,7 +473,7 @@ fn reap(_orphans: &[ConfirmedOrphan], _our_data_dir: &Path) -> Vec<u32> {
 /// Reap this instance's orphaned daemons before starting (#81, rescoped by #4395).
 ///
 /// Why: `start` still has to clear daemons that hold our data dir but are not in
-/// our lockfile, or two of them end up fighting over `bind_with_auto_port` and
+/// our lockfile, or two of them end up fighting over the daemon socket and
 /// the older one keeps consuming memory forever. What it must NOT do is decide
 /// that by name — see the module doc.
 ///

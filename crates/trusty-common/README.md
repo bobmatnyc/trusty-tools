@@ -56,19 +56,6 @@ By default the crate is dependency-light: `tokio`, `serde`, `reqwest`, and
 
 ## What's Included
 
-### Port Binding
-
-`bind_with_auto_port` walks forward through ports when the requested one is
-busy, so daemon restarts don't fail noisily.
-
-```rust
-use trusty_common::bind_with_auto_port;
-
-let addr = "127.0.0.1:7878".parse()?;
-let listener = bind_with_auto_port(addr, 10).await?;
-println!("listening on {}", listener.local_addr()?);
-```
-
 ### Data Directory
 
 `resolve_data_dir(app_name)` resolves an OS-appropriate per-application

@@ -91,7 +91,6 @@ fn the_b2a_cli_paths_dial_no_http() {
     assert_moved_off_http(&[
         "add.rs",
         "daemon_guard.rs",
-        "daemon_utils.rs",
         "list.rs",
         "remove.rs",
         "status.rs",

@@ -119,13 +119,9 @@ parentheses.
 
 ### 4.1 Core utilities (default features — `src/lib.rs`)
 
-**FR-CORE-1 — Port auto-walk** ✅
-- *Vision:* daemon restarts and concurrent instances should not fail noisily on a
-  busy port.
-- *Current:* `bind_with_auto_port(addr, max_attempts)` walks forward through
-  ports on `AddrInUse`, returning the first listener that binds
-  (`src/lib.rs:283`). `max_attempts == 0` tries the requested port exactly once.
-- *Gap:* none material.
+**FR-CORE-1 — Port auto-walk** (retired)
+- *Current:* `bind_with_auto_port` was deleted by #9542. No trusty-* daemon
+  binds TCP except trusty-console (ADR-0032).
 
 **FR-CORE-2 — OS-standard data directory** ✅
 - *Vision:* one per-app, per-machine data dir resolved identically across tools

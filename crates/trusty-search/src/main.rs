@@ -468,50 +468,33 @@ enum Commands {
     #[command(display_order = 21)]
     Stop,
 
-    /// Start MCP server (stdio by default; add --with-http for an HTTP listener)
+    /// Start the MCP server over stdio
     ///
-    /// Stdio MCP is always served on the process's stdin/stdout for Claude
-    /// Code, which pipes JSON-RPC directly and needs nothing more — so the
-    /// HTTP listener is OFF by default (issue #123).
-    ///
-    /// Pass `--with-http` to additionally bind an HTTP/SSE transport on
-    /// 127.0.0.1:<port> (port 0 = OS-chosen free port). The bound address is
-    /// written to `~/.trusty-search/mcp_http_addr` so admin clients can
-    /// discover it.
+    /// Serves MCP on the process's stdin/stdout for Claude Code, which pipes
+    /// JSON-RPC directly. #9542 retired the HTTP/SSE transport: `--with-http`,
+    /// `--http` and `--port` exit 1 naming the issue, and nothing is bound.
     ///
     /// Examples:
-    ///   trusty-search serve                       # MCP stdio only (Claude hook)
-    ///   trusty-search serve --with-http           # MCP stdio + HTTP on :0
-    ///   trusty-search serve --with-http --port 7878  # MCP stdio + HTTP on :7878
-    ///   trusty-search serve --http 0.0.0.0:8080   # legacy: explicit bind addr
+    ///   trusty-search serve                       # MCP stdio (Claude hook)
     ///
-    /// `--no-http` is accepted but ignored — HTTP is already off by default.
+    /// `--no-http` is accepted but ignored — there is no HTTP transport.
     #[command(display_order = 22)]
     Serve {
-        /// Enable the HTTP/SSE listener in addition to MCP stdio.
-        ///
-        /// Off by default: Claude Code MCP hooks pipe JSON-RPC over
-        /// stdin/stdout and never need the HTTP admin panel, so binding it
-        /// would just waste a port. Opt in with this flag when you want the
-        /// HTTP transport (e.g. for the browser admin panel).
-        #[arg(long, default_value_t = false)]
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true, default_value_t = false)]
         with_http: bool,
 
-        /// Deprecated no-op: HTTP is now OFF by default (issue #123), so
-        /// `--no-http` does nothing. Kept as a hidden, accepted flag so
+        /// Deprecated no-op (issue #123). Kept as a hidden, accepted flag so
         /// existing `.mcp.json` configs that still pass it don't break.
         #[arg(long, hide = true, default_value_t = false)]
         no_http: bool,
 
-        /// Port for the HTTP/SSE MCP transport (default: 0 = OS picks).
-        ///
-        /// Only used when `--with-http` is set.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true)]
+        port: Option<u16>,
 
-        /// Legacy: explicit "host:port" bind address. When set, overrides
-        /// `--port`. Kept for backward compatibility with older docs.
-        #[arg(long)]
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true)]
         http: Option<String>,
 
         /// Pin this MCP session to a single index id (issue #1373).
@@ -1253,7 +1236,7 @@ async fn run() -> Result<()> {
 
         Commands::Serve {
             with_http,
-            no_http: _, // deprecated no-op (issue #123): HTTP is opt-in now
+            no_http: _, // deprecated no-op (issue #123)
             port,
             http,
             index,
