@@ -51,7 +51,9 @@ impl RpcFallback for Stub {
                 CODE_REFUSED,
                 "palace \"dst\" already exists and is not empty: it holds drawers",
             )),
-            (Daemon::Current, _) => Ok(json!({"old": params["palace_id"], "new": params["new_id"]})),
+            (Daemon::Current, _) => {
+                Ok(json!({"old": params["palace_id"], "new": params["new_id"]}))
+            }
         }
     }
 }
@@ -97,7 +99,12 @@ async fn rename_arguments_use_the_schema_keys() {
     rename_palace_at(&socket, "src", "dst", false)
         .await
         .expect("rename");
-    let sent = calls.lock().expect("calls").last().cloned().expect("a call");
+    let sent = calls
+        .lock()
+        .expect("calls")
+        .last()
+        .cloned()
+        .expect("a call");
     assert_eq!(sent.0, RENAME_METHOD);
     assert_eq!(sent.1, rename_arguments("src", "dst", false));
 }
@@ -142,9 +149,9 @@ async fn rename_against_a_daemon_that_answers_32601_says_it_predates_palace_rena
     let err = rename_palace_at(&socket, "src", "dst", false)
         .await
         .expect_err("an old daemon cannot rename");
-    assert!(
-        err.to_string().contains("predates palace_rename"),
-        "{err}"
+    assert!(err.to_string().contains("predates palace_rename"), "{err}");
+    assert_eq!(
+        methods(&calls).last().map(String::as_str),
+        Some(RENAME_METHOD)
     );
-    assert_eq!(methods(&calls).last().map(String::as_str), Some(RENAME_METHOD));
 }

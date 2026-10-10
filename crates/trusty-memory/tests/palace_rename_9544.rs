@@ -92,17 +92,27 @@ async fn rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated() 
     let fx = Fixture::new();
     fx.palace("rw-src");
     for i in 0..3 {
-        fx.tool("memory_remember", json!({"palace": "rw-src", "text": note(i)}))
-            .await
-            .expect("remember");
+        fx.tool(
+            "memory_remember",
+            json!({"palace": "rw-src", "text": note(i)}),
+        )
+        .await
+        .expect("remember");
     }
     let out = fx
-        .tool("palace_rename", json!({"palace_id": "rw-src", "new_id": "rw-dst"}))
+        .tool(
+            "palace_rename",
+            json!({"palace_id": "rw-src", "new_id": "rw-dst"}),
+        )
         .await
         .expect("palace_rename");
     assert_eq!(out["new"], "rw-dst", "{out}");
 
-    assert_eq!(fx.drawer_ids("rw-src").await.len(), 3, "a read through the old id");
+    assert_eq!(
+        fx.drawer_ids("rw-src").await.len(),
+        3,
+        "a read through the old id"
+    );
     // The recall also runs the BM25 lane under the old id.
     fx.tool(
         "memory_recall",
@@ -110,13 +120,19 @@ async fn rename_old_id_reads_and_writes_land_in_new_and_old_dir_not_recreated() 
     )
     .await
     .expect("recall through the old id");
-    fx.tool("memory_remember", json!({"palace": "rw-src", "text": note(3)}))
-        .await
-        .expect("remember through the old id");
+    fx.tool(
+        "memory_remember",
+        json!({"palace": "rw-src", "text": note(3)}),
+    )
+    .await
+    .expect("remember through the old id");
     assert_eq!(fx.drawer_ids("rw-dst").await.len(), 4);
     tokio::time::sleep(Duration::from_millis(300)).await;
     let root = &fx.state.data_root;
-    assert!(!root.join("rw-src").exists(), "the old palace dir was recreated");
+    assert!(
+        !root.join("rw-src").exists(),
+        "the old palace dir was recreated"
+    );
 
     let created = fx
         .tool("palace_create", json!({"name": "rw-src", "force": true}))
@@ -142,7 +158,10 @@ async fn rename_concurrent_remember_loses_and_duplicates_nothing() {
             let mut acked = Vec::new();
             for i in 0..30 {
                 let out = fx
-                    .tool("memory_remember", json!({"palace": "race-src", "text": note(i)}))
+                    .tool(
+                        "memory_remember",
+                        json!({"palace": "race-src", "text": note(i)}),
+                    )
                     .await;
                 if let Ok(out) = out {
                     if let Some(id) = out["drawer_id"].as_str() {
@@ -154,19 +173,30 @@ async fn rename_concurrent_remember_loses_and_duplicates_nothing() {
         })
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
-    fx.tool("palace_rename", json!({"palace_id": "race-src", "new_id": "race-dst"}))
-        .await
-        .expect("palace_rename");
+    fx.tool(
+        "palace_rename",
+        json!({"palace_id": "race-src", "new_id": "race-dst"}),
+    )
+    .await
+    .expect("palace_rename");
     let acked = writer.await.expect("join");
     assert!(!acked.is_empty(), "no write was acknowledged");
 
     let stored = fx.drawer_ids("race-dst").await;
     let unique: HashSet<&String> = stored.iter().collect();
-    assert_eq!(unique.len(), stored.len(), "a drawer was stored twice: {stored:?}");
+    assert_eq!(
+        unique.len(),
+        stored.len(),
+        "a drawer was stored twice: {stored:?}"
+    );
     for id in &acked {
         assert!(unique.contains(id), "acknowledged drawer {id} is missing");
     }
-    assert_eq!(stored.len(), acked.len(), "the palace holds unacknowledged drawers");
+    assert_eq!(
+        stored.len(),
+        acked.len(),
+        "the palace holds unacknowledged drawers"
+    );
     assert!(!fx.state.data_root.join("race-src").exists());
     fx.shutdown().await;
 }

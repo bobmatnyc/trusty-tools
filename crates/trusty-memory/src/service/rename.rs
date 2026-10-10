@@ -201,7 +201,11 @@ impl MemoryService {
         }
         let mut bm25_dropped = evict_bm25(state, &ids).await;
         let before = if root.join(old).join("palace.json").exists() {
-            Some(count_blocking(state, old).await.map_err(|e| count_refusal(old, e))?)
+            Some(
+                count_blocking(state, old)
+                    .await
+                    .map_err(|e| count_refusal(old, e))?,
+            )
         } else {
             None
         };
@@ -281,10 +285,7 @@ pub(crate) fn rename_lock_set(
     set.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out: Vec<(String, Arc<Mutex<()>>)> = Vec::with_capacity(set.len());
     for (key, mutex) in set {
-        if !out
-            .iter()
-            .any(|(k, m)| *k == key || Arc::ptr_eq(m, &mutex))
-        {
+        if !out.iter().any(|(k, m)| *k == key || Arc::ptr_eq(m, &mutex)) {
             out.push((key, mutex));
         }
     }

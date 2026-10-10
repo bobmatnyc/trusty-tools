@@ -852,6 +852,10 @@ async fn evict_palace_never_recreates_a_moved_palace_dir() {
         .await
         .unwrap();
     let hits = lane.search("old", "lexical", 5).await.unwrap();
-    assert_eq!(hits.len(), 1, "a search through the old id reads new: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "a search through the old id reads new: {hits:?}"
+    );
     assert!(!root.join("old").exists(), "a search recreated the old dir");
 }

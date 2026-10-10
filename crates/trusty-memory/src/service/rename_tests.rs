@@ -162,7 +162,10 @@ async fn rename_concurrent_opposite_renames_do_not_abba() {
     drop((held_a, held_b));
     for (dir, joined) in [("a->b", ab.await), ("b->a", ba.await)] {
         if let Err(e) = joined.expect("join") {
-            assert!(!e.to_string().contains("busy"), "{dir} timed out on a lock: {e}");
+            assert!(
+                !e.to_string().contains("busy"),
+                "{dir} timed out on a lock: {e}"
+            );
         }
     }
 }
@@ -195,7 +198,10 @@ async fn rename_stale_writer_waits_on_the_renamed_palace_lock() {
     .expect("join")
     .expect("core rename");
     let new_lock = state.palace_write_lock("stale-src");
-    assert!(!Arc::ptr_eq(&new_lock, &old_lock), "the old id must now key the new palace");
+    assert!(
+        !Arc::ptr_eq(&new_lock, &old_lock),
+        "the old id must now key the new palace"
+    );
     let held_new = Arc::clone(&new_lock).lock_owned().await;
     drop(held_old);
 
@@ -214,7 +220,11 @@ async fn rename_stale_writer_waits_on_the_renamed_palace_lock() {
     let listed = dispatch_tool(&state, "memory_list", json!({"palace": "stale-dst"}))
         .await
         .expect("memory_list");
-    assert_eq!(listed["drawers"].as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(
+        listed["drawers"].as_array().map(Vec::len),
+        Some(1),
+        "{listed}"
+    );
 }
 
 /// Why (#9544, A7): chat sessions live in `chat_sessions.redb` under the palace
@@ -236,13 +246,20 @@ async fn rename_moves_chat_sessions() {
         .await
         .expect("rename");
     for via in ["chat-src", "chat-dst"] {
-        let sessions = state.session_store(via).expect("store").list_sessions().expect("list");
+        let sessions = state
+            .session_store(via)
+            .expect("store")
+            .list_sessions()
+            .expect("list");
         assert!(
             sessions.iter().any(|s| s.id == id),
             "session {id} missing through {via}: {sessions:?}"
         );
     }
-    assert!(!state.data_root.join("chat-src").exists(), "the old dir was recreated");
+    assert!(
+        !state.data_root.join("chat-src").exists(),
+        "the old dir was recreated"
+    );
 }
 
 /// Why (#9544, A8, ruling QG): a resident BM25 index keyed by either id keeps
@@ -265,11 +282,18 @@ async fn rename_drops_bm25_for_old_and_new_and_recreates_no_old_dir() {
     rename(&state, "lex-src", "lex-dst", false)
         .await
         .expect("rename");
-    assert_eq!(lane.resident_count().await, 0, "both ids' indexes must be dropped");
+    assert_eq!(
+        lane.resident_count().await,
+        0,
+        "both ids' indexes must be dropped"
+    );
     assert!(!state.data_root.join("lex-src").exists());
     let hits = lane.search("lex-src", "lexical", 5).await.expect("search");
     assert_eq!(hits.len(), 1, "{hits:?}");
-    assert!(!state.data_root.join("lex-src").exists(), "a search recreated the old dir");
+    assert!(
+        !state.data_root.join("lex-src").exists(),
+        "a search recreated the old dir"
+    );
     lane.shutdown().await;
 }
 
@@ -293,7 +317,9 @@ async fn rename_queues_bm25_repair_when_an_unflushed_index_is_dropped() {
     let bm25_dir = lane.data_dir_for_palace("dirty-src");
     std::fs::create_dir_all(&bm25_dir).expect("bm25 dir");
     std::fs::set_permissions(&bm25_dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
-    lane.index("dirty-src", "d1", "never reaches disk").await.expect("index");
+    lane.index("dirty-src", "d1", "never reaches disk")
+        .await
+        .expect("index");
 
     let result = rename(&state, "dirty-src", "dirty-dst", false).await;
     let moved = lane.data_dir_for_palace("dirty-dst");
@@ -315,12 +341,16 @@ async fn rename_queues_bm25_repair_when_an_unflushed_index_is_dropped() {
 async fn rename_clears_palace_names_last_used_write_locks_session_stores() {
     let (state, _tmp) = fixture();
     make_palace(&state, "cache-src");
-    state.palace_names.insert("cache-src".into(), "label".into());
+    state
+        .palace_names
+        .insert("cache-src".into(), "label".into());
     state.palace_last_used.insert("cache-src".into(), 1);
     let _ = state.palace_write_lock("cache-src");
     let _ = state.session_store("cache-src").expect("store");
     let pin = std::path::PathBuf::from("/project/root");
-    state.pin_project_map.insert("cache-src".into(), pin.clone());
+    state
+        .pin_project_map
+        .insert("cache-src".into(), pin.clone());
 
     rename(&state, "cache-src", "cache-dst", false)
         .await
@@ -328,9 +358,16 @@ async fn rename_clears_palace_names_last_used_write_locks_session_stores() {
     assert!(!state.palace_names.contains_key("cache-src"));
     assert!(!state.palace_last_used.contains_key("cache-src"));
     assert!(!state.palace_write_locks.contains_key("cache-src"));
-    assert_eq!(state.session_stores.len(), 0, "no chat store may stay cached");
+    assert_eq!(
+        state.session_stores.len(),
+        0,
+        "no chat store may stay cached"
+    );
     assert!(!state.pin_project_map.contains_key("cache-src"));
-    assert_eq!(state.pin_project_map.get("cache-dst").map(|p| p.clone()), Some(pin));
+    assert_eq!(
+        state.pin_project_map.get("cache-dst").map(|p| p.clone()),
+        Some(pin)
+    );
 }
 
 /// Why (#9544, A9): dashboards keyed by palace id need to hear about the move.
@@ -340,7 +377,9 @@ async fn rename_emits_palace_renamed_event() {
     let (state, _tmp) = fixture();
     make_palace(&state, "ev-src");
     let mut rx = state.events.subscribe();
-    rename(&state, "ev-src", "ev-dst", false).await.expect("rename");
+    rename(&state, "ev-src", "ev-dst", false)
+        .await
+        .expect("rename");
     let mut seen = false;
     while let Ok(event) = rx.try_recv() {
         if let DaemonEvent::PalaceRenamed { old, new } = event {
@@ -364,7 +403,9 @@ async fn rename_replace_empty_trashes_target_under_dot_trash() {
     assert_eq!(code, error_codes::REFUSED, "{msg}");
     assert!(msg.contains("replace_empty"), "{msg}");
 
-    let out = rename(&state, "rep-src", "rep-dst", true).await.expect("rename");
+    let out = rename(&state, "rep-src", "rep-dst", true)
+        .await
+        .expect("rename");
     let trashed = out["trashed_target"].as_str().expect("trashed_target");
     assert!(
         std::path::Path::new(trashed).starts_with(state.data_root.join(".trash")),
@@ -422,7 +463,10 @@ fn rename_format_too_new_source_maps_to_refused() {
 
     let counted = count_refusal("p", anyhow::Error::new(too_new()).context("open palace p"));
     assert_eq!(counted.rpc_code(), error_codes::REFUSED);
-    assert!(counted.to_string().contains("upgrade trusty-memory"), "{counted}");
+    assert!(
+        counted.to_string().contains("upgrade trusty-memory"),
+        "{counted}"
+    );
 }
 
 /// Why (#9544, ruling QB): `old` is joined onto the data root, so a path-shaped
@@ -436,7 +480,10 @@ async fn rename_rejects_path_shaped_old() {
         let (code, msg) = refusal(rename(&state, old, "fine-new", false).await);
         assert_eq!(code, error_codes::INVALID_PARAMS, "{old:?}: {msg}");
     }
-    assert!(state.palace_write_locks.is_empty(), "a refused id must not reach the locks");
+    assert!(
+        state.palace_write_locks.is_empty(),
+        "a refused id must not reach the locks"
+    );
 }
 
 /// Why (#9544): renaming an alias would move the palace it points at under a
@@ -477,7 +524,10 @@ async fn rename_refuses_a_nonempty_target() {
     remember(&state, "ne-dst", &note(1)).await;
     let (code, msg) = refusal(rename(&state, "ne-src", "ne-dst", true).await);
     assert_eq!(code, error_codes::REFUSED, "{msg}");
-    assert!(state.data_root.join("ne-src/palace.json").exists(), "nothing may move");
+    assert!(
+        state.data_root.join("ne-src/palace.json").exists(),
+        "nothing may move"
+    );
 }
 
 /// Why (#9544): a target that is not a palace id is refused as a conflict.
@@ -527,7 +577,10 @@ fn from_anyhow_maps_palace_rename_errors() {
             }),
             REFUSED,
         ),
-        (core(PalaceRenameError::TargetExists { new: "n".into() }), REFUSED),
+        (
+            core(PalaceRenameError::TargetExists { new: "n".into() }),
+            REFUSED,
+        ),
         (
             core(PalaceRenameError::TargetNotEmpty {
                 new: "n".into(),
