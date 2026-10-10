@@ -329,11 +329,16 @@ async fn an_unreadable_pane_identity_refuses_the_in_place_reactivate() {
 async fn reactivate_stopped_from_pane_running(
     command: &'static str,
 ) -> (u16, ManagedSessionState, String) {
-    let f = Fixture::new(FakeTmux {
+    reactivate_stopped_over(FakeTmux {
         pane_command: Some(command),
         ..FakeTmux::default()
     })
-    .await;
+    .await
+}
+
+/// Reactivate the Stopped record on its own pane %9 over `fake` (#9566).
+async fn reactivate_stopped_over(fake: FakeTmux) -> (u16, ManagedSessionState, String) {
+    let f = Fixture::new(fake).await;
     let (state, _root) = daemon_over(&f.bin).await;
     let mgr = state.session_manager().await;
     let id = seed_named_into(&mgr, LIVE, "stopped", Some("%9"), Some(LIVE_SERVER)).await;
@@ -371,6 +376,28 @@ async fn a_stopped_record_whose_pane_runs_tm_is_still_reactivated_in_place() {
         let (status, state, body) = reactivate_stopped_from_pane_running(command).await;
         assert_eq!(status, 200, "foreground `{command}` refused: {body}");
         assert_eq!(state, ManagedSessionState::Active, "foreground `{command}`");
+    }
+}
+
+/// #9566 fail closed: a foreground command tmux answers empty, or a read that
+/// exits non-zero, refuses the in-place reactivate like a live agent does.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_record_whose_pane_foreground_command_is_unreadable_never_reactivates_in_place() {
+    let cases = [
+        ("an empty answer", FakeTmux::default()),
+        (
+            "a non-zero exit",
+            FakeTmux {
+                pane_command_fails: true,
+                ..FakeTmux::default()
+            },
+        ),
+    ];
+    for (case, fake) in cases {
+        let (status, state, body) = reactivate_stopped_over(fake).await;
+        assert_eq!(status, 409, "{case} reactivated: {body}");
+        assert_eq!(state, ManagedSessionState::Stopped, "{case}");
     }
 }
 
