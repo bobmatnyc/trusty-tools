@@ -387,7 +387,8 @@ mod tests {
         let src = "[search]\nripgrep_fallback = false\n[local_model]\nenabled = \"yes\"\n";
         let cfg = parse(src).expect("a bad [local_model] still loads");
         assert!(!cfg.lexical_defaults.ripgrep_fallback);
-        assert_eq!(cfg.local_model.model, "llama3.2");
+        // The pre-#9258 fallback: the whole runtime default, not the serde one.
+        assert_eq!(cfg.local_model.model, LocalModelConfig::default().model);
         let broken = parse("[openrouter]\nmodel = \n").expect("no [search]: defaults");
         assert_eq!(broken.lexical_defaults, LexicalLaneDefaults::default());
     }
