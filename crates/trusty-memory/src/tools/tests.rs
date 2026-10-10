@@ -560,6 +560,8 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples[0]["predicate"], "works_at");
 }
 
+// #9544: palace_create refuses a live alias name with a typed error.
+mod alias_canon_tests;
 mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.

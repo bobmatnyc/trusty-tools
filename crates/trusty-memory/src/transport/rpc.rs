@@ -62,6 +62,8 @@ pub mod error_codes {
     pub const INTERNAL_ERROR: i32 = -32603;
     /// The thing asked for does not exist — [`crate::transport::CODE_NOT_FOUND`].
     pub const NOT_FOUND: i32 = -32004;
+    /// Well formed and refused — [`crate::transport::CODE_REFUSED`] (#9544).
+    pub const REFUSED: i32 = -32006;
 }
 
 /// JSON-RPC 2.0 request envelope.
@@ -175,11 +177,19 @@ impl JsonRpcResponse {
     /// logged every such call as an unreachable daemon.
     /// What: code = `NOT_FOUND` when the chain carries the registry's
     /// genuine-absence error (`PalaceRegistry::open_error_is_absent`, the same
-    /// test `api_error::open_handle` uses), `INTERNAL_ERROR` otherwise;
-    /// message = `format!("{e:#}")` either way.
-    /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`.
+    /// test `api_error::open_handle` uses), `REFUSED` when it carries a
+    /// `LiveAliasError` (#9544: a create refused because the id is a live
+    /// alias), `INTERNAL_ERROR` otherwise; message = `format!("{e:#}")` always.
+    /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`,
+    /// `from_anyhow_maps_live_alias_to_refused`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
-        let code = if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
+        let code = if e
+            .downcast_ref::<trusty_common::palace_alias::LiveAliasError>()
+            .is_some()
+        {
+            // #9544: the same refusal the service layer maps to `Conflict`.
+            error_codes::REFUSED
+        } else if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
             error_codes::NOT_FOUND
         } else {
             error_codes::INTERNAL_ERROR
@@ -821,6 +831,59 @@ mod tests {
             other.error.expect("error").code,
             error_codes::INTERNAL_ERROR
         );
+    }
+
+    /// Why (#9544): a `palace_create` refused because the id is a live alias
+    /// answered `-32603`, so a caller read a resolvable state clash as a daemon
+    /// fault. The refusal is `-32006`, matched by type, never by message.
+    /// What: maps a context-wrapped `LiveAliasError` directly, then sends a
+    /// `palace_create` for a live alias name through `dispatch`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn from_anyhow_maps_live_alias_to_refused() {
+        let live = anyhow::Error::from(trusty_common::palace_alias::LiveAliasError {
+            alias: "a".to_string(),
+            target: "t".to_string(),
+        })
+        .context("create_palace");
+        let resp = JsonRpcResponse::from_anyhow(json!(1), live);
+        assert_eq!(resp.error.expect("error").code, error_codes::REFUSED);
+        assert_eq!(
+            i64::from(error_codes::REFUSED),
+            crate::transport::CODE_REFUSED
+        );
+
+        // SAFETY: every test in this process writes the same idempotent "1".
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        let state = test_state();
+        let target = trusty_common::memory_core::Palace {
+            id: trusty_common::memory_core::PalaceId::new("rpc-target"),
+            name: "rpc-target".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("rpc-target"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, target)
+            .expect("create target");
+        trusty_common::palace_alias::PalaceAliasStore::register_alias(
+            &state.data_root,
+            "rpc-alias",
+            "rpc-target",
+        )
+        .expect("register alias");
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(10)),
+            method: "palace_create".to_string(),
+            params: Some(json!({"name": "rpc-alias"})),
+        };
+        let err = dispatch(&state, req).await.error.expect("error");
+        assert_eq!(err.code, error_codes::REFUSED, "{}", err.message);
+        assert!(!state.data_root.join("rpc-alias/palace.json").exists());
     }
 
     /// Why: `initialize` is the first method Claude Code sends over the UDS/
