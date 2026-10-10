@@ -266,9 +266,10 @@ impl MemoryService {
     /// non-HTTP creation flow.
     /// What: validates the name, builds the `Palace` row, calls
     /// `PalaceRegistry::create_palace`, and emits `PalaceCreated`. Returns
-    /// the new palace id.
+    /// the new palace id. A name that is a live alias is `Conflict` (#9544).
     /// Test: covered indirectly by `palace_list_includes_richer_counts` (which
-    /// posts a palace through the HTTP layer then reads it back).
+    /// posts a palace through the HTTP layer then reads it back);
+    /// `create_palace_for_a_live_alias_is_a_conflict`.
     pub async fn create_palace(
         &self,
         body: CreatePalaceBody,
@@ -326,7 +327,17 @@ impl MemoryService {
         self.state
             .registry
             .create_palace(&self.state.data_root, palace)
-            .map_err(|e| ServiceError::internal(format!("create palace: {e:#}")))?;
+            .map_err(|e| {
+                // #9544: a live alias name is a state clash, not a daemon fault.
+                let live_alias = e
+                    .downcast_ref::<trusty_common::palace_alias::LiveAliasError>()
+                    .is_some();
+                if live_alias {
+                    ServiceError::conflict(format!("create palace: {e:#}"))
+                } else {
+                    ServiceError::internal(format!("create palace: {e:#}"))
+                }
+            })?;
         // Issue #228: keep the in-memory palace-name cache in sync so writes
         // to this palace can resolve `Palace.name` without a disk walk.
         self.state.palace_names.insert(name.clone(), name.clone());

@@ -1483,3 +1483,110 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
 // the daemon wrote the OS-standard one; ADR-0032 removed both writes, and
 // `transport::uds::remove_retired_discovery_files` deletes whichever of them a
 // machine still carries.
+
+/// Create palace `canonical` on disk and register `alias -> canonical`.
+///
+/// Why (#9544): the two alias choke-point tests below need the same live
+/// alias, and a wrong shape (an alias directory, a missing target) silently
+/// disables the redirect, so the helper asserts the redirect fires.
+/// Test: used by `palace_write_lock_follows_a_live_alias` and
+/// `session_store_follows_a_live_alias_and_creates_no_alias_dir`.
+fn live_alias(state: &AppState, canonical: &str, alias: &str) {
+    let palace = trusty_common::memory_core::Palace {
+        id: trusty_common::memory_core::palace::PalaceId::new(canonical),
+        name: canonical.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(canonical),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create canonical palace");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        alias,
+        canonical,
+    )
+    .expect("register alias");
+    assert_eq!(
+        trusty_common::palace_alias::canonical_palace_id(&state.data_root, alias),
+        canonical,
+        "the alias must be live"
+    );
+}
+
+/// Why (#9544): the dedup gate is atomic only per mutex. Keyed on the raw id,
+/// a write through an alias and a write through its target took two mutexes
+/// for one store, and both could pass the gate.
+/// What: a live alias and its target return the same `Arc`; a dead alias (its
+/// target has no `palace.json`) and an unknown id keep their own keys.
+/// Test: this test.
+#[tokio::test]
+async fn palace_write_lock_follows_a_live_alias() {
+    let (state, _tmp) = test_state();
+    live_alias(&state, "lock-canonical", "lock-alias");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        "lock-dead-alias",
+        "lock-never-created",
+    )
+    .expect("register dead alias");
+
+    let canonical = state.palace_write_lock("lock-canonical");
+    assert!(
+        Arc::ptr_eq(&canonical, &state.palace_write_lock("lock-alias")),
+        "a live alias must share its target's write mutex"
+    );
+    let dead = state.palace_write_lock("lock-dead-alias");
+    let unknown = state.palace_write_lock("lock-unknown");
+    assert!(
+        !Arc::ptr_eq(&dead, &canonical),
+        "a dead alias keeps its own key"
+    );
+    assert!(
+        !Arc::ptr_eq(&unknown, &canonical),
+        "an unknown id keeps its own key"
+    );
+    assert!(!Arc::ptr_eq(&dead, &unknown), "distinct ids stay distinct");
+    assert!(Arc::ptr_eq(
+        &dead,
+        &state.palace_write_lock("lock-dead-alias")
+    ));
+}
+
+/// Why (#9544): `session_store` keyed its cache and its directory on the raw
+/// id, so a chat call through an alias created `<root>/<alias>/` and a second
+/// `chat_sessions.redb` for one palace.
+/// What: the alias and the target return the same store; a session created
+/// through the alias reads back through the target; no alias dir exists.
+/// Test: this test.
+#[tokio::test]
+async fn session_store_follows_a_live_alias_and_creates_no_alias_dir() {
+    let (state, _tmp) = test_state();
+    live_alias(&state, "chat-canonical", "chat-alias");
+
+    let via_alias = state.session_store("chat-alias").expect("store via alias");
+    let session = via_alias
+        .create_session(Some("through the alias".to_string()))
+        .expect("create session");
+    let via_canonical = state
+        .session_store("chat-canonical")
+        .expect("store via canonical");
+
+    assert!(
+        Arc::ptr_eq(&via_alias, &via_canonical),
+        "a live alias must share its target's session store"
+    );
+    assert!(
+        via_canonical
+            .get_session(&session)
+            .expect("get session")
+            .is_some(),
+        "a session created through the alias must read back through the target"
+    );
+    assert!(
+        !state.data_root.join("chat-alias").exists(),
+        "no directory may be created under the alias name"
+    );
+}

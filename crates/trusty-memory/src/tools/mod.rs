@@ -220,8 +220,8 @@ fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
     };
     // The same rule `PalaceRegistry::resolve_palace_alias` applies, from the
     // one place that owns it — a second spelling here is how the two drift.
-    let palace = trusty_common::palace_alias::alias_target_if_absent(&state.data_root, &palace)
-        .unwrap_or(palace);
+    // #9544: the named helper for this rule, not an open-coded copy of it.
+    let palace = trusty_common::palace_alias::canonical_palace_id(&state.data_root, &palace);
     let id = trusty_common::memory_core::PalaceId::new(&palace);
     let Some(data_dir) = state.registry.peek(&id).and_then(|h| h.data_dir.clone()) else {
         return;

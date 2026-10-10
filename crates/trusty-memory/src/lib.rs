@@ -897,14 +897,22 @@ impl AppState {
     /// inserts a freshly-constructed `tokio::sync::Mutex<()>` first. The
     /// `DashMap::entry().or_insert_with` API guarantees the lazy
     /// construction is racy-safe — only one mutex is ever inserted per
-    /// palace id.
-    /// Test: `tools::tests::dedup_gate_blocks_concurrent_duplicate_writes`.
+    /// palace id. The key is the canonical palace id (#9544), so a live alias
+    /// and its target share one mutex.
+    /// Test: `tools::tests::dedup_gate_blocks_concurrent_duplicate_writes`,
+    /// `palace_write_lock_follows_a_live_alias`.
     pub fn palace_write_lock(&self, palace_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        if let Some(existing) = self.palace_write_locks.get(palace_id) {
+        // #9544: key on the id the registry open reaches, or an alias write and
+        // a canonical write race past the dedup gate on two mutexes. An
+        // unreadable alias file falls back to the raw id; that is benign here
+        // because the open then fails closed on the alias's missing metadata.
+        let palace_id =
+            trusty_common::palace_alias::canonical_palace_id(&self.data_root, palace_id);
+        if let Some(existing) = self.palace_write_locks.get(&palace_id) {
             return existing.clone();
         }
         self.palace_write_locks
-            .entry(palace_id.to_string())
+            .entry(palace_id)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     }
@@ -1332,14 +1340,19 @@ impl AppState {
     /// the palace data dir if missing, opens (or reuses) a `ChatSessionStore`,
     /// and evicts cold, *unused* stores once more than the cap are resident.
     /// Callers keep the returned `Arc` for as long as they need it — eviction
-    /// never closes a store someone still holds.
+    /// never closes a store someone still holds. A live alias resolves to its
+    /// target first (#9544), so it shares the target's store and directory.
     /// Test: `session_store_cache::tests::open_handles_are_bounded_by_cap`,
-    /// `session_store_cache::tests::in_use_store_is_never_evicted`; the call
-    /// path is covered indirectly by the session HTTP handlers in `web::tests`.
+    /// `session_store_cache::tests::in_use_store_is_never_evicted`,
+    /// `session_store_follows_a_live_alias_and_creates_no_alias_dir`.
     pub fn session_store(&self, palace_id: &str) -> Result<Arc<ChatSessionStore>> {
+        // #9544: canonicalise before both the cache key and the path, or an
+        // alias opens a second `chat_sessions.redb` under `<root>/<alias>/`.
+        let palace_id =
+            trusty_common::palace_alias::canonical_palace_id(&self.data_root, palace_id);
         // #4639: bounded cache replaces the unbounded, never-evicting DashMap.
         self.session_stores
-            .get_or_open(palace_id, &self.data_root.join(palace_id))
+            .get_or_open(&palace_id, &self.data_root.join(&palace_id))
     }
 
     /// Builder-style setter for the default palace name.
