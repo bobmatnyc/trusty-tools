@@ -813,11 +813,27 @@ impl PalaceRegistry {
     /// Why: `palace new` saves metadata and immediately wants a working handle
     /// for further operations; combining the steps avoids a TOCTOU between
     /// save and open.
-    /// What: Computes `data_dir = data_root/<id>`, writes `palace.json`, and
+    /// What: Refuses with [`crate::palace_alias::LiveAliasError`] when the id is
+    /// a live alias (#9544), since a new palace would shadow it, and fails when
+    /// the alias file cannot be read. Otherwise
+    /// computes `data_dir = data_root/<id>`, writes `palace.json`, and
     /// returns a freshly opened handle (registered in the LRU cache, possibly
     /// evicting the LRU entry if at capacity).
-    /// Test: `registry_create_and_open`.
+    /// Test: `registry_create_and_open`, `palace_create_refuses_a_live_alias_name`,
+    /// `palace_create_fails_when_the_alias_file_is_unreadable`.
     pub fn create_palace(&self, data_root: &Path, mut palace: Palace) -> Result<Arc<PalaceHandle>> {
+        // #9544: a live alias name stays an alias; creating it would shadow it.
+        // An unreadable alias file fails the create rather than skipping the check.
+        if let Some(target) =
+            crate::palace_alias::try_alias_target_if_absent(data_root, palace.id.as_str())
+                .with_context(|| format!("check palace id {} against the alias map", palace.id))?
+        {
+            return Err(crate::palace_alias::LiveAliasError {
+                alias: palace.id.as_str().to_string(),
+                target,
+            }
+            .into());
+        }
         // Always anchor data_dir under data_root/<id> so callers can pass a
         // bare Palace without worrying about path layout.
         let palace_dir = data_root.join(palace.id.as_str());
