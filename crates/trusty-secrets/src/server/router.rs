@@ -346,12 +346,14 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
 /// What: waits for a permit from `admission` until `deadline`, then spawns
 /// the body with the permit moved into its closure, and waits for it until
 /// `deadline` plus [`BODY_GRACE`], so a body that stops at the deadline still
-/// gives its own answer. Past either wait the answer is
+/// gives its own answer. A permit granted at or past the deadline starts no
+/// body. Past either wait the answer is
 /// [`ErrorKind::DeadlineExceeded`]; a closed semaphore or a panicking body
 /// is [`ErrorKind::Internal`]. Neither is ever a success.
 /// Test: `server_stuck_backend_calls_do_not_starve_a_later_request`,
 /// `server_timed_out_request_keeps_its_permit_until_its_call_returns`,
-/// `server_closed_admission_is_internal_and_never_runs_the_body`.
+/// `server_closed_admission_is_internal_and_never_runs_the_body`,
+/// `server_request_admitted_past_its_deadline_never_runs_the_body`.
 pub(crate) async fn run_blocking(
     state: Arc<State>,
     admission: Arc<Semaphore>,
@@ -366,6 +368,12 @@ pub(crate) async fn run_blocking(
         Ok(Err(_closed)) => return Err(ErrorKind::Internal),
         Err(_elapsed) => return Err(ErrorKind::DeadlineExceeded),
     };
+    // #9572: `timeout_at` polls the acquire before its timer, so a free
+    // permit is granted past the deadline; the body must not start then.
+    // Returning drops the permit, which releases it.
+    if Instant::now() >= deadline {
+        return Err(ErrorKind::DeadlineExceeded);
+    }
     let task = tokio::task::spawn_blocking(move || {
         // #9572: the permit is the thread's, released only when it finishes.
         let _permit = permit;
@@ -528,13 +536,30 @@ pub(crate) async fn serve_state(
     Ok(ServeExit::from_uds(exit))
 }
 
-/// Run `future` on `runtime` to completion, then shut the runtime down.
+/// How long the process waits at exit for blocking threads still running.
 ///
-/// Why: #9572 — the binary's exit path, in the crate so a test can drive it.
-/// What: `block_on`, then the runtime is dropped.
+/// Why: #9572 — dropping the runtime waits with no limit for every blocking
+/// thread, so a call that never returns kept an idled-out server alive.
+pub const EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// Run `future` on `runtime` to completion, then shut the runtime down
+/// within [`EXIT_GRACE`].
+///
+/// Why: #9572 — after a stuck request answers, the server idles out; a
+/// plain runtime drop then hung on the stuck thread, and the next client
+/// started another server, so one hung process accrued per idle cycle.
+/// What: `block_on`, then `shutdown_timeout(EXIT_GRACE)`. A blocking call
+/// that is finishing normally gets up to [`EXIT_GRACE`] to end; one that is
+/// still running then is abandoned, and the process exits with `future`'s
+/// result. A write that call started may or may not land.
+/// `shutdown_timeout` rather than `shutdown_background`: the short wait lets
+/// a call that is about to finish complete instead of being cut off.
 /// Test: `server_process_exit_is_bounded_while_a_call_is_stuck`.
 pub fn run_to_exit<T>(runtime: tokio::runtime::Runtime, future: impl Future<Output = T>) -> T {
-    runtime.block_on(future)
+    let result = runtime.block_on(future);
+    // See #9572: no stuck thread can hold the process past this bound.
+    runtime.shutdown_timeout(EXIT_GRACE);
+    result
 }
 
 /// Remove stale template directories under `root`, reporting on stderr.

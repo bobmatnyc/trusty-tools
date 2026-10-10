@@ -154,9 +154,13 @@ started may still land then. Until it ends, every later call on the same
 Keychain item fails at once with `backend_timeout`, so that late write cannot
 replace a newer one. A file call is not bounded by the deadline, but the
 request is: 2 s past its deadline it answers `deadline_exceeded` while the
-call keeps its thread until it returns (#9572). At most 64 method calls run at
-once; a request that waits for a free slot past its deadline also answers
-`deadline_exceeded`, so calls that never return hold at most 64 threads.
+call keeps its thread until it returns (#9572). Each server process runs at most
+64 method calls at once; a request that waits for a free slot past its
+deadline also answers `deadline_exceeded`, so calls that never return hold at
+most 64 threads per server process, and a slot granted after the deadline
+starts nothing. When the server exits (idle or a signal), it waits at most
+2 s for running calls, then abandons any still stuck, so a write such a call
+started may or may not land.
 
 `delete` removes the key from every backend this build can store values in
 (the Keychain on macOS, the file backend, and 1Password or Keeper when the
