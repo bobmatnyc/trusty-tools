@@ -174,6 +174,84 @@ fn agent_label_matches_name_and_versioned_path() {
     }
 }
 
+fn args(list: &[&str]) -> Result<Vec<String>, ProcessError> {
+    Ok(list.iter().map(|a| (*a).to_owned()).collect())
+}
+
+/// Why: #9621, ruling Q2 — npm Claude Code is a `node` whose argv names the
+/// `claude-code` package (or the `claude` bin link); a plain `node` is not an
+/// agent, and a non-`node` process never has its argv read.
+/// Red when the argv arm is removed (claude-code node answers `false`), or
+/// when every `node` is judged an agent (plain node answers `true`).
+/// Test: itself.
+#[test]
+fn agent_verdict_reads_argv_of_node_only() {
+    let npm = "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+    assert_eq!(agent_verdict(&["node"], || args(&["node", npm])), Ok(true));
+    assert_eq!(
+        agent_verdict(&["node", "/opt/homebrew/bin/node"], || args(&[
+            "node",
+            "/opt/homebrew/bin/claude",
+            "--resume"
+        ])),
+        Ok(true)
+    );
+    assert_eq!(
+        agent_verdict(&["nodejs"], || args(&["nodejs", npm])),
+        Ok(true)
+    );
+    assert_eq!(
+        agent_verdict(&["node", "/usr/bin/node"], || args(&[
+            "node",
+            "/srv/app/server.js"
+        ])),
+        Ok(false),
+        "plain node"
+    );
+    let never = || -> Result<Vec<String>, ProcessError> { panic!("argv read for non-node") };
+    assert_eq!(agent_verdict(&["zsh", "/bin/zsh"], never), Ok(false));
+    assert_eq!(agent_verdict(&["claude"], never), Ok(true));
+    assert!(names_node("/usr/local/bin/node") && !names_node("nodemon"));
+}
+
+/// Why: #9621 — a `node` whose argv cannot be read may be Claude Code, so
+/// the verdict is the read error and the caller refuses (fail-closed).
+/// Red when an unreadable argv answers `Ok(false)`.
+/// Test: itself.
+#[test]
+fn agent_verdict_fails_closed_on_unreadable_node_argv() {
+    let unreadable = ProcessError::Unreadable { pid: 77 };
+    assert_eq!(
+        agent_verdict(&["node"], || Err(unreadable)),
+        Err(unreadable)
+    );
+}
+
+/// Test: itself.
+#[test]
+fn cmdline_parser_splits_on_nul() {
+    assert_eq!(
+        parse_cmdline(b"node\0/x/claude-code/cli.js\0"),
+        Some(vec!["node".to_owned(), "/x/claude-code/cli.js".to_owned()])
+    );
+    assert_eq!(parse_cmdline(b""), None, "a zombie has no argv");
+}
+
+/// Test: itself.
+#[test]
+fn procargs2_parser_reads_argc_arguments() {
+    let mut buf = 2i32.to_ne_bytes().to_vec();
+    buf.extend_from_slice(b"/usr/local/bin/node\0\0\0\0node\0/x/claude-code/cli.js\0HOME=/u\0");
+    assert_eq!(
+        parse_procargs2(&buf),
+        Some(vec!["node".to_owned(), "/x/claude-code/cli.js".to_owned()])
+    );
+    let mut short = 3i32.to_ne_bytes().to_vec();
+    short.extend_from_slice(b"/usr/local/bin/node\0node\0");
+    assert_eq!(parse_procargs2(&short), None, "fewer than argc arguments");
+    assert_eq!(parse_procargs2(b"\x01\0"), None, "no argc");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod os_table {
     use super::super::*;
@@ -227,6 +305,57 @@ mod os_table {
             OsProcessTable.is_agent(pid),
             Err(ProcessError::Unreadable { pid })
         );
+    }
+
+    /// Why: #9621 — the argv reader (`/proc/<pid>/cmdline` or
+    /// `KERN_PROCARGS2`) returns this process's own arguments.
+    /// Test: itself.
+    #[test]
+    fn os_argv_reads_this_process() {
+        let me = std::process::id();
+        let expected: Vec<String> = std::env::args().collect();
+        assert_eq!(super::super::os::argv(me), Ok(expected));
+    }
+
+    /// Spawn `/bin/sh` through a link named `node`, so its Linux `comm` is
+    /// `node`, with argv `node -c 'sleep 30; :' <script>`. The tempdir path
+    /// stays out of argv (`arg0`), so it cannot name Claude by accident.
+    #[cfg(target_os = "linux")]
+    fn spawn_node(dir: &std::path::Path, script: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        let link = dir.join("node");
+        if !link.exists() {
+            std::os::unix::fs::symlink("/bin/sh", &link).expect("link sh as node");
+        }
+        std::process::Command::new(&link)
+            .arg0("node")
+            .args(["-c", "sleep 30; :", script])
+            .spawn()
+            .expect("spawn node-named sh")
+    }
+
+    /// Why: #9621, ruling Q2, on the host table — a process named `node`
+    /// whose argv carries a `claude-code` segment is an agent; one whose
+    /// argv does not is not. Linux only: there `comm` is the exec'd link's
+    /// name; macOS is covered by `procargs2_parser_reads_argc_arguments` and
+    /// `os_argv_reads_this_process`.
+    /// Red when `is_agent` ignores argv (the claude-code node answers
+    /// `false`).
+    /// Test: itself.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn os_table_judges_a_node_process_on_its_argv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut npm = spawn_node(dir.path(), "/x/@anthropic-ai/claude-code/cli.js");
+        let mut plain = spawn_node(dir.path(), "/srv/app/server.js");
+        let npm_verdict = OsProcessTable.is_agent(npm.id());
+        let plain_verdict = OsProcessTable.is_agent(plain.id());
+        for child in [&mut npm, &mut plain] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert_eq!(npm_verdict, Ok(true), "claude-code node");
+        assert_eq!(plain_verdict, Ok(false), "plain node");
     }
 }
 

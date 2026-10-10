@@ -558,6 +558,128 @@ async fn resolve_of_seeded_key_outside_the_grant_is_refused() {
     assert_no_value(&response);
 }
 
+/// Grant `keys` to this process as a one-shot grant and return the token.
+async fn granted_once(fx: &Fixture, keys: &[&str]) -> String {
+    let mut params = grant_params(fx, me(), keys);
+    params["one_shot"] = json!(true);
+    let answer = ok(call(&fx.settings.socket, method::GRANT, params).await);
+    answer["token"].as_str().unwrap().to_owned()
+}
+
+/// Resolve `name` under `token` from this process.
+async fn resolve_now(fx: &Fixture, token: &str, name: &str) -> RpcResponse {
+    call(
+        &fx.settings.socket,
+        method::RESOLVE,
+        resolve_params(token, name),
+    )
+    .await
+}
+
+/// Why: #9621 — a one-shot grant is spent only after the caller's agent
+/// ancestry check passes, so an unreadable ancestry refuses without using
+/// it up; the next readable call gets the value, and the one after is
+/// refused.
+/// Red when the grant is spent before the ancestry check (the second call
+/// is refused).
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_grant_survives_unreadable_caller_ancestry() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    let (state, _grants) = state_with(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    let token = granted_once(&fx, &["API_KEY"]).await;
+    procs.add(me(), 99, 4242);
+    let unreadable = resolve_now(&fx, &token, "API_KEY").await;
+    procs.add(me(), 10, 4242);
+    let first = resolve_now(&fx, &token, "API_KEY").await;
+    let second = resolve_now(&fx, &token, "API_KEY").await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&unreadable, method::RESOLVE),
+        ErrorKind::GrantRefused
+    );
+    assert_eq!(ok(first)["value"], SENTINEL_VALUE);
+    assert_eq!(
+        fixed_error(&second, method::RESOLVE),
+        ErrorKind::GrantRefused,
+        "spent once"
+    );
+}
+
+/// Why: #9621 — the allow record is written before the grant is spent, so
+/// an audit failure returns no value and leaves the one-shot grant usable.
+/// Red when the grant is spent before the record (the retry is refused).
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_grant_survives_an_audit_failure() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    let token = granted_once(&fx, &["API_KEY"]).await;
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    set_mode(&dir, 0o755);
+    let restore = RestoreMode(dir);
+    let failed = resolve_now(&fx, &token, "API_KEY").await;
+    drop(restore);
+    let retry = resolve_now(&fx, &token, "API_KEY").await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&failed, method::RESOLVE),
+        ErrorKind::AuditUnavailable
+    );
+    assert_no_value(&failed);
+    assert_eq!(ok(retry)["value"], SENTINEL_VALUE);
+}
+
+/// Why: #9621 — a backend failure (here, the key is not stored yet) spends
+/// nothing; once the key exists the one-shot grant still resolves it.
+/// Red when the grant is spent before the backend read.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_shot_grant_survives_a_backend_failure() {
+    let fx = fixture();
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let server = fx.start_state(state).await;
+    let token = granted_once(&fx, &["API_KEY"]).await;
+    let missing = resolve_now(&fx, &token, "API_KEY").await;
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let retry = resolve_now(&fx, &token, "API_KEY").await;
+    server.stop().await;
+
+    assert_eq!(fixed_error(&missing, method::RESOLVE), ErrorKind::NotFound);
+    assert_eq!(ok(retry)["value"], SENTINEL_VALUE);
+}
+
+/// Why: #9621 — once the granted child exits, its grant is refused and
+/// pruned, so it neither keeps the server alive nor holds a slot.
+/// Red when the dead child's grant stays in the registry.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_against_a_dead_childs_grant_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let procs = procs_with_me();
+    let (state, grants) = state_with(&fx, Arc::clone(&procs));
+    let server = fx.start_state(state).await;
+    let token = granted(&fx, me(), &["API_KEY"]).await;
+    procs.remove(me());
+    let refused = resolve_now(&fx, &token, "API_KEY").await;
+    server.stop().await;
+
+    assert_eq!(
+        fixed_error(&refused, method::RESOLVE),
+        ErrorKind::GrantRefused
+    );
+    assert_no_value(&refused);
+    assert_eq!(grants.has_unexpired(), Ok(false), "the grant was pruned");
+}
+
 /// Why: #9070 slice 3, fail-closed — an ancestry `resolve` cannot read never
 /// counts as "no agent". The caller's parent is re-pointed after the grant
 /// to a pid the table does not hold, so the descendant check still passes

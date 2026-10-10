@@ -10,7 +10,9 @@
 //! A token is 256 bits from the OS CSPRNG; the registry keeps only its
 //! SHA-256 and compares hashes in constant time. Expiry is checked on every
 //! use, the TTL is capped at mint, and a one-shot grant is removed by its
-//! first successful use. Every failure denies: a wrong, unknown or expired
+//! first successful use ([`GrantRegistry::spend`] when the caller has checks
+//! of its own, #9621). A grant whose child has exited is dropped at the next
+//! mint or idle check (#9621). Every failure denies: a wrong, unknown or expired
 //! token, a key outside the grant and a caller outside the child's tree all
 //! answer the one [`GrantError::Refused`]; a poisoned lock, an unreadable
 //! process table and a clock error answer their own variant.
@@ -290,10 +292,11 @@ impl GrantRegistry {
     ///
     /// Why: `secrets.grant` (slice 2) registers the spawner's child here.
     /// What: validates the request, records the child's start time, caps
-    /// the TTL at the registry's max, drops expired grants, and refuses at
-    /// [`MAX_LIVE_GRANTS`].
+    /// the TTL at the registry's max, drops expired grants and grants whose
+    /// child has exited, and refuses at [`MAX_LIVE_GRANTS`].
     /// Test: `grant_ttl_is_capped_at_max_ttl`, `mint_rejects_invalid_requests`,
-    /// `unreadable_start_time_denies`, `live_grant_count_is_capped`.
+    /// `unreadable_start_time_denies`, `live_grant_count_is_capped`,
+    /// `dead_child_grants_are_pruned_and_free_capacity`.
     pub fn mint(&self, request: GrantRequest) -> Result<MintedGrant, GrantError> {
         if request.keys.is_empty() {
             return Err(GrantError::InvalidRequest("no keys"));
@@ -308,7 +311,7 @@ impl GrantRegistry {
         let now = self.now()?;
         let child_start = self.procs.start_time(request.child_pid)?;
         let ttl = request.ttl.min(self.max_ttl);
-        grants.retain(|g| g.expires_at > now);
+        self.prune(&mut grants, now);
         if grants.len() >= MAX_LIVE_GRANTS {
             return Err(GrantError::CapacityReached);
         }
@@ -363,6 +366,73 @@ impl GrantRegistry {
         keys: &[SecretKey],
         peer_pid: u32,
     ) -> Result<GrantScope, GrantError> {
+        let (mut grants, index) = self.checked(token, keys, peer_pid)?;
+        let scope = grants[index].scope.clone();
+        if grants[index].one_shot {
+            grants.swap_remove(index);
+        }
+        Ok(scope)
+    }
+
+    /// [`Self::authorize_scoped`]'s checks, without spending a one-shot
+    /// grant.
+    ///
+    /// Why: #9621 — `secrets.resolve` runs more checks after this one (the
+    /// caller's agent ancestry, the audit record, the backend read); a
+    /// one-shot grant must survive any of them failing. The caller spends it
+    /// with [`Self::spend`] once they all passed.
+    /// What: the same checks, in the same order; an expired grant is still
+    /// removed. Nothing else changes.
+    /// Test: `check_scoped_never_spends_and_spend_does_once`.
+    pub fn check_scoped(
+        &self,
+        token: &GrantToken,
+        keys: &[SecretKey],
+        peer_pid: u32,
+    ) -> Result<GrantScope, GrantError> {
+        let (grants, index) = self.checked(token, keys, peer_pid)?;
+        Ok(grants[index].scope.clone())
+    }
+
+    /// Spend one use of the grant `token` names, after
+    /// [`Self::check_scoped`] passed.
+    ///
+    /// Why: #9621 — the last step before `secrets.resolve` releases a value,
+    /// so a one-shot grant is used exactly once, by the first caller to get
+    /// here.
+    /// What: `Ok(true)` when the grant is still live: a one-shot grant is
+    /// removed, a reusable one is kept. `Ok(false)` when no live grant
+    /// matches — revoked, expired, or spent by a racing caller since the
+    /// check; the caller then refuses.
+    /// Test: `check_scoped_never_spends_and_spend_does_once`.
+    pub fn spend(&self, token: &GrantToken) -> Result<bool, GrantError> {
+        let presented = hash_token(token);
+        let mut grants = self.lock()?;
+        let now = self.now()?;
+        let Some(index) = find(&grants, &presented) else {
+            return Ok(false);
+        };
+        let grant = &grants[index];
+        if now >= grant.expires_at || grant.one_shot {
+            let live = now < grant.expires_at;
+            grants.swap_remove(index);
+            return Ok(live);
+        }
+        Ok(true)
+    }
+
+    /// The lock and the index of the grant that passed every check.
+    ///
+    /// What: in order — token match (constant time), clock not behind the
+    /// mint time, unexpired (an expired grant is removed), every key in the
+    /// grant, `peer_pid` the child or a descendant with the child's recorded
+    /// start time.
+    fn checked(
+        &self,
+        token: &GrantToken,
+        keys: &[SecretKey],
+        peer_pid: u32,
+    ) -> Result<(MutexGuard<'_, Vec<Grant>>, usize), GrantError> {
         if keys.is_empty() {
             return Err(GrantError::InvalidRequest("no keys"));
         }
@@ -391,11 +461,22 @@ impl GrantRegistry {
         )? {
             return Err(GrantError::Refused);
         }
-        let scope = grant.scope.clone();
-        if grant.one_shot {
-            grants.swap_remove(index);
-        }
-        Ok(scope)
+        Ok((grants, index))
+    }
+
+    /// Drop expired grants and grants whose child has exited.
+    ///
+    /// Why: #9621 — a grant outlives its child when the spawner never
+    /// revokes it (killed, or crashed); without this the registry holds it
+    /// until expiry and counts it against [`MAX_LIVE_GRANTS`].
+    /// What: keeps a grant only while unexpired and while its child's pid
+    /// reads back the recorded start time. A read error drops the grant:
+    /// a child that cannot be shown alive is treated as gone (fail-closed).
+    /// A zombie child not yet reaped still reads as alive.
+    fn prune(&self, grants: &mut Vec<Grant>, now: Duration) {
+        grants.retain(|g| {
+            g.expires_at > now && self.procs.start_time(g.child_pid) == Ok(g.child_start)
+        });
     }
 
     /// Remove the grant `token` names. `Ok(false)` when none matched.
@@ -413,15 +494,18 @@ impl GrantRegistry {
         }
     }
 
-    /// Whether any unexpired grant exists. Drops expired grants.
+    /// Whether any unexpired grant exists. Drops expired grants, and
+    /// grants whose child has exited (#9621).
     ///
     /// Why: the server defers its 60 s idle exit while this is `true`
-    /// (Architect ruling 2026-10-10, slice 2).
-    /// Test: `has_unexpired_tracks_expiry_and_revoke`.
+    /// (Architect ruling 2026-10-10, slice 2); a dead child's grant must
+    /// not keep it alive.
+    /// Test: `has_unexpired_tracks_expiry_and_revoke`,
+    /// `dead_child_grants_are_pruned_and_free_capacity`.
     pub fn has_unexpired(&self) -> Result<bool, GrantError> {
         let mut grants = self.lock()?;
         let now = self.now()?;
-        grants.retain(|g| g.expires_at > now);
+        self.prune(&mut grants, now);
         Ok(!grants.is_empty())
     }
 }
