@@ -160,7 +160,7 @@ describe('getChatAvailable (#9030)', () => {
   });
 
   it('keeps chat_available when a status_changed SSE frame replaces the health body', async () => {
-    window.__SEARCH_BASE__ = CONSOLE_BASE;
+    window.__SEARCH_BASE__ = new URL(CONSOLE_BASE, window.location.href).href;
     health.mockResolvedValue({ status: 'ok', chat_available: true });
     let source;
     vi.stubGlobal(
