@@ -444,7 +444,7 @@ tm mcp test                        # MCP-layer sweep (see §1)
 `tm services` exit codes are stable and scriptable: `0` ok/running, `1`
 down/unhealthy, `2` unknown service. `tm services port trusty-search` and
 `tm services url trusty-search` exit `1` and name the socket, because
-trusty-search has no port or URL. An old `~/.claude-mpm/services.yaml` with the
+trusty-search has no port or URL. A legacy `services.yaml` manifest with the
 static port-7878 trusty-search entry is read as the socket probe, with one
 `WARN` on stderr; `tm services init --force` writes the current manifest.
 
