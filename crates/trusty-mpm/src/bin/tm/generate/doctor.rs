@@ -307,7 +307,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "tcp_listeners",
-        "Which trusty-* processes hold a TCP socket in LISTEN state, graded against the ADR-0032 allowlist `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv` — the file the CI lint `scripts/check_no_tcp_listeners.sh` reads too (issue #8926). Only trusty-console may listen on TCP. Probed through libproc on macOS and `/proc` on Linux, never `lsof`. `Ok` when only the console listens, or nothing does; WARNS naming the issue for a `temporary` row's daemon still on TCP (tm #6288); FAILS on any other trusty-* listener, a trusty-search one included (its daemon binds no TCP port since #9214), including an opt-in `--http`/`--api` server. UNKNOWN — never `Ok` — when the probe cannot run or a trusty-* process's sockets cannot be read. Read-only.",
+        "Which trusty-* processes hold a TCP socket in LISTEN state, graded against the ADR-0032 allowlist `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv` — the file the CI lint `scripts/check_no_tcp_listeners.sh` reads too (issue #8926). Only trusty-console may listen on TCP. Probed through libproc on macOS and `/proc` on Linux, never `lsof`. `Ok` when only the console listens, or nothing does; WARNS naming the issue for a `temporary` row's daemon still on TCP (tm #6288; trusty-search #9214, whose daemon binds no TCP port from 0.59.0 while an older one still holds 7878); FAILS on any other trusty-* listener, including an opt-in `--http`/`--api` server. UNKNOWN — never `Ok` — when the probe cannot run or a trusty-* process's sockets cannot be read. Read-only.",
     ),
     (
         "pty_headroom",
