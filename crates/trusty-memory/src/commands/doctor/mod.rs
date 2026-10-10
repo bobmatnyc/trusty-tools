@@ -17,6 +17,8 @@
 //!      `mcp_registration`)
 //!   7. No palace's drawer count dropped further than its deletion journal
 //!      explains (#9283, `drawer_counts`)
+//!   8. Every palace is at this binary's format, or is named as needing the
+//!      daemon's migration (#9274, `palace_format`)
 //!
 //! Each check prints a ✅ or ❌ line. The command exits 0 if all critical
 //! checks pass, 1 otherwise.
@@ -35,6 +37,8 @@ mod lock_stall;
 mod mcp_registration;
 // #8751: the lock scan classifies the maintenance lease by its holder pid.
 mod palace_locks;
+// #9274: palaces the daemon has yet to migrate to this binary's format.
+mod palace_format;
 mod tier_s;
 
 use audit::audit_palaces;
@@ -45,6 +49,7 @@ use checks::{check_daemon_health, check_fastembed_cache, check_kg_redb_size};
 use drawer_counts::check_drawer_counts;
 pub use drawer_counts::{handle_ack_drop, handle_drawer_report, DrawerCountArgs};
 use mcp_registration::check_mcp_registrations;
+use palace_format::check_palace_formats;
 use palace_locks::check_stale_palace_locks;
 use tier_s::check_tier_s_reaffirmation;
 
@@ -320,6 +325,9 @@ pub async fn handle_doctor() -> Result<()> {
 
     // #9283: a drawer-count drop the deletion journal does not explain.
     results.push(check_drawer_counts());
+
+    // #9274: a palace the daemon has yet to migrate, or one it refuses.
+    results.push(check_palace_formats());
 
     // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
     results.push(check_tier_s_reaffirmation().await);

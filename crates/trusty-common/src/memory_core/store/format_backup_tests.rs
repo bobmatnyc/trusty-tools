@@ -291,3 +291,24 @@ fn free_space_probe_reports_a_real_filesystem() {
     let free = free_space_at(dir.path()).expect("statvfs");
     assert!(free.is_some_and(|b| b > 0), "{free:?}");
 }
+
+/// PR2 critic MEDIUM (#9274): a complete backup taken before the palace
+/// changed is not a backup of the palace about to migrate. It is kept, and a
+/// new backup of the current bytes is written and returned.
+#[test]
+fn a_backup_of_an_older_source_is_not_reused() {
+    let (root, dir) = palace();
+    let old = ensure_with(root.path(), ID, &dir, 0, 1, seams()).expect("first backup");
+    std::fs::write(dir.join("identity.txt"), b"I changed").expect("edit source");
+    // The directory stamp has millisecond resolution.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let new = ensure_with(root.path(), ID, &dir, 0, 1, seams()).expect("second backup");
+    assert_ne!(old, new, "the stale backup was reused");
+    assert_eq!(
+        std::fs::read(new.join("identity.txt")).expect("read"),
+        b"I changed"
+    );
+    assert!(old.join(MANIFEST).is_file(), "the older backup is kept");
+    assert_eq!(backups(root.path()).len(), 2);
+}

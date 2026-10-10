@@ -26,10 +26,11 @@ use crate::core::session::{Session, SessionId};
 
 use crate::control::SessionRegistry;
 use crate::daemon::audit::AuditLogger;
+use crate::daemon::manager::ManagerState;
 use crate::daemon::optimizer::OptimizerConfig;
 
 use super::overseer::{build_overseer, load_optimizer_config, load_overseer, make_audit_logger};
-use super::sm::build_session_manager_agent;
+use super::sm::{PalaceAccess, build_session_manager_agent};
 
 /// Build the control-plane [`SessionRegistry`] from the operator's config.
 ///
@@ -503,20 +504,21 @@ impl DaemonState {
         Arc::new(Self::new())
     }
 
-    /// Construct default state whose persisted pairing lives under `root`.
+    /// Construct default state whose persisted pairing lives under `root`,
+    /// opening the SM and portfolio palaces with `access`.
     ///
     /// Why: pairing now writes `pairing.json` to disk; tests that exercise
     /// confirm / clear must redirect that write to a temp directory so they
     /// never touch (or depend on) the operator's real `~/.trusty-mpm`. This
-    /// constructor is also the shared innermost path that both `new` and
-    /// `with_root` delegate to, so startup cleanup runs **exactly once** and
-    /// always against the correct `root` (not the default path).
+    /// constructor is also the shared innermost path that `new`, `with_root`
+    /// and `shared_read_only` delegate to, so startup cleanup runs **exactly
+    /// once** and always against the correct `root` (not the default path).
     /// What: removes orphan `.claim.*` files left by a crashed process (exactly
     /// once, against `root`), then reads the optimizer config and overseer policy
     /// from the real framework hooks path, restores any persisted Telegram
     /// pairing under `root`, and builds the full [`DaemonState`].
     /// Test: `pairing_persists_to_disk`, `pairing_reset_clears_disk`.
-    pub fn with_root(root: PathBuf) -> Self {
+    pub(super) fn with_root_access(root: PathBuf, access: PalaceAccess) -> Self {
         let optimizer = load_optimizer_config();
         let build = load_overseer();
         // Remove any orphan `.claim.*` files left by a previous crashed process
@@ -536,7 +538,7 @@ impl DaemonState {
         let session_registry = Arc::new(build_session_registry(&root));
         // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
         // failure degrades inside `provision` and never fails daemon startup.
-        let manager = Arc::new(crate::daemon::manager::ManagerState::provision(&root));
+        let manager = Arc::new(ManagerState::provision(&root, access));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -552,7 +554,7 @@ impl DaemonState {
             overseer: build.overseer,
             overseer_handler: build.handler,
             llm: build.llm,
-            session_manager_agent: build_session_manager_agent(&root),
+            session_manager_agent: build_session_manager_agent(&root, access),
             audit: make_audit_logger(&root),
             bus: Arc::new(crate::daemon::bus::PeerBus::new(&root.join("logs"))),
             paired_chat_id: Mutex::new(paired),
@@ -616,9 +618,9 @@ impl DaemonState {
         let session_registry = Arc::new(build_session_registry(&framework_root));
         // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
         // failure degrades inside `provision` and never fails daemon startup.
-        let manager = Arc::new(crate::daemon::manager::ManagerState::provision(
-            &framework_root,
-        ));
+        // #9274: a daemon built over its own paths opens the palaces as writer.
+        let access = PalaceAccess::Writer;
+        let manager = Arc::new(ManagerState::provision(&framework_root, access));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -633,7 +635,7 @@ impl DaemonState {
             overseer: build.overseer,
             overseer_handler: build.handler,
             llm: build.llm,
-            session_manager_agent: build_session_manager_agent(&framework_root),
+            session_manager_agent: build_session_manager_agent(&framework_root, access),
             audit: make_audit_logger(&framework_root),
             bus: Arc::new(crate::daemon::bus::PeerBus::new(
                 &framework_root.join("logs"),

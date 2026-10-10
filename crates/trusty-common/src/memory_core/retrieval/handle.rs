@@ -18,9 +18,9 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::memory_core::store::concurrent_open::OpenIntent;
+use crate::memory_core::store::format_migration;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
-use crate::memory_core::store::palace_format;
 use crate::memory_core::store::palace_store::PalaceStore;
 use crate::memory_core::store::vector::{CompactionResult, UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
@@ -431,8 +431,8 @@ impl PalaceHandle {
         purge_expired: bool,
     ) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
-        // #9274: refuse a newer palace format before any store writes a byte.
-        palace_format::gate_palace(data_dir, palace.id.as_str())?;
+        // #9274: refuse a newer format, or migrate a format-0 palace (writer).
+        format_migration::open_gate(data_dir, palace.id.as_str(), intent)?;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
 

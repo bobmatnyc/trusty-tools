@@ -67,6 +67,8 @@ LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/p
 LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
 LANE	features	trusty-common/content-resolver,trusty-common/integrity
+# #9274: gates `memory_core::store::format_v0_fixture` (a cfg site, so not NO-CFG).
+LANE	features	trusty-common/memory-core-test-support
 # #8616: `load-dynamic` joined this row once `ort_probe.rs` (mod-private,
 # `cfg(any(feature = "load-dynamic", feature = "cuda", test))`) gated a cfg
 # site on it, which rotted the prior NO-CFG row. `cargo doc` never runs the

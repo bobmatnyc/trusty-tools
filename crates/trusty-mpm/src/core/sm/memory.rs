@@ -33,7 +33,7 @@ use trusty_common::memory_core::retrieval::{
     PalaceHandle, RecallResult, RememberOptions, recall_deep_with_default_embedder,
     recall_with_default_embedder,
 };
-use trusty_common::memory_core::store::PalaceStore;
+use trusty_common::memory_core::store::{OpenIntent, PalaceStore};
 
 use super::config::SmMemoryConfig;
 
@@ -121,23 +121,46 @@ impl SmMemory {
     /// erroring when it already exists (the SM may restart against a populated
     /// store). Calling this twice — in one process or across restarts — must
     /// leave EXACTLY ONE palace on disk, never duplicate or wipe it.
-    /// What: derives `palace_id` from `cfg.palace`, then: if
-    /// `<data_root>/<id>/palace.json` already exists, opens it from disk;
-    /// otherwise creates and persists a fresh palace. Both paths register the
-    /// handle in the registry. Any failure is wrapped in
-    /// [`SmMemoryError::Palace`].
+    /// What: [`Self::open_with_intent`] with [`OpenIntent::ReadOnlyClient`],
+    /// the intent of `tm sm serve --stdio` and of the goal store it loads.
     /// Test: `palace_create_is_idempotent` (two `open` calls → one palace),
-    /// `data_survives_fresh_construction` (restart survival).
+    /// `data_survives_fresh_construction` (restart survival),
+    /// `a_read_only_open_recalls_while_a_writer_holds_the_palace`.
     pub fn open(data_root: impl Into<PathBuf>, cfg: &SmMemoryConfig) -> SmMemoryResult<Self> {
+        Self::open_with_intent(data_root, cfg, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open the SM memory subsystem with an explicit redb open intent.
+    ///
+    /// Why: `tm daemon run` and `tm sm serve --stdio` open the same SM palace
+    /// (#9274). The daemon holds it as writer, so a format-0 palace migrates;
+    /// `tm sm serve` must read beside it, and a writer open there fails while
+    /// the daemon holds `kg.redb`.
+    /// What: opens the registry with `intent`, derives `palace_id` from
+    /// `cfg.palace`, then: if `<data_root>/<id>/palace.json` already exists,
+    /// opens it from disk; otherwise creates and persists a fresh palace. Both
+    /// paths register the handle in the registry. Any failure is wrapped in
+    /// [`SmMemoryError::Palace`].
+    /// Test: `an_existing_format_0_sm_palace_migrates_at_open` (writer),
+    /// `a_read_only_open_recalls_while_a_writer_holds_the_palace` (read-only).
+    pub fn open_with_intent(
+        data_root: impl Into<PathBuf>,
+        cfg: &SmMemoryConfig,
+        intent: OpenIntent,
+    ) -> SmMemoryResult<Self> {
         let data_root = data_root.into();
         let palace_id = PalaceId::new(cfg.palace.clone());
         let recall_top_k = cfg.recall_top_k as usize;
 
-        let registry =
+        // #9274: the caller picks the intent; the registry defaults to read-only.
+        let mut registry =
             PalaceRegistry::open(&data_root).map_err(|source| SmMemoryError::Palace {
                 palace: palace_id.to_string(),
                 source,
             })?;
+        if intent == OpenIntent::Writer {
+            registry = registry.with_writer_intent();
+        }
 
         let me = Self {
             registry,

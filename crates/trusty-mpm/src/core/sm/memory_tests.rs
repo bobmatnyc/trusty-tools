@@ -431,3 +431,161 @@ fn construct_on_unwritable_root_is_error() {
         ),
     }
 }
+
+/// #9274 (PR3 critic HIGH 2): the daemon opens the SM palace as writer, so an
+/// existing format-0 SM palace migrates at open. Under read-only intent it is
+/// refused with `FormatNeedsMigration`.
+/// Test: this is the test.
+#[test]
+fn an_existing_format_0_sm_palace_migrates_at_open() {
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::palace_format::{
+        MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
+    };
+
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    let palace_dir = dir.path().join(&cfg.palace);
+    write_format_0_palace(&palace_dir, &cfg.palace).expect("format-0 palace");
+
+    // #9274: the daemon's open, the one that migrates.
+    let mem = SmMemory::open_with_intent(dir.path(), &cfg, OpenIntent::Writer)
+        .expect("a format-0 SM palace opens");
+    assert_eq!(mem.palace_id().as_str(), cfg.palace);
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
+            .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    assert!(
+        !palace_dir.join(MIGRATION_RECORD).exists(),
+        "migration left its record"
+    );
+}
+
+/// The env var naming the data root the writer child process holds (#9274).
+const HOLD_ROOT_ENV: &str = "TM_9274_HOLD_SM_PALACE_ROOT";
+
+/// Kills the writer child process if the test fails before releasing it.
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// #9274: `tm sm serve --stdio` opens the SM palace read-only, so it still
+/// opens and recalls while the daemon holds the palace as writer. A writer
+/// open there failed after the handoff retry and lost recall.
+///
+/// What: a child process (this test binary, running
+/// `hold_the_sm_palace_as_writer_child`) opens the palace as writer, writes a
+/// fact and keeps the palace open. This process then opens the palace the
+/// way `tm sm serve` does and recalls the fact, twice: once through the
+/// handle `PalaceRegistry::open` hydrates (always read-only), and once after
+/// dropping that handle, so the palace reopens with the registry's own
+/// intent. The writer is a separate process because this process's store
+/// cache would otherwise serve the open.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_read_only_open_recalls_while_a_writer_holds_the_palace() {
+    use std::time::{Duration, Instant};
+
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::sm::memory::tests::hold_the_sm_palace_as_writer_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(HOLD_ROOT_ENV, dir.path())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the writer");
+    let mut writer = ChildGuard(child);
+
+    let held = dir.path().join("held");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !held.exists() {
+        if let Some(status) = writer.0.try_wait().expect("poll the writer") {
+            panic!("the writer exited before it held the palace: {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the writer never held the palace"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let reader = SmMemory::open(dir.path(), &cfg).expect("sm serve opens a held palace");
+    let hits = reader
+        .recall("which marker did the daemon write")
+        .await
+        .expect("recall from a held palace");
+    assert!(
+        hits.iter()
+            .any(|h| h.drawer.content().contains("HELD_PALACE_MARKER")),
+        "a read-only open of a held palace must recall its content"
+    );
+
+    // `PalaceRegistry::open` hydrates an existing palace read-only before any
+    // intent applies; drop that handle so the next recall reopens the palace
+    // with the intent this registry carries.
+    reader.registry.remove(reader.palace_id());
+    let hits = reader
+        .recall("which marker did the daemon write")
+        .await
+        .expect("recall after a reopen of a held palace");
+    assert!(
+        hits.iter()
+            .any(|h| h.drawer.content().contains("HELD_PALACE_MARKER")),
+        "a reopen of a held palace must recall its content"
+    );
+    std::fs::write(dir.path().join("release"), b"").expect("release the writer");
+}
+
+/// Child half of `a_read_only_open_recalls_while_a_writer_holds_the_palace`:
+/// the daemon's writer open of the SM palace, held until the parent releases it.
+///
+/// What: returns at once unless `HOLD_ROOT_ENV` names a data root. Otherwise
+/// opens the palace there with writer intent, writes the marker fact, signals
+/// `held`, and keeps the palace open until `release` appears (at most 120 s).
+/// Test: run by `a_read_only_open_recalls_while_a_writer_holds_the_palace`.
+#[test]
+#[ignore = "child process of a_read_only_open_recalls_while_a_writer_holds_the_palace"]
+fn hold_the_sm_palace_as_writer_child() {
+    use std::time::{Duration, Instant};
+
+    let Some(root) = std::env::var_os(HOLD_ROOT_ENV).map(std::path::PathBuf::from) else {
+        return;
+    };
+    seed_shared_embedder_with_mock();
+    let cfg = SmMemoryConfig::default();
+    let writer = SmMemory {
+        registry: PalaceRegistry::open(&root)
+            .expect("registry")
+            .with_writer_intent(),
+        data_root: root.clone(),
+        palace_id: PalaceId::new(cfg.palace.clone()),
+        recall_top_k: cfg.recall_top_k as usize,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime
+        .block_on(writer.remember("HELD_PALACE_MARKER written by the daemon"))
+        .expect("remember as writer");
+    std::fs::write(root.join("held"), b"").expect("signal held");
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !root.join("release").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(writer);
+}

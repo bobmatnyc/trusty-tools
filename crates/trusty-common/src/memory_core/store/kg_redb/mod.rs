@@ -16,7 +16,7 @@
 mod drawer_ops;
 mod import;
 // #4810: at-open rewrite of the TRIPLES key to include the object.
-mod migrate;
+pub(crate) mod migrate;
 mod read_ops;
 // ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
 mod room_ops;
@@ -41,6 +41,8 @@ pub use copy_swap::{
     CompactFaultHook, CompactOutcome, CompactPlan, CompactStep, PreparedCompaction,
 };
 pub use stats::{KgRedbStats, KgTableStats};
+#[cfg(test)]
+pub(crate) use store::AFTER_PRE_OPEN;
 pub use store::KgStoreRedb;
 pub use types::{BatchOpResult, BatchWriteOp, READ_ONLY_ERROR_MSG};
 

@@ -7,14 +7,15 @@
 //! Test: `open_then_reopen_persists_state`, `write_on_snapshot_returns_read_only_error`.
 
 use crate::memory_core::store::concurrent_open::{
-    OpenIntent, OpenMode, backoff_sleep_ms, is_incompatible_format_refusal, try_open_or_snapshot,
+    OpenIntent, OpenMode, backoff_sleep_ms, is_incompatible_format_refusal,
+    try_open_primary_or_snapshot,
 };
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
 use crate::memory_core::store::palace_format::{
-    gate_kg_post_open, gate_kg_pre_open, is_format_refusal,
+    PALACE_FORMAT_SUPPORTED, gate_kg_post_open, gate_kg_pre_open, is_format_refusal, stamp_format,
 };
 use crate::memory_core::store::write_deadline::{DeadlinedWrite, palace_label};
 use crate::memory_core::timeouts;
@@ -23,8 +24,14 @@ use redb::Database;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::migrate::migrate_triple_keys_fail_open;
 use super::types::{GuardedWrite, KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam (#9274): runs between the pre-open marker read and the open.
+    pub(crate) static AFTER_PRE_OPEN: std::cell::Cell<Option<fn(&Path)>> =
+        const { std::cell::Cell::new(None) };
+}
 
 /// Store name a #8749 deadline error reports for this file.
 const KG_STORE_NAME: &str = "kg.redb";
@@ -71,12 +78,16 @@ impl KgStoreRedb {
     /// this function makes a single intent-passing call and does not double-
     /// retry. Opens the file, then in a single write transaction touches
     /// every table so the file always carries a stable schema even when no
-    /// data has been written. #9274: a palace-format marker above this
-    /// binary's format refuses the open before that transaction, without
-    /// retrying.
+    /// data has been written. #9274: a palace-format marker this binary does
+    /// not read — newer, or format 0 awaiting the palace migration — refuses
+    /// the open before that transaction, without retrying; it is checked
+    /// before the open and again on the opened file. A new KG is stamped at
+    /// the supported format in the init transaction. An incompatible redb
+    /// file is refused, never recreated empty (ADR-0067 D5).
     /// Test: `open_then_reopen_persists_state`,
     /// `writer_intent_open_fails_loud_on_locked_file`,
-    /// `a_direct_kg_open_of_an_n_plus_one_file_is_refused`.
+    /// `a_direct_kg_open_of_an_n_plus_one_file_is_refused`,
+    /// `the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker`.
     pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -120,7 +131,13 @@ impl KgStoreRedb {
 
         // #9274: refuse a newer palace format before `Database::create` writes
         // the header. A file this process already holds was gated when opened.
-        let marker_checked = Self::is_cached(path) || gate_kg_pre_open(path)?;
+        if !Self::is_cached(path) {
+            gate_kg_pre_open(path)?;
+        }
+        #[cfg(test)]
+        if let Some(hook) = AFTER_PRE_OPEN.with(std::cell::Cell::get) {
+            hook(path);
+        }
 
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..=max_attempts {
@@ -145,16 +162,14 @@ impl KgStoreRedb {
             // snapshot are rejected via `READ_ONLY_ERROR_MSG`. In-process TOCTOU
             // races resolve on the next retry cycle (the aborting task drops
             // the lock within the exponential-backoff window).
-            // #9274: a deferred marker read runs on the opened database,
-            // before the init transaction below writes anything.
-            let opened = try_open_or_snapshot(path, intent).and_then(|o| {
-                if !marker_checked {
-                    gate_kg_post_open(&*o.0, path)?;
-                }
-                Ok(o)
+            // #9274: every fresh open re-reads the marker on the database it
+            // opened, before the init transaction below writes anything.
+            let opened = try_open_primary_or_snapshot(path, intent).and_then(|o| {
+                let fresh = gate_kg_post_open(&*o.0, path)?;
+                Ok((o, fresh))
             });
             match opened {
-                Ok((db, snapshot_guard, mode)) => {
+                Ok(((db, snapshot_guard, mode), fresh)) => {
                     // Touch every table in a single write txn so they exist
                     // on disk even before the first write. Skip in snapshot
                     // mode because (a) the live file already initialised every
@@ -196,16 +211,13 @@ impl KgStoreRedb {
                             // gate reads this table on every open, so it must
                             // exist before anything asks.
                             let _ = wtx.open_table(KG_SCHEMA).context("init kg_schema table")?;
+                            // #9274: a new KG is born at the supported format;
+                            // a format-0 KG never reaches here (gated above).
+                            if fresh {
+                                stamp_format(&wtx, PALACE_FORMAT_SUPPORTED)?;
+                            }
                         }
                         wtx.commit().context("commit init txn")?;
-
-                        // #4810: rewrite pre-object triple keys once per
-                        // palace. Deliberately fail-open — a palace that cannot
-                        // be migrated still opens and behaves exactly as it did
-                        // before #4810. Snapshot mode never reaches here: a
-                        // migration written into a throw-away snapshot would be
-                        // discarded and re-attempted on every open.
-                        migrate_triple_keys_fail_open(&db, path);
                     }
 
                     let state = Arc::new(KgDbState {
@@ -258,7 +270,7 @@ impl KgStoreRedb {
     }
 
     /// Whether this process already holds a live handle on `path` (#9274).
-    fn is_cached(path: &Path) -> bool {
+    pub(crate) fn is_cached(path: &Path) -> bool {
         let cache = db_cache().lock().expect("db_cache poisoned");
         cache
             .get(&canonical_key(path))

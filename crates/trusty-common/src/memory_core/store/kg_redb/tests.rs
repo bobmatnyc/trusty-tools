@@ -411,6 +411,8 @@ mod tests {
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .expect("insert legacy drawer");
             }
+            // #9274: an old drawer row in a format-1 KG (rows are not rewritten).
+            crate::memory_core::store::palace_format::stamp_format(&wtx, 1).expect("stamp");
             wtx.commit().expect("commit");
         }
 
@@ -492,6 +494,8 @@ mod tests {
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .expect("insert pre-#4884 drawer");
             }
+            // #9274: an old drawer row in a format-1 KG (rows are not rewritten).
+            crate::memory_core::store::palace_format::stamp_format(&wtx, 1).expect("stamp");
             wtx.commit().expect("commit");
         }
 
@@ -920,85 +924,6 @@ mod tests {
     // #4810 — the object joins the TRIPLES key
     // ---------------------------------------------------------------------
 
-    /// Encode a key in the PRE-#4810 shape: `[subject_len][subject][predicate]`,
-    /// with no length prefix on the predicate and no object.
-    ///
-    /// Why: the migration tests must be able to write a palace that looks
-    /// exactly like one written by the old code. Nothing in production emits
-    /// this shape any more, which is precisely why the test has to.
-    fn legacy_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&(subject.len() as u16).to_be_bytes());
-        out.extend_from_slice(subject.as_bytes());
-        out.extend_from_slice(predicate.as_bytes());
-        out
-    }
-
-    /// Write `rows` into a fresh redb file using the pre-#4810 key shape and
-    /// leave no `KG_SCHEMA` marker, so the next `KgStoreRedb::open` sees a
-    /// palace that predates the fix.
-    fn seed_legacy_palace(path: &std::path::Path, rows: &[(&str, &str, &str, Option<i64>)]) {
-        use crate::memory_core::store::kg_store::{
-            ACTIVE_SUBJECT_COUNTS, TRIPLES, TripleValue, encode_u64, encode_value,
-        };
-        let db = redb::Database::create(path).expect("create legacy palace");
-        let wtx = db.begin_write().unwrap();
-        {
-            let mut triples = wtx.open_table(TRIPLES).unwrap();
-            let mut counts = wtx.open_table(ACTIVE_SUBJECT_COUNTS).unwrap();
-            let mut per_subject: std::collections::BTreeMap<&str, u64> =
-                std::collections::BTreeMap::new();
-            for (s, p, o, valid_to_ms) in rows {
-                let value = TripleValue {
-                    object: (*o).to_string(),
-                    valid_from_ms: 1_700_000_000_000,
-                    valid_to_ms: *valid_to_ms,
-                    confidence: 1.0,
-                    provenance: None,
-                };
-                let core = legacy_triple_key(s, p);
-                let key = if valid_to_ms.is_some() {
-                    let mut k = Vec::new();
-                    k.extend_from_slice(b"hist:");
-                    k.extend_from_slice(&core);
-                    k.extend_from_slice(&value.valid_from_ms.to_be_bytes());
-                    k
-                } else {
-                    *per_subject.entry(s).or_insert(0) += 1;
-                    core
-                };
-                let bytes = encode_value(&value).unwrap();
-                triples.insert(key.as_slice(), bytes.as_slice()).unwrap();
-            }
-            for (s, n) in per_subject {
-                counts
-                    .insert(s.as_bytes(), encode_u64(n).as_slice())
-                    .unwrap();
-            }
-        }
-        wtx.commit().unwrap();
-        drop(db);
-    }
-
-    /// Assert `backup` is a readable redb image that still holds the row at the
-    /// PRE-migration key — the property that makes it a recovery point, and one
-    /// a byte-count comparison cannot check (the live file grows during open).
-    fn assert_backup_holds_legacy_row(backup: &std::path::Path, subject: &str, predicate: &str) {
-        use crate::memory_core::store::kg_store::TRIPLES;
-        use redb::ReadableDatabase;
-        assert!(backup.is_file(), "backup must be a regular file");
-        let db = redb::Database::create(backup).expect("open backup as redb");
-        let rtx = db.begin_read().unwrap();
-        let triples = rtx.open_table(TRIPLES).unwrap();
-        let key = legacy_triple_key(subject, predicate);
-        assert!(
-            triples.get(key.as_slice()).unwrap().is_some(),
-            "the backup must still carry the pre-migration row"
-        );
-        drop(rtx);
-        drop(db);
-    }
-
     /// Why (#4810): the defect. `room:General --contains--> drawer:N` keyed on
     /// `(subject, predicate)` alone, so each new member closed the last one and
     /// a room of any size reported exactly one drawer. This test FAILS on
@@ -1387,8 +1312,8 @@ mod tests {
 
     /// Why (#4810): a fresh palace has nothing to rewrite but must still record
     /// which key shape it uses, or every open would re-scan every triple.
-    /// What: a new palace carries the marker; a second open is a no-op and
-    /// leaves no backup behind.
+    /// What: a new palace carries the marker (#9274: stamped with the palace
+    /// format when the KG is created); a second open still reads its row.
     #[test]
     fn migration_stamps_schema_and_is_idempotent() {
         use crate::memory_core::store::kg_store::{
@@ -1424,141 +1349,5 @@ mod tests {
             let kg = KgStoreRedb::open(&path).unwrap();
             assert_eq!(kg.query_active("alice").unwrap().len(), 1);
         }
-        let backup = dir.path().join("kg.redb.pre-4810.bak");
-        assert!(
-            !backup.exists(),
-            "no backup for a palace with nothing to do"
-        );
-    }
-
-    /// Why (#4810): the whole point of the migration — rows written under the
-    /// old key must be readable, and readable as the facts they were, after
-    /// one open. History rows carry the same key and must move with them.
-    /// What: seeds a legacy palace with two active rows and one closed row —
-    /// note that the legacy key physically CANNOT hold two objects for one
-    /// pair, which is the defect — opens it, and checks every row is
-    /// queryable at its new key and the history survived.
-    #[test]
-    fn migration_rewrites_legacy_keys_and_preserves_history() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("kg.redb");
-        seed_legacy_palace(
-            &path,
-            &[
-                ("room:General", "contains", "drawer:a", None),
-                ("alice", "knows", "bob", None),
-                ("alice", "knows", "carol", Some(1_700_000_100_000)),
-            ],
-        );
-
-        let kg = KgStoreRedb::open(&path).unwrap();
-        let room = kg.query_active("room:General").unwrap();
-        assert_eq!(room.len(), 1);
-        assert_eq!(room[0].object, "drawer:a");
-
-        let alice = kg.query_active("alice").unwrap();
-        assert_eq!(alice.len(), 1);
-        assert_eq!(alice[0].object, "bob");
-
-        // The closed row moved with the active ones.
-        let all = kg.dump_all_triples().unwrap();
-        assert_eq!(all.len(), 3);
-        assert!(
-            all.iter()
-                .any(|x| x.object == "carol" && x.valid_to.is_some())
-        );
-
-        // A new member now joins instead of replacing.
-        kg.assert(&t("room:General", "contains", "drawer:b"))
-            .unwrap();
-        assert_eq!(kg.query_active("room:General").unwrap().len(), 2);
-
-        // The pre-migration image was preserved.
-        let backup = dir.path().join("kg.redb.pre-4810.bak");
-        assert_backup_holds_legacy_row(&backup, "room:General", "contains");
-    }
-
-    /// Why (#4810), the fail-open check: the migration rewrites every triple in
-    /// the palace, so its failure branch is the one that must be reviewable.
-    /// A failed attempt must commit nothing, must not stop the palace opening,
-    /// and must be retried on the next open rather than latched off.
-    /// What: makes the backup step fail by putting a DIRECTORY where the `.bak`
-    /// file belongs — `fs::copy` cannot write over it — then asserts the open
-    /// succeeds, the legacy rows are still on disk untouched, and removing the
-    /// blocker lets the next open migrate them for real.
-    #[test]
-    fn migration_failure_leaves_the_palace_openable_and_retries() {
-        use crate::memory_core::store::kg_store::TRIPLES;
-        use redb::ReadableDatabase;
-
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("kg.redb");
-        seed_legacy_palace(
-            &path,
-            &[
-                ("room:General", "contains", "drawer:a", None),
-                ("room:Other", "contains", "drawer:b", None),
-            ],
-        );
-
-        // Block the backup: a directory at the backup path makes `fs::copy`
-        // fail, so the migration aborts before it opens a write transaction.
-        let backup = dir.path().join("kg.redb.pre-4810.bak");
-        std::fs::create_dir(&backup).unwrap();
-
-        {
-            let kg = KgStoreRedb::open(&path).unwrap();
-            assert!(
-                !kg.is_read_only(),
-                "a failed migration must not degrade the handle"
-            );
-            // Un-migrated rows do not decode under the new key, so queries are
-            // empty. That is the documented degraded state — not data loss.
-            assert!(kg.query_active("room:General").unwrap().is_empty());
-        }
-
-        // Nothing was committed: both legacy rows are still there, byte-shaped
-        // exactly as seeded.
-        {
-            let db = redb::Database::create(&path).unwrap();
-            let rtx = db.begin_read().unwrap();
-            let triples = rtx.open_table(TRIPLES).unwrap();
-            let legacy = legacy_triple_key("room:General", "contains");
-            assert!(
-                triples.get(legacy.as_slice()).unwrap().is_some(),
-                "the failed migration must not have removed the legacy row"
-            );
-            drop(rtx);
-            drop(db);
-        }
-
-        // Unblock and reopen: the migration retries rather than staying off.
-        std::fs::remove_dir(&backup).unwrap();
-        let kg = KgStoreRedb::open(&path).unwrap();
-        assert_eq!(kg.query_active("room:General").unwrap().len(), 1);
-        assert_eq!(
-            kg.query_active("room:Other").unwrap().len(),
-            1,
-            "retry migrated every row, not just the first"
-        );
-        assert_backup_holds_legacy_row(&backup, "room:General", "contains");
-    }
-
-    /// Why (#4810): "do not overwrite a `.bak` that verifies good" has a
-    /// mirror obligation — a `.bak` that does NOT verify must be replaced, or
-    /// a truncated leftover would be trusted as the recovery point.
-    #[test]
-    fn migration_replaces_a_backup_that_does_not_verify() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("kg.redb");
-        seed_legacy_palace(&path, &[("alice", "knows", "bob", None)]);
-
-        let backup = dir.path().join("kg.redb.pre-4810.bak");
-        std::fs::write(&backup, b"truncated").unwrap();
-
-        let kg = KgStoreRedb::open(&path).unwrap();
-        assert_eq!(kg.query_active("alice").unwrap().len(), 1);
-        // The short leftover was replaced by a real pre-migration image.
-        assert_backup_holds_legacy_row(&backup, "alice", "knows");
     }
 }
