@@ -115,10 +115,13 @@ pub struct Room {
 /// events (`SessionEvent`).
 /// What: An enum stored on every `Drawer`. `Unknown` is the migration
 /// default so legacy rows (written before this field existed) deserialize
-/// cleanly via `#[serde(default)]`.
+/// cleanly via `#[serde(default)]`. `#[non_exhaustive]` (#9144) so a variant
+/// appended later is not a breaking change for a crate that matches on it.
 /// Test: `drawer_type_serde_default_is_unknown` confirms missing field
-/// round-trips to `Unknown`; the classifier tests live in `filter.rs`.
+/// round-trips to `Unknown`; `drawer_type_postcard_indices_are_stable` pins
+/// each variant's index; the classifier tests live in `filter.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum DrawerType {
     /// Explicitly stored by user or model for long-term recall.
     UserFact,
@@ -146,6 +149,19 @@ pub enum DrawerType {
     /// SERIALIZATION SAFETY: appended at the END (index 5) so pre-existing
     /// postcard data is unaffected. Do NOT insert new variants before this one.
     Task,
+    // #9144: the five typed write variants, appended after `Task` (indices
+    // 6-10) so no existing postcard index or stored tag changes. Append any
+    // further variant after `Reference`.
+    /// A standing rule the owner or supervisor set; it holds until revoked.
+    Ruling,
+    /// A choice made for a piece of work, with its reason.
+    Decision,
+    /// A point-in-time state report; a newer one replaces it.
+    Status,
+    /// A record of one conversational turn.
+    Turn,
+    /// A pointer to an external source of truth: a doc, issue, ADR or path.
+    Reference,
 }
 
 impl DrawerType {
@@ -163,6 +179,11 @@ impl DrawerType {
             DrawerType::Commit => "Commit",
             DrawerType::Task => "Task",
             DrawerType::Unknown => "Unknown",
+            DrawerType::Ruling => "Ruling",
+            DrawerType::Decision => "Decision",
+            DrawerType::Status => "Status",
+            DrawerType::Turn => "Turn",
+            DrawerType::Reference => "Reference",
         }
     }
 
@@ -176,9 +197,12 @@ impl DrawerType {
     /// `as_str`, whose inverse it is. `kg_redb`'s helper now delegates here.
     /// What: `None` and any unrecognised tag both yield `Unknown`, which is the
     /// documented decode default for a row or record written by a version that
-    /// knew a variant this one does not.
+    /// knew a variant this one does not. Matching is exact and case-sensitive;
+    /// a caller naming a type uses [`Self::parse_write_type`] instead.
     /// Test: `drawer_type_tag_round_trips_every_variant`,
-    /// `drawer_type_from_unknown_tag_is_unknown`.
+    /// `drawer_type_from_unknown_tag_is_unknown`,
+    /// `lenient_decode_keeps_unknown_where_the_strict_parser_errors`,
+    /// `new_drawer_types_survive_a_palace_reopen`.
     pub fn from_tag(tag: Option<&str>) -> Self {
         match tag {
             Some("UserFact") => DrawerType::UserFact,
@@ -186,8 +210,50 @@ impl DrawerType {
             Some("AgentNote") => DrawerType::AgentNote,
             Some("Commit") => DrawerType::Commit,
             Some("Task") => DrawerType::Task,
+            // #9144: the stored tags of the typed write variants.
+            Some("Ruling") => DrawerType::Ruling,
+            Some("Decision") => DrawerType::Decision,
+            Some("Status") => DrawerType::Status,
+            Some("Turn") => DrawerType::Turn,
+            Some("Reference") => DrawerType::Reference,
             _ => DrawerType::Unknown,
         }
+    }
+
+    /// Every variant a caller may name at write time, in definition order.
+    /// `Unknown` is absent: it is the decode default, not a type to write.
+    const WRITABLE: [DrawerType; 10] = [
+        DrawerType::UserFact,
+        DrawerType::SessionEvent,
+        DrawerType::AgentNote,
+        DrawerType::Commit,
+        DrawerType::Task,
+        DrawerType::Ruling,
+        DrawerType::Decision,
+        DrawerType::Status,
+        DrawerType::Turn,
+        DrawerType::Reference,
+    ];
+
+    /// Parse a drawer type a caller names, rejecting anything not writable.
+    ///
+    /// Why (#9144): a write that names a type must store that type or fail.
+    /// [`Self::from_tag`] maps an unrecognised tag to `Unknown`, which is right
+    /// for stored data and wrong for input: a typo would store an unlabelled
+    /// drawer with no error.
+    /// What: matches `name` against every variant name except `Unknown`,
+    /// ignoring ASCII case and nothing else (no trimming, no `_` forms).
+    /// Returns [`ParseDrawerTypeError`] for any other input.
+    /// Test: `write_type_accepts_every_name_case_insensitively`,
+    /// `write_type_error_arm_rejects_unknown_blank_and_garbage`,
+    /// `lenient_decode_keeps_unknown_where_the_strict_parser_errors`.
+    pub fn parse_write_type(name: &str) -> Result<Self, ParseDrawerTypeError> {
+        Self::WRITABLE
+            .into_iter()
+            .find(|t| t.as_str().eq_ignore_ascii_case(name))
+            .ok_or_else(|| ParseDrawerTypeError {
+                name: name.to_string(),
+            })
     }
 
     /// Whether this drawer type is protected from the dream cycle.
@@ -201,6 +267,29 @@ impl DrawerType {
     /// `tests/memory_palace.rs` and the dream cycle tests.
     pub fn is_protected(&self) -> bool {
         matches!(self, DrawerType::Task)
+    }
+}
+
+/// A drawer type name [`DrawerType::parse_write_type`] does not accept.
+///
+/// Why (#9144): a caller that names a type needs a typed failure it can turn
+/// into a usage error, rather than a drawer silently stored as `Unknown`.
+/// What: carries the rejected input verbatim; `Display` lists the accepted
+/// names in lowercase.
+/// Test: `write_type_error_arm_rejects_unknown_blank_and_garbage`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "unknown drawer type {name:?}; expected one of: ruling, decision, status, turn, \
+     reference, userfact, sessionevent, agentnote, commit, task (any case)"
+)]
+pub struct ParseDrawerTypeError {
+    name: String,
+}
+
+impl ParseDrawerTypeError {
+    /// The rejected input, exactly as the caller passed it.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -543,22 +632,154 @@ mod tests {
         assert_eq!(DrawerType::Commit.as_str(), "Commit");
         assert_eq!(DrawerType::Task.as_str(), "Task");
         assert_eq!(DrawerType::Unknown.as_str(), "Unknown");
+        // #9144: the typed write variants.
+        assert_eq!(DrawerType::Ruling.as_str(), "Ruling");
+        assert_eq!(DrawerType::Decision.as_str(), "Decision");
+        assert_eq!(DrawerType::Status.as_str(), "Status");
+        assert_eq!(DrawerType::Turn.as_str(), "Turn");
+        assert_eq!(DrawerType::Reference.as_str(), "Reference");
     }
+
+    /// Every variant, in definition order (#9144 appended the last five).
+    const ALL_DRAWER_TYPES: [DrawerType; 11] = [
+        DrawerType::UserFact,
+        DrawerType::SessionEvent,
+        DrawerType::AgentNote,
+        DrawerType::Commit,
+        DrawerType::Unknown,
+        DrawerType::Task,
+        DrawerType::Ruling,
+        DrawerType::Decision,
+        DrawerType::Status,
+        DrawerType::Turn,
+        DrawerType::Reference,
+    ];
+
+    /// The five variants #9144 added.
+    const NEW_DRAWER_TYPES: [DrawerType; 5] = [
+        DrawerType::Ruling,
+        DrawerType::Decision,
+        DrawerType::Status,
+        DrawerType::Turn,
+        DrawerType::Reference,
+    ];
 
     /// #5902: `as_str` and `from_tag` are one projection, so every variant must
     /// survive a round trip. A variant added to only one half is the drift this
     /// pairing exists to make impossible.
     #[test]
     fn drawer_type_tag_round_trips_every_variant() {
-        for t in [
-            DrawerType::UserFact,
-            DrawerType::SessionEvent,
-            DrawerType::AgentNote,
-            DrawerType::Commit,
-            DrawerType::Task,
-            DrawerType::Unknown,
-        ] {
+        for t in ALL_DRAWER_TYPES {
             assert_eq!(DrawerType::from_tag(Some(t.as_str())), t, "{t:?}");
+        }
+    }
+
+    /// #9144: the new variants serialize as their bare name and decode back.
+    #[test]
+    fn new_drawer_types_round_trip_through_serde() {
+        for t in NEW_DRAWER_TYPES {
+            let json = serde_json::to_string(&t).expect("encode");
+            assert_eq!(json, format!("\"{}\"", t.as_str()), "{t:?}");
+            let back: DrawerType = serde_json::from_str(&json).expect("decode");
+            assert_eq!(back, t, "{t:?}");
+        }
+    }
+
+    /// #9144: values serialized before the new variants existed decode to the
+    /// same variant they did before: postcard bytes, serde JSON and the stored
+    /// tag.
+    #[test]
+    fn old_serialized_drawer_types_decode_to_the_same_variant() {
+        let old = [
+            (0u8, "\"UserFact\"", DrawerType::UserFact),
+            (1, "\"SessionEvent\"", DrawerType::SessionEvent),
+            (2, "\"AgentNote\"", DrawerType::AgentNote),
+            (3, "\"Commit\"", DrawerType::Commit),
+            (4, "\"Unknown\"", DrawerType::Unknown),
+            (5, "\"Task\"", DrawerType::Task),
+        ];
+        for (byte, json, want) in old {
+            let got: DrawerType = postcard::from_bytes(&[byte]).expect("old bytes decode");
+            assert_eq!(got, want, "postcard byte {byte}");
+            let got: DrawerType = serde_json::from_str(json).expect("old value decodes");
+            assert_eq!(got, want, "{json}");
+            assert_eq!(DrawerType::from_tag(Some(want.as_str())), want, "{json}");
+            assert!(
+                !NEW_DRAWER_TYPES.contains(&got),
+                "{json} decoded as {got:?}"
+            );
+        }
+    }
+
+    /// #9144: the strict parser takes every writable name in any ASCII case.
+    #[test]
+    fn write_type_accepts_every_name_case_insensitively() {
+        let cases = [
+            ("ruling", DrawerType::Ruling),
+            ("DECISION", DrawerType::Decision),
+            ("Status", DrawerType::Status),
+            ("tUrN", DrawerType::Turn),
+            ("reference", DrawerType::Reference),
+            ("userfact", DrawerType::UserFact),
+            ("SessionEvent", DrawerType::SessionEvent),
+            ("AGENTNOTE", DrawerType::AgentNote),
+            ("commit", DrawerType::Commit),
+            ("Task", DrawerType::Task),
+        ];
+        for (name, want) in cases {
+            assert_eq!(DrawerType::parse_write_type(name), Ok(want), "{name}");
+        }
+    }
+
+    /// #9144 error arm: anything outside the writable names is a typed error
+    /// naming the input, never a silent `Unknown`.
+    #[test]
+    fn write_type_error_arm_rejects_unknown_blank_and_garbage() {
+        for name in [
+            "Unknown",
+            "unknown",
+            "",
+            " ruling",
+            "ruling ",
+            "user_fact",
+            "rule",
+        ] {
+            let err = DrawerType::parse_write_type(name).expect_err(name);
+            assert_eq!(err.name(), name);
+            let msg = err.to_string();
+            assert!(msg.contains("ruling"), "{msg}");
+            assert!(msg.contains(&format!("{name:?}")), "{msg}");
+        }
+    }
+
+    /// #9144: the stored-tag decode stays lenient and case-sensitive while the
+    /// strict parser rejects or canonicalises the same input.
+    #[test]
+    fn lenient_decode_keeps_unknown_where_the_strict_parser_errors() {
+        for tag in ["SomethingFromTheFuture", "Rulings", ""] {
+            assert_eq!(
+                DrawerType::from_tag(Some(tag)),
+                DrawerType::Unknown,
+                "{tag}"
+            );
+            assert!(DrawerType::parse_write_type(tag).is_err(), "{tag}");
+        }
+        assert_eq!(DrawerType::from_tag(Some("ruling")), DrawerType::Unknown);
+        assert_eq!(
+            DrawerType::parse_write_type("ruling"),
+            Ok(DrawerType::Ruling)
+        );
+    }
+
+    /// #9144: only `SessionEvent` carries a default TTL and only `Task` is
+    /// protected; the new variants take neither.
+    #[test]
+    fn new_drawer_types_get_no_default_ttl_and_no_protection() {
+        for t in NEW_DRAWER_TYPES {
+            let d = Drawer::new(Uuid::new_v4(), "standing note").with_type(t);
+            assert_eq!(d.drawer_type, t);
+            assert!(d.expires_at.is_none(), "{t:?} must not expire by default");
+            assert!(!t.is_protected(), "{t:?} must not be protected");
         }
     }
 
