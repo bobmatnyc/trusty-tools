@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# resolve_contract_target.sh — the one crate pre-publish.yml Gates 5-6 check.
+# resolve_contract_target.sh — the crate a pre-publish.yml run names.
 #
-# Why: #9539. Both gates hardcoded trusty-common, so a pre-publish run for any
-#   other crate checked trusty-common's contracts under that crate's name. Both
-#   gates now take the crate, its version and its contracts.json path from here.
+# Why: #9539. Gates 5-6 hardcoded trusty-common, so a pre-publish run for any
+#   other crate checked trusty-common's contracts under that crate's name.
+#   Gate 6 now takes the crate, its version and its contracts.json path from
+#   here. Gate 5 checks every crates/*/contracts.json and calls this only so
+#   an unknown crate input fails (exit 1); it ignores 10 and 11.
 #
 # What: resolves the crate in this order, and never defaults to trusty-common:
 #     1. INPUT_CRATE, when set (workflow_dispatch's `crate` input);
