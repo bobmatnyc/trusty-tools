@@ -76,12 +76,24 @@ impl Drop for EnvGuard {
 /// the whole surface `ensure_daemon_with` consults.
 fn stub_daemon_socket(dir: &Path, binding: Option<serde_json::Value>) -> PathBuf {
     let socket = dir.join("tcode.sock");
+    stub_daemon_at(&socket, binding);
+    socket
+}
+
+/// [`stub_daemon_socket`] at an exact path — #4600's per-project socket sits
+/// beside the shared one. A stale socket file already there is replaced, as
+/// the real daemon's singleton bind replaces one.
+fn stub_daemon_at(socket: &Path, binding: Option<serde_json::Value>) {
+    let dir = socket.parent().expect("a socket path has a parent");
     // `connect_hardened` refuses a socket whose containing directory is wider
     // than `0700`, and `tempfile` creates one at the process umask.
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
         .expect("harden the stub socket directory");
-    let listener = UnixListener::bind(&socket).expect("bind the stub socket");
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+    if socket.exists() {
+        std::fs::remove_file(socket).expect("clear the stale stub socket");
+    }
+    let listener = UnixListener::bind(socket).expect("bind the stub socket");
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
         .expect("harden the stub socket");
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
@@ -114,7 +126,6 @@ fn stub_daemon_socket(dir: &Path, binding: Option<serde_json::Value>) -> PathBuf
             });
         }
     });
-    socket
 }
 
 /// The `binding` payload a daemon bound to `root` publishes.
@@ -278,11 +289,15 @@ async fn wait_for_record(path: &Path, label: &str) -> String {
 /// Test: `a_stalled_setup_still_reaches_the_spawn_branch`, plus the three spawn
 /// tests that depend on it.
 fn bind_socket_after_spawn(stub: &SleepingStub, dir: &Path, binding: serde_json::Value) {
+    bind_at_after_spawn(stub, dir.join("tcode.sock"), binding);
+}
+
+/// [`bind_socket_after_spawn`] at an exact socket path (#4600).
+fn bind_at_after_spawn(stub: &SleepingStub, socket: PathBuf, binding: serde_json::Value) {
     let argv_log = stub.argv_log.clone();
-    let dir = dir.to_path_buf();
     tokio::spawn(async move {
         wait_for_record(&argv_log, "argv").await;
-        stub_daemon_socket(&dir, Some(binding));
+        stub_daemon_at(&socket, Some(binding));
     });
 }
 
@@ -355,12 +370,69 @@ async fn attaches_to_a_projectless_daemon_when_projectless() {
     assert!(!marker.exists(), "must not have spawned anything");
 }
 
-/// The daemon on the well-known socket may be serving a DIFFERENT project.
-/// Attaching would run every session against the wrong repository, so it
-/// must be refused — and refused WITHOUT starting a competing daemon on a
-/// socket that is already bound (#4512).
+/// This project's own socket beside the shared `socket` (#4600).
+fn own_socket(socket: &Path, project: Option<&Path>) -> PathBuf {
+    trusty_code::serve::uds::project_socket_path(socket, project)
+}
+
+/// **The #4600 regression.** A second project must get a daemon of its own
+/// while another project's daemon holds the shared socket — never an attach
+/// to the first project's daemon, and never a refusal that leaves the second
+/// project unable to run.
+///
+/// Why: the shared socket used to be the only one, so project B's TUI could
+/// only refuse A's daemon (#4512) and stop. Two cases: a bound client against
+/// another project's daemon, and a projectless client against a bound one
+/// (the owner's 2026-09-16 reproduction). Each also leaves a STALE socket file
+/// at the own path, which must read as "nothing there", not as a reason to
+/// fall back to the shared socket.
+/// What: the stub binds the own socket only after it has been spawned, with
+/// the client's binding; the call must return that socket, distinct from the
+/// shared one, and the stub's argv must carry `--project-socket`.
+/// Test: this test.
 #[tokio::test]
-async fn refuses_a_daemon_bound_to_another_project() {
+async fn a_second_project_starts_its_own_daemon_beside_the_first() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let their_project = tempfile::tempdir().expect("their project");
+    let our_project = tempfile::tempdir().expect("our project");
+    let theirs = their_project.path().canonicalize().expect("canonicalize");
+    let ours = our_project.path().canonicalize().expect("canonicalize");
+
+    for wanted in [Some(ours.as_path()), None] {
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let shared = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&theirs))));
+        let own = own_socket(&shared, wanted);
+        drop(std::os::unix::net::UnixListener::bind(&own).expect("leave a stale own socket"));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = SleepingStub::new(dir.path());
+        bind_at_after_spawn(&stub, own.clone(), binding_json(wanted));
+
+        let resolved = ensure_daemon_with(wanted, &stub.path, &shared).await;
+        assert!(
+            matches!(&resolved, Ok(path) if *path == own && *path != shared),
+            "project {wanted:?} must get its own daemon on {own:?}, not attach to or be \
+             refused by the other project's daemon on {shared:?}: {resolved:?}"
+        );
+        let argv = stub.argv().await;
+        assert!(
+            argv.contains("--project-socket") && argv.contains("--port 0"),
+            "the second project's daemon must bind its own socket and no fixed port: {argv}"
+        );
+        assert_eq!(
+            argv.contains("--project "),
+            wanted.is_some(),
+            "--project must be forwarded exactly when the client has one: {argv}"
+        );
+    }
+}
+
+/// Same-project reuse holds on the own socket too (#4600): a TUI for a
+/// project whose daemon already runs on its own socket attaches to it while
+/// another project holds the shared socket, and starts nothing.
+#[tokio::test]
+async fn a_second_project_reuses_its_own_running_daemon() {
     let _lock = ENV_LOCK.lock().await;
     let _env = EnvGuard::isolated();
     let their_project = tempfile::tempdir().expect("their project");
@@ -368,13 +440,45 @@ async fn refuses_a_daemon_bound_to_another_project() {
     let theirs = their_project.path().canonicalize().expect("canonicalize");
     let ours = our_project.path().canonicalize().expect("canonicalize");
     let sock_dir = tempfile::tempdir().expect("socket dir");
-    let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&theirs))));
+    let shared = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&theirs))));
+    let own = own_socket(&shared, Some(&ours));
+    stub_daemon_at(&own, Some(binding_json(Some(&ours))));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let err = ensure_daemon_with(Some(&ours), &stub, &socket)
+    let resolved = ensure_daemon_with(Some(&ours), &stub, &shared).await;
+    assert!(
+        matches!(&resolved, Ok(path) if *path == own),
+        "must reuse this project's running daemon on {own:?}: {resolved:?}"
+    );
+    assert!(!marker.exists(), "must not have spawned anything");
+}
+
+/// The error path (#4600): this project's own socket answered by a daemon
+/// serving ANOTHER project — a hash collision, or a daemon started by hand —
+/// is refused with both projects named, and nothing is spawned. The shared
+/// socket is free here, so falling through to it would also be wrong: a
+/// competing daemon cannot take the own socket while that one holds it.
+#[tokio::test]
+async fn refuses_another_projects_daemon_on_this_projects_own_socket() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let their_project = tempfile::tempdir().expect("their project");
+    let our_project = tempfile::tempdir().expect("our project");
+    let theirs = their_project.path().canonicalize().expect("canonicalize");
+    let ours = our_project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let shared = sock_dir.path().join("tcode.sock");
+    let own = own_socket(&shared, Some(&ours));
+    stub_daemon_at(&own, Some(binding_json(Some(&theirs))));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("spawned");
+    let stub = marker_stub(dir.path(), &marker);
+
+    let err = ensure_daemon_with(Some(&ours), &stub, &shared)
         .await
         .expect_err("a daemon on another project must not be attached to");
 
@@ -393,10 +497,47 @@ async fn refuses_a_daemon_bound_to_another_project() {
     );
 }
 
+/// **The #4600 fail-open check.** A socket that starts answering after our
+/// spawn, while our child is still alive, is not proof the answer came from
+/// our child: two TUIs for different projects can race for the free shared
+/// socket, and the loser's child is still starting when the winner answers.
+/// Attaching on readiness alone would hand this TUI the other project's
+/// daemon, so the binding is verified before returning.
+#[tokio::test]
+async fn refuses_another_projects_daemon_that_answers_after_our_spawn() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let their_project = tempfile::tempdir().expect("their project");
+    let our_project = tempfile::tempdir().expect("our project");
+    let theirs = their_project.path().canonicalize().expect("canonicalize");
+    let ours = our_project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let shared = sock_dir.path().join("tcode.sock");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stub = SleepingStub::new(dir.path());
+    // The stub stays alive and never binds; the OTHER project answers.
+    bind_at_after_spawn(&stub, shared.clone(), binding_json(Some(&theirs)));
+
+    let resolved = ensure_daemon_with(Some(&ours), &stub.path, &shared).await;
+    assert!(
+        resolved.is_err(),
+        "must not attach to another project's daemon that answered after our spawn: \
+         {resolved:?}"
+    );
+    let rendered = format!("{:#}", resolved.expect_err("checked above"));
+    assert!(
+        rendered.contains(&theirs.display().to_string())
+            && rendered.contains(&ours.display().to_string()),
+        "error must name both projects: {rendered}"
+    );
+}
+
 /// Projectless and bound are not interchangeable in EITHER direction — a
 /// project-bound TUI must not silently lose its project to a projectless
 /// daemon, and a projectless TUI must not silently inherit a project it
-/// never named.
+/// never named. Since #4600 the mismatch is only reachable on the client's
+/// OWN socket; a mismatch on the shared one starts the client's own daemon.
 #[tokio::test]
 async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
     let _lock = ENV_LOCK.lock().await;
@@ -407,11 +548,12 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
     // Bound client, projectless daemon.
     {
         let sock_dir = tempfile::tempdir().expect("socket dir");
-        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
+        let shared = sock_dir.path().join("tcode.sock");
+        stub_daemon_at(&own_socket(&shared, Some(&ours)), Some(binding_json(None)));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(Some(&ours), &stub, &socket)
+        let err = ensure_daemon_with(Some(&ours), &stub, &shared)
             .await
             .expect_err("a bound TUI must not attach to a projectless daemon");
         let rendered = format!("{err:#}");
@@ -422,11 +564,12 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
     // Projectless client, bound daemon.
     {
         let sock_dir = tempfile::tempdir().expect("socket dir");
-        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&ours))));
+        let shared = sock_dir.path().join("tcode.sock");
+        stub_daemon_at(&own_socket(&shared, None), Some(binding_json(Some(&ours))));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(None, &stub, &socket)
+        let err = ensure_daemon_with(None, &stub, &shared)
             .await
             .expect_err("a projectless TUI must not inherit a daemon's project");
         let rendered = format!("{err:#}");
@@ -443,8 +586,8 @@ async fn refuses_a_project_bound_client_against_a_projectless_daemon() {
 /// projectless daemon — and "relaunch this TUI against <projectless>" is not
 /// a command anyone can run. The message has to carry `--projectless` for one
 /// mismatch class and `--project <root>` for the other.
-/// What: a repo-derived `wanted` against a projectless daemon, then the
-/// inverse, asserting each error names its own flag.
+/// What: a repo-derived `wanted` against a projectless daemon on its own
+/// socket, then the inverse, asserting each error names its own flag.
 /// Test: this test.
 #[tokio::test]
 async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
@@ -455,11 +598,12 @@ async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
 
     {
         let sock_dir = tempfile::tempdir().expect("socket dir");
-        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(None)));
+        let shared = sock_dir.path().join("tcode.sock");
+        stub_daemon_at(&own_socket(&shared, Some(&ours)), Some(binding_json(None)));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(Some(&ours), &stub, &socket)
+        let err = ensure_daemon_with(Some(&ours), &stub, &shared)
             .await
             .expect_err("a repo-homed TUI must not attach to a projectless daemon");
         let rendered = format!("{err:#}");
@@ -471,11 +615,12 @@ async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
 
     {
         let sock_dir = tempfile::tempdir().expect("socket dir");
-        let socket = stub_daemon_socket(sock_dir.path(), Some(binding_json(Some(&ours))));
+        let shared = sock_dir.path().join("tcode.sock");
+        stub_daemon_at(&own_socket(&shared, None), Some(binding_json(Some(&ours))));
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("spawned");
         let stub = marker_stub(dir.path(), &marker);
-        let err = ensure_daemon_with(None, &stub, &socket)
+        let err = ensure_daemon_with(None, &stub, &shared)
             .await
             .expect_err("a projectless TUI must not inherit a daemon's project");
         let rendered = format!("{err:#}");
@@ -488,19 +633,21 @@ async fn refusal_against_a_projectless_daemon_names_the_projectless_flag() {
 
 /// A daemon too old to report its binding cannot be verified, so it is
 /// refused — failing CLOSED, since "old build" is no evidence that its
-/// project is the right one.
+/// project is the right one. Placed on the client's own socket (#4600); on
+/// the shared socket the same daemon is passed over for a daemon of our own.
 #[tokio::test]
 async fn refuses_a_daemon_that_cannot_report_its_binding() {
     let _lock = ENV_LOCK.lock().await;
     let _env = EnvGuard::isolated();
     let sock_dir = tempfile::tempdir().expect("socket dir");
-    let socket = stub_daemon_socket(sock_dir.path(), None);
+    let shared = sock_dir.path().join("tcode.sock");
+    stub_daemon_at(&own_socket(&shared, None), None);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("spawned");
     let stub = marker_stub(dir.path(), &marker);
 
-    let err = ensure_daemon_with(None, &stub, &socket)
+    let err = ensure_daemon_with(None, &stub, &shared)
         .await
         .expect_err("an unverifiable daemon must not be attached to");
 
@@ -582,6 +729,11 @@ async fn spawns_a_daemon_when_none_is_running() {
     assert!(
         argv.contains("serve") && argv.contains("--http"),
         "must spawn `serve --http`: {argv}"
+    );
+    // #4600: no fixed port, and the shared socket when it is free.
+    assert!(
+        argv.contains("--port 0") && !argv.contains("--project-socket"),
+        "must spawn on an OS-assigned port and the shared socket: {argv}"
     );
     assert!(
         argv.contains("--project") && argv.contains(canonical.to_str().expect("utf8")),
@@ -807,7 +959,7 @@ async fn reports_a_daemon_that_dies_on_startup() {
 async fn the_spawned_daemon_leads_its_own_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let stub = stub_binary(dir.path(), "tcode-session", "exec sleep 300");
-    let mut child = spawn_daemon(&stub, None, None).expect("spawn the stub daemon");
+    let mut child = spawn_daemon(&stub, None, false, None).expect("spawn the stub daemon");
     let pid = child.id().expect("a live child has a pid") as libc::pid_t;
     // SAFETY: `getsid` only reads the session of our own unreaped child.
     let sid = unsafe { libc::getsid(pid) };

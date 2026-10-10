@@ -1,0 +1,3 @@
+Fixed
+- `tcode tui` in a second project now runs beside the first instead of refusing. When the shared daemon socket serves another project, the TUI starts its own project's daemon on a per-project socket beside the shared one (`tcode serve --project-socket`) and never attaches to the other project's daemon; a second TUI in the same project reuses that daemon. A daemon the TUI starts now binds an OS-assigned HTTP port instead of the fixed 7882, so a port held by another daemon no longer kills it on startup. An explicit `tcode serve --port` still wins. (#4600)
+- `tcode tui` now checks the project of a daemon it just started before attaching. A socket answered by another project's daemon during startup is refused instead of attached to. (#4600)
