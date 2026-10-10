@@ -18,7 +18,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    Capabilities, NamesIndex, ScopeSet, SecretBackend, SecretCache, mask_secret, platform,
+    Capabilities, NamesIndex, OpenedUnder, ScopeSet, SecretBackend, SecretCache, mask_secret,
+    platform,
 };
 use crate::api::methods::{DeleteResponse, KeyMeta, SetOutcome, SetResponse};
 use crate::api::{SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
@@ -36,6 +37,9 @@ pub struct SecretStore {
     index: NamesIndex,
     // #7520: the server's session cache; `None` reads the backend every time.
     cache: Option<Arc<SecretCache>>,
+    // #7520 M1: the settings `backend` was opened under; `None` is unknown,
+    // and the cache is then bypassed. Kept out of `Debug`.
+    opened_under: Option<OpenedUnder>,
 }
 
 impl fmt::Debug for SecretStore {
@@ -55,20 +59,28 @@ impl SecretStore {
             backend,
             index,
             cache: None,
+            opened_under: None,
         }
     }
 
-    /// This store, reading CLI-backed values through `cache` (#7520).
+    /// This store, reading CLI-backed values through `cache` (#7520), as
+    /// filled under `opened_under`, the settings the backend was opened under.
     ///
     /// What: only the read path consults it, after its gates; writes never
-    /// touch it (the server evicts).
-    /// Test: `resolve_second_call_does_not_reread_cli_backend`.
+    /// touch it (the server evicts). `opened_under: None` bypasses it.
+    /// Test: `resolve_second_call_does_not_reread_cli_backend`,
+    /// `cache_cleared_when_cli_account_settings_change`.
     #[cfg_attr(
         not(feature = "server"),
         allow(dead_code, reason = "only the server's resolve gives a cache")
     )]
-    pub(crate) fn with_cache(mut self, cache: Arc<SecretCache>) -> Self {
+    pub(crate) fn with_cache(
+        mut self,
+        cache: Arc<SecretCache>,
+        opened_under: Option<OpenedUnder>,
+    ) -> Self {
         self.cache = Some(cache);
+        self.opened_under = opened_under;
         self
     }
 
@@ -445,9 +457,13 @@ impl SecretStore {
     ) -> Result<SecretValue, SecretsError> {
         // #7520: after `admit` and the flag gate; a hit skips only this read.
         let value = match &self.cache {
-            Some(cache) => cache.read_through(&self.backend.id(), vault, key, || {
-                self.backend.get(vault, key)
-            })?,
+            Some(cache) => cache.read_through(
+                &self.backend.id(),
+                self.opened_under.as_ref(),
+                vault,
+                key,
+                || self.backend.get(vault, key),
+            )?,
             None => self.backend.get(vault, key)?,
         };
         value.ok_or_else(|| SecretsError::NotFound {

@@ -40,8 +40,8 @@ use crate::api::methods::{
     ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
     RevokeResponse,
 };
-use crate::store::SecretStore;
 use crate::store::resolve::{require_agent_use, resolve_reference};
+use crate::store::{OpenedUnder, SecretStore};
 
 /// Fold a registry error into its wire kind.
 ///
@@ -218,8 +218,16 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             // it also precedes the spend, so an audit failure spends nothing.
             gate.write_ahead()?;
             // #7520: every check above ran; a cache hit skips only the read.
-            let store = SecretStore::new(project.backend(state)?, state.index.clone())
-                .with_cache(Arc::clone(&state.cache));
+            // #7520 M1: the account config's settings for this backend, read
+            // on both sides of the open; a change between them is unknown.
+            let id = project.resolved_config().backend;
+            let account = state.file_consent_config.as_deref();
+            let before = OpenedUnder::read(account, &id);
+            let backend = project.backend(state)?;
+            let opened_under =
+                before.filter(|before| OpenedUnder::read(account, &id).as_ref() == Some(before));
+            let store = SecretStore::new(backend, state.index.clone())
+                .with_cache(Arc::clone(&state.cache), opened_under);
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),
             };
