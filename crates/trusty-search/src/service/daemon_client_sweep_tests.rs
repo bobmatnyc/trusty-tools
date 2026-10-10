@@ -5,10 +5,9 @@
 //! is about to delete. A sweep over the source is the only check that sees a
 //! call site before it runs.
 //! What: every `.rs` file under `src/commands/`, `src/mcp/`, plus `src/main.rs`
-//! is read; a file that names one of [`HTTP_MARKERS`] must be listed in
-//! [`NOT_YET_MOVED`], and a listed file that no longer names one must be
-//! removed from the list. The list only shrinks; the step that moves the last
-//! file deletes it and this test then forbids every marker outright.
+//! is read, and none may name one of [`HTTP_MARKERS`]. #9214 PR-A moved the
+//! last listed file (`src/commands/start/tests.rs`) onto the socket and deleted
+//! the `NOT_YET_MOVED` list, so every marker is now forbidden outright.
 //! Test: this file.
 
 use std::path::{Path, PathBuf};
@@ -25,34 +24,6 @@ const HTTP_MARKERS: &[&str] = &[
     // #9214: the HTTP-base guard the not-yet-moved subcommands call.
     "ensure_daemon_http_base",
 ];
-
-/// Files that still dial HTTP, relative to the crate root. Remove a row when
-/// its file moves onto `service::daemon_client`; never add one.
-///
-/// #9214 B2(d1) moved `src/main.rs` and `src/commands/dashboard.rs` off: the
-/// dashboard URL now comes from `search.health` over the socket.
-/// #9168 moved the MCP bridge (`src/mcp/**`, `serve.rs`, `serve_scope.rs`) off
-/// this list; [`the_mcp_bridge_builds_no_http_url`] keeps it off.
-///
-/// #9214 B2(a) moved `add`, `daemon_utils`, `list`, `remove`, `status` and
-/// `watch` off it, and `daemon_guard` now waits on the socket;
-/// [`the_b2a_cli_paths_dial_no_http`] keeps them off. The HTTP resolver
-/// `daemon_utils` held moved, fail-closed, to `daemon_http.rs`: the one row
-/// this list gained, and the file the last B2 phase deletes.
-///
-/// #9214 B2(b1) moved `cleanup`, `config`, `convert` and `migrate` off it;
-/// [`the_b2b1_cli_paths_dial_no_http`] keeps them off.
-///
-/// #9214 B2(b2) moved `explicit_target`, `index`, `index_cwd_resolve`,
-/// `index_relocate`, `index_remove(_stale)`, `index_status`, `reindex` and
-/// `reindex_engine/*` off it; [`the_b2b2_cli_paths_dial_no_http`] keeps them
-/// off.
-///
-/// #9214 slice 1 moved `query`, `doctor*`, auto-discover and the `monitor`
-/// status reads off it and deleted `daemon_http.rs`;
-/// [`the_slice1_cli_paths_dial_no_http`] keeps them off. The one row left is a
-/// test that drives the daemon's own HTTP listener, which goes with the bind.
-const NOT_YET_MOVED: &[&str] = &["src/commands/start/tests.rs"];
 
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -89,29 +60,14 @@ fn files_dialling_http(root: &Path) -> Vec<String> {
     hits
 }
 
-/// A file outside [`NOT_YET_MOVED`] that dials HTTP fails; so does a listed
-/// file that no longer does.
+/// Any file that dials HTTP fails (#9214 PR-A: nothing is exempt).
 #[test]
 fn no_cli_or_bridge_file_reintroduces_an_http_daemon_call() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let hits = files_dialling_http(root);
-
-    let new: Vec<&String> = hits
-        .iter()
-        .filter(|f| !NOT_YET_MOVED.contains(&f.as_str()))
-        .collect();
     assert!(
-        new.is_empty(),
-        "these files reach the daemon over HTTP; use service::daemon_client instead: {new:?}"
-    );
-
-    let moved: Vec<&&str> = NOT_YET_MOVED
-        .iter()
-        .filter(|f| !hits.iter().any(|h| h == *f))
-        .collect();
-    assert!(
-        moved.is_empty(),
-        "these files no longer dial HTTP; delete their NOT_YET_MOVED rows: {moved:?}"
+        hits.is_empty(),
+        "these files reach the daemon over HTTP; use service::daemon_client instead: {hits:?}"
     );
 }
 
