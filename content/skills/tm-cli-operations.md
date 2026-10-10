@@ -417,25 +417,36 @@ Three complementary layers — use the right one:
 |---|---|
 | `tm doctor` | Full trusty-mpm stack (instructions, agents, skills, memory, search) — needs a reachable daemon |
 | `tm validate [--path <dir>] [--repair]` | A workspace's deployed `.claude/{agents,skills}` + `settings.json` vs the bundled roster — **standalone, no daemon** |
-| `tm services status <name> [--json]` | A service daemon's **HTTP health** (is trusty-search up, on what port, healthy) |
+| `tm services status <name> [--json]` | A service daemon's **liveness** (is trusty-search up and healthy; HTTP services report their port) |
 | `tm mcp test [<name>]` | The **MCP protocol layer** — does each server actually spawn and speak MCP |
 
-Key distinction: **`tm services` checks HTTP liveness; `tm mcp test` checks the
-MCP handshake.** A daemon can be HTTP-healthy yet fail its MCP handshake (or vice
+Key distinction: **`tm services` checks daemon liveness; `tm mcp test` checks the
+MCP handshake.** A daemon can be live yet fail its MCP handshake (or vice
 versa) — test the layer you actually care about.
+
+`tm services` probes most services over HTTP `/health`. It probes trusty-search
+by calling `search.health` on its Unix socket, resolved from
+`TRUSTY_SEARCH_SOCKET`, else the daemon's data directory. trusty-search is UP
+only when the socket answers; otherwise it is DOWN and the dial error is shown.
+A process that `pgrep` matches never makes it UP. The default manifest starts
+trusty-search with `trusty-search start --no-http`, so it binds no TCP port.
 
 ```bash
 tm doctor                          # full diagnostic report
 tm validate --repair               # re-run the deploy pipeline to close gaps; non-zero exit if gaps remain
 tm services list [--json]          # every declared service + status (exit 0)
 tm services status trusty-search   # 0=running, 1=down, 2=unknown service
-tm services health trusty-search   # probes /health: prints OK / FAIL
+tm services health trusty-search   # socket probe for trusty-search (HTTP /health for others): prints OK / FAIL
 tm services port|url|log <name>    # scriptable single-value lookups
 tm mcp test                        # MCP-layer sweep (see §1)
 ```
 
 `tm services` exit codes are stable and scriptable: `0` ok/running, `1`
-down/unhealthy, `2` unknown service.
+down/unhealthy, `2` unknown service. `tm services port trusty-search` and
+`tm services url trusty-search` exit `1` and name the socket, because
+trusty-search has no port or URL. A legacy `services.yaml` manifest with the
+static port-7878 trusty-search entry is read as the socket probe, with one
+`WARN` on stderr; `tm services init --force` writes the current manifest.
 
 ---
 

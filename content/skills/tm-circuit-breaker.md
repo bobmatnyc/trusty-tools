@@ -214,7 +214,7 @@ see `tm-tool-usage-guide` (`mcp__trusty-search__search_health`,
 not the daemon is up — branch on the response's `healthy` field, not on the
 call succeeding.
 
-**Violation:** `PM: Bash(curl http://localhost:7878/health)`
+**Violation:** `PM: Bash(nc -U "$TRUSTY_SEARCH_SOCKET")`
 
 **Correct:** `PM: mcp__trusty-search__search_health()` — or delegate to
 local-ops for anything not covered by a trusty-* MCP health tool.
