@@ -47,6 +47,7 @@ const PROJECT: &str = "TS_LIVE_PROJECT";
 const OUT: &str = "TS_LIVE_OUT";
 const TOKEN: &str = "TS_LIVE_TOKEN";
 const ORIGINAL: &str = "TS_LIVE_ORIGINAL";
+const DETACH: &str = "TS_LIVE_DETACH";
 const VAULT: &str = "trusty/acme/web";
 const KEY: &str = "API_KEY";
 /// The seeded value; compared, never printed.
@@ -344,6 +345,7 @@ fn live_peer_pid_is_the_kernels() {
             // re-parents; that is the point of the role.
             #[allow(clippy::zombie_processes)]
             let _registrar = role(&me(), PEER_TEST, "registrar")
+                .env(DETACH, std::process::id().to_string())
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -352,9 +354,9 @@ fn live_peer_pid_is_the_kernels() {
             return;
         }
         Ok("registrar") => {
-            let first = parent_pid();
+            let detach: u32 = std::env::var(DETACH).unwrap().parse().unwrap();
             let started = Instant::now();
-            while parent_pid() == first && started.elapsed() < Duration::from_secs(10) {
+            while parent_pid() == detach && started.elapsed() < Duration::from_secs(10) {
                 std::thread::sleep(Duration::from_millis(20));
             }
             let mut child = role(&me(), PEER_TEST, "child")
@@ -375,7 +377,7 @@ fn live_peer_pid_is_the_kernels() {
             let child_ok = child.wait().unwrap().success();
             report(
                 "registrar",
-                json!({"pid": std::process::id(), "ppid": parent_pid(), "first_ppid": first,
+                json!({"pid": std::process::id(), "ppid": parent_pid(), "detach": detach,
                     "child": child.id(), "error": outcome.err(),
                     "child_ok": child_ok, "sibling_ok": sibling.success()}),
             );
@@ -430,9 +432,10 @@ fn live_peer_pid_is_the_kernels() {
     );
     println!("registrar {registrar}\nchild {child}\ngrandchild {grandchild}\nsibling {sibling}");
     assert_ne!(
-        registrar["ppid"], registrar["first_ppid"],
+        registrar["ppid"], registrar["detach"],
         "the registrar detached"
     );
+    assert_ne!(registrar["ppid"], std::process::id(), "not under this test");
     assert_eq!(registrar["error"], Value::Null, "the grant was minted");
     assert_eq!(child["pid"], registrar["child"]);
     assert_eq!(grandchild["ppid"], child["pid"]);
