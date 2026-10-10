@@ -582,6 +582,12 @@ trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
 
+### Clients and the socket
+
+`query`, `doctor`, `monitor status` and `monitor indexes` reach the daemon over its Unix socket, not over HTTP (trusty-search 0.58.0). With no daemon answering they fail with an error naming the socket. The socket is `TRUSTY_SEARCH_SOCKET` when set, else `<TRUSTY_DATA_DIR>/trusty-search.sock`. `trusty-search start --socket <absolute path>` binds the daemon at a path you choose: the path must be absolute, a missing parent directory is created at `0700`, and an existing parent not at `0700` is refused. A command that auto-starts the daemon binds the same socket it polls.
+
+Rust callers use `trusty_search::service::daemon_client::DaemonClient`; the HTTP `SearchClient` is removed. The `curl` examples and the `port` commands in this README address the HTTP listener, which is unchanged in 0.58.0.
+
 ## MCP tools
 
 <!-- BEGIN GENERATED: mcp-tools -->

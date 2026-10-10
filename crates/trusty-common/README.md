@@ -213,6 +213,10 @@ library slot. Enable it in at most one crate per build graph (typically
 `trusty-agents`). Downstream crates that only need the data types enable `symgraph`
 (contracts only) and stop there.
 
+### Palace format guard (`memory-core`)
+
+`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch` and `FormatMarkerUnreadable` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm. The `memory_core::store::format_backup` module copies a palace's primary files into a verified backup before a migration; trusty-common 0.58.0 stamps no marker yet.
+
 ## Migrations (`migrations` feature)
 
 Shared schema-migration kernel (issue #179) for long-lived trusty-* stores.

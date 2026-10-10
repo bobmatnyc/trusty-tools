@@ -10,7 +10,7 @@ from `cargo metadata`; the human-readable map is
 
 | Crate | What it is | Install / run |
 |---|---|---|
-| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked && tm start` |
+| [trusty-mpm](#trusty-mpm--meta-harness-multi-agent-orchestration) | PM-style multi-agent orchestration over coding work | `cargo install trusty-mpm --version 1.8.0 --locked && tm start` |
 | [trusty-memory](#trusty-memory--memory-palace-storage-engine) | Long-term memory storage with semantic search and an embedded UI | `cargo run -p trusty-memory -- serve` |
 | [trusty-search](#trusty-search--hybrid-code-search) | Machine-wide hybrid code search — BM25 + vector + KG fusion, MCP server | `cargo install trusty-search && trusty-search start` |
 | [trusty-review](#trusty-review--llm-backed-pr-review) | LLM-backed review of GitHub PRs and diffs via AWS Bedrock or OpenRouter | `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked && trusty-review run owner repo 123` |
@@ -33,7 +33,7 @@ delegating coding tasks to `trusty-code`.
 
 **Quick start:**
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
+cargo install trusty-mpm --version 1.8.0 --locked
 tm start
 tm launch
 ```
@@ -91,7 +91,7 @@ trusty-search index ~/Projects/myproj --name myproj
 trusty-search query "fn authenticate" --index myproj
 ```
 
-**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `console_metrics`
+**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `console_metrics`, `add_root`
 
 See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full documentation.
 

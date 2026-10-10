@@ -37,7 +37,7 @@ Foundational design docs live under [`research/`](research/):
 
 - [Product Requirements Document (reconstructed)](research/prd-2026-05-29.md)
 - [Architecture & technical specification (reconstructed)](research/architecture-spec-2026-05-29.md)
-- [`tm services` discovery spec](research/tm-services-discovery-spec-2026-05-28.md)
+- [`tm services` discovery spec](research/tm-services-discovery-spec-2026-05-28.md) (historical: its port-7878 HTTP probe for trusty-search is superseded by the Unix-socket probe, #9543, trusty-mpm 1.8.0)
 
 New current requirements belong in the workspace behavior-contract catalog;
 dated benchmarks, research, and session summaries stay in their evidence

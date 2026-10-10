@@ -3,7 +3,7 @@
 # trusty-tools roadmap
 
 This is the one roadmap for every crate in trusty-tools. The release plan
-sets the order of the next six releases, which come from trusty-mpm and
+sets the order of the next releases, which come from trusty-mpm and
 trusty-secrets. "Milestones by crate", further down, lists every open GitHub
 milestone under the crate it belongs to.
 
@@ -15,11 +15,11 @@ secrets, and one that records every event on one event bus. 2.0.0 then adds
 an architect that looks after all of your projects for you. A dashboard and
 Claude Code mods support follow it.
 
-Six releases, in this order.
+trusty-mpm 1.8.0 shipped on 2026-10-10. Five releases remain, in this order.
 
 | # | Release | What it delivers |
 |---|---|---|
-| 1 | trusty-mpm 1.8.0 | The base before the architect: content fully extracted, Unix sockets everywhere except the console, worktrees, a smaller starting context, and a pm-guard with only the checks it needs |
+| 1 | trusty-mpm 1.8.0 (shipped 2026-10-10) | The base before the architect: content fully extracted, Unix sockets everywhere except the console, worktrees, a smaller starting context, and a pm-guard with only the checks it needs |
 | 2 | trusty-secrets 0.1.0 | Secrets as a standalone, public crate with its own releases; trusty-mpm and the console use it |
 | 3 | trusty-mpm 1.9.0 | Every event captured on one event bus, in the internal `trusty-events` crate, run as its own supervised daemon over a Unix socket; the console reads from it |
 | 4 | trusty-mpm 2.0.0 | The architect |
@@ -93,7 +93,8 @@ so the same question never reaches you twice.
 
 ## How we get there
 
-1.7.1 and 1.7.2 are closed. The order of the releases from here is in the
+trusty-mpm 1.8.0 shipped on 2026-10-10. Next come trusty-secrets 0.1.0 and
+then trusty-mpm 1.9.0. The order of the releases from here is in the
 "Release plan" section above.
 
 ## Milestones by crate

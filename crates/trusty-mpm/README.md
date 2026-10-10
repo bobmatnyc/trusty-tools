@@ -33,6 +33,14 @@ Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
    tm --version
    ```
 
+### From crates.io
+
+trusty-mpm 1.8.0 is published on crates.io. Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
+
+```bash
+cargo install trusty-mpm --version 1.8.0 --locked
+```
+
 ### From Source with Cargo
 
 Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
@@ -99,7 +107,7 @@ All installations can be verified by running:
 tm --version
 ```
 
-Expected output: the semantic version of the installed binary (e.g., `tm 0.6.2`).
+Expected output: the semantic version of the installed binary (e.g., `tm 1.8.0`).
 
 ## Feature Flags
 
@@ -156,6 +164,18 @@ tm tui
 # Pair a Telegram bot
 tm telegram pair
 ```
+
+### What's in 1.8
+
+```bash
+tm worktrees [--json] [--no-size]   # count and GiB per project from the worktree ledger
+tm secrets doctor                   # project secrets through trusty-secrets (set, list, remove, import, copy)
+tm memory forget --fact-key <key>   # forget the drawer that holds a slot (or pass a drawer id)
+tm services                         # trusty-search is probed with search.health on its Unix socket
+tm fleet init                       # resumes the Architect's prior Claude conversation
+```
+
+`tm pr open` tags a phase pull request with its `[EPIC_N PHASE_M]` issue title. `tm doctor` gains a `worktree_registry` row. `tm services init` starts trusty-search with `--no-http`, and `port` and `url` for trusty-search exit 1 naming the socket. See the [CHANGELOG](CHANGELOG.md) for the full list, including the breaking `ServiceDecl` change.
 
 ### Token savings on the statusline
 

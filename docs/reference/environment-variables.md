@@ -53,6 +53,7 @@ Measure the effect on a live daemon with `scripts/measure-daemon-footprint.sh`.
 
 | Variable | Required by | Purpose |
 |---|---|---|
+| `TRUSTY_SEARCH_SOCKET` | `trusty-search` (`query`, `doctor`, `monitor status`, `monitor indexes`, auto-start), `tm` (`tm services`, `tm doctor`), `tctl ensure` (#9214, #9543) | Absolute path of the daemon's Unix socket. Clients dial it in place of the default `<TRUSTY_DATA_DIR>/trusty-search.sock`, and a command that auto-starts the daemon binds the same path. A client refuses a socket outside a `0700` directory. With no daemon answering, the error names the socket and never a guessed `127.0.0.1:7878`. The daemon takes the path from `trusty-search start --socket <absolute path>`; a missing parent directory is created at `0700` and an existing one not at `0700` is refused. |
 | `TRUSTY_MEMORY_LIMIT_MB` | `trusty-search` | Soft RSS ceiling for indexing pipeline. Auto-tuned from system RAM; override only when needed. |
 | `TRUSTY_MAX_CHUNKS` | `trusty-search` | Hard cap on chunks per index. Auto-tuned; rarely set manually. |
 | `TRUSTY_MAX_BATCH_SIZE` | `trusty-search` | ONNX embedding batch size. Auto-tuned; set if OOM during reindex. |

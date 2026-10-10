@@ -100,14 +100,19 @@ describe('flagship tool records are grounded in the repository', () => {
 	const TOOL_COUNT_SOURCES = [
 		{
 			slug: 'trusty-memory',
-			source: 'crates/trusty-memory/src/tools/mod.rs',
+			sources: ['crates/trusty-memory/src/tools/mod.rs'],
 			// Each dispatch arm: `"memory_remember" => handle_memory_remember(...)`.
 			// The `other =>` catch-all carries no quotes and is not counted.
 			pattern: /^\s*"[a-z_]+" =>/gm
 		},
 		{
 			slug: 'trusty-search',
-			source: 'crates/trusty-search/src/mcp/tools/descriptors.rs',
+			// `add_root` (#7434) declares its descriptor in index.rs and is appended
+			// by `tool_descriptors`, so both files count.
+			sources: [
+				'crates/trusty-search/src/mcp/tools/descriptors.rs',
+				'crates/trusty-search/src/mcp/tools/index.rs'
+			],
 			// Each descriptor in the tools/list JSON: `"name": "search_lexical"`.
 			pattern: /"name": "[a-z_]+"/g
 		}
@@ -115,15 +120,18 @@ describe('flagship tool records are grounded in the repository', () => {
 
 	it.each(TOOL_COUNT_SOURCES)(
 		'$slug fact card names the tool count its crate actually serves',
-		({ slug, source, pattern }) => {
-			const declared = readFileSync(path.join(REPO_ROOT, source), 'utf8').match(pattern);
-			expect(declared, source).not.toBeNull();
+		({ slug, sources, pattern }) => {
+			const source = sources.join(' + ');
+			const declared = sources.flatMap(
+				(file) => readFileSync(path.join(REPO_ROOT, file), 'utf8').match(pattern) ?? []
+			);
+			expect(declared.length, source).toBeGreaterThan(0);
 
 			const tool = TOOLS.find((candidate) => candidate.slug === slug);
 			const card = tool?.facts.find((fact) => fact.label === 'MCP tools');
 			expect(card, `${slug} has an 'MCP tools' fact card`).toBeDefined();
 
-			expect(Number(card!.value), `${slug} fact card vs ${source}`).toBe(declared!.length);
+			expect(Number(card!.value), `${slug} fact card vs ${source}`).toBe(declared.length);
 		}
 	);
 });
