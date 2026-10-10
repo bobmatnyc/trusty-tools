@@ -88,7 +88,7 @@ pub(crate) async fn reindex_report(
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     // #9169: a parked index is never rebuilt; unpark queues its reindex.
-    if let Some(refusal) = super::project_park::parked_refusal(state, id) {
+    if let Some(refusal) = super::project_park::parked_refusal(state, id).await {
         return Err(refusal);
     }
     let mut handle = state.registry.get(&index_id).ok_or((

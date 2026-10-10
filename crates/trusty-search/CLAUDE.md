@@ -268,7 +268,9 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   `search.project.map` answer `CODE_INTERNAL_ERROR` naming the file and the
   remedy; a resolve by an exact index id still answers. Requests that name
   an index id do not read parks from an unreadable map, prune deletes
-  nothing, and the boot orphan heal is skipped.
+  nothing, the boot orphan heal and relocation salvage are skipped, the
+  runtime orphan reaper reaps nothing, and `search.index.delete` is refused
+  with `500 project_map_unreadable`.
   `trusty-search project rebuild-map --yes` moves the file to
   `project-map.toml.corrupt-<unix>` and migrates again.
 - `search.project.resolve` answers from the map: a group's pin wins, a parked
@@ -276,7 +278,8 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   Each duplicate carries `parked`.
 - `search.project.map` → `{path, schema, projects, parked}`.
 - `search.project.park {index_id}` → `{index_id, parked, key, reason,
-  canonical_index_id, unloaded}`. Only a worktree, an orphaned root, or an
+  canonical_index_id, unpinned, unloaded}`. A pin naming the parked index is
+  dropped; `unpinned` lists the group keys it held. Only a worktree, an orphaned root, or an
   index sharing its root with another registration (not the group's live
   index) parks. A main checkout is refused with `-32009`
   `data.error = "park_refused"`. A parked index keeps its corpus and its
@@ -290,7 +293,10 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
 - A request naming a parked index (`search.query`, reindex, file reads and
   writes) answers `409 index_parked` — socket `-32009` with `data`
   `{parked: true, canonical_index_id, key, reason}`. It never redirects and
-  never returns empty hits.
+  never returns empty hits. `canonical_index_id` is the group's live answer
+  under the map (`null` when it has none), never a parked or unregistered id.
+- Deleting an index drops its park row and pins from the map, so an index
+  registered again at the same root is not parked.
 - `search.index.create` pins a new index's group when it has no pin
   (`pinned_by = create`); a pin that cannot be written is reported as
   `project_map_error` and the index stays registered.

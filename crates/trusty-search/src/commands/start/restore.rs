@@ -471,6 +471,9 @@ pub(super) async fn restore_indexes(
     // Runs strictly AFTER both live phases and under its own global ceiling, so
     // however long it takes or however early it gives up, no live index has
     // already lost anything to it.
+    // #9169: the salvage writes registry rows; it never touches a parked one,
+    // and touches none when the map was not read.
+    let missing_roots = boot_map.salvageable(missing_roots);
     if !missing_roots.is_empty() {
         let salvage = salvage_missing_root_entries(state, embedder, missing_roots).await;
         total_ok += salvage.ok;

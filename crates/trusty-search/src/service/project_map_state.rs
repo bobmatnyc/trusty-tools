@@ -192,7 +192,11 @@ fn target(
 }
 
 /// The index `key`'s group answers with under `map`, if any.
-fn group_answer(
+///
+/// What: the pinned resolve of `key`; a parked, unregistered, worktree or
+/// orphaned id never answers, so a stale pin yields to the f7 pick (#9169).
+/// Test: `parking_a_pinned_orphan_names_the_live_winner_and_clears_the_pin`.
+pub fn group_answer(
     key: &str,
     candidates: &[Candidate],
     disk: &impl Disk,
@@ -212,15 +216,18 @@ fn group_answer(
 /// and an index sharing its root with another registration as `operator` —
 /// unless it is its group's live index. A second main checkout, or any other
 /// root, is refused: the map cannot tell which clone an operator works in.
-/// Idempotent. Returns the row and the group's live index afterwards.
+/// Idempotent. A pin naming the parked id is dropped in the same write, so
+/// the group answers with its next live index. Returns the row, the group's
+/// live index afterwards, and the dropped pins.
 /// Test: `park_refuses_a_main_checkout_and_records_a_worktree`,
-/// `park_and_unpark_keep_the_corpus_and_queue_a_reindex`.
+/// `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `parking_a_pinned_orphan_names_the_live_winner_and_clears_the_pin`.
 pub fn park_decision(
     map_path: &Path,
     index_id: &str,
     candidates: &[Candidate],
     disk: &impl Disk,
-) -> Result<(ParkedIndex, Option<String>), MapRefusal> {
+) -> Result<ParkOutcome, MapRefusal> {
     let (probed, key) = target(index_id, candidates, disk)?;
     let shares_root = candidates
         .iter()
@@ -261,18 +268,37 @@ pub fn park_decision(
         reason,
         parked_unix: now_unix(),
     };
-    let written = project_map_io::update(map_path, |map| {
+    let (row, unpinned, map) = project_map_io::update(map_path, |map| {
         let mut map = map.unwrap_or(current);
-        if let Some(existing) = map.parked_row(index_id) {
-            let existing = existing.clone();
-            return Ok((None, (existing, map)));
-        }
-        map.park(row.clone());
-        Ok((Some(map.clone()), (row, map)))
+        // #9169: a parked index never answers, so no pin may keep naming it.
+        let unpinned = map.unpin_index(index_id);
+        let (row, newly_parked) = match map.parked_row(index_id) {
+            Some(existing) => (existing.clone(), false),
+            None => {
+                map.park(row.clone());
+                (row, true)
+            }
+        };
+        let changed = newly_parked || !unpinned.is_empty();
+        Ok((changed.then(|| map.clone()), (row, unpinned, map)))
     })?;
-    let (row, map) = written;
     let canonical = group_answer(&row.key, candidates, disk, &map);
-    Ok((row, canonical))
+    Ok(ParkOutcome {
+        row,
+        canonical,
+        unpinned,
+    })
+}
+
+/// What [`park_decision`] did.
+#[derive(Debug, Clone)]
+pub struct ParkOutcome {
+    /// The parked row (the existing one when it was already parked).
+    pub row: ParkedIndex,
+    /// The group's live index under the map after the park.
+    pub canonical: Option<String>,
+    /// The pins that named the parked id and were dropped.
+    pub unpinned: Vec<PinnedProject>,
 }
 
 /// Pin `index_id` as its group's index (`pinned_by = operator`).

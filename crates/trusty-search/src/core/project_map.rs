@@ -178,6 +178,20 @@ impl ProjectMap {
         Some(self.parked.remove(at))
     }
 
+    /// Drop every pin naming `index_id`; returns the dropped pins.
+    ///
+    /// Why: #9169 — a parked or deleted index can never answer for its
+    /// group, so a pin left on it would name a dead id.
+    /// Test: `parking_a_pinned_orphan_names_the_live_winner_and_clears_the_pin`,
+    /// `a_deleted_parked_index_recreated_at_its_root_is_served`.
+    pub fn unpin_index(&mut self, index_id: &str) -> Vec<PinnedProject> {
+        let (dropped, kept) = std::mem::take(&mut self.projects)
+            .into_iter()
+            .partition(|p| p.index_id == index_id);
+        self.projects = kept;
+        dropped
+    }
+
     /// The resolver's read-only slice of the map.
     pub fn view(&self) -> MapView {
         MapView {

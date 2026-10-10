@@ -5,7 +5,9 @@
 //! reconcile — and out of the boot orphan heal, which would deregister one.
 //! What: [`BootMap::load`] runs [`super::project_map_state::ensure_map`] once
 //! on the blocking pool; the rest filter the warm-boot entry list.
-//! Test: `a_parked_index_is_skipped_on_boot` (`project_map_state_tests.rs`).
+//! Test: `a_parked_index_is_skipped_on_boot`,
+//! `salvage_skips_parked_entries_and_everything_without_the_map`
+//! (`project_map_state_tests.rs`).
 
 use std::collections::HashSet;
 
@@ -82,6 +84,28 @@ impl BootMap {
     /// `entries` without the parked ones.
     pub fn without_parked(&self, entries: Vec<PersistedIndex>) -> Vec<PersistedIndex> {
         self.split(entries).1
+    }
+
+    /// The missing-root entries the boot salvage may touch (#9169).
+    ///
+    /// Why: the salvage rewrites a relocated root in `indexes.toml` and
+    /// stamps, then reaps, an ambiguous one — registry writes the heal is
+    /// also barred from when the map cannot say what is parked.
+    /// What: none when the map was not read; otherwise the unparked ones.
+    /// Test: `the_boot_salvage_touches_no_row_without_the_map`,
+    /// `salvage_skips_parked_entries_and_everything_without_the_map`.
+    pub fn salvageable(&self, entries: Vec<PersistedIndex>) -> Vec<PersistedIndex> {
+        if !self.readable {
+            if !entries.is_empty() {
+                tracing::warn!(
+                    "project-map unreadable: {} missing-root entr(ies) not relocated or \
+                     reaped (#9169)",
+                    entries.len()
+                );
+            }
+            return Vec::new();
+        }
+        self.without_parked(entries)
     }
 
     /// The boot orphan heal, only when the map was read (#9169: a heal that

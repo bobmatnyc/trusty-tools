@@ -201,12 +201,12 @@ fn park_refuses_a_main_checkout_and_records_a_worktree() {
         let err = park_decision(&map, refused, &candidates, &disk()).expect_err(refused);
         assert!(matches!(err, MapRefusal::Refused(_)), "{refused}: {err:?}");
     }
-    let (row, canonical) = park_decision(&map, "apex-wt", &candidates, &disk()).expect("wt");
-    assert_eq!(row.reason, ParkReason::Worktree);
-    assert_eq!(row.key, REPO);
-    assert_eq!(canonical.as_deref(), Some("apex"));
-    let (sibling, _) = park_decision(&map, "apex-9a4a584b", &candidates, &disk()).expect("sibling");
-    assert_eq!(sibling.reason, ParkReason::Operator);
+    let parked = park_decision(&map, "apex-wt", &candidates, &disk()).expect("wt");
+    assert_eq!(parked.row.reason, ParkReason::Worktree);
+    assert_eq!(parked.row.key, REPO);
+    assert_eq!(parked.canonical.as_deref(), Some("apex"));
+    let sibling = park_decision(&map, "apex-9a4a584b", &candidates, &disk()).expect("sibling");
+    assert_eq!(sibling.row.reason, ParkReason::Operator);
     let stored = project_map_io::load(&map).expect("load").expect("map");
     assert_eq!(stored.parked.len(), 2);
     assert!(matches!(
@@ -317,4 +317,23 @@ fn retain_unparked_drops_parked_rows_and_fails_closed() {
     assert_eq!(kept.len(), 3);
     std::fs::write(fx.map_path(), "garbage [[").expect("corrupt");
     assert!(retain_unparked(&fx.registry(), fx.persisted.clone()).is_err());
+}
+
+/// Why: the boot salvage writes registry rows, so it skips a parked entry and
+/// every entry when the map was not read.
+/// Test: this test.
+#[test]
+fn salvage_skips_parked_entries_and_everything_without_the_map() {
+    let rows = || {
+        vec![
+            PersistedIndex::new("parked", "/gone/a"),
+            PersistedIndex::new("free", "/gone/b"),
+        ]
+    };
+    let kept = BootMap::with_parked(["parked".to_string()]).salvageable(rows());
+    assert_eq!(
+        kept.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        ["free"]
+    );
+    assert!(BootMap::default().salvageable(rows()).is_empty());
 }

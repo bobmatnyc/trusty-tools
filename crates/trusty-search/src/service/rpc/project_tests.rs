@@ -174,3 +174,21 @@ async fn resolve_with_corrupt_project_map_errors_not_derived() {
         "bytes untouched"
     );
 }
+
+/// Why: ruling — a resolve by an exact index id still answers while the map
+/// cannot be read (Fail-Open Check 4); only the map-derived answers fail.
+/// Test: this test.
+#[tokio::test]
+async fn an_exact_index_id_resolves_while_the_map_is_corrupt() {
+    let fx = fixture();
+    std::fs::write(fx._tmp.path().join("project-map.toml"), "garbage [[").expect("garbage");
+    let response = rpc(
+        &fx.router,
+        serde_json::json!({ "project": "trusty-tools-4e2cf878" }),
+    )
+    .await;
+    let body = response
+        .result
+        .unwrap_or_else(|| panic!("an exact id must resolve: {:?}", response.error));
+    assert_eq!(body["index_id"], "trusty-tools-4e2cf878", "{body}");
+}

@@ -59,7 +59,7 @@ pub(super) async fn resolve_or_load_index(
     index_id: &IndexId,
 ) -> Result<Arc<IndexHandle>, (StatusCode, Json<serde_json::Value>)> {
     // #9169: a parked id is refused even while still resident, never redirected.
-    if let Some(refusal) = super::project_park::parked_refusal_json(state, &index_id.0) {
+    if let Some(refusal) = super::project_park::parked_refusal_json(state, &index_id.0).await {
         return Err(refusal);
     }
     // Hot path first — a warm index never pays for the embedder check.

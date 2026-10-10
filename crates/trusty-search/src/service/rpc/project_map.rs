@@ -68,7 +68,7 @@ pub struct ProjectIndexParams {
 ///
 /// Why: the socket is the map's only remote write path.
 /// What: `map` answers `{path, schema, projects, parked}`; `park` answers
-/// `{index_id, parked, key, reason, canonical_index_id, unloaded}`; `unpark`
+/// `{index_id, parked, key, reason, canonical_index_id, unpinned, unloaded}`; `unpark`
 /// answers `{index_id, unparked, reindex_queued, reindex}` (or
 /// `reindex_error`); `pin` answers `{index_id, key, pinned_by, previous}`.
 /// An unreadable map or registry is `CODE_INTERNAL_ERROR` naming the file and
@@ -164,11 +164,10 @@ async fn park_report(
     index_id: &str,
 ) -> Result<serde_json::Value, RpcError> {
     let id = index_id.to_string();
-    let ((parked, canonical), ctx) =
-        blocking(state, "park_refused", move |ctx, candidates, disk| {
-            park_decision(&ctx.map_path, &id, candidates, disk)
-        })
-        .await?;
+    let (outcome, ctx) = blocking(state, "park_refused", move |ctx, candidates, disk| {
+        park_decision(&ctx.map_path, &id, candidates, disk)
+    })
+    .await?;
     // #9169: the map row is written first, so a request racing the unload is
     // already refused as parked.
     let unloaded =
@@ -176,9 +175,11 @@ async fn park_report(
     Ok(serde_json::json!({
         "index_id": index_id,
         "parked": true,
-        "key": parked.key,
-        "reason": parked.reason,
-        "canonical_index_id": canonical,
+        "key": outcome.row.key,
+        "reason": outcome.row.reason,
+        "canonical_index_id": outcome.canonical,
+        // #9169: the pins the park dropped, by group key.
+        "unpinned": outcome.unpinned.iter().map(|p| &p.key).collect::<Vec<_>>(),
         "unloaded": unloaded,
     }))
 }
