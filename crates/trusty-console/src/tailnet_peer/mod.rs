@@ -1,4 +1,4 @@
-//! Peer-identity gate for the console's tailnet listener (#9035).
+//! Peer-identity gate for every non-loopback console listener (#9035, #7524).
 //!
 //! Why: `--tailscale` binds a second listener on the tailnet address, and before
 //! #9035 it served every route, writes included, to any tailnet node the ACLs
@@ -13,9 +13,10 @@
 //! determined — is refused with `403` before routing, on every route. An
 //! allowed peer must then also name this listener exactly in `Host`, and any
 //! `Origin` it sends, on any method, must be that same self-origin
-//! ([`self_origin::check_target`]). [`spawn_tailnet_listeners`] is the one
-//! place the tailnet listeners are bound and served, so neither check can be
-//! left off. The loopback listener does not use this module.
+//! ([`self_origin::check_target`]). [`serve_listeners`] is the one place the
+//! console's listeners are bound and served; it gates every listener whose
+//! address is not loopback, whatever bind mode produced it (#7524), so neither
+//! check can be left off. Loopback listeners are served ungated.
 //! Lookups are bounded by a timeout and cached per peer address, single-flight,
 //! so a request burst runs one `tailscale whois`, not one per request.
 //! Test: `tailnet_peer/tests.rs`.
@@ -35,6 +36,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use futures_util::future::BoxFuture;
 use tokio::sync::OnceCell;
 // #9035: tokio's clock, so a paused test clock can expire cache entries.
 use tokio::time::Instant;
@@ -124,10 +126,20 @@ impl TailnetPeerGate {
     /// Why: one decision function, so the middleware has no policy of its own.
     /// What: resolves the host's identity and the peer's, both through the
     /// cache. Allows only when both resolve, neither is tagged, and the logins
-    /// are equal. Any lookup failure is [`PeerVerdict::Unresolved`].
+    /// are equal. Any lookup failure is [`PeerVerdict::Unresolved`], and so is
+    /// a wildcard host address, without a lookup.
     /// Test: `same_login_peer_is_served`, `foreign_login_peer_gets_403_on_every_route`,
-    /// `resolver_error_fails_closed`, `tagged_peer_is_refused`.
+    /// `resolver_error_fails_closed`, `tagged_peer_is_refused`,
+    /// `wildcard_host_address_fails_closed_7524`.
     pub async fn authorize(&self, peer: IpAddr) -> PeerVerdict {
+        // #7524: a wildcard bind has no tailnet address of its own, so there is
+        // no host login to compare against. Refuse rather than ask `whois`.
+        if self.host_ip.is_unspecified() {
+            return PeerVerdict::Unresolved(format!(
+                "listener is bound to the wildcard address {}",
+                self.host_ip
+            ));
+        }
         let host = match self.identity(self.host_ip).await {
             Ok(id) => id,
             Err(e) => return PeerVerdict::Unresolved(format!("host identity: {e}")),
@@ -286,42 +298,88 @@ pub async fn serve_tailnet(
     .await
 }
 
-/// Bind every tailnet address in `addrs` and serve `router` on each behind its
-/// own peer gate.
+/// Every console listener, bound and serving ([`serve_listeners`]).
+pub struct ConsoleListeners {
+    /// Bound addresses, in the requested order; the first is the primary.
+    pub bound: Vec<SocketAddr>,
+    primary: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl ConsoleListeners {
+    /// Wait until the primary listener stops: graceful shutdown, or an error.
+    pub async fn wait_primary(self) -> anyhow::Result<()> {
+        self.primary
+            .await
+            .context("primary listener task failed")?
+            .context("server error")
+    }
+}
+
+/// Bind every address in `addrs` and serve `router` on each; every listener
+/// whose address is not loopback is served behind its own peer gate.
 ///
-/// Why: `run_serve` calls this for the `--tailscale` listener, so a revert to a
-/// plain `axum::serve` here turns `spawn_tailnet_listeners_gates_every_listener`
-/// red. The resolver is a parameter so that test needs no tailnet.
-/// What: binds each address, builds a [`TailnetPeerGate`] for its bound IP and
-/// spawns [`serve_tailnet`] with a fresh `shutdown()` future. Returns the bound
-/// addresses in order; a bind failure aborts with an error.
-/// Test: `spawn_tailnet_listeners_gates_every_listener`.
-pub async fn spawn_tailnet_listeners<S, F>(
+/// Why: `run_serve` serves all of its listeners through here, so the gate is
+/// chosen by the bound IP, never by list position. Before #7524 the first
+/// address was served plain, so an Explicit `--http 0.0.0.0:7788` (or
+/// `TRUSTY_CONSOLE_BIND`) served every route to any peer. The resolver is a
+/// parameter so the tests need no tailnet.
+/// What: binds each address in order (a bind failure aborts). A loopback
+/// listener is served by plain `axum::serve`, as before; any other goes
+/// through [`serve_tailnet`] with a [`TailnetPeerGate`] for its bound IP. A
+/// wildcard bind has no host identity, so its gate refuses every request
+/// ([`TailnetPeerGate::authorize`]). The first listener is the primary, whose
+/// task [`ConsoleListeners::wait_primary`] awaits; the rest log their exit.
+/// Test: `explicit_non_loopback_listener_is_gated_7524`,
+/// `listener_gating_follows_the_ip_not_the_position_7524`.
+pub async fn serve_listeners<S, F>(
     addrs: &[SocketAddr],
     router: &Router,
     resolver: Arc<dyn PeerResolver>,
     shutdown: S,
-) -> anyhow::Result<Vec<SocketAddr>>
+) -> anyhow::Result<ConsoleListeners>
 where
     S: Fn() -> F,
     F: Future<Output = ()> + Send + 'static,
 {
     let mut bound = Vec::with_capacity(addrs.len());
+    let mut primary = None;
     for &addr in addrs {
         let listener = crate::bind::bind_listener(addr).await?;
-        let local = listener.local_addr().context("get extra local addr")?;
-        tracing::info!("trusty-console also listening on http://{local}");
-        eprintln!("trusty-console (tailnet): http://{local}");
-        let gate = Arc::new(TailnetPeerGate::new(Arc::clone(&resolver), local.ip()));
-        let serve = serve_tailnet(listener, router.clone(), gate, shutdown());
-        tokio::spawn(async move {
-            if let Err(e) = serve.await {
-                tracing::warn!("extra listener {local} exited: {e}");
+        let local = listener.local_addr().context("get local addr")?;
+        // #7524: select the gate by the bound IP, never by list position.
+        let serve: BoxFuture<'static, std::io::Result<()>> = if local.ip().is_loopback() {
+            let (app, stop) = (router.clone(), shutdown());
+            Box::pin(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(stop)
+                    .await
+            })
+        } else {
+            if local.ip().is_unspecified() {
+                tracing::warn!(
+                    "trusty-console listener {local} is a wildcard bind; the tailnet peer \
+                     gate refuses every request on it (bind the tailnet address, or use --tailscale)"
+                );
             }
-        });
+            eprintln!("trusty-console (tailnet peer gate): http://{local}");
+            let gate = Arc::new(TailnetPeerGate::new(Arc::clone(&resolver), local.ip()));
+            Box::pin(serve_tailnet(listener, router.clone(), gate, shutdown()))
+        };
+        if primary.is_none() {
+            tracing::info!("trusty-console listening on http://{local}");
+            primary = Some(tokio::spawn(serve));
+        } else {
+            tracing::info!("trusty-console also listening on http://{local}");
+            tokio::spawn(async move {
+                if let Err(e) = serve.await {
+                    tracing::warn!("extra listener {local} exited: {e}");
+                }
+            });
+        }
         bound.push(local);
     }
-    Ok(bound)
+    let primary = primary.context("bind address list is empty")?;
+    Ok(ConsoleListeners { bound, primary })
 }
 
 #[cfg(test)]
