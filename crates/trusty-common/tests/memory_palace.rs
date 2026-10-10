@@ -151,7 +151,13 @@ fn drawer_type_postcard_indices_are_stable() {
         (DrawerType::AgentNote, 2),
         (DrawerType::Commit, 3),
         (DrawerType::Unknown, 4), // legacy default; must remain at 4
-        (DrawerType::Task, 5),    // appended last; must remain at 5
+        (DrawerType::Task, 5),    // appended after Unknown; must remain at 5
+        // #9144: appended after Task, in this order.
+        (DrawerType::Ruling, 6),
+        (DrawerType::Decision, 7),
+        (DrawerType::Status, 8),
+        (DrawerType::Turn, 9),
+        (DrawerType::Reference, 10),
     ];
     for (variant, expected_index) in cases {
         let encoded = postcard::to_allocvec(variant)
@@ -214,4 +220,46 @@ async fn task_completed_at_round_trips_through_reopen() {
     assert_eq!(d.drawer_type, DrawerType::Task);
     let got = d.completed_at.expect("completed_at persisted");
     assert_eq!(got.timestamp_millis(), done.timestamp_millis());
+}
+
+/// #9144: every typed write variant keeps its type across a palace reopen.
+///
+/// Why: redb stores `drawer_type` as the `as_str` tag and decodes it with the
+/// lenient `from_tag`, so a variant missing from `from_tag` would reopen as
+/// `Unknown` with no error.
+/// What: stores one drawer per new variant, flushes, drops the handle, reopens
+/// the palace from disk, and asserts each drawer's type survived.
+/// Test: this function.
+#[tokio::test]
+async fn new_drawer_types_survive_a_palace_reopen() {
+    let (handle, data_dir) = open_palace("typed-reopen");
+    let mut written = Vec::new();
+    for (content, t) in [
+        ("Ruling: never merge red CI", DrawerType::Ruling),
+        ("Decision: ship PR A before PR B", DrawerType::Decision),
+        ("Status: batch A is in review", DrawerType::Status),
+        ("Turn: asked for the gate table", DrawerType::Turn),
+        ("Reference: ADR-0067 owns the format", DrawerType::Reference),
+    ] {
+        written.push((remember_typed(&handle, content, 0.5, t).await, t));
+    }
+    handle.flush().expect("flush");
+    drop(handle); // release the redb write lock before reopening
+
+    let palace = Palace {
+        id: PalaceId::new("typed-reopen"),
+        name: "typed-reopen".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir,
+    };
+    let reopened = PalaceHandle::open(&palace).expect("reopen palace");
+    let drawers = reopened.drawers.read();
+    for (id, want) in written {
+        let d = drawers
+            .iter()
+            .find(|d| d.id == id)
+            .expect("drawer survived");
+        assert_eq!(d.drawer_type, want, "{want:?} must survive a reopen");
+    }
 }
