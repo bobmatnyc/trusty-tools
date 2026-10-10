@@ -103,6 +103,31 @@ fn a_superseded_snapshot_stays_below_its_replacement_after_both_weights() {
     assert!(rank(&results, n) < rank(&results, o), "{results:#?}");
 }
 
+/// Why (#9391): a `checkpoint` snapshot is a snapshot; its supersession order
+/// must survive both weights just as a `status` one does.
+#[test]
+fn a_superseded_checkpoint_stays_below_its_replacement_after_both_weights() {
+    let now = Utc::now();
+    let mut new = hit(0.6);
+    new.drawer.tags = vec!["checkpoint".into()];
+    new.drawer.created_at = now - chrono::Duration::days(30);
+    let mut old = hit(0.5);
+    old.drawer.tags = vec!["checkpoint".into()];
+    old.drawer.created_at = now - chrono::Duration::days(30);
+    let (o, n) = (id(&old), id(&new));
+    let mut results = vec![old, new];
+    demote_stale_snapshots(&mut results, now, &Supersessions::from([(o, n)]));
+    assert!(rank(&results, n) < rank(&results, o), "{results:#?}");
+    let score = |d| results[rank(&results, d)].score;
+    // New: 0.6 * 0.5 (stale checkpoint); old: 0.5 * 0.5 (stale) * SUPERSEDED_WEIGHT.
+    assert!((score(n) - 0.3).abs() < 1e-4, "new {}", score(n));
+    assert!(
+        (score(o) - 0.25 * SUPERSEDED_WEIGHT).abs() < 1e-4,
+        "old {}",
+        score(o)
+    );
+}
+
 /// Why: a NaN score sorts first; a superseded NaN must not stay there.
 #[test]
 fn a_superseded_nan_score_ranks_below_its_replacement() {
