@@ -74,3 +74,25 @@ async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
         "an early /health poll must not lock the chat provider in as None"
     );
 }
+
+/// #9030: once a chat request has decided the provider, `/health` reads it.
+///
+/// Why: the empty-cell path probes; the filled-cell path must not, and must
+/// agree with what chat decided.
+/// What: resolves the provider through `chat_provider` first (key only, local
+/// probe off), then asserts `health_report` says `true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn health_reads_a_provider_the_cell_already_holds() {
+    let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
+        .with_openrouter_api_key("sk-test-9030");
+    state.local_model.enabled = false;
+    let state = std::sync::Arc::new(state);
+    assert!(state.chat_provider().await.is_some());
+    let report = health_report(state).await;
+    assert_eq!(
+        report["chat_available"],
+        serde_json::json!(true),
+        "{report}"
+    );
+}

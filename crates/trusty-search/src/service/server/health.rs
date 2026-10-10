@@ -331,14 +331,17 @@ pub(super) struct HealthResponse {
     /// Test: `run_daemon_health_reports_the_transport_it_bound`,
     /// `health_reports_a_null_transport_when_no_listener_was_bound`.
     pub(super) transport: DaemonTransport,
-    /// #9030: whether `search.chat` can answer, i.e. a chat provider exists.
+    /// #9030: whether `search.chat` would not refuse with 503, i.e. a chat
+    /// provider is resolvable. A per-request `api_key` can still get an answer
+    /// when this is `false`.
     ///
     /// Why: the console's chat panel gated on nothing and offered a chat that
     /// answered 503 "no chat provider available" on a daemon with no key and no
     /// local model server.
-    /// What: `true` only when [`SearchAppState::chat_provider`] resolves to a
-    /// provider (a local Ollama / LM Studio server, or an OpenRouter key) -
-    /// the state the chat path decides on. Fails closed: `false` with no
+    /// What: `true` only when [`SearchAppState::chat_provider_available`]
+    /// finds a provider (a local Ollama / LM Studio server, or an OpenRouter
+    /// key) - the detection the chat path decides on. It never fills the
+    /// provider cell, so an early poll cannot lock the choice in. Fails closed: `false` with no
     /// provider and when resolution does not finish within
     /// [`CHAT_PROBE_BUDGET`]. Additive; no existing key changes.
     /// Test: `health_reports_chat_available_only_with_a_provider`,
@@ -1018,11 +1021,8 @@ pub(super) async fn health_handler(
         // #9030: report the listeners bound, never a guessed default.
         transport: state.transport.clone(),
         // #9030: the same provider resolution `search.chat` decides on.
-        chat_available: resolve_chat_available(
-            async { state.chat_provider().await.is_some() },
-            CHAT_PROBE_BUDGET,
-        )
-        .await,
+        chat_available: resolve_chat_available(state.chat_provider_available(), CHAT_PROBE_BUDGET)
+            .await,
     })
 }
 
