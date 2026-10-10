@@ -318,6 +318,8 @@ async fn global_search_reports_the_index_it_dropped_for_an_unreadable_corpus() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await
@@ -375,6 +377,8 @@ async fn global_search_reports_the_index_it_dropped_for_a_running_migration() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await
