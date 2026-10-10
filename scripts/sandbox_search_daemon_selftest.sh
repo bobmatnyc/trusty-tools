@@ -38,6 +38,9 @@
 #     stop-dead   --stop on a pid already dead says so and removes sandbox.pid
 #     live-dir    a start refuses while sandbox.pid names a live daemon of the
 #                 same dir, and leaves that daemon and its socket alone
+#     live-socket a start refuses while <dir>/data's socket accepts a
+#                 connection that sandbox.pid does not record, and leaves the
+#                 listener and its socket alone (#9214)
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
 #                 directory refuses
 #
@@ -442,6 +445,35 @@ if [ "$S12" -eq 1 ] && printf '%s' "$OUT12" | grep -qF "running sandbox daemon o
   pass live-dir
 else
   fail live-dir "exit $S12: $OUT12"
+fi
+kill "$DECOY_PID" 2>/dev/null || true
+DECOY_PID=""
+
+# 13. live-socket (#9214): no sandbox.pid, but a listener accepts on
+# <dir>/data's socket. The start refuses and unlinks nothing.
+DIR18="$TMP_ROOT/case18"
+SOCK18="$DIR18/data/trusty-search.sock"
+mkdir -p "$DIR18/data"
+"$PYTHON" -c 'import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(8)
+open(sys.argv[2], "w").close()
+time.sleep(120)' "$SOCK18" "$DIR18/listening" &
+DECOY_PID=$!
+i=0
+while [ "$i" -lt 50 ] && [ ! -e "$DIR18/listening" ]; do sleep 0.1; i=$((i + 1)); done
+set +e
+OUT18="$(run_launcher --bin "$STUB" --dir "$DIR18" 2>&1)"
+S18=$?
+set -e
+if [ ! -e "$DIR18/listening" ]; then
+  fail live-socket "the listener never bound $SOCK18"
+elif [ "$S18" -eq 1 ] && printf '%s' "$OUT18" | grep -qF "$SOCK18 accepts connections" \
+    && [ -S "$SOCK18" ] && kill -0 "$DECOY_PID" 2>/dev/null && [ ! -e "$DIR18/home/stub-args" ]; then
+  pass live-socket
+else
+  fail live-socket "exit $S18, socket kept: $([ -S "$SOCK18" ] && echo yes || echo no): $OUT18"
 fi
 kill "$DECOY_PID" 2>/dev/null || true
 DECOY_PID=""

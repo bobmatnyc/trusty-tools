@@ -42,8 +42,10 @@
 #   TRUSTY_EMBEDDERD_BIN before calling.
 #   Socket (#9214): the daemon binds no TCP port; it serves the Unix socket
 #   <dir>/data/trusty-search.sock only, so the script passes no `--port` and
-#   takes none. It removes a stale socket file before the start (refusing while
-#   sandbox.pid names a live daemon of this dir), waits up to 60 s
+#   takes none. It removes a stale socket file before the start, refusing
+#   while sandbox.pid names a live daemon of this dir, while the socket accepts
+#   a connection (a daemon sandbox.pid does not record), or when a python3
+#   connect probe cannot tell either way. It waits up to 60 s
 #   (SANDBOX_SOCKET_WAIT_SECS) for the socket to appear, and prints its path,
 #   or says it timed out. Clients reach the sandbox with
 #   `TRUSTY_DATA_DIR=<dir>/data` or `TRUSTY_SEARCH_SOCKET=<that path>`.
@@ -164,6 +166,25 @@ is_alive() {
   kill -0 "$1" 2>/dev/null || return 1
   st="$(ps -p "$1" -o stat= 2>/dev/null || true)"
   case "$st" in ''|Z*) return 1 ;; *) return 0 ;; esac
+}
+
+# socket_accepts PATH (#9214): one python3 connect to the Unix socket PATH,
+# 1 s timeout, nothing sent. Returns 0 when it is accepted (live), 3 when it is
+# refused or PATH is not a socket (stale), anything else when it cannot tell:
+# no python3, a timeout, or any other error. Stale is 3, not 1, so a python3
+# that dies on its own reads as "cannot tell", never as stale.
+socket_accepts() {
+  local py
+  py="$(command -v python3 || true)"
+  [ -n "$py" ] || return 2
+  "$py" -c 'import errno, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    sys.exit(3 if e.errno in (errno.ECONNREFUSED, errno.ENOENT, errno.ENOTSOCK) else 2)
+s.close()' "$1"
 }
 
 # wait_dead PID TENTHS: poll for up to TENTHS tenths of a second; succeeds when dead.
@@ -359,7 +380,17 @@ if [ -f "$SANDBOX/sandbox.pid" ]; then
     die "pid $prev is a running sandbox daemon of this dir; stop it with --stop $SANDBOX first"
   fi
 fi
-rm -f "$SOCKET"
+# #9214: a daemon of <dir>/data that sandbox.pid does not record still owns
+# its socket; unlink only a file nothing accepts on.
+if [ -e "$SOCKET" ] || [ -L "$SOCKET" ]; then
+  accepts=0
+  socket_accepts "$SOCKET" || accepts=$?
+  case "$accepts" in
+    0) die "$SOCKET accepts connections: a daemon sandbox.pid does not record serves it; stop that daemon first" ;;
+    3) rm -f "$SOCKET" ;;
+    *) die "cannot tell whether $SOCKET is live (no python3, or the connect was neither accepted nor refused); remove it by hand once no daemon serves it" ;;
+  esac
+fi
 
 CHILD=""
 # teardown: end only the pid this script spawned, and only while its argv still
