@@ -205,3 +205,66 @@ mod os_table {
         );
     }
 }
+
+/// Why: #9070 fix round — on macOS the real table must read the root-owned
+/// `login` (and pid 1) across uids, so a grant from a Terminal or iTerm2
+/// shell walks its whole parent chain. A live probe of the host, run by hand
+/// on a Mac with `--include-ignored --nocapture`; it reads no Keychain, no
+/// store and no HOME.
+/// What: picks a uid-0 `login` from `ps` (skipped when there is none), reads
+/// `parent` and `is_agent` for it and for pid 1, then walks from this
+/// process to pid 1 printing every hop, and asserts every read is `Ok`.
+/// Test: itself.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live macOS probe of the host process table; run by hand on a Mac"]
+fn macos_live_ancestor_walk_probe() {
+    let table = OsProcessTable;
+    let listing = std::process::Command::new("ps")
+        .args(["-axo", "pid=,uid=,comm="])
+        .output()
+        .expect("run ps");
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let login = text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let pid: u32 = fields.next()?.parse().ok()?;
+        let uid: u32 = fields.next()?.parse().ok()?;
+        let comm = fields.collect::<Vec<_>>().join(" ");
+        (uid == 0 && comm.ends_with("login")).then_some(pid)
+    });
+    match login {
+        Some(pid) => {
+            let parent = table.parent(pid);
+            println!(
+                "login pid {pid}: parent {parent:?}, is_agent {:?}",
+                table.is_agent(pid)
+            );
+            assert!(parent.is_ok(), "root login parent unreadable: {parent:?}");
+        }
+        None => println!("no root-owned login process; login probe skipped"),
+    }
+    let init_parent = table.parent(1);
+    println!(
+        "pid 1: parent {init_parent:?}, is_agent {:?}",
+        table.is_agent(1)
+    );
+    assert_eq!(init_parent, Ok(0), "pid 1's parent is the walk's root");
+
+    let me = std::process::id();
+    let mut pid = me;
+    for _ in 0..MAX_CHAIN_DEPTH {
+        let parent = table.parent(pid);
+        println!(
+            "hop pid {pid}: parent {parent:?}, is_agent {:?}",
+            table.is_agent(pid)
+        );
+        match parent {
+            Ok(next) if next != pid && pid > 1 => pid = next,
+            Ok(_) => break,
+            Err(e) => panic!("walk stopped at pid {pid}: {e:?}"),
+        }
+    }
+    let verdict = has_agent_ancestor(&table, me);
+    println!("has_agent_ancestor({me}) = {verdict:?}");
+    assert!(verdict.is_ok(), "the walk failed: {verdict:?}");
+}
