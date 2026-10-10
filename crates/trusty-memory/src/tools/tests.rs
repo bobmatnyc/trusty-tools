@@ -201,6 +201,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_create",
         "palace_delete",
         "palace_update",
+        "palace_rename",
         "palace_list",
         "palace_info",
         "palace_compact",

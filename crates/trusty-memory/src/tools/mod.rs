@@ -126,7 +126,8 @@ use {
     },
     palace_ops::{
         handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-        handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
+        handle_palace_list, handle_palace_reembed, handle_palace_rename, handle_palace_unalias,
+        handle_palace_update,
     },
     recall_ops::{handle_memory_recall, handle_memory_recall_all, handle_memory_recall_deep},
     room_ops::{handle_room_create, handle_room_list, handle_room_rename},
@@ -246,6 +247,8 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
         "palace_list" => handle_palace_list(state, args).await,
         "palace_delete" => handle_palace_delete(state, args).await,
         "palace_update" => handle_palace_update(state, args).await,
+        // #9544: move a palace to a new id; the old id keeps answering.
+        "palace_rename" => handle_palace_rename(state, args).await,
         "kg_assert" => handle_kg_assert(state, args).await,
         // The inverse of `kg_assert`: closes one (subject, predicate, object)
         // and leaves the pair's other objects live.

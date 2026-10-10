@@ -405,11 +405,16 @@ pub(crate) fn open_palace_handle_within(
 /// [`open_palace_handle_within`]. The registration lives inside the returned
 /// [`WriteGuard`], so the write counts from the start of its wait until the
 /// lock is released. `tool` prefixes the error so the caller sees which
-/// handler gave up.
-/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`.
+/// handler gave up. Once the mutex is held it re-reads the palace's mutex
+/// ([`AppState::palace_write_lock`]); when that is a different mutex — a
+/// rename moved the id to another palace while this writer waited (#9544,
+/// ruling QD) — it releases and waits on the current one, within the same
+/// budget.
+/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`,
+/// `rename_stale_writer_waits_on_the_renamed_palace_lock`.
 pub(crate) async fn begin_budgeted_write<'a>(
     state: &'a AppState,
-    write_lock: &'a std::sync::Arc<tokio::sync::Mutex<()>>,
+    write_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
     palace_id: &str,
     tool: &str,
 ) -> Result<(WriteGuard<'a>, OpBudget)> {
@@ -417,21 +422,43 @@ pub(crate) async fn begin_budgeted_write<'a>(
     // #4001: register before the wait so a queued writer is visible, and hold
     // the registration until the lock is released so a stalled holder is too.
     let tracked = state.worker_liveness.track();
-    let lock = timeouts::lock_with_timeout(
-        write_lock,
-        budget.leg(timeouts::write_lock_timeout()),
-        palace_id,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
-    Ok((
-        WriteGuard {
-            _lock: lock,
-            _tracked: tracked,
-        },
-        budget,
+    let mut mutex = std::sync::Arc::clone(write_lock);
+    for _ in 0..MAX_WRITE_LOCK_REKEYS {
+        let waited = budget.leg(timeouts::write_lock_timeout());
+        let lock = tokio::time::timeout(waited, std::sync::Arc::clone(&mutex).lock_owned())
+            .await
+            .map_err(|_| {
+                anyhow::Error::new(timeouts::WriteTimeout::LockWait {
+                    palace: palace_id.to_string(),
+                    waited,
+                })
+            })
+            .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
+        // #9544 (QD): a writer that took the mutex Arc before a rename must not
+        // write under it while post-rename writers hold the new palace's mutex.
+        let current = state.palace_write_lock(palace_id);
+        if std::sync::Arc::ptr_eq(&current, &mutex) {
+            return Ok((
+                WriteGuard {
+                    _lock: lock,
+                    _tracked: tracked,
+                },
+                budget,
+            ));
+        }
+        drop(lock);
+        mutex = current;
+    }
+    Err(anyhow::anyhow!(
+        "{tool}: palace '{palace_id}' changed identity {MAX_WRITE_LOCK_REKEYS} times while \
+         this write waited (a rename is in progress); retry when it is idle"
     ))
 }
+
+/// How many times [`begin_budgeted_write`] follows a palace's mutex to a new
+/// one before giving up (#9544). One rename moves it once; this only bounds a
+/// pathological rename loop.
+const MAX_WRITE_LOCK_REKEYS: usize = 4;
 
 /// A held palace write lock plus the write's liveness registration (#4001).
 ///
@@ -442,11 +469,11 @@ pub(crate) async fn begin_budgeted_write<'a>(
 /// holder visible, and it means neither can be dropped without the other.
 /// A write that holds the lock past the threshold reads as wedged even if it
 /// later finishes: every writer queued behind it has already failed.
-/// What: the `tokio` lock guard and a [`crate::worker_liveness::WorkGuard`];
-/// both release on drop.
+/// What: the owned `tokio` lock guard (owned so a re-key can swap mutexes,
+/// #9544) and a [`crate::worker_liveness::WorkGuard`]; both release on drop.
 /// Test: `tools::tests::write_liveness_tests`.
 pub(crate) struct WriteGuard<'a> {
-    _lock: tokio::sync::MutexGuard<'a, ()>,
+    _lock: tokio::sync::OwnedMutexGuard<()>,
     _tracked: crate::worker_liveness::WorkGuard<'a>,
 }
 

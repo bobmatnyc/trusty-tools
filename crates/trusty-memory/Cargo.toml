@@ -65,7 +65,8 @@ name = "trusty-memory"
 # 0.29.6 (Refs #9433): patch — trusty-common floor moves 0.54.4 -> 0.54.5 so a locked install carries the #9433 fix. No source change.
 # 0.31.1 (Refs #9340): patch — memory_list reports a read-only `fact_key` per drawer; 0.31.0 is live on crates.io. Additive only.
 # 0.32.0 (Refs #9274): minor — palace format gate; trusty-common floor moves 0.57 -> 0.58; 0.31.1 is live on crates.io.
-version = "0.32.0"
+# 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
+version = "0.32.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -154,8 +155,8 @@ trusty-mcp = { workspace = true, optional = true }
 # `axum-server`, which was here for the retired HTTP listener.
 # #9269: only the engine's `memory-core` is unconditional; every feature the
 # serving surface needs is switched on by `server` below (`config-cli` is what
-# pulls in clap).
-trusty-common = { path = "../trusty-common", version = "0.59", default-features = false, features = ["memory-core"] }
+# pulls in clap). #9544: 0.59.2 is the first release with `PalaceRegistry::rename_palace`.
+trusty-common = { path = "../trusty-common", version = "0.59.2", default-features = false, features = ["memory-core"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -251,7 +252,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.59", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.59.2", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 # #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
 # the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real
