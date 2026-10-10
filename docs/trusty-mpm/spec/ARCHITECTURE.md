@@ -146,7 +146,7 @@ crates/trusty-mpm/src/
 | `daemon` | HTTP API + shared state + hook relay + file watcher + reaper + discovery + lock + MCP backend + overseer composition + pairing store + coordinator/claude-config routes. | `daemon/api.rs` (+ `api/`), `daemon/state.rs`, `daemon/lock.rs`, `daemon/watcher.rs`, `daemon/discovery.rs`, `daemon/mcp_backend.rs`, `daemon/services/*` |
 | `tui` | ratatui coordinator dashboard polling the daemon. | `tui/dashboard.rs`, `tui/client.rs`, `tui/health.rs`, `tui/iterm2.rs` |
 | `telegram` | teloxide adapter → `CommandExecutor`, formatter, push-alert loop, pairing flow. | `telegram/commands.rs`, `telegram/alerts.rs`, `telegram/formatter.rs` |
-| `services` | `tm services` manifest + discovery engine. | `services/manifest.rs`, `services/discoverer.rs` |
+| `services` | `tm services` manifest + discovery engine. A `ServiceDecl` carries a `health_probe` (`http`, the default, or `uds_search`); trusty-search uses `uds_search` and is probed with `search.health` on its Unix socket (#9543, 1.8.0). | `services/manifest.rs`, `services/discoverer.rs` |
 
 ---
 
@@ -376,7 +376,7 @@ under #385/#394.
 |---|---|---|
 | `framework/hooks/optimizer.toml` | daemon `OptimizerConfig` (watcher hot-reloads) | ✅ |
 | `framework/hooks/overseer.toml` | daemon `OverseerConfig` (`[llm]` gates the LLM overseer) | ✅ |
-| `~/.claude-mpm/services.yaml` | `tm services` (`ServicesManifest`; embedded default fallback) | ✅ |
+| `~/.claude-mpm/services.yaml` | `tm services` (`ServicesManifest`; embedded default fallback). An old static port-7878 trusty-search entry reads as `health_probe: uds_search` (#9543) | ✅ |
 | `config.toml models.agents.*` | (intended) per-agent model overrides | 🟡 not read (#394) |
 | `config.toml [agents] sources` | (intended) remote registry sources | 🔵 not read (#388) |
 

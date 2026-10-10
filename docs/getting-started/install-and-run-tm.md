@@ -121,15 +121,17 @@ tctl status
 **Expected output:**
 ```
 tctl status — stack summary
-  trusty-search      0.31.0       up
-  trusty-memory      0.18.2       up
-  trusty-analyze     0.7.0        down
-  trusty-review      0.6.4        down
-  tga                2.8.0        n/a
-  trusty-console     0.3.1        down
-  trusty-mpm         0.16.0       up
+  trusty-search      <version>    up
+  trusty-memory      <version>    up
+  trusty-analyze     <version>    down
+  trusty-review      <version>    down
+  tga                <version>    n/a
+  trusty-console     <version>    down
+  trusty-mpm         <version>    up
 verdict: healthy (exit 0)
 ```
+
+Each row shows the installed version of that member. `tctl version` prints the same versions.
 
 The core members (`trusty-search`, `trusty-memory`, `trusty-mpm`) should be **up**. The analysis and review daemons are optional.
 
@@ -149,12 +151,13 @@ This performs a full health check:
 ```
 trusty-mpm doctor
   ✅ instructions  instruction pipeline ran
-  ✅ agents        55 agent(s) deployed
-  ✅ skills        262 skill(s) available
-  ✅ skill_source  19 skill file(s) available
+  ✅ agents        <n> agent(s) deployed
+  ✅ skills        <n> skill(s) available
+  ✅ skill_source  <n> skill file(s) available
   ✅ memory        trusty-memory healthy at 127.0.0.1:7070
-  ✅ search        trusty-search healthy at 127.0.0.1:7878
+  ✅ search        trusty-search healthy at <socket path>, `<index>` index present
   ✅ worktrees     no orphaned worktrees found
+  ✅ worktree_registry  <n> worktree(s) across <n> project(s), <x> GiB measured
   ⚠️  gh_account    gh is not authenticated
 
 overall: ⚠️ passed with warnings
@@ -378,6 +381,10 @@ See [claude-mpm vs trusty-mpm — Differences & Install](./claude-mpm-vs-trusty-
 | `tm` | Guided setup + launch a Claude Code session in a tmux window. |
 | `tm doctor` | Full health check (agents, skills, daemons, worktrees). |
 | `tm sessions` | List all active sessions. |
+| `tm worktrees [--json] [--no-size]` | Count and size of the worktrees the machine-wide ledger (`~/.trusty-mpm/worktrees.jsonl`) records, per project. |
+| `tm secrets <verb>` | Project secrets through the trusty-secrets socket: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value. |
+| `tm memory forget <drawer-id>` | Delete one trusty-memory drawer. `--fact-key <key>` names the drawer by its slot instead of its id. |
+| `tm services` | Manifest-driven daemon status. trusty-search is probed over its Unix socket. |
 | `tm run <command>` | Run a command in a managed session. |
 | `tm load` | Provision a managed workspace in the current project. |
 | `tm --version` | Print trusty-mpm version. |
@@ -389,6 +396,7 @@ See [claude-mpm vs trusty-mpm — Differences & Install](./claude-mpm-vs-trusty-
 |---|---|
 | `TRUSTY_MEMORY_URL` | Override trusty-memory daemon URL (e.g., for CI). Default: auto-discovered. |
 | `TRUSTY_SEARCH_URL` | Override trusty-search daemon URL. Default: auto-discovered. |
+| `TRUSTY_SEARCH_SOCKET` | Unix socket `tm`, `tctl` and the `trusty-search` CLI dial to reach the daemon. Default: the socket in the daemon's data directory. |
 | `RUST_LOG` | Set tracing level (e.g., `RUST_LOG=debug` for verbose output). |
 
 ---

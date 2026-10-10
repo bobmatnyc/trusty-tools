@@ -50,6 +50,28 @@ An MCP server exposes the same orchestration surface to a session itself, so an
 agent can enumerate sessions, delegate work, and read project state through tool
 calls rather than by shelling out.
 
+## Worktrees, secrets and memory you can account for
+
+Every worktree the daemon or `tm launch --worktree` creates goes into a
+machine-wide ledger at `~/.trusty-mpm/worktrees.jsonl`. `tm worktrees` prints
+the count and size per project from it, and `tm doctor` carries the same
+numbers in a `worktree_registry` row. A worktree the ledger cannot record is
+not created.
+
+`tm secrets` keeps project secrets in trusty-secrets, starting its server on
+first use. `set` reads the value from the clipboard or stdin, never an
+argument, and no verb prints a value. `list`, `remove`, `import`, `copy` and
+`doctor` cover the rest.
+
+`tm memory forget` deletes one trusty-memory drawer by id, or by its slot with
+`--fact-key`. `tm memory remember` and `tm memory note` take `--fact-key` and
+`--expires-at`, so a new write under a key supersedes the previous fact in that
+slot.
+
+`tm fleet init` resumes the Architect's earlier Claude conversation when it
+relaunches the Architect. `tm pr open` tags a phase pull request with the
+`[EPIC_N PHASE_M]` title of its phase issue.
+
 ## Coming from claude-mpm
 
 trusty-mpm is not a fork or a version of the Python `claude-mpm` — unrelated
@@ -66,3 +88,7 @@ straight into a dispatched engineer's brief. `tm validate` checks a
 workspace's deployed agents, skills, and settings against the canonical roster,
 and `tm repair` recovers from a deploy state that has drifted. `tm health`
 reports daemon reachability and a fleet summary in one line.
+
+`tm services` reports daemon status from a manifest. It finds trusty-search by
+calling `search.health` on its Unix socket, so the daemon counts as running
+only when the socket answers.

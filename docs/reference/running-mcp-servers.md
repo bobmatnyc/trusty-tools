@@ -22,6 +22,13 @@ cargo run -p trusty-mpm --bin tm -- --help
 # trusty-memory (MCP server + embedded Svelte UI)
 RUST_LOG=info cargo run -p trusty-memory
 
+# Clients (`tm`, `tctl`, and the `trusty-search` commands `query`, `doctor` and
+# `monitor`) reach trusty-search over its Unix socket: `TRUSTY_SEARCH_SOCKET`,
+# else the socket in the daemon's data directory. `trusty-search start --socket
+# <absolute path>` binds a chosen path. The HTTP listener is optional, and
+# `tm services init` starts the daemon with `--no-http`, so the `port` commands
+# below apply only when the HTTP listener is enabled.
+
 # Report the daemon's listening port (stdout is clean — safe for shell substitution):
 trusty-search port                                   # bare port: 7878
 trusty-search port --addr                            # host:port: 127.0.0.1:7878
@@ -53,7 +60,7 @@ cargo build --release -p trusty-search
 | Service | Default URL |
 |---|---|
 | trusty-console | `http://127.0.0.1:7788` |
-| trusty-search | `http://127.0.0.1:7878` |
+| trusty-search | `http://127.0.0.1:7878` when the HTTP listener is enabled; clients use the Unix socket |
 | trusty-memory | `http://127.0.0.1:7070` |
 
 To wire a locally-built binary into Claude Code, update your project's
