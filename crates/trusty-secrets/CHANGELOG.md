@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.4] — 2026-10-10
+
+### Added
+
+- `secrets.set_agents_may_use` on the trusty-secrets socket (DOC-74 §15.8, S8 slice 3, #9070). It takes `project`, `vault`, `key` and `allowed`, and answers the vault, the key and the flag as set. A caller whose own ancestry, read from its socket peer pid, has a Claude Code process may turn the flag off but not on (`agent_use_refused`, -32065); an unreadable ancestry or a missing peer pid refuses with `grant_refused`. The allow audit record is written before the backend call: if the log cannot be opened or the record appended, the flag is not changed (`audit_unavailable`), and a backend failure after it adds a second, deny record with its kind.
+- The `api` types `SetAgentsMayUseRequest` and `SetAgentsMayUseResponse` and the method name `method::SET_AGENTS_MAY_USE`.
+- Audit: `AuditMethod::SetAgentsMayUse`, and two optional record fields: `agents_allowed`, the flag value a flag-set call asked for, and `agent_parent`, whether the caller had a Claude Code ancestor, on `grant`, `resolve` and flag-set records once judged. Older records decode with both absent.
+- `server::grant`: an in-memory exec-grant registry for `secrets.resolve` (DOC-74 §15.8, S8 slice 1, #9070). `GrantRegistry` mints a 256-bit token from the OS CSPRNG and keeps only its SHA-256, compared in constant time. A grant holds its allowed keys, the child pid and that process's start time, an expiry checked on every use and capped at a max TTL, and an optional one-shot flag. A wrong, unknown or expired token, a key outside the grant, a caller outside the child's process tree and a reused child pid all return the one `GrantError::Refused`. A poisoned lock, an unreadable process table or start time, and a clock error each deny with their own variant. `has_unexpired` reports whether any grant is still live.
+- `server::ancestry`: `ProcessTable` (Linux `/proc`, macOS `proc_pidinfo`; any other target refuses every read) and `is_self_or_descendant`, which compares the root's recorded start time so a reused pid is refused.
+- `secrets.grant`, `secrets.resolve` and `secrets.revoke` on the trusty-secrets socket (DOC-74 §15.8, S8 slice 2, #9070). `secrets.grant` takes `project`, `child_pid`, `keys`, `ttl_secs` and an optional `one_shot`, mints the grant server-side and returns its token. `secrets.resolve` takes a token and one key and is the only method that returns a value: it answers only when the token is live, the key is in the grant, and the socket peer's pid (from the kernel, never the request) is the child or a descendant. Every such refusal is the one new error kind `grant_refused` (-32082) and carries no value. A full registry is `grant_limit_reached` (-32083). `secrets.revoke` removes a grant even when the audit log is unwritable. None of the three has a console route or an MCP tool.
+- A registrar with a Claude Code ancestor, judged server-side from its own peer pid's ancestry (`has_agent_ancestor`, `ProcessTable::is_agent`), may grant only keys flagged "agents may use"; any other key is refused with `agent_use_refused` before anything is minted. `secrets.resolve` checks the flag again before each read of such a grant.
+- Audit: `AuditMethod::{Grant, Resolve, Revoke}`. `grant` writes one record per granted key or one deny, `resolve` one record per call, allow or deny, `revoke` one per call. An allowed grant or resolve whose record cannot be written returns no token or value. Every audit record, for every method, now carries the caller's pid.
+- The `api` types `ExecGrantRequest`, `ExecGrantResponse`, `ResolveRequest`, `ResolveResponse`, `RevokeRequest` and `RevokeResponse`, whose `Debug` redacts tokens and values, and the method names `method::GRANT`, `method::RESOLVE` and `method::REVOKE`.
+- The server's 60 s idle exit waits while any exec grant is unexpired, and exits at most one idle window after the last one expires or is revoked.
+- On macOS, the ancestry walk reads each parent pid and process name with `PROC_PIDT_SHORTBSDINFO`, which answers across uids, so a grant from a shell under the root-owned `login` (Terminal, iTerm2) or `sshd` reads its whole parent chain. Only the granted child's start time still uses `PROC_PIDTBSDINFO`.
+
+### Changed
+
+- `secrets.resolve` also judges the resolving caller's own ancestry: a caller with a Claude Code ancestor reads only keys flagged "agents may use", even from a grant a non-agent registered for it (#9070). An unreadable ancestry refuses with `grant_refused`.
+- `ProcessTable::is_agent` has a default body that answers `ProcessError::Unreadable`, so a process table that does not implement it fails closed in `has_agent_ancestor` instead of failing to compile (#9070).
+
 ## [0.1.3] — 2026-10-10
 
 ### Fixed
