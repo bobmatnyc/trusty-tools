@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.60.0] — 2026-10-10
+
+### Breaking
+
+- `trusty-search start` no longer accepts `--port` or `--no-http`. Both were ignored since the socket-only daemon (#9214); clap now rejects either as an unknown argument and exits 2. A launchd or systemd unit that still passes one fails to start: run `trusty-search service install` to regenerate a launchd unit, or delete the flag from a systemd `ExecStart=` line (#9536).
+- `TRUSTY_SEARCH_NO_HTTP` is no longer read, and the deprecation warnings for all three inputs are gone (#9536).
+
+### Added
+
+- `project-map.toml`, the canonical project-to-index map, next to `indexes.toml` (refs [#9169](https://github.com/bobmatnyc/trusty-tools/issues/9169)). The first boot with no map pins each project to the index `search.project.resolve` returns today and parks nothing; `indexes.toml` and `projects.json` are not changed. After that, `search.project.resolve` answers from the map and reports `pinned_by`.
+  - A map that cannot be parsed, has a newer schema or cannot be read fails closed: `search.project.resolve` and `search.project.map` return an internal error naming the file and the remedy, and the file is never rewritten. A resolve by an exact index id still works.
+  - New socket methods `search.project.map`, `search.project.park`, `search.project.unpark` and `search.project.pin`, and the CLI `trusty-search project map|park|unpark|pin|rebuild-map`. `rebuild-map` moves the old file to `project-map.toml.corrupt-<unix>` first.
+  - Only a worktree, an orphaned root or a same-root sibling can be parked; a second main checkout is refused. A parked index keeps its corpus and its registration, is not loaded at boot, watched, reindexed or searched by `search.query.all`, and is listed by `search.indexes.list` with `parked: true`. Prune, the boot orphan heal, the boot relocation salvage, the boot same-root dedup and the runtime orphan reaper never touch it, and none of them changes a registration while the map cannot be read. A search or reindex naming it answers `-32009` with `data` `{parked, canonical_index_id, key}`; `canonical_index_id` is the project's live index under the map, never a parked or unregistered id.
+  - Parking a pinned index drops its pin, and `search.project.park` lists the dropped pins in `unpinned`. Deleting an index drops its park row and pins, so an index created again at the same root is not parked; a delete while the map cannot be read is refused with `500 project_map_unreadable`.
+  - Unpark clears the row, reloads the index and queues a reindex. A new index for a project with no pin gets a `create` pin.
+
 ## [0.59.0] — 2026-10-10
 
 ### Breaking
