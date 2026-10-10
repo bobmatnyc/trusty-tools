@@ -206,6 +206,8 @@ mod tests_grep_glob_7674;
 #[cfg(test)]
 mod tests_health;
 #[cfg(test)]
+mod tests_health_chat;
+#[cfg(test)]
 mod tests_health_contention;
 #[cfg(test)]
 mod tests_health_degraded;
