@@ -43,6 +43,7 @@ pub(crate) async fn run_sm_serve(action: CoordinatorAction) -> Result<()> {
         .finish()
         .try_init();
 
-    let state = trusty_mpm::daemon::state::DaemonState::shared();
+    // #9274: the daemon holds the SM and portfolio palaces as writer; read beside it.
+    let state = trusty_mpm::daemon::state::DaemonState::shared_read_only();
     trusty_mpm::daemon::sm_stdio::run_sm_stdio(state).await
 }

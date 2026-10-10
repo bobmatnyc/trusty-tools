@@ -111,6 +111,18 @@ pub enum PalaceStoreError {
         expected: String,
         actual: String,
     },
+    /// #9274 (ADR-0067 D3 rule 4): a migration step failed. The palace stays
+    /// refused; the next writer-intent open resumes from the files on disk.
+    #[error(
+        "FormatMigrationFailed: palace {palace} migration from format {from} to {to} failed: \
+         {reason}; the palace is refused until a writer open completes it"
+    )]
+    FormatMigrationFailed {
+        palace: String,
+        from: u32,
+        to: u32,
+        reason: String,
+    },
     /// #9274: the backup filesystem lacks the 1.1x headroom the copy needs.
     #[error(
         "InsufficientSpace: format-migration backup at {path} needs {needed} bytes, \
@@ -128,7 +140,7 @@ impl PalaceStoreError {
     ///
     /// Why: retry loops and the MCP error mapping must tell a refusal that no
     /// wait can change from a transient failure.
-    /// What: `true` for the five `Format*` variants.
+    /// What: `true` for the six `Format*` variants.
     /// Test: `format_errors_are_not_retried`.
     pub fn is_format_refusal(&self) -> bool {
         matches!(
@@ -138,6 +150,7 @@ impl PalaceStoreError {
                 | Self::FormatTooOld { .. }
                 | Self::FormatMarkerMismatch { .. }
                 | Self::FormatMarkerUnreadable { .. }
+                | Self::FormatMigrationFailed { .. }
         )
     }
 
@@ -154,6 +167,7 @@ impl PalaceStoreError {
             Self::FormatTooOld { .. } => "FormatTooOld",
             Self::FormatMarkerMismatch { .. } => "FormatMarkerMismatch",
             Self::FormatMarkerUnreadable { .. } => "FormatMarkerUnreadable",
+            Self::FormatMigrationFailed { .. } => "FormatMigrationFailed",
             Self::BackupFailed { .. } => "BackupFailed",
             Self::BackupVerifyMismatch { .. } => "BackupVerifyMismatch",
             Self::InsufficientSpace { .. } => "InsufficientSpace",

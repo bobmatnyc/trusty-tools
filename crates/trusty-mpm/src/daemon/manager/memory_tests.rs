@@ -16,7 +16,7 @@ use super::*;
 #[test]
 fn portfolio_palace_exposes_stable_id() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let palace = PortfolioPalace::provision(dir.path());
+    let palace = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
     assert_eq!(palace.id(), PORTFOLIO_PALACE_ID);
     assert_eq!(palace.id(), "tm-manager-portfolio");
 }
@@ -28,7 +28,7 @@ fn portfolio_palace_exposes_stable_id() {
 #[test]
 fn portfolio_palace_reports_unavailable_without_feature() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let palace = PortfolioPalace::provision(dir.path());
+    let palace = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
     assert!(!palace.is_available());
     let reason = palace
         .unavailable_reason()
@@ -51,14 +51,14 @@ fn portfolio_palace_provisions_and_is_idempotent() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     // First startup: palace is created and available.
-    let first = PortfolioPalace::provision(dir.path());
+    let first = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
     assert!(first.is_available(), "first provision must be available");
     let mem = first.memory().expect("live memory under feature");
     assert_eq!(mem.persisted_palace_count().expect("count"), 1);
     assert_eq!(mem.palace_id().as_str(), PORTFOLIO_PALACE_ID);
 
     // Second startup against the same root: still exactly ONE palace.
-    let second = PortfolioPalace::provision(dir.path());
+    let second = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
     assert!(second.is_available());
     assert_eq!(
         second
@@ -162,7 +162,7 @@ fn portfolio_palace_under_a_fenced_home_is_refused() {
         .iter()
         .find(|r| r.ends_with(".trusty-mpm"))
         .expect("the lib binary fences ~/.trusty-mpm");
-    let _ = PortfolioPalace::provision(&root.join("tm-8545-fence-probe"));
+    let _ = PortfolioPalace::provision(&root.join("tm-8545-fence-probe"), PalaceAccess::Writer);
 }
 
 /// Under the feature, a remembered observation round-trips through recall —
@@ -175,7 +175,7 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
-    let palace = PortfolioPalace::provision(dir.path());
+    let palace = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
     let mem = palace.memory().expect("live memory under feature");
 
     mem.remember(
@@ -192,5 +192,39 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
     assert!(
         !hits.is_empty(),
         "a remembered portfolio observation must be recallable"
+    );
+}
+
+/// #9274 (PR3 critic HIGH 2): the daemon opens the portfolio palace as
+/// writer, so an existing format-0 portfolio palace migrates at open. Under
+/// read-only intent it is refused with `FormatNeedsMigration`.
+/// Test: this is the test.
+#[cfg(feature = "manager-memory")]
+#[test]
+fn an_existing_format_0_portfolio_palace_migrates_at_open() {
+    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_common::memory_core::store::OpenIntent;
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::palace_format::{
+        MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
+    };
+
+    seed_shared_embedder_with_mock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_root = dir.path().join("palace");
+    let palace_dir = data_root.join(PORTFOLIO_PALACE_ID);
+    write_format_0_palace(&palace_dir, PORTFOLIO_PALACE_ID).expect("format-0 palace");
+
+    // #9274: the daemon opens the portfolio palace as writer, so it migrates.
+    let mem = PortfolioMemory::open_with_intent(&data_root, OpenIntent::Writer)
+        .expect("a format-0 portfolio palace opens");
+    assert_eq!(mem.persisted_palace_count().expect("count"), 1);
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
+            .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    assert!(
+        !palace_dir.join(MIGRATION_RECORD).exists(),
+        "migration left its record"
     );
 }
