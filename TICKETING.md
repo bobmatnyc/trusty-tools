@@ -236,7 +236,7 @@ Every issue body and every comment ends with the attribution line below.
 | `pr_issue_link` | `Refs #N` (fixed) |
 | `status_on_creation` | Backlog — filing is not a dispatch; In development waits for a brief that says work starts now |
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
-| `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>` |
+| `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>`; a phase's PR `<type>(<scope>): [EPIC_<epic#> PHASE_<n>] <subject>` |
 | `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |
 | `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed, a phase's Status changes (`tm issue transition` on a phase regenerates the block itself, #8448) |
 | `research_docs_path` | `docs/research/<effort>/` — trackers link to the doc; no issue body carries findings |
@@ -267,6 +267,10 @@ the next starts. No gate means no tracker; one issue with a task list costs less
 - Tracker title: `[EPIC <epic#>] <the outcome, in plain words>`. Label `epic`.
 - Phase title: `[EPIC_<epic#> PHASE_<n>] <what this phase does>`, where
   `<epic#>` is the tracker's own issue number.
+- Phase PR title: `<type>(<scope>): [EPIC_<epic#> PHASE_<n>] <subject>`. The
+  tag follows the conventional prefix, because `cliff.toml` drops a subject
+  that opens with a bracket from the release notes. `tm pr open` adds the tag
+  itself when the body's first link line names a phase issue (#9571).
 - Create the tracker FIRST titled `[EPIC] <outcome>`, read its number back, and
   rename the title in place before filing phase issues — they cannot go in the
   same batch. Link them as **native sub-issues**, never a markdown task list.

@@ -106,10 +106,9 @@ attribution footer (a missing one exits 2; it never appends one) and attaches
 `--assignee @me --label trusty-mpm --label ws/<session>` itself — you never
 type them. Before spawning `gh` it runs `scripts/check_changelog_fragment.sh`
 (`--docs-only` skips it for a PR touching no crate source); a rung 1
-(docs-only) branch must pass `--docs-only` or the gate refuses. A failed check exits 2 before `gh` runs; fix it and re-run.
-`--issue N` emits `Refs #N` — this repo's fix PRs never use `--closes`, which
-would emit `Closes #N` instead. Hand-assembled `gh pr create` is the fallback
-only on a host where `tm` is not on PATH.
+(docs-only) branch must pass `--docs-only` or the gate refuses. Any failed check exits 2 before `gh` runs.
+`--issue N` emits `Refs #N`; fix PRs here never pass `--closes`.
+Hand-assembled `gh pr create` is only for a host without `tm` on PATH.
 
 ## Labels, project, milestone on the PR
 
@@ -120,7 +119,9 @@ nothing here restates it.
 
 `tm pr open` applies your half itself, in one `gh pr edit` after the PR exists:
 the component labels for every crate the diff touches, and the milestone and
-project(s) of the issue the body's first `Refs #N` names. You pass no flag.
+project(s) of the issue the body's first `Refs #N` names. A phase issue adds a title
+tag: `<type>(<scope>): [EPIC_N PHASE_M] <subject>` (`tm-epic`).
+You pass no flag.
 Each step is best-effort: a refused step prints a warning and the PR still
 opens. A warning is yours to fix on the PR. "no component label: no workspace crate
 owns the changed paths" (docs-only PR) and "no project or milestone" (`Refs`-less

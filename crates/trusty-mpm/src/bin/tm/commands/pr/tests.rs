@@ -1686,6 +1686,7 @@ fn refs_issue() -> RefsIssue {
         kind: RefKind::Issue,
         milestone: Some("mpm 1.6".to_string()),
         projects: vec!["trusty-mpm".to_string()],
+        title: String::new(),
     }
 }
 
@@ -1802,6 +1803,7 @@ fn metadata_notes_an_issue_with_no_milestone() {
         kind: RefKind::Issue,
         milestone: None,
         projects: Vec::new(),
+        title: String::new(),
     };
     let meta = metadata::plan(
         RefsLookup::Found(&bare),
@@ -1840,9 +1842,14 @@ fn metadata_edit_argv_carries_every_field() {
         projects: vec!["trusty-mpm".to_string()],
         notes: Vec::new(),
         inherited_from: Some(7274),
+        title: Some("feat(x): [EPIC_12 PHASE_2] add X".to_string()),
     };
     let argv = metadata::edit_argv("4242", Some("o/r"), &meta).join(" ");
     assert!(argv.starts_with("pr edit 4242 --repo o/r"), "{argv}");
+    assert!(
+        argv.contains("--title feat(x): [EPIC_12 PHASE_2] add X"),
+        "{argv}"
+    );
     assert!(argv.contains("--add-label trusty-mpm"), "{argv}");
     assert!(argv.contains("--milestone mpm 1.6"), "{argv}");
     assert!(argv.contains("--add-project trusty-mpm"), "{argv}");
@@ -2029,7 +2036,8 @@ fn open_notes_an_unreadable_refs_issue() {
         .on("pr edit 4242", "");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
     let code = open::run(&gh, &args, &pre).expect("an unreadable issue is not an error");
-    assert_eq!(code, super::EXIT_OK);
+    // #9571: the unread issue may be a phase issue, so the title is missing.
+    assert_eq!(code, super::EXIT_PARTIAL);
     assert!(
         gh.calls()
             .iter()
@@ -3673,3 +3681,7 @@ fn pr_8934_an_explicit_repo_never_skips() {
         None
     );
 }
+
+// #9571: `tm pr open`'s phase-title tests, split out for the test SLOC cap.
+#[path = "phase_title_open_tests.rs"]
+mod phase_title_open;
