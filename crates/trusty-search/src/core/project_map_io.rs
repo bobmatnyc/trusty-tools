@@ -7,7 +7,7 @@
 //! What: [`load`] fails closed on anything but a clean schema-1 parse or a
 //! missing file; [`update`] runs one read-modify-write under the in-process
 //! mutex and the cross-process `.lock` sidecar, then publishes atomically;
-//! [`quarantine`] moves a file aside for `project rebuild-map`.
+//! [`quarantine_and_rebuild`] moves a file aside for `project rebuild-map`.
 //! Test: `core::project_map::tests` (`project_map_tests.rs`).
 
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ pub fn load(path: &Path) -> Result<Option<ProjectMap>, ProjectMapError> {
 /// the operator CLI in another process — so it needs the registry's
 /// discipline: the locks span the load AND the save, or a concurrent write is
 /// lost (#4871).
-/// What: takes [`MAP_WRITE_LOCK`] (a poisoned guard is recovered: the data is
+/// What: takes `MAP_WRITE_LOCK` (a poisoned guard is recovered: the data is
 /// the file, not the guard), then the `.lock` sidecar via
 /// [`trusty_common::file_lock::with_exclusive_lock`]; a lock that cannot be
 /// taken is [`ProjectMapError::Lock`], never a bypass. Under them: [`load`]
