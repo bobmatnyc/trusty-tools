@@ -189,6 +189,8 @@ fn spawn_and_capture_gated(
     before_stdin: impl FnOnce(),
 ) -> (bool, String, String) {
     let mut cmd = Command::new(exe);
+    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+    trusty_common::parent_death::exit_with_parent(&mut cmd);
     cmd.args(args)
         .current_dir(cwd)
         .env_remove("TAGENT_PROJECT_DIR")

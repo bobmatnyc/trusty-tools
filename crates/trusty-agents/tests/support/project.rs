@@ -90,7 +90,10 @@ impl Project {
     pub async fn run_task(&self, task: &str, workflow: &str) -> Result<TaskResult> {
         let out_dir = self.root.path().join("out");
         std::fs::create_dir_all(&out_dir).ok();
-        let mut child = Command::new(&self.binary)
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        let mut child = cmd
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
             // #4826: an inherited `TAGENT_PROJECT_DIR` now outranks exe-path
@@ -149,8 +152,10 @@ impl Project {
             dirs.extend(std::env::split_paths(&inherited));
         }
         let path = std::env::join_paths(dirs).context("join PATH")?;
-        Command::new(&self.binary)
-            .current_dir(self.root.path())
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        cmd.current_dir(self.root.path())
             .env("HOME", self.home.path())
             .env("PATH", path)
             .env_remove("TAGENT_PROJECT_DIR")
@@ -175,7 +180,10 @@ impl Project {
     /// Test: Exercised by `project_inspect_returns_matched_skills` and
     /// `project_inspect_returns_agent_match`.
     pub async fn run_inspect(&self, task: &str) -> Result<Value> {
-        let output = Command::new(&self.binary)
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        let output = cmd
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
             // #4826: see `run_task` — clear the inherited project-dir hint so
