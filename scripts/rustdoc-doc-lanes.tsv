@@ -97,6 +97,7 @@ NO-CFG	trusty-common	embedder-load-dynamic
 NO-CFG	trusty-common	unconditional-only
 NO-CFG	trusty-embedderd	coreml
 NO-CFG	trusty-embedderd	http-server
+NO-CFG	trusty-mpm	channels
 NO-CFG	trusty-mpm	cli
 NO-CFG	trusty-search	bundled-ort
 NO-CFG	trusty-search	coreml
