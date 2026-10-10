@@ -42,6 +42,9 @@ struct FakeTmux {
     /// #9004: what the pane-identity `display-message` prints, or `None` to
     /// exit 1.
     identity: Option<&'static str>,
+    /// #9566: what a `display-message` for `#{pane_current_command}` prints,
+    /// or `None` for the fake's empty answer.
+    pane_command: Option<&'static str>,
     /// What tmux answers once a `send-keys` reached it — the state the
     /// post-grace re-check sees — or `None` to keep the answers above.
     after_signal: Option<AfterSignal>,
@@ -54,6 +57,7 @@ impl Default for FakeTmux {
             sessions_fail: false,
             panes: Some("%9:1"),
             identity: Some(LIVE_IDENTITY),
+            pane_command: None,
             after_signal: None,
         }
     }
@@ -153,11 +157,20 @@ impl Fixture {
         // #9004: only the pane-identity read asks for `session_id`; the pid
         // probe's `#{pane_pid}` read keeps its empty answer.
         let identity = identity_answer(fake.identity);
+        // #9566: only the foreground-command read is a `display-message` for
+        // `pane_current_command`; `list-panes -a -F` also names it.
+        let command = fake.pane_command.map_or(String::new(), |cmd| {
+            format!(
+                "case \"$*\" in *display-message*pane_current_command*) \
+                 echo '{cmd}'; exit 0;; esac"
+            )
+        });
         let script = format!(
             "#!/bin/sh\necho \"$*\" >> '{log}'\n\
              if [ \"$1\" = send-keys ]; then touch '{signalled}'; fi\n\
              if [ -f '{signalled}' ]; then :; {after}\nfi\n\
              if [ \"$1\" = list-sessions ]; then {sessions}; fi\n\
+             {command}\n\
              case \"$*\" in *session_id*) {identity};; esac\n\
              if [ \"$1\" = list-panes ]; then {panes}; fi\nexit 0\n",
             log = log.display(),

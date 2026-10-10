@@ -324,6 +324,56 @@ async fn an_unreadable_pane_identity_refuses_the_in_place_reactivate() {
     assert_identity_read_and_pane_untouched(&f);
 }
 
+/// Reactivate the Stopped record on the record's own pane %9, whose
+/// foreground command the fake reports as `command` (#9566).
+async fn reactivate_stopped_from_pane_running(
+    command: &'static str,
+) -> (u16, ManagedSessionState, String) {
+    let f = Fixture::new(FakeTmux {
+        pane_command: Some(command),
+        ..FakeTmux::default()
+    })
+    .await;
+    let (state, _root) = daemon_over(&f.bin).await;
+    let mgr = state.session_manager().await;
+    let id = seed_named_into(&mgr, LIVE, "stopped", Some("%9"), Some(LIVE_SERVER)).await;
+    let outcome = f
+        .scoped(reactivate_core(&state, &id.to_string(), &from_pane("%9")))
+        .await;
+    let record = mgr.get(&id).await.expect("record");
+    (outcome.status, record.state, format!("{:?}", outcome.body))
+}
+
+/// #9566: a bare `tm` run by a live agent's Bash tool sits in that agent's
+/// pane, so the pane's foreground is the agent, not `tm`. A Stopped record
+/// whose claude is in fact live is never reactivated from there, so `bin/tm`
+/// never execs a second `claude --resume` of the same session.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_record_whose_pane_runs_a_live_agent_is_never_reactivated_in_place() {
+    for command in ["claude", "node", "2.1.3"] {
+        let (status, state, body) = reactivate_stopped_from_pane_running(command).await;
+        assert_eq!(status, 409, "foreground `{command}` reactivated: {body}");
+        assert_eq!(
+            state,
+            ManagedSessionState::Stopped,
+            "foreground `{command}`"
+        );
+    }
+}
+
+/// #9566 keeps #9565: the relaunch of a dead claude from its own pane, whose
+/// foreground is the requesting `tm`, still reactivates the record.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_stopped_record_whose_pane_runs_tm_is_still_reactivated_in_place() {
+    for command in ["tm", "zsh"] {
+        let (status, state, body) = reactivate_stopped_from_pane_running(command).await;
+        assert_eq!(status, 200, "foreground `{command}` refused: {body}");
+        assert_eq!(state, ManagedSessionState::Active, "foreground `{command}`");
+    }
+}
+
 /// #9101 runtime-exit reap, on a real tmux: reaping a stale Active record
 /// stops the record but never publishes its id into the restarted server's
 /// session that reused its name. Red on f91060103c, which set

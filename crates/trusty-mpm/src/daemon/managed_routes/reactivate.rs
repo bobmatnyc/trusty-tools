@@ -631,4 +631,39 @@ mod tests {
             "a blank caller_pane_id must not trigger the proof-of-death shortcut"
         );
     }
+
+    #[test]
+    fn should_reconcile_stale_active_false_when_caller_pane_runs_a_live_agent() {
+        // #9566: a bare `tm` run by a live claude's Bash tool sits in that
+        // claude's pane, whose foreground stays the agent. Proof-of-death from
+        // that pane must not reconcile the Active record.
+        let record = active_record("tm-demo");
+        for cmd in ["claude", "node", "2.1.3"] {
+            let panes = vec![pane_with_id("tm-demo", cmd, "%5")];
+            assert!(
+                !should_reconcile_stale_active(&record, &panes, Some("%5"), true, &AlwaysIdleProbe),
+                "a caller pane running `{cmd}` was reconciled"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reconcile_stale_active_false_when_unconfirmed_caller_pane_runs_a_live_agent() {
+        // #9566 twin without proof-of-death: the probe path must not read the
+        // live agent in the caller's pane as idle either.
+        let record = active_record("tm-demo");
+        for cmd in ["claude", "node", "2.1.3"] {
+            let panes = vec![pane_with_id("tm-demo", cmd, "%5")];
+            assert!(
+                !should_reconcile_stale_active(
+                    &record,
+                    &panes,
+                    Some("%5"),
+                    false,
+                    &AlwaysIdleProbe
+                ),
+                "a caller pane running `{cmd}` was reconciled"
+            );
+        }
+    }
 }
