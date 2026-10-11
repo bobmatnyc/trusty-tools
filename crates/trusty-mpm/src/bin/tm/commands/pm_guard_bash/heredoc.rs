@@ -165,6 +165,9 @@ impl HeredocBodies {
 
     /// [`HeredocBodies::scan`] against the command's operators `ops`.
     fn scan_with(command: &str, ops: &[(usize, OperatorCtx)]) -> Self {
+        // #9720: `delimiters_on` binary-searches `ops`, which the walk pushes
+        // in byte order.
+        debug_assert!(ops.windows(2).all(|w| w[0].0 < w[1].0), "ops out of order");
         let quotes = QuoteScan::new(command);
         if quotes.balanced {
             return Self::settle(Self::collect(command, Some(&quotes), ops));

@@ -37,12 +37,14 @@ pub(super) struct Delimiter {
 /// shell code; one in a comment, `${…}` text or after a `\` is skipped, and an
 /// [`OperatorCtx::Ambiguous`] one is read loosely for [`super::HeredocBodies::collect`]
 /// to refuse. `None` — no confidence — when a code `<<` has a word
-/// [`delimiter_word`] does not accept.
+/// [`delimiter_word`] does not accept. #9720: `ops` must be in byte order,
+/// as the walk pushes it; each `<<` is found by binary search.
 /// Test: `heredoc_bodies_ignore_a_here_string`,
 /// `heredoc_bodies_ignore_quoted_operator`,
 /// `heredoc_bodies_handle_tab_stripped_delimiter`,
 /// `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`,
-/// `heredoc_bodies_skip_an_operator_outside_code`.
+/// `heredoc_bodies_skip_an_operator_outside_code`,
+/// `heredoc_bodies_look_up_operators_in_log_work_9720`.
 pub(super) fn delimiters_on(
     line: &str,
     (at, offset): (usize, usize),
@@ -62,10 +64,13 @@ pub(super) fn delimiters_on(
             i += 3;
             continue;
         }
-        let Some(&(_, ctx)) = ops.iter().find(|(pos, _)| {
+        // #9720: `ops` is in byte order, so a binary search, not a scan from
+        // the first operator for every `<<`.
+        let hit = ops.binary_search_by(|(pos, _)| {
             charge(Site::OperatorLookup, 1);
-            *pos == at + i
-        }) else {
+            pos.cmp(&(at + i))
+        });
+        let Some(&(_, ctx)) = hit.ok().and_then(|k| ops.get(k)) else {
             // #9150: a comment, `${…}` text or `\<<` opens no body.
             i += 2;
             continue;
