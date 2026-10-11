@@ -44,8 +44,10 @@ pub(crate) const CLIENT_MARGIN: Duration = Duration::from_secs(15);
 pub(crate) const BODY_GRACE: Duration = Duration::from_secs(2);
 
 /// The whole-operation deadline the server gives one request of `name`.
+///
+/// What: #9066 — a bridged method gets its direct method's deadline.
 pub(crate) fn request_deadline(name: &str) -> Duration {
-    match name {
+    match crate::api::bridge::direct_method(name).unwrap_or(name) {
         // #9070: `resolve` reads a value, `grant` may read agents flags and
         // `set_agents_may_use` writes one, all through the backend.
         method::SET

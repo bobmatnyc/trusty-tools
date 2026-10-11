@@ -3,12 +3,13 @@
 //! Why: AC 7 — the ancestry and expiry rules are proven against a process
 //! table and a clock the test controls.
 //! What: [`FakeProcs`] maps pid to (parent, start time) and can fail every
-//! read, fail one pid's start time, panic on one pid, or mark a pid as
-//! Claude Code. [`FakeClock`]
+//! read, fail one pid's start time, panic on one pid, mark a pid as
+//! Claude Code, or give a pid an executable path (#9066). [`FakeClock`]
 //! holds a settable time and can fail.
 //! Test: used by `grant_tests.rs` and `ancestry_tests.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ struct ProcState {
     start_unreadable: HashSet<u32>,
     panic_on: Option<u32>,
     agents: HashSet<u32>,
+    // #9066: the executable each pid runs; a pid with none is unreadable.
+    exes: HashMap<u32, PathBuf>,
     parent_delay: Option<Duration>,
 }
 
@@ -77,6 +80,11 @@ impl FakeProcs {
         self.with(|s| s.agents.insert(pid));
     }
 
+    /// Give `pid` the executable `path` (#9066).
+    pub(crate) fn set_executable(&self, pid: u32, path: &str) {
+        self.with(|s| s.exes.insert(pid, PathBuf::from(path)));
+    }
+
     /// Panic when `pid`'s start time is read.
     pub(crate) fn panic_on_start(&self, pid: u32) {
         self.with(|s| s.panic_on = Some(pid));
@@ -130,6 +138,18 @@ impl ProcessTable for FakeProcs {
                 return Err(ProcessError::Unreadable { pid });
             }
             Ok(s.agents.contains(&pid))
+        })
+    }
+
+    fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        self.with(|s| {
+            if s.unreadable {
+                return Err(ProcessError::Unreadable { pid });
+            }
+            s.exes
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid })
         })
     }
 }

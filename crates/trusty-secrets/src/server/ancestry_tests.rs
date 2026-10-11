@@ -329,6 +329,10 @@ mod os_table {
         );
         let first = OsProcessTable.start_time(me).expect("own start time");
         assert_eq!(OsProcessTable.start_time(me), Ok(first));
+        // #9066: the executable read names this test binary.
+        let exe = OsProcessTable.executable(me).expect("own executable");
+        let current = std::env::current_exe().expect("current_exe");
+        assert_eq!(exe.file_name(), current.file_name());
     }
 
     #[test]

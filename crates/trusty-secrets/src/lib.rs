@@ -8,10 +8,11 @@
 //! What: two features (DOC-74 §15.2).
 //! - `api` — validated names ([`SecretKey`], [`VaultName`], …), the
 //!   [`SecretRef`] grammar, the redacting [`SecretValue`], the `secrets.*`
-//!   method request/response types, and [`SecretsError`].
+//!   method request/response types, [`api::mask_secret`], the console
+//!   bridge's [`api::BridgeAssertion`] (#9066), and [`SecretsError`].
 //! - `store` — the [`store::SecretBackend`] trait and its Keychain
 //!   implementation, the names-only [`store::NamesIndex`], scope resolution,
-//!   [`store::mask_secret`], config resolution, and the in-process
+//!   config resolution, and the in-process
 //!   `secret://` resolver, env map and `.env` parser `tm secrets exec` uses
 //!   ([`store::resolve`], [`store::parse_dotenv`]).
 //! - `cli-backends` — `store::cli`, the blocking runner and template-file
