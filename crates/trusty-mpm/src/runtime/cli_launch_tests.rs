@@ -106,6 +106,42 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
     assert!(spec.session_id.is_empty() && spec.launch_id.is_empty());
 }
 
+/// #8992: a stamp value tm does not recognise resolves to the PM default, so the
+/// launch is trimmed. Only an explicit `supervisor` stamp keeps every tool.
+#[test]
+fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
+    for value in ["Supervisor", "architect", ""] {
+        let env = vec![(
+            crate::core::session_profile::SESSION_PROFILE_ENV.to_owned(),
+            value.to_owned(),
+        )];
+        let launch = CliLaunch {
+            model: None,
+            prompt_file: None,
+            config_dir: None,
+            oauth_token: None,
+            mcp_env: &env,
+            scoped_mcp: None,
+            alternate_screen: false,
+        };
+        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        assert!(
+            env_words(&spec).contains(&"CLAUDE_CODE_DISABLE_ARTIFACT=1".to_owned()),
+            "stamp {value:?}: {:?}",
+            spec.env_set
+        );
+        assert!(
+            spec.args.windows(2).any(|w| w
+                == [
+                    "--disallowedTools",
+                    "Workflow,DesignSync,mcp__claude-in-chrome"
+                ]),
+            "stamp {value:?}: {:?}",
+            spec.args
+        );
+    }
+}
+
 /// #8992: a launch stamped supervisor (the Architect) keeps every tool — no
 /// Artifact switch, no `--disallowedTools`.
 #[test]

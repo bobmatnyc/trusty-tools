@@ -86,14 +86,28 @@ pub(crate) fn relaunch_command() -> String {
 /// prompt through `--append-system-prompt-file`. [`relaunch_command`] stays
 /// bare for the config-apply restarter, which relaunches an existing pane.
 /// What: the same `env -u …` scrub, then the profile stamp the prompt was
-/// composed for (#8453), then `claude --append-system-prompt-file '<file>'`.
-/// Both values are single-quoted because the pane shell re-splits the line.
+/// composed for (#8453) and, for a PM, `CLAUDE_CODE_DISABLE_ARTIFACT='1'`
+/// (#8992), then `claude --append-system-prompt-file '<file>'` and, for a PM,
+/// the `--disallowedTools` pair. Every value is single-quoted because the pane
+/// shell re-splits the line.
 /// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
-/// `pm_launch_builders_carry_the_prompt_file`.
+/// `pm_launch_builders_carry_the_prompt_file`,
+/// `gui_spawn_command_trims_a_pm_and_not_a_supervisor`.
 pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, String)) -> String {
+    use crate::core::pm_tool_trim::{stamped_profile, trim_args, trim_env};
     use crate::core::spawn_disclaim::pane::shell_single_quote;
+    // #8992: the stamp's profile decides the trim; each piece is one shell word.
+    let profile = stamped_profile(std::slice::from_ref(stamp));
+    let env: String = trim_env(profile)
+        .iter()
+        .map(|(k, v)| format!(" {k}={}", shell_single_quote(v)))
+        .collect();
+    let args: String = trim_args(profile)
+        .iter()
+        .map(|a| format!(" {}", shell_single_quote(a)))
+        .collect();
     format!(
-        "env{} {}={} claude --append-system-prompt-file {}",
+        "env{} {}={}{env} claude --append-system-prompt-file {}{args}",
         crate::core::claude_env_scrub::env_unset_flags(),
         stamp.0,
         shell_single_quote(&stamp.1),
@@ -145,10 +159,38 @@ mod tests {
         assert!(cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"), "{cmd}");
         assert!(
             cmd.ends_with(
-                " TRUSTY_MPM_SESSION_PROFILE='pm' claude \
-                 --append-system-prompt-file '/t/with space/p.txt'"
+                " TRUSTY_MPM_SESSION_PROFILE='pm' CLAUDE_CODE_DISABLE_ARTIFACT='1' claude \
+                 --append-system-prompt-file '/t/with space/p.txt' \
+                 '--disallowedTools' 'Workflow,DesignSync,mcp__claude-in-chrome'"
             ),
             "{cmd}"
+        );
+    }
+
+    /// #8992: the GUI spawn of a PM carries the Artifact switch and the deny
+    /// flag; a supervisor stamp keeps every tool. Before the fix the line
+    /// ended at the prompt file for both.
+    #[test]
+    fn gui_spawn_command_trims_a_pm_and_not_a_supervisor() {
+        let file = std::path::Path::new("/t/p.txt");
+        let pm = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into()));
+        assert!(
+            pm.contains(" CLAUDE_CODE_DISABLE_ARTIFACT='1' claude "),
+            "{pm}"
+        );
+        assert!(
+            pm.ends_with(" '--disallowedTools' 'Workflow,DesignSync,mcp__claude-in-chrome'"),
+            "{pm}"
+        );
+        let sup = gui_spawn_command(
+            file,
+            &("TRUSTY_MPM_SESSION_PROFILE".into(), "supervisor".into()),
+        );
+        assert!(!sup.contains("CLAUDE_CODE_DISABLE_ARTIFACT"), "{sup}");
+        assert!(!sup.contains("--disallowedTools"), "{sup}");
+        assert!(
+            sup.ends_with("--append-system-prompt-file '/t/p.txt'"),
+            "{sup}"
         );
     }
 
