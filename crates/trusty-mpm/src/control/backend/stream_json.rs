@@ -741,6 +741,8 @@ mod tests {
     /// own bound, return Ok, and log the reap's result instead of dropping it.
     #[tokio::test]
     async fn stop_during_pending_exit_reap_kills_at_once_and_logs_the_result() {
+        // #4931: a thread-local capture records nothing unless MAX_LEVEL is raised.
+        crate::test_support::enable_event_capture();
         let logs = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(logs.clone())
@@ -752,8 +754,13 @@ mod tests {
         let bound = Duration::from_secs(5);
         let mut backend = spawn_sh("exec >&-; exec sleep 30", bound);
         let pid = worker_pid(&backend);
-        let cancelled = tokio::time::timeout(Duration::from_millis(100), backend.recv()).await;
+        let cancelled = tokio::time::timeout(Duration::from_secs(1), backend.recv()).await;
         assert!(cancelled.is_err(), "the first recv must still be waiting");
+        assert!(
+            backend.child.is_none() && backend.exit_reaper.is_some(),
+            "recv must have reached stdout EOF and handed the child to the exit reap \
+             before stop() runs, or this test does not exercise the pending-reap branch"
+        );
 
         let started = std::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(10), backend.stop())
