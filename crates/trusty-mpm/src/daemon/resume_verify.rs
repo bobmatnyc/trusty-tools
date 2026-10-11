@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use trusty_common::catchup::session_log;
 use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
 
@@ -48,8 +49,8 @@ const SLOT_READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// first, so the guard only fires on a step that ignored them.
 const GUARD_GRACE: Duration = Duration::from_millis(250);
 
-/// The most characters of a refused line the report echoes back.
-const MAX_ECHO_CHARS: usize = 200;
+/// How many hex digits of a refused line's SHA-256 the report carries.
+const LINE_HASH_HEX: usize = 12;
 
 /// What the verify pass needs beyond the catch-up's own arguments.
 ///
@@ -88,11 +89,15 @@ impl ResumeVerifyHost {
 /// `no_session_owner`, `invalid_session_id`, `no_palace`,
 /// `memory_unreachable`, `memory_error`, `slot_unresolved`,
 /// `no_verify_command`, `pass_timeout`), `detail` on an unverified status, and
-/// `checks`, one entry per `verify` line with `command`, `claimed`, `returned`
-/// and `verdict`.
+/// `checks`: one entry per `verify` line with `command`, `claimed`, `returned`
+/// and `verdict`, for at most [`MAX_LINES`] lines, then one `over_line_cap`
+/// summary counting the `skipped` rest. A refused line's entry has a `null`
+/// `command` and carries only `line_len` and `line_sha256`, never its text.
 /// Test: `a_resume_reads_the_live_values_and_reports_the_stale_ones`,
 /// `an_unreachable_memory_daemon_is_unverified_and_catchup_still_answers`,
-/// `the_whole_pass_is_bounded`.
+/// `the_whole_pass_is_bounded`,
+/// `the_checks_list_stops_at_the_line_cap_with_one_summary`,
+/// `a_refused_line_reports_its_length_and_hash_never_its_text`.
 pub(crate) async fn resume_verify(
     host: &ResumeVerifyHost,
     socket: &Path,
@@ -139,15 +144,24 @@ async fn verify_pass(
         commit: recorded_commit(&markdown),
     };
     let mut checks = Vec::new();
-    for (index, line) in verify.split('\n').enumerate() {
-        let check = if index >= MAX_LINES {
-            refused(line, "unverified:over_line_cap")
-        } else if let Some(command) = AllowedCommand::parse(line) {
-            run_check(host, &command, project_dir, &claims, deadline).await
-        } else {
-            refused(line, "unverified:not_allowlisted")
+    let mut lines = verify.split('\n');
+    // #9390: the slot is writer-controlled; past the cap one summary, then stop.
+    for line in lines.by_ref().take(MAX_LINES) {
+        let check = match AllowedCommand::parse(line) {
+            Some(command) => run_check(host, &command, project_dir, &claims, deadline).await,
+            None => refused(line, "unverified:not_allowlisted"),
         };
         checks.push(check);
+    }
+    let skipped = lines.count();
+    if skipped > 0 {
+        checks.push(json!({
+            "command": null,
+            "claimed": null,
+            "returned": null,
+            "verdict": "unverified:over_line_cap",
+            "skipped": skipped,
+        }));
     }
     json!({ "fact_key": fact_key, "status": "ran", "checks": checks })
 }
@@ -332,10 +346,24 @@ fn check(command: String, claimed: Value, returned: Value, verdict: &str) -> Val
     json!({ "command": command, "claimed": claimed, "returned": returned, "verdict": verdict })
 }
 
-/// The entry for a line that never ran, echoing at most [`MAX_ECHO_CHARS`].
+/// The entry for a line that never ran: its byte length and short hash only.
+///
+/// Why: the line is store-controlled text, and echoing it into the PM's
+/// context is a prompt-injection channel (#9390, critic C2).
+/// What: `command` is `null`; `line_len` is the byte length and `line_sha256`
+/// the first [`LINE_HASH_HEX`] hex digits of the line's SHA-256.
+/// Test: `a_refused_line_reports_its_length_and_hash_never_its_text`.
 fn refused(line: &str, verdict: &str) -> Value {
-    let echo: String = line.chars().take(MAX_ECHO_CHARS).collect();
-    check(echo, Value::Null, Value::Null, verdict)
+    let mut hash = format!("{:x}", Sha256::digest(line.as_bytes()));
+    hash.truncate(LINE_HASH_HEX);
+    json!({
+        "command": null,
+        "claimed": null,
+        "returned": null,
+        "verdict": verdict,
+        "line_len": line.len(),
+        "line_sha256": hash,
+    })
 }
 
 /// A pass that read no command: `status: unverified:<reason>`, logged.
