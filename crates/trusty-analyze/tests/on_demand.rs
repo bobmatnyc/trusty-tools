@@ -102,6 +102,35 @@ fn use_the_binary_under_test() {
     unsafe { std::env::set_var("PATH", format!("{}:{current}", dir.display())) };
 }
 
+/// Count the live processes started as a server on `socket`.
+///
+/// Why (#9714): `bind_hardened` binds a temp name and links it into place, so
+/// the kernel's bound name for the listener is the vanished temp name. On Linux
+/// `lsof <path>` matches a Unix socket by that bound name, so it found no holder
+/// at all and the singleton assertion could never fail.
+/// What: `pgrep -f "serve --socket <socket>"` matches each process's argv — the
+/// path the server was told to serve — and never a kernel socket name. Exit 1
+/// means no match (0); any other failure panics rather than returning a count
+/// that passes.
+/// Test: `two_concurrent_callers_share_one_server`.
+fn server_processes_on(socket: &Path) -> usize {
+    let pattern = format!("serve --socket {}", socket.display());
+    let out = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(&pattern)
+        .output()
+        .expect("run pgrep: without it the singleton check proves nothing");
+    match out.status.code() {
+        Some(0 | 1) => String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .count(),
+        _ => panic!(
+            "pgrep -f {pattern:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    }
+}
+
 /// Poll until `socket` answers, or give up after `budget`.
 async fn await_serving(socket: &Path, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
@@ -284,6 +313,8 @@ async fn a_server_that_cannot_start_is_an_error_not_a_success() {
 /// first's socket; across processes `bind_singleton_hardened` refuses the loser.
 /// A test that spawned two servers would show up here as two different pids
 /// answering, or as a caller that got an error while a healthy server was up.
+/// What: races two `ensure_running` calls on one handle, then asserts both got
+/// the same serving socket and exactly one server process exists for it.
 /// Test: this is the test.
 #[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -330,22 +361,14 @@ async fn two_concurrent_callers_share_one_server() {
         "one server must be left serving after both calls returned"
     );
 
-    // Exactly one process is answering: a second server would have had to bind
-    // the same path, and `bind_singleton_hardened` refuses that while the first
-    // is live. Assert it directly by counting the processes that hold it.
-    let holders = std::process::Command::new("lsof")
-        .arg("-t")
-        .arg(&socket)
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .count()
-        })
-        .unwrap_or(1);
-    assert!(
-        holders <= 1,
-        "{holders} processes are serving one socket; the singleton bind failed"
+    // Exactly one server process exists for this socket: the spawn gate must
+    // start one child, and a second server would have had to bind the same path,
+    // which `bind_singleton_hardened` refuses while the first is live.
+    // #9714: counted by argv, not by `lsof <path>` — see `server_processes_on`.
+    let holders = server_processes_on(&socket);
+    assert_eq!(
+        holders, 1,
+        "{holders} server processes for one socket; the singleton spawn failed"
     );
 
     // Stop the server rather than waiting out its window: the tempdir is about
