@@ -320,10 +320,17 @@ fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
     assert_denies(&past_bound, "SMTP mail");
     let evals = format!("{}sendmail bob", "eval if ".repeat(10_000));
     assert_denies(&evals, "SMTP mail");
-    let braces = format!("{}sendmail bob{}", "{ ".repeat(10_000), "; }".repeat(10_000));
+    let braces = format!(
+        "{}sendmail bob{}",
+        "{ ".repeat(10_000),
+        "; }".repeat(10_000)
+    );
     assert_denies(&braces, "SMTP mail");
     // Each keyword level re-maps with the walk's own bound: the product holds.
-    let product = format!("{}sendmail bob", format!("{}if ", "eval ".repeat(31)).repeat(40));
+    let product = format!(
+        "{}sendmail bob",
+        format!("{}if ", "eval ".repeat(31)).repeat(40)
+    );
     assert_denies(&product, "SMTP mail");
 }
 
