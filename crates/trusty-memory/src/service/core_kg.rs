@@ -530,14 +530,22 @@ impl MemoryService {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| {
-                // #5549: every open failure mapped to 404, so a palace that
-                // could not be read was reported as one that is not there.
-                if PalaceRegistry::open_error_is_absent(&e) {
-                    ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
-                } else {
-                    ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
-                }
-            })
+            .map_err(|e| open_failure(id, &e))
+    }
+}
+
+/// Map one `open_palace` failure for palace `id` onto a [`ServiceError`].
+///
+/// Why: [`MemoryService::open_handle`]'s mapping, kept apart so a test can
+/// drive it with every error variant, not only the ones a fixture can provoke.
+/// What: `NotFound` for a genuine absence, `Internal` otherwise.
+/// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`.
+pub(super) fn open_failure(id: &str, e: &anyhow::Error) -> ServiceError {
+    // #5549: every open failure mapped to 404, so a palace that
+    // could not be read was reported as one that is not there.
+    if PalaceRegistry::open_error_is_absent(e) {
+        ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+    } else {
+        ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
     }
 }
