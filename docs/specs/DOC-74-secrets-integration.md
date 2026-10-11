@@ -1118,6 +1118,7 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
 | `secrets.revoke` | Removes an exec grant (§15.8, S8) | Whether a live grant matched |
 | `secrets.set_agents_may_use` | Turns one key's "agents may use" flag on or off (§15.8, S8) | The vault, the key and the flag as set |
+| `secrets.bridge.list`, `.set`, `.delete`, `.copy`, `.set_agents_may_use` | The direct method, run under the console's verdict on its HTTP client; verified console peer only (§15.6, S3a) | What the direct method returns |
 
 **Request deadline and client wait (#7524 P2-M1).** The server gives each
 request one whole-operation deadline, counted from its arrival: 120 s for
@@ -1251,7 +1252,48 @@ trusty-console adds a `secrets_uds` bridge at `/api/secrets/*` and a page at
 `/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket and spawn contract per ruling 31, 2026-10-05: §15.2).
 The console never opens a store.
 
-**Masking.** A new `mask_secret` in `trusty-secrets`:
+**Bridge verdict (S3a, #9066; owner Dd7 option B and Architect ruling
+2026-10-11).** A bridged call gets the verdict a direct socket call gets.
+The socket's peer is the console, not the HTTP client it serves, so the
+console makes the ancestry judgment and the server checks who made it.
+
+- The bridge forwards `list`, `set`, `delete`, `copy` and
+  `set_agents_may_use` as `secrets.bridge.<method>`. `scopes` and `doctor`
+  read no credential and go direct. `resolve` has no console route.
+- Each bridged call carries a `bridge` field beside the method's own
+  params: `agent_parent` (a boolean) and `source`. `mapped` means the
+  console found the client's pid and read its chain. `unmappable` means it
+  found no pid: a non-agent, and `agent_parent` must be `false`.
+  `unreadable` means it found a pid but could not read the chain:
+  `agent_parent` must be `true`, and the server treats the call as the
+  direct socket treats an unreadable chain, so `set_agents_may_use` ON is
+  `grant_refused` and OFF is allowed. The server never takes a pid as a
+  parameter.
+- **Verified console.** The server reads the socket peer's pid from the
+  kernel, as for every call, then reads that pid's executable from the
+  process table (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS). The
+  file name must be `trusty-console`, and the peer's own parent chain must
+  be readable and hold no Claude Code process. This is the identity the
+  existing peer code already reads; a launch credential would need a secret
+  shared with a server any client may spawn first. Any other peer is
+  refused with `bridge_refused` (-32084), whatever it asserted. Known
+  limit: a same-uid process outside any agent tree can run a binary named
+  `trusty-console`. On Linux a console whose binary was replaced on disk
+  reads as `trusty-console (deleted)` and is refused until it restarts.
+- A missing, undecodable or contradictory assertion, or one with an
+  unknown field, is `invalid_params`.
+- A refused call leaves one deny record. An accepted call runs the direct
+  method body, so it leaves the direct call's records, plus `source`
+  (`mapped`, `unmappable`, `unreadable`, or `malformed` for a refused
+  assertion) and the asserted `agent_parent`. An allowed change keeps the
+  direct method's fail-closed audit: no record, no backend call. Errors
+  answer under the direct method's name, with its deadline, so a bridged
+  error is the same wire error a direct caller gets.
+- There is no human-presence or confirm step. Tailnet requests are
+  non-agent; that is S3b's concern (§15.7).
+
+**Masking.** A new `mask_secret` in `trusty-secrets`, exported from the
+`api` feature, which is all the bridge links (#9066):
 
 - `secrets.list` shows length and `updated_at` only.
 - `secrets.set` shows the first 8 characters and the length, once.
@@ -1353,10 +1395,13 @@ console toggle that calls it is
 whose own parent chain includes Claude Code may turn the flag off but not on
 (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
-record with its kind, so no flag change exists without a record. Known
-limit: a caller with no agent ancestor that acts for an agent, such as the
-console process serving an agent's `curl`, is not seen by this rule; the
-console route needs its own gate (#9066, #9067). `exec` never
+record with its kind, so no flag change exists without a record. The
+console process has no agent ancestor even when it serves an agent's
+`curl`, so its route has its own gate: the bridge verdict (§15.6, #9066).
+The console judges its HTTP client's chain and sends the answer with the
+call; the server applies this rule to that answer, and takes it only from
+the verified console. The console toggle is
+[#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). `exec` never
 injects a key into a process whose parent chain includes Claude Code unless
 that key carries the flag. The rule covers env injection (tiers 1 and 2) and
 grant contents (tier 3). It is enforced from the day each `exec` path ships.
