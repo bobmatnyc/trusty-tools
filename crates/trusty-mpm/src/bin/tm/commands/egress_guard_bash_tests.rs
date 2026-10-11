@@ -850,6 +850,12 @@ fn bash_egress_denies_padded_continuations_and_tm_flags_9699() {
         ),
         ("se\\\nndmail -t <m", "SMTP mail"),
         ("tm --account work slack send '#ops' hi", "Slack"),
+        // #9710 (a): a flag value holding `$ { } :` or a quoted space.
+        (
+            r#"tm --url "http://127.0.0.1:${TM_PORT}" slack send '#ops' hi"#,
+            "Slack",
+        ),
+        (r#"tm --account "ops team" slack send '#ops' hi"#, "Slack"),
     ] {
         let needle = format!("it reaches {service} (");
         match bash(&call_padded(command)) {
@@ -858,6 +864,40 @@ fn bash_egress_denies_padded_continuations_and_tm_flags_9699() {
         }
     }
     assert!(missed.is_empty(), "padded rows not denied: {missed:#?}");
+}
+
+/// 🔴 #9710 (b): a hit the walk found before `:;` padding spent its call
+/// budget denies; the raw scan never gets to discard it. The here-document
+/// row's `it's` opens a quote the raw scan cannot close, so only the walk's hit
+/// can deny it.
+#[test]
+fn bash_egress_keeps_a_walk_hit_when_the_call_budget_runs_out_9710() {
+    let pad = ":;".repeat(4_100);
+    let mut missed = Vec::new();
+    for command in [
+        format!(r#"tm --url "http://127.0.0.1:${{TM_PORT}}" slack send '#ops' hi;{pad}"#),
+        "cat <<'EOF'\nit's\nEOF\n".to_owned()
+            + &format!(r#"tm --account "ops team" slack send '#ops' hi;{pad}"#),
+    ] {
+        match bash(&command) {
+            Verdict::Deny { check, reason }
+                if check == BASH_CHECK && reason.contains("it reaches Slack (") => {}
+            other => missed.push(format!("{:.80}: {other:?}", command)),
+        }
+    }
+    assert!(missed.is_empty(), "rows not denied: {missed:#?}");
+}
+
+/// 🔴 #9710 (a): the raw scan reads a `tm` word's flags as the shell splits
+/// them, so a quote inside a `#` comment does not swallow the `tm` command
+/// after it.
+#[test]
+fn bash_egress_reads_tm_flags_past_a_commented_quote_9710() {
+    let command = format!(
+        ": # it's\n{}",
+        call_padded(r#"tm --account "ops team" slack send '#ops' hi"#)
+    );
+    assert_denies_as(bash(&command), "`: # it's` + padded tm", "Slack");
 }
 
 /// 🔴 #9699 critic: the raw scan removes each `\`+newline before it strips
@@ -891,6 +931,15 @@ fn raw_word_hit_skips_tm_flags_9699() {
         ("tm --url http://127.0.0.1:1 -v gchat send", GCHAT),
         ("tm --account=work slack send", SLACK),
         ("tm --url tm --url tm slack", SLACK),
+        // #9710 (a): the value is one shell word, whatever bytes it holds.
+        (
+            r#"tm --url "http://127.0.0.1:${TM_PORT}" slack send '#ops' hi"#,
+            SLACK,
+        ),
+        (r#"tm --account "ops team" slack send '#ops' hi"#, SLACK),
+        (r"tm --account ops\ team slack send", SLACK),
+        (r#"tm --account "" slack send"#, SLACK),
+        (r#"tm --url='a b' gchat send"#, GCHAT),
     ] {
         assert_eq!(
             raw_word_hit(text).map(|hit| hit.service),
