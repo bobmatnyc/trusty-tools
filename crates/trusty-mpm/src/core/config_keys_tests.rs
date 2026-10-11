@@ -100,6 +100,16 @@ fn unknown_yaml_key_is_reported() {
     assert_eq!(unknown_key_paths(&doc, &parsed), vec!["defualt_model"]);
 }
 
+/// Why (#8454 S2c): `channels:` is the host ceiling trusty-channels reads; a
+/// valid one is not a typo. A misspelt sibling still is.
+#[test]
+fn a_channels_section_is_not_reported_but_a_misspelling_is() {
+    let raw = "channels:\n  version: 1\nchannles:\n  version: 1\n";
+    let doc = yaml_document(raw).expect("valid yaml mapping");
+    let parsed: TrustyToolsConfig = serde_yaml::from_str(raw).expect("parses leniently");
+    assert_eq!(unknown_key_paths(&doc, &parsed), vec!["channles"]);
+}
+
 /// Why: a clean document must produce nothing to log.
 #[test]
 fn report_is_silent_for_a_clean_document() {

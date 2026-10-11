@@ -122,6 +122,9 @@ trusty-secrets = { path = "crates/trusty-secrets", version = "0.1", default-feat
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
+# #8454 S2c: the deny-by-default channel route policy; trusty-mpm reads it
+# for `tm doctor`.
+trusty-channels = { path = "crates/trusty-channels", version = "0.1" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
