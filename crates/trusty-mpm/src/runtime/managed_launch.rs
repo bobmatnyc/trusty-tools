@@ -172,8 +172,10 @@ impl ManagedLaunch<'_> {
     /// three paths drifting the way the four shell builders did.
     /// What: [`managed_env_unset`] + [`managed_env_set`] with an empty argv,
     /// then [`crate::core::alt_screen::configured_env`] for
-    /// `alternate_screen` (#8405).
+    /// `alternate_screen` (#8405), the profile stamp, and the #8992
+    /// [`crate::core::pm_tool_trim::trim_env`].
     /// Test: `attach_and_resume_share_an_identical_environment`,
+    /// `a_pm_spawn_disables_artifacts_and_denies_the_optional_built_ins`,
     /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
     /// `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`.
     fn base(&self) -> LaunchSpec {
@@ -192,6 +194,8 @@ impl ManagedLaunch<'_> {
         // #8453: the launch stamp `tm hook --pm-guard` reads; written for a PM
         // too, so an inherited supervisor stamp never survives.
         env_set.push(crate::core::session_profile::launch_env(self.profile));
+        // #8992: a PM loads no Artifact tools; in `base` so attach matches resume.
+        env_set.extend(crate::core::pm_tool_trim::trim_env(self.profile));
         LaunchSpec {
             session_id: self.session_id.to_owned(),
             // #8233 review round 2 (finding 3): one id per LAUNCH, minted here
@@ -216,7 +220,8 @@ impl ManagedLaunch<'_> {
     /// choice for `config_dir` (#4451 — `user` is the tier
     /// `CLAUDE_CONFIG_DIR/agents` relocates into), then the additive
     /// `--mcp-config` (#7892; no `--strict-mcp-config`, so the operator's
-    /// user-scope servers load beside tm's builtins), then
+    /// user-scope servers load beside tm's builtins), then the #8992
+    /// [`crate::core::pm_tool_trim::trim_args`] for a PM, then
     /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] (#1269).
     ///
     /// Every token is pushed UNQUOTED: these reach `execv` with no shell in
@@ -240,6 +245,8 @@ impl ManagedLaunch<'_> {
         args.extend(crate::core::session_mcp_scope::mcp_config_argv(
             self.mcp_config,
         ));
+        // #8992: a PM denies the optional built-ins it never calls.
+        args.extend(crate::core::pm_tool_trim::trim_args(self.profile));
         args.extend(
             crate::core::model_inject::PERMISSION_MODE_FLAG
                 .split_whitespace()

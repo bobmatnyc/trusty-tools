@@ -1,0 +1,2 @@
+Changed
+- A tm-launched PM no longer loads Claude Code built-in tools it never uses. The daemon spawn and resume, `tm launch`, `tm connect` and the in-place `tm session start` set `CLAUDE_CODE_DISABLE_ARTIFACT=1` and pass `--disallowedTools Workflow,DesignSync,mcp__claude-in-chrome`, which removes the Artifact tools, `Workflow`, `DesignSync` and the claude-in-chrome browser tools from the session. The `Cron*` tools stay, because session resume uses them. A supervisor (Architect) launch keeps every tool (#8992).
