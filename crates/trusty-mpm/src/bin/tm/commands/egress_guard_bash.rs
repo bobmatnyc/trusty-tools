@@ -23,7 +23,11 @@
 //! (7) hosts read at runtime; (8) Unicode confusables. Also: a program run by
 //! `find -exec`, `ssh`, `watch` or `parallel`, and a `$(…)` inside an
 //! unquoted-delimiter here-document body fed to a non-shell, are not read as
-//! command position.
+//! command position. In a walk that cannot finish, a quote the raw scan pairs
+//! differently from bash — in a here-document body, or nested in a `$(…)` or
+//! backtick inside `"…"` — can hide a later `tm` flag value, as in
+//! `x="$(echo 'a"b')"; ` then 4 100 `:;` then
+//! `tm --account "ops team" slack send '#ops' hi` (#9710).
 //! Test: `egress_guard_bash_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
@@ -464,8 +468,11 @@ fn tm_words_hit<S: AsRef<str>>(words: &[S]) -> Option<Hit> {
 /// dropped and a `#` comment skipped.
 ///
 /// Why: a `tm` flag value such as `"http://h:${PORT}"` or `"ops team"` is one
-/// word to bash. An open quote reads to the end of `text`; the raw words, read
-/// beside these, still judge what it swallows.
+/// word to bash. It pairs quotes left to right and does not know a here-doc
+/// body or a `$(…)` or backtick nested in `"…"`, so it can pair a quote
+/// differently from bash. An unclosed quote reads to the end of `text`. The
+/// raw words cannot recover a spaced flag value it swallows; the module
+/// header lists this residual.
 /// Test: `raw_word_hit_skips_tm_flags_9699`,
 /// `bash_egress_reads_tm_flags_past_a_commented_quote_9710`.
 fn shell_words(text: &str) -> Vec<String> {
