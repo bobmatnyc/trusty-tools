@@ -1180,8 +1180,7 @@ async fn format_too_new_is_a_conflict_at_the_service_open_handle() {
     let failure = svc
         .list_drawers("too-new-svc", ListDrawersQuery::default())
         .await
-        .err()
-        .expect("a palace newer than this binary is refused");
+        .expect_err("a palace newer than this binary is refused");
     assert!(
         matches!(&failure, ServiceError::Conflict(m) if m.contains("FormatTooNew")),
         "{failure:?}"
