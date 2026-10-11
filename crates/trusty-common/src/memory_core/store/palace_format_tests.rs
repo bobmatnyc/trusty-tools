@@ -568,10 +568,11 @@ fn the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker() {
     );
 }
 
-/// #9274: `doctor` reads a palace's format state without writing; a format-0
-/// palace is "needs migration", and an interrupted one says so.
+/// #9274, re-pointed by #9275: `doctor` reads a palace's format state without
+/// writing; a format-1 palace is "needs migration", and an interrupted one
+/// says so.
 #[test]
-fn status_reports_needs_migration_for_a_format_0_palace() {
+fn status_reports_needs_migration_for_a_format_1_palace() {
     let root = tempdir().expect("tempdir");
     let palace = saved_palace(root.path(), "status");
     assert_eq!(
@@ -584,35 +585,14 @@ fn status_reports_needs_migration_for_a_format_0_palace() {
         palace_format_status(&palace.data_dir).expect("status"),
         PalaceFormatStatus::Current
     );
-    // Make it format 0: drop both markers, keep a drawer so the KG is not new.
-    PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
-        .expect("open")
-        .kg
-        .upsert_drawer_sync(&Drawer::new(uuid::Uuid::new_v4(), "data"))
-        .expect("drawer");
-    {
-        let db = crate::redb_cache::create_palace_db(&palace.data_dir.join(KG_FILE)).expect("kg");
-        let wtx = db.begin_write().expect("txn");
-        wtx.open_table(KG_SCHEMA)
-            .expect("schema")
-            .remove(KG_SCHEMA_PALACE_FORMAT)
-            .expect("remove");
-        wtx.commit().expect("commit");
-    }
-    let mut v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(palace.data_dir.join(PALACE_JSON)).expect("read"))
-            .expect("json");
-    v.as_object_mut().expect("obj").remove("format_version");
-    std::fs::write(
-        palace.data_dir.join(PALACE_JSON),
-        serde_json::to_vec_pretty(&v).expect("encode"),
-    )
-    .expect("write");
+    // Make it format 1: both markers at 1.
+    stamp_marker(&palace.data_dir, 1);
+    stamp_mirror(&palace.data_dir, 1);
     let before = hash_tree(&palace.data_dir);
     assert_eq!(
         palace_format_status(&palace.data_dir).expect("status"),
         PalaceFormatStatus::NeedsMigration {
-            found: 0,
+            found: 1,
             interrupted: false
         }
     );
@@ -620,7 +600,7 @@ fn status_reports_needs_migration_for_a_format_0_palace() {
     assert_eq!(
         palace_format_status(&palace.data_dir).expect("status"),
         PalaceFormatStatus::NeedsMigration {
-            found: 0,
+            found: 1,
             interrupted: true
         }
     );

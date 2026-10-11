@@ -195,16 +195,17 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
     );
 }
 
-/// #9274 (PR3 critic HIGH 2): the daemon opens the portfolio palace as
-/// writer, so an existing format-0 portfolio palace migrates at open. Under
-/// read-only intent it is refused with `FormatNeedsMigration`.
+/// #9274 (PR3 critic HIGH 2), re-pointed by #9275: the daemon opens the
+/// portfolio palace as writer, so an existing format-1 portfolio palace
+/// migrates at open. Under read-only intent it is refused with
+/// `FormatNeedsMigration`.
 /// Test: this is the test.
 #[cfg(feature = "manager-memory")]
 #[test]
-fn an_existing_format_0_portfolio_palace_migrates_at_open() {
+fn an_existing_format_1_portfolio_palace_migrates_at_open() {
     use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
     use trusty_common::memory_core::store::OpenIntent;
-    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
     use trusty_common::memory_core::store::palace_format::{
         MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
     };
@@ -213,11 +214,11 @@ fn an_existing_format_0_portfolio_palace_migrates_at_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let data_root = dir.path().join("palace");
     let palace_dir = data_root.join(PORTFOLIO_PALACE_ID);
-    write_format_0_palace(&palace_dir, PORTFOLIO_PALACE_ID).expect("format-0 palace");
+    write_format_1_palace(&palace_dir, PORTFOLIO_PALACE_ID).expect("format-1 palace");
 
     // #9274: the daemon opens the portfolio palace as writer, so it migrates.
     let mem = PortfolioMemory::open_with_intent(&data_root, OpenIntent::Writer)
-        .expect("a format-0 portfolio palace opens");
+        .expect("a format-1 portfolio palace opens");
     assert_eq!(mem.persisted_palace_count().expect("count"), 1);
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
@@ -295,7 +296,7 @@ fn open_the_portfolio_palace_as_the_daemon_child() {
 }
 
 /// #9659: the portfolio analogue of `sm_serve_first_then_daemon_gets_the_writer_lock`.
-/// With a format-0 portfolio palace and `tm sm serve`'s read-only provision
+/// With a format-1 portfolio palace (#9275) and `tm sm serve`'s read-only provision
 /// held for the whole test, the daemon's writer provision (a separate process,
 /// as in production) migrates the palace and `remember` lands.
 /// Test: this is the test.
@@ -303,12 +304,12 @@ fn open_the_portfolio_palace_as_the_daemon_child() {
 #[test]
 fn sm_serve_first_then_daemon_gets_the_portfolio_writer_lock() {
     use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
-    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
-    write_format_0_palace(&portfolio_palace_dir(dir.path()), PORTFOLIO_PALACE_ID)
-        .expect("format-0 palace");
+    write_format_1_palace(&portfolio_palace_dir(dir.path()), PORTFOLIO_PALACE_ID)
+        .expect("format-1 palace");
 
     let _serve = PortfolioPalace::provision(dir.path(), PalaceAccess::ReadOnly);
     let out = std::process::Command::new(std::env::current_exe().expect("test binary"))

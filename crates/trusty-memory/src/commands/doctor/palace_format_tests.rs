@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::commands::doctor::CheckStatus;
-use trusty_common::memory_core::store::kg_store::DRAWERS;
+use trusty_common::memory_core::store::kg_store::{
+    DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, encode_value,
+};
+use trusty_common::memory_core::store::palace_format::KG_SCHEMA_PALACE_FORMAT;
 
 /// A palace directory with a `palace.json` carrying `mirror`, if any.
 fn palace(root: &Path, id: &str, mirror: Option<u32>) -> std::path::PathBuf {
@@ -16,20 +19,32 @@ fn palace(root: &Path, id: &str, mirror: Option<u32>) -> std::path::PathBuf {
     dir
 }
 
-/// A format-0 KG: a drawer row and no `kg_schema` table.
-fn format_0_kg(dir: &Path) {
+/// A KG holding a drawer row, stamped `format` when it is `Some` (format 0
+/// has no `kg_schema` table).
+fn kg_at(dir: &Path, format: Option<u32>) {
     let db = redb::Database::create(dir.join("kg.redb")).expect("kg");
     let wtx = db.begin_write().expect("txn");
     wtx.open_table(DRAWERS)
         .expect("drawers")
         .insert(&[7u8; 16][..], &b"row"[..])
         .expect("insert");
+    if let Some(v) = format {
+        let mut t = wtx.open_table(KG_SCHEMA).expect("kg_schema");
+        for (key, version) in [(KG_SCHEMA_TRIPLE_KEY, 1), (KG_SCHEMA_PALACE_FORMAT, v)] {
+            let bytes = encode_value(&KgSchemaMarker {
+                schema_version: version,
+            })
+            .expect("encode");
+            t.insert(key, bytes.as_slice()).expect("marker");
+        }
+    }
     wtx.commit().expect("commit");
 }
 
-/// #9274 AC7: a format-0 palace is its own "needs migration by the daemon"
-/// state (`Warn`), distinct from a current palace (`Pass`) and a refused one
-/// (`Fail`); the check writes nothing.
+/// #9274 AC7, re-pointed by #9275: a format-1 palace is its own "needs
+/// migration by the daemon" state (`Warn`), distinct from a current palace
+/// (`Pass`) and a refused one (`Fail`, newer or format 0); the check writes
+/// nothing.
 #[test]
 fn palace_format_check_names_a_palace_that_needs_migration() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -37,14 +52,14 @@ fn palace_format_check_names_a_palace_that_needs_migration() {
     let r = palace_format_verdict(root.path());
     assert_eq!(r.status, CheckStatus::Pass, "{r:?}");
 
-    let old = palace(root.path(), "old", None);
-    format_0_kg(&old);
+    let old = palace(root.path(), "old", Some(1));
+    kg_at(&old, Some(1));
     let before = std::fs::read(old.join("kg.redb")).expect("read");
     let r = palace_format_verdict(root.path());
     assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
     let shown = format!("{r:?}");
     assert!(shown.contains("needs migration by the daemon"), "{shown}");
-    assert!(shown.contains("old (format 0)"), "{shown}");
+    assert!(shown.contains("old (format 1)"), "{shown}");
     assert!(!shown.contains("current"), "{shown}");
     assert_eq!(before, std::fs::read(old.join("kg.redb")).expect("reread"));
 
@@ -53,7 +68,15 @@ fn palace_format_check_names_a_palace_that_needs_migration() {
     assert_eq!(r.status, CheckStatus::Fail, "{r:?}");
     let shown = format!("{r:?}");
     assert!(shown.contains("FormatTooNew"), "{shown}");
-    assert!(shown.contains("old (format 0)"), "{shown}");
+    assert!(shown.contains("old (format 1)"), "{shown}");
+
+    // #9275: format 0 is two behind — refused, not "needs migration".
+    let older = palace(root.path(), "older", None);
+    kg_at(&older, None);
+    let r = palace_format_verdict(root.path());
+    assert_eq!(r.status, CheckStatus::Fail, "{r:?}");
+    let shown = format!("{r:?}");
+    assert!(shown.contains("FormatTooOld"), "{shown}");
 }
 
 /// #9274 (PR3 critic MEDIUM): a palace whose `kg.redb` is held — as the

@@ -203,12 +203,25 @@ size. Recovering one is a manual step that the E14 guide documents.
 
 - **Chunked embeddings**
   ([#9275](https://github.com/bobmatnyc/trusty-tools/issues/9275), E7). The
-  change is N → N+1 on derived data. `vector_keys` moves from one vector per
-  drawer to k vectors per drawer. The migration rewrites the mapping so each
-  existing vector becomes chunk 0 of its drawer, then stamps N+1. A
-  background re-embed then adds chunks for drawers over the window. Recall
-  keeps working during the re-embed, and the palace reports `rebuilding`
-  until it ends. The backup covers primary files only, so it stays small.
+  change is format 1 → 2 on derived data. `vector_keys` may hold k rows per
+  drawer: `{uuid}#{n}` for chunk n, the bare uuid for chunk 0. The key
+  grammar makes every existing row a valid one-chunk drawer, so the
+  migration rewrites no row and does not re-embed. It stamps format 2 at the
+  first writer-intent open, before any store opens and so before any
+  `{uuid}#{n}` row can exist. The stamp is a fence: a 1.x binary that reads
+  format 1 would skip, orphan or, in its dream rebuild, discard chunk rows,
+  and the stamp makes it refuse the palace (`FormatTooNew`) instead. A
+  format-0 palace is refused `FormatTooOld`; open it first with 0.33.x.
+  Re-embedding the drawers over the window is separate work that follows
+  this stamp; until it runs, such a drawer keeps its one truncated vector.
+  The backup covers primary files only, so it stays small.
+  - **Rollback:** restore the backup (Consequences, Restore), then delete
+    the palace's `index.usearch.redb`. The vector index is derived and is not
+    backed up; left in place after a restore it can hold chunk rows under a
+    format-1 palace, which a format-1 binary misreads. Then run the
+    `palace_reembed` tool to embed the drawers into a fresh index.
+  - **Binaries older than trusty-memory 0.33.0** carry no format gate, so no
+    stamp can fence them off. Do not open a format-2 palace with one.
 - **Memory sync** (1.x, DOC-80). The change is N → N+1 on primary data. It
   adds the typed drawer fields (OQ-4), the outbox table, tombstones and
   suppression markers. It needs a bump, not a backfill, because an older 1.x

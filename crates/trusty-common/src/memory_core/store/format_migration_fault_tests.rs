@@ -4,10 +4,10 @@
 //! copy, the mirror is written before the marker, and a crash between any two
 //! steps leaves a palace the next writer open completes.
 //! What: `Seams::after` stops the migration after a chosen step exactly as a
-//! crash would; the v0 fixture comes from format_migration_tests.rs.
+//! crash would; the v1 fixture comes from format_migration_tests.rs (#9275).
 //! Test: this file.
 
-use super::tests::{assert_migrated, build_v0, complete_backups, hash_tree, marker, mirror};
+use super::tests::{assert_migrated, build_v1, complete_backups, hash_tree, marker, mirror};
 use super::{Seams, Step, open_gate_with};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
@@ -36,7 +36,7 @@ fn stop_at(step: Step) -> std::io::Result<()> {
 #[test]
 fn a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes() {
     for step in [Step::Backup, Step::Record, Step::Mirror, Step::Kg] {
-        let v0 = build_v0(&format!("v0-fault-{step:?}"));
+        let v0 = build_v1(&format!("v1-fault-{step:?}"));
         STOP.with(|s| s.set(Some(step)));
         let seams = Seams {
             after: stop_at,
@@ -55,10 +55,10 @@ fn a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes() {
 
         let record = v0.dir().join(MIGRATION_RECORD).exists();
         let (want_record, want_mirror, want_marker) = match step {
-            Step::Backup => (false, None, None),
-            Step::Record => (true, None, None),
-            Step::Mirror => (true, Some(1), None),
-            Step::Kg => (true, Some(1), Some(1)),
+            Step::Backup => (false, Some(1), Some(1)),
+            Step::Record => (true, Some(1), Some(1)),
+            Step::Mirror => (true, Some(2), Some(1)),
+            Step::Kg => (true, Some(2), Some(2)),
         };
         assert_eq!(record, want_record, "{step:?}: record");
         assert_eq!(mirror(v0.dir()), want_mirror, "{step:?}: mirror");
@@ -78,7 +78,7 @@ fn a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes() {
 /// filesystem leaves no backup directory, no record and no palace change.
 #[test]
 fn insufficient_space_aborts_the_migration_before_the_backup() {
-    let v0 = build_v0("v0-no-space");
+    let v0 = build_v1("v1-no-space");
     let before = hash_tree(v0.dir());
     let seams = Seams {
         backup: format_backup::Seams {
