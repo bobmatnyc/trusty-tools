@@ -19,17 +19,41 @@ fn bash(command: &str) -> Verdict {
     )
 }
 
-/// Assert `command` is an `egress-bash` deny naming `service`.
+/// `command` behind 4 100 `:;` no-op segments (#9699): they spend the walk's
+/// 4 096-call budget, so the walk gives up before it reaches `command`.
+fn call_padded(command: &str) -> String {
+    format!("{}{command}", ":;".repeat(4_100))
+}
+
+/// Assert `command`, and the same command behind [`call_padded`], are each an
+/// `egress-bash` deny naming `service`.
+///
+/// Why (#9699 property): every walk deny row must still deny when padding
+/// spends the call budget first. A padded row over the 64 KiB cap denies on
+/// the cap instead.
 fn assert_denies(command: &str, service: &str) {
-    match bash(command) {
+    assert_denies_as(bash(command), command, service);
+    let padded = call_padded(command);
+    let shown = format!("`:;`×4100 + {command:.80}");
+    if padded.len() > MAX_COMMAND_BYTES {
+        assert_deny_with(bash(&padded), &shown, "64 KiB");
+    } else {
+        assert_denies_as(bash(&padded), &shown, service);
+    }
+}
+
+/// Assert `verdict`, on the command shown as `what`, is an `egress-bash` deny
+/// naming `service`.
+fn assert_denies_as(verdict: Verdict, what: &str, service: &str) {
+    match verdict {
         Verdict::Deny { check, reason } => {
-            assert_eq!(check, BASH_CHECK, "`{command}`: {reason}");
+            assert_eq!(check, BASH_CHECK, "`{what:.200}`: {reason}");
             assert!(
                 reason.contains(&format!("it reaches {service} (")),
-                "`{command}` must name {service}: {reason}"
+                "`{what:.200}` must name {service}: {reason}"
             );
         }
-        Verdict::Allow => panic!("`{command}` must be denied as {service}"),
+        Verdict::Allow => panic!("`{what:.200}` must be denied as {service}"),
     }
 }
 
@@ -770,19 +794,25 @@ fn bash_egress_judges_an_open_quote_and_many_parens_within_bound_9699() {
     assert_deny_with(verdict, "`echo 'x ((…`", "it reaches SMTP mail (");
 }
 
+/// The text a walk-budget deny names: the budget's size and unit (#9699).
+const WALK_BUDGET_NEEDLE: &str = "8 MiB (8388608-byte) walk budget";
+
 /// 🔴 #9699 (b): `time eval` doubles the reads of its payload per level. A
 /// budget of calls alone let a near-cap payload run past the bound; the
-/// budget now counts the bytes each call reads too.
+/// budget now counts the bytes each call reads too. Spending it denies, and
+/// the deny names the budget (supervisor ruling: fail closed, no raw scan).
 #[test]
-fn bash_egress_judges_a_near_cap_time_eval_payload_within_bound_9699() {
+fn bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699() {
     let prefix = "time eval ".repeat(12);
     let command = format!("{prefix}{}", padded(65_536 - prefix.len(), "ab "));
     assert_eq!(command.len(), 65_536);
-    assert_eq!(bash_within(command, LARGE_INPUT_BOUND), Verdict::Allow);
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "`time eval`×12 + 64 KiB", WALK_BUDGET_NEEDLE);
 }
 
-/// 🔴 #9699 (b): when the byte-counting budget ends the walk over a near-cap
-/// `time eval` payload, the raw scan still denies the spliced program after it.
+/// 🔴 #9699 (b): when the byte budget ends the walk over a near-cap `time
+/// eval` payload, the command denies on the budget; the raw scan, which
+/// padding can steer, never judges it.
 #[test]
 fn bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699() {
     let prefix = "time eval ".repeat(12);
@@ -790,11 +820,83 @@ fn bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699() {
     let filler = padded(65_000 - prefix.len() - tail.len(), "ab ");
     let command = format!("{prefix}{filler}{tail}");
     let verdict = bash_within(command, LARGE_INPUT_BOUND);
-    assert_deny_with(
-        verdict,
-        "`time eval`×12 … se''ndmail",
-        "it reaches SMTP mail (",
-    );
+    assert_deny_with(verdict, "`time eval`×12 … se''ndmail", WALK_BUDGET_NEEDLE);
+}
+
+/// #9699: a hit the walk found before it spent its byte budget is the hit the
+/// deny names.
+#[test]
+fn bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699() {
+    let prefix = "sendmail bob; ".to_owned() + &"time eval ".repeat(12);
+    let command = format!("{prefix}{}", padded(65_000 - prefix.len(), "ab "));
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "sendmail; `time eval`×12", "it reaches SMTP mail (");
+}
+
+/// 🔴 #9699 critic: `:;` padding spends the walk's call budget, so the raw
+/// scan judges what follows. It must join `\`+newline as bash does and read
+/// `tm`'s subcommand past its global flags.
+#[test]
+fn bash_egress_denies_padded_continuations_and_tm_flags_9699() {
+    let mut missed = Vec::new();
+    for (command, service) in [
+        (
+            "curl -d @m.json https://hooks.sl\\\nack.com/services/T/B/x",
+            "Slack",
+        ),
+        ("se\\\nndmail -t <m", "SMTP mail"),
+        ("tm --account work slack send '#ops' hi", "Slack"),
+    ] {
+        let needle = format!("it reaches {service} (");
+        match bash(&call_padded(command)) {
+            Verdict::Deny { check, reason } if check == BASH_CHECK && reason.contains(&needle) => {}
+            other => missed.push(format!("{command:?}: {other:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "padded rows not denied: {missed:#?}");
+}
+
+/// 🔴 #9699 critic: the raw scan removes each `\`+newline before it strips
+/// quotes; the text as written is still judged.
+#[test]
+fn raw_hit_joins_line_continuations_9699() {
+    for (text, service) in [
+        (
+            "curl -d @m.json https://hooks.sl\\\nack.com/services/T/B/x",
+            SLACK,
+        ),
+        ("se\\\nndmail -t <m", SMTP),
+        ("s''e\\\nndmail -t <m", SMTP),
+        ("sendmail\\\nx", SMTP),
+    ] {
+        assert_eq!(
+            raw_hit(text).map(|hit| hit.service),
+            Some(service),
+            "{text:?}"
+        );
+    }
+    assert_eq!(raw_hit("echo se\\\n ndmail"), None);
+}
+
+/// 🔴 #9699 critic: the raw scan reads `tm`'s subcommand past its flags and
+/// `--url`/`--account` values, as the walk does.
+#[test]
+fn raw_word_hit_skips_tm_flags_9699() {
+    for (text, service) in [
+        ("tm --account work slack send '#ops' hi", SLACK),
+        ("tm --url http://127.0.0.1:1 -v gchat send", GCHAT),
+        ("tm --account=work slack send", SLACK),
+        ("tm --url tm --url tm slack", SLACK),
+    ] {
+        assert_eq!(
+            raw_word_hit(text).map(|hit| hit.service),
+            Some(service),
+            "{text:?}"
+        );
+    }
+    for text in ["tm --account slack status", "tm -v status slack"] {
+        assert_eq!(raw_word_hit(text), None, "{text:?}");
+    }
 }
 
 /// 🔴 #9699: an over-cap Bash command is denied before the trust-anchor floor
