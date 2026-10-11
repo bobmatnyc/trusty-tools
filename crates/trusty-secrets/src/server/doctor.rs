@@ -30,12 +30,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::audit::AuditMethod;
 use super::errors::ErrorKind;
-use super::methods::{Caller, to_json};
+use super::gate::{Recording, audited};
+use super::methods::{Caller, split_project, to_json};
 use super::project::{self, ProjectContext, RefusedProject};
 use super::router::State;
 use super::tools::{self, DetectedTool};
-use crate::api::{BackendId, SecretsError};
+use crate::api::{BackendChoice, BackendId, BackendsResponse, SecretsError};
 use crate::store::config::{self, MachineSecretsConfig};
 use crate::store::{Capabilities, cli_backends};
 
@@ -397,44 +399,7 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
     };
     let target = Target::of(state, &request)?;
-    // #9326: the file backend is listed beside the Keychain. #7519 P4: every
-    // CLI-backed id is listed, linked or not, so a missing row never hides why.
-    let mut ids = vec![
-        BackendId::keychain(),
-        BackendId::file(),
-        BackendId::onepassword(),
-        BackendId::keeper(),
-    ];
-    if !ids.contains(&target.selected) {
-        ids.push(target.selected.clone());
-    }
-    // Read only on a build that links a CLI backend, the only rows it judges.
-    let account =
-        (!cli_backends().is_empty()).then(|| Account::load(state.file_consent_config.as_deref()));
-    let mut backends: Vec<BackendStatus> = ids
-        .into_iter()
-        .map(|id| judge(state, account.as_ref(), id))
-        .collect();
-    // The selected row says what a write meets first: the tracked refusal,
-    // then the `file` consent check, then the open.
-    let refusal = match target.refused {
-        Some(detail) => Some((Unavailable::TrackedSettingRefused, detail)),
-        // #7519 P4: the same check, with the same inputs, as
-        // `ProjectContext::open_for_write`; `file` read available while every
-        // write into it was refused (#7524 H1).
-        None => config::check_value_write_for(
-            &target.selected,
-            state.file_consent_config.as_deref(),
-            state.keychain_compiled,
-        )
-        .err()
-        .map(|e| (Unavailable::NotEnabled, e.to_string())),
-    };
-    if let Some((reason, detail)) = refusal
-        && let Some(row) = backends.iter_mut().find(|row| row.id == target.selected)
-    {
-        *row = BackendStatus::unavailable(row.id.clone(), reason, detail);
-    }
+    let backends = rows(state, &target.selected, target.refused);
     to_json(&DoctorResponse {
         socket: state.settings.socket.clone(),
         index_root: state.settings.index_root.clone(),
@@ -451,6 +416,91 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
         // #7519 P4: DOC-74 §7 — a PATH lookup only; nothing is spawned.
         tools: tools::detect(state.start.search_path.as_deref()),
     })
+}
+
+/// The doctor table's rows for a project whose writes use `selected`.
+///
+/// What: rows for `keychain`, `file`, `onepassword` and `keeper`, then
+/// `selected` when it is none of them, each judged by [`judge`]. The
+/// selected row then says what a write meets first: `refused` (the tracked
+/// refusal), then the `file` consent check. Shared by [`doctor`] and
+/// [`backends`] (#9067 P1), so the page offers what doctor reports.
+fn rows(state: &State, selected: &BackendId, refused: Option<String>) -> Vec<BackendStatus> {
+    // #9326: the file backend is listed beside the Keychain. #7519 P4: every
+    // CLI-backed id is listed, linked or not, so a missing row never hides why.
+    let mut ids = vec![
+        BackendId::keychain(),
+        BackendId::file(),
+        BackendId::onepassword(),
+        BackendId::keeper(),
+    ];
+    if !ids.contains(selected) {
+        ids.push(selected.clone());
+    }
+    // Read only on a build that links a CLI backend, the only rows it judges.
+    let account =
+        (!cli_backends().is_empty()).then(|| Account::load(state.file_consent_config.as_deref()));
+    let mut backends: Vec<BackendStatus> = ids
+        .into_iter()
+        .map(|id| judge(state, account.as_ref(), id))
+        .collect();
+    let refusal = match refused {
+        Some(detail) => Some((Unavailable::TrackedSettingRefused, detail)),
+        // #7519 P4: the same check, with the same inputs, as
+        // `ProjectContext::open_for_write`; `file` read available while every
+        // write into it was refused (#7524 H1).
+        None => config::check_value_write_for(
+            selected,
+            state.file_consent_config.as_deref(),
+            state.keychain_compiled,
+        )
+        .err()
+        .map(|e| (Unavailable::NotEnabled, e.to_string())),
+    };
+    if let Some((reason, detail)) = refusal
+        && let Some(row) = backends.iter_mut().find(|row| &row.id == selected)
+    {
+        *row = BackendStatus::unavailable(row.id.clone(), reason, detail);
+    }
+    backends
+}
+
+/// `secrets.bridge.backends`: the doctor rows for one project, as id and
+/// availability only (#9067 P1).
+///
+/// Why: the page's copy dialog needs the backends this host opens; a fixed
+/// list would offer the Keychain on a Linux host that has none. Doctor is
+/// not bridged and carries paths, so the page gets this reduced form.
+/// What: resolves the project like `secrets.scopes`; a project that does
+/// not resolve fails with the kind scopes gets. Reached only through the
+/// console bridge, so it is always audited: admitted fail-closed, one
+/// record per call, under [`AuditMethod::Backends`]. Reads no credential,
+/// spawns nothing and changes nothing.
+/// Test: `bridge_backends_match_doctor_and_are_audited_once`,
+/// `bridge_backends_from_non_console_peer_is_refused`,
+/// `bridge_backends_errors_map_as_bridged_scopes_does`.
+pub(crate) fn backends(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    audited(
+        state,
+        caller,
+        AuditMethod::Backends,
+        Recording::Once,
+        |gate| {
+            let (dir, rest) = split_project(params)?;
+            if !rest.is_empty() {
+                return Err(ErrorKind::InvalidParams);
+            }
+            let project = ProjectContext::resolve(state, &dir)?;
+            gate.project(&project);
+            gate.admit()?;
+            let selected = project.resolved_config().backend;
+            let choices = rows(state, &selected, None)
+                .into_iter()
+                .map(|row| BackendChoice::new(row.id, row.available))
+                .collect();
+            to_json(&BackendsResponse::new(selected, choices))
+        },
+    )
 }
 
 fn capability_names(caps: Capabilities) -> Vec<String> {

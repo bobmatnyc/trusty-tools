@@ -22,6 +22,8 @@ pub mod routes;
 pub mod verdict;
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod mount_tests;
 #[cfg(test)]
 mod picker_tests;
@@ -181,13 +183,15 @@ impl SecretsBridge {
 
     /// Record the console's bound loopback addresses as its own authorities.
     ///
-    /// What: only loopback addresses count; the tailnet listener is refused
-    /// by its tag. Only the first call takes effect.
+    /// What: only loopback addresses count, each with `localhost` on its
+    /// port (#9067 P2); the tailnet listener is refused by its tag. Only the
+    /// first call takes effect.
     pub fn set_authorities(&self, bound: &[SocketAddr]) {
         let own = bound
             .iter()
             .filter(|addr| addr.ip().is_loopback())
-            .map(|addr| SelfAuthorities::new(*addr, None))
+            // #9067 P2: `localhost:PORT` is this listener too.
+            .map(|addr| SelfAuthorities::loopback(*addr))
             .collect();
         // #9066: set once at startup; a second call is ignored.
         let _ = self.authorities.set(own);
@@ -237,7 +241,8 @@ impl crate::server::AppState {
 ///
 /// Why: mounted as its own sub-router, after the console's permissive CORS
 /// layer and write-origin guard, so neither applies here (A6).
-/// What: `session`, the two picker routes (`projects`, `scopes`, #9067),
+/// What: `session`, the picker routes (`projects`, `scopes`, and
+/// `backends` for copy, #9067),
 /// five credential verbs, `resolve` (501), and a catch-all (404) so no
 /// `/api/secrets/*` path falls through to the generic proxy. Every route
 /// takes any method; the guard answers everything but `POST` (Architect Q3).
@@ -249,6 +254,8 @@ pub fn router(bridge: Arc<SecretsBridge>) -> Router {
         .route("/api/secrets/session", any(routes::session))
         .route("/api/secrets/projects", any(routes::projects))
         .route("/api/secrets/scopes", any(routes::scopes))
+        // #9067 P1: the copy dialog's backends.
+        .route("/api/secrets/backends", any(routes::backends))
         .route("/api/secrets/list", any(routes::list))
         .route("/api/secrets/set", any(routes::set))
         .route("/api/secrets/delete", any(routes::delete))

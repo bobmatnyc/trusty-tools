@@ -82,6 +82,10 @@ pub enum AuditMethod {
     /// call (#9067, Ddf).
     #[serde(rename = "secrets.scopes")]
     Scopes,
+    /// `secrets.bridge.backends`, the copy dialog's backend list: one record
+    /// per call (#9067 P1). It has no direct method.
+    #[serde(rename = "secrets.backends")]
+    Backends,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,

@@ -6,6 +6,7 @@
 //! was the only way to its dashboard — #6286 already deleted trusty-memory's,
 //! and #6287 deleted trusty-analyze's, leaving each SPA in a crate with no
 //! listener. All three are served here instead.
+//! #9067: the Secrets page is a fourth mount, at `/tools/secrets/`.
 //! What: `rust_embed` embeds three bundles, each the Vite output of one of this
 //! crate's own UI projects — build.rs builds `ui-search/` → `ui-search-dist/`,
 //! `ui-memory/` → `ui-memory-dist/` and `ui-analyze/` → `ui-analyze-dist/`
@@ -21,11 +22,14 @@
 //! `tests/search_ui_mount.rs`, `tests/memory_ui_mount.rs` and
 //! `tests/analyze_ui_mount.rs` drive the routes through the real router.
 
+use std::net::SocketAddr;
+
 use axum::{
     body::Body,
-    extract::Path,
-    http::{StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    extract::{ConnectInfo, Path, Request},
+    http::{HeaderValue, StatusCode, header},
+    middleware::Next,
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use rust_embed::{EmbeddedFile, RustEmbed};
 
@@ -61,6 +65,16 @@ struct MemoryUiAssets;
 #[derive(RustEmbed)]
 #[folder = "ui-analyze-dist/"]
 struct AnalyzeUiAssets;
+
+/// The Secrets page bundle, committed under `ui-secrets-dist/` (#9067).
+///
+/// Same arrangement as [`SearchUiAssets`], one manifest row over:
+/// `trusty-console-secrets`, rebuilt by `make -C crates/trusty-console
+/// secrets-ui`.
+/// Test: `secrets_index_is_embedded` below.
+#[derive(RustEmbed)]
+#[folder = "ui-secrets-dist/"]
+struct SecretsUiAssets;
 
 /// One dashboard's mount: where its bytes are and where its API calls go.
 ///
@@ -114,6 +128,17 @@ const ANALYZE: SpaMount = SpaMount {
     base_global: "__ANALYZE_BASE__",
     api_base: "/api/analyze/",
     remedy: "analyze dashboard assets not bundled — run `make -C crates/trusty-console analyze-ui`.",
+};
+
+/// Where the Secrets page's API calls go (#9067).
+///
+/// Same shape as [`SEARCH`], over `secrets_uds::routes`: `/api/secrets/list`
+/// reaches `secrets.bridge.list`.
+const SECRETS: SpaMount = SpaMount {
+    get: SecretsUiAssets::get,
+    base_global: "__SECRETS_BASE__",
+    api_base: "/api/secrets/",
+    remedy: "secrets page assets not bundled — run `make -C crates/trusty-console secrets-ui`.",
 };
 
 /// `GET /tools/search` — redirect to the trailing-slash form.
@@ -188,6 +213,79 @@ pub async fn analyze_ui_index() -> Response {
 /// `tests/analyze_ui_mount.rs`.
 pub async fn analyze_ui_asset(Path(path): Path<String>) -> Response {
     serve_asset(&ANALYZE, &path)
+}
+
+/// `GET /tools/secrets` — redirect to the trailing-slash form (#9067).
+///
+/// Same reason as [`search_ui_redirect`]: the bundle's asset refs are relative.
+/// Test: `secrets_ui_bare_path_redirects` in `tests/secrets_ui_mount.rs`.
+pub async fn secrets_ui_redirect() -> Redirect {
+    Redirect::permanent("/tools/secrets/")
+}
+
+/// `GET /tools/secrets/` — the Secrets page shell (#9067).
+pub async fn secrets_ui_index() -> Response {
+    serve_index(&SECRETS)
+}
+
+/// `GET /tools/secrets/{*path}` — one bundle file, or the shell on a miss.
+///
+/// Test: `secrets_ui_serves_every_asset_the_shell_references` and
+/// `secrets_ui_unknown_path_falls_back_to_the_shell` in
+/// `tests/secrets_ui_mount.rs`.
+pub async fn secrets_ui_asset(Path(path): Path<String>) -> Response {
+    serve_asset(&SECRETS, &path)
+}
+
+/// The page a non-loopback client gets in place of the Secrets page.
+const SECRETS_OFF_LOOPBACK_PAGE: &str = "<!doctype html><html lang=\"en\"><head>\
+<meta charset=\"utf-8\"><title>Secrets page refused</title></head><body>\
+<h1>Secrets page refused</h1><p>The Secrets page is served only to a browser \
+on this machine, over the console's loopback address.</p></body></html>";
+
+/// The layer on every `/tools/secrets/` route (#9067 P3, P5).
+///
+/// Why: P3 — another site must not frame the page that sets credentials.
+/// P5 — until S3b the page is served to loopback clients only; the API
+/// already refuses the tailnet, and this fails closed one step earlier.
+/// What: a request the tailnet listener tagged, or one whose peer address
+/// is known and not loopback, gets a fixed 403 HTML page and never reaches
+/// the bundle. Every response, the 403 included, carries
+/// `Content-Security-Policy: frame-ancestors 'none'` and
+/// `X-Frame-Options: DENY`. A request with no peer address (the loopback
+/// listener reports a pid lookup, not an address) is served.
+/// Test: `every_secrets_page_response_forbids_framing`,
+/// `a_non_loopback_client_gets_a_403_page_for_the_secrets_page`,
+/// `a_tailnet_tagged_request_gets_the_403_page`.
+pub async fn secrets_page_guard(request: Request, next: Next) -> Response {
+    let mut response = if is_off_loopback(&request) {
+        tracing::warn!(
+            route = request.uri().path(),
+            "secrets page refused a non-loopback client"
+        );
+        (StatusCode::FORBIDDEN, Html(SECRETS_OFF_LOOPBACK_PAGE)).into_response()
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    // #9067 P3: never framed, by any site.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+}
+
+/// Whether `request` came from off this machine (#9067 P5).
+fn is_off_loopback(request: &Request) -> bool {
+    let extensions = request.extensions();
+    extensions
+        .get::<crate::tailnet_peer::TailnetRequest>()
+        .is_some()
+        || extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .is_some_and(|ConnectInfo(peer)| !peer.ip().to_canonical().is_loopback())
 }
 
 /// Serve one bundle file, falling back to the shell when it is not one.
@@ -325,6 +423,24 @@ mod tests {
         );
     }
 
+    /// Why: #9067 — the Secrets bundle is built from this crate's
+    /// `ui-secrets/`; embedding another tree would serve a dashboard whose
+    /// calls go to a different bridge at `/tools/secrets/`.
+    /// Test: this is the test.
+    #[test]
+    fn secrets_index_is_embedded() {
+        let index = SecretsUiAssets::get("index.html").expect("bundle carries index.html");
+        let html = String::from_utf8_lossy(index.data.as_ref());
+        assert!(
+            html.contains("<title>Trusty Secrets</title>"),
+            "wrong bundle embedded"
+        );
+        assert!(
+            html.contains("./assets/"),
+            "bundle must use relative asset refs so the /tools/secrets/ mount resolves them"
+        );
+    }
+
     /// Why: the three mounts must set DIFFERENT globals at different prefixes,
     /// or one dashboard's API calls reach another's daemon.
     /// Test: this is the test.
@@ -334,6 +450,9 @@ mod tests {
         let search = inject_api_base(html, SEARCH.base_global, SEARCH.api_base);
         let memory = inject_api_base(html, MEMORY.base_global, MEMORY.api_base);
         let analyze = inject_api_base(html, ANALYZE.base_global, ANALYZE.api_base);
+        let secrets = inject_api_base(html, SECRETS.base_global, SECRETS.api_base);
+        assert!(secrets.contains(r#"window.__SECRETS_BASE__ = new URL("/api/secrets/""#));
+        assert!(!secrets.contains("__ANALYZE_BASE__"));
         assert!(search.contains(r#"window.__SEARCH_BASE__ = new URL("/api/search/""#));
         assert!(memory.contains(r#"window.__MEMORY_BASE__ = new URL("/api/memory/""#));
         assert!(analyze.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/""#));
@@ -363,6 +482,29 @@ mod tests {
         );
         assert!(out.contains(r#""/api/\"evil\"/""#));
         assert!(!out.contains(r#""/api/"evil"/""#));
+    }
+
+    /// Why: #9067 P5 — a request the tailnet listener tagged is refused the
+    /// Secrets page even with no peer address on it, so the refusal does not
+    /// hang on which connect info the listener attached.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_tailnet_tagged_request_gets_the_403_page() {
+        use tower::ServiceExt;
+        let router = crate::server::build_router(crate::server::AppState::new(vec![]));
+        let mut request = axum::http::Request::builder()
+            .uri("/tools/secrets/")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(crate::tailnet_peer::TailnetRequest);
+        let response = router.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&axum::http::HeaderValue::from_static("DENY"))
+        );
     }
 
     #[test]

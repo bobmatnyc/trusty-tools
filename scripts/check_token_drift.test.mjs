@@ -192,7 +192,8 @@ test("every ENFORCED crate compares >0 real tokens against canonical", () => {
   // mis-configured path/selector), so a bare doesNotThrow here would already
   // catch that; we additionally assert the returned comparedCount is > 0 and
   // that no crate has drifted, making this the CI regression for the flip.
-  assert.ok(ENFORCED.length === 6, `expected 6 enforced crates, got ${ENFORCED.length}`);
+  // #9067: the console's Secrets page is the seventh.
+  assert.ok(ENFORCED.length === 7, `expected 7 enforced crates, got ${ENFORCED.length}`);
   const canonical = parseCanonical(TOKENS_CSS_PATH);
   for (const crate of ENFORCED) {
     let diffs;

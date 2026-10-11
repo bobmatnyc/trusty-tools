@@ -1,10 +1,11 @@
 //! build.rs — build the UIs before compiling so rust-embed has assets.
 //!
-//! Why: The web console ships FOUR embedded Svelte SPAs. Its own management UI
+//! Why: The web console ships FIVE embedded Svelte SPAs. Its own management UI
 //! lives in `ui/src/` and builds to `ui/dist/`; the search dashboard lives in
 //! `ui-search/src/` and builds to `ui-search-dist/`; the memory dashboard lives
 //! in `ui-memory/src/` and builds to `ui-memory-dist/`; the analyze dashboard
-//! lives in `ui-analyze/src/` and builds to `ui-analyze-dist/`.
+//! lives in `ui-analyze/src/` and builds to `ui-analyze-dist/`; the Secrets
+//! page lives in `ui-secrets/src/` and builds to `ui-secrets-dist/` (#9067).
 //! `src/tools_ui.rs` serves the latter three at `/tools/search/`,
 //! `/tools/memory/` and `/tools/analyze/`. Running `pnpm build` here means a
 //! plain `cargo build` always produces a binary with up-to-date assets, with no
@@ -61,6 +62,11 @@ fn main() {
     println!("cargo:rerun-if-changed=ui-analyze/vite.config.js");
     println!("cargo:rerun-if-changed=ui-analyze/index.html");
     println!("cargo:rerun-if-changed=ui-analyze/src");
+    // #9067: the Secrets page is this crate's fifth UI project.
+    println!("cargo:rerun-if-changed=ui-secrets/package.json");
+    println!("cargo:rerun-if-changed=ui-secrets/vite.config.js");
+    println!("cargo:rerun-if-changed=ui-secrets/index.html");
+    println!("cargo:rerun-if-changed=ui-secrets/src");
 
     // The console's own management UI, embedded from `ui/dist/`.
     build_bundle(
@@ -99,6 +105,15 @@ fn main() {
         &crate_root.join("ui-analyze-dist"),
         "trusty-console-analyze",
     );
+
+    // #9067: the Secrets page, embedded from `ui-secrets-dist/`. Same shape
+    // as the analyze bundle above.
+    build_bundle(
+        &crate_root,
+        &crate_root.join("ui-secrets"),
+        &crate_root.join("ui-secrets-dist"),
+        "trusty-console-secrets",
+    );
 }
 
 /// Rebuild one committed UI bundle, unless it already matches its source.
@@ -113,7 +128,8 @@ fn main() {
 /// build actually ran. `stamp_key` is the bundle's `ui-bundle-manifest.tsv` row
 /// key — `trusty-console` for `ui/dist/`, `trusty-console-search` for
 /// `ui-search-dist/`, `trusty-console-memory` for `ui-memory-dist/`, and
-/// `trusty-console-analyze` for `ui-analyze-dist/`. The four keys must differ:
+/// `trusty-console-analyze` for `ui-analyze-dist/`, and `trusty-console-secrets`
+/// for `ui-secrets-dist/` (#9067). The five keys must differ:
 /// `stamp-ui-bundle.sh` stamps every row matching the name it is given, so a
 /// shared key would have one bundle's build certify another.
 /// Test: `git status --porcelain` is empty after `cargo test -p trusty-console`;
