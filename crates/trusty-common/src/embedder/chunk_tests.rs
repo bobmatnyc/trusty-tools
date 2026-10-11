@@ -311,7 +311,10 @@ fn fixture_fastembed_cache(model_max_length: usize) -> tempfile::TempDir {
     std::fs::create_dir_all(repo.join("refs")).expect("refs dir");
     let files = [
         (repo.join("refs").join("main"), "fixture".to_string()),
-        (snapshot.join("tokenizer.json"), small_bert_tokenizer_json(&[])),
+        (
+            snapshot.join("tokenizer.json"),
+            small_bert_tokenizer_json(&[]),
+        ),
         (
             snapshot.join("tokenizer_config.json"),
             serde_json::json!({"model_max_length": model_max_length, "pad_token": "[PAD]"})
@@ -335,7 +338,10 @@ fn fastembed_truncates_at_minilm_window_on_every_model_revision() {
     // fastembed 5.13.4 truncates at min(TextInitOptions::max_length,
     // tokenizer_config.json `model_max_length`) — `common.rs` `load_tokenizer`.
     let scratch = tempfile::tempdir().expect("tempdir");
-    for model in [EmbeddingModel::AllMiniLML6V2, EmbeddingModel::AllMiniLML6V2Q] {
+    for model in [
+        EmbeddingModel::AllMiniLML6V2,
+        EmbeddingModel::AllMiniLML6V2Q,
+    ] {
         let opts = FastEmbedder::text_init_options(model, scratch.path().to_path_buf());
         assert_eq!(opts.max_length, MINILM_MAX_SEQ_LENGTH);
     }
