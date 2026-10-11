@@ -3,8 +3,8 @@
 //! Why: ADR-0066 D1.1 freezes the trusty-memory MCP surface for 1.x, and D4
 //! names this snapshot as its guard. A 1.x change is additive only: removing
 //! or renaming a tool or a param, a new required param, an optional param made
-//! required, or a changed param type must fail here. A new tool or a new
-//! optional param must not.
+//! required, or a changed param type must fail here as a break. A new tool or
+//! a new optional param is not a break, but it fails until the snapshot pins it.
 //! What: [`snapshot`] reduces the default `tools/list` payload
 //! (`tool_definitions()`, no `--palace` default) to one JSON Lines record per
 //! tool: name, required params, param types and the deprecation flag, sorted
@@ -291,7 +291,9 @@ fn snapshot_path() -> PathBuf {
 
 /// Why: the verdict `mcp_schema_matches_snapshot` asserts, callable on a
 /// synthetic snapshot. What: compares the snapshot text with the live payload;
-/// a break is an error. Test: `mcp_schema_unpinned_additions_fail`.
+/// a break is an error, and so is an addition the snapshot does not pin
+/// (checked after breaks, so a break still reports as one).
+/// Test: `mcp_schema_unpinned_additions_fail`.
 fn gate(golden: &str, live: &Value) -> Result<(), String> {
     let report = check(&parse(golden), live);
     if !report.breaks.is_empty() {
@@ -305,15 +307,17 @@ fn gate(golden: &str, live: &Value) -> Result<(), String> {
             report.breaks.join("\n  - "),
         ));
     }
+    // #9276: an unpinned addition fails, so a later removal of it is caught;
+    // an empty snapshot fails here too, as every live tool is an addition.
     if !report.additions.is_empty() {
-        eprintln!(
-            "note: the MCP schema gained {} item(s) the snapshot does not pin yet. \
-             Additive changes are allowed in 1.x (ADR-0066 D3); pin them with \
-             `{REFRESH_CMD}` together with a changelog fragment that names the \
-             addition (ADR-0066 D4):\n  {}",
+        return Err(format!(
+            "trusty-memory MCP schema gained {} item(s) the snapshot does not pin:\n  - {}\n\n\
+             Additive changes are allowed in 1.x (ADR-0066 D3), but each one is pinned. \
+             Refresh with:\n    {REFRESH_CMD}\nand commit {SNAPSHOT} together with a \
+             changelog fragment that names the addition (ADR-0066 D4).",
             report.additions.len(),
-            report.additions.join("\n  ")
-        );
+            report.additions.join("\n  - ")
+        ));
     }
     Ok(())
 }
