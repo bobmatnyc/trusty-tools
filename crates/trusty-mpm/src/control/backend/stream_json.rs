@@ -682,6 +682,65 @@ mod tests {
         assert_reaped(pid);
     }
 
+    /// A `tracing` writer that keeps every formatted line for an assertion.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The actor drops a pending `recv` on Stop/ForceStop, then calls `stop`.
+    /// `stop` must kill the lingering worker at once, not wait out the reap's
+    /// own bound, return Ok, and log the reap's result instead of dropping it.
+    #[tokio::test]
+    async fn stop_during_pending_exit_reap_kills_at_once_and_logs_the_result() {
+        let logs = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let bound = Duration::from_secs(5);
+        let mut backend = spawn_sh("exec >&-; exec sleep 30", bound);
+        let pid = worker_pid(&backend);
+        let cancelled = tokio::time::timeout(Duration::from_millis(100), backend.recv()).await;
+        assert!(cancelled.is_err(), "the first recv must still be waiting");
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(10), backend.stop())
+            .await
+            .expect("stop must return within 10 s")
+            .expect("a requested stop is Ok even though it killed the worker");
+        let took = started.elapsed();
+        assert!(
+            took < bound / 2,
+            "stop must kill at once, not wait out the {bound:?} reap bound; took {took:?}"
+        );
+        assert_reaped(pid);
+        let logged = String::from_utf8(logs.0.lock().expect("capture lock").clone())
+            .expect("the captured log must be utf-8");
+        assert!(
+            logged.contains("WARN") && logged.contains("claude worker"),
+            "stop must log the reap's result at warn: {logged:?}"
+        );
+    }
+
     /// Verify that spawning when `claude` is absent returns a descriptive error.
     /// This test is skipped with `#[ignore]` in CI where `claude` is installed,
     /// so it does not run as an integration test by default.
