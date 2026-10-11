@@ -8,6 +8,7 @@
 //! marker on the live file (the KG's post-open gate reads the copy's).
 //! Test: `an_observer_open_never_locks_the_live_file`,
 //! `an_observer_open_of_a_missing_file_creates_nothing`,
+//! `a_failed_observer_copy_leaves_no_snapshot_file`,
 //! `the_observer_gate_refuses_a_missing_palace_and_a_migration_in_progress`.
 
 use super::concurrent_open::{OpenMode, SnapshotGuard, snapshot_path_for};
@@ -29,8 +30,17 @@ use std::sync::Arc;
 /// [`OpenMode::Snapshot`] and a guard that deletes the copy on drop. The copy
 /// is a point-in-time read; a write against it is rejected by the store.
 /// Test: `an_observer_open_never_locks_the_live_file`,
-/// `an_observer_open_of_a_missing_file_creates_nothing`.
+/// `an_observer_open_of_a_missing_file_creates_nothing`,
+/// `a_failed_observer_copy_leaves_no_snapshot_file`.
 pub(super) fn open_observer_copy(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    open_observer_copy_with(path, |from, to| std::fs::copy(from, to))
+}
+
+/// [`open_observer_copy`] with the file copy injected; a test fails it partway.
+fn open_observer_copy_with(
+    path: &Path,
+    copy: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
     if !path.try_exists().unwrap_or(false) {
         anyhow::bail!(
             "no store at {}: a read-only observer never creates one (#9659); \
@@ -39,7 +49,7 @@ pub(super) fn open_observer_copy(path: &Path) -> Result<(Arc<Database>, Snapshot
         );
     }
     let snap = snapshot_path_for(path);
-    std::fs::copy(path, &snap).with_context(|| {
+    copy(path, &snap).with_context(|| {
         format!(
             "copy {} -> {} for an observer",
             path.display(),
@@ -131,6 +141,29 @@ mod tests {
         let path = missing.join("kg.redb");
         assert!(try_open_or_snapshot(&path, OpenIntent::Observer).is_err());
         assert!(!missing.exists(), "an observer open created a directory");
+    }
+
+    /// #9659: a copy that fails after creating the snapshot file leaves no
+    /// snapshot file behind.
+    #[test]
+    fn a_failed_observer_copy_leaves_no_snapshot_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        drop(create_palace_db(&path).expect("create the live file"));
+
+        let mut written = None;
+        let result = open_observer_copy_with(&path, |_, to| {
+            std::fs::write(to, b"partial")?;
+            written = Some(to.to_path_buf());
+            Err(std::io::Error::other("injected: no space left on device"))
+        });
+        assert!(result.is_err(), "a failed copy must fail the open");
+        let snap = written.expect("the copy ran");
+        assert!(
+            !snap.exists(),
+            "a failed copy left {} behind",
+            snap.display()
+        );
     }
 
     /// #9659: the observer gate refuses a palace without a `kg.redb` and one
