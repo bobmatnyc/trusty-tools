@@ -31,7 +31,10 @@ use super::{StableHookExeError, resolve_stable_hook_exe, strip_hook_entries_matc
 /// What: 10, the value the pm-guard entry uses.
 /// Test: `egress_hook_timeout_exceeds_the_guard_budget` (the drift test, in
 /// the binary, against S1's own constants).
-pub const EGRESS_GUARD_TIMEOUT_SECS: u64 = 0;
+pub const EGRESS_GUARD_TIMEOUT_SECS: u64 = 10;
+
+/// The `PreToolUse` matchers that fire for every tool.
+const ALL_TOOLS_MATCHERS: [&str; 2] = ["", "*"];
 
 /// The `PreToolUse` group that registers `<exe> hook --egress-guard`.
 ///
@@ -40,22 +43,41 @@ pub const EGRESS_GUARD_TIMEOUT_SECS: u64 = 0;
 /// What: matcher `""` (every tool), one command entry, timeout
 /// [`EGRESS_GUARD_TIMEOUT_SECS`].
 /// Test: `egress_group_registers_the_guard_command_with_timeout_10`.
-pub fn egress_guard_hook_group(_exe: &Path) -> Value {
-    Value::Null
+pub fn egress_guard_hook_group(exe: &Path) -> Value {
+    serde_json::json!({
+        "matcher": ALL_TOOLS_MATCHERS[0],
+        "hooks": [{
+            "type": "command",
+            "command": format!("{}{EGRESS_GUARD_SUFFIX}", exe.display()),
+            "timeout": EGRESS_GUARD_TIMEOUT_SECS,
+        }]
+    })
 }
 
 /// Whether `cmd` is an egress-guard hook command, whatever binary it names.
 ///
 /// Test: `egress_is_project_managed_hook_command_claims_the_egress_suffix`.
-pub fn is_egress_guard_hook_command(_cmd: &str) -> bool {
-    false
+pub fn is_egress_guard_hook_command(cmd: &str) -> bool {
+    cmd.ends_with(EGRESS_GUARD_SUFFIX)
 }
 
 /// Append the egress group to a `hooks` object's `PreToolUse` array.
 ///
-/// What: creates the array when absent; skips a group already present.
+/// What: creates the array when absent; skips a group already present. A
+/// `PreToolUse` value that is not an array is left alone — the writers'
+/// loaders reject such a file before it gets here.
 /// Test: `egress_settings_writer_adds_entry_even_when_pm_guard_disabled`.
-pub(crate) fn push_egress_guard_group(_hooks: &mut Map<String, Value>, _exe: &Path) {}
+pub(crate) fn push_egress_guard_group(hooks: &mut Map<String, Value>, exe: &Path) {
+    let group = egress_guard_hook_group(exe);
+    if let Some(groups) = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        && !groups.contains(&group)
+    {
+        groups.push(group);
+    }
+}
 
 /// `additions` with the egress group appended, the binary resolved by the
 /// lifecycle triad's rule.
@@ -69,8 +91,16 @@ pub(crate) fn with_egress_guard_group(
     additions: Result<Value, StableHookExeError>,
     exe_override: Option<&Path>,
 ) -> Result<Value, StableHookExeError> {
-    let additions = additions?;
-    resolve_stable_hook_exe(exe_override)?;
+    let mut additions = additions?;
+    let exe = resolve_stable_hook_exe(exe_override)?;
+    if let Some(root) = additions.as_object_mut()
+        && let Some(hooks) = root
+            .entry("hooks")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+    {
+        push_egress_guard_group(hooks, &exe);
+    }
     Ok(additions)
 }
 
@@ -106,16 +136,66 @@ pub enum EgressGuardState {
 /// [`EgressGuardState::Weakened`]; no entry is
 /// [`EgressGuardState::Missing`].
 /// Test: `egress_state_reads_present_missing_and_weakened`.
-pub fn egress_guard_state(_settings: &Value) -> EgressGuardState {
-    EgressGuardState::Present
+pub fn egress_guard_state(settings: &Value) -> EgressGuardState {
+    let groups = settings
+        .get("hooks")
+        .and_then(|hooks| hooks.get("PreToolUse"))
+        .and_then(Value::as_array);
+    let mut weakened = None;
+    for group in groups.into_iter().flatten() {
+        let entries = group.get("hooks").and_then(Value::as_array);
+        for entry in entries.into_iter().flatten() {
+            let named = entry
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(is_egress_guard_hook_command);
+            if !named {
+                continue;
+            }
+            match entry_fault(group, entry) {
+                None => return EgressGuardState::Present,
+                Some(fault) => {
+                    weakened.get_or_insert(fault);
+                }
+            }
+        }
+    }
+    weakened.map_or(EgressGuardState::Missing, EgressGuardState::Weakened)
+}
+
+/// Why an egress entry inside `group` cannot do its job, or `None`.
+fn entry_fault(group: &Value, entry: &Value) -> Option<String> {
+    match group.get("matcher") {
+        None => {}
+        Some(Value::String(m)) if ALL_TOOLS_MATCHERS.contains(&m.as_str()) => {}
+        Some(other) => return Some(format!("its matcher {other} does not fire for every tool")),
+    }
+    if entry.get("type").and_then(Value::as_str) != Some("command") {
+        return Some("its entry is not a `command` hook".to_owned());
+    }
+    match entry.get("timeout") {
+        None => None,
+        Some(t) if t.as_u64().is_some_and(|t| t >= EGRESS_GUARD_TIMEOUT_SECS) => None,
+        Some(t) => Some(format!(
+            "its timeout {t} is under {EGRESS_GUARD_TIMEOUT_SECS} s, so Claude Code can kill it \
+             into an allow"
+        )),
+    }
+}
+
+/// Whether `settings` carries any egress-guard entry, working or not.
+pub(crate) fn has_egress_guard_entry(settings: &Value) -> bool {
+    egress_guard_state(settings) != EgressGuardState::Missing
 }
 
 /// Whether `settings` sets `disableAllHooks` to anything but `false`.
 ///
 /// Why: that one key turns every hook off, the egress guard included.
 /// Test: `egress_disable_all_hooks_detects_any_non_false_value`.
-pub fn disables_all_hooks(_settings: &Value) -> bool {
-    false
+pub fn disables_all_hooks(settings: &Value) -> bool {
+    settings
+        .get("disableAllHooks")
+        .is_some_and(|value| *value != Value::Bool(false))
 }
 
 #[cfg(test)]

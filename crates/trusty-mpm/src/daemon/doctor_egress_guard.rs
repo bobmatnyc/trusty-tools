@@ -16,21 +16,187 @@
 //! reads `[pm_guard]`: the entry has no off switch (Architect D3). Read-only.
 //! Test: the `egress_doctor_*` tests below.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
+use super::doctor_hooks_hygiene::candidate_settings_files;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::standalone::hooks::build_tree::PM_GUARD_SUFFIX;
+use crate::core::standalone::hooks::cleanup::event_names_matching;
+use crate::core::standalone::hooks::egress::{
+    EgressGuardState, disables_all_hooks, egress_guard_state, is_egress_guard_hook_command,
+};
+use crate::core::standalone::hooks::is_mpm_hook_command;
+use crate::core::trusty_tools_config::managed_claude_config_dir_at;
 
 /// The check's name.
 const NAME: &str = "egress_guard";
 
+/// How many findings the message names before counting the rest.
+const SHOWN: usize = 3;
+
+/// The settings files in one directory, and whether tm owns it outright.
+struct Tier {
+    files: Vec<PathBuf>,
+    managed: bool,
+}
+
 /// Report whether every tm-provisioned settings file registers the egress
 /// guard. See the module doc.
 pub(super) fn check_egress_guard(
-    _project_dir: Option<&Path>,
-    _active_workspace_paths: &[PathBuf],
-    _home: &Path,
+    project_dir: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+    home: &Path,
 ) -> DoctorCheck {
-    DoctorCheck::new(NAME, CheckStatus::Ok, "egress guard registered")
+    let mut tiers: BTreeMap<PathBuf, Tier> = BTreeMap::new();
+    for file in candidate_settings_files(project_dir, active_workspace_paths) {
+        let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+        tiers
+            .entry(dir)
+            .or_insert_with(|| Tier {
+                files: Vec::new(),
+                managed: false,
+            })
+            .files
+            .push(file);
+    }
+    let managed = managed_claude_config_dir_at(home);
+    if managed.join("settings.json").is_file() {
+        let files = ["settings.json", "settings.local.json"]
+            .into_iter()
+            .map(|name| managed.join(name))
+            .filter(|path| path.is_file())
+            .collect();
+        tiers.insert(
+            managed,
+            Tier {
+                files,
+                managed: true,
+            },
+        );
+    }
+    let (mut fails, mut unknowns, mut guarded) = (Vec::new(), Vec::new(), 0usize);
+    for (dir, tier) in &tiers {
+        match judge_tier(dir, tier) {
+            Verdict::Fine(true) => guarded += 1,
+            Verdict::Fine(false) => {}
+            Verdict::Unknown(why) => unknowns.extend(why),
+            Verdict::Fail(why) => fails.extend(why),
+        }
+    }
+    let remedy = "Relaunch the session with tm, or run `tm install` for the managed tier; a \
+         running Claude Code session keeps the hooks it loaded at startup.";
+    if !fails.is_empty() {
+        return DoctorCheck::new(
+            NAME,
+            CheckStatus::Fail,
+            format!("{} {remedy}", listed(&fails)),
+        );
+    }
+    if !unknowns.is_empty() {
+        return DoctorCheck::new(
+            NAME,
+            CheckStatus::Unknown,
+            format!(
+                "cannot tell whether the egress guard is registered: {}",
+                listed(&unknowns)
+            ),
+        );
+    }
+    DoctorCheck::new(
+        NAME,
+        CheckStatus::Ok,
+        format!(
+            "`hook --egress-guard` registered in {guarded} tm-provisioned settings director{}",
+            if guarded == 1 { "y" } else { "ies" }
+        ),
+    )
+}
+
+/// The outcome for one settings directory.
+enum Verdict {
+    /// Nothing wrong; `true` when the directory is tm-provisioned.
+    Fine(bool),
+    /// A file could not be read or parsed.
+    Unknown(Vec<String>),
+    /// The guard is missing, weakened or switched off.
+    Fail(Vec<String>),
+}
+
+/// Judge one directory's settings files. See the module doc.
+fn judge_tier(dir: &Path, tier: &Tier) -> Verdict {
+    let mut values = Vec::new();
+    let mut unknown = Vec::new();
+    for file in &tier.files {
+        match std::fs::read_to_string(file) {
+            Err(e) => unknown.push(format!("{} is unreadable ({e})", file.display())),
+            Ok(text) if text.trim().is_empty() => {
+                values.push((file, Value::Object(Default::default())))
+            }
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(value) if value.is_object() => values.push((file, value)),
+                _ => unknown.push(format!("{} is not a JSON object", file.display())),
+            },
+        }
+    }
+    let provisioned = tier.managed
+        || values
+            .iter()
+            .any(|(_, value)| !event_names_matching(value, is_tm_hook_command).is_empty());
+    let mut fails = Vec::new();
+    let (mut present, mut weakened) = (false, false);
+    for (file, value) in &values {
+        if disables_all_hooks(value) {
+            fails.push(format!("{} sets disableAllHooks", file.display()));
+        }
+        match egress_guard_state(value) {
+            EgressGuardState::Present => present = true,
+            EgressGuardState::Weakened(why) => {
+                weakened = true;
+                fails.push(format!(
+                    "{}: the egress entry is weakened — {why}",
+                    file.display()
+                ));
+            }
+            EgressGuardState::Missing => {}
+        }
+    }
+    if provisioned && !present && !weakened && unknown.is_empty() {
+        fails.push(format!(
+            "{} carries no `hook --egress-guard` PreToolUse group",
+            dir.display()
+        ));
+    }
+    if provisioned && !fails.is_empty() {
+        Verdict::Fail(fails)
+    } else if !unknown.is_empty() {
+        Verdict::Unknown(unknown)
+    } else {
+        Verdict::Fine(provisioned)
+    }
+}
+
+/// A tm hook command: the lifecycle `tm hook` (including a build-tree one),
+/// the pm-guard or the egress guard. Not `trusty-memory`, which writes its
+/// own project hooks outside tm.
+fn is_tm_hook_command(cmd: &str) -> bool {
+    is_mpm_hook_command(cmd) || cmd.ends_with(PM_GUARD_SUFFIX) || is_egress_guard_hook_command(cmd)
+}
+
+/// The first [`SHOWN`] findings joined, plus a count of the rest.
+fn listed(findings: &[String]) -> String {
+    let mut text = findings
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if findings.len() > SHOWN {
+        text.push_str(&format!(" (and {} more)", findings.len() - SHOWN));
+    }
+    text
 }
 
 #[cfg(test)]

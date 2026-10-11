@@ -41,7 +41,7 @@
 //! project may legitimately register its own hook that happens to live under
 //! `target/debug`, and tm must not delete another owner's entry. Both halves
 //! must hold — the executable is in a Cargo build tree AND the argv after it is
-//! one of the four shapes tm itself writes. A command tm never writes
+//! one of the five shapes tm itself writes. A command tm never writes
 //! (`<build-tree>/mytool --check`, `<build-tree>/tm lint`) is left untouched no
 //! matter where it lives. The residual overlap is a foreign binary invoked with
 //! tm's exact argv from inside a Cargo build tree; that command is already dead
@@ -58,9 +58,10 @@ use std::path::Path;
 /// shape one of tm's writers produces: `" hook"` is the six-event lifecycle
 /// triad ([`super::mpm_hook_additions_with_exe`]), [`PM_GUARD_SUFFIX`] the PM
 /// enforcement guard, [`DIVERT_CHECK_SUFFIX`] the #6887 bulk-read diversion
-/// groups, and [`PROMPT_FEEDBACK_SUFFIX`] the #7688 prompt-feedback capture.
-/// Anything else is not tm's to classify.
-/// What: the four tails, matched as exact string suffixes so the whole prefix
+/// groups, [`PROMPT_FEEDBACK_SUFFIX`] the #7688 prompt-feedback capture, and
+/// [`EGRESS_GUARD_SUFFIX`] the #8454 egress guard. Anything else is not tm's
+/// to classify.
+/// What: the five tails, matched as exact string suffixes so the whole prefix
 /// is the executable path — spaces in that path included. They are mutually
 /// exclusive: a command ending in [`PM_GUARD_SUFFIX`] cannot also end in
 /// `" hook"`.
@@ -75,6 +76,9 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     // capture hook as tm's own, so a stale one pointing at a Cargo build tree
     // would survive the repair every sibling shape gets.
     PROMPT_FEEDBACK_SUFFIX,
+    // #8454: the build-tree shape only. The installed egress entry stays
+    // unclaimed, so `tm hooks clean` and the strips never remove it.
+    EGRESS_GUARD_SUFFIX,
 ];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
