@@ -8,7 +8,8 @@
 //! chain, and asserts the verdict; this module decides whether to believe
 //! it, then runs the direct method body under it.
 //! What: [`METHODS`], one bridged entry per method the console forwards
-//! (`list`, `set`, `delete`, `copy`, `set_agents_may_use`). Each entry:
+//! (`scopes`, `list`, `set`, `delete`, `copy`, `set_agents_may_use`). Each
+//! entry:
 //! 1. takes the [`BRIDGE_FIELD`] assertion out of the params; one that is
 //!    missing, does not decode, carries an unknown field or contradicts its
 //!    source is `malformed`;
@@ -55,7 +56,9 @@ use crate::api::{BRIDGE_FIELD, BridgeAssertion, SecretKey, VaultName};
 pub(crate) const CONSOLE_EXECUTABLE: &str = "trusty-console";
 
 /// Every bridged method, with its entry.
-pub(crate) const METHODS: [(&str, MethodFn); 5] = [
+pub(crate) const METHODS: [(&str, MethodFn); 6] = [
+    // #9067: the page's scope picker.
+    (bridged::SCOPES, scopes),
     (bridged::LIST, list),
     (bridged::SET, set),
     (bridged::DELETE, delete),
@@ -102,11 +105,12 @@ impl BridgeVerdict {
 
     /// The ancestry answer the direct socket would have reached.
     ///
-    /// Why: Architect 04:03Z — `unmappable` is a non-agent, and a mapped pid
-    /// whose chain cannot be read gets what the direct socket gives an
-    /// unreadable chain: `has_agent_ancestor` errs, and
-    /// `set_agents_may_use` refuses ON with [`ErrorKind::GrantRefused`].
-    /// What: `mapped` answers its boolean, `unmappable` `false`;
+    /// Why: Architect 04:03Z — a mapped pid whose chain cannot be read gets
+    /// what the direct socket gives an unreadable chain: `has_agent_ancestor`
+    /// errs, and `set_agents_may_use` refuses ON with
+    /// [`ErrorKind::GrantRefused`]. #9067 Architect Q5: `unmappable` is an
+    /// agent, so ON is [`ErrorKind::AgentUseRefused`].
+    /// What: `mapped` answers its boolean, `unmappable` `true`;
     /// `unreadable` is [`ErrorKind::GrantRefused`]; anything else (never
     /// reached past [`bridged`]) is [`ErrorKind::InvalidParams`].
     /// Test: `bridge_verdict_parity_with_direct_socket_table`,
@@ -114,11 +118,16 @@ impl BridgeVerdict {
     pub(crate) fn judged(self) -> Result<bool, ErrorKind> {
         match (self.source, self.agent_parent) {
             (AuditSource::Mapped, Some(agent_parent)) => Ok(agent_parent),
-            (AuditSource::Unmappable, Some(false)) => Ok(false),
+            // #9067: fail closed; an unmappable client is never a person.
+            (AuditSource::Unmappable, Some(true)) => Ok(true),
             (AuditSource::Unreadable, _) => Err(ErrorKind::GrantRefused),
             _ => Err(ErrorKind::InvalidParams),
         }
     }
+}
+
+fn scopes(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    bridged(state, caller, params, AuditMethod::Scopes, methods::scopes)
 }
 
 fn list(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {

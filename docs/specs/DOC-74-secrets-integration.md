@@ -1263,13 +1263,35 @@ The console never opens a store.
 The socket's peer is the console, not the HTTP client it serves, so the
 console makes the ancestry judgment and the server checks who made it.
 
-- The bridge forwards `list`, `set`, `delete`, `copy` and
-  `set_agents_may_use` as `secrets.bridge.<method>`. `scopes` and `doctor`
-  read no credential and go direct. `resolve` has no console route.
+- The bridge forwards `scopes`, `list`, `set`, `delete`, `copy` and
+  `set_agents_may_use` as `secrets.bridge.<method>` (#9067: `scopes`, the
+  page's scope picker, is bridged, no longer direct). The server runs the
+  direct `secrets.scopes` body: the project scope, then the owner scope
+  from the checkout's origin remote, never a machine scope. The console
+  relays a scopes result only when every kind is `project` or `owner`.
+  `doctor` is not bridged. `resolve` has no console route.
+- **Project picker (#9067).** `POST /api/secrets/projects` returns
+  `{"projects": [{"name", "path"}]}` from the tm project registry
+  (`$TRUSTY_MPM_ROOT/project-paths.json`, else
+  `~/.trusty-mpm/project-paths.json`), keeping each row whose path is an
+  existing absolute directory. The page picks a project from this list,
+  never a typed path or the console's working directory (Architect
+  ruling). An absent or empty registry is an empty list; an unreadable or
+  malformed one is a fixed 503. The route takes the same guard and CSRF
+  header as every secrets route and never dials the socket. The console
+  reads the file itself, so trusty-secrets gains no trusty-common edge
+  (owner ruling Df0). Known limit: the registry keys each checkout by its
+  directory basename and keeps the first one registered, so of two
+  checkouts that share a basename (`acme/web`, `bob/web`) only the first
+  is listed, and the page cannot reach the second (Architect ruling
+  2026-10-11 D1).
 - Each bridged call carries a `bridge` field beside the method's own
   params: `agent_parent` (a boolean) and `source`. `mapped` means the
   console found the client's pid and read its chain. `unmappable` means it
-  found no pid: a non-agent, and `agent_parent` must be `false`.
+  found no pid, which includes every client on a platform other than macOS
+  and Linux: the client is treated as an agent, and `agent_parent` must be
+  `true` (#9067, Architect Q5: fail closed), so `set_agents_may_use` ON is
+  `agent_use_refused` and OFF is allowed.
   `unreadable` means it found a pid but could not read the chain:
   `agent_parent` must be `true`, and the server treats the call as the
   direct socket treats an unreadable chain, so `set_agents_may_use` ON is
@@ -1294,8 +1316,9 @@ console makes the ancestry judgment and the server checks who made it.
   deny record, naming the vault and key its params carried when they
   decode. An accepted `set`, `delete`, `copy` or `set_agents_may_use` runs
   the direct method body and leaves the direct call's records. An accepted
-  `list` leaves one record, allow or deny; a direct `list` leaves a record
-  only when denied. Every allowed bridge call, `list` included, is admitted
+  `list` or `scopes` leaves one record, allow or deny; a direct `list`
+  leaves a record only when denied, and a direct `scopes` never does.
+  Every allowed bridge call, `list` and `scopes` included, is admitted
   fail-closed: when the audit log cannot be written it is refused with
   `audit_unavailable` and no backend call runs. Bridge auditing follows the
   machine config's `secrets.audit`, as the direct socket's does (owner

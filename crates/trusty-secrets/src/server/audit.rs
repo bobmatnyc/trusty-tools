@@ -45,7 +45,8 @@ pub enum AuditStream {
     CredentialAccess,
 }
 
-/// The audited `secrets.*` method. `scopes` and `doctor` are never audited.
+/// The audited `secrets.*` method. A direct `scopes` and `doctor` are never
+/// audited.
 ///
 /// What: serialized as the method's wire name. A name this build does not
 /// know decodes as [`AuditMethod::Other`].
@@ -77,6 +78,10 @@ pub enum AuditMethod {
     /// call, then a deny if that call fails; one deny for a refusal (#9070).
     #[serde(rename = "secrets.set_agents_may_use")]
     SetAgentsMayUse,
+    /// `secrets.scopes`, through the console bridge only: one record per
+    /// call (#9067, Ddf).
+    #[serde(rename = "secrets.scopes")]
+    Scopes,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,

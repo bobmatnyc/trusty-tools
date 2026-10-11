@@ -58,7 +58,8 @@ fn os_pid_of(local: SocketAddr, peer: SocketAddr) -> Option<u32> {
     macos::pid_of(local, peer)
 }
 
-// #9066 A1: no socket table to read, so every client is `unmappable`.
+// #9066 A1: no socket table to read, so every client is `unmappable`;
+// #9067: which is asserted an agent, so toggle-ON is refused here.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn os_pid_of(_local: SocketAddr, _peer: SocketAddr) -> Option<u32> {
     None

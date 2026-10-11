@@ -7,7 +7,8 @@
 //! HTTP client is (owner ruling Dd7 B). The console writes no audit of its
 //! own; the server records every bridged call (ruling Ddf).
 //! What: [`SecretsBridge`], the shared state — the dial, the per-launch CSRF
-//! token, the console's own loopback authorities and the process table;
+//! token, the console's own loopback authorities, the process table and the
+//! tm project registry file the page's picker reads (#9067, `projects`);
 //! [`router`], the routes behind [`guard::guard`]; and [`TailnetRequest`],
 //! the tag the tailnet listener puts on every request so the guard refuses it.
 //! Test: `tests.rs` beside this module; `tests/secrets_uds_bridge.rs`.
@@ -16,17 +17,20 @@ pub mod dial;
 pub mod errors;
 pub mod guard;
 pub mod pid_map;
+pub mod projects;
 pub mod routes;
 pub mod verdict;
 
 #[cfg(test)]
 mod mount_tests;
 #[cfg(test)]
+mod picker_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use axum::Router;
@@ -114,6 +118,8 @@ pub struct SecretsBridge {
     enabled: Option<(SecretsDial, CsrfToken)>,
     authorities: OnceLock<Vec<SelfAuthorities>>,
     table: Arc<dyn ProcessTable>,
+    // #9067: the tm project registry file; `None` when `$HOME` is unknown.
+    registry: Option<PathBuf>,
 }
 
 impl fmt::Debug for SecretsBridge {
@@ -131,6 +137,7 @@ impl SecretsBridge {
             enabled: None,
             authorities: OnceLock::new(),
             table: Arc::new(OsProcessTable),
+            registry: projects::default_registry_file(),
         }
     }
 
@@ -163,6 +170,13 @@ impl SecretsBridge {
         self
     }
 
+    /// Read the project picker from `registry` instead of tm's (tests).
+    #[must_use]
+    pub fn with_registry(mut self, registry: Option<PathBuf>) -> Self {
+        self.registry = registry;
+        self
+    }
+
     /// Record the console's bound loopback addresses as its own authorities.
     ///
     /// What: only loopback addresses count; the tailnet listener is refused
@@ -187,6 +201,10 @@ impl SecretsBridge {
 
     pub(crate) fn dial(&self) -> Option<&SecretsDial> {
         self.enabled.as_ref().map(|(dial, _)| dial)
+    }
+
+    pub(crate) fn registry(&self) -> Option<&Path> {
+        self.registry.as_deref()
     }
 
     pub(crate) fn table(&self) -> Arc<dyn ProcessTable> {
@@ -217,14 +235,18 @@ impl crate::server::AppState {
 ///
 /// Why: mounted as its own sub-router, after the console's permissive CORS
 /// layer and write-origin guard, so neither applies here (A6).
-/// What: six verbs, `resolve` (501), and a catch-all (404) so no
+/// What: `session`, the two picker routes (`projects`, `scopes`, #9067),
+/// five credential verbs, `resolve` (501), and a catch-all (404) so no
 /// `/api/secrets/*` path falls through to the generic proxy. Every route
 /// takes any method; the guard answers everything but `POST` (Architect Q3).
 /// Test: `unknown_secrets_paths_never_reach_the_socket`,
-/// `the_real_router_sends_no_cors_header_on_secrets_routes`.
+/// `the_real_router_sends_no_cors_header_on_secrets_routes`,
+/// `picker_routes_refuse_bad_origin_host_csrf_and_method`.
 pub fn router(bridge: Arc<SecretsBridge>) -> Router {
     Router::new()
         .route("/api/secrets/session", any(routes::session))
+        .route("/api/secrets/projects", any(routes::projects))
+        .route("/api/secrets/scopes", any(routes::scopes))
         .route("/api/secrets/list", any(routes::list))
         .route("/api/secrets/set", any(routes::set))
         .route("/api/secrets/delete", any(routes::delete))

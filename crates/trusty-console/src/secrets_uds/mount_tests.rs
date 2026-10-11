@@ -238,6 +238,9 @@ async fn serve_tailnet_refuses_every_secrets_route_before_any_lookup() {
     ));
     for path in [
         "/api/secrets/session",
+        // #9067: the picker routes are refused on the tailnet too.
+        "/api/secrets/projects",
+        "/api/secrets/scopes",
         "/api/secrets/list",
         "/api/secrets/set",
         "/api/secrets/delete",

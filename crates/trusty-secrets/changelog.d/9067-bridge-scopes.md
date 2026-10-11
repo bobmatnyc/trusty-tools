@@ -1,0 +1,2 @@
+Added
+- `secrets.bridge.scopes`: the console bridge's form of `secrets.scopes`, for the Secrets page's scope picker. It is refused with `bridge_refused` from any peer that is not the verified console, answers what a direct `secrets.scopes` answers (project and owner scopes only), and, like every bridge call, leaves one `secrets.scopes` audit record and is refused with `audit_unavailable` when the record cannot be written. A direct `secrets.scopes` still leaves no record (#9067).
