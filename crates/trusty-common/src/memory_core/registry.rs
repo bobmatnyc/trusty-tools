@@ -936,10 +936,8 @@ impl PalaceRegistry {
     /// What: sets `intent` before hydrating. Under `Writer` a palace that fails
     /// to open logs an ERROR and is recorded unopenable, never a snapshot
     /// handle. Under `Observer` the root directory is not created.
-    /// Test: `a_writer_registry_never_hydrates_read_only` (trusty-common);
-    /// `sm_serve_first_then_daemon_gets_the_writer_lock` and
-    /// `a_writer_provision_beside_a_kg_holder_is_unavailable_with_a_reason`
-    /// (trusty-mpm).
+    /// Test: `a_writer_registry_never_hydrates_read_only`; the trusty-mpm SM
+    /// and portfolio #9659 tests cover both intents end to end.
     pub fn open_with_intent(data_root: &Path, intent: OpenIntent) -> Result<Self> {
         if intent != OpenIntent::Observer {
             std::fs::create_dir_all(data_root)
