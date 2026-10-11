@@ -286,6 +286,15 @@ fn pty_state(master: &std::fs::File, groups: &[i64]) -> String {
     )
 }
 
+/// SIGKILL a process group the test's tm created.
+///
+/// Why: #9694 — `kill_on_drop` ends tm only; a background job in the
+/// command's group outlives a failing test unless its group is killed.
+fn kill_group(group: i64) {
+    // SAFETY: plain syscall to a group this test's tm created.
+    unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
+}
+
 /// Why: tier 1 end to end — the value reaches the env, output is scrubbed,
 /// one resolve per key, and the grant is revoked on a normal exit.
 #[tokio::test(flavor = "multi_thread")]
@@ -584,7 +593,14 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
     drop(cmd);
     let start = Instant::now();
     while fx.seen().revokes.is_empty() {
-        assert!(start.elapsed() < Duration::from_secs(20), "never revoked");
+        if start.elapsed() >= Duration::from_secs(20) {
+            // #9694: once granted, the job runs; end its group before failing.
+            let granted = fx.seen().grants.first().map(|g| g["child_pid"].as_i64());
+            if let Some(Some(group)) = granted {
+                kill_group(group);
+            }
+            panic!("never revoked");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let group = fx.seen().grants[0]["child_pid"].as_i64().unwrap();
@@ -593,16 +609,20 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
     let start = Instant::now();
     // SAFETY: TIOCGPGRP on an open pty master only reads.
     while i64::from(unsafe { libc::tcgetpgrp(master.as_raw_fd()) }) != tm_pid {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "tm never took the terminal back after the revoke\n{}",
-            pty_state(&master, &[tm_pid, group])
-        );
+        if start.elapsed() >= Duration::from_secs(20) {
+            // #9694: snapshot, then end the job's group before failing.
+            let state = pty_state(&master, &[tm_pid, group]);
+            kill_group(group);
+            panic!("tm never took the terminal back after the revoke\n{state}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let exited = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            master.write_all(b"\x03").expect("write Ctrl-C");
+            // #9694: a failed write falls through to the group kill below.
+            if let Err(e) = master.write_all(b"\x03") {
+                break Err(std::io::Error::other(format!("write Ctrl-C: {e}")));
+            }
             tokio::select! {
                 status = child.wait() => break status,
                 () = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -615,8 +635,7 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
     let state = exited
         .is_err()
         .then(|| pty_state(&master, &[tm_pid, group]));
-    // SAFETY: plain syscall to the group this test's tm created.
-    unsafe { libc::killpg(group as libc::pid_t, libc::SIGKILL) };
+    kill_group(group);
     let Ok(status) = exited else {
         let _ = child.start_kill();
         let mut stderr = Vec::new();
