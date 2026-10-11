@@ -25,7 +25,9 @@ use std::panic::AssertUnwindSafe;
 
 use futures::FutureExt as _;
 
-use crate::commands::egress_guard_bash::{BASH_CHECK, bash_deny_reason, bash_egress_hit};
+use crate::commands::egress_guard_bash::{
+    BASH_CHECK, bash_deny_reason, bash_egress_hit, bash_oversize_reason,
+};
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
@@ -163,9 +165,12 @@ pub(crate) fn decide(
 /// Why (§4 fail closed): Claude Code always sends a string `command`, so any
 /// other shape is a delivery fault, denied like a malformed payload.
 /// What: a missing or non-string `tool_input.command` denies as
-/// `egress-unclassifiable-payload`; a command [`bash_egress_hit`] names a hit
-/// in denies as [`BASH_CHECK`] with the plan §6 text; anything else allows.
+/// `egress-unclassifiable-payload`; a command over the byte cap denies as
+/// [`BASH_CHECK`] naming the cap (#9699); a command [`bash_egress_hit`] names
+/// a hit in denies as [`BASH_CHECK`] with the plan §6 text; anything else
+/// allows.
 /// Test: `bash_egress_denies_missing_or_non_string_command`,
+/// `bash_egress_denies_a_command_over_the_byte_cap_9699`,
 /// `bash_egress_trust_anchor_verdict_precedes_the_bash_arm`.
 fn bash_verdict(input: &serde_json::Value) -> Verdict {
     let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
@@ -174,10 +179,23 @@ fn bash_verdict(input: &serde_json::Value) -> Verdict {
             unclassifiable("a Bash `tool_input.command` is missing or not a string"),
         );
     };
+    // #9699: an over-cap command is denied before the walk reads any of it.
+    if let Some(reason) = bash_oversize_reason(command) {
+        return deny(BASH_CHECK, reason);
+    }
     match bash_egress_hit(command) {
         Some(hit) => deny(BASH_CHECK, bash_deny_reason(&hit)),
         None => Verdict::Allow,
     }
+}
+
+/// The over-cap deny for a Bash payload, before any parser reads it (#9699).
+fn oversize_bash(payload: &serde_json::Value) -> Option<Verdict> {
+    if payload.get("tool_name")?.as_str()? != BASH_TOOL {
+        return None;
+    }
+    let command = payload.get("tool_input")?.get("command")?.as_str()?;
+    bash_oversize_reason(command).map(|reason| deny(BASH_CHECK, reason))
 }
 
 /// The guard's verdict: the trust-anchor floor first, then [`decide`].
@@ -185,18 +203,24 @@ fn bash_verdict(input: &serde_json::Value) -> Verdict {
 /// Why (#8454 S2, Architect D1): `[pm_guard] enabled = false` leaves the
 /// pm-guard hook out, and with it the #8878 trust-anchor floor; this hook has
 /// no off switch, so it runs that floor itself.
-/// What: when the read is a payload and `anchor` denies it, a
-/// `trust-anchor-write` deny; otherwise [`decide`]'s verdict.
-/// Test: `egress_trust_anchor_verdict_precedes_the_family_check`.
+/// What: a Bash command over the byte cap denies first, unread (#9699); then,
+/// when the read is a payload and `anchor` denies it, a `trust-anchor-write`
+/// deny; otherwise [`decide`]'s verdict.
+/// Test: `egress_trust_anchor_verdict_precedes_the_family_check`,
+/// `bash_egress_cap_precedes_the_trust_anchor_floor_9699`.
 pub(crate) fn verdict(
     read: &Result<serde_json::Value, HookStdinError>,
     table: &FamilyTable,
     anchor: impl FnOnce(&serde_json::Value) -> Option<String>,
 ) -> Verdict {
-    if let Ok(payload) = read
-        && let Some(reason) = anchor(payload)
-    {
-        return deny(TRUST_ANCHOR_RULE, reason);
+    if let Ok(payload) = read {
+        // #9699: the anchor floor parses the command too, so the cap runs first.
+        if let Some(oversize) = oversize_bash(payload) {
+            return oversize;
+        }
+        if let Some(reason) = anchor(payload) {
+            return deny(TRUST_ANCHOR_RULE, reason);
+        }
     }
     decide(read, table)
 }

@@ -7,7 +7,8 @@
 //! variable and no `agent_id`.
 //! What: [`bash_egress_hit`] names the first outbound-channel token a command
 //! carries. A family host denies in any word; a family program denies only in
-//! command position, so `grep mail f` is allowed. It reuses the pm-guard shell
+//! command position, so `grep mail f` is allowed. A command over
+//! [`MAX_COMMAND_BYTES`] is denied unread (#9699). It reuses the pm-guard shell
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
 //! `tokenize`, `resolve_program_word`, `split_heredoc_bodies` and
 //! `decode_ansi_c` — and adds no tokenizer.
@@ -103,9 +104,29 @@ const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
 /// The per-segment error for shell keywords nested past the depth bound.
 const TOO_DEEP: UnplaceableWrite = "shell keywords nested deeper than the guard follows";
 
-/// The most [`segment_hits`] calls one [`text_hit`] makes before it fails
-/// closed (#8454 critic round 3): `time eval S` reads `S` twice per level.
+/// The work units one [`text_hit`] spends before it fails closed (#8454
+/// critic round 3): `time eval S` reads `S` twice per level. #9699 (b): a
+/// [`segment_hits`] call costs one unit plus one per [`BYTES_PER_UNIT`] of its
+/// segment, so the budget bounds the bytes re-read as well as the calls.
 const WORK_BUDGET: usize = 4096;
+
+/// The segment bytes one [`WORK_BUDGET`] unit pays for (#9699 (b)): the walk
+/// re-reads at most ~4 MiB, 64 full reads of a command at the cap.
+const BYTES_PER_UNIT: usize = 1024;
+
+/// The most bytes of a Bash command the arm reads: 64 KiB (#9699 (b)).
+///
+/// Why: the walk's cost grows with the bytes it re-reads, and Claude Code
+/// kills a hook at its timeout, which is an allow. So a command over the cap
+/// is denied whole — never scanned in part, never allowed. The cap is
+/// inclusive, as #9699 words it ("a command over a byte cap"): 65 536 bytes is
+/// read, 65 537 is denied.
+/// Test: `bash_egress_byte_cap_boundary_is_65536_bytes_9699`.
+pub(crate) const MAX_COMMAND_BYTES: usize = 64 * 1024;
+
+/// The quoting bytes the shell removes from a word, which the raw scan also
+/// strips (#9699 (a)).
+const QUOTING: &[char] = &['\'', '"', '\\'];
 
 /// One outbound-channel name a Bash command carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +174,26 @@ pub(crate) fn bash_egress_hit(command: &str) -> Option<Hit> {
         .find_map(text_hit)
 }
 
+/// The deny reason for a command over [`MAX_COMMAND_BYTES`]; `None` when the
+/// command fits.
+///
+/// Why (#9699 (b)): the caller runs this before any parser reads the command,
+/// the trust-anchor floor's included, so no read of an over-cap command can
+/// run the hook past its timeout.
+/// Test: `bash_egress_denies_a_command_over_the_byte_cap_9699`,
+/// `bash_egress_cap_precedes_the_trust_anchor_floor_9699`.
+pub(crate) fn bash_oversize_reason(command: &str) -> Option<String> {
+    (command.len() > MAX_COMMAND_BYTES).then(|| {
+        format!(
+            "tm hook --egress-guard denies this Bash command: it is {} bytes, over the 64 KiB \
+             ({MAX_COMMAND_BYTES}-byte) cap the guard reads, so the guard cannot rule out an \
+             outbound channel in it (#9699). Write the payload to a file first, or split the \
+             command.",
+            command.len()
+        )
+    })
+}
+
 /// The plan §6 deny reason for `hit`.
 pub(crate) fn bash_deny_reason(hit: &Hit) -> String {
     format!(
@@ -164,7 +205,7 @@ pub(crate) fn bash_deny_reason(hit: &Hit) -> String {
 }
 
 /// [`host_hit`] over the raw text, then [`segment_hits`] over every segment
-/// and nested body, within [`WORK_BUDGET`] calls; a text the walk cannot
+/// and nested body, within [`WORK_BUDGET`] units; a text the walk cannot
 /// parse, or one that spends the budget, falls back to [`raw_hit`].
 fn text_hit(text: &str) -> Option<Hit> {
     if let Some(found) = host_hit(text) {
@@ -178,10 +219,19 @@ fn text_hit(text: &str) -> Option<Hit> {
     }
 }
 
-/// [`host_hit`], then [`raw_word_hit`]: the fail-closed judgement of a text
-/// the parsers cannot read.
+/// [`host_hit`], then [`raw_word_hit`], over `text` and over `text` with its
+/// [`QUOTING`] bytes removed: the fail-closed judgement of a text the parsers
+/// cannot read.
+///
+/// Why (#9699 (a)): the raw words split at quotes, so `se''ndmail` read as
+/// `se` and `ndmail`; the shell removes those quotes and runs `sendmail`.
+/// Test: `bash_egress_denies_quote_split_names_in_the_raw_scan_9699`,
+/// `bash_allows_quote_separated_words_in_the_raw_scan_9699`.
 fn raw_hit(text: &str) -> Option<Hit> {
-    host_hit(text).or_else(|| raw_word_hit(text))
+    let unquoted: String = text.chars().filter(|c| !QUOTING.contains(c)).collect();
+    [text, unquoted.as_str()]
+        .into_iter()
+        .find_map(|text| host_hit(text).or_else(|| raw_word_hit(text)))
 }
 
 /// The first family host, SMTP URL or `smtp.*` host on a mail port in `text`.
@@ -285,20 +335,24 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// unmeasurable wrapper option hides it, every word stands in for it.
 /// Leading shell keywords ([`after_keywords`]) are skipped and the rest mapped
 /// again one `depth` deeper; past [`MAX_SUBSTITUTION_DEPTH`] that is an `Err`.
-/// Each call spends one unit of `budget`; an empty budget is an `Err`.
+/// Each call spends one unit of `budget` plus one per [`BYTES_PER_UNIT`] of
+/// the segment; a budget that cannot pay is an `Err`.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
 /// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
 /// `bash_egress_denies_program_behind_a_shell_keyword`,
 /// `bash_egress_denies_keyword_nesting_past_the_depth_bound`,
-/// `bash_egress_bounds_work_for_time_eval_nesting`.
+/// `bash_egress_bounds_work_for_time_eval_nesting`,
+/// `bash_egress_judges_a_near_cap_time_eval_payload_within_bound_9699`.
 fn segment_hits(
     segment: &str,
     depth: usize,
     budget: &Cell<usize>,
 ) -> Result<Vec<Hit>, UnplaceableWrite> {
     // #8454 critic round 3: the walk also re-reads a wrapper's inner command,
-    // so depth alone does not bound the total work.
-    let left = budget.get().checked_sub(1).ok_or(TOO_DEEP)?;
+    // so depth alone does not bound the total work. #9699 (b): nor does a
+    // count of calls, each of which may read the whole command.
+    let cost = 1 + segment.len() / BYTES_PER_UNIT;
+    let left = budget.get().checked_sub(cost).ok_or(TOO_DEEP)?;
     budget.set(left);
     if segment.is_empty() {
         return Ok(Vec::new());

@@ -695,7 +695,7 @@ fn bash_allows_a_60_kib_heredoc_9699() {
 /// 🔴 #9699 (a): once the walk gives up — budget spent, nesting too deep, a
 /// segment that will not lex, an undecodable `$"…"` — the raw scan also reads
 /// the text with its quotes removed, so a name spliced from quoted pieces
-/// still denies. The `$'…'` row was already denied; it pins the decode path.
+/// still denies. The `$'…'` row decodes leniently to a `'s'lack.com` splice.
 #[test]
 fn bash_egress_denies_quote_split_names_in_the_raw_scan_9699() {
     let nest = |inner: &str| format!("{}{inner}{}", "$(".repeat(33), ")".repeat(33));
