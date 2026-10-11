@@ -45,7 +45,8 @@ const METHOD_RESOLVE: &str = "search.project.resolve";
 /// What: at most `max_groups` resolves, each bounded by `per_call`, all
 /// inside `budget`. Groups left over are reported as not checked.
 /// Test: `a_resolve_that_times_out_stops_the_fanout_and_is_not_ok`,
-/// `groups_past_the_cap_are_not_checked_not_ok`.
+/// `groups_past_the_cap_are_not_checked_not_ok`,
+/// `the_fanout_budget_cuts_off_slow_groups_as_not_checked`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct FanoutLimits {
     /// Most pinned groups one run resolves.
@@ -124,7 +125,8 @@ pub(super) enum MapRead {
 /// daemon older than trusty-search 0.60.0; a body without a `projects` array
 /// is malformed. None of them is `Readable`.
 /// Test: `unreadable_project_map_is_fail_not_ok`,
-/// `a_daemon_without_the_map_method_is_not_checked`.
+/// `a_daemon_without_the_map_method_is_not_checked`,
+/// `a_map_answer_that_cannot_be_read_is_never_ok`.
 pub(super) fn read_map(rpc: Rpc) -> MapRead {
     let body = match rpc {
         Rpc::Answer(body) => body,
@@ -192,41 +194,50 @@ pub(super) struct Fanout {
 ///
 /// What: drops parked duplicates; a duplicate that is a worktree, orphaned,
 /// or shares its root with another member is parkable; any other live
-/// duplicate is a competing checkout.
+/// duplicate is a competing checkout. An answer missing a field the verdict
+/// reads is `Err("resolve answered without `<field>`")`, never a clean group.
 /// Test: `duplicate_index_group_is_warn`, `a_same_root_sibling_is_a_duplicate_not_a_checkout`,
-/// `a_parked_duplicate_is_ok`.
-pub(super) fn classify(pin: &Pin, body: &Value) -> GroupFinding {
-    let text = |v: &Value, name: &str| {
-        v.get(name)
+/// `a_parked_duplicate_is_ok`, `a_malformed_resolve_answer_is_not_checked_not_clean`.
+pub(super) fn classify(pin: &Pin, body: &Value) -> Result<GroupFinding, String> {
+    // #9169: validate the shape the way `read_map` does — unread input is not clean.
+    let missing = |field: &str| format!("resolve answered without `{field}`");
+    let text = |v: &Value, field: &str| {
+        v.get(field)
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
+            .map(str::to_string)
+            .ok_or_else(|| missing(field))
     };
-    let answer_root = text(body, "root_path");
-    let duplicates: Vec<&Value> = body
+    let answer = text(body, "index_id")?;
+    let answer_root = text(body, "root_path")?;
+    let rows = body
         .get("duplicates")
         .and_then(Value::as_array)
-        .map(|d| d.iter().collect())
-        .unwrap_or_default();
+        .ok_or_else(|| missing("duplicates"))?;
+    let mut members = Vec::with_capacity(rows.len());
+    for dup in rows {
+        let parked = dup
+            .get("parked")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| missing("parked"))?;
+        let (id, root, kind) = (
+            text(dup, "index_id")?,
+            text(dup, "root_path")?,
+            text(dup, "kind")?,
+        );
+        members.push((id, root, kind, parked));
+    }
     let mut finding = GroupFinding {
         key: pin.key.clone(),
-        answer: text(body, "index_id"),
+        answer,
         pinned_by: pin.pinned_by.clone(),
         ..GroupFinding::default()
     };
-    for dup in &duplicates {
-        if dup.get("parked").and_then(Value::as_bool) == Some(true) {
+    for (id, root, kind, parked) in &members {
+        if *parked {
             continue;
         }
-        let (id, root, kind) = (
-            text(dup, "index_id"),
-            text(dup, "root_path"),
-            text(dup, "kind"),
-        );
-        let shares_root = root == answer_root
-            || duplicates
-                .iter()
-                .any(|o| text(o, "index_id") != id && text(o, "root_path") == root);
+        let shares_root =
+            *root == answer_root || members.iter().any(|(o, r, _, _)| o != id && r == root);
         let label = format!("`{id}` ({kind}, {root})");
         if shares_root || kind == "worktree" || kind == "orphaned" {
             finding.parkable.push(label);
@@ -234,7 +245,7 @@ pub(super) fn classify(pin: &Pin, body: &Value) -> GroupFinding {
             finding.checkouts.push(label);
         }
     }
-    finding
+    Ok(finding)
 }
 
 /// Resolve each pin's group, bounded by `limits`.
@@ -243,9 +254,13 @@ pub(super) fn classify(pin: &Pin, body: &Value) -> GroupFinding {
 /// index, in map order. A refusal marks that group unchecked and the
 /// fan-out goes on; a call with no answer (timeout, dead socket) stops it and
 /// marks every remaining group unchecked, as do the cap and the budget.
+/// A malformed answer marks its group unchecked. A call cut short by the
+/// budget is reported as the budget, not as a daemon that stopped answering.
 /// Test: `a_group_whose_resolve_fails_is_not_ok`,
 /// `a_resolve_that_times_out_stops_the_fanout_and_is_not_ok`,
-/// `groups_past_the_cap_are_not_checked_not_ok`.
+/// `groups_past_the_cap_are_not_checked_not_ok`,
+/// `the_fanout_budget_cuts_off_slow_groups_as_not_checked`,
+/// `a_malformed_resolve_answer_is_not_checked_not_clean`.
 pub(super) async fn resolve_groups(socket: &Path, pins: &[Pin], limits: FanoutLimits) -> Fanout {
     let started = Instant::now();
     let mut out = Fanout::default();
@@ -255,20 +270,30 @@ pub(super) async fn resolve_groups(socket: &Path, pins: &[Pin], limits: FanoutLi
             stop = Some(format!("past the {}-group cap", limits.max_groups));
         }
         let left = limits.budget.saturating_sub(started.elapsed());
+        // #9169: the budget is a reason of its own, not "stopped answering".
+        let over_budget = format!("past the {:?} budget", limits.budget);
         if stop.is_none() && left.is_zero() {
-            stop = Some(format!("past the {}s budget", limits.budget.as_secs()));
+            stop = Some(over_budget.clone());
         }
         if let Some(reason) = &stop {
             out.unchecked.push((pin.key.clone(), reason.clone()));
             continue;
         }
+        let budget_bound = left < limits.per_call;
         let params = serde_json::json!({ "project": pin.index_id });
         match call(socket, METHOD_RESOLVE, params, limits.per_call.min(left)).await {
-            Rpc::Answer(body) => out.groups.push(classify(pin, &body)),
+            Rpc::Answer(body) => match classify(pin, &body) {
+                Ok(finding) => out.groups.push(finding),
+                Err(reason) => out.unchecked.push((pin.key.clone(), reason)),
+            },
             Rpc::Refused { code, message, .. } => out.unchecked.push((
                 pin.key.clone(),
                 format!("resolve refused ({code}): {message}"),
             )),
+            Rpc::Unreachable(_) if budget_bound => {
+                out.unchecked.push((pin.key.clone(), over_budget.clone()));
+                stop = Some(over_budget);
+            }
             Rpc::Unreachable(e) => {
                 out.unchecked
                     .push((pin.key.clone(), format!("no answer: {e}")));

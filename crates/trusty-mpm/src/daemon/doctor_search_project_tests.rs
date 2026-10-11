@@ -211,7 +211,7 @@ fn two_main_checkouts_warn_until_an_operator_pins_one() {
         ("operator", CheckStatus::Ok),
     ] {
         let fanout = Fanout {
-            groups: vec![classify(&pin(by), &body)],
+            groups: vec![classify(&pin(by), &body).unwrap()],
             unchecked: vec![],
         };
         let [dups, two, _] = build_group_rows(&map, Some(&fanout));
@@ -230,7 +230,7 @@ fn a_same_root_sibling_is_a_duplicate_not_a_checkout() {
         "a",
         serde_json::json!([dup("a-1a2b3c4d", "main_checkout", "/src/a", false)]),
     );
-    let finding = classify(&pin("migration"), &body);
+    let finding = classify(&pin("migration"), &body).unwrap();
     assert_eq!(finding.parkable.len(), 1, "{finding:?}");
     assert!(finding.checkouts.is_empty(), "{finding:?}");
 }
@@ -241,7 +241,7 @@ fn a_parked_duplicate_is_ok() {
         "a",
         serde_json::json!([dup("a-wt", "worktree", "/wt/a", true)]),
     );
-    let finding = classify(&pin("migration"), &body);
+    let finding = classify(&pin("migration"), &body).unwrap();
     assert_eq!(
         finding,
         GroupFinding {
