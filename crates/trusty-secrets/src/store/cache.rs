@@ -344,6 +344,11 @@ impl SecretCache {
     }
 }
 
+// #7520 S2: its own file, because it installs this test binary's allocator.
+#[cfg(test)]
+#[path = "cache_zeroize_tests.rs"]
+mod zeroize_tests;
+
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};

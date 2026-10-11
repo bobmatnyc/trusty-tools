@@ -41,6 +41,8 @@ mod agents_flag;
 pub mod ancestry;
 pub mod audit;
 pub mod client;
+// #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
+mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
 mod deadline;
 mod doctor;
@@ -63,6 +65,7 @@ pub use ancestry::{
 };
 pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use core_dump::disable_core_dumps;
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
 };

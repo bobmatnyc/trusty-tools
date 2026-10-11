@@ -64,6 +64,12 @@ name = "audit_post_success"
 path = "tests/audit_post_success.rs"
 required-features = ["server"]
 
+# #7520 S2: sets RLIMIT_CORE for its whole process, so it is its own binary.
+[[test]]
+name = "core_dump_limit"
+path = "tests/core_dump_limit.rs"
+required-features = ["server"]
+
 # #9070: S8 live checks; spawns the real binary, so it needs `server`.
 [[test]]
 name = "live_flag_peer"
