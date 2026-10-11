@@ -43,6 +43,23 @@ async function open(overrides) {
   return fake;
 }
 
+/** Choose an option in a select, as the user does. */
+function change(select, value) {
+  select.value = value;
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+const OTHER = '/work/acme-api';
+
+/** #9712: two projects whose project vaults hold 3 keys and 1 key. */
+const TWO_PROJECTS = {
+  projects: () => [200, { projects: [{ name: 'acme-web', path: PROJECT }, { name: 'acme-api', path: OTHER }] }],
+  list: (body) => [200, {
+    vault: body.vault,
+    keys: (body.project === PROJECT ? ['A', 'B', 'C'] : ['Z']).map((name) => ({ name, length: 1, updated_at: 't' })),
+  }],
+};
+
 function type(el, value) {
   el.value = value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -184,6 +201,40 @@ describe('the Secrets page', () => {
     await settle();
     expect(q('copy-confirm')).toBeNull();
     expect(fake.calls.some((c) => c.verb === 'copy')).toBe(false);
+  });
+
+  // #9712: a count that answers late must not open a confirm for another project.
+  test.each([
+    ['a project switch', () => change(q('project'), OTHER)],
+    ['a scope switch', () => change(q('scope'), 'trusty/acme')],
+    ['Escape', () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))],
+  ])('a copy count that answers after %s opens no confirm', async (_, act) => {
+    const fake = await open(TWO_PROJECTS);
+    const release = fake.hold('list');
+    await submit(q('copy-form'));
+    // The held call is the copy count for the first project.
+    expect(fake.calls.filter((c) => c.verb === 'list').pop().body).toEqual({ project: PROJECT, vault: VAULT });
+    act();
+    await settle();
+    release();
+    await settle();
+    expect(q('copy-confirm')).toBeNull();
+    expect(fake.calls.some((c) => c.verb === 'copy')).toBe(false);
+  });
+
+  test('the copy confirm names the project it counted and sends that project', async () => {
+    const fake = await open(TWO_PROJECTS);
+    change(q('project'), OTHER);
+    await settle();
+    await submit(q('copy-form'));
+    const text = q('copy-confirm').textContent;
+    expect(text).toContain(OTHER);
+    expect(text).toContain('1 key');
+    click(q('confirm-copy'), 1);
+    await settle();
+    const copies = fake.calls.filter((c) => c.verb === 'copy');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].body.project).toBe(OTHER);
   });
 
   test('copy defaults from to the selected backend', async () => {
