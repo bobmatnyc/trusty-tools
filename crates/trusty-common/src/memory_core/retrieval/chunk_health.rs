@@ -8,6 +8,7 @@
 //! lists the drawers whose rows are not exactly chunks `0..expected`.
 //! Test: `chunk_health_tests.rs`.
 
+use super::embed_store::{ChunkPlanner, expected_chunk_count};
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::vector::ChunkShape;
@@ -42,14 +43,70 @@ impl ChunkCheck {
 
 /// Drawers whose chunk rows do not match the chunk count their text needs.
 ///
-/// C1 seam: reports nothing (the PR B behaviour). The pipeline commit adds the
-/// comparison.
-/// Test: `health_flags_a_drawer_with_fewer_chunk_rows_than_expected`.
+/// Why: see the module doc; this is the comparison `embed_health` runs.
+/// What: `Ran` with an empty list when no live drawer has a vector. Otherwise
+/// `Unavailable` when no embedder is ready, its tokenizer will not load, or
+/// the index scan failed. A drawer whose text fits one chunk is checked under
+/// the drawer read lock; the rest are cloned and split outside it with
+/// [`expected_chunk_count`], so the check and the writers share one split. A
+/// drawer whose text will not split counts as short (its repair reports why).
+/// Test: `health_flags_a_drawer_with_fewer_chunk_rows_than_expected`,
+/// `health_flags_a_gapped_group`,
+/// `health_reports_chunk_check_unavailable_when_no_embedder_is_ready`.
 pub(super) fn short_chunk_ids(
-    _embedder: Option<&dyn Embedder>,
-    _drawers: &RwLock<Vec<Drawer>>,
-    _with_vector: &HashSet<Uuid>,
-    _shapes: anyhow::Result<HashMap<Uuid, ChunkShape>>,
+    embedder: Option<&dyn Embedder>,
+    drawers: &RwLock<Vec<Drawer>>,
+    with_vector: &HashSet<Uuid>,
+    shapes: anyhow::Result<HashMap<Uuid, ChunkShape>>,
 ) -> (Vec<Uuid>, ChunkCheck) {
-    (Vec::new(), ChunkCheck::Ran)
+    if with_vector.is_empty() {
+        return (Vec::new(), ChunkCheck::Ran);
+    }
+    let Some(embedder) = embedder else {
+        return unavailable("no embedder has initialised in this process".to_string());
+    };
+    let planner = match ChunkPlanner::for_embedder(embedder) {
+        Ok(planner) => planner,
+        Err(e) => return unavailable(format!("{e:#}")),
+    };
+    let shapes = match shapes {
+        Ok(shapes) => shapes,
+        Err(e) => return unavailable(format!("scan vector keys: {e:#}")),
+    };
+    let shape_of = |id: &Uuid| shapes.get(id).copied().unwrap_or_default();
+
+    let mut short = Vec::new();
+    let mut long: Vec<(Uuid, String, ChunkShape)> = Vec::new();
+    for drawer in drawers
+        .read()
+        .iter()
+        .filter(|d| with_vector.contains(&d.id))
+    {
+        let shape = shape_of(&drawer.id);
+        let fits = planner
+            .as_ref()
+            .is_none_or(|p| p.fits_one_chunk(drawer.content()));
+        if fits {
+            if !shape.is_complete(1) {
+                short.push(drawer.id);
+            }
+        } else {
+            long.push((drawer.id, drawer.content().to_string(), shape));
+        }
+    }
+    for (id, text, shape) in long {
+        match expected_chunk_count(embedder, &text) {
+            Ok(expected) if shape.is_complete(expected) => {}
+            Ok(_) => short.push(id),
+            Err(e) => {
+                tracing::warn!(drawer = %id, "#9275: drawer text will not split: {e:#}");
+                short.push(id);
+            }
+        }
+    }
+    (short, ChunkCheck::Ran)
+}
+
+fn unavailable(reason: String) -> (Vec<Uuid>, ChunkCheck) {
+    (Vec::new(), ChunkCheck::Unavailable(reason))
 }

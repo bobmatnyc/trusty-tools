@@ -23,8 +23,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
-use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, RememberOptions};
-use trusty_common::memory_core::store::{Triple, VectorStore as _};
+use trusty_common::memory_core::retrieval::{
+    embed_chunks, shared_embedder, PalaceHandle, RememberOptions,
+};
+use trusty_common::memory_core::store::Triple;
 use uuid::Uuid;
 
 use super::bridge::KuzuExport;
@@ -518,17 +520,14 @@ impl HandleSink {
         id: Uuid,
         m: &MappedMemory,
     ) -> Result<(), KuzuImportError> {
-        let vectors = embedder
-            .embed_batch(std::slice::from_ref(&m.content))
+        // #9275: one vector per chunk; `upsert_chunks` replaces the whole
+        // group, so a shorter rewrite leaves no stale chunk rows.
+        let vectors = embed_chunks(embedder, &m.content).await.map_err(sink_err)?;
+        self.handle
+            .vector_store
+            .upsert_chunks(id, vectors)
             .await
             .map_err(sink_err)?;
-        if let Some(v) = vectors.into_iter().next() {
-            self.handle
-                .vector_store
-                .upsert(id, v)
-                .await
-                .map_err(sink_err)?;
-        }
         let (content, tags, importance, created) = (
             m.content.clone(),
             m.tags.clone(),

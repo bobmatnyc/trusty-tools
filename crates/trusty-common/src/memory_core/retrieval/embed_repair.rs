@@ -659,23 +659,29 @@ impl PalaceHandle {
         }
     }
 
-    /// Re-embed every live drawer that has no vector.
+    /// Re-embed every live drawer that has no vector, or fewer chunk rows than
+    /// its text needs (#9275).
     ///
     /// Why: the repair half of #4906. Fixing the write path does not make the
     /// drawers already written without a vector findable, and #4834 cannot
-    /// delete a source file until they are.
+    /// delete a source file until they are. #9275: a drawer embedded before
+    /// chunking has a vector and is still unfindable by its tail.
     /// What: computes [`EmbedHealth`], then (unless `dry_run`) embeds each
-    /// missing drawer through the same `embed_and_store` primitive the write
-    /// path uses, clearing its ledger row on success and refreshing it on
-    /// failure. Idempotent and safe to re-run: a repaired drawer is no longer in
-    /// the missing set, so a second run does nothing.
+    /// missing drawer, then each short one, through the same `embed_and_store`
+    /// primitive the write path uses (`limit` caps the union, missing first),
+    /// clearing its ledger row on success and refreshing it on failure.
+    /// Idempotent and safe to re-run: a repaired drawer is in neither set, so a
+    /// second run does nothing. When the chunk check could not run because no
+    /// embedder had initialised, it initialises one and checks again.
     ///
     /// Errors, rather than half-running, when the palace is read-only (a
     /// snapshot handle cannot write vectors — route through the daemon) or when
-    /// there is work to do and no embedder can be initialised. A dry run has
-    /// neither constraint, so it still reports on a host with no model.
+    /// there is known work to do and no embedder can be initialised. A dry run
+    /// has neither constraint, so it still reports on a host with no model; so
+    /// does a palace whose only gap is a chunk check that could not run.
     /// Test: `backfill_reembeds_a_marked_drawer`,
-    /// `backfill_is_a_noop_on_a_healthy_palace`, `backfill_dry_run_repairs_nothing`.
+    /// `backfill_is_a_noop_on_a_healthy_palace`, `backfill_dry_run_repairs_nothing`,
+    /// `legacy_palace_recalls_unchanged_then_reembed_adds_the_tail`.
     pub async fn backfill_missing_vectors(
         &self,
         opts: VectorBackfillOptions,
@@ -686,10 +692,22 @@ impl PalaceHandle {
         if opts.dry_run || health.needs_no_repair() {
             return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
         }
+        // #9275: an unrun chunk check is not known work; it never turns a
+        // no-op into an error on a read-only handle or a host with no model.
+        let unknown_only =
+            health.missing_vector_ids.is_empty() && health.short_chunk_ids.is_empty();
+        if unknown_only && self.is_read_only() {
+            return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
+        }
         self.refuse_read_only_backfill()?;
-        let embedder = shared_embedder()
-            .await
-            .context("acquire shared embedder for vector backfill")?;
+        let embedder = match shared_embedder().await {
+            Ok(embedder) => embedder,
+            Err(e) if unknown_only => {
+                tracing::warn!(palace = %self.id, "#9275: no embedder for the chunk check: {e:#}");
+                return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
+            }
+            Err(e) => return Err(e.context("acquire shared embedder for vector backfill")),
+        };
         self.backfill_with(opts, &embedder).await
     }
 

@@ -1,0 +1,4 @@
+Added
+- The memory pipeline embeds a drawer longer than the embedder window as one vector per window-sized chunk and stores them under `{uuid}#{n}` keys, so a fact late in a long drawer is findable. Every drawer-vector writer (remember, the deferred lane, `palace_reembed` repair, shared-memory import and the dream index rebuild) uses the new `retrieval::embed_chunks` and `UsearchStore::upsert_chunks`, so a rewrite to shorter text drops the stale chunk rows (#9275).
+- `Embedder::chunking_tokenizer()`, a provided trait method (default `Ok(None)`) that hands the chunker the tokenizer an embedder truncates with; `FastEmbedder` loads it once and caches it. A known window with a tokenizer that will not load is an embed error, never one truncated vector (#9275).
+- `UsearchStore::chunk_shapes()` and `ChunkShape`, each drawer's chunk-row count and highest chunk index; `MockEmbedder::with_chunking(window)` and `seed_shared_embedder_with` for tests (#9275).

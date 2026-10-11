@@ -24,11 +24,10 @@ use super::record::SharedMemoryRecord;
 use crate::memory_core::content_hash::ContentHash;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
+use crate::memory_core::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
 use crate::memory_core::room_identity::DEFAULT_WING_ID;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
-use crate::memory_core::store::vector::VectorStore;
 use crate::memory_core::timeouts;
 
 /// What one record's import did.
@@ -410,7 +409,7 @@ async fn merge_into_existing(
 /// [`super::record::SharedMemoryRecord`].
 /// What: resolves the room label to an id (minting the registry row when this
 /// palace has not seen that room), embeds the body under the same bounded timeout
-/// the write path uses, upserts the vector, persists the drawer, and pushes it
+/// the write path uses, stores its chunk vectors (#9275), persists the drawer, and pushes it
 /// into the in-memory table.
 /// Test: `import_preserves_the_record_created_at_on_insert`,
 /// `export_then_import_preserves_metadata`, `imported_memory_is_recallable`,
@@ -438,7 +437,8 @@ async fn insert_new(
     let embed_timeout = timeouts::embed_batch_timeout();
     let vecs = tokio::time::timeout(
         embed_timeout,
-        embedder.embed_batch(std::slice::from_ref(&rec.content)),
+        // #9275: one vector per chunk, stored as the drawer's whole group.
+        embed_chunks(embedder.as_ref(), &rec.content),
     )
     .await
     .map_err(|_| {
@@ -449,13 +449,11 @@ async fn insert_new(
         )
     })?
     .context("embed the imported content")?;
-    if let Some(v) = vecs.into_iter().next() {
-        handle
-            .vector_store
-            .upsert(id, v)
-            .await
-            .context("upsert the imported drawer's vector")?;
-    }
+    handle
+        .vector_store
+        .upsert_chunks(id, vecs)
+        .await
+        .context("upsert the imported drawer's vectors")?;
 
     handle
         .kg

@@ -8,8 +8,7 @@
 
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
-use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
-use crate::memory_core::store::vector::VectorStore;
+use crate::memory_core::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -335,19 +334,17 @@ pub(crate) async fn rebuild_index_with(
         if started.elapsed() >= budget {
             break;
         }
-        let body = drawer.content().to_string();
-        let vecs = embedder
-            .embed_batch(std::slice::from_ref(&body))
+        // #9275: every chunk of the drawer, stored as one whole group, so a
+        // budget stop never leaves a partial group.
+        let vecs = embed_chunks(embedder.as_ref(), drawer.content())
             .await
             .with_context(|| format!("re-embed drawer {}", drawer.id))?;
-        if let Some(v) = vecs.into_iter().next() {
-            handle
-                .vector_store
-                .upsert(drawer.id, v)
-                .await
-                .with_context(|| format!("re-upsert drawer {}", drawer.id))?;
-            rebuilt += 1;
-        }
+        handle
+            .vector_store
+            .upsert_chunks(drawer.id, vecs)
+            .await
+            .with_context(|| format!("re-upsert drawer {}", drawer.id))?;
+        rebuilt += 1;
     }
     Ok(rebuilt)
 }
