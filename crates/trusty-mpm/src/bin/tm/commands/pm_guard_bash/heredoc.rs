@@ -35,6 +35,7 @@ pub(super) mod scan_work;
 pub(super) use heredoc_delimiter::delimiter_word;
 use heredoc_delimiter::{Delimiter, delimiters_on};
 use scan_work::{Site, charge};
+use std::collections::HashMap;
 
 /// One here-document body and the line that opened it (#8756).
 ///
@@ -261,6 +262,7 @@ impl HeredocBodies {
         let mut data = Vec::new();
         let mut expanding = Vec::new();
         let mut bodies = Vec::new();
+        let mut later: Option<LineIndex> = None;
         let mut line = 0;
         while line < lines.len() {
             let (start, mut end) = lines[line];
@@ -301,8 +303,9 @@ impl HeredocBodies {
                 if delimiter.ambiguous {
                     // #9150: a shell that reads this `<<` as an operator
                     // ends its body at a line the guard cannot place.
-                    charge(Site::AmbiguousEnd, lines.len().saturating_sub(line));
-                    if !matches!(body_span(command, &lines, line, &delimiter), Ok(None)) {
+                    // #9720: one index of the lines answers every such `<<`.
+                    let index = later.get_or_insert_with(|| LineIndex::new(command, &lines));
+                    if index.ends_from(line, &delimiter) {
                         return Err(Abandon::Delimiter);
                     }
                     continue;
@@ -583,6 +586,60 @@ fn line_spans(command: &str) -> Vec<(usize, usize)> {
     }
     spans.push((start, command.len()));
     spans
+}
+
+/// The command's lines indexed by text, to ask whether an arithmetic `<<`'s
+/// word could end a body (#9720).
+///
+/// Why: [`body_span`] compared each such `<<` with every later line, so a
+/// line of shifts above many lines cost shifts x lines: 4.7 s for 5 000
+/// shifts over 50 000 lines on EVO, per scan.
+/// What: the last line index holding each text, as is and with leading tabs
+/// dropped. [`LineIndex::ends_from`] answers what [`body_span`] answers for a
+/// quoted delimiter, which reads no continuation: whether a line from `from`
+/// on is the word — or, last of all, the word with a trailing `\r` dropped.
+/// Test: `heredoc_bodies_check_arithmetic_shifts_in_linear_work_9720`,
+/// `heredoc_scan_matches_the_pre_9720_golden_table`.
+struct LineIndex<'a> {
+    exact: HashMap<&'a str, usize>,
+    untabbed: HashMap<&'a str, usize>,
+    last: Option<&'a str>,
+    count: usize,
+}
+
+impl<'a> LineIndex<'a> {
+    fn new(command: &'a str, lines: &[(usize, usize)]) -> Self {
+        charge(Site::AmbiguousEnd, lines.len());
+        let mut index = Self {
+            exact: HashMap::new(),
+            untabbed: HashMap::new(),
+            last: lines.last().map(|(s, e)| &command[*s..*e]),
+            count: lines.len(),
+        };
+        for (at, (start, end)) in lines.iter().enumerate() {
+            let text = &command[*start..*end];
+            index.exact.insert(text, at);
+            index.untabbed.insert(text.trim_start_matches('\t'), at);
+        }
+        index
+    }
+
+    /// Whether a line at index `from` or later ends `delimiter`'s body.
+    fn ends_from(&self, from: usize, delimiter: &Delimiter) -> bool {
+        charge(Site::AmbiguousEnd, 1);
+        debug_assert!(delimiter.quoted, "an ambiguous word is read quoted");
+        let (lines, last) = if delimiter.strip_tabs {
+            (
+                &self.untabbed,
+                self.last.map(|t| t.trim_start_matches('\t')),
+            )
+        } else {
+            (&self.exact, self.last)
+        };
+        let word = delimiter.word.as_str();
+        lines.get(word).is_some_and(|at| *at >= from)
+            || (from < self.count && last == Some(word.trim_end_matches('\r')))
+    }
 }
 
 /// One located here-document body.
