@@ -23,6 +23,8 @@
 //! Test: `egress_guard_bash_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
+use std::cell::Cell;
+
 use crate::commands::pm_guard_bash::{
     Decoded, MAX_SUBSTITUTION_DEPTH, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient,
     keyword_words, shell_segments_map, split_heredoc_bodies, tokenize,
@@ -101,6 +103,10 @@ const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
 /// The per-segment error for shell keywords nested past the depth bound.
 const TOO_DEEP: UnplaceableWrite = "shell keywords nested deeper than the guard follows";
 
+/// The most [`segment_hits`] calls one [`text_hit`] makes before it fails
+/// closed (#8454 critic round 3): `time eval S` reads `S` twice per level.
+const WORK_BUDGET: usize = 4096;
+
 /// One outbound-channel name a Bash command carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Hit {
@@ -158,12 +164,14 @@ pub(crate) fn bash_deny_reason(hit: &Hit) -> String {
 }
 
 /// [`host_hit`] over the raw text, then [`segment_hits`] over every segment
-/// and nested body; a text the walk cannot parse falls back to [`raw_hit`].
+/// and nested body, within [`WORK_BUDGET`] calls; a text the walk cannot
+/// parse, or one that spends the budget, falls back to [`raw_hit`].
 fn text_hit(text: &str) -> Option<Hit> {
     if let Some(found) = host_hit(text) {
         return Some(found);
     }
-    match shell_segments_map(text, &|segment: &str| segment_hits(segment, 0)) {
+    let budget = Cell::new(WORK_BUDGET);
+    match shell_segments_map(text, &|segment: &str| segment_hits(segment, 0, &budget)) {
         Ok(hits) => hits.into_iter().next(),
         // #8454 plan §5: unlexable or too deep denies only on a family token.
         Err(_) => raw_hit(text),
@@ -277,11 +285,21 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// unmeasurable wrapper option hides it, every word stands in for it.
 /// Leading shell keywords ([`after_keywords`]) are skipped and the rest mapped
 /// again one `depth` deeper; past [`MAX_SUBSTITUTION_DEPTH`] that is an `Err`.
+/// Each call spends one unit of `budget`; an empty budget is an `Err`.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
 /// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
 /// `bash_egress_denies_program_behind_a_shell_keyword`,
-/// `bash_egress_denies_keyword_nesting_past_the_depth_bound`.
-fn segment_hits(segment: &str, depth: usize) -> Result<Vec<Hit>, UnplaceableWrite> {
+/// `bash_egress_denies_keyword_nesting_past_the_depth_bound`,
+/// `bash_egress_bounds_work_for_time_eval_nesting`.
+fn segment_hits(
+    segment: &str,
+    depth: usize,
+    budget: &Cell<usize>,
+) -> Result<Vec<Hit>, UnplaceableWrite> {
+    // #8454 critic round 3: the walk also re-reads a wrapper's inner command,
+    // so depth alone does not bound the total work.
+    let left = budget.get().checked_sub(1).ok_or(TOO_DEEP)?;
+    budget.set(left);
     if segment.is_empty() {
         return Ok(Vec::new());
     }
@@ -297,7 +315,7 @@ fn segment_hits(segment: &str, depth: usize) -> Result<Vec<Hit>, UnplaceableWrit
         if depth >= MAX_SUBSTITUTION_DEPTH {
             return Err(TOO_DEEP);
         }
-        return shell_segments_map(rest, &|inner: &str| segment_hits(inner, depth + 1));
+        return shell_segments_map(rest, &|inner: &str| segment_hits(inner, depth + 1, budget));
     }
     let (text, bodies) = split_heredoc_bodies(segment);
     let argv = tokenize(&text).map_err(|_| UNLEXABLE_SEGMENT)?;
