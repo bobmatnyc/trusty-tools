@@ -23,7 +23,7 @@
 //! cases below it.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use trusty_memory::tools::tool_definitions;
