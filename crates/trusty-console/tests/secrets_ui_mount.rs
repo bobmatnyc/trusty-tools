@@ -167,3 +167,106 @@ async fn the_secrets_mount_does_not_shadow_the_other_mounts() {
     assert_ne!(api.status, StatusCode::OK);
     assert!(!api.body.contains("Trusty Secrets"));
 }
+
+/// A GET of `path` from a client at `peer`, as the tailnet listener's
+/// `ConnectInfo<SocketAddr>` reports it.
+async fn get_from(path: &str, peer: &str) -> Got {
+    let mut request = Request::builder()
+        .uri(path)
+        .body(Body::empty())
+        .expect("request");
+    let peer: std::net::SocketAddr = peer.parse().expect("peer");
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(peer));
+    send(request).await
+}
+
+/// Assert `got` forbids framing (#9067 P3).
+fn assert_unframeable(path: &str, got: &Got) {
+    assert_eq!(
+        got.header("content-security-policy"),
+        Some("frame-ancestors 'none'"),
+        "{path}: {:?}",
+        got.headers
+    );
+    assert_eq!(got.header("x-frame-options"), Some("DENY"), "{path}");
+}
+
+/// Why: #9067 P3 — another site must not frame the Secrets page, so every
+/// `/tools/secrets/` response carries `frame-ancestors 'none'` and
+/// `X-Frame-Options: DENY`: the redirect, the shell, each asset, the
+/// fallback, a wrong method and the refusal page. Red until the page's
+/// layer sets them.
+/// Test: itself.
+#[tokio::test]
+async fn every_secrets_page_response_forbids_framing() {
+    let shell = get("/tools/secrets/").await;
+    let mut paths = vec![
+        "/tools/secrets".to_owned(),
+        "/tools/secrets/".to_owned(),
+        "/tools/secrets/no/such/file".to_owned(),
+    ];
+    paths.extend(
+        local_refs(&shell.body)
+            .into_iter()
+            .map(|r| format!("/tools/secrets/{r}")),
+    );
+    for path in &paths {
+        assert_unframeable(path, &get(path).await);
+    }
+    let post = send(
+        Request::builder()
+            .method("POST")
+            .uri("/tools/secrets/")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_unframeable("POST /tools/secrets/", &post);
+    let refused = get_from("/tools/secrets/", "100.64.0.7:50000").await;
+    assert_unframeable("tailnet /tools/secrets/", &refused);
+}
+
+/// Why: #9067 P5 — until S3b the page is refused to any client that is not
+/// on loopback, before it is served: a fixed 403 page, with no page bytes
+/// and no injected base. A loopback client still gets the page. Red until
+/// the page's layer refuses it.
+/// Test: itself.
+#[tokio::test]
+async fn a_non_loopback_client_gets_a_403_page_for_the_secrets_page() {
+    for path in [
+        "/tools/secrets",
+        "/tools/secrets/",
+        "/tools/secrets/index.html",
+        "/tools/secrets/no/such/file",
+    ] {
+        for peer in [
+            "100.64.0.7:50000",
+            "192.168.1.20:50000",
+            "[fd7a:115c::1]:50000",
+        ] {
+            let got = get_from(path, peer).await;
+            assert_eq!(got.status, StatusCode::FORBIDDEN, "{path} from {peer}");
+            assert!(
+                got.header(header::CONTENT_TYPE.as_str())
+                    .is_some_and(|v| v.starts_with("text/html")),
+                "{path}: {:?}",
+                got.headers
+            );
+            assert!(
+                !got.body.contains("__SECRETS_BASE__"),
+                "{path}: {}",
+                got.body
+            );
+            assert!(!got.body.contains("./assets/"), "{path}: {}", got.body);
+            assert!(got.body.contains("loopback"), "{path}: {}", got.body);
+        }
+    }
+    let local = get_from("/tools/secrets/", "127.0.0.1:50000").await;
+    assert_eq!(local.status, StatusCode::OK);
+    assert!(local.body.contains("__SECRETS_BASE__"));
+    // The other mounts are not refused by this layer.
+    let analyze = get_from("/tools/analyze/", "100.64.0.7:50000").await;
+    assert_eq!(analyze.status, StatusCode::OK);
+}

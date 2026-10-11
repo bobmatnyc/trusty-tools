@@ -372,7 +372,8 @@ async fn origin_absent_or_foreign_is_refused_on_every_method() {
 async fn host_not_this_listener_is_refused() {
     let (_tmp, socket, seen) = ok_stub();
     let bridge = bridge_at(&socket, Arc::new(family()));
-    for host in ["evil.test:7788", "localhost:7788", "127.0.0.1:9999"] {
+    // #9067 P2: `localhost:7788` is now an own authority; see authority_tests.rs.
+    for host in ["evil.test:7788", "localhost:9999", "127.0.0.1:9999"] {
         let mut request = own_request(&bridge, "/api/secrets/list", LIST_BODY);
         let headers = request.headers_mut();
         headers.insert("host", host.parse().expect("header"));

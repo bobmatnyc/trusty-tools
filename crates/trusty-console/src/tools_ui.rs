@@ -430,6 +430,29 @@ mod tests {
         assert!(!out.contains(r#""/api/"evil"/""#));
     }
 
+    /// Why: #9067 P5 — a request the tailnet listener tagged is refused the
+    /// Secrets page even with no peer address on it, so the refusal does not
+    /// hang on which connect info the listener attached.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn a_tailnet_tagged_request_gets_the_403_page() {
+        use tower::ServiceExt;
+        let router = crate::server::build_router(crate::server::AppState::new(vec![]));
+        let mut request = axum::http::Request::builder()
+            .uri("/tools/secrets/")
+            .body(Body::empty())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(crate::tailnet_peer::TailnetRequest);
+        let response = router.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.headers().get(header::X_FRAME_OPTIONS),
+            Some(&axum::http::HeaderValue::from_static("DENY"))
+        );
+    }
+
     #[test]
     fn cache_control_hashed_assets_are_immutable() {
         assert!(cache_control_for("assets/index-abc.js").contains("immutable"));

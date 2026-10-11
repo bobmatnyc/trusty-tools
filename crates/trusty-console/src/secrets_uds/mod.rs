@@ -22,6 +22,8 @@ pub mod routes;
 pub mod verdict;
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod mount_tests;
 #[cfg(test)]
 mod picker_tests;
