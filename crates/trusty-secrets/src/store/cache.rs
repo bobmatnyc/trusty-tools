@@ -13,7 +13,8 @@
 //! [`OpenedUnder`] settings they were filled under, and to the account
 //! config file's stat fingerprint; a read under other settings, or after
 //! that file changed, drops them and advances the epoch the same way. An
-//! entry as old as the max age is never served (#7520 S2). A poisoned lock
+//! entry as old as the max age, by `Instant` or by wall time, is never
+//! served (#7520 S2). A poisoned lock
 //! or unknown settings fail closed: every lookup misses and nothing is
 //! stored. `Debug` shows the entry count and the max age only. The
 //! cache is not a gate: [`super::SecretStore`] consults it only after the
@@ -97,6 +98,7 @@ struct Stamp {
 /// What: a rename or rewrite changes the inode or ctime, which no caller can
 /// set. A filesystem with coarse timestamps can miss an in-place rewrite of
 /// the same length within one tick; DOC-74 §8.4 records that limit.
+#[cfg_attr(not(unix), allow(dead_code, reason = "built on unix only"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Fingerprint([Stamp; 2]);
 
@@ -138,11 +140,38 @@ pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// What one cached value is filed under.
 type Slot = (BackendId, VaultName, SecretKey);
 
+/// When the read that filled an entry started, on both clocks (#7520 S2).
+///
+/// Why: `Instant` does not advance while the machine sleeps (macOS
+/// `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`), and the wall clock can be
+/// stepped; each covers the other's gap.
+/// What: [`Self::younger_than`] holds only while both ages are under the
+/// bound; a wall clock now earlier than the fill fails closed.
+/// Test: `entry_expires_after_max_age`,
+/// `entry_expires_on_wall_time_while_instant_stands_still`.
+#[derive(Clone, Copy)]
+struct Filled {
+    at: Instant,
+    wall: SystemTime,
+}
+
+impl Filled {
+    /// Whether an entry filled at `self` is still under `max_age` at `now`.
+    fn younger_than(&self, now: &Filled, max_age: Duration) -> bool {
+        // #7520 S2: a stepped-back wall clock is an unknown age, a miss.
+        now.at.saturating_duration_since(self.at) < max_age
+            && now
+                .wall
+                .duration_since(self.wall)
+                .is_ok_and(|age| age < max_age)
+    }
+}
+
 /// The map and the eviction epoch, under one lock.
 #[derive(Default)]
 struct Entries {
     /// Each value with the time the read that filled it started.
-    values: HashMap<Slot, (SecretValue, Instant)>,
+    values: HashMap<Slot, (SecretValue, Filled)>,
     /// Advanced by every eviction; a read stores its value only when the
     /// epoch it started under is still current.
     epoch: u64,
@@ -238,12 +267,14 @@ impl SecretCache {
     /// stored. With a poisoned lock, `read` runs and nothing is stored.
     /// #7520 S2: every entry as old as the max age is dropped before the
     /// lookup, so it is never served; a value's age counts from the start of
-    /// the read that filled it.
+    /// the read that filled it, on both `Instant` and the wall clock
+    /// ([`Filled`]).
     /// Test: `failed_read_is_not_cached`,
     /// `cache_read_started_before_an_eviction_is_not_stored`,
     /// `cache_read_started_under_other_settings_is_not_stored`,
     /// `poisoned_cache_misses_and_stores_nothing`,
-    /// `entry_expires_after_max_age`.
+    /// `entry_expires_after_max_age`,
+    /// `entry_expires_on_wall_time_while_instant_stands_still`.
     pub(crate) fn read_through(
         &self,
         backend: &BackendId,
@@ -257,7 +288,10 @@ impl SecretCache {
             return read();
         };
         let slot = (backend.clone(), vault.clone(), key.clone());
-        let now = (self.now)();
+        let now = Filled {
+            at: (self.now)(),
+            wall: (self.wall)(),
+        };
         let epoch = match self.lock() {
             Some(mut entries) => {
                 entries.adopt(backend, under);
@@ -265,7 +299,7 @@ impl SecretCache {
                 let max_age = self.max_age;
                 entries
                     .values
-                    .retain(|_, (_, filled)| now.saturating_duration_since(*filled) < max_age);
+                    .retain(|_, (_, filled)| filled.younger_than(&now, max_age));
                 match entries.values.get(&slot) {
                     Some((value, _)) => return Ok(Some(value.clone())),
                     None => Some(entries.epoch),
