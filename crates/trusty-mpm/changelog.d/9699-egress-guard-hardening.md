@@ -1,0 +1,5 @@
+Security
+- `tm hook --egress-guard` now denies a Bash command over 64 KiB (65 536 bytes) before any parser reads it, the trust-anchor floor's included; the deny names the cap. A command at or under the cap is judged as before (#9699).
+- When the Bash egress walk gives up on a command (its work budget is spent, nesting is too deep, a segment will not lex, or a `$"…"` quote will not decode), the raw scan now also reads the text with its quotes and backslashes removed, so a name spliced from quoted pieces (`se''ndmail`, `cu""rl hooks.sl''ack.com`) is still denied (#9699).
+- The egress walk's work budget now counts the bytes each step reads as well as the steps, so a large command that the walk re-reads many times (`time eval` nesting) ends early and falls back to the raw scan instead of running past the hook timeout (#9699).
+- The shared shell parser no longer slows quadratically on an open quote followed by many unclosed `(`, which affected both `tm hook --egress-guard` and `tm hook --pm-guard` (#9699).
