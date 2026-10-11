@@ -318,7 +318,8 @@ fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
     // Past the bound the raw scan reads every word, an argument included.
     let past_bound = format!("{}echo sendmail", "eval if ".repeat(40));
     assert_denies(&past_bound, "SMTP mail");
-    let evals = format!("{}sendmail bob", "eval if ".repeat(10_000));
+    // #9699: 8 000 levels keeps this under the 64 KiB cap, which denies first.
+    let evals = format!("{}sendmail bob", "eval if ".repeat(8_000));
     assert_denies(&evals, "SMTP mail");
     let braces = format!(
         "{}sendmail bob{}",
