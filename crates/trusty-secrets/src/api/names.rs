@@ -303,7 +303,8 @@ impl BackendId {
     }
 
     /// A backend id from a compile-time literal the crate itself defines.
-    #[cfg(any(test, feature = "test-support"))]
+    // #9066: its callers are all under `store`; an `api`-only test build has none.
+    #[cfg(all(feature = "store", any(test, feature = "test-support")))]
     pub(crate) fn from_static(id: &'static str) -> Self {
         debug_assert!(Self::new(id).is_ok(), "static backend id must be valid");
         Self(id.to_string())

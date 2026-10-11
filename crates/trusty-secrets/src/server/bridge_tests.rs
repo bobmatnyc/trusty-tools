@@ -769,3 +769,64 @@ async fn bridge_methods_answer_as_their_direct_method() {
     }
     server.stop().await;
 }
+
+/// Why: owner ruling Ddf (2026-10-11), every arm — with `secrets.audit:
+/// false` no bridged method writes a record: `list`, `set`, `delete`,
+/// `copy` and `set_agents_may_use` allowed, a `set_agents_may_use` ON
+/// refused for an agent client, and an `invalid_params` refusal of a
+/// malformed assertion. Each still answers as it does with the audit on.
+/// Red when any bridged arm skips the machine suppression.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_audit_disabled_writes_nothing_for_every_method() {
+    let fx = fixture();
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: keychain\n  audit: false\n",
+    )
+    .unwrap();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    seed(&fx, "OLD_KEY", OPEN_VALUE, false);
+    let server = serve(&fx, console_procs(), "API_KEY").await;
+    let socket = &fx.settings.socket;
+    let mapped = || assertion(false, "mapped");
+    let project = fx.project();
+    let delete = json!({"project": project, "vault": PROJECT_VAULT, "key": "OLD_KEY"});
+    let copy = json!({"project": project, "from_backend": "keychain", "to_backend": "spare",
+                      "keys": ["API_KEY"]});
+    let allowed = [
+        ("secrets.bridge.list", list_params(&fx)),
+        (BRIDGE_SET, set_params(&fx, "NEW_KEY", OPEN_VALUE)),
+        ("secrets.bridge.delete", delete),
+        ("secrets.bridge.copy", copy),
+        (BRIDGE_FLAG, flag(&fx, "API_KEY", false)),
+    ];
+    for (name, params) in allowed {
+        let response = call(socket, name, bridged(params, mapped())).await;
+        assert!(
+            response.error.is_none(),
+            "{name}: {:?}",
+            error_json(&response)
+        );
+    }
+    let agent = call(
+        socket,
+        BRIDGE_FLAG,
+        bridged(flag(&fx, "API_KEY", true), assertion(true, "mapped")),
+    )
+    .await;
+    assert_eq!(kind(&agent).as_deref(), Some("agent_use_refused"));
+    let malformed = call(
+        socket,
+        BRIDGE_FLAG,
+        bridged(flag(&fx, "API_KEY", true), json!({"agent_parent": "no"})),
+    )
+    .await;
+    assert_eq!(kind(&malformed).as_deref(), Some("invalid_params"));
+    server.stop().await;
+
+    assert!(holds(&fx, "NEW_KEY") && !holds(&fx, "OLD_KEY"));
+    assert!(!flag_on(&fx, "API_KEY"), "the flag stayed OFF");
+    let all = raw_records(&fx);
+    assert!(all.is_empty(), "audit off, yet records: {all:?}");
+}
