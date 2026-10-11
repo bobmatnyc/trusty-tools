@@ -102,6 +102,7 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::memory_core::store::concurrent_open::{OpenIntent, try_open_or_snapshot};
+    use redb::ReadableDatabase;
 
     /// #9659: an observer open copies even when nothing holds the file, so a
     /// writer can still take the live file while the observer's copy is open.
