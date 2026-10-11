@@ -107,3 +107,27 @@ fn cli_backends_feature_closure_never_reaches_trusty_common() {
         assert!(line.contains("optional = true"), "{line}");
     }
 }
+
+/// Why: #9066, Architect ruling Q1 (2026-10-11) — trusty-console links
+/// `ancestry` and `client` to judge and reach the socket, and must never
+/// link a store, a keychain or the server. A later edit that widens either
+/// closure fails here. `server` is the positive control: it reaches both.
+/// Test: itself.
+#[test]
+fn ancestry_and_client_features_reach_no_store_or_server() {
+    let table = features(&manifest());
+    let ancestry = reached_deps(&table, "ancestry");
+    let expected: BTreeSet<String> = ["thiserror", "libc"].map(String::from).into();
+    assert_eq!(ancestry, expected);
+    let client = reached_deps(&table, "client");
+    let expected: BTreeSet<String> = ["serde", "thiserror", "trusty-common", "serde_json", "dirs"]
+        .map(String::from)
+        .into();
+    assert_eq!(client, expected);
+    let server = reached_deps(&table, "server");
+    assert!(
+        server.is_superset(&ancestry) && server.is_superset(&client),
+        "{server:?}"
+    );
+    assert!(server.contains("keyring"), "positive control: {server:?}");
+}

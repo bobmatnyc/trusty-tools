@@ -18,9 +18,15 @@
 //! - `cli-backends` — `store::cli`, the blocking runner and template-file
 //!   guard the 1Password and Keeper backends share (#7519; Unix only). It
 //!   adds no dependency beyond `store`'s.
+//! - `ancestry` — the process-ancestry walk ([`ancestry`]): std, `thiserror`
+//!   and libc only, so the console bridge shares the socket's verdict
+//!   without a store (#9066).
+//! - `client` — the spawn-on-first-call client helper
+//!   (`server::client::OnDemandSecrets`) and the fixed error table it reads
+//!   (`server::errors`), with no store (#9066; Unix only).
 //! - `server` — the `secrets.*` methods on an on-demand Unix socket, the
 //!   `trusty-secrets` binary that serves them, and the client helper that
-//!   spawns it ([`server`]; Unix only).
+//!   spawns it ([`server`]; Unix only). It includes `ancestry` and `client`.
 //!
 //! No item in this crate prints, logs, or formats a secret value. Errors and
 //! `Debug` output carry names and locations only.
@@ -51,12 +57,23 @@
 //! Governing document: DOC-74 §15.2–§15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
+// #9066: the process-ancestry walk alone, shared by the socket and the
+// console bridge (Architect ruling Q1, 2026-10-11).
+#[cfg(feature = "ancestry")]
+pub mod ancestry;
+#[cfg(all(test, feature = "ancestry"))]
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "the grant tests use the rest under `server`")
+)]
+mod ancestry_fakes;
 #[cfg(feature = "api")]
 pub mod api;
 #[cfg(feature = "store")]
 pub mod store;
 // #9065: S2 — the on-demand socket. trusty-common's UDS stack is Unix-only.
-#[cfg(all(unix, feature = "server"))]
+// #9066: `client` alone builds only the client helper and its error table.
+#[cfg(all(unix, any(feature = "server", feature = "client")))]
 pub mod server;
 
 #[cfg(feature = "api")]

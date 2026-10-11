@@ -37,63 +37,86 @@
 //!
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
+//!
+//! #9066: the `client` feature alone builds only `client`, `errors` and
+//! `deadline` here, so the console bridge spawns and calls the socket with
+//! no store, keychain or server code (Architect ruling Q3, 2026-10-11).
 
-// #9070: S8 slice 3, the flag-set method body.
-mod agents_flag;
-// #9070: S8 — exec grants and process ancestry.
-pub mod ancestry;
-pub mod audit;
-// #9066: S3a, the console bridge's verdict.
-mod bridge;
+/// Each item only under the `server` feature (#9066).
+macro_rules! server_only {
+    ($($item:item)*) => { $( #[cfg(feature = "server")] $item )* };
+}
+
 pub mod client;
-// #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
-mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "the server deadlines are unused by `client`")
+)]
 mod deadline;
-mod doctor;
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "the server's renderers are unused by `client`")
+)]
 pub mod errors;
-// #9070: S8 slice 2, the exec-grant method bodies.
-mod exec;
-mod gate;
-pub mod grant;
-#[cfg(test)]
-mod grant_fakes;
-mod methods;
-pub mod project;
-mod router;
-pub mod settings;
-mod tools;
 
-pub use ancestry::{
-    OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
-    is_self_or_descendant,
-};
-pub use audit::{
-    AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
-};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
-pub use core_dump::disable_core_dumps;
-pub use doctor::{
-    BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
-};
 pub use errors::ErrorKind;
-pub use grant::{
-    Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
-    GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
-};
-pub use methods::PROJECT_FIELD;
-pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
-pub use router::{
-    BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
-    default_backends, run_to_exit, serve, serve_with,
-};
-pub use settings::{
-    AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
-    DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
-    ServerSettings, SettingsError, template_root_beside,
-};
-pub use tools::DetectedTool;
 
-#[cfg(test)]
-#[path = "server_tests.rs"]
-mod tests;
+server_only! {
+    // #9070: S8 slice 3, the flag-set method body.
+    mod agents_flag;
+    // #9070: S8 — exec grants; #9066: the walk moved to the `ancestry`
+    // feature, re-exported here so every `server::ancestry` path holds.
+    pub use crate::ancestry;
+    pub mod audit;
+    // #9066: S3a, the console bridge's verdict.
+    mod bridge;
+    // #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
+    mod core_dump;
+    mod doctor;
+    // #9070: S8 slice 2, the exec-grant method bodies.
+    mod exec;
+    mod gate;
+    pub mod grant;
+    #[cfg(test)]
+    mod grant_fakes;
+    mod methods;
+    pub mod project;
+    mod router;
+    pub mod settings;
+    mod tools;
+
+    pub use ancestry::{
+        OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
+        is_self_or_descendant,
+    };
+    pub use audit::{
+        AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource,
+        AuditStream,
+    };
+    pub use core_dump::disable_core_dumps;
+    pub use doctor::{
+        BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
+    };
+    pub use grant::{
+        Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
+        GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
+    };
+    pub use methods::PROJECT_FIELD;
+    pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
+    pub use router::{
+        BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
+        default_backends, run_to_exit, serve, serve_with,
+    };
+    pub use settings::{
+        AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
+        DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
+        ServerSettings, SettingsError, template_root_beside,
+    };
+    pub use tools::DetectedTool;
+
+    #[cfg(test)]
+    #[path = "server_tests.rs"]
+    mod tests;
+}

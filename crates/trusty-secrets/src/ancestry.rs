@@ -1,5 +1,10 @@
 //! Process ancestry for exec grants (DOC-74 §15.8, S8 slice 1, #9070).
 //!
+//! #9066: the `ancestry` feature (std, `thiserror` and libc only), so the
+//! console bridge judges its HTTP client with the same walk the socket server
+//! uses, and links no store, keychain or server (Architect ruling Q1,
+//! 2026-10-11). `server::ancestry` re-exports this module.
+//!
 //! Why: `secrets.resolve` answers only a caller that is the granted child or
 //! one of its descendants (DOC-74 §15.8 condition 3). A bare pid is not an
 //! identity — the kernel reuses pids — so a grant records the child's start

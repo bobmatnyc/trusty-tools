@@ -14,8 +14,13 @@ readme = "README.md"
 
 # DOC-74 §15.2. `api` is the wire vocabulary only (no store code), so a caller
 # that only names keys — trusty-console's bridge — never links a keychain.
-# `store` is everything that touches a backend or the disk. The `client`
-# feature in the spec ships with S9, not here.
+# `store` is everything that touches a backend or the disk.
+#
+# #9066 (Architect rulings Q1 and Q3, 2026-10-11): `ancestry` is the process
+# ancestry walk alone (std, thiserror, libc), so trusty-console judges its
+# HTTP client with the walk the socket uses. `client` is the spawn-on-first
+# -call helper and its fixed error table, with no store; S9 adds the
+# `secrets.resolve` client to it. Pinned by tests/cli_backends_feature_closure.rs.
 #
 # `server` (S2, #9065) is the on-demand UDS socket and the `trusty-secrets`
 # binary: tokio plus trusty-common's UDS stack (owner rulings 24, 31, 32). It
@@ -25,7 +30,9 @@ readme = "README.md"
 default = ["api", "store", "server"]
 api = ["dep:serde", "dep:thiserror"]
 store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
-server = ["store", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
+ancestry = ["dep:thiserror", "dep:libc"]
+client = ["api", "dep:trusty-common", "dep:serde_json", "dep:dirs"]
+server = ["store", "ancestry", "client", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
 # #7519: the blocking runner and template-file guard the CLI-backed backends
 # (1Password, Keeper) share. std plus `store`'s libc only — owner ruling
 # 2026-10-07, "no common dependencies"; pinned by

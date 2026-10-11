@@ -1,7 +1,7 @@
 //! Tests for process ancestry (#9070).
 
 use super::*;
-use crate::server::grant_fakes::FakeProcs;
+use crate::ancestry_fakes::FakeProcs;
 
 fn tree() -> FakeProcs {
     FakeProcs::sample_tree()
