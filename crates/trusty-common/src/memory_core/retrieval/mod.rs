@@ -65,6 +65,8 @@ pub use embedder::seed_shared_embedder_with_mock;
 pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
+// #9390: a committed slot whose verify command was not stored.
+pub use tier_c_verify::VerifyNotStored;
 pub use types::{
     CrossPalaceRecall, CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult,
     RememberOptions, RetrievalLayers,

@@ -369,7 +369,8 @@ async fn run_pipeline(
     // The guard is deliberately NOT the write mutex: that one must release on
     // timeout (it is what unblocks the queue), and this one must not.
     let order = handle.commit_mutex.clone().lock_owned().await;
-    tokio::spawn(tier_c::commit_and_mirror(
+    // #9390: a missed verify record is reported after the post-commit steps.
+    let verify_missed = tokio::spawn(tier_c::commit_and_mirror(
         handle.commit_ctx(),
         drawer,
         verify,
@@ -395,5 +396,8 @@ async fn run_pipeline(
     // new drawer without waiting for a dream cycle.
     handle.rebuild_closets();
 
-    Ok(id)
+    match verify_missed {
+        Some(missed) => Err(missed.into()),
+        None => Ok(id),
+    }
 }

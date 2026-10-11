@@ -14,7 +14,7 @@
 //! Test: `crates/trusty-memory/src/tools/tests/verify_with_tests.rs`, plus
 //! `tier_c_verify_tests` in this directory.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use uuid::Uuid;
 
 use super::tier_c::CommitCtx;
@@ -25,6 +25,26 @@ use crate::memory_core::store::kg_store::VERIFY_WITH;
 
 /// Provenance stamped on a `verify_with` triple.
 const VERIFY_PROVENANCE: &str = "tier_c:verify-on-write";
+
+/// A slot drawer committed, but its verify command was not stored (#9390).
+///
+/// Why: the drawer is durable and holds its slot, so every post-commit step
+/// (deferred embed, L1 snapshot, closets, and the daemon's BM25 enqueue and
+/// event) must still run, or recall cannot find it. The caller asked for the
+/// command, so it must still learn the command is missing.
+/// What: the committed drawer's id and the record failure. The write pipeline
+/// returns it as the error AFTER its post-commit steps; a caller with its own
+/// post-write steps finds `drawer` by downcasting and runs them first. A retry
+/// is safe: it writes a new drawer to the slot and retires this one.
+/// Test: `crates/trusty-memory/src/tools/tests/verify_with_tests.rs` (failed-record case).
+#[derive(Debug, thiserror::Error)]
+#[error("drawer {drawer} is stored, but its verify command was not: {reason}")]
+pub struct VerifyNotStored {
+    /// The committed drawer that holds the slot without a command.
+    pub drawer: Uuid,
+    /// The record failure, rendered with its cause chain.
+    pub reason: String,
+}
 
 /// Refuse a `verify_with` command this write cannot store (#9390).
 ///
@@ -56,24 +76,28 @@ pub(super) fn check_verify_command(opts: &RememberOptions) -> Result<Option<Stri
 /// Store `command` as `drawer:<drawer> verify_with <command>` (#9390).
 ///
 /// Why: the caller asked for the command, so a failed write is an error, not a
-/// warning. The drawer is already committed when this runs; a retry writes a
-/// new drawer to the same slot and retires this one.
+/// warning. The drawer is already committed when this runs, so the error is a
+/// [`VerifyNotStored`] the pipeline reports after its post-commit steps.
 /// What: asserts one triple with confidence 1.0. `verify_with` is functional,
 /// so the assert closes any earlier active command on the same drawer.
-/// Test: `a_refused_slot_stores_no_verify_command`, `slot_retirement_closes_the_retirees_verify_command`.
+/// Test: `a_refused_slot_stores_no_verify_command`, `slot_retirement_closes_the_retirees_verify_command`,
+/// and the failed-record case in `crates/trusty-memory/src/tools/tests/verify_with_tests.rs`.
 pub(super) async fn record_verify_command(
     ctx: &CommitCtx,
     drawer: Uuid,
     command: &str,
-) -> Result<()> {
-    let missed = || format!("drawer {drawer} is stored, but its verify command was not");
+) -> Result<(), VerifyNotStored> {
+    let missed = |e: anyhow::Error| VerifyNotStored {
+        drawer,
+        reason: format!("{e:#}"),
+    };
     // #9390: the test seam stands in for a failed KG write; see `PalaceHandle`.
     #[cfg(any(test, feature = "embedder-test-support"))]
     if ctx
         .fail_next_verify_record
         .swap(false, std::sync::atomic::Ordering::SeqCst)
     {
-        return Err(anyhow!("injected verify_with failure")).with_context(missed);
+        return Err(missed(anyhow!("injected verify_with failure")));
     }
     let triple = Triple {
         subject: format!("drawer:{drawer}"),
@@ -84,7 +108,7 @@ pub(super) async fn record_verify_command(
         confidence: 1.0,
         provenance: Some(VERIFY_PROVENANCE.to_string()),
     };
-    ctx.kg.assert(triple).await.with_context(missed)
+    ctx.kg.assert(triple).await.map_err(missed)
 }
 
 /// Close the `verify_with` command of a drawer its slot just retired (#9390).
@@ -113,7 +137,7 @@ pub(super) async fn close_retired_verify_command(ctx: &CommitCtx, retired: Uuid)
             palace = %ctx.palace,
             retired = %retired,
             "#9390: retired the fact_key incumbent but could not close its \
-             verify_with command; memory_list will still report it: {e:#}"
+             verify_with command; memory_list hides it, the drawer holds no slot: {e:#}"
         );
     }
 }
