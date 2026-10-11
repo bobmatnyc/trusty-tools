@@ -84,6 +84,10 @@ pub(crate) enum MemoryAction {
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
+        /// #9390: command that re-reads this slot's fact, e.g.
+        /// `gh pr view 123 --json headRefOid`. Needs `--fact-key`.
+        #[arg(long, requires = "fact_key")]
+        verify: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -118,6 +122,10 @@ pub(crate) enum MemoryAction {
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
+        /// #9390: command that re-reads this slot's fact, e.g.
+        /// `gh pr view 123 --json headRefOid`. Needs `--fact-key`.
+        #[arg(long, requires = "fact_key")]
+        verify: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,

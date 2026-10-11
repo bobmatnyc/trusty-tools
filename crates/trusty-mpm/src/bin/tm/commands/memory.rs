@@ -97,6 +97,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             tags,
             fact_key,
             expires_at,
+            verify,
             json,
             memory_socket,
         } => {
@@ -107,6 +108,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                 slot: FactSlot {
                     fact_key,
                     expires_at,
+                    verify,
                 },
             };
             super::memory_verbs::run(verb, palace, memory_socket, json).await
@@ -118,6 +120,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             tags,
             fact_key,
             expires_at,
+            verify,
             json,
             memory_socket,
         } => {
@@ -128,6 +131,7 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                 slot: FactSlot {
                     fact_key,
                     expires_at,
+                    verify,
                 },
             };
             super::memory_verbs::run(verb, palace, memory_socket, json).await

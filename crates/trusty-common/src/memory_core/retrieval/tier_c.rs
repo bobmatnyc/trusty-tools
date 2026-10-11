@@ -33,6 +33,7 @@ use std::sync::Arc;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
+use super::tier_c_verify::{VerifyNotStored, close_retired_verify_command, record_verify_command};
 use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::share::assert_superseded_by;
 use crate::memory_core::store::kg::KnowledgeGraph;
@@ -464,6 +465,9 @@ pub(super) struct CommitCtx {
     /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
     #[cfg(test)]
     pub commit_delay: Option<std::time::Duration>,
+    /// #9390 test seam: when set, the next verify record fails once.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fail_next_verify_record: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Commit `drawer` durably and mirror the outcome into the in-memory table, as
@@ -506,15 +510,23 @@ pub(super) struct CommitCtx {
 /// `superseded_by` edge through [`link_retired`] (#9433). It runs only when the
 /// atomic commit succeeded, so the edge never names an uncommitted drawer, and
 /// it fails open.
+/// Under the same guard, a retirement closes the retiree's `verify_with`
+/// command, failing open, and `verify` — the newcomer's command, already
+/// checked and only `Some` for an admitted slot — is recorded (#9390). A
+/// failed record does not fail the commit: it comes back as
+/// `Ok(Some(VerifyNotStored))`, so the caller runs its post-commit steps for
+/// the committed drawer and then reports the failure.
 /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`,
 /// `a_second_writer_waits_for_an_abandoned_commit_to_mirror`,
 /// `a_failed_retirement_commit_writes_no_edge`,
-/// `a_chain_of_slot_writes_links_each_retiree_to_its_successor`.
+/// `a_chain_of_slot_writes_links_each_retiree_to_its_successor`,
+/// `slot_retirement_closes_the_retirees_verify_command`.
 pub(super) async fn commit_and_mirror(
     ctx: CommitCtx,
     drawer: Drawer,
+    verify: Option<String>,
     order: OwnedMutexGuard<()>,
-) -> Result<()> {
+) -> Result<Option<VerifyNotStored>> {
     let retired = persist_with_retirement(&ctx, &drawer)
         .await
         .context("persist drawer metadata")?;
@@ -544,11 +556,18 @@ pub(super) async fn commit_and_mirror(
     // and before the guard drops, so the next writer's retirement edge follows.
     if let Some(retired) = retired {
         link_retired(&ctx, retired, newcomer).await;
+        // #9390: the retiree's command re-checks a fact it no longer asserts.
+        close_retired_verify_command(&ctx, retired).await;
     }
+    // #9390: under the guard, so the next writer's retirement sees this command.
+    let missed = match verify.as_deref() {
+        Some(command) => record_verify_command(&ctx, newcomer, command).await.err(),
+        None => None,
+    };
     // #6366: explicit so the release is visibly ordered AFTER the mirror — the
     // next writer's incumbent read must not start before this point.
     drop(order);
-    Ok(())
+    Ok(missed)
 }
 
 #[cfg(test)]

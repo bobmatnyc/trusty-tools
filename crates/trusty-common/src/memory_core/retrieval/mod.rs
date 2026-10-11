@@ -29,6 +29,8 @@ mod relevance;
 mod scope;
 // ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
 mod tier_c;
+// #9390: a slot's re-verify command, stored as a `verify_with` KG triple.
+mod tier_c_verify;
 mod types;
 // #6366: the write critical section and its ceiling. Split out of `handle` so
 // the pipeline sits in one future a timeout can drop as a unit — and so
@@ -49,6 +51,8 @@ mod tests;
 #[cfg(test)]
 mod tier_c_tests;
 #[cfg(test)]
+mod tier_c_verify_tests;
+#[cfg(test)]
 mod timeout_tests;
 #[cfg(test)]
 mod write_pipeline_tests;
@@ -61,6 +65,8 @@ pub use embedder::seed_shared_embedder_with_mock;
 pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
+// #9390: a committed slot whose verify command was not stored.
+pub use tier_c_verify::VerifyNotStored;
 pub use types::{
     CrossPalaceRecall, CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult,
     RememberOptions, RetrievalLayers,
