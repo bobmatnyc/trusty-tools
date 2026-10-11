@@ -1,6 +1,7 @@
 <!-- PURPOSE: The safety core (#8533) — the ONLY section a project's CLAUDE.md
      cannot replace. It holds rules that protect the instruction system
-     itself. Everything else belongs in a replaceable section; see
+     itself, plus the Completion Standard core bar (owner-directed, #9182).
+     Everything else belongs in a replaceable section; see
      sections/README.md before adding anything here. -->
 
 ## Memory & Instruction Sources
@@ -26,3 +27,20 @@
 - `CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
   per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
   a skill, `docs/`, or memory. The test is frequency of need, not format.
+
+## Completion Standard
+
+Ship and close. Work beyond this needs an explicit user request.
+
+- **Done** (all four, then stop): (1) acceptance criteria met; (2) required
+  gates pass: tests for the changed behaviour, required CI, a critic with no
+  open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
+  rung's live check; (4) shipped by the normal path, issue closed with evidence.
+- **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
+  wrong behaviour against the criteria, a security or credential exposure,
+  data loss or corruption, a crash, hang or leaked process, a resource pileup,
+  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
+  review round, issue or fix round.
+- **Limits:** after the first review, at most one fix round and one delta
+  review; a blocker left after that goes to the Architect. Never widen scope.
+  Detail: `Skill(skill="tm-workflow")`.

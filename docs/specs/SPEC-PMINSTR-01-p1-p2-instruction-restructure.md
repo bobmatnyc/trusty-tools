@@ -1508,6 +1508,7 @@ report, and this table are tested against it.
 |---|---|---|
 | Memory & Instruction Sources | `CORE` | fixed section |
 | Customization Surface | `CORE` | fixed section |
+| Completion Standard | `CORE` | fixed section |
 | Detected project stack | `CORE` | generated block |
 | Memory protocol | `MEMORY` | pinned block |
 | Code search protocol | `SEARCH` | pinned block |

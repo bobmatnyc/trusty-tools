@@ -52,6 +52,19 @@ const FIXED_ROSTER: &str = "## Delegation Authority\n\n\
 const FIXED_STACK: &str =
     "## Project Stack Profile\n\nDetected stack: Rust. Route implementation to `rust-engineer`.";
 
+/// The project `CLAUDE.md` of the override configuration: a WORKFLOW and an
+/// AGENT-DELEGATION marker block around prose the composer ignores.
+const OVERRIDE_CLAUDE_MD: &str = "# Project Instructions\n\n\
+     Prose outside the markers is not instruction content and is ignored.\n\n\
+     <!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+     # Workflow (project override)\n\n\
+     Two phases only: implement, then verify.\n\
+     <!-- TRUSTY-MPM: WORKFLOW END -->\n\n\
+     <!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->\n\
+     # Routing (project override)\n\n\
+     Route every implementation task to `rust-engineer`.\n\
+     <!-- TRUSTY-MPM: AGENT-DELEGATION END -->\n";
+
 /// Directory holding the committed snapshots.
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -149,24 +162,51 @@ fn golden_claude_md_override_prompt() {
     // and that the framework floor is byte-for-byte the floor every other
     // configuration receives.
     let tmp = TempDir::new().expect("tempdir");
-    std::fs::write(
-        tmp.path().join("CLAUDE.md"),
-        "# Project Instructions\n\n\
-         Prose outside the markers is not instruction content and is ignored.\n\n\
-         <!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
-         # Workflow (project override)\n\n\
-         Two phases only: implement, then verify.\n\
-         <!-- TRUSTY-MPM: WORKFLOW END -->\n\n\
-         <!-- TRUSTY-MPM: AGENT-DELEGATION START v=1 -->\n\
-         # Routing (project override)\n\n\
-         Route every implementation task to `rust-engineer`.\n\
-         <!-- TRUSTY-MPM: AGENT-DELEGATION END -->\n",
-    )
-    .expect("write CLAUDE.md");
+    std::fs::write(tmp.path().join("CLAUDE.md"), OVERRIDE_CLAUDE_MD).expect("write CLAUDE.md");
 
     let (prompt, _) =
         resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_golden("pm-prompt-claude-md-override.md", &prompt);
+}
+
+/// One phrase per part of the Completion Standard's core bar: the four-part
+/// Done list, the six fix-bar classes, and the round limit.
+const COMPLETION_CORE_BAR: [&str; 4] = [
+    "**Done** (all four, then stop): (1) acceptance criteria met; (2) required gates pass",
+    "(3) a runtime change passed its rung's live check; (4) shipped by the normal path, \
+     issue closed with evidence.",
+    "a finding blocks ONLY if it causes or leaves unguarded wrong behaviour against the \
+     criteria, a security or credential exposure, data loss or corruption, a crash, hang or \
+     leaked process, a resource pileup, or a broken gate or CI.",
+    "at most one fix round and one delta review; a blocker left after that goes to the Architect.",
+];
+
+#[test]
+fn a_workflow_override_keeps_the_completion_core_bar() {
+    // #9182: the Completion Standard shipped only in the `workflow` section, so
+    // a project's WORKFLOW marker removed it with no signal. The core bar now
+    // sits in CORE, which no marker replaces. Asserted on both composers, with
+    // whitespace collapsed so a re-wrap of the source does not fail the test.
+    let tmp = TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join("CLAUDE.md"), OVERRIDE_CLAUDE_MD).expect("write CLAUDE.md");
+    let (packaged, _) =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let (assembled, _) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
+
+    for (label, prompt) in [("packaged", &packaged), ("roster absent", &assembled)] {
+        assert!(
+            prompt.contains("Two phases only: implement, then verify.")
+                && !prompt.contains("## Sprint, then Harden"),
+            "{label}: the WORKFLOW override did not replace the bundled section"
+        );
+        let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        for part in COMPLETION_CORE_BAR {
+            assert!(
+                flat.contains(part),
+                "{label}: a WORKFLOW override removed the Completion Standard core bar: {part:?}"
+            );
+        }
+    }
 }
 
 #[test]

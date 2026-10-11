@@ -190,6 +190,23 @@ or worktree, not the operator's live checkout.
   per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
   a skill, `docs/`, or memory. The test is frequency of need, not format.
 
+## Completion Standard
+
+Ship and close. Work beyond this needs an explicit user request.
+
+- **Done** (all four, then stop): (1) acceptance criteria met; (2) required
+  gates pass: tests for the changed behaviour, required CI, a critic with no
+  open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
+  rung's live check; (4) shipped by the normal path, issue closed with evidence.
+- **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
+  wrong behaviour against the criteria, a security or credential exposure,
+  data loss or corruption, a crash, hang or leaked process, a resource pileup,
+  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
+  review round, issue or fix round.
+- **Limits:** after the first review, at most one fix round and one delta
+  review; a blocker left after that goes to the Architect. Never widen scope.
+  Detail: `Skill(skill="tm-workflow")`.
+
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
 Unbudgeted: `git status/add/commit/log/diff/pull/stash`, ≤3 config/doc file
@@ -360,23 +377,6 @@ No known language or framework marker files were found in this project. **Do NOT
 - 🔴 The hard line: never turn red green by deleting coverage. No `#[ignore]`,
   no cfg-gating, no `--exclude`, no narrowing to `--lib`. Going fast licenses
   running fewer gates, never making a failing gate report success.
-
-## Completion Standard
-
-Ship and close. Work beyond this needs an explicit user request.
-
-- **Done** (all four, then stop): (1) acceptance criteria met; (2) required
-  gates pass: tests for the changed behaviour, required CI, a critic with no
-  open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
-  rung's live check; (4) shipped by the normal path, issue closed with evidence.
-- **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
-  wrong behaviour against the criteria, a security or credential exposure,
-  data loss or corruption, a crash, hang or leaked process, a resource pileup,
-  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
-  review round, issue or fix round.
-- **Limits:** after the first review, at most one fix round and one delta
-  review; a blocker left after that goes to the Architect. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
 
 ## Risk — the second input to every skip condition
 

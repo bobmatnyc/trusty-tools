@@ -60,6 +60,7 @@ the one in `tm-workflow.md`, or the manifest diverges from it:
 |---|---|---|
 | Memory & Instruction Sources | `CORE` | fixed section |
 | Customization Surface | `CORE` | fixed section |
+| Completion Standard | `CORE` | fixed section |
 | Detected project stack | `CORE` | generated block |
 | Memory protocol | `MEMORY` | pinned block |
 | Code search protocol | `SEARCH` | pinned block |
@@ -124,6 +125,10 @@ own words were "this should be part of the core instruction set." That is a
 deliberate placement decision by the same authority who made the ruling above,
 not a routine protection-seeking promotion. It is not precedent for moving
 other content into `core.md`.
+
+**Second owner-directed exception, #9182:** the Completion Standard core bar
+(Done, the fix bar, the round limit) moved from `workflow` to `core.md`, so a
+`WORKFLOW` override cannot drop it. The fuller text stays in `tm-workflow`.
 
 **The reverse move, 2026-09-21 (#8361):** `## Autonomous Execution` left
 `core.md` for its own tier-`project` section. Inside `core` no project could set
