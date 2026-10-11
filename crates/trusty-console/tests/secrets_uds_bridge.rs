@@ -35,7 +35,9 @@ fn the_secrets_bridge_builds_no_http_url() {
     rust_files(&manifest_dir().join("src/secrets_uds"), &mut files);
     assert!(files.len() >= 6, "found {files:?}");
     for file in files {
-        if file.ends_with("tests.rs") {
+        // #9066: test files (`tests.rs`, `*_tests.rs`) build requests on purpose.
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "tests.rs" || name.ends_with("_tests.rs") {
             continue;
         }
         let source = std::fs::read_to_string(&file).expect("read");

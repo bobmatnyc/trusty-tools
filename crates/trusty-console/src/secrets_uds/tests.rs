@@ -27,7 +27,7 @@ use super::errors::{Refusal, UPSTREAM_KINDS};
 use super::verdict::{AcceptedPeer, PidResolver, judge};
 use super::{CSRF_HEADER, MAX_BODY_BYTES, SecretsBridge, TailnetRequest, router};
 
-const OWN: &str = "127.0.0.1:7788";
+pub(super) const OWN: &str = "127.0.0.1:7788";
 const SPECIMEN: &str = "SPECIMEN-VALUE-1234567890";
 
 // ─── fakes ───────────────────────────────────────────────────────────────────
@@ -81,10 +81,10 @@ fn family() -> FakeTable {
 }
 
 /// Every framed request a stub socket received.
-type Seen = Arc<Mutex<Vec<Value>>>;
+pub(super) type Seen = Arc<Mutex<Vec<Value>>>;
 
 /// Bind a stub secrets socket that answers each request with `respond`.
-fn stub<F>(dir: &Path, respond: F) -> (PathBuf, Seen)
+pub(super) fn stub<F>(dir: &Path, respond: F) -> (PathBuf, Seen)
 where
     F: Fn(&Value) -> Option<Value> + Send + Sync + 'static,
 {
@@ -110,7 +110,7 @@ where
     (socket, seen)
 }
 
-fn ok_frame(result: Value) -> Option<Value> {
+pub(super) fn ok_frame(result: Value) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
 }
 
@@ -128,12 +128,12 @@ fn bridge_at(socket: &Path, table: Arc<dyn ProcessTable>) -> Arc<SecretsBridge> 
     Arc::new(bridge)
 }
 
-fn token(bridge: &SecretsBridge) -> String {
+pub(super) fn token(bridge: &SecretsBridge) -> String {
     bridge.token().expect("enabled").to_hex()
 }
 
 /// A request from the console's own page: Host, Origin and the token.
-fn own_request(bridge: &SecretsBridge, path: &str, body: &str) -> Request<Body> {
+pub(super) fn own_request(bridge: &SecretsBridge, path: &str, body: &str) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(path)
@@ -160,14 +160,14 @@ async fn send(bridge: &Arc<SecretsBridge>, request: Request<Body>) -> (StatusCod
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn text(refusal: Refusal) -> &'static str {
+pub(super) fn text(refusal: Refusal) -> &'static str {
     refusal.status_and_text().1
 }
 
-const LIST_BODY: &str = r#"{"project":"/p","vault":"trusty/acme/web"}"#;
+pub(super) const LIST_BODY: &str = r#"{"project":"/p","vault":"trusty/acme/web"}"#;
 
 /// A tempdir and a stub that answers every request with `{"ok":true}`.
-fn ok_stub() -> (tempfile::TempDir, PathBuf, Seen) {
+pub(super) fn ok_stub() -> (tempfile::TempDir, PathBuf, Seen) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (socket, seen) = stub(tmp.path(), |_| ok_frame(json!({ "ok": true })));
     (tmp, socket, seen)

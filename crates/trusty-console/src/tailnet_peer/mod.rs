@@ -335,13 +335,15 @@ impl ConsoleListeners {
 /// `TRUSTY_CONSOLE_BIND`) served every route to any peer. The resolver is a
 /// parameter so the tests need no tailnet.
 /// What: binds each address in order (a bind failure aborts). A loopback
-/// listener is served by plain `axum::serve`, as before; any other goes
+/// listener is served by `axum::serve`, ungated, with the client's pid read
+/// at accept for the secrets bridge (#9066, Unix only); any other goes
 /// through [`serve_tailnet`] with a [`TailnetPeerGate`] for its bound IP. A
 /// wildcard bind has no host identity, so its gate refuses every request
 /// ([`TailnetPeerGate::authorize`]). The first listener is the primary, whose
 /// task [`ConsoleListeners::wait_primary`] awaits; the rest log their exit.
 /// Test: `explicit_non_loopback_listener_is_gated_7524`,
-/// `listener_gating_follows_the_ip_not_the_position_7524`.
+/// `listener_gating_follows_the_ip_not_the_position_7524`,
+/// `a_loopback_request_is_judged_from_the_pid_found_at_accept`.
 pub async fn serve_listeners<S, F>(
     addrs: &[SocketAddr],
     router: &Router,
@@ -361,6 +363,13 @@ where
         let serve: BoxFuture<'static, std::io::Result<()>> = if local.ip().is_loopback() {
             let (app, stop) = (router.clone(), shutdown());
             Box::pin(async move {
+                // #9066 A9: the client's pid and start time are read at accept.
+                #[cfg(unix)]
+                let app = app.into_make_service_with_connect_info::<
+                    crate::secrets_uds::verdict::AcceptedPeer,
+                >();
+                #[cfg(not(unix))]
+                let app = app.into_make_service();
                 axum::serve(listener, app)
                     .with_graceful_shutdown(stop)
                     .await

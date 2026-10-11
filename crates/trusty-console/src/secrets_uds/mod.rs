@@ -15,9 +15,12 @@
 pub mod dial;
 pub mod errors;
 pub mod guard;
+pub mod pid_map;
 pub mod routes;
 pub mod verdict;
 
+#[cfg(test)]
+mod mount_tests;
 #[cfg(test)]
 mod tests;
 
@@ -217,7 +220,8 @@ impl crate::server::AppState {
 /// What: six verbs, `resolve` (501), and a catch-all (404) so no
 /// `/api/secrets/*` path falls through to the generic proxy. Every route
 /// takes any method; the guard answers everything but `POST` (Architect Q3).
-/// Test: `unknown_secrets_paths_never_reach_the_socket`.
+/// Test: `unknown_secrets_paths_never_reach_the_socket`,
+/// `the_real_router_sends_no_cors_header_on_secrets_routes`.
 pub fn router(bridge: Arc<SecretsBridge>) -> Router {
     Router::new()
         .route("/api/secrets/session", any(routes::session))
