@@ -3,3 +3,5 @@ version 0.60.1
 reason  The #9390 expiring-slot stack adds the pub field verify_with to the non-#[non_exhaustive] RememberOptions struct; under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version; PalaceHandle.fail_next_verify_record is a pub(crate) test seam behind cfg(any(test, feature = "embedder-test-support")), visible to the all-features gate. Refs #9390.
 accept  constructible_struct_adds_field  RememberOptions.verify_with
 accept  constructible_struct_adds_private_field  PalaceHandle.fail_next_verify_record
+# #9659: tm sm serve opens through a snapshot copy and never holds the live kg.redb lock; adds OpenIntent::Observer to the exhaustive pub enum trusty_common::memory_core::store::concurrent_open::OpenIntent. Architect approval 2026-10-11 09:05Z; no version bump.
+accept  enum_variant_added  OpenIntent:Observer
