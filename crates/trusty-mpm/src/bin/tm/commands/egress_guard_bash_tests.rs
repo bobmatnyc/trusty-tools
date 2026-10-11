@@ -306,6 +306,20 @@ fn bash_egress_denies_program_behind_a_shell_keyword() {
     }
 }
 
+/// 🔴 #8454 S3 critic round 2 (HIGH): keyword nesting is followed only to
+/// `MAX_SUBSTITUTION_DEPTH`; past it the command is judged raw, so deep
+/// nesting neither overflows the stack nor hides a program.
+#[test]
+fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
+    // Past the bound the raw scan reads every word, an argument included.
+    let past_bound = format!("{}echo sendmail", "eval if ".repeat(40));
+    assert_denies(&past_bound, "SMTP mail");
+    let evals = format!("{}sendmail bob", "eval if ".repeat(10_000));
+    assert_denies(&evals, "SMTP mail");
+    let braces = format!("{}sendmail bob{}", "{ ".repeat(10_000), "; }".repeat(10_000));
+    assert_denies(&braces, "SMTP mail");
+}
+
 /// 🔴 #8454 S3 (plan §5, fail closed): a command the guard cannot lex or nest
 /// through is denied when its text holds a family token. An allow here is the
 /// error arm failing open.
