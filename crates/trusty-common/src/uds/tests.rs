@@ -424,6 +424,100 @@ async fn bind_hardened_propagates_an_address_in_use_failure() {
     );
 }
 
+/// Sorted file names in `dir`.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read socket dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Asserts `err` is the `EADDRINUSE` bind failure a taken `path` produces.
+fn assert_address_in_use(err: &UdsSecurityError, path: &Path) {
+    match err {
+        UdsSecurityError::Bind {
+            path: failed,
+            source,
+        } => {
+            assert_eq!(failed, path, "the error must name the final path");
+            assert_eq!(source.kind(), std::io::ErrorKind::AddrInUse, "{source}");
+        }
+        other => panic!("expected Bind, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn bind_hardened_leaves_no_temp_socket_when_the_final_path_is_taken() {
+    // #9714: success leaves only the final socket, and the link-failure arm
+    // removes the temp name it bound before reporting EADDRINUSE.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    let sock = dir.join("t.sock");
+    let _first = bind_hardened(&sock).expect("first bind");
+    assert_eq!(names_in(&dir), ["t.sock"], "a bind leaves no temp name");
+
+    let err = bind_hardened(&sock).expect_err("second bind must fail");
+
+    assert_address_in_use(&err, &sock);
+    assert_eq!(
+        names_in(&dir),
+        ["t.sock"],
+        "a failed bind leaves no temp name"
+    );
+}
+
+#[tokio::test]
+async fn bind_hardened_never_replaces_a_file_that_appears_during_the_bind() {
+    // #9714: the final placement must refuse an occupied path, as a bare bind
+    // did. A `rename` into place would silently replace it.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sockets");
+    let sock = dir.join("t.sock");
+
+    let err = bind_hardened_with(&sock, || {
+        std::fs::write(&sock, b"planted").expect("plant a file at the final path");
+    })
+    .expect_err("an occupied final path must be refused");
+
+    assert_address_in_use(&err, &sock);
+    assert_eq!(std::fs::read(&sock).expect("read planted"), b"planted");
+    assert_eq!(names_in(&dir), ["t.sock"], "the temp name must be removed");
+}
+
+#[test]
+fn temp_socket_name_fits_the_final_name_budget() {
+    // #9714: the temp name may be no longer than the final file name, so a
+    // path inside the `sun_path` budget stays inside it, and it must never be
+    // a path component with a special meaning.
+    let long = "x".repeat(40);
+    for final_name in ["s", "ab", "t.sock", "trusty-search.sock", long.as_str()] {
+        let mut seen = std::collections::HashSet::new();
+        for seq in 0..64 {
+            let name = super::place::temp_socket_name(std::ffi::OsStr::new(final_name), 4242, seq);
+            let text = name.to_str().expect("temp names are ASCII");
+            assert!(
+                !text.is_empty() && text.len() <= final_name.len(),
+                "{text:?} must fit in {final_name:?}"
+            );
+            assert!(
+                text != "." && text != ".." && !text.contains('/'),
+                "{text:?}"
+            );
+            seen.insert(name);
+        }
+        if final_name.len() >= 6 {
+            assert_eq!(seen.len(), 64, "neighbouring seq values must not collide");
+        }
+    }
+}
+
 // ── connect (review finding 3) ──────────────────────────────────────────────
 
 #[tokio::test]

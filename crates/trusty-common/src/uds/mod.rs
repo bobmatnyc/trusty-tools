@@ -14,8 +14,9 @@
 //! What: four primitives, in the order a daemon uses them.
 //!   - [`scratch_socket_dir`] resolves a per-uid directory under the system
 //!     scratch space, replacing the bare `$TMPDIR`-with-`/tmp`-fallback.
-//!   - [`bind_hardened`] creates that directory at `0700`, binds, and sets the
-//!     socket to `0600` before returning it to the caller.
+//!   - [`bind_hardened`] creates that directory at `0700`, binds a temp name,
+//!     sets it to `0600`, then links it to the final path, so the final path
+//!     is never visible at any other mode (#9714).
 //!   - [`connect_hardened`] is the dialer's half: it verifies the directory and
 //!     socket a client is about to trust before writing anything to it.
 //!   - [`ensure_peer_is_self`] refuses an accepted connection whose peer uid is
@@ -64,6 +65,8 @@ mod tests;
 
 pub mod dir;
 mod peer;
+// #9714: bind under a temp name, then link the narrowed socket into place.
+mod place;
 pub mod probe;
 // #8267: the bounded connect retry every framed dial runs under, so "the
 // daemon refused one connect" stops being a session-long MCP failure.
@@ -519,25 +522,32 @@ fn socket_parent(path: &Path) -> Result<&Path, UdsSecurityError> {
 /// and two in `trusty-agents`). See #5099.
 ///
 /// What: checks the `sun_path` budget, hardens the parent directory via
-/// [`prepare_socket_dir`], binds, then narrows the socket to [`SOCKET_MODE`]
-/// before returning — so the listener is already `0600` when the caller first
-/// calls `accept`. Deliberately does *not* remove a stale socket file:
-/// `CtrlSocket::bind_singleton` must probe before clobbering, and folding an
-/// unconditional unlink in here would break that singleton guarantee. Callers
-/// that want stale-file cleanup keep doing it themselves, immediately before
-/// this call.
+/// [`prepare_socket_dir`], binds a temp name beside `path`, narrows it to
+/// [`SOCKET_MODE`], sizes its buffers, then hard-links it to `path` and drops
+/// the temp name. So `path` appears already `0600`, or not at all, and no
+/// dialler can see it at the umask mode. Deliberately does *not* remove a
+/// stale socket file: `CtrlSocket::bind_singleton` must probe before
+/// clobbering, and folding an unconditional unlink in here would break that
+/// singleton guarantee. An occupied `path` fails with `EADDRINUSE`, as a bare
+/// `bind` did. Callers that want stale-file cleanup keep doing it themselves,
+/// immediately before this call.
 ///
-/// The `0600` step is defence in depth, not the race fix — the `0700` directory
-/// is what makes the socket unreachable during the window between `bind` and
-/// `chmod`. [`prepare_socket_dir`]'s docs carry the reasoning and the residual
-/// race it does not close.
+/// The `0600` mode is part of the client contract, not defence in depth:
+/// [`verify_socket_for_connect`] refuses any other mode. The `0700` directory
+/// keeps other uids out; it does not stop a same-uid client from dialling a
+/// socket still at the umask mode, which is the #9714 race the temp-name bind
+/// closes. [`prepare_socket_dir`]'s docs carry the residual directory race.
 ///
 /// # Errors
 ///
-/// Any [`UdsSecurityError`] the directory hardening, the bind, the chmod or
-/// [`sockbuf::tune_listener_buffers`] produces.
+/// Any [`UdsSecurityError`] the directory hardening, the bind, the chmod,
+/// [`sockbuf::tune_listener_buffers`] or the final link produces. Every error
+/// after the temp bind removes the temp name.
 ///
 /// Test: `bind_hardened_sets_socket_0600_and_dir_0700`,
+/// `bind_hardened_never_exposes_the_final_path_below_0600`,
+/// `bind_hardened_leaves_no_temp_socket_when_the_final_path_is_taken`,
+/// `bind_hardened_never_replaces_a_file_that_appears_during_the_bind`,
 /// `bind_hardened_socket_is_connectable_after_hardening`,
 /// `bind_hardened_rejects_an_over_long_path`,
 /// `hardened_sockets_hold_far_more_in_flight_than_the_platform_default`.
@@ -551,35 +561,40 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
 /// no sleep standing in for the interleaving, the same seam
 /// `singleton::bind_singleton_with` gives the takeover race.
 /// What: identical to [`bind_hardened`]; `after_bind` runs once, after the
-/// bind and before the chmod.
-/// Test: `bind_hardened_never_exposes_the_final_path_below_0600`.
+/// temp bind and before the chmod and the link into place.
+/// Test: `bind_hardened_never_exposes_the_final_path_below_0600`,
+/// `bind_hardened_never_replaces_a_file_that_appears_during_the_bind`.
 pub(crate) fn bind_hardened_with(
     path: &Path,
     after_bind: impl FnOnce(),
 ) -> Result<UnixListener, UdsSecurityError> {
     check_sun_path_budget(path)?;
-    prepare_socket_dir(socket_parent(path)?)?;
+    let parent = socket_parent(path)?;
+    prepare_socket_dir(parent)?;
 
-    let listener = UnixListener::bind(path).map_err(|source| UdsSecurityError::Bind {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    // #9714: bind a temp name and publish it only once it is 0600; binding
+    // `path` itself left it dialable at the umask mode until the chmod.
+    let (temp, listener) = place::bind_temp_beside(path, parent)?;
     after_bind();
 
-    std::fs::set_permissions(path, Permissions::from_mode(SOCKET_MODE)).map_err(|source| {
-        UdsSecurityError::Chmod {
-            path: path.to_path_buf(),
+    let narrowed = std::fs::set_permissions(&temp, Permissions::from_mode(SOCKET_MODE))
+        .map_err(|source| UdsSecurityError::Chmod {
+            path: temp.clone(),
             mode: SOCKET_MODE,
             source,
-        }
-    })?;
+        })
+        // #6896: sized on the LISTENER, which macOS copies onto every socket
+        // `accept` returns. Linux does not, so the accepted end is sized by
+        // `accept_sized`. The strict form: a listener has no peer, so it must
+        // never reach the hung-up-peer outcome (#6896 review).
+        .and_then(|()| sockbuf::tune_listener_buffers(&listener).map(drop));
+    if let Err(e) = narrowed {
+        // #9714: nothing reached `path`; drop the temp name with the listener.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
 
-    // #6896: sized on the LISTENER, which macOS copies onto every socket
-    // `accept` returns. Linux does not, so the accepted end is sized by
-    // `accept_sized`. The strict form: a listener has no peer, so it must never
-    // reach the hung-up-peer outcome (#6896 review).
-    sockbuf::tune_listener_buffers(&listener)?;
-
+    place::publish(&temp, path)?;
     Ok(listener)
 }
 
