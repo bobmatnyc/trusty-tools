@@ -76,9 +76,13 @@ fn row<'a>(rows: &'a [DoctorCheck], name: &str) -> &'a DoctorCheck {
         .unwrap_or_else(|| panic!("no {name} row in {rows:?}"))
 }
 
-/// Run git in `dir` with every `GIT_*` variable cleared and a fixed identity.
+/// Run git in `dir` with every `GIT_*` variable cleared, a fixed identity,
+/// and auto-maintenance off.
 fn git(dir: &Path, args: &[&str]) {
-    let mut cmd = Command::new("git");
+    // See #9710: `git commit` otherwise detaches `git maintenance run --auto`,
+    // which unlinks `.git/objects/maintenance.lock` after the commit returns
+    // and moves that directory's mtime inside a `snapshot` window (#7171).
+    let mut cmd = trusty_common::git::command();
     cmd.current_dir(dir).args([
         "-c",
         "user.name=test",
