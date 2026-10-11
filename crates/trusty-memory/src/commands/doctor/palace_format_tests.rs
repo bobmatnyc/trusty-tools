@@ -97,3 +97,87 @@ fn palace_format_check_warns_on_a_palace_it_cannot_verify() {
     let r = palace_format_verdict(root.path());
     assert_eq!(r.status, CheckStatus::Pass, "{r:?}");
 }
+
+/// Copy the checked-in 0.33.0 palace (`testdata/palace-format/v1/`) to
+/// `<root>/palaces/personal`, returning the palace and the blob directory.
+fn copy_v1_blob(
+    root: &Path,
+) -> (
+    trusty_common::memory_core::palace::Palace,
+    std::path::PathBuf,
+) {
+    let blob = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palace-format/v1/personal");
+    let dir = root.join("palaces").join("personal");
+    std::fs::create_dir_all(&dir).expect("dir");
+    for name in ["palace.json", "kg.redb", "index.usearch.redb"] {
+        std::fs::copy(blob.join(name), dir.join(name)).expect("copy blob file");
+    }
+    let palace = trusty_common::memory_core::palace::Palace {
+        id: trusty_common::memory_core::palace::PalaceId::new("personal"),
+        name: "personal".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir,
+    };
+    (palace, blob)
+}
+
+/// #9275 (ADR-0067 D4 canary): the palace trusty-memory 0.33.0 wrote — not
+/// one this crate built — migrates to format 2 at the daemon's writer open.
+/// `doctor` names it "needs migration" before and passes it after; its
+/// drawers and triples survive; the backup is byte-identical to the blob.
+#[test]
+fn the_0_33_0_v1_palace_migrates_to_2_and_its_backup_matches_the_blob() {
+    use trusty_common::memory_core::retrieval::PalaceHandle;
+    use trusty_common::memory_core::store::OpenIntent;
+    use trusty_common::memory_core::store::format_backup::{MANIFEST, backup_root, verify_backup};
+    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (palace, blob) = copy_v1_blob(root.path());
+    let palaces = root.path().join("palaces");
+    let r = palace_format_verdict(&palaces);
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+    assert!(format!("{r:?}").contains("personal (format 1)"), "{r:?}");
+
+    let handle = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer).expect("migrates");
+    let texts: Vec<String> = handle
+        .drawers
+        .read()
+        .iter()
+        .map(|d| d.content().to_string())
+        .collect();
+    for want in [
+        "first drawer for the format 1 fixture",
+        "second drawer in the format 1 fixture",
+    ] {
+        assert!(texts.iter().any(|t| t.contains(want)), "{want}: {texts:?}");
+    }
+    drop(handle);
+
+    let r = palace_format_verdict(&palaces);
+    assert_eq!(r.status, CheckStatus::Pass, "{r:?}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(palace.data_dir.join("palace.json")).expect("read"))
+            .expect("json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    let kg = KgStoreRedb::open(&palace.data_dir.join("kg.redb")).expect("migrated KG opens");
+    let alice = kg.query_active("alice").expect("query");
+    assert!(alice.iter().any(|t| t.object == "bob"), "{alice:?}");
+    drop(kg);
+
+    let backups: Vec<_> = std::fs::read_dir(backup_root(root.path(), "personal"))
+        .expect("backup root")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| p.join(MANIFEST).is_file())
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    verify_backup(&backups[0]).expect("the backup verifies");
+    for name in ["palace.json", "kg.redb"] {
+        assert_eq!(
+            std::fs::read(backups[0].join(name)).expect("backup file"),
+            std::fs::read(blob.join(name)).expect("blob file"),
+            "{name} in the backup is not the 0.33.0 bytes"
+        );
+    }
+}
