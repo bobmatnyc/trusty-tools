@@ -92,7 +92,8 @@ fn cli_parses_hook() {
         Command::Hook {
             pm_guard: false,
             divert_check: false,
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 }
@@ -108,7 +109,24 @@ fn cli_parses_hook_prompt_feedback() {
         Command::Hook {
             pm_guard: false,
             divert_check: false,
-            prompt_feedback: true
+            prompt_feedback: true,
+            egress_guard: false
+        }
+    ));
+}
+
+/// Why (#8454): `tm hook --egress-guard` is a separate hook mode; parsing must
+/// round-trip the flag so the dispatcher routes to the egress guard.
+#[test]
+fn cli_parses_hook_egress_guard() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--egress-guard"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false,
+            prompt_feedback: false,
+            egress_guard: true
         }
     ));
 }
@@ -124,7 +142,8 @@ fn cli_parses_hook_pm_guard() {
         Command::Hook {
             pm_guard: true,
             divert_check: false,
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 }

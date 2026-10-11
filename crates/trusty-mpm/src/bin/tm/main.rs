@@ -38,7 +38,7 @@ use commands::{
     managed_workspace::LaunchDir,
     manager::manager,
     memory::memory,
-    misc::{attach_cmd, coordinator, hook, optimizer, overseer, validate},
+    misc::{attach_cmd, coordinator, optimizer, overseer, validate},
     project::project,
     projects::projects,
     services::services,
@@ -560,22 +560,9 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Some(Command::Reinstall(args)) => commands::reinstall::run(args).await,
-        Some(Command::Hook {
-            pm_guard,
-            divert_check,
-            prompt_feedback,
-        }) => {
-            if pm_guard {
-                commands::pm_guard::pm_guard(&url, started).await
-            // #6887: a separate hook mode, not a pm-guard variant.
-            } else if divert_check {
-                commands::divert_check::divert_check().await
-            // #7688: likewise — the capture never relays to the daemon.
-            } else if prompt_feedback {
-                commands::prompt_feedback_hook::prompt_feedback_hook().await
-            } else {
-                hook(&client, &url).await
-            }
+        // #8454: the mode dispatch lives in `hook_mode` (500-SLOC cap).
+        Some(hook @ Command::Hook { .. }) => {
+            commands::hook_mode::run(hook, &client, &url, started).await
         }
         // #7688: the read-back for what the capture above collected.
         Some(Command::PromptFeedback(args)) => commands::prompt_feedback_cli::run(args).await,

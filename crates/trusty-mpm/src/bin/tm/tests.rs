@@ -1803,7 +1803,8 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             divert_check: false,
             // #7688: a bare `tm hook` is still the daemon relay, never the
             // prompt-feedback capture.
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 

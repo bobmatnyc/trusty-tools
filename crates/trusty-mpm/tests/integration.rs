@@ -61,6 +61,8 @@ mod tm_doctor_standalone;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #8454: `tm hook --egress-guard`, the outbound-channel family deny.
+mod tm_hook_egress_guard_8454;
 mod tm_hook_idle_parking;
 mod tm_hook_notification_8392;
 // #8531: `tm hook` SessionStart over the socket, HTTP only on Unreachable.

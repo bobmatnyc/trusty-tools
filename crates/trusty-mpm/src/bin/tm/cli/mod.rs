@@ -593,8 +593,13 @@ pub(crate) enum Command {
     /// `permissionDecision: "deny"` response for direct file edits / forbidden
     /// Bash verbs the PM must delegate — see `commands::pm_guard`. The managed
     /// launcher registers exactly this form as the session's `PreToolUse` hook.
-    /// Test: `cli_parses_hook` / `cli_parses_hook_pm_guard` plus the inline
-    /// `hook_guard_short_circuits`.
+    ///
+    /// `--egress-guard` (issue #8454) denies every MCP tool of an outbound
+    /// message family (Slack, Gmail, Notion, Google Chat) for every caller,
+    /// failing closed on any payload it cannot read — see
+    /// `commands::egress_guard`.
+    /// Test: `cli_parses_hook` / `cli_parses_hook_pm_guard` /
+    /// `cli_parses_hook_egress_guard` plus the inline `hook_guard_short_circuits`.
     Hook {
         /// Run in PM-enforcement mode (blocks direct edits; steers to delegate).
         #[arg(long)]
@@ -609,6 +614,10 @@ pub(crate) enum Command {
         /// `prompt-self-improvement` flag is on. Always exits 0.
         #[arg(long)]
         prompt_feedback: bool,
+        /// Run in outbound-channel deny mode (#8454): refuse every Slack,
+        /// Gmail, Notion and Google Chat MCP tool, for every caller.
+        #[arg(long)]
+        egress_guard: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
