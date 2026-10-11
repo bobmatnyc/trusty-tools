@@ -302,17 +302,47 @@ pub(crate) fn resolve_type_arg(args: &Value, tool: &str) -> Result<Option<Drawer
     }
 }
 
+/// Resolve the optional `verify` argument of the write tools (#9390).
+///
+/// Why: a re-verify command on a write with no slot has nothing to re-check,
+/// and a blank one checks nothing. Both are caller mistakes, so they fail
+/// before any content gate can answer with a "skipped" success.
+/// What: absent or JSON `null` gives `Ok(None)`. A string that is non-blank on
+/// a call that also names `fact_key` gives `Ok(Some(trimmed))`. A missing
+/// `fact_key`, a blank string, or a non-string is an `Err`; nothing is written.
+/// Test: `verify_without_fact_key_is_refused`,
+/// `a_verify_command_round_trips_through_memory_list`.
+pub(crate) fn resolve_verify_arg(args: &Value, tool: &str) -> Result<Option<String>> {
+    let command = match args.get("verify") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.trim(),
+        Some(other) => return Err(anyhow!("{tool}: 'verify' must be a string, got {other}")),
+    };
+    if command.is_empty() {
+        return Err(anyhow!("{tool}: 'verify' must not be empty or whitespace"));
+    }
+    if args.get("fact_key").and_then(|v| v.as_str()).is_none() {
+        return Err(anyhow!(
+            "{tool}: 'verify' needs 'fact_key': only a Tier C slot can be re-verified, and nothing was stored"
+        ));
+    }
+    Ok(Some(command.to_string()))
+}
+
 /// Fold an admission decision into the write options and the response envelope.
 ///
 /// Why: both `memory_remember` and `memory_note` need the identical
 /// "carry the resolved slot down, report the tier back up" step; duplicating it
 /// is how the two tools would drift on what a refusal looks like.
 /// What: on admission, sets `opts.fact_key` / `opts.expires_at` to the resolved
-/// values. Otherwise leaves them unset so the library writes an ordinary
-/// drawer. Returns `(tier_label, refusal_reason)` for the JSON envelope.
-/// Test: same tests as [`resolve_tier_c`].
+/// values and `opts.verify_with` to `verify` (#9390). Otherwise leaves all
+/// three unset so the library writes an ordinary drawer with no command.
+/// Returns `(tier_label, refusal_reason)` for the JSON envelope.
+/// Test: same tests as [`resolve_tier_c`], plus
+/// `a_verify_command_round_trips_through_memory_list`.
 pub(crate) fn apply_tier_c(
     admission: &TierCAdmission,
+    verify: Option<String>,
     opts: &mut RememberOptions,
 ) -> (&'static str, Option<String>) {
     match admission {
@@ -322,6 +352,7 @@ pub(crate) fn apply_tier_c(
         } => {
             opts.fact_key = Some(fact_key.clone());
             opts.expires_at = Some(*expires_at);
+            opts.verify_with = verify;
             ("C", None)
         }
         TierCAdmission::Refused(refusal) => ("E", Some(refusal.to_string())),

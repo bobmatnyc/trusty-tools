@@ -29,6 +29,8 @@ mod relevance;
 mod scope;
 // ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
 mod tier_c;
+// #9390: a slot's re-verify command, stored as a `verify_with` KG triple.
+mod tier_c_verify;
 mod types;
 // #6366: the write critical section and its ceiling. Split out of `handle` so
 // the pipeline sits in one future a timeout can drop as a unit — and so
@@ -48,6 +50,8 @@ pub(crate) mod recall_log_tests;
 mod tests;
 #[cfg(test)]
 mod tier_c_tests;
+#[cfg(test)]
+mod tier_c_verify_tests;
 #[cfg(test)]
 mod timeout_tests;
 #[cfg(test)]

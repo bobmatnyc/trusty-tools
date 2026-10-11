@@ -281,7 +281,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null. #9390: each drawer also carries `verify`, always present: the command that re-reads its slot's fact, or null when it has none. A drawer displaced from its slot reads null.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -492,10 +492,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         .position(|t| t["name"] == "palace_update")
         .map_or(tools.len(), |i| i + 1);
     tools.insert(at, palace_rename_definition());
-    // #9144: `memory_remember`'s `type`, from its own `json!` for the recursion limit.
-    if let Some(remember) = tools.iter_mut().find(|t| t["name"] == "memory_remember") {
-        remember["inputSchema"]["properties"]["type"] = remember_type_property();
-    }
+    // #9144 `type`, #9390 `verify`: own `json!` calls for the recursion limit.
+    super::write_property_definitions::splice(tools);
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
     tools.extend(super::chat_assets::definitions());
@@ -513,22 +511,6 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // advertised. Applied after the splices so a spliced group is covered too.
     super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
-}
-
-/// The `type` property of `memory_remember`'s input schema (#9144).
-///
-/// Why: its own `json!` call, because the enum array in the main literal trips
-/// the macro recursion limit (the same reason [`palace_rename_definition`]
-/// splits).
-/// What: an optional string, enum of the five writable drawer types, matched
-/// case-insensitively by `helpers::resolve_type_arg`.
-/// Test: `memory_remember_schema_advertises_the_type_enum`.
-fn remember_type_property() -> Value {
-    json!({
-        "type": "string",
-        "enum": ["Ruling", "Decision", "Status", "Turn", "Reference"],
-        "description": "#9144: optional drawer type, matched case-insensitively. Ruling = a standing rule that holds until revoked; Decision = a choice made for a piece of work; Status = a point-in-time state report a newer one replaces; Turn = a record of one conversational turn; Reference = a pointer to an external source of truth. Recall treats Ruling and Decision as rulings, and weights Status by 0.8 and Turn by 0.7 unless the drawer holds a live `fact_key` slot. Omit it for the heuristic classifier (today's behaviour). Any other value, including UserFact, is an error and nothing is written."
-    })
 }
 
 /// The `palace_rename` schema (#9544).

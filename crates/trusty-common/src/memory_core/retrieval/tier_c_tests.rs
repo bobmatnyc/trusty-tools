@@ -951,7 +951,7 @@ async fn re_running_a_retirement_keeps_one_active_edge() {
         commit_delay: None,
     };
     let order = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
-    super::tier_c::commit_and_mirror(ctx, stored(&handle, b), order)
+    super::tier_c::commit_and_mirror(ctx, stored(&handle, b), None, order)
         .await
         .expect("the replayed retirement commits");
 
@@ -996,7 +996,7 @@ async fn a_failed_retirement_commit_writes_no_edge() {
     let newcomer = slot_newcomer(incumbent.room_id, "the newcomer");
     let newcomer_id = newcomer.id;
     let order = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
-    super::tier_c::commit_and_mirror(ctx, newcomer, order)
+    super::tier_c::commit_and_mirror(ctx, newcomer, None, order)
         .await
         .expect_err("a read-only KG must refuse the atomic commit");
 

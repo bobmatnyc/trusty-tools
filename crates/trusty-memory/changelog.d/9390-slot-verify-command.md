@@ -1,0 +1,2 @@
+Added
+- `memory_remember` and `memory_note` accept an optional `verify`: the command that re-reads a Tier C slot's fact, e.g. `gh pr view 123 --json headRefOid`. It needs `fact_key`; a `verify` without one, or an empty one, is an error and nothing is written. `memory_list` reports `verify` per drawer (null when none). A later write to the same slot closes the retired drawer's command. Palace export does not carry the command, since export already skips Tier C slots (#9390).

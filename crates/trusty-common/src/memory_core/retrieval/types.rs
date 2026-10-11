@@ -180,6 +180,19 @@ pub struct RememberOptions {
     /// Test: `explicit_expiry_is_honoured_without_a_fact_key`,
     /// `already_elapsed_expiry_degrades_to_tier_e`.
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The command that re-reads this slot's fact (#9390).
+    ///
+    /// Why: a slot's value goes stale when a later event changes it; the
+    /// command (`gh pr view 123 --json headRefOid`) lets a reader check the
+    /// value instead of trusting it.
+    /// What: `None` (the default) stores no command. `Some(cmd)` needs a
+    /// `fact_key` and a non-blank command, or the write fails before anything
+    /// is stored. On an admitted slot it is stored as the KG triple
+    /// `drawer:<id> verify_with <cmd>` under the slot write's commit guard; on
+    /// a refused slot (Tier E) no command is stored.
+    /// Test: `a_refused_slot_stores_no_verify_command`,
+    /// `a_verify_command_without_a_fact_key_is_refused_and_writes_nothing`.
+    pub verify_with: Option<String>,
 }
 
 impl Default for RememberOptions {
@@ -196,6 +209,7 @@ impl Default for RememberOptions {
             // what every caller that predates ADR-0028 gets.
             fact_key: None,
             expires_at: None,
+            verify_with: None,
         }
     }
 }
@@ -222,6 +236,7 @@ impl RememberOptions {
             wing_id: None,
             fact_key: None,
             expires_at: None,
+            verify_with: None,
         }
     }
 

@@ -290,7 +290,20 @@ pub const FUNCTIONAL_PREDICATES: &[&str] = &[
     "requires_python",
     "source_repo",
     "superseded_by",
+    // #9390: a slot drawer's one re-verify command; see `VERIFY_WITH`.
+    "verify_with",
 ];
+
+/// The predicate that stores a Tier C slot drawer's re-verify command (#9390).
+///
+/// Why: a slot names a fact a later event makes false; the command re-reads it
+/// so a resume pass can check the value instead of trusting it. It lives in
+/// the KG as `drawer:<id> verify_with <command>`, an additive triple, so the
+/// drawer row and the palace format are unchanged (ADR-0067 D3).
+/// What: a wire constant, listed in [`FUNCTIONAL_PREDICATES`] so a drawer
+/// holds at most one active command.
+/// Test: `slot_retirement_closes_the_retirees_verify_command`.
+pub const VERIFY_WITH: &str = "verify_with";
 
 /// Whether asserting `predicate` supersedes the subject's prior object.
 ///
