@@ -1,0 +1,4 @@
+crate   trusty-mpm
+version 1.9.0
+reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version. Refs #9390.
+accept  constructible_struct_adds_field  FactSlot.verify
