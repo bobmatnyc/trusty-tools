@@ -635,7 +635,19 @@ put in an error message.
 >   Off unix there is no fingerprint and nothing is cached.
 > - Failures are still not cached. The idle exit is unchanged and is not
 >   deferred while the cache holds values; the cache dies with the server.
->   Zeroize-on-drop and disabling core dumps wait for an owner ruling.
+> - Zeroize-on-drop (owner ruling Dd8, 2026-10-11): the cache keeps its own
+>   copy of each value in a buffer that is overwritten with zeros when the
+>   entry is dropped — by max age, by an eviction, by a settings or
+>   fingerprint change, by a replacing insert, and with the whole cache when
+>   the server exits. This covers the cache's copies only. A value still
+>   passes through the backend CLI's output, the `SecretValue` a resolve
+>   returns, and the response buffer, and those are not zeroed.
+> - Core dumps (ruling Dd8): the server sets `RLIMIT_CORE` to 0, soft and
+>   hard, first thing at start, before it reads the 1Password token or any
+>   secret, on every unix build. It fails closed: if the limit cannot be
+>   set, or reads back other than (0, 0), the binary exits 1 without
+>   serving. Lowering a limit needs no privilege, so this does not fail on
+>   a working system.
 
 ```rust
 /// Populated once per `tm` session (daemon-side) or once per process (a bare
