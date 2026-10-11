@@ -87,6 +87,11 @@ fn build_router_inner(
     self_origins: crate::routes::origin_guard::SelfOrigins,
     webhook: Option<crate::webhook::WebhookIngress>,
 ) -> Router {
+    // #9066: taken before `with_state` consumes the state.
+    #[cfg(unix)]
+    let secrets = state.secrets();
+    #[cfg(not(unix))]
+    let secrets = ();
     let core = Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
@@ -383,5 +388,30 @@ fn build_router_inner(
             crate::routes::origin_guard::guard_write_origin,
         ))
         .layer(CorsLayer::permissive())
+        // #9066 A6: merged after the permissive CORS layer and the write-origin
+        // guard, so neither applies to `/api/secrets/*`; the bridge has its own.
+        .merge(secrets_routes(secrets))
         .layer(TraceLayer::new_for_http())
+}
+
+/// The `/api/secrets/*` routes (#9066): the bridge on Unix.
+#[cfg(unix)]
+fn secrets_routes(bridge: std::sync::Arc<crate::secrets_uds::SecretsBridge>) -> Router {
+    crate::secrets_uds::router(bridge)
+}
+
+/// The `/api/secrets/*` routes elsewhere: a fixed 501, since no client pid
+/// can be read there (#9066, Architect Q8).
+#[cfg(not(unix))]
+fn secrets_routes((): ()) -> Router {
+    async fn unsupported() -> (axum::http::StatusCode, &'static str) {
+        (
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "the secrets bridge is not available on this platform",
+        )
+    }
+    Router::new()
+        .route("/api/secrets", any(unsupported))
+        .route("/api/secrets/", any(unsupported))
+        .route("/api/secrets/{*rest}", any(unsupported))
 }

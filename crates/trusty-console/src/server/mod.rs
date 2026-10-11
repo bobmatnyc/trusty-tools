@@ -158,6 +158,9 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
     pub(crate) analyze_socket: Option<Arc<PathBuf>>,
+    /// The trusty-secrets bridge (#9066); disabled until `run_serve` builds one.
+    #[cfg(unix)]
+    pub(crate) secrets: Arc<crate::secrets_uds::SecretsBridge>,
     /// When this server's state was built, which is when the console started
     /// serving (#6908).
     ///
@@ -272,6 +275,8 @@ impl AppState {
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
+            #[cfg(unix)]
+            secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
             started_at: Instant::now(),
         }
     }

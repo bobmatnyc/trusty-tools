@@ -11341,7 +11341,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -11351,8 +11351,10 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "http-body-util",
+ "libc",
  "mime_guess",
  "open",
+ "rand_core 0.6.4",
  "reqwest 0.12.28",
  "rust-embed",
  "serde",
@@ -11365,6 +11367,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-secrets",
  "which 6.0.3",
 ]
 

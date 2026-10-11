@@ -126,5 +126,12 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # "live: spawns the real binary and a detached process tree; run on EVO and the
 # Mac"). 120 -> 122.
 #
+# #9066 (PR2b) added trusty-console
+# `secrets_uds_live::live_bridge_is_judged_by_the_real_server`
+# (`tests/secrets_uds_live.rs`, T24). It stays unselected: it spawns the real
+# trusty-secrets binary (built beside the test, or found by `bin_resolve`) and
+# copies of the test binary as a process tree that must not sit under Claude
+# Code; run it on EVO with `--include-ignored`. 122 -> 123.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 122
+# UNSELECTED-BASELINE: 123
