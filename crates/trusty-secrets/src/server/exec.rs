@@ -220,6 +220,8 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             // #7520: every check above ran; a cache hit skips only the read.
             // #7520 M1: the account config's settings for this backend, read
             // on both sides of the open; a change between them is unknown.
+            // #7520 S2: the read carries the file's stat fingerprint, so an
+            // A->B->A flip during the open also counts as a change.
             let id = project.resolved_config().backend;
             let account = state.file_consent_config.as_deref();
             let before = OpenedUnder::read(account, &id);

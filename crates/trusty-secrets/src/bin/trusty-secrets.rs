@@ -4,13 +4,16 @@
 //! call, it serves until 60 s pass with no answered request, then removes its
 //! socket and exits. No launchd job runs it.
 //! What: parses `serve [--socket P] [--index-dir P] [--machine-config P]
-//! [--audit-log P] [--idle-timeout-secs N]` (env: `TRUSTY_SECRETS_SOCKET`,
-//! `TRUSTY_SECRETS_INDEX_DIR` off the default socket only (#7524),
-//! `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`; the audit log has no environment
-//! override), serves
+//! [--audit-log P] [--idle-timeout-secs N] [--cache-max-age-secs N]` (env:
+//! `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR` off the default
+//! socket only (#7524), `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`,
+//! `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` to shorten only (#7520); the audit
+//! log has no environment override), serves
 //! with the real backends, and exits 0 on idle or SIGTERM/SIGINT, within
 //! `EXIT_GRACE` of either however many backend calls are stuck (#9572). A refused
 //! bind — a live instance already serving — exits 1 without touching it.
+//! #7520 S2: it first sets `RLIMIT_CORE` to 0, soft and hard, and exits 1
+//! when it cannot.
 //! The git redirect variables are removed from its environment at start.
 //! #7519: on a `cli-backends` build, so is every `OP_*` variable but an
 //! `op signin` session; the service-account token is kept for the 1Password
@@ -31,6 +34,12 @@ fn main() -> ExitCode {
 
 #[cfg(unix)]
 fn main() -> ExitCode {
+    // #7520 S2 (ruling Dd8): no core file, set before the first secret (the
+    // 1Password token below) is read. Fail closed: DOC-74 names no fallback.
+    if let Err(e) = trusty_secrets::server::disable_core_dumps() {
+        eprintln!("trusty-secrets: cannot disable core dumps: {e}");
+        return ExitCode::FAILURE;
+    }
     // #9065: a detached server keeps its first spawner's environment for its
     // whole life. Drop the git redirect variables before any thread exists;
     // every git call also scrubs them itself.

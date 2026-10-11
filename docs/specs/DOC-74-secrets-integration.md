@@ -596,10 +596,58 @@ put in an error message.
 > - `secrets.set`, `secrets.delete` and `secrets.copy` evict the (vault, key)
 >   they write, under every backend, after the write. An eviction also stops
 >   a read already in flight from storing the old value.
-> - `Debug` shows the entry count only; values stay `SecretValue`.
+> - `Debug` shows the entry count and the max age (S2); values stay
+>   `SecretValue`.
 > - A poisoned lock is a miss and stores nothing.
-> - A max age and the cache's lifecycle on idle exit, including zeroize,
->   are S2, pending owner rulings.
+> - Each backend's entries belong to the settings its section of the
+>   account machine config held when they were filled. A read under other
+>   settings drops them, and a resolve whose settings change while the
+>   backend opens stores nothing.
+>
+> **Amended 2026-10-10 (#7520 S2).**
+>
+> - Max age: an entry is never served once it is as old as the max age,
+>   counted from the start of the read that filled it, even while the
+>   server stays busy and never reaches its idle exit. The next resolve
+>   reads the backend again. Age is counted on both the monotonic clock and
+>   the wall clock, and the entry is a miss when either reaches the max age:
+>   the monotonic clock does not advance while the machine sleeps (macOS
+>   `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`), so after a lid-close the
+>   wall clock bounds it. A wall clock now earlier than the fill (stepped
+>   back) is also a miss. The default is 600 s (provisional, plan §6
+>   point 1). `trusty-secrets serve --cache-max-age-secs N` sets it;
+>   `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` may only shorten it, because the
+>   on-demand client passes the first spawner's environment to the shared
+>   server.
+> - Writes made outside the server: a value changed by `op`, the 1Password
+>   app, Keeper or another machine is not seen by a running server while
+>   its entry is cached. The old value answers until the entry reaches the
+>   max age or the server exits, whichever comes first. Writes through
+>   `secrets.set`, `secrets.delete` and `secrets.copy` evict at once.
+> - Account file fingerprint: the settings an entry belongs to include a
+>   stat fingerprint of the account machine config (device, inode, length,
+>   mtime and ctime, of the path and of its symlink target). Any change to
+>   that file drops the backend's entries, and a file replaced and replaced
+>   back while the backend opens (A→B→A) counts as a change, so nothing read
+>   in that window is stored. A filesystem with coarse timestamps can miss
+>   an in-place rewrite of the same length within one timestamp tick; a
+>   rename, which editors use to save, always changes the inode or ctime.
+>   Off unix there is no fingerprint and nothing is cached.
+> - Failures are still not cached. The idle exit is unchanged and is not
+>   deferred while the cache holds values; the cache dies with the server.
+> - Zeroize-on-drop (owner ruling Dd8, 2026-10-11): the cache keeps its own
+>   copy of each value in a buffer that is overwritten with zeros when the
+>   entry is dropped — by max age, by an eviction, by a settings or
+>   fingerprint change, by a replacing insert, and with the whole cache when
+>   the server exits. This covers the cache's copies only. A value still
+>   passes through the backend CLI's output, the `SecretValue` a resolve
+>   returns, and the response buffer, and those are not zeroed.
+> - Core dumps (ruling Dd8): the server sets `RLIMIT_CORE` to 0, soft and
+>   hard, first thing at start, before it reads the 1Password token or any
+>   secret, on every unix build. It fails closed: if the limit cannot be
+>   set, or reads back other than (0, 0), the binary exits 1 without
+>   serving. Lowering a limit needs no privilege, so this does not fail on
+>   a working system.
 
 ```rust
 /// Populated once per `tm` session (daemon-side) or once per process (a bare

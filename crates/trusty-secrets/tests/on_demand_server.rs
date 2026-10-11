@@ -127,6 +127,27 @@ async fn binary_exits_after_idle_and_removes_its_socket() {
     assert!(!p.socket.exists(), "socket file removed on exit");
 }
 
+/// Why: #7520 S2 (ruling Dd8) — the real binary runs with `RLIMIT_CORE` at
+/// 0, soft and hard, so it never writes a core file. Linux only: it reads
+/// the server's limits from `/proc`.
+/// Test: itself.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_runs_with_core_dumps_disabled() {
+    let p = paths();
+    let mut child = spawn_server(&p, 30);
+    wait_serving(&p.socket).await;
+    let limits = std::fs::read_to_string(format!("/proc/{}/limits", child.id())).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    let line = limits
+        .lines()
+        .find_map(|line| line.strip_prefix("Max core file size"))
+        .expect("a core file size line");
+    let values: Vec<&str> = line.split_whitespace().take(2).collect();
+    assert_eq!(values, ["0", "0"], "server RLIMIT_CORE (soft, hard)");
+}
+
 /// Why: a second binary on a live socket exits non-zero and the first keeps
 /// serving on an untouched socket.
 /// Test: itself.

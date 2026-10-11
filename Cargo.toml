@@ -289,6 +289,9 @@ toml = "0.8"
 # not reflow the operator's comments and unrelated tables.
 toml_edit = "0.22"
 libc = "0.2"
+# #7520 S2: trusty-secrets zeroes a cached secret value when it is dropped
+# (ruling Dd8). Already in the lockfile through other crates.
+zeroize = "1"
 # `trusty-embedderd`'s pre-init ONNX Runtime probe (#8616). Same major as the
 # `libloading` that `ort`'s `load-dynamic` feature already pulls in.
 libloading = "0.9"

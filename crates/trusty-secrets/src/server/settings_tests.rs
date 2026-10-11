@@ -6,8 +6,12 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use super::{INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError};
+use super::{
+    CACHE_MAX_AGE_ENV, DEFAULT_CACHE_MAX_AGE, INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings,
+    SettingsError,
+};
 use crate::store::INDEX_SUBDIR;
 
 /// An environment that sets only [`INDEX_DIR_ENV`], to `value`.
@@ -238,4 +242,35 @@ fn settings_index_env_is_ignored_on_any_socket_when_the_account_home_is_unknown(
     let args = serve_args(Some(&sandbox), &[]);
     let parsed = ServerSettings::from_args_with(args, env, || None).unwrap();
     assert_ne!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+}
+
+/// Why: #7520 S2 — the cache max age is `--cache-max-age-secs`, else
+/// [`CACHE_MAX_AGE_ENV`], else the default. The variable may shorten it but
+/// never lengthen it, since the first spawner's environment reaches the
+/// server every client shares (#7524). A bad flag is an error; a bad or
+/// longer variable is the default.
+/// Red while `serve` has no such flag or variable.
+/// Test: itself.
+#[test]
+fn settings_cache_max_age_flag_env_default() {
+    let socket = Path::new("/tmp/trusty-secrets-7520/s.sock");
+    let parsed = |extra: &[&str], var: Option<&'static str>| {
+        let env = move |name: &str| var.filter(|_| name == CACHE_MAX_AGE_ENV).map(str::to_owned);
+        parse_settings(serve_args(Some(socket), extra), env).map(|s| s.cache_max_age)
+    };
+    assert_eq!(parsed(&[], None).unwrap(), DEFAULT_CACHE_MAX_AGE);
+    assert_eq!(parsed(&[], Some("30")).unwrap(), Duration::from_secs(30));
+    for ignored in ["3600", "0", "soon", ""] {
+        let max_age = parsed(&[], Some(ignored)).unwrap();
+        assert_eq!(max_age, DEFAULT_CACHE_MAX_AGE, "{ignored:?}");
+    }
+    let flag = parsed(&["--cache-max-age-secs", "3600"], Some("30")).unwrap();
+    assert_eq!(flag, Duration::from_secs(3600));
+    for bad in ["0", "soon"] {
+        let refused = parsed(&["--cache-max-age-secs", bad], None);
+        assert!(
+            matches!(refused, Err(SettingsError::InvalidCacheMaxAge)),
+            "{bad:?}: {refused:?}"
+        );
+    }
 }

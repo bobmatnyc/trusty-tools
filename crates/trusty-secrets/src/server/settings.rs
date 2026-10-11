@@ -23,10 +23,13 @@
 //! beside an index named by `--index-dir`, else under `$HOME`
 //! ([`template_root_beside`]), so no environment variable can put a
 //! value-bearing file in a project tree.
+//! #7520 S2: [`CACHE_MAX_AGE_ENV`] can shorten the session cache's max age
+//! and never lengthen it, for the same reason; `--cache-max-age-secs` may.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
 //! `settings_idle_env_falls_back_on_garbage_and_zero`,
+//! `settings_cache_max_age_flag_env_default`,
 //! `settings_reject_unknown_and_incomplete_flags`,
 //! `settings_index_env_is_ignored_on_the_default_socket`,
 //! `settings_index_override_survives_off_the_default_socket`,
@@ -71,6 +74,19 @@ pub const IDLE_TIMEOUT_ENV: &str = "TRUSTY_SECRETS_IDLE_TIMEOUT_SECS";
 /// Idle window before the server exits (owner ruling 31).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Shortens the session cache's max age, in whole seconds (#7520 S2).
+///
+/// What: a positive integer up to [`DEFAULT_CACHE_MAX_AGE`] is that many
+/// seconds; anything else — unset, `0`, garbage, or longer than the default
+/// — is the default. It never lengthens the max age: the on-demand client
+/// passes the first spawner's environment to the server every client shares
+/// (#7524), so only `--cache-max-age-secs` may.
+pub const CACHE_MAX_AGE_ENV: &str = "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS";
+
+/// How long a cached 1Password or Keeper value answers before the next
+/// resolve reads the backend again (#7520 S2; provisional, plan §6 point 1).
+pub const DEFAULT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+
 /// The subcommand that serves the socket.
 pub const SERVE_SUBCOMMAND: &str = "serve";
 
@@ -80,7 +96,7 @@ pub const SERVE_SUBCOMMAND: &str = "serve";
 pub enum SettingsError {
     /// The first argument is not `serve`.
     #[error(
-        "usage: trusty-secrets serve [--socket PATH] [--index-dir PATH] [--machine-config PATH] [--audit-log PATH] [--idle-timeout-secs N]"
+        "usage: trusty-secrets serve [--socket PATH] [--index-dir PATH] [--machine-config PATH] [--audit-log PATH] [--idle-timeout-secs N] [--cache-max-age-secs N]"
     )]
     Usage,
     /// A flag this binary does not define. The flag itself is not echoed.
@@ -95,6 +111,9 @@ pub enum SettingsError {
     /// `--idle-timeout-secs` is not a positive integer.
     #[error("--idle-timeout-secs must be a positive whole number of seconds")]
     InvalidIdleTimeout,
+    /// `--cache-max-age-secs` is not a positive integer (#7520 S2).
+    #[error("--cache-max-age-secs must be a positive whole number of seconds")]
+    InvalidCacheMaxAge,
     /// A default location needs `$HOME`.
     #[error(transparent)]
     Home(#[from] SecretsError),
@@ -118,6 +137,8 @@ pub struct ServerSettings {
     pub machine_config: PathBuf,
     /// How long the server stays up with no answered request.
     pub idle_timeout: Duration,
+    /// How long a cached CLI-backed value may answer (#7520 S2).
+    pub cache_max_age: Duration,
     /// The append-only credential access audit log (#4567).
     pub audit_log: PathBuf,
     /// Size at which [`Self::audit_log`] is rotated when next opened.
@@ -147,6 +168,7 @@ impl ServerSettings {
             index_root,
             machine_config,
             idle_timeout,
+            cache_max_age: DEFAULT_CACHE_MAX_AGE,
         }
     }
 
@@ -202,7 +224,7 @@ impl ServerSettings {
             return Err(SettingsError::Usage);
         }
         let (mut socket, mut index_root, mut machine_config, mut idle) = (None, None, None, None);
-        let mut audit_log = None;
+        let (mut audit_log, mut cache_max_age) = (None, None);
         while let Some(flag) = args.next() {
             let flag: &'static str = match flag.to_str() {
                 Some("--socket") => "--socket",
@@ -210,6 +232,7 @@ impl ServerSettings {
                 Some("--machine-config") => "--machine-config",
                 Some("--idle-timeout-secs") => "--idle-timeout-secs",
                 Some("--audit-log") => "--audit-log",
+                Some("--cache-max-age-secs") => "--cache-max-age-secs",
                 _ => return Err(SettingsError::UnknownArgument),
             };
             let value = args.next().ok_or(SettingsError::MissingValue { flag })?;
@@ -218,6 +241,11 @@ impl ServerSettings {
                 "--index-dir" => index_root = Some(PathBuf::from(value)),
                 "--machine-config" => machine_config = Some(PathBuf::from(value)),
                 "--audit-log" => audit_log = Some(PathBuf::from(value)),
+                // #7520 S2: strict like the idle flag; only a flag lengthens.
+                "--cache-max-age-secs" => {
+                    cache_max_age =
+                        Some(positive_secs(&value).ok_or(SettingsError::InvalidCacheMaxAge)?);
+                }
                 _ => idle = Some(parse_idle_flag(&value)?),
             }
         }
@@ -260,6 +288,8 @@ impl ServerSettings {
                 None => under_home(MACHINE_CONFIG_SUBPATH)?,
             },
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
+            cache_max_age: cache_max_age
+                .unwrap_or_else(|| cache_max_age_from_env(env(CACHE_MAX_AGE_ENV).as_deref())),
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
             template_root,
@@ -380,9 +410,26 @@ pub fn template_root_beside(index_root: &Path) -> PathBuf {
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.
 fn parse_idle_flag(value: &OsString) -> Result<Duration, SettingsError> {
+    positive_secs(value).ok_or(SettingsError::InvalidIdleTimeout)
+}
+
+/// A flag value as a positive whole number of seconds, or `None`.
+fn positive_secs(value: &OsString) -> Option<Duration> {
     match value.to_str().map(str::trim).map(str::parse::<u64>) {
-        Some(Ok(secs)) if secs > 0 => Ok(Duration::from_secs(secs)),
-        _ => Err(SettingsError::InvalidIdleTimeout),
+        Some(Ok(secs)) if secs > 0 => Some(Duration::from_secs(secs)),
+        _ => None,
+    }
+}
+
+/// The cache max age from [`CACHE_MAX_AGE_ENV`]'s raw value (#7520 S2).
+///
+/// What: a positive integer up to [`DEFAULT_CACHE_MAX_AGE`] is that many
+/// seconds; anything else is the default. Lenient like [`idle_from_env`].
+/// Test: `settings_cache_max_age_flag_env_default`.
+fn cache_max_age_from_env(raw: Option<&str>) -> Duration {
+    match raw.map(str::trim).map(str::parse::<u64>) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs).min(DEFAULT_CACHE_MAX_AGE),
+        _ => DEFAULT_CACHE_MAX_AGE,
     }
 }
 

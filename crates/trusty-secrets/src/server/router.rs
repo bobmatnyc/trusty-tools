@@ -258,6 +258,8 @@ impl State {
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
         let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
+        // #7520 S2: entries answer for at most the configured max age.
+        let cache = Arc::new(SecretCache::new(settings.cache_max_age));
         Self {
             settings,
             index,
@@ -271,7 +273,7 @@ impl State {
             admission_cap_override: None,
             cancel: Arc::new(AtomicBool::new(false)),
             grants: Arc::new(GrantRegistry::os_default()),
-            cache: Arc::new(SecretCache::new()),
+            cache,
         }
     }
 
