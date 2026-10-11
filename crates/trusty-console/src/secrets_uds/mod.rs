@@ -22,6 +22,8 @@ pub mod verdict;
 #[cfg(test)]
 mod mount_tests;
 #[cfg(test)]
+mod picker_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt;
@@ -114,6 +116,8 @@ pub struct SecretsBridge {
     enabled: Option<(SecretsDial, CsrfToken)>,
     authorities: OnceLock<Vec<SelfAuthorities>>,
     table: Arc<dyn ProcessTable>,
+    // #9067: the tm project registry file; `None` when `$HOME` is unknown.
+    registry: Option<PathBuf>,
 }
 
 impl fmt::Debug for SecretsBridge {
@@ -131,6 +135,7 @@ impl SecretsBridge {
             enabled: None,
             authorities: OnceLock::new(),
             table: Arc::new(OsProcessTable),
+            registry: None,
         }
     }
 
@@ -160,6 +165,13 @@ impl SecretsBridge {
     #[must_use]
     pub fn with_table(mut self, table: Arc<dyn ProcessTable>) -> Self {
         self.table = table;
+        self
+    }
+
+    /// Read the project picker from `registry` instead of tm's (tests).
+    #[must_use]
+    pub fn with_registry(mut self, registry: Option<PathBuf>) -> Self {
+        self.registry = registry;
         self
     }
 

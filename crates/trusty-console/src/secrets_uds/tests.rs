@@ -34,7 +34,7 @@ const SPECIMEN: &str = "SPECIMEN-VALUE-1234567890";
 
 /// A process table the test writes; counts every read.
 #[derive(Default)]
-struct FakeTable {
+pub(super) struct FakeTable {
     /// pid -> (parent, start, is_agent)
     procs: HashMap<u32, (u32, u64, bool)>,
     /// pids whose parent read fails although their start time reads.
@@ -73,7 +73,7 @@ impl ProcessTable for FakeTable {
 }
 
 /// A shell (500) under Claude (400), and a shell (600) under launchd (1).
-fn family() -> FakeTable {
+pub(super) fn family() -> FakeTable {
     FakeTable::default()
         .with(400, 1, 40, true)
         .with(500, 400, 50, false)
@@ -114,13 +114,13 @@ pub(super) fn ok_frame(result: Value) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": 1, "result": result }))
 }
 
-fn error_frame(kind: Option<&str>) -> Option<Value> {
+pub(super) fn error_frame(kind: Option<&str>) -> Option<Value> {
     let data = kind.map_or(Value::Null, |k| json!({ "kind": k }));
     Some(json!({ "jsonrpc": "2.0", "id": 1, "error": {
         "code": -32000, "message": "UPSTREAM-MESSAGE-TEXT", "data": data } }))
 }
 
-fn bridge_at(socket: &Path, table: Arc<dyn ProcessTable>) -> Arc<SecretsBridge> {
+pub(super) fn bridge_at(socket: &Path, table: Arc<dyn ProcessTable>) -> Arc<SecretsBridge> {
     let bridge = SecretsBridge::new(SecretsDial::new(socket.to_path_buf()).with_external(true))
         .expect("mint")
         .with_table(table);
@@ -145,7 +145,10 @@ pub(super) fn own_request(bridge: &SecretsBridge, path: &str, body: &str) -> Req
         .expect("request")
 }
 
-async fn send(bridge: &Arc<SecretsBridge>, request: Request<Body>) -> (StatusCode, String) {
+pub(super) async fn send(
+    bridge: &Arc<SecretsBridge>,
+    request: Request<Body>,
+) -> (StatusCode, String) {
     let response = router(Arc::clone(bridge))
         .oneshot(request)
         .await
@@ -217,9 +220,10 @@ async fn each_route_dials_its_bridged_method_with_an_assertion() {
     assert_eq!(methods, expected, "exactly one call per request, in order");
     for request in seen.iter() {
         let bridge = &request["params"]["bridge"];
+        // #9067 Architect Q5: an unmappable client is asserted an agent.
         assert_eq!(
             bridge,
-            &json!({ "agent_parent": false, "source": "unmappable" })
+            &json!({ "agent_parent": true, "source": "unmappable" })
         );
         assert!(!request.to_string().contains("pid"), "no pid on the wire");
     }
@@ -248,6 +252,22 @@ async fn unknown_secrets_paths_never_reach_the_socket() {
             Refusal::UnknownRoute,
         ),
         ("/api/secrets", StatusCode::NOT_FOUND, Refusal::UnknownRoute),
+        // #9067: the picker routes match exactly; a longer path is unknown.
+        (
+            "/api/secrets/scopes/extra",
+            StatusCode::NOT_FOUND,
+            Refusal::UnknownRoute,
+        ),
+        (
+            "/api/secrets/projects/x",
+            StatusCode::NOT_FOUND,
+            Refusal::UnknownRoute,
+        ),
+        (
+            "/api/secrets/machine_scopes",
+            StatusCode::NOT_FOUND,
+            Refusal::UnknownRoute,
+        ),
     ];
     for (path, status, refusal) in cases {
         let (got, body) = send(&bridge, own_request(&bridge, path, LIST_BODY)).await;
@@ -548,11 +568,20 @@ fn found(pid: u32, start: u64) -> AcceptedPeer {
     }
 }
 
+/// Why: #9067 Architect Q5, a Fail-Open Check — a client the console cannot
+/// map to a pid (every client off macOS and Linux) must not pass as a
+/// person, so it is asserted an agent and toggle-ON is refused for it.
+/// Red while `unmappable` carries `agent_parent: false`.
+/// Test: itself.
 #[test]
-fn verdict_without_a_pid_is_unmappable_and_not_an_agent() {
+fn verdict_without_a_pid_is_unmappable_and_an_agent() {
     let verdict = judge(&family(), AcceptedPeer::Unfound);
-    assert_eq!(verdict, BridgeAssertion::unmappable());
-    assert!(!verdict.agent_parent);
+    assert_eq!(
+        serde_json::to_value(verdict).expect("json"),
+        json!({ "agent_parent": true, "source": "unmappable" })
+    );
+    assert!(verdict.agent_parent);
+    assert!(verdict.is_consistent());
 }
 
 #[test]
@@ -662,7 +691,7 @@ async fn verdicts_reach_the_wire_and_are_forwarded() {
         (
             family(),
             AcceptedPeer::Unfound,
-            json!({ "agent_parent": false, "source": "unmappable" }),
+            json!({ "agent_parent": true, "source": "unmappable" }),
         ),
         (broken, found(600, 60), unreadable.clone()),
         (family(), found(600, 61), unreadable),
