@@ -270,6 +270,13 @@ pub async fn guard_tailnet_peer(
     next.run(req).await
 }
 
+/// The tag on every request the tailnet listener serves (#9066).
+///
+/// Why: the secrets bridge serves the console's own loopback page only; a
+/// tailnet request is refused before any pid lookup (A2).
+#[derive(Debug, Clone, Copy)]
+pub struct TailnetRequest;
+
 /// Serve `router` on the tailnet listener behind the peer gate.
 ///
 /// Why: the one serve path for a tailnet listener, so tests drive the exact
@@ -286,10 +293,14 @@ pub async fn serve_tailnet(
 ) -> std::io::Result<()> {
     let listen = listener.local_addr()?;
     // #9035: the tailnet listener must never serve an unauthenticated peer.
-    let app = router.layer(axum::middleware::from_fn_with_state(
-        TailnetGuard { gate, listen },
-        guard_tailnet_peer,
-    ));
+    // #9066: every request here is tagged, so the secrets bridge refuses it.
+    let app =
+        router
+            .layer(axum::Extension(TailnetRequest))
+            .layer(axum::middleware::from_fn_with_state(
+                TailnetGuard { gate, listen },
+                guard_tailnet_peer,
+            ));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -324,13 +335,15 @@ impl ConsoleListeners {
 /// `TRUSTY_CONSOLE_BIND`) served every route to any peer. The resolver is a
 /// parameter so the tests need no tailnet.
 /// What: binds each address in order (a bind failure aborts). A loopback
-/// listener is served by plain `axum::serve`, as before; any other goes
+/// listener is served by `axum::serve`, ungated, with the client's pid read
+/// at accept for the secrets bridge (#9066, Unix only); any other goes
 /// through [`serve_tailnet`] with a [`TailnetPeerGate`] for its bound IP. A
 /// wildcard bind has no host identity, so its gate refuses every request
 /// ([`TailnetPeerGate::authorize`]). The first listener is the primary, whose
 /// task [`ConsoleListeners::wait_primary`] awaits; the rest log their exit.
 /// Test: `explicit_non_loopback_listener_is_gated_7524`,
-/// `listener_gating_follows_the_ip_not_the_position_7524`.
+/// `listener_gating_follows_the_ip_not_the_position_7524`,
+/// `a_loopback_request_is_judged_from_the_pid_found_at_accept`.
 pub async fn serve_listeners<S, F>(
     addrs: &[SocketAddr],
     router: &Router,
@@ -350,6 +363,13 @@ where
         let serve: BoxFuture<'static, std::io::Result<()>> = if local.ip().is_loopback() {
             let (app, stop) = (router.clone(), shutdown());
             Box::pin(async move {
+                // #9066 A9, F1: the pid lookup starts at accept, off the loop.
+                #[cfg(unix)]
+                let app = app
+                    .into_make_service_with_connect_info::<crate::secrets_uds::verdict::PeerLookup>(
+                    );
+                #[cfg(not(unix))]
+                let app = app.into_make_service();
                 axum::serve(listener, app)
                     .with_graceful_shutdown(stop)
                     .await

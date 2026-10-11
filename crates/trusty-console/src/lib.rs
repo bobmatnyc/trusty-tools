@@ -72,6 +72,9 @@ pub mod routes;
 pub mod analyze_uds;
 pub mod memory_uds;
 pub mod search_uds;
+// #9066: the trusty-secrets bridge (`/api/secrets/*`), Unix only (Q8).
+#[cfg(unix)]
+pub mod secrets_uds;
 pub mod server;
 pub mod service;
 // #6642: per-service pid discovery + CPU sampling for the home-page graphs.
@@ -341,6 +344,15 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // ── service setup ───────────────────────────────────────────────────────
     let connectors = detect::all_connectors();
     let state = server::AppState::new(connectors);
+    // #9066: a bridge that cannot be built leaves every secrets route refusing.
+    #[cfg(unix)]
+    let state = match secrets_uds::SecretsBridge::for_home() {
+        Ok(bridge) => state.with_secrets(bridge),
+        Err(e) => {
+            tracing::warn!("secrets bridge disabled: {e}");
+            state
+        }
+    };
 
     // Kick off an eager first poll so the cache is warm before the first
     // HTTP request arrives.
@@ -598,6 +610,9 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         shutdown_signal,
     )
     .await?;
+    // #9066 A11: secrets routes refuse every request until this is set.
+    #[cfg(unix)]
+    state.secrets().set_authorities(&listeners.bound);
     let primary_local = *listeners
         .bound
         .first()
