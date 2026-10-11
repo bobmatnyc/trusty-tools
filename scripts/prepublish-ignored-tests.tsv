@@ -10,7 +10,7 @@
 # which the job authenticates with its own GITHUB_TOKEN, and the workspace
 # build. It must not need an API key, a live daemon, a compiled binary on disk,
 # a Python/torch venv, tmux, macOS hardware, or minutes of soak time. Those are
-# the reasons the other 120 ignored tests stay unselected; see the baseline
+# the reasons the other 122 ignored tests stay unselected; see the baseline
 # note at the bottom.
 #
 # ADDING A ROW is how you widen the gate, and it is always welcome. Removing one
@@ -53,16 +53,17 @@ trusty-search	typeahead::typeahead_blended_mode_returns_results_tagged_by_source
 trusty-search	hnsw_recall_9414::recall_holds_on_a_150k_clustered_index_after_reload	CPU only: builds a 150K-vector HNSW index and brute-forces 200 queries (~20 s debug, #9414); no model, no daemon
 trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: builds a 150K x 384 HNSW index and compacts it twice (~100 s debug, #9450); asserts the abandon-on-write and no-lost-vector outcomes; no model, no daemon
 
-# THE UNSELECTED REMAINDER. 149 ignored tests are enumerable in this workspace
-# on the Linux runner; the 29 rows above run, and 120 do not. A macOS checkout
-# enumerates two more (trusty-mpm's macOS-only
-# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper` and
-# `core::process::tests::claude_pid_resolves_from_inside_its_own_pane`), so a
-# local `--list-only` run there reads 122 against this Linux baseline. The gate
+# THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
+# on the Linux runner; the 29 rows above run, and 122 do not. A macOS checkout
+# enumerates three more (trusty-mpm's macOS-only
+# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`,
+# `core::process::tests::claude_pid_resolves_from_inside_its_own_pane` and
+# `tm_secrets_exec_live::live_keychain_flag_on_write_proof`), so a
+# local `--list-only` run there reads 125 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
-# WHY 120 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# WHY 122 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
 # API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
 # TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
 # compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
@@ -116,5 +117,14 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # trusty-secrets binary plus test-binary copies in detached process trees, which
 # this gate does not run. 118 -> 120.
 #
+# #9621 added two more live ignored tests that stay unselected, both needing
+# real process ancestry and a detached process tree, which this gate does not
+# provide: trusty-mpm `tm_secrets_exec_live::live_exec_spawn_and_revoke` (PR
+# #9653, `tests/tm_secrets_exec_live.rs`; "live: real process ancestry; run
+# detached from any Claude Code tree") and trusty-secrets
+# `live_flag_peer::live_dead_child_grant_is_refused_and_pruned` (PR #9645;
+# "live: spawns the real binary and a detached process tree; run on EVO and the
+# Mac"). 120 -> 122.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 120
+# UNSELECTED-BASELINE: 122
