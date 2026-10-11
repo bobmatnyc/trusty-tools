@@ -153,7 +153,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "search_project_duplicate_index",
-        "Reads trusty-search's project map (`search.project.map`), then resolves each pinned index (at most 64 groups, 3 s per call, 15 s in all). Warn names each group that still holds a live worktree, orphaned or same-root duplicate, with the remedy `trusty-search project park <id>`; parked duplicates are fine. Warn \"not checked\" for a map that was not read and for each group whose resolve was refused, timed out or fell past the cap — never Ok. Read-only; it never parks (issue #9169).",
+        "Reads trusty-search's project map (`search.project.map`), then resolves each pinned index (at most 64 groups, 3 s per call, 15 s in all). Warn names each group that still holds a live worktree, orphaned or same-root duplicate, with the remedy `trusty-search project park <id>`; parked duplicates are fine. Warn \"not checked\" for a map that was not read and for each group whose resolve was refused, timed out or fell past the cap — never Ok. The check is read-only (issue #9169); `tm doctor --fix --yes` parks each flagged duplicate through the daemon's `search.project.park`, never this project's own index and nothing when the map was not read (issue #9664).",
     ),
     (
         "search_project_two_checkouts",

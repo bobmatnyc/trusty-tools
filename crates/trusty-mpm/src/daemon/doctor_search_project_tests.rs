@@ -205,6 +205,7 @@ fn two_main_checkouts_warn_until_an_operator_pins_one() {
     let map = MapRead::Readable {
         path: "m".into(),
         pins: vec![pin("migration")],
+        parked: vec![],
     };
     for (by, want) in [
         ("migration", CheckStatus::Warn),
