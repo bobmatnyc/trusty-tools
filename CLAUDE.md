@@ -93,8 +93,8 @@ appends the unique, actionable items from PM/agent `## Prompt feedback`
 addenda there as one dated comment per session, deduplicated against earlier
 comments. Never a new issue per item; never close it — strike items as they land.
 
-🔴 **Issue lifecycle — Status on Project #45:** Backlog → Groomed → In development → Development complete → Merged → Deployed → Published.
-Close rule: rung 1–3, docs and CI close at Merged; rung 4–6 close at Deployed. Fix PRs use `Refs #N`, never `Closes #N`.
+🔴 **Issue lifecycle — Status on Project #45:** Backlog → Ready for Development → In Development → In PR → Merged → On Prod → Published (plus On Preview, Won't Do).
+Close rule: rung 1–3, docs and CI close at Merged; rung 4–6 close at On Prod. Label mapping: [TICKETING.md](TICKETING.md). Fix PRs use `Refs #N`, never `Closes #N`.
 The Status field and the `status:*` labels are both maintained until the migration lands.
 Standard of record: [TICKETING.md](TICKETING.md).
 
