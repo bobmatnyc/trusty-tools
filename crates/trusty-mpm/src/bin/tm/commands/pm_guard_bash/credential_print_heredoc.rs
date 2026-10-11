@@ -112,6 +112,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
     let mut copied = 0;
     let mut stack = vec![Ctx::Code(0)];
     let mut pending: Vec<Pending> = Vec::new();
+    let mut line_end = LineEnd::default();
     // #8596 round 3: `#` opens a comment only at the start of a word.
     let mut word_start = true;
     let mut i = 0;
@@ -212,7 +213,9 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                 }
                 _ => {
                     let waiting = pending.len();
-                    if let Some(step) = code_byte(text, i, &mut stack, &mut pending, ops) {
+                    if let Some(step) =
+                        code_byte(text, i, &mut stack, &mut pending, ops, &mut line_end)
+                    {
                         if let Some(p) = pending.get_mut(waiting) {
                             (p.index, p.depth, p.low) = (ops.len() - 1, stack.len(), stack.len());
                             // Copy the operator now: a comment after it on
@@ -282,6 +285,7 @@ fn code_byte(
     stack: &mut Vec<Ctx>,
     pending: &mut Vec<Pending>,
     ops: &mut Vec<(usize, OperatorCtx)>,
+    line_end: &mut LineEnd,
 ) -> Option<Step> {
     let bytes = text.as_bytes();
     let step = |next, word_start| Some(Step { next, word_start });
@@ -309,7 +313,7 @@ fn code_byte(
                 return step(i + 3, true);
             }
             ops.push((i, OperatorCtx::Code));
-            match read_operator(text, i) {
+            match read_operator(text, i, line_end) {
                 Some(p) => {
                     // #9150: after a refused word the walk reads that word.
                     let (next, word_start) = (p.op.1, p.word.is_none());
@@ -435,6 +439,32 @@ fn set_top(stack: &mut [Ctx], ctx: Ctx) {
     }
 }
 
+/// The end of the line the walk is on, found once per line (#9720).
+///
+/// Why: each operator searched from its own `<<` to the line's end, so a line
+/// of `n` operators cost `n` searches of the line.
+/// What: [`LineEnd::from`] keeps the first newline at or after the last `at`
+/// it searched from, and reuses it while `at` has not passed it. The walk
+/// only moves forward, so no newline lies between a later `at` and that one.
+/// Test: `heredoc_operators_find_each_line_end_once_9720`.
+#[derive(Default)]
+struct LineEnd(Option<usize>);
+
+impl LineEnd {
+    /// The byte offset of the first newline at or after `at`, or the length.
+    fn from(&mut self, text: &str, at: usize) -> usize {
+        if let Some(end) = self.0
+            && at <= end
+        {
+            return end;
+        }
+        let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+        charge(Site::LineEnd, end - at);
+        self.0 = Some(end);
+        end
+    }
+}
+
 /// Read a here-document operator starting at the `<<` at byte `at`.
 ///
 /// What: `None` when no delimiter word follows. #9150: the word is read by
@@ -443,8 +473,9 @@ fn set_top(stack: &mut [Ctx], ctx: Ctx) {
 /// refuses still yields a [`Pending`], with no `word` and an `op` covering
 /// only the `<<`: the walk reads the word's bytes as code, the operator can
 /// still turn [`OperatorCtx::Ambiguous`], and [`consume_bodies`] strips no
-/// body from that operator on.
-fn read_operator(text: &str, at: usize) -> Option<Pending> {
+/// body from that operator on. #9720: `line_end` finds the line's end once
+/// for every operator on it.
+fn read_operator(text: &str, at: usize, line_end: &mut LineEnd) -> Option<Pending> {
     let bytes = text.as_bytes();
     let mut j = at + 2;
     let strip_tabs = bytes.get(j) == Some(&b'-');
@@ -454,8 +485,7 @@ fn read_operator(text: &str, at: usize) -> Option<Pending> {
     while matches!(bytes.get(j), Some(b' ' | b'\t')) {
         j += 1;
     }
-    let line_end = text[at..].find('\n').map_or(text.len(), |n| at + n);
-    charge(Site::LineEnd, line_end - at);
+    let line_end = line_end.from(text, at);
     let (word, quoted, op_end) = match delimiter_word(&bytes[..line_end], j) {
         Some((word, _, _)) if word.is_empty() => return None,
         Some((word, quoted, end)) => (Some(word), quoted, end),
