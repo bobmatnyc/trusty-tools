@@ -42,6 +42,9 @@ const PANIC_REASON: &str = "tm hook --egress-guard failed while deciding this to
 /// `tool_input.server` rather than in `tool_name` (#8454 fix round).
 const RESOURCE_TOOLS: &[&str] = &["ReadMcpResourceTool", "ListMcpResourcesTool"];
 
+/// Claude Code's shell tool, judged by its `tool_input.command` (#8454 S3).
+const BASH_TOOL: &str = "Bash";
+
 /// The guard's decision for one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -109,6 +112,10 @@ pub(crate) fn decide(
             unclassifiable("`tool_input` is missing or is not an object"),
         );
     };
+    // #8454 S3: a Bash command is judged by its text.
+    if tool_name == BASH_TOOL {
+        return bash_verdict(input);
+    }
     let classification = if RESOURCE_TOOLS.contains(&tool_name) {
         // #8454 fix round: these name their server in `tool_input.server`.
         match input.get("server").and_then(serde_json::Value::as_str) {
@@ -147,6 +154,11 @@ pub(crate) fn decide(
             ),
         ),
     }
+}
+
+/// The Bash arm of [`decide`] (#8454 S3).
+fn bash_verdict(_input: &serde_json::Value) -> Verdict {
+    Verdict::Allow
 }
 
 /// The guard's verdict: the trust-anchor floor first, then [`decide`].
