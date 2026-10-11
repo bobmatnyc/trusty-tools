@@ -35,3 +35,7 @@ where
 pub(crate) async fn egress_guard(_url: &str) -> anyhow::Result<()> {
     anyhow::bail!("tm hook --egress-guard is not implemented yet (#8454)")
 }
+
+#[cfg(test)]
+#[path = "egress_guard_tests.rs"]
+mod tests;

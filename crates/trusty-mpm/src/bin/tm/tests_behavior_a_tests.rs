@@ -115,6 +115,22 @@ fn cli_parses_hook_prompt_feedback() {
     ));
 }
 
+/// Why (#8454): `tm hook --egress-guard` is a separate hook mode; parsing must
+/// round-trip the flag so the dispatcher routes to the egress guard.
+#[test]
+fn cli_parses_hook_egress_guard() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--egress-guard"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false,
+            prompt_feedback: false,
+            egress_guard: true
+        }
+    ));
+}
+
 /// Why (#1977): the managed launcher registers `tm hook --pm-guard` as the
 /// PreToolUse enforcement hook; parsing must round-trip the flag so the
 /// dispatcher routes to the PM guard instead of the observability relay.
