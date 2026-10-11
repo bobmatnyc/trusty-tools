@@ -285,6 +285,8 @@ enum Quote {
 fn lift(command: &str, quotes: bool) -> Lifted {
     let heredocs = HeredocBodies::scan(command);
     let bytes = command.as_bytes();
+    // #9699 (c): `close_of` per unclosed `(` scanned to the end each time.
+    let parens = (!quotes).then(|| ParenCloses::scan(bytes));
     let (mut outer, mut bodies) = (String::with_capacity(command.len()), Vec::new());
     let (mut quote, mut copied, mut i) = (Quote::None, 0, 0);
     while i < bytes.len() {
@@ -330,7 +332,12 @@ fn lift(command: &str, quotes: bool) -> Lifted {
             i += 1;
             continue;
         };
-        match close_of(bytes, i + len, bytes[i + len - 1] == b'`', quotes) {
+        let backtick = bytes[i + len - 1] == b'`';
+        let close = match &parens {
+            Some(parens) if !backtick => parens.close(i + len),
+            _ => close_of(bytes, i + len, backtick, quotes),
+        };
+        match close {
             Some(close) => {
                 outer.push_str(&command[copied..i + len]);
                 bodies.push(command[i + len..close].to_string());
@@ -395,6 +402,61 @@ fn close_of(bytes: &[u8], start: usize, backtick: bool, quotes: bool) -> Option<
         j += 1;
     }
     None
+}
+
+/// Every answer `close_of(bytes, start, false, false)` gives, from one scan.
+///
+/// Why (#9699 (c)): [`lift`]'s quote-blind pass asked [`close_of`] once per
+/// paren opener, and each unclosed one scanned to the end of input:
+/// quadratic, ~3-10 s at 100 KB. This answers every opener in O(log n).
+/// What: the paren depth before each byte, and each `)` keyed by the depth
+/// before it, escaped bytes skipped. Byte `start - 1` is always the opener's
+/// `(`, so a scan from `start` and a scan from 0 skip the same escaped bytes
+/// past it, and the close is the first `)` at or past `start` whose depth
+/// equals the depth at `start`. Depth stays at 0 on an unmatched `)`.
+/// Test: `paren_closes_answer_as_close_of_9699`,
+/// `lift_bodies_is_linear_on_an_open_quote_and_many_parens_9699`.
+struct ParenCloses {
+    /// The depth before each byte, and once more at the end of input.
+    depth: Vec<usize>,
+    /// Each unescaped `)` as `(depth before it, index)`, sorted.
+    closes: Vec<(usize, usize)>,
+}
+
+impl ParenCloses {
+    fn scan(bytes: &[u8]) -> Self {
+        let mut depth = Vec::with_capacity(bytes.len() + 1);
+        let (mut closes, mut level, mut j) = (Vec::new(), 0usize, 0);
+        while j < bytes.len() {
+            depth.push(level);
+            match bytes[j] {
+                b'\\' if j + 1 < bytes.len() => {
+                    depth.push(level);
+                    j += 1;
+                }
+                b'(' => level += 1,
+                b')' => {
+                    closes.push((level, j));
+                    level = level.saturating_sub(1);
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        depth.push(level);
+        closes.sort_unstable();
+        Self { depth, closes }
+    }
+
+    /// The `)` closing a paren body that starts at `start`, after its `(`.
+    fn close(&self, start: usize) -> Option<usize> {
+        let level = *self.depth.get(start)?;
+        let at = self.closes.partition_point(|&close| close < (level, start));
+        self.closes
+            .get(at)
+            .filter(|&&(found, _)| found == level)
+            .map(|&(_, index)| index)
+    }
 }
 
 #[cfg(test)]
@@ -746,6 +808,49 @@ mod tests {
                 shell_write_targets(command, &|_| false).is_err(),
                 "{command}"
             );
+        }
+    }
+
+    // #9699 (c): an open quote sends `lift` to its quote-blind pass, which
+    // once scanned to the end of input for every unclosed `(` — quadratic.
+    // At the egress cap's size it now finishes far inside the bound.
+    #[test]
+    fn lift_bodies_is_linear_on_an_open_quote_and_many_parens_9699() {
+        let command = format!("echo 'x {}", "(".repeat(65_000));
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let lifted = lift_bodies(&command).map(|(outer, bodies)| (outer.len(), bodies.len()));
+            let _ = send.send(lifted);
+        });
+        let lifted = recv
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("65 000 unclosed `(` behind an open quote must lift within 2 s");
+        assert_eq!(lifted, Ok((65_008, 0)));
+    }
+
+    // #9699 (c): `ParenCloses` answers as `close_of` does, for every `(` an
+    // opener can end on, over every command of up to 7 bytes from the bytes
+    // that move a paren scan.
+    #[test]
+    fn paren_closes_answer_as_close_of_9699() {
+        const ALPHABET: &[u8] = b"()\\`a";
+        for len in 0..=7u32 {
+            for code in 0..ALPHABET.len().pow(len) {
+                let (mut bytes, mut rest) = (Vec::new(), code);
+                for _ in 0..len {
+                    bytes.push(ALPHABET[rest % ALPHABET.len()]);
+                    rest /= ALPHABET.len();
+                }
+                let parens = ParenCloses::scan(&bytes);
+                for start in (1..=bytes.len()).filter(|&s| bytes[s - 1] == b'(') {
+                    assert_eq!(
+                        parens.close(start),
+                        close_of(&bytes, start, false, false),
+                        "{:?} from {start}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+            }
         }
     }
 }

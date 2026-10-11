@@ -40,6 +40,40 @@ fn heredoc_bodies_claim_nothing_when_unterminated() {
     assert!(!HeredocBodies::scan(shift).contains(redirect));
 }
 
+/// #9699: `scan` skips a command with no `<`. The full scan finds nothing in
+/// one either — quoted, unbalanced, continued, commented or `EOF`-shaped — so
+/// the skip changes no answer.
+#[test]
+fn heredoc_scan_finds_nothing_without_an_angle_bracket_9699() {
+    for command in [
+        "",
+        "echo hi",
+        "cat EOF\nbody\nEOF",
+        "echo 'it''s \"open",
+        "echo \"open\nnext",
+        "a \\\nb \\\n",
+        "x # c\ny",
+        "$(echo `a`) ( b ) > f",
+    ] {
+        let ops = heredoc_operators(command);
+        assert!(ops.is_empty(), "{command:?}");
+        // The full path; `scan` clears `lost` when no code `<<` exists.
+        let full = HeredocBodies::scan_with(command, &ops);
+        for found in [&full, &HeredocBodies::scan(command)] {
+            assert!(
+                found.spans.is_empty()
+                    && found.frames.is_empty()
+                    && found.data.is_empty()
+                    && found.expanding.is_empty()
+                    && found.bodies.is_empty()
+                    && !found.unscannable,
+                "{command:?}"
+            );
+        }
+        assert!(!HeredocBodies::scan(command).lost, "{command:?}");
+    }
+}
+
 /// #6946: the frame runs from the newline that opened the body through the
 /// end of the terminator line, and stops there.
 #[test]

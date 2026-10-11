@@ -19,17 +19,41 @@ fn bash(command: &str) -> Verdict {
     )
 }
 
-/// Assert `command` is an `egress-bash` deny naming `service`.
+/// `command` behind 4 100 `:;` no-op segments (#9699): they spend the walk's
+/// 4 096-call budget, so the walk gives up before it reaches `command`.
+fn call_padded(command: &str) -> String {
+    format!("{}{command}", ":;".repeat(4_100))
+}
+
+/// Assert `command`, and the same command behind [`call_padded`], are each an
+/// `egress-bash` deny naming `service`.
+///
+/// Why (#9699 property): every walk deny row must still deny when padding
+/// spends the call budget first. A padded row over the 64 KiB cap denies on
+/// the cap instead.
 fn assert_denies(command: &str, service: &str) {
-    match bash(command) {
+    assert_denies_as(bash(command), command, service);
+    let padded = call_padded(command);
+    let shown = format!("`:;`×4100 + {command:.80}");
+    if padded.len() > MAX_COMMAND_BYTES {
+        assert_deny_with(bash(&padded), &shown, "64 KiB");
+    } else {
+        assert_denies_as(bash(&padded), &shown, service);
+    }
+}
+
+/// Assert `verdict`, on the command shown as `what`, is an `egress-bash` deny
+/// naming `service`.
+fn assert_denies_as(verdict: Verdict, what: &str, service: &str) {
+    match verdict {
         Verdict::Deny { check, reason } => {
-            assert_eq!(check, BASH_CHECK, "`{command}`: {reason}");
+            assert_eq!(check, BASH_CHECK, "`{what:.200}`: {reason}");
             assert!(
                 reason.contains(&format!("it reaches {service} (")),
-                "`{command}` must name {service}: {reason}"
+                "`{what:.200}` must name {service}: {reason}"
             );
         }
-        Verdict::Allow => panic!("`{command}` must be denied as {service}"),
+        Verdict::Allow => panic!("`{what:.200}` must be denied as {service}"),
     }
 }
 
@@ -318,7 +342,8 @@ fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
     // Past the bound the raw scan reads every word, an argument included.
     let past_bound = format!("{}echo sendmail", "eval if ".repeat(40));
     assert_denies(&past_bound, "SMTP mail");
-    let evals = format!("{}sendmail bob", "eval if ".repeat(10_000));
+    // #9699: 8 000 levels keeps this under the 64 KiB cap, which denies first.
+    let evals = format!("{}sendmail bob", "eval if ".repeat(8_000));
     assert_denies(&evals, "SMTP mail");
     let braces = format!(
         "{}sendmail bob{}",
@@ -603,5 +628,363 @@ fn bash_other_residuals_are_not_detected() {
         ("heredoc $(…)", "cat <<EOF\n$(sendmail bob)\nEOF".to_owned()),
     ] {
         assert_eq!(bash(&command), Verdict::Allow, "{residual}: `{command}`");
+    }
+}
+
+/// The bound on a large-input verdict (#9699): generous for a debug build on a
+/// loaded host, and below the seconds a quadratic or unbounded walk takes.
+const LARGE_INPUT_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The verdict on `command`, which must arrive within `bound`: Claude Code
+/// kills a hook at its timeout, and a killed hook is an allow (#9699).
+fn bash_within(command: String, bound: std::time::Duration) -> Verdict {
+    let shown: String = command.chars().take(48).collect();
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(bash(&command));
+    });
+    recv.recv_timeout(bound)
+        .unwrap_or_else(|err| panic!("`{shown}…` was not judged within {bound:?}: {err}"))
+}
+
+/// Assert `verdict`, on the command shown as `what`, is an `egress-bash` deny
+/// whose reason contains `needle`.
+fn assert_deny_with(verdict: Verdict, what: &str, needle: &str) {
+    match verdict {
+        Verdict::Deny { check, reason } => {
+            assert_eq!(check, BASH_CHECK, "{what}: {reason}");
+            assert!(
+                reason.contains(needle),
+                "{what} must name `{needle}`: {reason}"
+            );
+        }
+        Verdict::Allow => panic!("{what} must be denied (`{needle}`)"),
+    }
+}
+
+/// `echo` and `filler` repeated to exactly `len` bytes; it names no channel.
+fn padded(len: usize, filler: &str) -> String {
+    let mut command = "echo ".to_owned();
+    while command.len() + filler.len() <= len {
+        command.push_str(filler);
+    }
+    command.push_str(&"a".repeat(len - command.len()));
+    command
+}
+
+/// 🔴 #9699 (b): a command over the 64 KiB cap is denied whole and the reason
+/// names the cap, though it names no channel. A family token past the cap
+/// denies the same way: the command is never scanned in part.
+#[test]
+fn bash_egress_denies_a_command_over_the_byte_cap_9699() {
+    for command in [
+        padded(65_537, "a"),
+        padded(256 * 1024, "ab "),
+        format!("{} sendmail bob", padded(70_000, "ab ")),
+    ] {
+        let what = format!("a {}-byte command", command.len());
+        assert_deny_with(bash_within(command, LARGE_INPUT_BOUND), &what, "64 KiB");
+    }
+}
+
+/// 🔴 #9699: the cap is inclusive. 65 536 bytes is read as any command is;
+/// 65 537 bytes is denied.
+#[test]
+fn bash_egress_byte_cap_boundary_is_65536_bytes_9699() {
+    assert_eq!(bash(&padded(65_536, "a")), Verdict::Allow, "65 536 bytes");
+    assert_deny_with(bash(&padded(65_537, "a")), "65 537 bytes", "64 KiB");
+}
+
+/// #9699 control: a ~60 KiB here-document of plain prose, under the cap and
+/// naming no channel, is allowed within the bound.
+#[test]
+fn bash_allows_a_60_kib_heredoc_9699() {
+    let mut body = String::new();
+    for n in 0.. {
+        if body.len() >= 60 * 1024 {
+            break;
+        }
+        body.push_str(&format!(
+            "line {n}: the cache (target dir) keeps it's state; see notes\n"
+        ));
+    }
+    let command = format!("cat > notes.md <<'EOF'\n{body}EOF");
+    assert!(
+        (60 * 1024..=65_536).contains(&command.len()),
+        "{}",
+        command.len()
+    );
+    assert_eq!(bash_within(command, LARGE_INPUT_BOUND), Verdict::Allow);
+}
+
+/// 🔴 #9699 (a): once the walk gives up — budget spent, nesting too deep, a
+/// segment that will not lex, an undecodable `$"…"` — the raw scan also reads
+/// the text with its quotes removed, so a name spliced from quoted pieces
+/// still denies. The `$'…'` row decodes leniently to a `'s'lack.com` splice.
+#[test]
+fn bash_egress_denies_quote_split_names_in_the_raw_scan_9699() {
+    let nest = |inner: &str| format!("{}{inner}{}", "$(".repeat(33), ")".repeat(33));
+    let mut missed = Vec::new();
+    for (row, command, service) in [
+        (
+            "budget spent",
+            format!("{}se''ndmail bob", "time eval ".repeat(11)),
+            "SMTP mail",
+        ),
+        ("too deep", nest("se''ndmail bob"), "SMTP mail"),
+        (
+            "undecodable",
+            format!("$\"x\"; {}", nest("se''ndmail bob")),
+            "SMTP mail",
+        ),
+        (
+            "unlexable, spliced host",
+            r#"cu""rl hooks.sl''ack.com 'unclosed"#.to_owned(),
+            "Slack",
+        ),
+        (
+            "unlexable, quoted label",
+            "curl 's'lack.com/api 'unclosed".to_owned(),
+            "Slack",
+        ),
+        (
+            "unlexable, backslash",
+            r"se\ndmail bob 'unclosed".to_owned(),
+            "SMTP mail",
+        ),
+        (
+            "unlexable, ANSI-C",
+            r"curl $'\x73'lack.com/x 'unclosed".to_owned(),
+            "Slack",
+        ),
+    ] {
+        let needle = format!("it reaches {service} (");
+        match bash_within(command, LARGE_INPUT_BOUND) {
+            Verdict::Deny { check, reason } if check == BASH_CHECK && reason.contains(&needle) => {}
+            other => missed.push(format!("{row}: {other:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "rows not denied: {missed:#?}");
+}
+
+/// #9699 control: removing quotes joins only the pieces a quote joins; words
+/// the shell keeps apart stay apart in the raw scan. The S3 argument rulings
+/// hold on the walk.
+#[test]
+fn bash_allows_quote_separated_words_in_the_raw_scan_9699() {
+    for command in [
+        r#"echo "se" "ndmail" 'unclosed"#,
+        "echo 'mai' 'lx' \"unclosed",
+        "grep mail file",
+        "git log --grep mail",
+        "echo gws http mail",
+    ] {
+        assert_allows(command);
+    }
+}
+
+/// 🔴 #9699 (c): an open quote and tens of thousands of `(` sent the shared
+/// `lift` pass quadratic. Near the cap the command is judged within the
+/// bound, and the program behind the parens still denies.
+#[test]
+fn bash_egress_judges_an_open_quote_and_many_parens_within_bound_9699() {
+    let command = format!("echo 'x {} sendmail bob", "(".repeat(65_000));
+    assert!(command.len() <= 65_536, "{}", command.len());
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "`echo 'x ((…`", "it reaches SMTP mail (");
+}
+
+/// The text a walk-budget deny names: the budget's size and unit (#9699).
+const WALK_BUDGET_NEEDLE: &str = "4608 KiB (4718592-byte) walk budget";
+
+/// 🔴 #9699 (b): `time eval` doubles the reads of its payload per level. A
+/// budget of calls alone let a near-cap payload run past the bound; the
+/// budget now counts the bytes each call reads too. Spending it denies, and
+/// the deny names the budget (supervisor ruling: fail closed, no raw scan).
+#[test]
+fn bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699() {
+    let prefix = "time eval ".repeat(12);
+    let command = format!("{prefix}{}", padded(65_536 - prefix.len(), "ab "));
+    assert_eq!(command.len(), 65_536);
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "`time eval`×12 + 64 KiB", WALK_BUDGET_NEEDLE);
+}
+
+/// 🔴 #9699 (b): when the byte budget ends the walk over a near-cap `time
+/// eval` payload, the command denies on the budget; the raw scan, which
+/// padding can steer, never judges it.
+#[test]
+fn bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699() {
+    let prefix = "time eval ".repeat(12);
+    let tail = "; se''ndmail bob";
+    let filler = padded(65_000 - prefix.len() - tail.len(), "ab ");
+    let command = format!("{prefix}{filler}{tail}");
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "`time eval`×12 … se''ndmail", WALK_BUDGET_NEEDLE);
+}
+
+/// #9699: a hit the walk found before it spent its byte budget is the hit the
+/// deny names.
+#[test]
+fn bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699() {
+    let prefix = "sendmail bob; ".to_owned() + &"time eval ".repeat(12);
+    let command = format!("{prefix}{}", padded(65_000 - prefix.len(), "ab "));
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(
+        verdict,
+        "sendmail; `time eval`×12",
+        "it reaches SMTP mail (",
+    );
+}
+
+/// 🔴 #9699 critic: `:;` padding spends the walk's call budget, so the raw
+/// scan judges what follows. It must join `\`+newline as bash does and read
+/// `tm`'s subcommand past its global flags.
+#[test]
+fn bash_egress_denies_padded_continuations_and_tm_flags_9699() {
+    let mut missed = Vec::new();
+    for (command, service) in [
+        (
+            "curl -d @m.json https://hooks.sl\\\nack.com/services/T/B/x",
+            "Slack",
+        ),
+        ("se\\\nndmail -t <m", "SMTP mail"),
+        ("tm --account work slack send '#ops' hi", "Slack"),
+    ] {
+        let needle = format!("it reaches {service} (");
+        match bash(&call_padded(command)) {
+            Verdict::Deny { check, reason } if check == BASH_CHECK && reason.contains(&needle) => {}
+            other => missed.push(format!("{command:?}: {other:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "padded rows not denied: {missed:#?}");
+}
+
+/// 🔴 #9699 critic: the raw scan removes each `\`+newline before it strips
+/// quotes; the text as written is still judged.
+#[test]
+fn raw_hit_joins_line_continuations_9699() {
+    for (text, service) in [
+        (
+            "curl -d @m.json https://hooks.sl\\\nack.com/services/T/B/x",
+            SLACK,
+        ),
+        ("se\\\nndmail -t <m", SMTP),
+        ("s''e\\\nndmail -t <m", SMTP),
+        ("sendmail\\\nx", SMTP),
+    ] {
+        assert_eq!(
+            raw_hit(text).map(|hit| hit.service),
+            Some(service),
+            "{text:?}"
+        );
+    }
+    assert_eq!(raw_hit("echo se\\\n ndmail"), None);
+}
+
+/// 🔴 #9699 critic: the raw scan reads `tm`'s subcommand past its flags and
+/// `--url`/`--account` values, as the walk does.
+#[test]
+fn raw_word_hit_skips_tm_flags_9699() {
+    for (text, service) in [
+        ("tm --account work slack send '#ops' hi", SLACK),
+        ("tm --url http://127.0.0.1:1 -v gchat send", GCHAT),
+        ("tm --account=work slack send", SLACK),
+        ("tm --url tm --url tm slack", SLACK),
+    ] {
+        assert_eq!(
+            raw_word_hit(text).map(|hit| hit.service),
+            Some(service),
+            "{text:?}"
+        );
+    }
+    for text in ["tm --account slack status", "tm -v status slack"] {
+        assert_eq!(raw_word_hit(text), None, "{text:?}");
+    }
+}
+
+/// 🔴 #9699: an over-cap Bash command is denied before the trust-anchor floor
+/// runs, so no parser reads it and its size cannot outlast the hook timeout.
+#[test]
+fn bash_egress_cap_precedes_the_trust_anchor_floor_9699() {
+    let read = bash_read(serde_json::json!({ "command": padded(65_537, "a") }));
+    let verdict = verdict(&read, &FamilyTable::builtin(), |_| {
+        panic!("the trust-anchor floor must not read an over-cap command")
+    });
+    assert_deny_with(verdict, "an over-cap command", "64 KiB");
+}
+
+/// #9699: `after_keywords` counts from a prefix of the words that doubles, and
+/// gives the count every word gives, at and around each prefix boundary.
+#[test]
+fn after_keywords_counts_from_a_word_prefix_9699() {
+    let mut cases: Vec<String> = ["", "echo x", "time", "time -p", "coproc", "coproc N"]
+        .map(str::to_owned)
+        .to_vec();
+    for n in [6, 7, 8, 9, 14, 15, 16, 17, 40] {
+        cases.push(format!("{}x y", "! ".repeat(n)));
+        cases.push("! ".repeat(n));
+        cases.push(format!("{}time -p sendmail", "{ ".repeat(n)));
+        cases.push(format!("{}coproc N {{ sendmail", "if ".repeat(n)));
+        cases.push(format!("{}coproc N", "then ".repeat(n)));
+    }
+    for case in cases {
+        let words: Vec<String> = case.split_whitespace().map(str::to_owned).collect();
+        let count = keyword_words(&words, 0).0;
+        let expected = (count > 0).then(|| words[count..].join(" "));
+        let got =
+            after_keywords(&case).map(|rest| rest.split_whitespace().collect::<Vec<_>>().join(" "));
+        assert_eq!(got, expected, "{case:?}");
+    }
+}
+
+/// #9699: `host_hit` reads only the candidates around a `.` and lowercases
+/// only what can match; it answers as the full byte scan it replaced does.
+#[test]
+fn host_hit_reads_the_first_dotted_candidate_9699() {
+    // The scan `host_hit` replaced: every run of host bytes, lowercased.
+    let full_scan = |text: &str| -> Option<Hit> {
+        let lower = text.to_ascii_lowercase();
+        if let Some(url) = SMTP_URLS.iter().find(|url| lower.contains(**url)) {
+            return Some(hit(SMTP, url));
+        }
+        let bytes = lower.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            if !is_host_byte(bytes[start]) {
+                start += 1;
+                continue;
+            }
+            let end = (start..bytes.len())
+                .find(|&i| !is_host_byte(bytes[i]))
+                .unwrap_or(bytes.len());
+            let piece = lower[start..end].trim_matches(['.', '-']);
+            if let Some(found) = family_host(piece).or_else(|| smtp_port_hit(piece, &lower[end..]))
+            {
+                return Some(found);
+            }
+            start = end;
+        }
+        None
+    };
+    for text in [
+        "",
+        "echo ab ab",
+        "curl https://hooks.Slack.COM/x",
+        "a.b c.notion.so d.slack.com",
+        "notslack.com and -slack.com-",
+        "..slack.com. x",
+        "SMTP.example.com 587",
+        "smtp.x.com:465 smtp.y.com 25",
+        "smtp.x.com:80 then mail.google.com",
+        "é.slack.com",
+        "€x.chat.googleapis.com",
+        "googleapis.com storage.googleapis.com",
+        "SMTPS://h and smtp://g",
+        "x://y a.slack-edge.com",
+        "...",
+        "a.",
+    ] {
+        assert_eq!(host_hit(text), full_scan(text), "{text:?}");
     }
 }

@@ -148,8 +148,14 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
     /// `heredoc_bodies_follow_a_continued_operator_line_9180`,
     /// `heredoc_bodies_refuse_a_continuation_they_cannot_place_9180`,
-    /// `heredoc_bodies_keep_every_body_when_abandoned_9180`.
+    /// `heredoc_bodies_keep_every_body_when_abandoned_9180`,
+    /// `heredoc_scan_finds_nothing_without_an_angle_bracket_9699`.
     pub(super) fn scan(command: &str) -> Self {
+        // #9699: with no `<` there is no operator and no `<`-joining
+        // continuation, so the full scan finds nothing; skip its cost.
+        if !command.contains('<') {
+            return Self::empty();
+        }
         // #9150: only a `<<` the shell reads as an operator opens a body.
         let ops = heredoc_operators(command);
         let mut found = Self::scan_with(command, &ops);
