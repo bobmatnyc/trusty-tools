@@ -493,7 +493,8 @@ fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let mut i = 0;
     while i < bytes.len() {
         // #6946: a here-document body and its terminator are data, not syntax.
-        if quoted(i) || bodies.suppresses_separator(i) {
+        // #9699: only `&|;\n` can cut, so every other byte skips the checks.
+        if !b"&|;\n".contains(&bytes[i]) || quoted(i) || bodies.suppresses_separator(i) {
             i += 1;
             continue;
         }
