@@ -462,13 +462,20 @@ fn mcp_schema_flags_breaking_changes() {
             }),
         ),
     ];
-    for (name, expected, change) in cases {
-        let breaks = check(&golden, &change(&live, &tool, &req, &opt)).breaks;
-        assert!(
-            breaks.iter().any(|b| b.starts_with(&expected)),
-            "{name} must be reported as `{expected}…`, got {breaks:?}"
-        );
-    }
+    // Every case runs before the assert, so one red run names each missed class.
+    let missed: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, expected, change)| {
+            let breaks = check(&golden, &change(&live, &tool, &req, &opt)).breaks;
+            (!breaks.iter().any(|b| b.starts_with(&expected)))
+                .then(|| format!("{name}: expected `{expected}…`, got {breaks:?}"))
+        })
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "not reported as breaks:\n{}",
+        missed.join("\n")
+    );
 }
 
 /// Why: ADR-0066 D3 allows additive change in 1.x. What: a new tool (even
@@ -599,13 +606,19 @@ fn mcp_schema_deprecation_notice_shape() {
             "deprecated tool `old_tool_9276` was removed",
         ),
     ];
-    for (name, changed, expected) in cases {
-        let breaks = check(&golden, &changed).breaks;
-        assert!(
-            breaks
+    let missed: Vec<String> = cases
+        .into_iter()
+        .filter_map(|(name, changed, expected)| {
+            let breaks = check(&golden, &changed).breaks;
+            (!breaks
                 .iter()
-                .any(|b| b.contains(OLD) && b.contains(expected)),
-            "{name} must be reported as `{expected}`, got {breaks:?}"
-        );
-    }
+                .any(|b| b.contains(OLD) && b.contains(expected)))
+            .then(|| format!("{name}: expected `{expected}`, got {breaks:?}"))
+        })
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "not reported as breaks:\n{}",
+        missed.join("\n")
+    );
 }
