@@ -431,34 +431,60 @@ async fn upsert_chunks_with_one_bad_dimension_changes_nothing() {
 
 /// Q4 error arm: zero chunks and more than the cap are hard errors that write
 /// nothing; exactly the cap is accepted.
+///
+/// #9275: the boundary runs at a cap of 32 through `replace_group_capped`. At
+/// the production cap of 4096 one call inserts 4096 points and outran the
+/// 60 s HNSW op budget on CI. The production cap is still checked: its refusal
+/// happens before any insert, so it costs no graph work.
 #[tokio::test]
 async fn upsert_chunks_rejects_empty_and_over_cap() {
     use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    const CAP: usize = 32;
     let dir = tempdir().unwrap();
     let store = open(dir.path());
     let id = Uuid::new_v4();
+    let key = id.to_string();
+    // Non-degenerate: every vector spans all DIM axes, none collinear.
     let many = |n: usize| -> Vec<Vec<f32>> {
         (0..n)
-            .map(|i| planar(i as f32 * 360.0 / n as f32))
+            .map(|i| {
+                (0..DIM)
+                    .map(|j| ((i * DIM + j) as f32 * 0.618_034 + 0.5).sin())
+                    .collect()
+            })
             .collect()
     };
 
     assert!(store.upsert_chunks(id, Vec::new()).await.is_err());
+    assert!(
+        store
+            .hnsw_for_test()
+            .replace_group_capped(&key, &[], CAP)
+            .is_err()
+    );
+
     let over = store
         .upsert_chunks(id, many(MAX_CHUNKS_PER_DRAWER + 1))
         .await
         .unwrap_err();
-    assert!(format!("{over:#}").contains("4096"), "{over:#}");
+    assert!(format!("{over:#}").contains("1..=4096"), "{over:#}");
+
+    let over = store
+        .hnsw_for_test()
+        .replace_group_capped(&key, &many(CAP + 1), CAP)
+        .unwrap_err();
+    assert!(over.to_string().contains("1..=32"), "{over}");
     assert!(
         keys_of(&store, id).is_empty(),
         "a refused write writes nothing"
     );
+    assert_eq!(store.index_size(), 0);
 
     store
-        .upsert_chunks(id, many(MAX_CHUNKS_PER_DRAWER))
-        .await
+        .hnsw_for_test()
+        .replace_group_capped(&key, &many(CAP), CAP)
         .unwrap();
-    assert_eq!(store.index_size(), MAX_CHUNKS_PER_DRAWER);
+    assert_eq!(store.index_size(), CAP);
     assert_eq!(store.entry_count().unwrap(), 1);
 }
 
