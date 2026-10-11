@@ -21,7 +21,7 @@
 use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::RoomType;
+use trusty_common::memory_core::palace::{Drawer, RoomType};
 use trusty_common::memory_core::retrieval::{
     recall_across_palaces_reporting, recall_deep_scoped, recall_scoped, scope_admits,
     CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope,
@@ -29,7 +29,7 @@ use trusty_common::memory_core::retrieval::{
 
 use crate::service::recall_stream::{recall_all_scoped, RecallAllScope};
 
-use super::bm25::{bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall};
+use super::bm25::{bm25_live_hits, bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
@@ -80,9 +80,9 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// omitted until the embedder warms up.
 /// What: seeds the result set with `retrieve_l0_l1`, joins the optional BM25
 /// lane (query runs regardless of embedder state — BM25 has no embedder
-/// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
-/// merges without duplicating drawers already present, re-sorts by score
-/// descending, and truncates to `top_k`.
+/// dependency), hydrates any BM25-only hits via `bm25_live_hits` (#9390: which
+/// refills past expired slots), merges without duplicating drawers already
+/// present, re-sorts by score descending, and truncates to `top_k`.
 /// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
 /// another room's drawer just because the daemon happened to be warming. L0/L1
@@ -94,7 +94,8 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// Taking no `palace` parameter makes that disagreement unrepresentable.
 /// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
 /// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
-/// `bm25_alias_recall.rs::an_aliased_recall_reads_the_corpus_the_backfill_wrote`.
+/// `bm25_alias_recall.rs::an_aliased_recall_reads_the_corpus_the_backfill_wrote`,
+/// `recall_returns_the_live_slot_past_twenty_expired_ones_while_warming`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
@@ -102,7 +103,6 @@ async fn recall_without_embedder(
     scope: &RecallScope,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
-    let palace = handle.id.as_str();
     let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
     // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
     // scope so a WING-scoped recall issued while the embedder is warming is
@@ -110,11 +110,10 @@ async fn recall_without_embedder(
     // results — a scope boundary failing open, which is a leak, not a
     // degraded result.
     let allowed = scope.allowed_room_ids(&handle.kg);
-    if let Some(bm25_hits) = bm25_search_optional(state, palace, query, top_k).await {
-        for hydrated in bm25_hits_to_recall_results(handle, &bm25_hits) {
-            if !scope_admits(&allowed, hydrated.drawer.room_id) {
-                continue;
-            }
+    // #9390: refilled past expired slots, which ADR-0028 D6 never deletes.
+    let admits = |d: &Drawer| scope_admits(&allowed, d.room_id);
+    if let Some(bm25_hits) = bm25_live_hits(state, handle, query, top_k, admits).await {
+        for hydrated in bm25_hits {
             if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
                 results.push(hydrated);
             }
