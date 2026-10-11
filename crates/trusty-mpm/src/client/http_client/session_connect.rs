@@ -376,11 +376,9 @@ mod prompt_refusal_tests {
                 "{spec:?}"
             );
             assert!(
-                spec.args.windows(2).any(|w| w
-                    == [
-                        "--disallowedTools",
-                        "Workflow,DesignSync,mcp__claude-in-chrome"
-                    ]),
+                spec.args
+                    .windows(2)
+                    .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
                 "{spec:?}"
             );
         }

@@ -669,7 +669,7 @@ fn inplace_session_spec_carries_the_prompt_file() {
             "--dangerously-skip-permissions",
             // #8992: the probe is a PM launch, so the tool trim follows.
             "--disallowedTools",
-            "Workflow,DesignSync,mcp__claude-in-chrome"
+            "Workflow,DesignSync"
         ],
         "the in-place launch must carry the PM prompt file"
     );
@@ -689,11 +689,9 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
     );
     assert!(pm.env_set.contains(&artifact_off), "{:?}", pm.env_set);
     assert!(
-        pm.args.windows(2).any(|w| w
-            == [
-                "--disallowedTools",
-                "Workflow,DesignSync,mcp__claude-in-chrome"
-            ]),
+        pm.args
+            .windows(2)
+            .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
         "{:?}",
         pm.args
     );

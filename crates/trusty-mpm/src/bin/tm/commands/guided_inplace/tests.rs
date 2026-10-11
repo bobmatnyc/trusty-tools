@@ -1237,11 +1237,9 @@ fn inplace_pm_relaunch_trims_the_unused_tools() {
     };
     assert_eq!(real.profile, SessionProfile::Pm);
     assert!(
-        real.args.windows(2).any(|w| w
-            == [
-                "--disallowedTools",
-                "Workflow,DesignSync,mcp__claude-in-chrome"
-            ]),
+        real.args
+            .windows(2)
+            .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
         "{:?}",
         real.args
     );

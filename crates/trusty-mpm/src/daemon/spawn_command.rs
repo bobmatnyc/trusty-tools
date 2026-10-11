@@ -161,7 +161,7 @@ mod tests {
             cmd.ends_with(
                 " TRUSTY_MPM_SESSION_PROFILE='pm' CLAUDE_CODE_DISABLE_ARTIFACT='1' claude \
                  --append-system-prompt-file '/t/with space/p.txt' \
-                 '--disallowedTools' 'Workflow,DesignSync,mcp__claude-in-chrome'"
+                 '--disallowedTools' 'Workflow,DesignSync'"
             ),
             "{cmd}"
         );
@@ -179,7 +179,7 @@ mod tests {
             "{pm}"
         );
         assert!(
-            pm.ends_with(" '--disallowedTools' 'Workflow,DesignSync,mcp__claude-in-chrome'"),
+            pm.ends_with(" '--disallowedTools' 'Workflow,DesignSync'"),
             "{pm}"
         );
         let sup = gui_spawn_command(

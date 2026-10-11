@@ -15,10 +15,7 @@ fn a_pm_launch_disables_the_artifact_tools() {
 fn a_pm_launch_denies_the_optional_built_ins() {
     assert_eq!(
         trim_args(SessionProfile::Pm),
-        [
-            "--disallowedTools",
-            "Workflow,DesignSync,mcp__claude-in-chrome"
-        ]
+        ["--disallowedTools", "Workflow,DesignSync"]
     );
 }
 
@@ -27,6 +24,18 @@ fn the_cron_tools_are_never_denied() {
     // #8992: session resume schedules through CronCreate/CronDelete/CronList.
     let value = &trim_args(SessionProfile::Pm)[1];
     assert!(!value.contains("Cron"), "{value}");
+}
+
+#[test]
+fn the_chrome_tools_are_never_denied() {
+    // #8992: web-qa needs the chrome tools; deny rules reach subagents
+    assert!(
+        !DISALLOWED_TOOLS
+            .iter()
+            .any(|t| t.contains("claude-in-chrome")),
+        "{DISALLOWED_TOOLS:?}"
+    );
+    assert!(!trim_args(SessionProfile::Pm)[1].contains("chrome"));
 }
 
 #[test]

@@ -273,7 +273,7 @@ fn spawn_argv_matches_the_shell_line_it_replaces() {
 }
 
 /// #8992: a PM's spawn and resume carry `CLAUDE_CODE_DISABLE_ARTIFACT=1` and
-/// deny `Workflow`, `DesignSync` and the claude-in-chrome server in ONE argv
+/// deny `Workflow` and `DesignSync` in ONE argv
 /// value, ahead of the permission flag; the `Cron*` tools stay. Before the fix
 /// neither the variable nor the flag was there.
 #[test]
@@ -291,10 +291,7 @@ fn a_pm_spawn_disables_artifacts_and_denies_the_optional_built_ins() {
             .unwrap_or_else(|| panic!("no --disallowedTools in {:?}", spec.args));
         assert_eq!(
             spec.args[at + 1..at + 3],
-            [
-                "Workflow,DesignSync,mcp__claude-in-chrome",
-                "--dangerously-skip-permissions"
-            ]
+            ["Workflow,DesignSync", "--dangerously-skip-permissions"]
         );
         assert!(!spec.args.iter().any(|a| a.contains("Cron")));
         assert_eq!(

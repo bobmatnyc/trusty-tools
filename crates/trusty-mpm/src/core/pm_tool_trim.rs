@@ -1,9 +1,8 @@
 //! The built-in tools a tm-launched PM does not load (#8992).
 //!
-//! Why: a PM session never uses Claude Code's Artifact family, `Workflow`,
-//! `DesignSync` or the claude-in-chrome browser tools, yet their schemas ride
-//! in every request. The owner's method (#8992, 2026-10-01): turn Artifact off
-//! with `CLAUDE_CODE_DISABLE_ARTIFACT=1`, deny the other optional built-ins with
+//! Why: a PM session never uses Claude Code's Artifact family, `Workflow` or
+//! `DesignSync`, yet their schemas ride in every request. The owner's method
+//! (#8992, 2026-10-01): turn Artifact off with `CLAUDE_CODE_DISABLE_ARTIFACT=1`, deny the other optional built-ins with
 //! `--disallowedTools`, and KEEP the `Cron*` tools, which session resume uses.
 //! The supervisor profile is not a PM and keeps its full tool set.
 //! What: [`trim_env`] and [`trim_args`] return the variable and the argv a
@@ -28,13 +27,13 @@ pub const DISALLOWED_TOOLS_FLAG: &str = "--disallowedTools";
 /// The optional built-ins a PM launch denies, as Claude Code permission rules.
 ///
 /// Why: these are the #8992 tools a PM never calls. `mcp__claude-in-chrome`
-/// is the server-level rule, which removes every tool of that built-in MCP
-/// server. `CronCreate`/`CronDelete`/`CronList` are deliberately absent: session
-/// resume schedules through them.
+/// is deliberately absent: `web-qa` drives the browser and a session-level deny
+/// reaches subagents. `CronCreate`/`CronDelete`/`CronList` are also absent:
+/// session resume schedules through them.
 /// What: rule strings, joined with `,` into one argv value by [`trim_args`].
 /// Test: `a_pm_launch_denies_the_optional_built_ins`,
-/// `the_cron_tools_are_never_denied`.
-pub const DISALLOWED_TOOLS: [&str; 3] = ["Workflow", "DesignSync", "mcp__claude-in-chrome"];
+/// `the_cron_tools_are_never_denied`, `the_chrome_tools_are_never_denied`.
+pub const DISALLOWED_TOOLS: [&str; 2] = ["Workflow", "DesignSync"];
 
 /// The environment a launch of `profile` adds.
 ///
@@ -52,7 +51,7 @@ pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
 ///
 /// Why: ONE value token, comma-joined. `--disallowedTools` is variadic, so a
 /// space-separated list would also swallow any bare word that followed it.
-/// What: `["--disallowedTools", "Workflow,DesignSync,mcp__claude-in-chrome"]`
+/// What: `["--disallowedTools", "Workflow,DesignSync"]`
 /// for a PM; empty for a supervisor.
 /// Test: `a_pm_launch_denies_the_optional_built_ins`,
 /// `a_supervisor_launch_keeps_every_tool`.

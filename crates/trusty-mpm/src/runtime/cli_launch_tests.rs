@@ -98,7 +98,7 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
             "--mcp-config",
             "/h/mcp.json",
             "--disallowedTools",
-            "Workflow,DesignSync,mcp__claude-in-chrome",
+            "Workflow,DesignSync",
             "--dangerously-skip-permissions",
         ]
     );
@@ -131,11 +131,9 @@ fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
             spec.env_set
         );
         assert!(
-            spec.args.windows(2).any(|w| w
-                == [
-                    "--disallowedTools",
-                    "Workflow,DesignSync,mcp__claude-in-chrome"
-                ]),
+            spec.args
+                .windows(2)
+                .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
             "stamp {value:?}: {:?}",
             spec.args
         );
