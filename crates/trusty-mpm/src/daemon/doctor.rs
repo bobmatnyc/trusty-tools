@@ -303,6 +303,11 @@ use doctor_search_pin::check_search_index_pin;
 mod doctor_search_project;
 use doctor_search_project::check_search_project;
 
+// #9664: `tm doctor --fix` parks what `search_project_duplicate_index` flags.
+#[path = "doctor_search_park.rs"]
+mod doctor_search_park;
+pub use doctor_search_park::repair_duplicate_indexes;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #5007 —
 // the managed-session-store integrity probe; a corrupt `sessions.json` blocks
 // every write and was previously invisible to every diagnostic).
