@@ -1019,6 +1019,186 @@ async fn absent_palace_is_still_404_at_both_open_handles() {
     );
 }
 
+/// Save palace `id` under `root` with a `palace.json` mirror naming a format
+/// newer than this binary reads, and return the `palace.json` path.
+///
+/// Why (#9665): the fixture `format_too_new_maps_to_refused_error_naming_variant`
+/// uses, shared by the service and the JSON-RPC wire tests.
+pub(crate) fn seed_too_new_palace(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    use trusty_common::memory_core::store::PalaceStore;
+    let dir = root.join(id);
+    PalaceStore::save_palace(&Palace {
+        id: PalaceId::new(id),
+        name: id.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.clone(),
+    })
+    .expect("save palace");
+    let path = dir.join("palace.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    doc["format_version"] = json!(u32::MAX);
+    std::fs::write(&path, serde_json::to_vec(&doc).expect("encode")).expect("write");
+    path
+}
+
+/// Every open error a mapper must classify, as `(name, error, is_refusal)`.
+///
+/// Why (#9665): one list, so the service and wire mappers are pinned to the
+/// same six `Format*` refusals and the same non-refusals. Each error carries
+/// the `open palace` context `open_palace_handle_within` adds.
+pub(crate) fn open_errors() -> Vec<(&'static str, anyhow::Error, bool)> {
+    use trusty_common::memory_core::store::PalaceStoreError as E;
+    let p = || "p".to_string();
+    let path = || std::path::PathBuf::from("/x/p");
+    let io = || std::io::Error::other("disk");
+    let all: Vec<(E, bool)> = vec![
+        (
+            E::FormatTooNew {
+                palace: p(),
+                found: 9,
+                supported: 1,
+            },
+            true,
+        ),
+        (
+            E::FormatNeedsMigration {
+                palace: p(),
+                found: 1,
+                supported: 2,
+            },
+            true,
+        ),
+        (
+            E::FormatTooOld {
+                palace: p(),
+                found: 1,
+                supported: 3,
+            },
+            true,
+        ),
+        (
+            E::FormatMarkerMismatch {
+                palace: p(),
+                marker: 1,
+                mirror: 2,
+            },
+            true,
+        ),
+        (
+            E::FormatMarkerUnreadable {
+                palace: p(),
+                path: path(),
+                reason: "torn".into(),
+            },
+            true,
+        ),
+        (
+            E::FormatMigrationFailed {
+                palace: p(),
+                from: 1,
+                to: 2,
+                reason: "x".into(),
+            },
+            true,
+        ),
+        (
+            E::BackupFailed {
+                path: path(),
+                source: io(),
+            },
+            false,
+        ),
+        (
+            E::BackupVerifyMismatch {
+                file: path(),
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            false,
+        ),
+        (
+            E::InsufficientSpace {
+                path: path(),
+                needed: 2,
+                available: 1,
+            },
+            false,
+        ),
+        (
+            E::Io {
+                path: path(),
+                source: io(),
+            },
+            false,
+        ),
+        (
+            E::Json {
+                path: path(),
+                source: serde_json::from_str::<u8>("x").unwrap_err(),
+            },
+            false,
+        ),
+    ];
+    let mut out: Vec<(&'static str, anyhow::Error, bool)> = all
+        .into_iter()
+        .map(|(e, refusal)| {
+            let name = e.variant_name();
+            (
+                name,
+                anyhow::Error::from(e).context("open palace p"),
+                refusal,
+            )
+        })
+        .collect();
+    out.push(("plain", anyhow::anyhow!("redb lock held"), false));
+    out
+}
+
+/// Why (#9665): `MemoryService::open_handle` sent a format refusal to
+/// `Internal`, so the folded RPC and service routes answered `-32603` for a
+/// palace no retry can open.
+/// What: maps every entry of `open_errors` through `open_failure` (refusals to
+/// `Conflict`, the rest to `Internal`), then opens a too-new palace through
+/// `list_drawers` and checks it reaches the wire as `Refused`, bytes unchanged.
+/// Test: itself.
+#[tokio::test]
+async fn format_too_new_is_a_conflict_at_the_service_open_handle() {
+    for (name, e, refusal) in open_errors() {
+        match (super::core_kg::open_failure("p", &e), refusal) {
+            (ServiceError::Conflict(m), true) => assert!(m.contains(name), "{m}"),
+            (ServiceError::Internal(_), false) => {}
+            (other, _) => panic!("{name}: refusal={refusal}, got {other:?}"),
+        }
+    }
+
+    let (svc, state) = service();
+    let path = seed_too_new_palace(&state.data_root, "too-new-svc");
+    let before = std::fs::read(&path).expect("read");
+    let failure = svc
+        .list_drawers("too-new-svc", ListDrawersQuery::default())
+        .await
+        .expect_err("a palace newer than this binary is refused");
+    assert!(
+        matches!(&failure, ServiceError::Conflict(m) if m.contains("FormatTooNew")),
+        "{failure:?}"
+    );
+    let api = crate::transport::ApiError::from(failure);
+    assert_eq!(
+        api.kind,
+        crate::transport::ErrorKind::Refused,
+        "{}",
+        api.message
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        before,
+        "palace.json changed"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Dream status
 // ---------------------------------------------------------------------------

@@ -1,0 +1,2 @@
+Fixed
+- A tool call or service request against a palace refused over its on-disk format (`FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable`, `FormatMigrationFailed`) now answers JSON-RPC `-32006` (refused) instead of `-32603` (internal error). The message still leads with the variant name. Backup, disk-space and I/O failures stay `-32603` (#9665).

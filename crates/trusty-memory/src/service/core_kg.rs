@@ -14,6 +14,7 @@ use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStat
 use trusty_common::memory_core::palace::PalaceId;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
 use trusty_common::memory_core::store::kg::{ExpandDirection, Triple};
+use trusty_common::memory_core::store::palace_format::is_format_refusal;
 use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
 
 use super::core::KG_GRAPH_MAX_TRIPLES;
@@ -522,22 +523,36 @@ impl MemoryService {
     /// per-palace recall reach this one helper.
     /// What: returns `ServiceError::NotFound` only when
     /// `PalaceRegistry::open_error_is_absent` confirms the palace is genuinely
-    /// not there, and `ServiceError::Internal` (500) otherwise.
-    /// Test: `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
+    /// not there, `ServiceError::Conflict` (Refused) for a palace-format
+    /// refusal (#9665), and `ServiceError::Internal` (500) otherwise.
+    /// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`,
+    /// `unreadable_palace_is_500_not_404_at_the_service_open_handle`,
     /// `unstattable_palace_is_500_not_404_at_the_service_open_handle`,
     /// `absent_palace_is_still_404_at_both_open_handles`.
     pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| {
-                // #5549: every open failure mapped to 404, so a palace that
-                // could not be read was reported as one that is not there.
-                if PalaceRegistry::open_error_is_absent(&e) {
-                    ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
-                } else {
-                    ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
-                }
-            })
+            .map_err(|e| open_failure(id, &e))
+    }
+}
+
+/// Map one `open_palace` failure for palace `id` onto a [`ServiceError`].
+///
+/// Why: [`MemoryService::open_handle`]'s mapping, kept apart so a test can
+/// drive it with every error variant, not only the ones a fixture can provoke.
+/// What: `NotFound` for a genuine absence, `Conflict` for a format refusal,
+/// `Internal` otherwise — the table `transport::api_error::open_handle` keeps.
+/// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`.
+pub(super) fn open_failure(id: &str, e: &anyhow::Error) -> ServiceError {
+    // #5549: every open failure mapped to 404, so a palace that
+    // could not be read was reported as one that is not there.
+    if PalaceRegistry::open_error_is_absent(e) {
+        ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+    } else if is_format_refusal(e) {
+        // #9665: a format refusal no retry can clear was reported as internal.
+        ServiceError::conflict(format!("palace refused: {id} ({e:#})"))
+    } else {
+        ServiceError::internal(format!("palace could not be loaded: {id} ({e:#})"))
     }
 }
