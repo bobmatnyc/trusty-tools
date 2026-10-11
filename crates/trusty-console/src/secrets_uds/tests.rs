@@ -120,10 +120,38 @@ pub(super) fn error_frame(kind: Option<&str>) -> Option<Value> {
         "code": -32000, "message": "UPSTREAM-MESSAGE-TEXT", "data": data } }))
 }
 
+/// The registry file name the bridge helpers write beside the stub socket;
+/// not `project-paths.json`, so a picker test's own registry is never replaced.
+pub(super) const BRIDGE_REGISTRY: &str = "bridge-registry.json";
+
+/// Write a tm registry under `dir` whose rows list `projects` as paths.
+pub(super) fn registry_listing(dir: &Path, name: &str, projects: &[&str]) -> PathBuf {
+    let rows: Vec<Value> = projects
+        .iter()
+        .map(|path| json!({ "alias": "listed", "path": path }))
+        .collect();
+    let file = dir.join(name);
+    std::fs::write(&file, Value::Array(rows).to_string()).expect("write registry");
+    file
+}
+
+/// A bridge to `socket` whose registry lists `/p`, the project every
+/// credential-route test names (#9067: an unlisted project never dials).
 pub(super) fn bridge_at(socket: &Path, table: Arc<dyn ProcessTable>) -> Arc<SecretsBridge> {
+    bridge_listing(socket, table, &["/p"])
+}
+
+/// A bridge to `socket` whose registry, beside the socket, lists `projects`.
+pub(super) fn bridge_listing(
+    socket: &Path,
+    table: Arc<dyn ProcessTable>,
+    projects: &[&str],
+) -> Arc<SecretsBridge> {
+    let dir = socket.parent().expect("socket dir");
     let bridge = SecretsBridge::new(SecretsDial::new(socket.to_path_buf()).with_external(true))
         .expect("mint")
-        .with_table(table);
+        .with_table(table)
+        .with_registry(Some(registry_listing(dir, BRIDGE_REGISTRY, projects)));
     bridge.set_authorities(&[OWN.parse().expect("addr")]);
     Arc::new(bridge)
 }
@@ -525,7 +553,10 @@ fn list_for(project: &str) -> String {
 async fn upstream_errors_relay_only_the_kind() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (socket, _seen) = kind_echo_stub(tmp.path());
-    let bridge = bridge_at(&socket, Arc::new(family()));
+    // #9067: every kind is sent as the project, so the registry lists each.
+    let mut listed: Vec<&str> = UPSTREAM_KINDS.iter().map(|row| row.0).collect();
+    listed.extend(["brand_new_kind", "/none"]);
+    let bridge = bridge_listing(&socket, Arc::new(family()), &listed);
     for (kind, status, fixed) in UPSTREAM_KINDS {
         let request = own_request(&bridge, "/api/secrets/list", &list_for(kind));
         let (got, body) = send(&bridge, request).await;
@@ -547,7 +578,7 @@ async fn upstream_errors_relay_only_the_kind() {
 async fn audit_unavailable_is_relayed_without_retry() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let (socket, seen) = kind_echo_stub(tmp.path());
-    let bridge = bridge_at(&socket, Arc::new(family()));
+    let bridge = bridge_listing(&socket, Arc::new(family()), &["audit_unavailable"]);
     let request = own_request(&bridge, "/api/secrets/list", &list_for("audit_unavailable"));
     let (status, body) = send(&bridge, request).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -817,7 +848,10 @@ async fn dial_reports_a_missing_binary_as_unavailable() {
     let dial = SecretsDial::new(tmp.path().join("s").join("secrets.sock"))
         .with_external(false)
         .with_program(tmp.path().join("no-such-trusty-secrets"));
-    let bridge = SecretsBridge::new(dial).expect("mint");
+    let registry = registry_listing(tmp.path(), BRIDGE_REGISTRY, &["/p"]);
+    let bridge = SecretsBridge::new(dial)
+        .expect("mint")
+        .with_registry(Some(registry));
     bridge.set_authorities(&[OWN.parse().expect("addr")]);
     let bridge = Arc::new(bridge);
     let (status, body) = send(

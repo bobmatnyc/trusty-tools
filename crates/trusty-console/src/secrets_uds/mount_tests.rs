@@ -22,7 +22,9 @@ use trusty_secrets::ancestry::{OsProcessTable, ProcessError, ProcessTable, Start
 use super::dial::SecretsDial;
 use super::errors::Refusal;
 use super::pid_map::{lookups, tests::spawn_client};
-use super::tests::{LIST_BODY, OWN, Seen, ok_stub, own_request, text, token};
+use super::tests::{
+    BRIDGE_REGISTRY, LIST_BODY, OWN, Seen, ok_stub, own_request, registry_listing, text, token,
+};
 use super::{CSRF_HEADER, SecretsBridge};
 use crate::server::{AppState, build_router};
 use crate::tailnet_peer::{
@@ -35,9 +37,11 @@ fn bridge(
     own: SocketAddr,
     table: Arc<dyn ProcessTable>,
 ) -> SecretsBridge {
+    let dir = socket.parent().expect("socket dir");
     let bridge = SecretsBridge::new(SecretsDial::new(socket.to_path_buf()).with_external(true))
         .expect("mint")
-        .with_table(table);
+        .with_table(table)
+        .with_registry(Some(registry_listing(dir, BRIDGE_REGISTRY, &["/p"])));
     bridge.set_authorities(&[own]);
     bridge
 }
@@ -329,11 +333,12 @@ async fn child_assertion(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_loopback_request_is_judged_from_the_pid_found_at_accept() {
-    let (_tmp, socket, seen) = ok_stub();
+    let (tmp, socket, seen) = ok_stub();
     let table = Arc::new(ChildTable::default());
     let secrets = SecretsBridge::new(SecretsDial::new(socket).with_external(true))
         .expect("mint")
-        .with_table(Arc::clone(&table) as Arc<dyn ProcessTable>);
+        .with_table(Arc::clone(&table) as Arc<dyn ProcessTable>)
+        .with_registry(Some(registry_listing(tmp.path(), BRIDGE_REGISTRY, &["/p"])));
     let state = AppState::new(Vec::new()).with_secrets(secrets);
     let bridge = state.secrets();
     let (stop, stopped) = tokio::sync::watch::channel(false);
