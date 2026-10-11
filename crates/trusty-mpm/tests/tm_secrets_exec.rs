@@ -549,13 +549,14 @@ async fn exec_drain_after_exit_answers_sigterm() {
 /// again by then, so a terminal Ctrl-C ends tm with 130 instead of reaching
 /// only the job, which ignores SIGINT.
 /// What: tm runs as a session leader whose controlling terminal is a pty;
-/// after the revoke, `\x03` goes to the master every 200 ms until tm exits.
-/// A Ctrl-C that lands before the handback reaches the ignoring job only.
+/// after the revoke, and once the pty's foreground group is tm's again,
+/// `\x03` goes to the master every 200 ms until tm exits.
 /// A thread reads the master, as a terminal does: on macOS a session
 /// leader's exit waits for the terminal's output (the echoed `^C`) to drain.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
     use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
     let fx = Fixture::new(Script::new()).await;
     let (mut master, slave) = open_pty();
     // #9621: an unread master held tm's exit on macOS (state `E`, Elapsed).
@@ -565,7 +566,9 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
         let mut buf = [0u8; 256];
         while matches!(terminal.read(&mut buf), Ok(n) if n > 0) {}
     });
-    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", "sleep 30 &"]);
+    // #9694: the job inherits the ignore; sh alone sets it in the forked child.
+    let job = "trap '' INT; sleep 30 &";
+    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", job]);
     cmd.stdin(slave).kill_on_drop(true);
     // SAFETY: setsid and ioctl are async-signal-safe; fd 0 is the slave.
     unsafe {
@@ -584,6 +587,19 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
         assert!(start.elapsed() < Duration::from_secs(20), "never revoked");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let group = fx.seen().grants[0]["child_pid"].as_i64().unwrap();
+    // #9694: tm takes the terminal back after the revoke; a Ctrl-C before
+    // that reaches only the job. tm is a session leader: its group is its pid.
+    let start = Instant::now();
+    // SAFETY: TIOCGPGRP on an open pty master only reads.
+    while i64::from(unsafe { libc::tcgetpgrp(master.as_raw_fd()) }) != tm_pid {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "tm never took the terminal back after the revoke\n{}",
+            pty_state(&master, &[tm_pid, group])
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let exited = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             master.write_all(b"\x03").expect("write Ctrl-C");
@@ -595,7 +611,6 @@ async fn exec_drain_after_exit_answers_terminal_ctrl_c() {
     })
     .await;
     // The background sleep holds tm's output pipe; end it whatever the verdict.
-    let group = fx.seen().grants[0]["child_pid"].as_i64().unwrap();
     // #9621: a hung tm says nothing; snapshot the terminal before the kill.
     let state = exited
         .is_err()
