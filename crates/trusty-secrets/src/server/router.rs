@@ -42,8 +42,8 @@ use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at_in,
-    platform,
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
+    open_backend_at_in, platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -209,8 +209,9 @@ pub(crate) fn account_machine(path: Option<&Path>) -> Option<MachineSecretsConfi
 /// [`ServerSettings::audit_log`] (#4567), whether this server acts as a
 /// Keychain build (#7524), and the account's own machine config, the one
 /// file that may consent to `file` writes there (#7524 H1), and the
-/// in-memory exec-grant registry (#9070). `Debug` shows settings and the
-/// index root only.
+/// in-memory exec-grant registry (#9070), and the session's value cache
+/// (#7520). `Debug` shows settings, the index root and the cache's entry
+/// count only.
 #[non_exhaustive]
 pub struct State {
     /// Paths and the idle window.
@@ -243,6 +244,9 @@ pub struct State {
     // #9070: memory only (Architect ruling 2026-10-10); a crate-private field
     // so tests can give it a fake process table and clock.
     pub(crate) grants: Arc<GrantRegistry>,
+    /// The session's cache of CLI-backed values `secrets.resolve` read.
+    // #7520: lives and dies with this server; set, delete and copy evict.
+    pub(crate) cache: Arc<SecretCache>,
 }
 
 impl State {
@@ -267,6 +271,7 @@ impl State {
             admission_cap_override: None,
             cancel: Arc::new(AtomicBool::new(false)),
             grants: Arc::new(GrantRegistry::os_default()),
+            cache: Arc::new(SecretCache::new()),
         }
     }
 
@@ -287,6 +292,8 @@ impl fmt::Debug for State {
         f.debug_struct("State")
             .field("settings", &self.settings)
             .field("index_root", &self.index.root())
+            // #7520 AC3: the cache's `Debug` is its entry count only.
+            .field("cache", &self.cache)
             .finish_non_exhaustive()
     }
 }
