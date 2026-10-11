@@ -30,7 +30,7 @@ use crate::core::catchup::resolve::{
     CallerIdentity, redact_sessions_not_owned_by, resolve_snapshot_for_identity,
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
-use crate::core::config::MpmConfig;
+use crate::daemon::catchup_host::CatchupHost;
 use crate::daemon::catchup_payload::{HydrationReceipt, catchup_payload, resolved_note};
 use crate::daemon::catchup_superseded::assess_snapshot;
 use crate::daemon::pause_resume_slot::{ResumeSlotHost, record_resume_slot};
@@ -155,10 +155,7 @@ pub async fn session_context_catchup_with_session_created(
     full: bool,
     sessions_offset: usize,
 ) -> Result<Value, String> {
-    let host = CatchupHost {
-        config: MpmConfig::load_default(),
-        memory_socket: trusty_common::memory_rpc::resolve_memory_socket_or_unreachable(),
-    };
+    let host = CatchupHost::resolve();
     session_context_catchup_in(
         &host,
         project_dir,
@@ -170,21 +167,6 @@ pub async fn session_context_catchup_with_session_created(
         sessions_offset,
     )
     .await
-}
-
-/// What a catch-up reads from the host rather than from its arguments.
-///
-/// Why: the public entry points load `~/.trusty-mpm/config.toml` and resolve
-/// the live trusty-memory socket, so a test calling them could reach the
-/// operator's daemon (seen as a flake). Tests pass an isolated host instead.
-/// What: the config whose `[catchup]`/`[session_refs]` sections apply, and the
-/// memory socket the palace leg queries.
-/// Test: `isolated_catchup` in this module's tests builds every catch-up on one.
-pub(crate) struct CatchupHost {
-    /// The loaded `MpmConfig`.
-    pub(crate) config: MpmConfig,
-    /// The trusty-memory socket; an unserved path makes the palace leg empty.
-    pub(crate) memory_socket: PathBuf,
 }
 
 /// [`session_context_catchup_with_session_created`] against an explicit host.
@@ -285,6 +267,7 @@ pub(crate) async fn session_context_catchup_in(
 
     // #8408: a null snapshot must say when the tmux-session route was skipped.
     let note = resolved_note(resolved.as_ref(), &caller);
+    let verified = host.verify_resume(&primary, resolved.as_ref()).await; // #9390
     Ok(catchup_payload(
         merged,
         sessions_offset,
@@ -292,6 +275,7 @@ pub(crate) async fn session_context_catchup_in(
         note,
         session_refs,
         freshness,
+        verified,
     ))
 }
 
@@ -859,8 +843,17 @@ mod tests {
     /// trusty-memory daemon: an empty home's defaults and an unserved socket.
     fn isolated_host() -> CatchupHost {
         CatchupHost {
-            config: MpmConfig::default(),
+            config: crate::core::config::MpmConfig::default(),
             memory_socket: PathBuf::from("/nonexistent/mcp-context-test.sock"),
+            // #9390: the verify pass never spawns a real `gh`/`git` in a test.
+            resume_verify: crate::daemon::resume_verify::ResumeVerifyHost {
+                runner: std::sync::Arc::new(
+                    crate::daemon::resume_verify_runner::fake::FakeRunner::never(),
+                ),
+                palace: Some("mcp-context-test".to_string()),
+                command_timeout: std::time::Duration::from_secs(1),
+                pass_timeout: std::time::Duration::from_secs(2),
+            },
         }
     }
 
@@ -1043,6 +1036,7 @@ mod tests {
             None,
             HydrationReceipt::default(),
             SnapshotFreshness::default(),
+            Value::Null,
         );
         assert_eq!(
             body["undatable_sessions_dropped"], 4,
@@ -1088,6 +1082,7 @@ mod tests {
             None,
             HydrationReceipt::default(),
             freshness,
+            Value::Null,
         );
 
         assert_eq!(body["resolved_snapshot_superseded"], true, "{body}");
@@ -1843,6 +1838,7 @@ mod tests {
             None,
             receipt,
             SnapshotFreshness::default(),
+            Value::Null,
         );
         assert_eq!(body["session_refs"]["hydrated"], false, "{body}");
         assert_eq!(body["session_refs"]["refs_seen"], 0, "{body}");

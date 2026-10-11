@@ -79,6 +79,11 @@ pub mod mcp_context;
 pub mod mcp_disk;
 // #9390: the `ws:<session>/resume` slot `session_context_pause` writes.
 pub(crate) mod pause_resume_slot;
+// #9390: the catch-up host, and the resume verify pass it runs over that slot.
+pub(crate) mod catchup_host;
+pub(crate) mod resume_verify;
+pub(crate) mod resume_verify_runner;
+pub(crate) mod verify_allowlist;
 // #8985: the last complete `disk_survey` pass, refreshed in the background.
 pub(crate) mod disk_survey_cache;
 pub mod mcp_project;

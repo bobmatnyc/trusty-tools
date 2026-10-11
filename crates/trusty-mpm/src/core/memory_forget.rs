@@ -171,6 +171,23 @@ pub fn match_fact_key(
     limit: usize,
     now: DateTime<Utc>,
 ) -> Result<String, MemoryVerbError> {
+    let drawer = match_fact_key_drawer(fact_key, palace, listing, limit, now)?;
+    Ok(drawer_id_of(drawer).to_string())
+}
+
+/// [`match_fact_key`], answering the matched drawer's whole listing entry.
+///
+/// Why (#9390): the resume verify pass needs the slot's `verify` command, not
+/// only its id, and must refuse exactly what the forget refuses.
+/// Test: `forget_by_fact_key_skips_an_expired_occupant`,
+/// `the_resume_slot_is_read_through_the_shared_slot_matcher`.
+pub(crate) fn match_fact_key_drawer<'a>(
+    fact_key: &str,
+    palace: &str,
+    listing: &'a Value,
+    limit: usize,
+    now: DateTime<Utc>,
+) -> Result<&'a Value, MemoryVerbError> {
     let refuse = |detail: String| MemoryVerbError::FactKey {
         key: fact_key.to_string(),
         detail,
@@ -193,10 +210,7 @@ pub fn match_fact_key(
     }
     let (mut live, mut expired) = (Vec::new(), Vec::new());
     for drawer in drawers {
-        let id = drawer
-            .get("drawer_id")
-            .and_then(Value::as_str)
-            .unwrap_or("(no id)");
+        let id = drawer_id_of(drawer);
         let Some(listed_key) = drawer.get("fact_key") else {
             return Err(refuse(format!(
                 "the trusty-memory daemon is too old: its {LIST_METHOD} reports no fact_key \
@@ -207,10 +221,10 @@ pub fn match_fact_key(
             continue;
         }
         match drawer.get("expires_at").and_then(Value::as_str) {
-            None => live.push(id),
+            None => live.push(drawer),
             Some(raw) => match DateTime::parse_from_rfc3339(raw) {
                 Ok(at) if at <= now => expired.push(id),
-                Ok(_) => live.push(id),
+                Ok(_) => live.push(drawer),
                 Err(e) => {
                     return Err(refuse(format!(
                         "drawer {id} has an unreadable expires_at {raw:?} ({e}), so it cannot \
@@ -221,7 +235,7 @@ pub fn match_fact_key(
         }
     }
     match live.as_slice() {
-        [one] => Ok((*one).to_string()),
+        [one] => Ok(*one),
         [] if expired.is_empty() => Err(refuse(format!(
             "no live drawer holds it in palace {palace}"
         ))),
@@ -233,7 +247,18 @@ pub fn match_fact_key(
         many => Err(refuse(format!(
             "{} live drawers hold it in palace {palace}: {}; forget one by id",
             many.len(),
-            many.join(", ")
+            many.iter()
+                .map(|d| drawer_id_of(d))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
+}
+
+/// A listed drawer's id, or `(no id)`.
+fn drawer_id_of(drawer: &Value) -> &str {
+    drawer
+        .get("drawer_id")
+        .and_then(Value::as_str)
+        .unwrap_or("(no id)")
 }
