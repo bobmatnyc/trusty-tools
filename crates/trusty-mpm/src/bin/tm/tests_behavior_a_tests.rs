@@ -92,7 +92,8 @@ fn cli_parses_hook() {
         Command::Hook {
             pm_guard: false,
             divert_check: false,
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 }
@@ -108,7 +109,8 @@ fn cli_parses_hook_prompt_feedback() {
         Command::Hook {
             pm_guard: false,
             divert_check: false,
-            prompt_feedback: true
+            prompt_feedback: true,
+            egress_guard: false
         }
     ));
 }
@@ -124,7 +126,8 @@ fn cli_parses_hook_pm_guard() {
         Command::Hook {
             pm_guard: true,
             divert_check: false,
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 }

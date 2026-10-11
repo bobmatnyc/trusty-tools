@@ -25,7 +25,8 @@ fn cli_parses_hook_divert_check() {
         Command::Hook {
             pm_guard: false,
             divert_check: true,
-            prompt_feedback: false
+            prompt_feedback: false,
+            egress_guard: false
         }
     ));
 }
