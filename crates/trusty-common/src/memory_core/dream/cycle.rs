@@ -20,7 +20,7 @@ use crate::memory_core::palace::Drawer;
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::store::vector::VectorStore;
 use crate::memory_core::timeouts;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,7 +138,7 @@ pub(super) async fn compact_pass(
     // below, which re-takes it independently (no reentrancy — tokio::Mutex is
     // not reentrant). `remember` never holds this across `compact_pass`, and the
     // idle dreamer holds only the `is_compacting` flag, so this cannot deadlock.
-    let (drawer_count, index_size_after) = {
+    let (drawer_count, vector_drawers) = {
         let _write_guard = timeouts::lock_with_timeout(
             &handle.write_mutex,
             timeouts::write_lock_timeout(),
@@ -162,7 +162,13 @@ pub(super) async fn compact_pass(
                 Err(e) => tracing::warn!(?vid, "dream compact: vector remove failed: {e:#}"),
             }
         }
-        (drawer_ids.len(), handle.vector_store.index_size())
+        // #9275: drawers with a vector, not rows — a chunked drawer has one
+        // row per chunk, and a rebuild would drop every chunk but the first.
+        let vector_drawers = handle
+            .vector_store
+            .drawer_count()
+            .context("dream compact: count vector drawers")?;
+        (drawer_ids.len(), vector_drawers)
     };
 
     // Fallback rebuild: if the index still reports significantly more
@@ -174,7 +180,7 @@ pub(super) async fn compact_pass(
     // Only rebuild when we have drawers to re-embed AND the index has at
     // least 1 + 2*drawer_count entries (well past noise). Avoids tight
     // rebuild loops on a healthy small palace.
-    if drawer_count > 0 && index_size_after > drawer_count.saturating_mul(2) + 1 {
+    if drawer_count > 0 && vector_drawers > drawer_count.saturating_mul(2) + 1 {
         let rebuilt = rebuild_index_from_drawers(handle, started, budget)
             .await
             .map_err(|e| e.context("dream compact rebuild"))?;
@@ -182,7 +188,7 @@ pub(super) async fn compact_pass(
         // orphans removed via rebuild is `index_size_before - drawer_count`.
         // Surface a conservative `removed` increment by counting the
         // delta as orphans dropped from the index.
-        let delta = index_size_after.saturating_sub(rebuilt);
+        let delta = vector_drawers.saturating_sub(rebuilt);
         removed = removed.saturating_add(delta);
     }
 

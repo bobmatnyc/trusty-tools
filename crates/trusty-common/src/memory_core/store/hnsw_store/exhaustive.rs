@@ -61,7 +61,7 @@ use redb::ReadableTable;
 /// Nothing migrates when this number changes: no graph is persisted, and
 /// `HnswStore::open_with_mode` rebuilds the index from the raw `VECTORS` rows on
 /// every open.
-/// What: compared against the number of LIVE drawers — `VECTOR_KEYS` rows, the
+/// What: compared against the number of LIVE rows — `VECTOR_KEYS` rows, the
 /// `reverse` map `search` builds two statements earlier. Not
 /// `Hnsw::get_nb_point()`, which also counts tombstoned points and re-upsert
 /// shadows: those accumulate within a session, so a palace of 2900 real drawers
@@ -70,6 +70,12 @@ use redb::ReadableTable;
 /// but the overhang is bounded by churn since the last open — one extra point
 /// per delete or re-upsert, and `HnswStore::open` rebuilds one point per live
 /// vector — so a bulk `palace_reembed` at most doubles it.
+///
+/// #9275 (Architect ruling Q3): the count is ROWS, not drawers. A drawer
+/// stored as several chunk rows (`{drawer}#n`) counts once per row, so a
+/// chunked palace leaves the exact path at fewer drawers than 24,576. That is
+/// accepted: scan cost follows rows, and counting distinct drawers would cost
+/// a second pass over `VECTOR_KEYS` per search.
 /// Test: `search_uses_the_graph_above_the_exhaustive_threshold`,
 /// `search_is_exact_at_the_exhaustive_threshold`,
 /// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`,
@@ -102,8 +108,8 @@ pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 24_576;
 /// missing-true-neighbour defect #5171 exists to close, reached through
 /// re-embedding instead of through graph reachability, and `palace_reembed`
 /// marks every drawer shadowed. Any bounding of the result must therefore
-/// happen AFTER re-scoring; [`super::HnswStore::search`] does it with the
-/// `out.len() >= k` break on the already-corrected ranking. Cost is bounded by
+/// happen AFTER re-scoring; [`super::HnswStore::search`] does it in
+/// `groups::group_rows`, on the already-corrected ranking. Cost is bounded by
 /// the gate that selects this path: at most one entry per live drawer, so at
 /// most [`EXHAUSTIVE_SCAN_MAX_POINTS`] plus whatever dead-but-untombstoned
 /// overhang the graph carries.
