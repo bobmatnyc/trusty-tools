@@ -13,7 +13,8 @@
 //! (#7519 P4).
 //! #4567: `set`, `delete`, `copy` and `list` run under [`audited`], which
 //! records them on the credential access audit trail; `scopes` and `doctor`
-//! read no credential and leave no record.
+//! read no credential and leave no record when called direct (#9067: a
+//! bridged `scopes` is audited like every bridge call).
 //! Test: `server_tests.rs` and `audit_tests.rs` beside this module.
 
 use std::path::PathBuf;
@@ -26,7 +27,7 @@ use serde_json::{Map, Value};
 use super::audit::AuditMethod;
 use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
-use super::gate::{Recording, audited};
+use super::gate::{Gate, Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
 use crate::api::methods::{
@@ -115,14 +116,37 @@ pub(crate) fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 
 /// `secrets.scopes`: the project scope, then the owner scope.
 ///
-/// Test: `server_scopes_round_trip_over_a_real_socket`.
-pub(crate) fn scopes(state: &State, _caller: Caller, params: Value) -> Result<Value, ErrorKind> {
-    let (dir, rest) = split_project(params)?;
-    if !rest.is_empty() {
-        return Err(ErrorKind::InvalidParams);
+/// What: the scopes [`ProjectContext::resolve`] derives for the checkout,
+/// the owner from its origin remote; there is no machine scope. A direct
+/// call leaves no record. #9067: a console bridge call is audited like a
+/// bridged `list`: admitted fail-closed, one record per call.
+/// Test: `server_scopes_round_trip_over_a_real_socket`,
+/// `bridge_scopes_returns_only_project_and_owner_kinds`,
+/// `bridge_scopes_refuses_when_audit_unwritable`.
+pub(crate) fn scopes(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    let body = |gate: Option<&mut Gate<'_>>| -> Result<Value, ErrorKind> {
+        let (dir, rest) = split_project(params)?;
+        if !rest.is_empty() {
+            return Err(ErrorKind::InvalidParams);
+        }
+        let project = ProjectContext::resolve(state, &dir)?;
+        if let Some(gate) = gate {
+            gate.project(&project);
+            gate.admit()?;
+        }
+        to_json(&project.scopes().to_response())
+    };
+    match caller.bridge() {
+        // #9067: every bridge call is audited (Ddf).
+        Some(_) => audited(
+            state,
+            caller,
+            AuditMethod::Scopes,
+            Recording::Once,
+            |gate| body(Some(gate)),
+        ),
+        None => body(None),
     }
-    let project = ProjectContext::resolve(state, &dir)?;
-    to_json(&project.scopes().to_response())
 }
 
 /// `secrets.list`: names, lengths, `updated_at`, and the agents flag.

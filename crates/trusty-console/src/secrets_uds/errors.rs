@@ -48,6 +48,8 @@ pub enum Refusal {
     UnknownUpstream,
     /// This target has no secrets bridge.
     PlatformUnsupported,
+    /// The tm project registry could not be found, read or parsed (#9067).
+    RegistryUnavailable,
 }
 
 impl Refusal {
@@ -103,6 +105,10 @@ impl Refusal {
             Self::PlatformUnsupported => (
                 StatusCode::NOT_IMPLEMENTED,
                 "secrets are not available on this platform",
+            ),
+            Self::RegistryUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the tm project registry could not be read",
             ),
         }
     }

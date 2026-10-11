@@ -88,3 +88,47 @@ fn the_console_links_trusty_secrets_with_api_and_ancestry_only() {
         "{workspace_entry}"
     );
 }
+
+/// Why: Df0, extended for #9067 — the project picker reads the tm registry
+/// in the console, so trusty-secrets gains no trusty-common edge: neither
+/// feature the console links (`api`, `ancestry`) may enable one, directly or
+/// through another feature that does.
+/// Test: this is the test.
+#[test]
+fn the_linked_trusty_secrets_features_reach_no_trusty_common() {
+    let manifest = std::fs::read_to_string(manifest_dir().join("../trusty-secrets/Cargo.toml"))
+        .expect("manifest");
+    let features: Vec<(&str, &str)> = manifest
+        .split("[features]")
+        .nth(1)
+        .and_then(|rest| rest.split("\n[").next())
+        .expect("a [features] table")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, deps)| (name.trim(), deps.trim()))
+        .collect();
+    let mut pending = vec!["api", "ancestry"];
+    let mut seen = Vec::new();
+    while let Some(name) = pending.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name);
+        let (_, deps) = features
+            .iter()
+            .find(|(feature, _)| *feature == name)
+            .unwrap_or_else(|| panic!("feature {name} is declared"));
+        assert!(!deps.contains("trusty-common"), "{name} = {deps}");
+        for dep in deps.trim_matches(['[', ']']).split(',') {
+            let dep = dep.trim().trim_matches('"');
+            if !dep.is_empty() && !dep.contains(':') && !dep.contains('/') {
+                pending.push(dep);
+            }
+        }
+    }
+    assert!(
+        seen.contains(&"api") && seen.contains(&"ancestry"),
+        "{seen:?}"
+    );
+}

@@ -8,10 +8,13 @@
 //! A7), judges the client from the [`PeerLookup`] the listener started at
 //! accept, adds the `bridge` assertion, and makes exactly one call (A4). A
 //! result is relayed as the server sent it — for `set`, the server's mask
-//! text; an error passes only through the closed kind table.
+//! text; an error passes only through the closed kind table. #9067: the
+//! `scopes` result must decode as project and owner scopes before it is
+//! relayed; `projects` reads the tm registry and dials nothing.
 //! Test: `each_route_dials_its_bridged_method_with_an_assertion`,
 //! `malformed_bodies_never_echo_the_value`,
-//! `upstream_errors_relay_only_the_kind`.
+//! `upstream_errors_relay_only_the_kind`,
+//! `scopes_route_never_relays_a_machine_scope`.
 
 use std::sync::Arc;
 
@@ -21,12 +24,21 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trusty_secrets::api::bridge::method;
+use trusty_secrets::api::methods::ScopesResponse;
 use trusty_secrets::api::{BRIDGE_FIELD, BackendId, SecretKey, SecretValue, VaultName};
 
 use super::dial::DialError;
 use super::errors::{Refusal, upstream_response};
+use super::projects::read_registry;
 use super::verdict::{PeerLookup, judge_in_time};
 use super::{MAX_BODY_BYTES, SecretsBridge};
+
+/// `POST /api/secrets/scopes` (#9067).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopesBody {
+    project: String,
+}
 
 /// `POST /api/secrets/list`.
 #[derive(Serialize, Deserialize)]
@@ -87,6 +99,44 @@ pub async fn session(State(bridge): State<Arc<SecretsBridge>>) -> Response {
     }
 }
 
+/// `POST /api/secrets/projects`: the picker's projects from the tm registry.
+///
+/// Why: #9067, Architect ruling — the page picks a registered project,
+/// never a typed path or the console's working directory.
+/// What: reads the registry on the blocking pool; an absent or empty one
+/// is `{"projects": []}`, one that cannot be read is
+/// [`Refusal::RegistryUnavailable`]. Never dials the secrets socket.
+/// Test: `projects_route_lists_the_registry_and_never_dials`,
+/// `projects_route_answers_an_empty_list_for_an_absent_or_empty_registry`,
+/// `projects_route_refuses_a_malformed_or_unknown_registry`.
+pub async fn projects(State(bridge): State<Arc<SecretsBridge>>) -> Response {
+    let Some(file) = bridge.registry().map(ToOwned::to_owned) else {
+        return Refusal::RegistryUnavailable.into_response();
+    };
+    match tokio::task::spawn_blocking(move || read_registry(&file)).await {
+        Ok(Ok(projects)) => Json(json!({ "projects": projects })).into_response(),
+        _ => Refusal::RegistryUnavailable.into_response(),
+    }
+}
+
+/// `POST /api/secrets/scopes` -> `secrets.bridge.scopes` (#9067).
+///
+/// What: the result is relayed only when it decodes as
+/// [`ScopesResponse`], whose kinds are project and owner; anything else,
+/// a machine scope included, is [`Refusal::UnknownUpstream`].
+/// Test: `scopes_route_dials_secrets_bridge_scopes_with_an_assertion`,
+/// `scopes_route_never_relays_a_machine_scope`.
+pub async fn scopes(State(bridge): State<Arc<SecretsBridge>>, request: Request) -> Response {
+    let result = match call::<ScopesBody>(&bridge, request, method::SCOPES).await {
+        Ok(result) => result,
+        Err(refused) => return refused,
+    };
+    match serde_json::from_value::<ScopesResponse>(result) {
+        Ok(scopes) => Json(scopes).into_response(),
+        Err(_) => Refusal::UnknownUpstream.into_response(),
+    }
+}
+
 /// `POST /api/secrets/list` -> `secrets.bridge.list`.
 pub async fn list(State(bridge): State<Arc<SecretsBridge>>, request: Request) -> Response {
     forward::<ListBody>(&bridge, request, method::LIST).await
@@ -133,8 +183,24 @@ async fn forward<T>(bridge: &SecretsBridge, request: Request, name: &'static str
 where
     T: Serialize + DeserializeOwned,
 {
+    match call::<T>(bridge, request, name).await {
+        Ok(result) => Json(result).into_response(),
+        Err(refused) => refused,
+    }
+}
+
+/// Decode, judge and call once: the server's result, or the response that
+/// replaces it.
+async fn call<T>(
+    bridge: &SecretsBridge,
+    request: Request,
+    name: &'static str,
+) -> Result<Value, Response>
+where
+    T: Serialize + DeserializeOwned,
+{
     let Some(dial) = bridge.dial() else {
-        return Refusal::Unavailable.into_response();
+        return Err(Refusal::Unavailable.into_response());
     };
     // #9066 F2: a missing lookup is judged `unreadable` by `judge_in_time`.
     let lookup = request
@@ -142,26 +208,26 @@ where
         .get::<ConnectInfo<PeerLookup>>()
         .map(|info| info.0.clone());
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
-        return Refusal::TooLarge.into_response();
+        return Err(Refusal::TooLarge.into_response());
     };
     // #9066 A7: the serde error can quote the value; it is dropped unread.
     let Ok(body) = serde_json::from_slice::<T>(&bytes) else {
-        return Refusal::BadBody.into_response();
+        return Err(Refusal::BadBody.into_response());
     };
     let Ok(Value::Object(mut params)) = serde_json::to_value(&body) else {
-        return Refusal::BadBody.into_response();
+        return Err(Refusal::BadBody.into_response());
     };
     drop(body);
     // #9066 F1: the lookup and the ancestry walk run off the async threads.
     let assertion = judge_in_time(bridge.table(), lookup).await;
     let Ok(assertion) = serde_json::to_value(assertion) else {
-        return Refusal::BadBody.into_response();
+        return Err(Refusal::BadBody.into_response());
     };
     params.insert(BRIDGE_FIELD.to_owned(), assertion);
     match dial.call(name, Value::Object(params)).await {
-        Ok(result) => Json(result).into_response(),
-        Err(DialError::Unavailable) => Refusal::Unavailable.into_response(),
-        Err(DialError::Transport) => Refusal::Transport.into_response(),
-        Err(DialError::Rpc { kind }) => upstream_response(kind.as_deref()),
+        Ok(result) => Ok(result),
+        Err(DialError::Unavailable) => Err(Refusal::Unavailable.into_response()),
+        Err(DialError::Transport) => Err(Refusal::Transport.into_response()),
+        Err(DialError::Rpc { kind }) => Err(upstream_response(kind.as_deref())),
     }
 }

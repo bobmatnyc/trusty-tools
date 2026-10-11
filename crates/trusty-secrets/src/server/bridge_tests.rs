@@ -177,18 +177,20 @@ async fn bridge_call_is_audited_allow_and_deny() {
 /// holding (or not) a Claude Code process, and once through the bridge,
 /// with the console asserting the same verdict. The wire error, the result
 /// and the records must match; the bridge records add `source` and
-/// `agent_parent`. `unmappable` (no pid) is a non-agent.
+/// `agent_parent`. #9067 Architect Q5: `unmappable` (no pid) is an agent, so
+/// ON is `agent_use_refused` and OFF is allowed, as for an agent tree.
 /// Red until the bridge method exists.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bridge_verdict_parity_with_direct_socket_table() {
     // (agent ancestor, flag value, source, expected kind)
-    let rows: [(bool, bool, &str, Option<&str>); 5] = [
+    let rows: [(bool, bool, &str, Option<&str>); 6] = [
         (true, true, "mapped", Some("agent_use_refused")),
         (true, false, "mapped", None),
         (false, true, "mapped", None),
         (false, false, "mapped", None),
-        (false, true, "unmappable", None),
+        (true, true, "unmappable", Some("agent_use_refused")),
+        (true, false, "unmappable", None),
     ];
     for (agent, allowed, source, expected) in rows {
         let direct_fx = fixture();
@@ -305,7 +307,7 @@ async fn bridge_assertion_from_non_console_peer_is_refused() {
             BRIDGE_SET,
             bridged(
                 set_params(&fx, "NEW_KEY", OPEN_VALUE),
-                assertion(false, "unmappable"),
+                assertion(true, "unmappable"),
             ),
         )
         .await;
@@ -317,9 +319,15 @@ async fn bridge_assertion_from_non_console_peer_is_refused() {
         assert!(!holds(&fx, "NEW_KEY"), "{case}: nothing was stored");
         let all = raw_records(&fx);
         assert_eq!(all.len(), 2, "{case}: {all:?}");
-        for (record, method_name, source, name) in [
-            (&all[0], method::SET_AGENTS_MAY_USE, "mapped", "API_KEY"),
-            (&all[1], method::SET, "unmappable", "NEW_KEY"),
+        for (record, method_name, source, name, agent_parent) in [
+            (
+                &all[0],
+                method::SET_AGENTS_MAY_USE,
+                "mapped",
+                "API_KEY",
+                false,
+            ),
+            (&all[1], method::SET, "unmappable", "NEW_KEY", true),
         ] {
             assert_eq!(record["method"], method_name, "{case}: {record}");
             // #9066 LOW1: the deny names the key the call attempted.
@@ -328,7 +336,7 @@ async fn bridge_assertion_from_non_console_peer_is_refused() {
             assert_eq!(record["decision"], "deny", "{case}: {record}");
             assert_eq!(record["reason"], "bridge_refused", "{case}: {record}");
             assert_eq!(record["source"], source, "{case}: {record}");
-            assert_eq!(record["agent_parent"], false, "{case}: {record}");
+            assert_eq!(record["agent_parent"], agent_parent, "{case}: {record}");
             assert_eq!(record["caller_pid"], json!(me()), "{case}: {record}");
         }
     }
@@ -618,7 +626,8 @@ async fn bridge_malformed_assertion_is_refused_and_audited() {
             "a pid",
             Some(json!({"agent_parent": false, "source": "mapped", "pid": 1})),
         ),
-        ("unmappable agent", Some(assertion(true, "unmappable"))),
+        // #9067 Architect Q5: unmappable must now carry `true`.
+        ("unmappable non-agent", Some(assertion(false, "unmappable"))),
         ("unreadable non-agent", Some(assertion(false, "unreadable"))),
     ];
     let fx = fixture();
@@ -771,8 +780,8 @@ async fn bridge_methods_answer_as_their_direct_method() {
 }
 
 /// Why: owner ruling Ddf (2026-10-11), every arm — with `secrets.audit:
-/// false` no bridged method writes a record: `list`, `set`, `delete`,
-/// `copy` and `set_agents_may_use` allowed, a `set_agents_may_use` ON
+/// false` no bridged method writes a record: `list`, `scopes`, `set`,
+/// `delete`, `copy` and `set_agents_may_use` allowed, a `set_agents_may_use` ON
 /// refused for an agent client, and an `invalid_params` refusal of a
 /// malformed assertion. Each still answers as it does with the audit on.
 /// Red when any bridged arm skips the machine suppression.
@@ -796,6 +805,7 @@ async fn bridge_audit_disabled_writes_nothing_for_every_method() {
                       "keys": ["API_KEY"]});
     let allowed = [
         ("secrets.bridge.list", list_params(&fx)),
+        (BRIDGE_SCOPES, json!({"project": project})),
         (BRIDGE_SET, set_params(&fx, "NEW_KEY", OPEN_VALUE)),
         ("secrets.bridge.delete", delete),
         ("secrets.bridge.copy", copy),
@@ -829,4 +839,140 @@ async fn bridge_audit_disabled_writes_nothing_for_every_method() {
     assert!(!flag_on(&fx, "API_KEY"), "the flag stayed OFF");
     let all = raw_records(&fx);
     assert!(all.is_empty(), "audit off, yet records: {all:?}");
+}
+
+/// The bridged `secrets.scopes` (#9067).
+const BRIDGE_SCOPES: &str = "secrets.bridge.scopes";
+
+/// Why: #9067 — the scope picker's call is refused, like every bridged
+/// method, when the socket peer is not the verified console, whatever it
+/// asserted; the refusal is `bridge_refused` (-32084) with one deny record.
+/// Red until `secrets.bridge.scopes` exists.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_scopes_from_non_console_peer_is_refused() {
+    let impostor = procs_with_me();
+    impostor.set_executable(me(), "/usr/bin/python3");
+    let under_agent = console_procs();
+    under_agent.set_agent(10);
+    for (case, procs) in [
+        ("impostor", impostor),
+        ("unreadable executable", procs_with_me()),
+        ("console under an agent", under_agent),
+    ] {
+        let fx = fixture();
+        let server = serve(&fx, procs, "API_KEY").await;
+        let refused = call(
+            &fx.settings.socket,
+            BRIDGE_SCOPES,
+            bridged(json!({"project": fx.project()}), assertion(false, "mapped")),
+        )
+        .await;
+        server.stop().await;
+
+        assert_eq!(kind(&refused).as_deref(), Some("bridge_refused"), "{case}");
+        assert_eq!(
+            refused.error.as_ref().map(|e| e.code),
+            Some(-32084),
+            "{case}"
+        );
+        assert!(refused.result.is_none(), "{case}");
+        let all = raw_records(&fx);
+        assert_eq!(all.len(), 1, "{case}: {all:?}");
+        assert_eq!(all[0]["method"], method::SCOPES, "{case}");
+        assert_eq!(all[0]["decision"], "deny", "{case}");
+        assert_eq!(all[0]["reason"], "bridge_refused", "{case}");
+        assert_eq!(all[0]["source"], "mapped", "{case}");
+    }
+}
+
+/// Why: #9067 — the bridged scope picker answers what a direct
+/// `secrets.scopes` answers: the project scope, then the owner scope from
+/// the origin remote, and never a machine scope. Every bridge call is
+/// audited (Ddf), so it leaves one allow record where the direct call
+/// leaves none.
+/// Red until `secrets.bridge.scopes` exists.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_scopes_returns_only_project_and_owner_kinds() {
+    let fx = fixture();
+    let server = serve(&fx, console_procs(), "API_KEY").await;
+    let socket = &fx.settings.socket;
+    let direct = ok(call(socket, method::SCOPES, json!({"project": fx.project()})).await);
+    assert!(
+        raw_records(&fx).is_empty(),
+        "a direct scopes leaves no record"
+    );
+    let via_bridge = call(
+        socket,
+        BRIDGE_SCOPES,
+        bridged(
+            json!({"project": fx.project()}),
+            assertion(true, "unmappable"),
+        ),
+    )
+    .await;
+    server.stop().await;
+
+    let via_bridge = ok(via_bridge);
+    assert_eq!(via_bridge, direct);
+    assert_eq!(
+        via_bridge,
+        json!({"scopes": [
+            {"kind": "project", "vault": PROJECT_VAULT},
+            {"kind": "owner", "vault": "trusty/acme"},
+        ]})
+    );
+    let kinds: Vec<&str> = via_bridge["scopes"]
+        .as_array()
+        .expect("scopes")
+        .iter()
+        .filter_map(|scope| scope["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.iter().all(|k| *k == "project" || *k == "owner"),
+        "{kinds:?}"
+    );
+    assert!(!via_bridge.to_string().contains("machine"), "{via_bridge}");
+    let all = raw_records(&fx);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["method"], method::SCOPES);
+    assert_eq!(all[0]["decision"], "allow");
+    assert_eq!(all[0]["source"], "unmappable");
+    assert_eq!(all[0]["agent_parent"], true);
+}
+
+/// Why: #9067 review — a bridged scopes call is admitted fail-closed like a
+/// bridged list: when the audit log cannot be written it is refused with
+/// `audit_unavailable` and returns no scopes. A direct scopes on the same
+/// server still answers; it leaves no record, so it needs none.
+/// Red when the bridged scopes skips `Gate::admit`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_scopes_refuses_when_audit_unwritable() {
+    let fx = fixture();
+    let (state, _grants) = state_with(&fx, console_procs());
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    let _restore = RestoreMode(dir);
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let bridge = call(
+        socket,
+        BRIDGE_SCOPES,
+        bridged(json!({"project": fx.project()}), assertion(false, "mapped")),
+    )
+    .await;
+    let direct = call(socket, method::SCOPES, json!({"project": fx.project()})).await;
+    server.stop().await;
+
+    assert_eq!(kind(&bridge).as_deref(), Some("audit_unavailable"));
+    assert!(bridge.result.is_none(), "{:?}", bridge.result);
+    assert!(
+        !wire(&bridge).contains(r#""kind":"project""#),
+        "{}",
+        wire(&bridge)
+    );
+    assert_eq!(ok(direct)["scopes"][0]["vault"], PROJECT_VAULT);
 }

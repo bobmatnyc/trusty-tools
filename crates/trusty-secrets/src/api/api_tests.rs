@@ -374,9 +374,14 @@ fn api_bridge_assertion_wire_shape_and_consistency() {
     ] {
         assert!(built.is_consistent(), "{built:?}");
     }
-    let unmappable_agent: BridgeAssertion =
-        serde_json::from_str(r#"{"agent_parent":true,"source":"unmappable"}"#).unwrap();
-    assert!(!unmappable_agent.is_consistent());
+    // #9067 Architect Q5: an unmappable client is an agent (fail closed).
+    assert_eq!(
+        serde_json::to_value(BridgeAssertion::unmappable()).unwrap(),
+        serde_json::json!({"agent_parent": true, "source": "unmappable"})
+    );
+    let unmappable_clear: BridgeAssertion =
+        serde_json::from_str(r#"{"agent_parent":false,"source":"unmappable"}"#).unwrap();
+    assert!(!unmappable_clear.is_consistent());
     let unreadable_clear: BridgeAssertion =
         serde_json::from_str(r#"{"agent_parent":false,"source":"unreadable"}"#).unwrap();
     assert!(!unreadable_clear.is_consistent());
@@ -400,6 +405,8 @@ fn api_bridge_assertion_wire_shape_and_consistency() {
     ] {
         assert_eq!(direct_method(name), Some(direct));
     }
+    // #9067: the scope picker is bridged too; a literal pins the wire name.
+    assert_eq!(direct_method("secrets.bridge.scopes"), Some(method::SCOPES));
     assert_eq!(direct_method(method::SET), None);
     assert_eq!(direct_method("secrets.bridge.resolve"), None);
 }
