@@ -505,6 +505,69 @@ async fn bridge_list_refuses_when_audit_unwritable() {
     assert_eq!(ok(direct)["vault"], PROJECT_VAULT);
 }
 
+/// Why: owner ruling Ddf (2026-10-11) — the bridge honours the machine
+/// config's `secrets.audit: false` as the direct socket does. A bridged
+/// list, a bridged set and a `bridge_refused` deny answer as they do with
+/// the audit on, and write no record. With the log then unwritable, the
+/// list and the set still succeed: nothing is written, so nothing refuses.
+/// Red when a bridge call skips the machine suppression.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_respects_audit_disabled() {
+    let fx = fixture();
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: keychain\n  audit: false\n",
+    )
+    .unwrap();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, console_procs());
+    let (refusing, _grants) = state_with(&fx, console_procs());
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let mapped = || assertion(false, "mapped");
+    let listed = call(socket, BRIDGE_LIST, bridged(list_params(&fx), mapped())).await;
+    let set = call(
+        socket,
+        BRIDGE_SET,
+        bridged(set_params(&fx, "NEW_KEY", OPEN_VALUE), mapped()),
+    )
+    .await;
+    // No peer pid: the console cannot be verified.
+    let (_, entry) = crate::server::bridge::METHODS
+        .into_iter()
+        .find(|(name, _)| *name == BRIDGE_SET)
+        .expect("the bridged set method");
+    let refused = entry(
+        &refusing,
+        Caller::new(None),
+        bridged(set_params(&fx, "BAD_KEY", OPEN_VALUE), mapped()),
+    );
+    assert_eq!(ok(listed)["keys"].as_array().map(Vec::len), Some(1));
+    assert!(ok(set)["masked"].is_string());
+    assert_eq!(refused, Err(ErrorKind::BridgeRefused));
+    assert!(holds(&fx, "NEW_KEY") && !holds(&fx, "BAD_KEY"));
+    let all = raw_records(&fx);
+    assert!(all.is_empty(), "audit off, yet records: {all:?}");
+
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    let _restore = RestoreMode(dir);
+    let listed = call(socket, BRIDGE_LIST, bridged(list_params(&fx), mapped())).await;
+    let set = call(
+        socket,
+        BRIDGE_SET,
+        bridged(set_params(&fx, "LATE_KEY", OPEN_VALUE), mapped()),
+    )
+    .await;
+    server.stop().await;
+    assert_eq!(ok(listed)["keys"].as_array().map(Vec::len), Some(2));
+    assert!(ok(set)["masked"].is_string());
+    assert!(holds(&fx, "LATE_KEY"));
+    assert!(raw_records(&fx).is_empty());
+}
+
 /// Why: `verify_console`'s last check — a peer that runs the console's
 /// executable but whose own ancestry cannot be read is refused with
 /// `bridge_refused`, as a console under Claude Code is, and the deny record
