@@ -48,6 +48,21 @@ fn refuses_what_it_cannot_decode() {
     }
 }
 
+/// #8454: the lenient decode reads each refused escape as a space, `$"` as
+/// `"`, and closes an unterminated quote, so the decodable rest is kept.
+#[test]
+fn lenient_decode_reads_past_a_refused_escape() {
+    for (command, lenient) in [
+        (r"echo $'a\nb' $'\x73'", "echo 'a b' 's'"),
+        (r"echo $'\cA'", "echo ' A'"),
+        (r#"$'\x73ent' $"x""#, r#"'sent' "x""#),
+        (r"echo $'open", "echo 'open'"),
+        ("echo hi", "echo hi"),
+    ] {
+        assert_eq!(decode_ansi_c_lenient(command), lenient, "{command}");
+    }
+}
+
 /// A `$'` inside quotes, after a backslash, or after `$$` is no quote.
 #[test]
 fn leaves_a_quoted_dollar_quote_alone() {

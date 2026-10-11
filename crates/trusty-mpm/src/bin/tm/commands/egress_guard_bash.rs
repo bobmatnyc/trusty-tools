@@ -22,7 +22,8 @@
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
 use crate::commands::pm_guard_bash::{
-    Decoded, UnplaceableWrite, decode_ansi_c, shell_segments_map, split_heredoc_bodies, tokenize,
+    Decoded, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient, shell_segments_map,
+    split_heredoc_bodies, tokenize,
 };
 use crate::commands::program_word::{Unresolved, resolve_program_word};
 
@@ -117,10 +118,11 @@ fn hit(service: &'static str, token: &str) -> Hit {
 /// Why (plan §2, §5): the deny must hold against wrappers, nesting and `$'…'`
 /// quoting, and must fail closed on a command it cannot read, without
 /// refusing an unreadable command that names no channel.
-/// What: an undecodable `$'…'`/`$"…"` is judged by [`raw_hit`]. Otherwise the
-/// command, and its decoded form when it carries `$'…'`, each go through
-/// [`text_hit`].
+/// What: an undecodable `$'…'`/`$"…"` is judged by [`raw_hit`], then its
+/// lenient decode by [`text_hit`]. Otherwise the command, and its decoded form
+/// when it carries `$'…'`, each go through [`text_hit`].
 /// Test: `bash_egress_denies_ansi_c_quoted_names`,
+/// `bash_egress_denies_ansi_c_beside_an_undecodable_quote`,
 /// `bash_egress_denies_unlexable_with_family_token`,
 /// `bash_allows_unlexable_without_family_token`,
 /// `bash_allows_family_words_as_arguments`.
@@ -128,8 +130,12 @@ pub(crate) fn bash_egress_hit(command: &str) -> Option<Hit> {
     let decoded = match decode_ansi_c(command) {
         Decoded::Plain => None,
         Decoded::Text(text) => Some(text),
-        // #8454: a quote the decoder cannot read is judged as unlexable text.
-        Decoded::Undecodable(_) => return raw_hit(command),
+        // #8454: a quote the decoder cannot read is judged as unlexable text,
+        // and (critic round 1) the raw scan splits at `\`, so the decodable
+        // quotes are judged too.
+        Decoded::Undecodable(_) => {
+            return raw_hit(command).or_else(|| text_hit(&decode_ansi_c_lenient(command)));
+        }
     };
     std::iter::once(command)
         .chain(decoded.as_deref())

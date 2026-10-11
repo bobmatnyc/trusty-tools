@@ -43,6 +43,33 @@ pub(crate) enum Decoded {
 /// Test: `decodes_each_supported_escape`, `refuses_what_it_cannot_decode`,
 /// `leaves_a_quoted_dollar_quote_alone`.
 pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
+    match rewrite(command, false) {
+        Err(tok) => Decoded::Undecodable(tok),
+        Ok(Some(text)) => Decoded::Text(text),
+        Ok(None) => Decoded::Plain,
+    }
+}
+
+/// [`decode_ansi_c`] that never refuses: each escape it would refuse reads as
+/// a space, `$"` reads as `"`, and an unterminated quote closes at the end.
+///
+/// Why (#8454 S3 critic round 1): the egress guard must still judge the
+/// decodable quotes of a command that also carries a refused one, or one
+/// undecodable `$'hi\n'` hides a decodable `$'…\x73lack.com'`.
+/// What: the [`decode_ansi_c`] walk in lenient mode; `command` unchanged when
+/// it holds no live quote.
+/// Test: `lenient_decode_reads_past_a_refused_escape`.
+pub(crate) fn decode_ansi_c_lenient(command: &str) -> String {
+    match rewrite(command, true) {
+        Ok(Some(text)) => text,
+        // The lenient walk never refuses; `Err` keeps the raw text to judge.
+        Ok(None) | Err(_) => command.to_owned(),
+    }
+}
+
+/// The [`decode_ansi_c`] walk: `Ok(None)` when no live quote is found, `Err`
+/// with the refused token unless `lenient`.
+fn rewrite(command: &str, lenient: bool) -> Result<Option<String>, String> {
     let chars: Vec<char> = command.chars().collect();
     let (mut out, mut found, mut i) = (String::new(), false, 0);
     let (mut single, mut double) = (false, false);
@@ -63,10 +90,16 @@ pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
             i += 2;
             continue;
         } else if c == '$' && next == Some('"') {
-            return Decoded::Undecodable(token(&chars[i..], '"'));
+            if !lenient {
+                return Err(token(&chars[i..], '"'));
+            }
+            // #8454: lenient reads `$"…"` as `"…"`.
+            found = true;
+            i += 1;
+            continue;
         } else if c == '$' && next == Some('\'') {
-            let Some((text, len)) = ansi_c_body(&chars[i + 2..]) else {
-                return Decoded::Undecodable(token(&chars[i..], '\''));
+            let Some((text, len)) = ansi_c_body(&chars[i + 2..], lenient) else {
+                return Err(token(&chars[i..], '\''));
             };
             out.push('\'');
             out.push_str(&text.replace('\'', "'\\''"));
@@ -81,11 +114,7 @@ pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
         out.push(c);
         i += 1;
     }
-    if found {
-        Decoded::Text(out)
-    } else {
-        Decoded::Plain
-    }
+    Ok(found.then_some(out))
 }
 
 /// The #6660 refusal for `command`, naming the `$'…'` token when that is the
@@ -162,19 +191,28 @@ fn token(rest: &[char], quote: char) -> String {
 }
 
 /// Decode an ANSI-C body up to its closing `'`: the text and the number of
-/// chars consumed, closing quote included. `None` fails closed.
-fn ansi_c_body(body: &[char]) -> Option<(String, usize)> {
+/// chars consumed, closing quote included. `None` fails closed. `lenient`
+/// reads each refused escape as a space and closes an unterminated body.
+fn ansi_c_body(body: &[char], lenient: bool) -> Option<(String, usize)> {
     let (mut out, mut i) = (String::new(), 0);
     loop {
-        match body.get(i)? {
+        let Some(c) = body.get(i) else {
+            return lenient.then(|| (out, body.len()));
+        };
+        match c {
             '\'' => return Some((out, i + 1)),
             '\\' => {
-                let (byte, len) = escape(&body[i + 1..])?;
+                let decoded = escape(&body[i + 1..]);
                 // #9001: NUL truncates in bash; a newline would move segment cuts.
-                if byte == 0 || byte > 0x7f || byte == b'\n' || byte == b'\r' {
-                    return None;
+                let byte = decoded
+                    .map(|(byte, _)| byte)
+                    .filter(|&b| b != 0 && b <= 0x7f && b != b'\n' && b != b'\r');
+                let len = decoded.map_or(1.min(body.len() - i - 1), |(_, len)| len);
+                match byte {
+                    Some(byte) => out.push(char::from(byte)),
+                    None if lenient => out.push(' '),
+                    None => return None,
                 }
-                out.push(char::from(byte));
                 i += 1 + len;
             }
             c => {

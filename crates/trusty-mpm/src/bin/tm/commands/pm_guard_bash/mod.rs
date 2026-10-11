@@ -156,7 +156,7 @@ pub(crate) use heredoc::split_heredoc_bodies;
 mod ansi_c_decode;
 pub(crate) use ansi_c_decode::unclassifiable_reason;
 // #8454 S3: the egress Bash arm judges what a `$'…'` quote decodes to.
-pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c};
+pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
