@@ -25,6 +25,7 @@ use crate::commands::pm_guard_bash::{
     Decoded, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient, shell_segments_map,
     split_heredoc_bodies, tokenize,
 };
+use crate::commands::pm_guard_secret_positions::LIST_INTRODUCERS;
 use crate::commands::program_word::{Unresolved, resolve_program_word};
 
 /// The audit slug of a Bash egress deny.
@@ -92,6 +93,9 @@ const SMTPLIB: &str = "smtplib";
 const RAW_SEPARATORS: &[char] = &[
     ';', '|', '&', '(', ')', '{', '}', '<', '>', '\'', '"', '`', '$', '=', ',', '\\',
 ];
+
+/// Keywords that lead a command, besides the [`LIST_INTRODUCERS`].
+const LEADING_KEYWORDS: &[&str] = &["if", "while", "until", "!"];
 
 /// The per-segment error for a segment that will not tokenize.
 const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
@@ -270,11 +274,18 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// The program word ([`resolve_program_word`]) is judged by
 /// [`program_position_hit`]; a lookup (`command -v`) runs nothing; when an
 /// unmeasurable wrapper option hides it, every word stands in for it.
+/// A leading shell keyword ([`after_keyword`]) is skipped and the rest mapped
+/// again.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
-/// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`.
+/// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
+/// `bash_egress_denies_program_behind_a_shell_keyword`.
 fn segment_hits(segment: &str) -> Result<Vec<Hit>, UnplaceableWrite> {
     if segment.is_empty() {
         return Ok(Vec::new());
+    }
+    // #8454 critic round 1: `then sendmail …` runs `sendmail`.
+    if let Some(rest) = after_keyword(segment) {
+        return shell_segments_map(rest, &segment_hits);
     }
     let (text, bodies) = split_heredoc_bodies(segment);
     let argv = tokenize(&text).map_err(|_| UNLEXABLE_SEGMENT)?;
@@ -288,6 +299,14 @@ fn segment_hits(segment: &str) -> Result<Vec<Hit>, UnplaceableWrite> {
         Err(Unresolved) => argv.iter().find_map(|word| program_hit(&basename(word))),
     };
     Ok(found.into_iter().collect())
+}
+
+/// `segment` past its first word, when that word is a shell keyword that only
+/// leads a command: a [`LIST_INTRODUCERS`] word or a [`LEADING_KEYWORDS`] one.
+fn after_keyword(segment: &str) -> Option<&str> {
+    let (first, rest) = segment.split_once(char::is_whitespace)?;
+    (LIST_INTRODUCERS.contains(&first) || LEADING_KEYWORDS.contains(&first))
+        .then(|| rest.trim_start())
 }
 
 /// The hit of the program at `argv[at]`, given the segment's data bodies.
