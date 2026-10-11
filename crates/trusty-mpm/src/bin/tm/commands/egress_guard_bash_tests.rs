@@ -285,6 +285,21 @@ fn bash_egress_denies_ansi_c_beside_an_undecodable_quote() {
     assert_denies("$'\\x73endmail' bob $\"x\"", "SMTP mail");
 }
 
+/// 🔴 #8454 S3 critic round 1 (HIGH): a shell keyword in front of the program
+/// word does not hide it.
+#[test]
+fn bash_egress_denies_program_behind_a_shell_keyword() {
+    for (command, service) in [
+        ("if true; then sendmail bob </dev/null; fi", "SMTP mail"),
+        ("{ mail -s x a@b </dev/null; }", "SMTP mail"),
+        ("! sendmail bob", "SMTP mail"),
+        ("while gws x; do :; done", "Google Workspace"),
+        ("if ! tm slack send x; then :; fi", "Slack"),
+    ] {
+        assert_denies(command, service);
+    }
+}
+
 /// 🔴 #8454 S3 (plan §5, fail closed): a command the guard cannot lex or nest
 /// through is denied when its text holds a family token. An allow here is the
 /// error arm failing open.
