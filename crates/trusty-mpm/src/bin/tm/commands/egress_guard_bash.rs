@@ -11,13 +11,15 @@
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
 //! `tokenize`, `resolve_program_word`, `split_heredoc_bodies` and
 //! `decode_ansi_c` — and adds no tokenizer.
-//! Accepted residuals (plan §4): hosts built from variables or substitutions;
-//! encoded payloads; scripts run by path; aliases, functions and rc files;
-//! self-configured tools (`gh` extensions, `rclone`, `aws sns`, `gcloud`); DNS,
-//! IP-literal or shortener fronting; hosts read at runtime; Unicode
-//! confusables. Also: a program run by `find -exec`, `ssh`, `watch` or
-//! `parallel`, and a `$(…)` inside an unquoted-delimiter here-document body
-//! fed to a non-shell, are not read as command position.
+//! Accepted residuals (plan §4): (1) hosts or programs the shell constructs —
+//! from variables, substitutions, brace expansion, curl URL globs or path
+//! globs; (2) encoded payloads; (3) scripts run by path; (4) aliases,
+//! functions and rc files; (5) self-configured tools (`gh` extensions,
+//! `rclone`, `aws sns`, `gcloud`); (6) DNS, IP-literal or shortener fronting;
+//! (7) hosts read at runtime; (8) Unicode confusables. Also: a program run by
+//! `find -exec`, `ssh`, `watch` or `parallel`, and a `$(…)` inside an
+//! unquoted-delimiter here-document body fed to a non-shell, are not read as
+//! command position.
 //! Test: `egress_guard_bash_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 

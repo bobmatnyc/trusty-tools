@@ -502,3 +502,49 @@ fn bash_script_by_path_is_not_detected() {
 fn bash_base64_payload_is_not_detected() {
     assert_allows("echo c2VuZG1haWwgYm9i | base64 -d | sh");
 }
+
+/// #8454 S3 documented limit (PM ruling, critic round 1): a host or program
+/// the shell or curl constructs by brace expansion or a glob is not detected.
+/// This folds into residual 1; the test pins today's allow outcome.
+#[test]
+fn bash_shell_constructed_name_is_not_detected() {
+    for command in [
+        "curl https://hooks.slack.co{m,}/x",
+        "curl 'https://hooks.slack.{com}/x'",
+        "{sendmail,bob@x}",
+        "/usr/sbin/sendmai?",
+    ] {
+        assert_allows(command);
+    }
+}
+
+/// #8454 S3 documented limits: residuals 4 (aliases, functions, rc files),
+/// 5 (self-configured tools), 6 (DNS, IP-literal or shortener fronting) and
+/// 8 (Unicode confusables), plus a program run by `find -exec`, `ssh`,
+/// `watch` or `parallel` and a `$(…)` in an unquoted here-document fed to a
+/// non-shell. The test pins today's allow outcome for each.
+#[test]
+fn bash_other_residuals_are_not_detected() {
+    let confusable = format!(
+        "curl https://hooks.{}lack.com/x",
+        char::from_u32(0x455).expect("Cyrillic dze is a char")
+    );
+    for (residual, command) in [
+        ("4 alias", "alias sm=sendmail; sm bob".to_owned()),
+        ("4 rc file", ". ~/.notifyrc; notify bob".to_owned()),
+        ("5 gh extension", "gh notify-team hi".to_owned()),
+        ("5 rclone", "rclone copy f team-remote:".to_owned()),
+        ("5 aws sns", "aws sns publish --message hi".to_owned()),
+        ("5 gcloud", "gcloud pubsub topics publish t".to_owned()),
+        ("6 IP literal", "curl https://34.202.13.4/api/x".to_owned()),
+        ("6 shortener", "curl https://bit.ly/abc123".to_owned()),
+        ("8 confusable", confusable),
+        ("find -exec", "find . -exec sendmail bob \\;".to_owned()),
+        ("ssh", "ssh host sendmail bob".to_owned()),
+        ("watch", "watch sendmail bob".to_owned()),
+        ("parallel", "parallel sendmail ::: bob".to_owned()),
+        ("heredoc $(…)", "cat <<EOF\n$(sendmail bob)\nEOF".to_owned()),
+    ] {
+        assert_eq!(bash(&command), Verdict::Allow, "{residual}: `{command}`");
+    }
+}
