@@ -28,6 +28,7 @@
 //! `verify_gate_fails_a_drawer_no_vector_search_returns`.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -123,6 +124,55 @@ pub async fn refresh_drawer(
     })
 }
 
+/// How long the findability gate waits for a warming daemon, per import run.
+///
+/// Why (#9275): `palace_verify_embedded` answers `verified: false` while the
+/// daemon's embedder is still warming, because its chunk-count check cannot
+/// run yet. That is "not yet", not "unfindable", and failing on it blocked
+/// every `--refresh` run started in the minutes after a daemon start.
+/// What: the first warming answer starts one run-wide deadline; the gate asks
+/// again every `poll` until the check runs or the deadline passes, then fails
+/// closed. Later rows share the deadline, so a daemon that never warms costs
+/// one wait per run, not one per file.
+/// Test: `verify_gate_waits_for_a_warming_daemon`,
+/// `verify_gate_fails_closed_naming_the_cause_when_warm_up_outlasts_the_wait`.
+#[derive(Debug, Clone)]
+pub struct WarmupWait {
+    budget: Duration,
+    poll: Duration,
+    deadline: Option<Instant>,
+}
+
+impl WarmupWait {
+    /// The daemon's default embedder init timeout (`TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`).
+    pub const DEFAULT_BUDGET: Duration = Duration::from_secs(180);
+    /// How often a warming daemon is asked again.
+    pub const DEFAULT_POLL: Duration = Duration::from_secs(2);
+
+    /// A wait of at most `budget` per run, asking again every `poll`.
+    pub fn new(budget: Duration, poll: Duration) -> Self {
+        Self {
+            budget,
+            poll,
+            deadline: None,
+        }
+    }
+
+    /// Whether the run-wide deadline has passed; the first call starts it.
+    fn expired(&mut self) -> bool {
+        let deadline = *self
+            .deadline
+            .get_or_insert_with(|| Instant::now() + self.budget);
+        Instant::now() >= deadline
+    }
+}
+
+impl Default for WarmupWait {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_BUDGET, Self::DEFAULT_POLL)
+    }
+}
+
 /// Fail `result` unless the drawer it names is retrievable right now.
 ///
 /// Why (#5044, gate from PR #6328): the reason to refresh a drawer is that
@@ -136,11 +186,18 @@ pub async fn refresh_drawer(
 /// palace does not know, an alias-audited collision, or a gate that could not
 /// run at all — downgrades the row to [`ImportStatus::Failed`], which is what
 /// makes the run exit non-zero. Rows with no drawer id (a dry-run create, an
-/// index file) and rows already failed are left alone.
+/// index file) and rows already failed are left alone. A daemon still warming
+/// its embedder is asked again within `wait` before the row fails (#9275).
 /// Test: `verify_gate_fails_a_drawer_no_vector_search_returns`,
 /// `verify_gate_fails_closed_when_it_cannot_run`,
+/// `verify_gate_waits_for_a_warming_daemon`,
 /// `refresh_replaces_a_drifted_drawer`.
-pub async fn verify_findable(socket: &Path, palace: &str, result: &mut FileResult) {
+pub async fn verify_findable(
+    socket: &Path,
+    palace: &str,
+    result: &mut FileResult,
+    wait: &mut WarmupWait,
+) {
     let Some(drawer_id) = result.drawer_id.clone() else {
         return;
     };
@@ -148,7 +205,7 @@ pub async fn verify_findable(socket: &Path, palace: &str, result: &mut FileResul
         return;
     }
     let stored = stored_phrase(result.status);
-    match verdict(socket, palace, &drawer_id).await {
+    match verdict(socket, palace, &drawer_id, wait).await {
         Ok(None) => {}
         Ok(Some(reason)) => fail(result, format!("{stored}, but is not findable: {reason}")),
         // #5044: a gate that could not run is never a pass — nothing is known
@@ -175,17 +232,45 @@ fn stored_phrase(status: ImportStatus) -> &'static str {
 }
 
 /// `Ok(None)` when the drawer is findable, `Ok(Some(reason))` when it is not.
-async fn verdict(socket: &Path, palace: &str, drawer_id: &str) -> anyhow::Result<Option<String>> {
-    let answer = trusty_common::memory_rpc::call_memory_tool_at(
-        socket,
-        "palace_verify_embedded",
-        json!({ "palace": palace, "drawer_ids": [drawer_id] }),
-    )
-    .await?;
-    if answer.get("verified").and_then(Value::as_bool) == Some(true) {
-        return Ok(None);
+///
+/// #9275: a warming answer is asked again until `wait` runs out, then fails
+/// closed with the daemon's own cause.
+async fn verdict(
+    socket: &Path,
+    palace: &str,
+    drawer_id: &str,
+    wait: &mut WarmupWait,
+) -> anyhow::Result<Option<String>> {
+    loop {
+        let answer = trusty_common::memory_rpc::call_memory_tool_at(
+            socket,
+            "palace_verify_embedded",
+            json!({ "palace": palace, "drawer_ids": [drawer_id] }),
+        )
+        .await?;
+        if answer.get("verified").and_then(Value::as_bool) == Some(true) {
+            return Ok(None);
+        }
+        if !is_warming(&answer) {
+            return Ok(Some(unverified_reason(&answer)));
+        }
+        if wait.expired() {
+            return Ok(Some(format!(
+                "{}; the daemon's embedder was still warming after {:?} — re-run once it is ready",
+                unverified_reason(&answer),
+                wait.budget
+            )));
+        }
+        tokio::time::sleep(wait.poll).await;
     }
-    Ok(Some(unverified_reason(&answer)))
+}
+
+/// Whether the answer is "not yet": the chunk-count check could not run
+/// because the daemon's embedder has not initialised (#9275). Any other
+/// unrun check (tokenizer, index scan) will not clear by waiting.
+fn is_warming(answer: &Value) -> bool {
+    answer.get("chunk_check").and_then(Value::as_str) == Some("unavailable")
+        && answer.get("embedder_ready").and_then(Value::as_bool) == Some(false)
 }
 
 /// Turn a `verified: false` answer into the phrase an operator can act on.
@@ -203,6 +288,17 @@ fn unverified_reason(answer: &Value) -> String {
         return "the drawer has no vector, so no vector search will return it — \
                 run palace_reembed"
             .to_string();
+    }
+    // #9275: a chunk-count check that did not run says why; name it.
+    if answer.get("chunk_check").and_then(Value::as_str) == Some("unavailable") {
+        let cause = answer
+            .get("chunk_check_error")
+            .and_then(Value::as_str)
+            .unwrap_or("the daemon gave no reason");
+        return format!(
+            "the palace's chunk-count check did not run ({cause}), so a drawer short of \
+             chunk rows cannot be ruled out"
+        );
     }
     match answer.get("alias_audit").and_then(Value::as_str) {
         Some("clean") | None => {
