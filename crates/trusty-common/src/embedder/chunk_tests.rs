@@ -8,7 +8,7 @@
 
 use super::chunk::overlap_tokens;
 use super::fast_embedder::MINILM_MAX_SEQ_LENGTH;
-use super::test_env::env_lock;
+use super::test_env::{EnvVarGuard, env_lock};
 use super::{
     CHUNK_OVERLAP_PERCENT, ChunkError, ChunkTokenizer, Embedder, FASTEMBED_MAX_LENGTH,
     FastEmbedder, MockEmbedder, TextChunk, chunk_text, resolve_fastembed_cache_dir,
@@ -355,6 +355,28 @@ fn fastembed_truncates_at_minilm_window_on_every_model_revision() {
             .expect("fixture cache loads");
         assert_eq!(tok.max_length(), Some(want), "model_max_length {model_max}");
         assert_eq!(tok.special_overhead(), 2);
+    }
+}
+
+#[test]
+fn production_init_options_pass_the_minilm_window_to_fastembed() {
+    // The options `FastEmbedder` hands `TextEmbedding::try_new`. The cache
+    // dir points at a tempdir: nothing reads the host cache or downloads.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let _home = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = env_lock();
+    let dir = scratch.path().to_str().expect("utf-8 tempdir");
+    let _cache = EnvVarGuard::apply("FASTEMBED_CACHE_DIR", Some(dir));
+    let _device = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+    for model in [
+        EmbeddingModel::AllMiniLML6V2,
+        EmbeddingModel::AllMiniLML6V2Q,
+    ] {
+        let (opts, _provider) = FastEmbedder::init_options(model);
+        assert_eq!(opts.max_length, MINILM_MAX_SEQ_LENGTH);
+        assert_eq!(opts.cache_dir, scratch.path());
     }
 }
 

@@ -431,7 +431,8 @@ impl FastEmbedder {
     /// reflects which backend was actually wired in.
     /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
     /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
-    /// always `Cpu`.
+    /// always `Cpu`. `production_init_options_pass_the_minilm_window_to_fastembed`
+    /// pins the truncation length (#9275).
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
