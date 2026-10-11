@@ -6,15 +6,18 @@
 //! ruling). A secrets call needs a checkout directory, and tm's
 //! `project-paths.json` is the registry that records one per project.
 //! What: [`default_registry_file`] locates that file as tm does;
-//! [`read_registry`] turns it into [`PickerProject`] rows. The console reads
+//! [`read_registry`] turns it into [`PickerProject`] rows, and
+//! [`registry_lists`] tells a bridged call whether its project is a path
+//! the registry lists (#9067 PR B1). The console reads
 //! the file itself, as trusty-search's allowlist does, so no crate gains a
 //! dependency edge for it (owner ruling Df0).
 //! Test: `projects_route_lists_the_registry_and_never_dials`,
 //! `projects_route_answers_an_empty_list_for_an_absent_or_empty_registry`,
 //! `projects_route_refuses_a_malformed_or_unknown_registry`,
-//! `registry_file_follows_the_tm_root`.
+//! `registry_file_follows_the_tm_root`,
+//! `an_unlisted_project_is_refused_on_every_route_without_a_dial`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +48,8 @@ pub struct PickerProject {
 /// Why the registry could not be read. The page sees fixed text only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryError {
+    /// The file does not exist (#9067 PR B1: the picker reads it as empty).
+    Missing,
     /// The file exists but could not be read.
     Unreadable,
     /// The file is not a JSON array of registry rows.
@@ -78,13 +83,11 @@ pub(crate) fn registry_file_for(root: Option<OsString>, home: Option<PathBuf>) -
 ///
 /// [`RegistryError`]; the I/O or serde message is dropped, never shown.
 pub fn read_registry(file: &Path) -> Result<Vec<PickerProject>, RegistryError> {
-    let raw = match std::fs::read_to_string(file) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(RegistryError::Unreadable),
+    let rows = match load_rows(file) {
+        Ok(rows) => rows,
+        Err(RegistryError::Missing) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let rows: Vec<RegistryRow> =
-        serde_json::from_str(&raw).map_err(|_| RegistryError::Malformed)?;
     Ok(rows
         .into_iter()
         .filter(|row| row.path.is_absolute() && row.path.is_dir())
@@ -96,4 +99,39 @@ pub fn read_registry(file: &Path) -> Result<Vec<PickerProject>, RegistryError> {
             })
         })
         .collect())
+}
+
+/// Whether the registry in `file` lists `project`, byte for byte.
+///
+/// Why: #9067 PR B1, Architect ruling — a bridged call may name only a
+/// project the tm registry lists, so a page or script cannot point the
+/// secrets server at an arbitrary checkout.
+/// What: reads the file fresh on each call and compares `project` with each
+/// row's `path` as raw bytes. There is no prefix, case-fold, normalisation
+/// or substring match; `Path` equality is avoided because it ignores a
+/// trailing slash and repeated separators. Every row counts, not only the
+/// rows the picker shows.
+/// Test: `an_unlisted_project_is_refused_on_every_route_without_a_dial`,
+/// `near_miss_project_names_are_refused_without_a_dial`,
+/// `a_registry_edit_between_calls_is_seen_by_the_next_call`.
+///
+/// # Errors
+///
+/// [`RegistryError`], including [`RegistryError::Missing`]: an absent
+/// registry lists nothing and the caller refuses the call.
+pub fn registry_lists(file: &Path, project: &str) -> Result<bool, RegistryError> {
+    let wanted = OsStr::new(project);
+    Ok(load_rows(file)?
+        .iter()
+        .any(|row| row.path.as_os_str() == wanted))
+}
+
+/// Every row of `file`; the I/O or serde message is dropped, never shown.
+fn load_rows(file: &Path) -> Result<Vec<RegistryRow>, RegistryError> {
+    let raw = match std::fs::read_to_string(file) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(RegistryError::Missing),
+        Err(_) => return Err(RegistryError::Unreadable),
+    };
+    serde_json::from_str(&raw).map_err(|_| RegistryError::Malformed)
 }
