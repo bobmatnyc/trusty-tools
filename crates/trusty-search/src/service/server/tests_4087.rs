@@ -174,6 +174,8 @@ async fn healthy_index_is_unaffected_by_the_corpus_failure_guard() {
 /// exclusion without a count would be the same silence in a different place.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_excludes_and_counts_corpus_failed_indexes() {
     let (state, embedder) = build_state_with(&[
         ("ok-one", None),

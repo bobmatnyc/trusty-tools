@@ -264,6 +264,8 @@ async fn list_indexes_details_includes_root_path() {
 /// `hierarchy_dedup_count` and the sub-index result should be preferred
 /// when both parent and child contain the same file region.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_nested_hierarchy_dedup_count_present() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -331,6 +333,8 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
 /// sub-index must be boosted, and `hierarchy_dedup_count` reflects any
 /// dropped parent copies.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_sub_index_boost_applied() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -441,6 +445,8 @@ async fn global_search_sub_index_boost_applied() {
 /// the response echoes `fanout_concurrency == 1`.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_serial_returns_all_results() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -510,6 +516,8 @@ async fn global_search_serial_returns_all_results() {
 /// single index and asserts the response echoes `fanout_concurrency == 4`.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_request_override_echoed() {
     use crate::core::{
         indexer::CodeIndexer,

@@ -64,6 +64,8 @@ fn semantic_query() -> crate::core::indexer::SearchQuery {
 /// retries on it would loop forever.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn semantic_stage_on_skip_vector_index_is_503_not_degraded_200() {
     let state = state_with_handle("vec-off", |h| {
         h.skip_vector = true;

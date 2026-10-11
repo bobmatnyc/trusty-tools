@@ -98,6 +98,8 @@ fn query(body: serde_json::Value) -> crate::core::indexer::SearchQuery {
 /// Pre-fix the `search_handler` call returned `Err((500, …))`.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailable() {
     let (state, _tmp) = state_with_failing_embedder("fail-embed-8348").await;
     let axum::Json(body) = super::search::search_handler(
@@ -135,6 +137,8 @@ async fn a_failed_query_embed_degrades_to_lexical_hits_flagged_vector_unavailabl
 ///
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn a_pinned_semantic_query_with_a_failed_embed_is_503_not_500() {
     let (state, _tmp) = state_with_failing_embedder("fail-embed-pinned-8348").await;
     let (status, axum::Json(body)) = super::search::search_handler(

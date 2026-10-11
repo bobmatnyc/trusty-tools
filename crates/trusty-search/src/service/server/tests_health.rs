@@ -282,6 +282,8 @@ async fn graph_handler_filters_by_edge_type() {
 /// with the correct `index_id` and the response must list both indexes
 /// as searched. BM25-only path (no embedder) keeps the test hermetic.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_fans_out_and_merges() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -373,6 +375,8 @@ async fn global_search_empty_registry_returns_empty_results() {
 /// fan out to the named indexes; results from indexes outside the
 /// allow-list must not appear, even when they match the query.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_restricts_to_named_indexes() {
     use crate::core::{
         indexer::CodeIndexer,

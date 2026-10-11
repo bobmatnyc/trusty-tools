@@ -358,6 +358,8 @@ async fn search_handler_meta_includes_stale_index_root_field() {
 /// `cold_indexes_skipped == 1` in the response.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn test_global_search_surfaces_cold_indexes_skipped() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;
