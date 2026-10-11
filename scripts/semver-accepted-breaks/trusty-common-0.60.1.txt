@@ -5,3 +5,9 @@ accept  constructible_struct_adds_field  RememberOptions.verify_with
 accept  constructible_struct_adds_private_field  PalaceHandle.fail_next_verify_record
 # #9659: tm sm serve opens through a snapshot copy and never holds the live kg.redb lock; adds OpenIntent::Observer to the exhaustive pub enum trusty_common::memory_core::store::concurrent_open::OpenIntent. Architect approval 2026-10-11 09:05Z; no version bump.
 accept  enum_variant_added  OpenIntent:Observer
+# #9275 PR C (chunked embedding pipeline): EmbedHealth gains the pub fields short_chunk_ids and chunk_check; VectorBackfillReport gains the pub fields short, still_short_ids and chunk_check. Behavior changes, not API items: EmbedHealth::is_healthy() is stricter (it also needs the expected chunk count per drawer), and a tokenizer load error now fails remember, import and rebuild (it used to store a truncated vector). The dream/rebuild return type RebuildReport{rebuilt, skipped} is pub(crate), so it needs no row. No version bump.
+accept  constructible_struct_adds_field  EmbedHealth.short_chunk_ids
+accept  constructible_struct_adds_field  EmbedHealth.chunk_check
+accept  constructible_struct_adds_field  VectorBackfillReport.short
+accept  constructible_struct_adds_field  VectorBackfillReport.still_short_ids
+accept  constructible_struct_adds_field  VectorBackfillReport.chunk_check
