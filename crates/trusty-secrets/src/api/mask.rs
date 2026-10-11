@@ -7,7 +7,9 @@
 //! whose 4-character format `memory_core::filter` depends on.
 //! What: [`mask_secret`]. `list` never calls it; `list` reports length and
 //! `updated_at` through [`crate::api::methods::KeyMeta`] and no characters.
-//! Test: `mask_secret_table`.
+//! #9066: in `api`, not `store`, so the console bridge, which links `api`
+//! only, masks with the same function; `store` re-exports it.
+//! Test: `mask_secret_table`, `mask_secret_never_shows_a_specimen_value_whole`.
 
 /// Characters of the head `mask_secret` reveals for a long value.
 pub const MASK_HEAD_CHARS: usize = 8;

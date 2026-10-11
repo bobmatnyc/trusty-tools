@@ -1,0 +1,5 @@
+Added
+- `secrets.bridge.list`, `secrets.bridge.set`, `secrets.bridge.delete`, `secrets.bridge.copy` and `secrets.bridge.set_agents_may_use`: the console bridge's entries. Each carries the console's verdict on its HTTP client in a `bridge` field (`agent_parent` and a `source` of `mapped`, `unmappable` or `unreadable`) and gets the direct method's verdict, error text, deadline and audit records. The server takes the verdict only from a peer running the `trusty-console` executable outside any Claude Code process tree; any other peer is refused with the new `bridge_refused` kind (-32084), and a malformed assertion with `invalid_params`, each with a deny record (#9066).
+- Audit records of a bridge call carry `source` (`mapped`, `unmappable`, `unreadable` or `malformed`) and the asserted `agent_parent`; a direct call's record is unchanged.
+- `api::mask_secret`, `api::BridgeAssertion` and `api::BridgeSource`, so a caller that links only `api` can mask a value and build the assertion. `store::mask_secret` still resolves.
+- `ProcessTable::executable`, a provided method that reads the executable a pid runs; the default refuses.

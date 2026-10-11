@@ -24,6 +24,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use super::audit::AuditMethod;
+use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
 use super::gate::{Recording, audited};
 use super::project::ProjectContext;
@@ -47,18 +48,33 @@ pub const PROJECT_FIELD: &str = "project";
 /// the router reads it before it spawns the body and passes it in here.
 /// What: the peer pid, or `None` when the kernel reported none (a direct
 /// dispatch in a test, or a target without a peer-pid option). A method that
-/// grants on it treats `None` as a refusal.
+/// grants on it treats `None` as a refusal. #9066: on a console bridge call,
+/// also the console's verdict on the client it serves.
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
-/// `audit_value_never_reaches_the_audit_file`.
+/// `audit_value_never_reaches_the_audit_file`,
+/// `bridge_call_is_audited_allow_and_deny`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Caller {
     pid: Option<u32>,
+    // #9066: set only by the bridge, after it read the assertion.
+    bridge: Option<BridgeVerdict>,
 }
 
 impl Caller {
     /// A caller with the peer pid `pid`.
     pub(crate) fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+        Self { pid, bridge: None }
+    }
+
+    /// This caller, acting through the console bridge under `verdict`.
+    pub(crate) fn with_bridge(mut self, verdict: BridgeVerdict) -> Self {
+        self.bridge = Some(verdict);
+        self
+    }
+
+    /// The console's verdict, on a bridge call only (#9066).
+    pub(crate) fn bridge(self) -> Option<BridgeVerdict> {
+        self.bridge
     }
 
     /// The peer pid, when the kernel reported one.

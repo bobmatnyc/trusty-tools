@@ -13,6 +13,7 @@
 //! Test: itself.
 
 use super::*;
+use crate::server::methods::Caller;
 
 /// The bridged `secrets.set_agents_may_use`.
 const BRIDGE_FLAG: &str = "secrets.bridge.set_agents_may_use";
@@ -537,6 +538,8 @@ async fn bridge_errors_and_masked_set_never_carry_the_specimen_value() {
 /// Test: itself.
 #[test]
 fn mask_secret_never_shows_a_specimen_value_whole() {
+    // #9066: the `api` path the console bridge links.
+    use crate::api::mask_secret;
     let masked = mask_secret(SENTINEL_VALUE);
     assert!(!masked.contains(SENTINEL_VALUE), "{masked}");
     assert_eq!(
@@ -544,4 +547,57 @@ fn mask_secret_never_shows_a_specimen_value_whole() {
         format!("SENTINEL… [{} chars]", SENTINEL_VALUE.len())
     );
     assert_eq!(mask_secret("hunter2!"), "[8 chars]");
+}
+
+/// Why: the Fail-Open Check — a bridge call whose peer pid the kernel did
+/// not report cannot be verified, so even OFF is refused, with one deny
+/// record that names no pid.
+/// Red when a missing peer pid skips the console check.
+/// Test: itself.
+#[test]
+fn bridge_with_no_peer_pid_is_refused() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, console_procs());
+    let (_, entry) = crate::server::bridge::METHODS
+        .into_iter()
+        .find(|(name, _)| *name == BRIDGE_FLAG)
+        .expect("the bridged flag method");
+    for allowed in [true, false] {
+        let params = bridged(flag(&fx, "API_KEY", allowed), assertion(false, "mapped"));
+        assert_eq!(
+            entry(&state, Caller::new(None), params),
+            Err(ErrorKind::BridgeRefused)
+        );
+    }
+    assert!(!flag_on(&fx, "API_KEY"));
+    let all = raw_records(&fx);
+    assert_eq!(all.len(), 2, "{all:?}");
+    for record in &all {
+        assert_eq!(record["reason"], "bridge_refused", "{record}");
+        assert_eq!(record["caller_pid"], Value::Null, "{record}");
+        assert_eq!(record["source"], "mapped", "{record}");
+    }
+}
+
+/// Why: a bridged call answers under its direct method's name and gets its
+/// direct method's deadline, so the console's error text and wait match a
+/// direct caller's. Against the host's real process table this test binary
+/// is not `trusty-console`, so every bridged method refuses it with fixed
+/// text that echoes nothing it sent.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_methods_answer_as_their_direct_method() {
+    use crate::server::deadline::{client_wait, request_deadline};
+    let fx = fixture();
+    let server = fx.start().await;
+    for (name, _) in crate::server::bridge::METHODS {
+        let direct = crate::api::bridge::direct_method(name).expect("a direct method");
+        assert_eq!(request_deadline(name), request_deadline(direct), "{name}");
+        assert_eq!(client_wait(name), client_wait(direct), "{name}");
+        let response = call(&fx.settings.socket, name, json!(SENTINEL_VALUE)).await;
+        assert_eq!(fixed_error(&response, direct), ErrorKind::BridgeRefused);
+        assert!(!wire(&response).contains(SENTINEL_VALUE), "{name}");
+    }
+    server.stop().await;
 }

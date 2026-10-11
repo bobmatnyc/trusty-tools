@@ -288,6 +288,11 @@ impl Gate<'_> {
         record.project_root = self.project_root.clone();
         record.agents_allowed = self.agents_allowed;
         record.agent_parent = self.agent_parent;
+        // #9066: a bridge call names the console's assertion on every record.
+        if let Some(verdict) = self.caller.bridge() {
+            record.agent_parent = record.agent_parent.or(verdict.agent_parent());
+            record.source = Some(verdict.source());
+        }
         record
     }
 

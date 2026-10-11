@@ -24,6 +24,9 @@
 //! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
 //!   process-ancestry checks `secrets.grant` and `secrets.resolve` use (S8,
 //!   #9070).
+//! - `bridge` — `secrets.bridge.*`, the console bridge's entries: the
+//!   console's verdict on its HTTP client, taken only from the verified
+//!   `trusty-console` peer (S3a, #9066).
 //!
 //! `router` and `methods` are private (#9073): S8 changes the method table
 //! and the body signature, so only the re-exports below are public.
@@ -40,6 +43,8 @@ mod agents_flag;
 // #9070: S8 — exec grants and process ancestry.
 pub mod ancestry;
 pub mod audit;
+// #9066: S3a, the console bridge's verdict.
+mod bridge;
 pub mod client;
 // #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
 mod core_dump;
@@ -63,7 +68,9 @@ pub use ancestry::{
     OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
-pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
+pub use audit::{
+    AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
+};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use core_dump::disable_core_dumps;
 pub use doctor::{

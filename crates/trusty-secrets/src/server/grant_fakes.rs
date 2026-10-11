@@ -140,6 +140,18 @@ impl ProcessTable for FakeProcs {
             Ok(s.agents.contains(&pid))
         })
     }
+
+    fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        self.with(|s| {
+            if s.unreadable {
+                return Err(ProcessError::Unreadable { pid });
+            }
+            s.exes
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid })
+        })
+    }
 }
 
 /// A clock the test sets. `None` is a clock failure.
