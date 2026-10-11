@@ -26,7 +26,7 @@ use std::panic::AssertUnwindSafe;
 use futures::FutureExt as _;
 
 use crate::commands::egress_guard_bash::{
-    BASH_CHECK, bash_deny_reason, bash_egress_hit, bash_oversize_reason,
+    BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::{
@@ -166,9 +166,9 @@ pub(crate) fn decide(
 /// other shape is a delivery fault, denied like a malformed payload.
 /// What: a missing or non-string `tool_input.command` denies as
 /// `egress-unclassifiable-payload`; a command over the byte cap denies as
-/// [`BASH_CHECK`] naming the cap (#9699); a command [`bash_egress_hit`] names
-/// a hit in denies as [`BASH_CHECK`] with the plan §6 text; anything else
-/// allows.
+/// [`BASH_CHECK`] naming the cap (#9699); a command [`bash_egress_deny`]
+/// denies is a [`BASH_CHECK`] deny with its reason — the plan §6 text, or the
+/// walk budget (#9699); anything else allows.
 /// Test: `bash_egress_denies_missing_or_non_string_command`,
 /// `bash_egress_denies_a_command_over_the_byte_cap_9699`,
 /// `bash_egress_trust_anchor_verdict_precedes_the_bash_arm`.
@@ -183,8 +183,8 @@ fn bash_verdict(input: &serde_json::Value) -> Verdict {
     if let Some(reason) = bash_oversize_reason(command) {
         return deny(BASH_CHECK, reason);
     }
-    match bash_egress_hit(command) {
-        Some(hit) => deny(BASH_CHECK, bash_deny_reason(&hit)),
+    match bash_egress_deny(command) {
+        Some(found) => deny(BASH_CHECK, bash_deny_reason(&found)),
         None => Verdict::Allow,
     }
 }

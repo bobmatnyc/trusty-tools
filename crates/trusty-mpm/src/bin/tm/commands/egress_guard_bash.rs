@@ -8,7 +8,8 @@
 //! What: [`bash_egress_hit`] names the first outbound-channel token a command
 //! carries. A family host denies in any word; a family program denies only in
 //! command position, so `grep mail f` is allowed. A command over
-//! [`MAX_COMMAND_BYTES`] is denied unread (#9699). It reuses the pm-guard shell
+//! [`MAX_COMMAND_BYTES`] is denied unread, and so is one whose walk reads past
+//! [`WALK_BYTE_BUDGET`] (#9699). It reuses the pm-guard shell
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
 //! `tokenize`, `resolve_program_word`, `split_heredoc_bodies` and
 //! `decode_ansi_c` — and adds no tokenizer.
@@ -24,7 +25,7 @@
 //! Test: `egress_guard_bash_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use crate::commands::pm_guard_bash::{
     Decoded, MAX_SUBSTITUTION_DEPTH, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient,
@@ -104,15 +105,27 @@ const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
 /// The per-segment error for shell keywords nested past the depth bound.
 const TOO_DEEP: UnplaceableWrite = "shell keywords nested deeper than the guard follows";
 
-/// The work units one [`text_hit`] spends before it fails closed (#8454
-/// critic round 3): `time eval S` reads `S` twice per level. #9699 (b): a
-/// [`segment_hits`] call costs one unit plus one per [`BYTES_PER_UNIT`] of its
-/// segment, so the budget bounds the bytes re-read as well as the calls.
-const WORK_BUDGET: usize = 4096;
+/// The most [`segment_hits`] calls one [`text_hit`] makes before it falls
+/// back to [`raw_hit`] (#8454 critic round 3): `time eval S` reads `S` twice
+/// per level.
+const CALL_BUDGET: usize = 4096;
 
-/// The segment bytes one [`WORK_BUDGET`] unit pays for (#9699 (b)): the walk
-/// re-reads at most ~4 MiB, 64 full reads of a command at the cap.
-const BYTES_PER_UNIT: usize = 1024;
+/// The most segment bytes one [`text_hit`] walk reads: 4608 KiB, 72 full
+/// reads of a command at the cap (#9699 (b)).
+///
+/// Why: a count of calls alone let each call read the whole command, so a
+/// near-cap payload ran past the hook timeout. Spending this budget denies and
+/// never falls back to [`raw_hit`] (supervisor ruling, #9699 critic): padding
+/// can steer the raw scan. The size sits above the 4 216 179 bytes that 8 000
+/// `eval if` levels read before the depth bound, and keeps a spent walk under
+/// 3 s in a debug build (8 375 798 bytes took 4.7 s on EVO, 2026-10-11).
+/// Test: `bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699`,
+/// `bash_egress_denies_keyword_nesting_past_the_depth_bound`,
+/// `bash_allows_a_60_kib_heredoc_9699`.
+const WALK_BYTE_BUDGET: usize = 72 * MAX_COMMAND_BYTES;
+
+/// The per-segment error for a walk that spent [`WALK_BYTE_BUDGET`].
+const BYTES_SPENT: UnplaceableWrite = "a walk that read past its byte budget";
 
 /// The most bytes of a Bash command the arm reads: 64 KiB (#9699 (b)).
 ///
@@ -127,6 +140,35 @@ pub(crate) const MAX_COMMAND_BYTES: usize = 64 * 1024;
 /// The quoting bytes the shell removes from a word, which the raw scan also
 /// strips (#9699 (a)).
 const QUOTING: &[char] = &['\'', '"', '\\'];
+
+/// Why the Bash arm denies a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BashDeny {
+    /// The command names an outbound channel.
+    Channel(Hit),
+    /// The walk read [`WALK_BYTE_BUDGET`] bytes and found no channel (#9699).
+    WalkBudget,
+}
+
+/// One [`text_hit`] walk's two budgets and the first hit it found.
+struct Walk {
+    /// [`segment_hits`] calls left; none left falls back to [`raw_hit`].
+    calls: Cell<usize>,
+    /// Segment bytes left to read; none left denies (#9699).
+    bytes: Cell<usize>,
+    /// The first hit, kept when a spent byte budget ends the walk (#9699).
+    first: OnceCell<Hit>,
+}
+
+impl Walk {
+    fn new() -> Self {
+        Self {
+            calls: Cell::new(CALL_BUDGET),
+            bytes: Cell::new(WALK_BYTE_BUDGET),
+            first: OnceCell::new(),
+        }
+    }
+}
 
 /// One outbound-channel name a Bash command carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +187,8 @@ fn hit(service: &'static str, token: &str) -> Hit {
     }
 }
 
-/// The first outbound-channel token `command` carries, if any.
+/// Why the Bash arm denies `command`, if it does: the first outbound-channel
+/// token it carries, or a walk that spent its byte budget.
 ///
 /// Why (plan §2, §5): the deny must hold against wrappers, nesting and `$'…'`
 /// quoting, and must fail closed on a command it cannot read, without
@@ -158,7 +201,7 @@ fn hit(service: &'static str, token: &str) -> Hit {
 /// `bash_egress_denies_unlexable_with_family_token`,
 /// `bash_allows_unlexable_without_family_token`,
 /// `bash_allows_family_words_as_arguments`.
-pub(crate) fn bash_egress_hit(command: &str) -> Option<Hit> {
+pub(crate) fn bash_egress_deny(command: &str) -> Option<BashDeny> {
     let decoded = match decode_ansi_c(command) {
         Decoded::Plain => None,
         Decoded::Text(text) => Some(text),
@@ -166,7 +209,9 @@ pub(crate) fn bash_egress_hit(command: &str) -> Option<Hit> {
         // and (critic round 1) the raw scan splits at `\`, so the decodable
         // quotes are judged too.
         Decoded::Undecodable(_) => {
-            return raw_hit(command).or_else(|| text_hit(&decode_ansi_c_lenient(command)));
+            return raw_hit(command)
+                .map(BashDeny::Channel)
+                .or_else(|| text_hit(&decode_ansi_c_lenient(command)));
         }
     };
     std::iter::once(command)
@@ -194,28 +239,53 @@ pub(crate) fn bash_oversize_reason(command: &str) -> Option<String> {
     })
 }
 
-/// The plan §6 deny reason for `hit`.
-pub(crate) fn bash_deny_reason(hit: &Hit) -> String {
-    format!(
-        "tm hook --egress-guard denies this Bash command: it reaches {} ({}) outside the \
-         owner channel, and no tm-launched session, PM or subagent may message Slack, Gmail, \
-         Notion or Google Chat directly (#8454). Ask the operator instead.",
-        hit.service, hit.token
-    )
+/// The deny reason for `deny`: the plan §6 text for a channel, or the walk
+/// budget's size for a spent budget (#9699).
+/// Test: `bash_egress_trust_anchor_verdict_precedes_the_bash_arm`,
+/// `bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699`.
+pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
+    match deny {
+        BashDeny::Channel(hit) => format!(
+            "tm hook --egress-guard denies this Bash command: it reaches {} ({}) outside the \
+             owner channel, and no tm-launched session, PM or subagent may message Slack, \
+             Gmail, Notion or Google Chat directly (#8454). Ask the operator instead.",
+            hit.service, hit.token
+        ),
+        BashDeny::WalkBudget => format!(
+            "tm hook --egress-guard denies this Bash command: reading it through its wrappers \
+             and nested commands passed the guard's {} KiB ({WALK_BYTE_BUDGET}-byte) walk \
+             budget, so the guard cannot rule out an outbound channel in it (#9699). Write the \
+             payload to a file first, or unwrap the command.",
+            WALK_BYTE_BUDGET / 1024
+        ),
+    }
 }
 
 /// [`host_hit`] over the raw text, then [`segment_hits`] over every segment
-/// and nested body, within [`WORK_BUDGET`] units; a text the walk cannot
-/// parse, or one that spends the budget, falls back to [`raw_hit`].
-fn text_hit(text: &str) -> Option<Hit> {
+/// and nested body within one [`Walk`]'s budgets.
+///
+/// What: a walk that spends [`WALK_BYTE_BUDGET`] denies, naming the first hit
+/// it found if any (#9699); a text the walk cannot parse, or one that spends
+/// [`CALL_BUDGET`], falls back to [`raw_hit`].
+/// Test: `bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699`,
+/// `bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699`.
+fn text_hit(text: &str) -> Option<BashDeny> {
     if let Some(found) = host_hit(text) {
-        return Some(found);
+        return Some(BashDeny::Channel(found));
     }
-    let budget = Cell::new(WORK_BUDGET);
-    match shell_segments_map(text, &|segment: &str| segment_hits(segment, 0, &budget)) {
-        Ok(hits) => hits.into_iter().next(),
+    let walk = Walk::new();
+    let walked = shell_segments_map(text, &|segment: &str| segment_hits(segment, 0, &walk));
+    match walked {
+        Ok(hits) => hits.into_iter().next().map(BashDeny::Channel),
+        // #9699: a spent byte budget denies; it never reaches the raw scan.
+        Err(BYTES_SPENT) => Some(
+            walk.first
+                .get()
+                .cloned()
+                .map_or(BashDeny::WalkBudget, BashDeny::Channel),
+        ),
         // #8454 plan §5: unlexable or too deep denies only on a family token.
-        Err(_) => raw_hit(text),
+        Err(_) => raw_hit(text).map(BashDeny::Channel),
     }
 }
 
@@ -335,25 +405,23 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// unmeasurable wrapper option hides it, every word stands in for it.
 /// Leading shell keywords ([`after_keywords`]) are skipped and the rest mapped
 /// again one `depth` deeper; past [`MAX_SUBSTITUTION_DEPTH`] that is an `Err`.
-/// Each call spends one unit of `budget` plus one per [`BYTES_PER_UNIT`] of
-/// the segment; a budget that cannot pay is an `Err`.
+/// Each call spends one of `walk`'s calls and the segment's bytes; a budget
+/// that cannot pay is an `Err`, [`BYTES_SPENT`] for the bytes, and every hit
+/// is also kept as `walk`'s first.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
 /// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
 /// `bash_egress_denies_program_behind_a_shell_keyword`,
 /// `bash_egress_denies_keyword_nesting_past_the_depth_bound`,
 /// `bash_egress_bounds_work_for_time_eval_nesting`,
-/// `bash_egress_judges_a_near_cap_time_eval_payload_within_bound_9699`.
-fn segment_hits(
-    segment: &str,
-    depth: usize,
-    budget: &Cell<usize>,
-) -> Result<Vec<Hit>, UnplaceableWrite> {
+/// `bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699`.
+fn segment_hits(segment: &str, depth: usize, walk: &Walk) -> Result<Vec<Hit>, UnplaceableWrite> {
     // #8454 critic round 3: the walk also re-reads a wrapper's inner command,
     // so depth alone does not bound the total work. #9699 (b): nor does a
     // count of calls, each of which may read the whole command.
-    let cost = 1 + segment.len() / BYTES_PER_UNIT;
-    let left = budget.get().checked_sub(cost).ok_or(TOO_DEEP)?;
-    budget.set(left);
+    let bytes = walk.bytes.get().checked_sub(segment.len()).ok_or(BYTES_SPENT)?;
+    walk.bytes.set(bytes);
+    let calls = walk.calls.get().checked_sub(1).ok_or(TOO_DEEP)?;
+    walk.calls.set(calls);
     if segment.is_empty() {
         return Ok(Vec::new());
     }
@@ -369,19 +437,23 @@ fn segment_hits(
         if depth >= MAX_SUBSTITUTION_DEPTH {
             return Err(TOO_DEEP);
         }
-        return shell_segments_map(rest, &|inner: &str| segment_hits(inner, depth + 1, budget));
+        return shell_segments_map(rest, &|inner: &str| segment_hits(inner, depth + 1, walk));
     }
     let (text, bodies) = split_heredoc_bodies(segment);
     let argv = tokenize(&text).map_err(|_| UNLEXABLE_SEGMENT)?;
     // #8454: quoting the shell joins (`"sl""ack.com"`) is judged as one word.
-    if let Some(found) = argv.iter().find_map(|word| host_hit(word)) {
-        return Ok(vec![found]);
+    let found = argv
+        .iter()
+        .find_map(|word| host_hit(word))
+        .or_else(|| match resolve_program_word(&argv) {
+            Ok(word) if word.lookup => None,
+            Ok(word) => program_position_hit(&argv, word.index, &bodies),
+            Err(Unresolved) => argv.iter().find_map(|word| program_hit(&basename(word))),
+        });
+    if let Some(hit) = &found {
+        // #9699: a later spent byte budget must not drop this hit.
+        let _ = walk.first.set(hit.clone());
     }
-    let found = match resolve_program_word(&argv) {
-        Ok(word) if word.lookup => None,
-        Ok(word) => program_position_hit(&argv, word.index, &bodies),
-        Err(Unresolved) => argv.iter().find_map(|word| program_hit(&basename(word))),
-    };
     Ok(found.into_iter().collect())
 }
 

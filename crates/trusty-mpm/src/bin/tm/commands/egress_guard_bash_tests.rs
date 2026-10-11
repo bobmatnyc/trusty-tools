@@ -795,7 +795,7 @@ fn bash_egress_judges_an_open_quote_and_many_parens_within_bound_9699() {
 }
 
 /// The text a walk-budget deny names: the budget's size and unit (#9699).
-const WALK_BUDGET_NEEDLE: &str = "8 MiB (8388608-byte) walk budget";
+const WALK_BUDGET_NEEDLE: &str = "4608 KiB (4718592-byte) walk budget";
 
 /// 🔴 #9699 (b): `time eval` doubles the reads of its payload per level. A
 /// budget of calls alone let a near-cap payload run past the bound; the
