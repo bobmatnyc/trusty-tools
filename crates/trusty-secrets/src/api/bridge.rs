@@ -13,15 +13,20 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::BackendId;
 use super::methods::method as direct;
 
 /// The params field that carries the console's [`BridgeAssertion`].
 pub const BRIDGE_FIELD: &str = "bridge";
 
 /// The bridged method names. Each runs its direct method under the console's
-/// verdict. `doctor` is not bridged; `grant`, `resolve` and `revoke` have no
-/// console route.
+/// verdict, except `backends`, which has no direct form. `doctor` is not
+/// bridged; `grant`, `resolve` and `revoke` have no console route.
 pub mod method {
+    /// The backends the page's copy dialog may offer: `secrets.doctor`'s
+    /// judgement for one project, reduced to id and availability (#9067 P1).
+    /// Bridge-only; it has no direct method.
+    pub const BACKENDS: &str = "secrets.bridge.backends";
     /// `secrets.scopes` through the console bridge: the page's scope picker
     /// (#9067).
     pub const SCOPES: &str = "secrets.bridge.scopes";
@@ -51,6 +56,52 @@ pub fn direct_method(bridged: &str) -> Option<&'static str> {
         method::COPY => Some(direct::COPY),
         method::SET_AGENTS_MAY_USE => Some(direct::SET_AGENTS_MAY_USE),
         _ => None,
+    }
+}
+
+/// One backend in a [`BackendsResponse`].
+///
+/// What: the id and whether the server opens it now; never a path, reason
+/// or detail. Unknown fields are refused, so a server that sent more would
+/// not have it relayed to the page (#9067 P1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BackendChoice {
+    /// The backend id.
+    pub id: BackendId,
+    /// Whether this server opens it now.
+    pub available: bool,
+}
+
+/// `secrets.bridge.backends` response (#9067 P1).
+///
+/// Why: the copy dialog must offer the backends this host has, not a fixed
+/// list: a Linux host has no Keychain.
+/// What: the backend a write in the project uses, and every backend
+/// `secrets.doctor` lists, in its order.
+/// Test: `bridge_backends_match_doctor_and_are_audited_once`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct BackendsResponse {
+    /// The backend the project's writes use.
+    pub selected: BackendId,
+    /// Every backend, available or not.
+    pub backends: Vec<BackendChoice>,
+}
+
+impl BackendsResponse {
+    /// A response for `selected` over `backends`.
+    pub fn new(selected: BackendId, backends: Vec<BackendChoice>) -> Self {
+        Self { selected, backends }
+    }
+}
+
+impl BackendChoice {
+    /// One backend row.
+    pub fn new(id: BackendId, available: bool) -> Self {
+        Self { id, available }
     }
 }
 

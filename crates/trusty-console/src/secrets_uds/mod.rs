@@ -241,7 +241,8 @@ impl crate::server::AppState {
 ///
 /// Why: mounted as its own sub-router, after the console's permissive CORS
 /// layer and write-origin guard, so neither applies here (A6).
-/// What: `session`, the two picker routes (`projects`, `scopes`, #9067),
+/// What: `session`, the picker routes (`projects`, `scopes`, and
+/// `backends` for copy, #9067),
 /// five credential verbs, `resolve` (501), and a catch-all (404) so no
 /// `/api/secrets/*` path falls through to the generic proxy. Every route
 /// takes any method; the guard answers everything but `POST` (Architect Q3).
@@ -253,6 +254,8 @@ pub fn router(bridge: Arc<SecretsBridge>) -> Router {
         .route("/api/secrets/session", any(routes::session))
         .route("/api/secrets/projects", any(routes::projects))
         .route("/api/secrets/scopes", any(routes::scopes))
+        // #9067 P1: the copy dialog's backends.
+        .route("/api/secrets/backends", any(routes::backends))
         .route("/api/secrets/list", any(routes::list))
         .route("/api/secrets/set", any(routes::set))
         .route("/api/secrets/delete", any(routes::delete))

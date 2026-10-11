@@ -916,6 +916,7 @@ async fn tailnet_requests_are_refused_before_any_lookup() {
         // #9067: the picker routes are refused on the tailnet too.
         "/api/secrets/projects",
         "/api/secrets/scopes",
+        "/api/secrets/backends",
         "/api/secrets/list",
         "/api/secrets/set",
         "/api/secrets/delete",
