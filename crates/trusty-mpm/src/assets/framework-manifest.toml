@@ -80,8 +80,9 @@
 #     silently deploy nothing.
 #
 # Deprecating an agent is an edit to THIS FILE: move its stem into `deprecated`.
-# The deploy filter then never selects it. (It does not retract an already-
-# deployed copy — orphan retraction is issue #391 / ADR-0025 clause 9, unshipped.)
+# The deploy filter then never selects it. It does not retract an already-
+# deployed copy: the #8992 orphan sweep (`tm doctor --fix-agents --yes`) removes
+# only files the bundle no longer ships, and a deprecated stem is still shipped.
 
 version = 1
 
