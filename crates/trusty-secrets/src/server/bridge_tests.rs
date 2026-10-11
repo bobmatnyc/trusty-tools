@@ -19,6 +19,8 @@ use crate::server::methods::Caller;
 const BRIDGE_FLAG: &str = "secrets.bridge.set_agents_may_use";
 /// The bridged `secrets.set`.
 const BRIDGE_SET: &str = "secrets.bridge.set";
+/// The bridged `secrets.list`.
+const BRIDGE_LIST: &str = "secrets.bridge.list";
 /// An executable path whose file name is the console's.
 const CONSOLE_EXE: &str = "/opt/trusty/bin/trusty-console";
 
@@ -315,11 +317,14 @@ async fn bridge_assertion_from_non_console_peer_is_refused() {
         assert!(!holds(&fx, "NEW_KEY"), "{case}: nothing was stored");
         let all = raw_records(&fx);
         assert_eq!(all.len(), 2, "{case}: {all:?}");
-        for (record, method_name, source) in [
-            (&all[0], method::SET_AGENTS_MAY_USE, "mapped"),
-            (&all[1], method::SET, "unmappable"),
+        for (record, method_name, source, name) in [
+            (&all[0], method::SET_AGENTS_MAY_USE, "mapped", "API_KEY"),
+            (&all[1], method::SET, "unmappable", "NEW_KEY"),
         ] {
             assert_eq!(record["method"], method_name, "{case}: {record}");
+            // #9066 LOW1: the deny names the key the call attempted.
+            assert_eq!(record["vault"], PROJECT_VAULT, "{case}: {record}");
+            assert_eq!(record["key"], name, "{case}: {record}");
             assert_eq!(record["decision"], "deny", "{case}: {record}");
             assert_eq!(record["reason"], "bridge_refused", "{case}: {record}");
             assert_eq!(record["source"], source, "{case}: {record}");
@@ -431,6 +436,104 @@ async fn bridge_audit_write_failure_refuses() {
     assert!(!holds(&fx, "NEW_KEY"), "no value was written");
 }
 
+/// `list` params for the project vault.
+fn list_params(fx: &Fixture) -> Value {
+    json!({"project": fx.project(), "vault": PROJECT_VAULT})
+}
+
+/// Why: every bridge call is audited (#9066 review). An allowed bridged list
+/// leaves one allow record naming the vault and the console's verdict, where
+/// a direct list leaves none.
+/// Red while the bridged list runs the direct list's deny-only recording.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_list_allow_is_audited() {
+    let fx = fixture();
+    let server = serve(&fx, console_procs(), "API_KEY").await;
+    let socket = &fx.settings.socket;
+    let listed = call(
+        socket,
+        BRIDGE_LIST,
+        bridged(list_params(&fx), assertion(false, "mapped")),
+    )
+    .await;
+    server.stop().await;
+
+    let listed = ok(listed);
+    assert_eq!(listed["vault"], PROJECT_VAULT);
+    assert_eq!(listed["keys"].as_array().map(Vec::len), Some(1), "{listed}");
+    let all = raw_records(&fx);
+    assert_eq!(all.len(), 1, "{all:?}");
+    let record = &all[0];
+    assert_eq!(record["method"], method::LIST, "{record}");
+    assert_eq!(record["decision"], "allow", "{record}");
+    assert_eq!(record["reason"], Value::Null, "{record}");
+    assert_eq!(record["vault"], PROJECT_VAULT, "{record}");
+    assert_eq!(record["caller_pid"], json!(me()), "{record}");
+    assert_eq!(record["source"], "mapped", "{record}");
+    assert_eq!(record["agent_parent"], false, "{record}");
+}
+
+/// Why: a bridged list is admitted fail-closed like a bridged change: when
+/// the audit log cannot be written it is refused with `audit_unavailable`
+/// and lists nothing. A direct list on the same server still answers; its
+/// allow leaves no record, so it needs none.
+/// Red while the bridged list runs the direct list's deny-only recording.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_list_refuses_when_audit_unwritable() {
+    let fx = fixture();
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let (state, _grants) = state_with(&fx, console_procs());
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    let _restore = RestoreMode(dir);
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let bridge = call(
+        socket,
+        BRIDGE_LIST,
+        bridged(list_params(&fx), assertion(false, "mapped")),
+    )
+    .await;
+    let direct = call(socket, method::LIST, list_params(&fx)).await;
+    server.stop().await;
+
+    assert_eq!(kind(&bridge).as_deref(), Some("audit_unavailable"));
+    assert!(bridge.result.is_none(), "{:?}", bridge.result);
+    assert_eq!(ok(direct)["vault"], PROJECT_VAULT);
+}
+
+/// Why: `verify_console`'s last check — a peer that runs the console's
+/// executable but whose own ancestry cannot be read is refused with
+/// `bridge_refused`, as a console under Claude Code is, and the deny record
+/// names the key the call attempted.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_console_with_unreadable_chain_is_refused() {
+    let procs = console_procs();
+    // The shared parent 10 vanishes: the executable reads, the chain does not.
+    procs.remove(10);
+    let fx = fixture();
+    let server = serve(&fx, procs, "API_KEY").await;
+    let on = call(
+        &fx.settings.socket,
+        BRIDGE_FLAG,
+        bridged(flag(&fx, "API_KEY", true), assertion(false, "mapped")),
+    )
+    .await;
+    server.stop().await;
+
+    assert_eq!(kind(&on).as_deref(), Some("bridge_refused"));
+    assert!(!flag_on(&fx, "API_KEY"), "the flag stayed OFF");
+    let all = raw_records(&fx);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["reason"], "bridge_refused", "{}", all[0]);
+    assert_eq!(all[0]["vault"], PROJECT_VAULT, "{}", all[0]);
+    assert_eq!(all[0]["key"], "API_KEY", "{}", all[0]);
+}
+
 /// Why: the Fail-Open Check — an assertion that is missing, mistyped, names
 /// an unknown source, carries an extra field (a pid is never a parameter),
 /// or contradicts its source is refused with `invalid_params`, changes
@@ -475,6 +578,8 @@ async fn bridge_malformed_assertion_is_refused_and_audited() {
         assert_eq!(record["decision"], "deny", "{record}");
         assert_eq!(record["reason"], "invalid_params", "{record}");
         assert_eq!(record["source"], "malformed", "{record}");
+        assert_eq!(record["vault"], PROJECT_VAULT, "{record}");
+        assert_eq!(record["key"], "API_KEY", "{record}");
     }
 }
 
