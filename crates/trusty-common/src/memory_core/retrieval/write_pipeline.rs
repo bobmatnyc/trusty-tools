@@ -56,7 +56,6 @@ use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
 use crate::memory_core::room_identity::DEFAULT_WING_ID;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
-use crate::memory_core::store::vector::VectorStore;
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
@@ -320,30 +319,20 @@ async fn run_pipeline(
         let embedder = super::embedder::shared_embedder()
             .await
             .context("acquire shared embedder for remember")?;
-        let embed_timeout = timeouts::embed_batch_timeout();
-        let vecs = tokio::time::timeout(
-            embed_timeout,
-            // `from_ref` rather than `&[content]`: the deferred branch below
-            // still needs `content`, so this borrows instead of moving.
-            embedder.embed_batch(std::slice::from_ref(&content)),
+        // #9275: one vector per window-sized chunk, so a fact late in a long
+        // drawer is findable; the embed ceiling scales with the chunk count.
+        let vecs = super::embed_store::embed_chunks_within(
+            embedder.as_ref(),
+            &content,
+            timeouts::embed_batch_timeout(),
         )
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "embed_batch timed out after {:?} on remember path (issue #906); \
-                     increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
-                     take longer on this host",
-                embed_timeout
-            )
-        })?
-        .context("embed drawer content")?;
-        if let Some(v) = vecs.into_iter().next() {
-            handle
-                .vector_store
-                .upsert(id, v)
-                .await
-                .context("upsert drawer vector")?;
-        }
+        .context("embed drawer content on remember path (issue #906)")?;
+        handle
+            .vector_store
+            .upsert_chunks(id, vecs)
+            .await
+            .context("upsert drawer vectors")?;
     }
 
     // Persist drawer metadata BEFORE the in-memory push so a crash mid-op

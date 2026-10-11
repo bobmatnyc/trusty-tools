@@ -24,9 +24,11 @@
 //! Test: `health_reports_the_drawer_with_no_vector`,
 //! `backfill_reembeds_a_marked_drawer`, `backfill_is_a_noop_on_a_healthy_palace`.
 
+use super::chunk_health::{ChunkCheck, short_chunk_ids};
 use super::deferred_embed::{RetryPolicy, embed_and_store};
-use super::embedder::{shared_embedder, shared_embedder_initialized};
+use super::embedder::{SHARED_EMBEDDER, shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
 use crate::memory_core::store::vector::{AliasScan, UnaliasOutcome};
 use anyhow::{Context, Result};
@@ -198,6 +200,12 @@ pub struct EmbedHealth {
     pub embedder_ready: bool,
     /// Vector-id alias audit (#5005), including whether it ran at all.
     pub alias_audit: AliasAudit,
+    /// #9275: drawers with a vector whose chunk rows are fewer than (or gapped
+    /// against) the chunk count their text needs. Their tail is unfindable.
+    pub short_chunk_ids: Vec<Uuid>,
+    /// #9275: whether the chunk-count comparison ran; `Unavailable` is never
+    /// an empty `short_chunk_ids` standing in for "could not tell".
+    pub chunk_check: ChunkCheck,
 }
 
 impl EmbedHealth {
@@ -206,9 +214,21 @@ impl EmbedHealth {
     /// #5005: an aliased drawer has a vector key and still resolves to nothing,
     /// so key presence alone is not the health condition — and an alias audit
     /// that could not run is not a passing one. Healthy requires no missing
-    /// drawers AND an audit that ran and came back clean.
+    /// drawers AND an audit that ran and came back clean. #9275: and no drawer
+    /// short of chunk rows, with a chunk check that ran.
     pub fn is_healthy(&self) -> bool {
-        self.missing_vector_ids.is_empty() && self.alias_audit.is_clean()
+        self.missing_vector_ids.is_empty()
+            && self.alias_audit.is_clean()
+            && self.short_chunk_ids.is_empty()
+            && self.chunk_check == ChunkCheck::Ran
+    }
+
+    /// Whether a backfill has nothing it could repair: no missing drawer, no
+    /// short drawer, and a chunk check that ran (#9275).
+    fn needs_no_repair(&self) -> bool {
+        self.missing_vector_ids.is_empty()
+            && self.short_chunk_ids.is_empty()
+            && self.chunk_check == ChunkCheck::Ran
     }
 }
 
@@ -268,6 +288,34 @@ pub struct VectorBackfillReport {
     /// as `missing == 0` (#5000 resolution item 3); an `Unavailable` audit
     /// blocks exactly as a non-empty one does.
     pub alias_audit: AliasAudit,
+    /// #9275: drawers found with fewer chunk rows than their text needs.
+    pub short: usize,
+    /// #9275: short drawers still not repaired after this run.
+    pub still_short_ids: Vec<Uuid>,
+    /// #9275: whether the chunk-count comparison ran; `short` means nothing
+    /// when it is `Unavailable`.
+    pub chunk_check: ChunkCheck,
+}
+
+impl VectorBackfillReport {
+    /// The report before any repair: counts and id lists from `health`.
+    fn from_health(health: &EmbedHealth, dry_run: bool) -> Self {
+        Self {
+            palace_id: health.palace_id.clone(),
+            dry_run,
+            drawer_count: health.drawer_count,
+            vector_count: health.vector_count,
+            missing: health.missing_vector_ids.len(),
+            attempted: 0,
+            repaired: 0,
+            still_failing: 0,
+            still_missing_ids: health.missing_vector_ids.clone(),
+            alias_audit: health.alias_audit.clone(),
+            short: health.short_chunk_ids.len(),
+            still_short_ids: health.short_chunk_ids.clone(),
+            chunk_check: health.chunk_check.clone(),
+        }
+    }
 }
 
 /// How an alias repair run should behave.
@@ -547,8 +595,19 @@ impl PalaceHandle {
     /// DRAWERS table, hydrated at open) and the vector index's id set. Excludes
     /// expired non-Tier-C drawers, which are never served regardless. Cheap: no
     /// embedding, no vector search, no redb write.
-    /// Test: `health_reports_the_drawer_with_no_vector`.
+    /// #9275: also compares each drawer's chunk rows with the count its text
+    /// needs, using the shared embedder only if it has already initialised
+    /// (never a cold init); otherwise the chunk check is `Unavailable`.
+    /// Test: `health_reports_the_drawer_with_no_vector`,
+    /// `health_reports_chunk_check_unavailable_when_no_embedder_is_ready`.
     pub fn embed_health(&self) -> EmbedHealth {
+        let embedder = SHARED_EMBEDDER.get().map(|e| e.as_ref() as &dyn Embedder);
+        self.embed_health_with(embedder)
+    }
+
+    /// [`Self::embed_health`] against an explicit embedder (#9275 test seam).
+    /// Test: `health_flags_a_drawer_with_fewer_chunk_rows_than_expected`.
+    pub(crate) fn embed_health_with(&self, embedder: Option<&dyn Embedder>) -> EmbedHealth {
         let vector_ids: HashSet<Uuid> = self.vector_store.all_ids().into_iter().collect();
         let now = chrono::Utc::now();
         let live: Vec<Uuid> = self
@@ -576,6 +635,17 @@ impl PalaceHandle {
         if let Some(reason) = alias_audit.unavailable_reason() {
             tracing::error!(palace = %self.id, "#5005: alias audit failed: {reason}");
         }
+        let with_vector: HashSet<Uuid> = live
+            .iter()
+            .copied()
+            .filter(|id| vector_ids.contains(id))
+            .collect();
+        let shapes = self.vector_store.chunk_shapes();
+        let (short_chunk_ids, chunk_check) =
+            short_chunk_ids(embedder, &self.drawers, &with_vector, shapes);
+        if let Some(reason) = chunk_check.unavailable_reason() {
+            tracing::warn!(palace = %self.id, "#9275: chunk-count check did not run: {reason}");
+        }
         EmbedHealth {
             palace_id: self.id.as_str().to_string(),
             drawer_count: live.len(),
@@ -584,65 +654,93 @@ impl PalaceHandle {
             recorded_failures,
             embedder_ready: shared_embedder_initialized(),
             alias_audit,
+            short_chunk_ids,
+            chunk_check,
         }
     }
 
-    /// Re-embed every live drawer that has no vector.
+    /// Re-embed every live drawer that has no vector, or fewer chunk rows than
+    /// its text needs (#9275).
     ///
     /// Why: the repair half of #4906. Fixing the write path does not make the
     /// drawers already written without a vector findable, and #4834 cannot
-    /// delete a source file until they are.
+    /// delete a source file until they are. #9275: a drawer embedded before
+    /// chunking has a vector and is still unfindable by its tail.
     /// What: computes [`EmbedHealth`], then (unless `dry_run`) embeds each
-    /// missing drawer through the same `embed_and_store` primitive the write
-    /// path uses, clearing its ledger row on success and refreshing it on
-    /// failure. Idempotent and safe to re-run: a repaired drawer is no longer in
-    /// the missing set, so a second run does nothing.
+    /// missing drawer, then each short one, through the same `embed_and_store`
+    /// primitive the write path uses (`limit` caps the union, missing first),
+    /// clearing its ledger row on success and refreshing it on failure.
+    /// Idempotent and safe to re-run: a repaired drawer is in neither set, so a
+    /// second run does nothing. When the chunk check could not run because no
+    /// embedder had initialised, it initialises one and checks again.
     ///
     /// Errors, rather than half-running, when the palace is read-only (a
     /// snapshot handle cannot write vectors — route through the daemon) or when
-    /// there is work to do and no embedder can be initialised. A dry run has
-    /// neither constraint, so it still reports on a host with no model.
+    /// there is known work to do and no embedder can be initialised. A dry run
+    /// has neither constraint, so it still reports on a host with no model; so
+    /// does a palace whose only gap is a chunk check that could not run.
     /// Test: `backfill_reembeds_a_marked_drawer`,
-    /// `backfill_is_a_noop_on_a_healthy_palace`, `backfill_dry_run_repairs_nothing`.
+    /// `backfill_is_a_noop_on_a_healthy_palace`, `backfill_dry_run_repairs_nothing`,
+    /// `legacy_palace_recalls_unchanged_then_reembed_adds_the_tail`.
     pub async fn backfill_missing_vectors(
         &self,
         opts: VectorBackfillOptions,
     ) -> Result<VectorBackfillReport> {
         let health = self.embed_health();
-        let mut report = VectorBackfillReport {
-            palace_id: health.palace_id.clone(),
-            dry_run: opts.dry_run,
-            drawer_count: health.drawer_count,
-            vector_count: health.vector_count,
-            missing: health.missing_vector_ids.len(),
-            attempted: 0,
-            repaired: 0,
-            still_failing: 0,
-            still_missing_ids: health.missing_vector_ids.clone(),
-            alias_audit: health.alias_audit.clone(),
-        };
-
         // A healthy palace short-circuits BEFORE touching the embedder, so the
         // no-op case costs nothing and works on a host with no model at all.
-        if opts.dry_run || health.missing_vector_ids.is_empty() {
+        if opts.dry_run || health.needs_no_repair() {
+            return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
+        }
+        // #9275: an unrun chunk check is not known work; it never turns a
+        // no-op into an error on a read-only handle or a host with no model.
+        let unknown_only =
+            health.missing_vector_ids.is_empty() && health.short_chunk_ids.is_empty();
+        if unknown_only && self.is_read_only() {
+            return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
+        }
+        self.refuse_read_only_backfill()?;
+        let embedder = match shared_embedder().await {
+            Ok(embedder) => embedder,
+            Err(e) if unknown_only => {
+                tracing::warn!(palace = %self.id, "#9275: no embedder for the chunk check: {e:#}");
+                return Ok(VectorBackfillReport::from_health(&health, opts.dry_run));
+            }
+            Err(e) => return Err(e.context("acquire shared embedder for vector backfill")),
+        };
+        self.backfill_with(opts, &embedder).await
+    }
+
+    /// [`Self::backfill_missing_vectors`] against an explicit embedder.
+    ///
+    /// Why (#9275): the shared embedder is a process-wide cell the lib tests
+    /// seed with a non-chunking mock; this is the seam a chunking test drives.
+    /// What: recomputes health with `embedder`, then re-embeds the missing
+    /// drawers followed by the short ones (`limit` caps the union, missing
+    /// first) through `embed_and_store`.
+    /// Test: `backfill_limit_applies_to_missing_then_short`,
+    /// `backfill_dry_run_counts_short_drawers_and_writes_nothing`.
+    pub(crate) async fn backfill_with(
+        &self,
+        opts: VectorBackfillOptions,
+        embedder: &std::sync::Arc<dyn Embedder + Send + Sync>,
+    ) -> Result<VectorBackfillReport> {
+        let health = self.embed_health_with(Some(embedder.as_ref()));
+        let mut report = VectorBackfillReport::from_health(&health, opts.dry_run);
+        if opts.dry_run
+            || (health.missing_vector_ids.is_empty() && health.short_chunk_ids.is_empty())
+        {
             return Ok(report);
         }
+        self.refuse_read_only_backfill()?;
 
-        if self.is_read_only() {
-            anyhow::bail!(
-                "palace '{}' is read-only: the HTTP daemon holds the write lock — run the \
-                 vector backfill through the daemon (`palace_reembed`) or stop it first",
-                self.id
-            );
-        }
-
-        let embedder = shared_embedder()
-            .await
-            .context("acquire shared embedder for vector backfill")?;
-
+        let queue = health
+            .missing_vector_ids
+            .iter()
+            .chain(&health.short_chunk_ids);
         let targets: Vec<Uuid> = match opts.limit {
-            Some(n) => health.missing_vector_ids.iter().copied().take(n).collect(),
-            None => health.missing_vector_ids.clone(),
+            Some(n) => queue.copied().take(n).collect(),
+            None => queue.copied().collect(),
         };
 
         let mut repaired: HashSet<Uuid> = HashSet::new();
@@ -661,7 +759,7 @@ impl PalaceHandle {
                 continue;
             };
             report.attempted += 1;
-            match embed_and_store(&embedder, &self.vector_store, id, &content, &opts.retry).await {
+            match embed_and_store(embedder, &self.vector_store, id, &content, &opts.retry).await {
                 Ok(attempts) => {
                     tracing::info!(
                         palace = %self.id, drawer = %id, attempts,
@@ -683,6 +781,7 @@ impl PalaceHandle {
 
         report.repaired = repaired.len();
         report.still_missing_ids.retain(|id| !repaired.contains(id));
+        report.still_short_ids.retain(|id| !repaired.contains(id));
         if let Some(data_dir) = self.data_dir.as_ref()
             && !repaired.is_empty()
         {
@@ -695,6 +794,18 @@ impl PalaceHandle {
             }
         }
         Ok(report)
+    }
+
+    /// Refuse a vector write on a read-only snapshot handle.
+    fn refuse_read_only_backfill(&self) -> Result<()> {
+        if self.is_read_only() {
+            anyhow::bail!(
+                "palace '{}' is read-only: the HTTP daemon holds the write lock — run the \
+                 vector backfill through the daemon (`palace_reembed`) or stop it first",
+                self.id
+            );
+        }
+        Ok(())
     }
 
     /// Refresh a drawer's ledger row after a failed repair attempt.

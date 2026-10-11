@@ -449,6 +449,25 @@ pub trait Embedder: Send + Sync {
     fn input_window(&self) -> Option<usize> {
         None
     }
+
+    /// Tokenizer that counts tokens the way this embedder truncates, for
+    /// [`super::chunk_text`].
+    ///
+    /// Why: #9275 — the memory pipeline holds a `dyn Embedder` and must split
+    /// a long drawer at the window this embedder reports; only the backend
+    /// knows which tokenizer it truncates with (Architect ruling Q6: a trait
+    /// method, never a downcast).
+    /// What: default `Ok(None)` — the caller does not chunk. `FastEmbedder`
+    /// returns its cached model tokenizer; a load failure is `Err`, never
+    /// `Ok(None)`, so a known window with an unknown tokenizer cannot degrade
+    /// to one truncated vector.
+    /// Test: `default_chunking_tokenizer_is_none`,
+    /// `chunking_mock_reports_window_and_tokenizer`.
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<Option<std::sync::Arc<super::ChunkTokenizer>>, super::ChunkError> {
+        Ok(None)
+    }
 }
 
 /// Convenience helper: embed a single text via `embed_batch` and return the

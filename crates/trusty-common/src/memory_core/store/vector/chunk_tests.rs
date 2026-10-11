@@ -525,3 +525,32 @@ async fn unalias_reports_error_when_a_group_delete_fails() {
     assert_eq!(outcome.freed.len(), 2, "the retry frees both drawers");
     assert!(keys_of(&store, a).is_empty());
 }
+
+/// #9275 PR C: the shape the health check compares with the expected count.
+#[tokio::test]
+async fn chunk_shapes_counts_rows_and_the_highest_index() {
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    let (whole, gapped, bare) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    store
+        .upsert_chunks(whole, vec![planar(0.0), planar(5.0), planar(10.0)])
+        .await
+        .unwrap();
+    raw_row(&store, &gapped.to_string(), &planar(20.0));
+    raw_row(&store, &format!("{gapped}#3"), &planar(25.0));
+    raw_row(&store, &bare.to_string(), &planar(30.0));
+    raw_row(&store, "not-a-uuid#1", &planar(40.0));
+
+    let shapes = store.chunk_shapes().unwrap();
+    assert_eq!(shapes.len(), 3, "the malformed key names no drawer");
+    let (w, g, b) = (shapes[&whole], shapes[&gapped], shapes[&bare]);
+    assert_eq!((w.rows, w.max_index), (3, 2));
+    assert_eq!((g.rows, g.max_index), (2, 3));
+    assert_eq!((b.rows, b.max_index), (1, 0));
+    assert!(w.is_complete(3) && !w.is_complete(2) && !w.is_complete(4));
+    assert!(
+        !g.is_complete(2) && !g.is_complete(4),
+        "a gap is never complete"
+    );
+    assert!(b.is_complete(1) && !b.is_complete(0));
+}

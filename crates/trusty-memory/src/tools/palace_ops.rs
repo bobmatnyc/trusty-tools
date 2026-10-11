@@ -295,7 +295,8 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
     }))
 }
 
-/// `palace_reembed` — report, and optionally repair, drawers with no vector.
+/// `palace_reembed` — report, and optionally repair, drawers with no vector
+/// or with fewer chunk rows than their text needs (#9275).
 ///
 /// Why (#4906): the deferred-embed lane used to drop failures silently, leaving
 /// drawers durable in redb and permanently invisible to vector recall — 39 of
@@ -341,6 +342,14 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
         "still_failing": report.still_failing,
         "still_missing_ids": report.still_missing_ids
             .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        // #9275: drawers with fewer chunk rows than their text needs. They are
+        // repaired with the missing ones (`limit` caps both, missing first);
+        // `short` is unknown, not zero, while `chunk_check` is "unavailable".
+        "short": report.short,
+        "still_short_ids": report.still_short_ids
+            .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        "chunk_check": super::embed_audit::chunk_state(&report.chunk_check),
+        "chunk_check_error": report.chunk_check.unavailable_reason(),
         // Without this a shortfall is unexplained: "no embedder on this host"
         // reads identically to "the embedder is dropping writes".
         "embedder_ready": health.embedder_ready,

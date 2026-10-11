@@ -127,11 +127,15 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
                 );
                 warmup_state.set_ready();
             }
-            Err(e) => tracing::error!(
-                elapsed_ms = ws.elapsed().as_millis() as u64,
-                "background embedder warm-up failed (daemon stays Warming; \
-                 memory ops will return a bounded error on first request): {e:#}"
-            ),
+            Err(e) => {
+                tracing::error!(
+                    elapsed_ms = ws.elapsed().as_millis() as u64,
+                    "background embedder warm-up failed (daemon stays Warming; \
+                     memory ops will return a bounded error on first request): {e:#}"
+                );
+                // #9275: lets palace_verify_embedded say "failed", not "warming".
+                let _ = warmup_state.embedder_warm_failure.set(format!("{e:#}"));
+            }
         }
     });
 

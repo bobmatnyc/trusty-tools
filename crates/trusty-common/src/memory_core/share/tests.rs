@@ -980,3 +980,37 @@ async fn an_embedder_failure_during_import_writes_nothing_durably() {
     assert_eq!(ok.inserted, 1);
     assert_eq!(dst.kg.load_drawers().unwrap().len(), 1);
 }
+
+/// Why (#9275): an imported memory is re-embedded on arrival, so a long one
+/// must arrive as one vector row per chunk, or its tail is unfindable on the
+/// importing machine.
+/// What: exports a 95-word memory and imports it through a chunking mock
+/// (window 12: ten words per chunk); reads the new drawer's row shape.
+/// Test: itself.
+#[tokio::test]
+async fn import_writes_chunk_rows_for_a_long_shared_record() {
+    use crate::embedder::{MockEmbedder, chunk_text};
+    use crate::memory_core::embed::Embedder;
+    use crate::memory_core::share::import::import_palace_records_with_embedder;
+
+    let tmp = tempdir().unwrap();
+    let src = open_palace(tmp.path(), "chunk-src");
+    let dst = open_palace(tmp.path(), "chunk-dst");
+    let long: String = (0..95).map(|i| format!("w{i} ")).collect();
+    write(&src, long.trim(), &["net"]).await;
+    let records = export_palace_records(&src).unwrap();
+
+    let mock = MockEmbedder::new(dst.vector_store.dim()).with_chunking(12);
+    let tok = mock.chunking_tokenizer().unwrap().expect("tokenizer");
+    let k = chunk_text(&tok, long.trim(), 12).unwrap().len();
+    assert!(k > 1, "{k} chunks");
+    let mock: Arc<dyn Embedder + Send + Sync> = Arc::new(mock);
+    let summary = import_palace_records_with_embedder(&dst, &records, &mock)
+        .await
+        .expect("import");
+    assert_eq!(summary.inserted, 1);
+
+    let id = dst.drawers.read()[0].id;
+    let shape = dst.vector_store.chunk_shapes().unwrap()[&id];
+    assert_eq!((shape.rows, shape.max_index), (k, (k - 1) as u32));
+}

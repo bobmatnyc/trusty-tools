@@ -199,6 +199,18 @@ impl ImportReport {
 /// `non_memory_files_are_skipped_and_non_markdown_ignored`,
 /// `unparseable_file_is_reported_not_fatal`.
 pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
+    run_import_with_wait(opts, refresh::WarmupWait::default()).await
+}
+
+/// [`run_import`] with an explicit warm-up wait for the findability gate.
+///
+/// Why (#9275): the default wait is minutes long; the gate's tests need one of
+/// milliseconds.
+/// Test: `verify_gate_waits_for_a_warming_daemon`.
+pub(crate) async fn run_import_with_wait(
+    opts: &ImportOptions,
+    mut wait: refresh::WarmupWait,
+) -> anyhow::Result<ImportReport> {
     let socket = match &opts.memory_socket {
         Some(url) => url.clone(),
         None => trusty_common::memory_rpc::resolve_memory_socket()
@@ -223,7 +235,7 @@ pub async fn run_import(opts: &ImportOptions) -> anyhow::Result<ImportReport> {
         // deleting the source, so every row that names a drawer has to prove
         // that drawer is retrievable — including one this run only skipped.
         if opts.refresh {
-            refresh::verify_findable(&socket, &opts.palace, &mut result).await;
+            refresh::verify_findable(&socket, &opts.palace, &mut result, &mut wait).await;
         }
         report.files.push(result);
     }

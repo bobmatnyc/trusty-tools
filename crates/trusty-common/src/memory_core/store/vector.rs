@@ -249,6 +249,27 @@ pub struct CompactionResult {
     pub index_size_after: usize,
 }
 
+/// One drawer's chunk rows in the vector index (#9275).
+///
+/// Why: "has a vector" no longer means "fully embedded"; the health check
+/// needs the row count and the highest index to tell a complete group from a
+/// short or gapped one.
+/// What: `rows` keys of the drawer; `max_index` the largest chunk number
+/// (0 for a bare key only).
+/// Test: `chunk_shapes_counts_rows_and_the_highest_index`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkShape {
+    pub rows: usize,
+    pub max_index: u32,
+}
+
+impl ChunkShape {
+    /// Whether the rows are exactly chunks `0..expected`, with no gap.
+    pub fn is_complete(&self, expected: usize) -> bool {
+        expected > 0 && self.rows == expected && self.max_index as usize == expected - 1
+    }
+}
+
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     async fn upsert(&self, id: Uuid, embedding: Vec<f32>) -> Result<()>;
@@ -475,6 +496,28 @@ impl UsearchStore {
                 Vec::new()
             }
         }
+    }
+
+    /// Each drawer's chunk rows, as a row count and the highest chunk index.
+    ///
+    /// Why (#9275): a drawer written before chunking (or by a failed partial
+    /// repair) has fewer rows than its text needs; the health check compares
+    /// this shape with the expected chunk count.
+    /// What: one `VECTOR_KEYS` scan, no embedding. Keys that do not parse are
+    /// skipped, as in [`Self::all_ids`]. A read failure is an error.
+    /// Test: `health_flags_a_gapped_group`,
+    /// `chunk_shapes_counts_rows_and_the_highest_index`.
+    pub fn chunk_shapes(&self) -> Result<HashMap<Uuid, ChunkShape>> {
+        let mut shapes: HashMap<Uuid, ChunkShape> = HashMap::new();
+        for key in self.inner.all_keys()? {
+            let Ok((id, n)) = vector_key::parse(&key) else {
+                continue;
+            };
+            let shape = shapes.entry(id).or_default();
+            shape.rows += 1;
+            shape.max_index = shape.max_index.max(n);
+        }
+        Ok(shapes)
     }
 
     /// [`Self::index_size`] with each drawer's chunk rows counted once.

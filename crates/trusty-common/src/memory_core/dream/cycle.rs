@@ -181,9 +181,17 @@ pub(super) async fn compact_pass(
     // least 1 + 2*drawer_count entries (well past noise). Avoids tight
     // rebuild loops on a healthy small palace.
     if drawer_count > 0 && index_entries > drawer_count.saturating_mul(2) + 1 {
-        let rebuilt = rebuild_index_from_drawers(handle, started, budget)
+        let report = rebuild_index_from_drawers(handle, started, budget)
             .await
             .map_err(|e| e.context("dream compact rebuild"))?;
+        // #9275: each skipped drawer is logged by the rebuild; this is the sum.
+        if report.skipped > 0 {
+            tracing::warn!(
+                palace = %handle.id, skipped = report.skipped,
+                "#9275: dream rebuild left drawers with no vector; embed health reports them"
+            );
+        }
+        let rebuilt = report.rebuilt;
         // `rebuilt` counts every drawer we re-upserted; the number of
         // orphans removed via rebuild is `index_size_before - drawer_count`.
         // Surface a conservative `removed` increment by counting the
@@ -344,7 +352,11 @@ pub(super) async fn dedup_pass_with_embedder(
                 &snapshot,
                 drawer,
                 query_vec,
-                dedup_threshold,
+                MergeRule {
+                    threshold: dedup_threshold,
+                    embedder,
+                    embed_timeout,
+                },
                 &mut already_removed,
                 &mut outcome,
             )
@@ -355,6 +367,15 @@ pub(super) async fn dedup_pass_with_embedder(
     Ok(outcome)
 }
 
+/// How [`dedup_one`] merges: the score floor, and the embedder and per-chunk
+/// ceiling that re-embed a changed survivor (#9275).
+#[derive(Clone, Copy)]
+struct MergeRule<'a> {
+    threshold: f32,
+    embedder: &'a (dyn Embedder + Send + Sync),
+    embed_timeout: Duration,
+}
+
 /// Merge `drawer`'s nearest duplicate, if it has one above the threshold.
 ///
 /// Why: the chunked rewrite (#7106) nests a chunk loop around what used to be
@@ -362,7 +383,8 @@ pub(super) async fn dedup_pass_with_embedder(
 /// this file inside their size budgets and leaves the merge rule in one place.
 /// What: searches the HNSW index with `query_vec`, takes the first neighbour
 /// that is a different, not-yet-removed, unprotected drawer scoring at least
-/// `dedup_threshold`, persists the merge via `helpers::persist_merge`, then
+/// `rule.threshold`, persists the merge via `helpers::persist_merge` (which
+/// re-embeds a changed survivor with `rule`'s embedder and ceiling), then
 /// forgets the loser. Adds to `outcome` — at most one merge per source, which
 /// keeps the pass's behaviour predictable. A failed persist or evict is logged
 /// and counted in `outcome.failed` (#9391), not returned as an error.
@@ -374,20 +396,20 @@ async fn dedup_one(
     snapshot: &[Drawer],
     drawer: &Drawer,
     query_vec: &[f32],
-    dedup_threshold: f32,
+    rule: MergeRule<'_>,
     already_removed: &mut HashSet<Uuid>,
     outcome: &mut DedupOutcome,
 ) -> Result<()> {
     // Top-3 keeps the dedup pass cheap; the first neighbor is `drawer`
     // itself (score ~1.0) so we look at index 1+. `vector_store.search`
     // returns pure cosine similarity — no importance weighting baked
-    // in, so we can compare directly to `dedup_threshold`.
+    // in, so we can compare directly to `rule.threshold`.
     let hits = handle.vector_store.search(query_vec, 3).await?;
     for hit in hits.into_iter() {
         if hit.drawer_id == drawer.id || already_removed.contains(&hit.drawer_id) {
             continue;
         }
-        if hit.score < dedup_threshold {
+        if hit.score < rule.threshold {
             continue;
         }
         // Resolve the loser's drawer record from the snapshot. If it's
@@ -405,7 +427,15 @@ async fn dedup_one(
         // #9172: the survivor is chosen on the live rows and the merged text is
         // persisted BEFORE the loser is deleted. A failed persist deletes
         // nothing, so the loser stays the durable copy of its own text.
-        let (survivor_id, loser_id) = match persist_merge(handle, drawer.id, hit_drawer.id).await {
+        // #9275: the merged survivor is re-embedded as a full chunk group.
+        let merge = persist_merge(
+            handle,
+            drawer.id,
+            hit_drawer.id,
+            rule.embedder,
+            rule.embed_timeout,
+        );
+        let (survivor_id, loser_id) = match merge.await {
             Ok(Some(pair)) => pair,
             Ok(None) => continue,
             Err(e) => {

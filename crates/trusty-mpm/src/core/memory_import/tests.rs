@@ -17,7 +17,11 @@ use serde_json::{Value, json};
 use crate::uds_mock::RpcError;
 
 use super::parse::{describe, parse_memory_file, split_frontmatter, wikilink_targets};
-use super::{DEDUP_CANDIDATE_LIMIT, ImportOptions, ImportStatus, has_headline_of, run_import};
+use super::refresh::WarmupWait;
+use super::{
+    DEDUP_CANDIDATE_LIMIT, ImportOptions, ImportStatus, has_headline_of, run_import,
+    run_import_with_wait,
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -263,6 +267,17 @@ struct StubState {
     deny: HashSet<String>,
     /// Drawer ids `palace_verify_embedded` reports as stored but unfindable.
     unembedded: HashSet<String>,
+    /// #9275: how many `palace_verify_embedded` calls answer as a daemon whose
+    /// embedder is still warming; `usize::MAX` never warms.
+    warming_answers: usize,
+    /// #9275: the drawer ids of every `palace_verify_embedded` call, in order.
+    verify_calls: Vec<String>,
+    /// #9275: set, a not-ready answer reports a FAILED warm-up with this error
+    /// rather than one still in progress.
+    warm_failure: Option<String>,
+    /// #9275: the chunk-count check runs even while not ready — as it does
+    /// live when the only drawer asked about has no vector to count.
+    chunk_check_ran: bool,
 }
 
 type Stub = Arc<Mutex<StubState>>;
@@ -340,6 +355,11 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
                         .collect()
                 })
                 .unwrap_or_default();
+            st.verify_calls.extend(requested.iter().cloned());
+            let warming = st.warming_answers > 0;
+            if warming && st.warming_answers != usize::MAX {
+                st.warming_answers -= 1;
+            }
             let (mut embedded, mut missing, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
             for id in requested {
                 if !st.content.contains_key(&id) {
@@ -356,7 +376,18 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
                 "missing": missing,
                 "unknown": unknown,
                 "alias_audit": "clean",
-                "verified": missing.is_empty() && unknown.is_empty(),
+                // #9275: a warming daemon cannot run the chunk-count check.
+                "chunk_check": if warming && !st.chunk_check_ran { "unavailable" } else { "ran" },
+                "chunk_check_error": warming
+                    .then_some("no embedder has initialised in this process"),
+                "embedder_ready": !warming,
+                "embedder_state": match (&st.warm_failure, warming) {
+                    (_, false) => "ready",
+                    (Some(_), true) => "failed",
+                    (None, true) => "warming",
+                },
+                "embedder_error": st.warm_failure.as_deref().filter(|_| warming),
+                "verified": missing.is_empty() && unknown.is_empty() && !warming,
             })
         }
         other => json!({ "error": format!("unexpected method {other}") }),
@@ -955,6 +986,153 @@ async fn verify_gate_fails_closed_when_it_cannot_run() {
             .contains("the drawer was written"),
         "an unverifiable row must still say the drawer is in the palace: {:#?}",
         report.files[0]
+    );
+}
+
+/// A gate wait short enough for a test: 2 s budget, 10 ms between asks.
+fn quick_wait(budget: std::time::Duration) -> WarmupWait {
+    WarmupWait::new(budget, std::time::Duration::from_millis(10))
+}
+
+/// Why (#9275): since the chunk-count check, a daemon still warming its
+/// embedder answers `verified: false` for a drawer that is fully embedded.
+/// That is "not yet"; failing on it blocked every refresh run started in the
+/// minutes after a daemon start.
+/// What: a drawer already in the palace, a daemon that answers "warming" twice
+/// and then verifies; the refresh run passes after three asks.
+/// Test: itself.
+#[tokio::test]
+async fn verify_gate_waits_for_a_warming_daemon() {
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+    state.lock().unwrap().warming_answers = 2;
+
+    let report = run_import_with_wait(
+        &refresh_opts(dir.path(), daemon.socket(), false),
+        quick_wait(std::time::Duration::from_secs(2)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.failed, 0, "{:#?}", report.files);
+    assert_eq!(report.skipped, 1, "{:#?}", report.files);
+    assert_eq!(state.lock().unwrap().verify_calls.len(), 3);
+}
+
+/// Why (#9275): a daemon that never finishes warming must still fail the run
+/// closed, and the row must say why rather than "named no cause".
+/// What: two drawers already in the palace, a daemon that never warms, a 50 ms
+/// wait. Both rows fail naming the daemon's cause and the warm-up; the second
+/// row asks once, because the deadline is run-wide.
+/// Test: itself.
+#[tokio::test]
+async fn verify_gate_fails_closed_naming_the_cause_when_warm_up_outlasts_the_wait() {
+    let target = "---\nname: gate-merge-commands-with-and\ndescription: Gate merges with &&.\nmetadata:\n  type: feedback\n---\nGate body.\n";
+    let dir = write_dir(&[
+        ("admin-merge-only-on-green.md", SAMPLE),
+        ("gate-merge-commands-with-and.md", target),
+    ]);
+    let (daemon, state) = start_stub().await;
+    run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+    state.lock().unwrap().warming_answers = usize::MAX;
+
+    let report = run_import_with_wait(
+        &refresh_opts(dir.path(), daemon.socket(), false),
+        quick_wait(std::time::Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.failed, 2, "{:#?}", report.files);
+    for row in &report.files {
+        let detail = row.detail.clone().unwrap_or_default();
+        assert!(detail.contains("chunk-count check did not run"), "{detail}");
+        assert!(
+            detail.contains("no embedder has initialised in this process"),
+            "{detail}"
+        );
+        assert!(detail.contains("still warming"), "{detail}");
+        assert!(detail.contains("already in the palace"), "{detail}");
+    }
+    let second = report.files[1].drawer_id.clone().expect("drawer id");
+    let asks = state
+        .lock()
+        .unwrap()
+        .verify_calls
+        .iter()
+        .filter(|id| **id == second)
+        .count();
+    assert_eq!(asks, 1, "the second row must not wait again");
+}
+
+/// Why (#9275, Architect 17:19Z): a daemon whose startup warm-up already
+/// FAILED will not warm by waiting. Waiting out the budget on it is a dead
+/// wait that ends in the same failure minutes later.
+/// What: a daemon that answers "warm-up failed" and names the error, and a
+/// 5 s wait budget. The row fails on the first ask, well inside the budget,
+/// naming the warm-up error and not "still warming" — also when the drawer
+/// has no vector and the chunk check therefore ran.
+/// Test: itself.
+#[tokio::test]
+async fn verify_gate_fails_closed_at_once_naming_a_failed_warm_up() {
+    let dir = write_dir(&[("admin-merge-only-on-green.md", SAMPLE)]);
+    let (daemon, state) = start_stub().await;
+    run_import(&opts(dir.path(), daemon.socket(), false))
+        .await
+        .unwrap();
+    {
+        let mut st = state.lock().unwrap();
+        st.warming_answers = usize::MAX;
+        st.warm_failure = Some("FastEmbedder cold init timed out after 180s".to_string());
+    }
+
+    let budget = std::time::Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let report = run_import_with_wait(
+        &refresh_opts(dir.path(), daemon.socket(), false),
+        quick_wait(budget),
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    let detail = report.files[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("warm-up failed"), "{detail}");
+    assert!(
+        detail.contains("FastEmbedder cold init timed out after 180s"),
+        "{detail}"
+    );
+    assert!(!detail.contains("still warming"), "{detail}");
+    assert_eq!(state.lock().unwrap().verify_calls.len(), 1, "asked once");
+    assert!(elapsed < budget, "waited {elapsed:?} on a failed warm-up");
+
+    // Live shape (EVO): a drawer with no vector, so the chunk check "ran".
+    // The failed warm-up is still named, since no re-embed can run without it.
+    {
+        let mut st = state.lock().unwrap();
+        st.chunk_check_ran = true;
+        let id = report.files[0].drawer_id.clone().expect("drawer id");
+        st.unembedded.insert(id);
+    }
+    let report = run_import_with_wait(
+        &refresh_opts(dir.path(), daemon.socket(), false),
+        quick_wait(budget),
+    )
+    .await
+    .unwrap();
+    let detail = report.files[0].detail.clone().unwrap_or_default();
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert!(detail.contains("has no vector"), "{detail}");
+    assert!(detail.contains("warm-up failed"), "{detail}");
+    assert!(
+        detail.contains("FastEmbedder cold init timed out after 180s"),
+        "{detail}"
     );
 }
 

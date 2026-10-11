@@ -425,3 +425,66 @@ fn mock_embedder_input_window_is_configurable() {
         Some(64)
     );
 }
+
+#[test]
+fn default_chunking_tokenizer_is_none() {
+    assert!(
+        NoWindow
+            .chunking_tokenizer()
+            .expect("default is Ok")
+            .is_none()
+    );
+    assert!(
+        MockEmbedder::new(8)
+            .with_input_window(64)
+            .chunking_tokenizer()
+            .expect("mock is Ok")
+            .is_none(),
+        "a window alone does not supply a tokenizer"
+    );
+}
+
+#[test]
+fn chunking_mock_reports_window_and_tokenizer() {
+    let mock = MockEmbedder::new(8).with_chunking(12);
+    assert_eq!(mock.input_window(), Some(12));
+    let tok = mock
+        .chunking_tokenizer()
+        .expect("tokenizer loads")
+        .expect("chunking mock supplies a tokenizer");
+    assert_eq!(tok.special_overhead(), 2, "[CLS] and [SEP]");
+    assert_eq!(tok.count_tokens("one two three-four five.").unwrap(), 4);
+    let text = (0..30)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let chunks = chunk_text(&tok, &text, 12).expect("chunks");
+    assert!(chunks.len() >= 3, "{} chunks", chunks.len());
+    assert!(
+        chunks
+            .iter()
+            .all(|c| tok.count_tokens(c.text).unwrap() <= 10)
+    );
+}
+
+#[tokio::test]
+async fn chunking_mock_ignores_words_past_the_window() {
+    let mock = MockEmbedder::new(64).with_chunking(6);
+    let v = mock
+        .embed_batch(&[
+            "a b c d".to_string(),
+            "a b c d e f g".to_string(),
+            "d c b a".to_string(),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(v[0], v[1], "words past window - 2 never reach the vector");
+    assert_eq!(v[0], v[2], "word order does not matter");
+    let plain = MockEmbedder::new(64);
+    let p = plain.embed_batch(&["a b c d".to_string()]).await.unwrap();
+    assert_eq!(
+        p[0],
+        plain.hash_to_vec("a b c d"),
+        "MockEmbedder::new is unchanged"
+    );
+}

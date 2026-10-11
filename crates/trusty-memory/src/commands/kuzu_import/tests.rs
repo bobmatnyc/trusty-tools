@@ -867,3 +867,53 @@ fn deprecated_kuzu_data_forwards_to_import() {
         "{err:#}"
     );
 }
+
+/// Why (#9275): `--update` rewrites a drawer's text, so its whole vector group
+/// must follow — a long rewrite gains one row per chunk and a shorter one
+/// leaves no stale `#n` row.
+/// What: a drawer written through the sink, then `update_memory_with` against
+/// a chunking mock (window 12: ten words per chunk) with long, then short,
+/// text; the row shape is read after each.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_memory_rewrites_the_whole_chunk_group() {
+    use trusty_common::embedder::{chunk_text, MockEmbedder};
+    use trusty_common::memory_core::embed::Embedder as _;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let sink = HandleSink {
+        handle: palace(tmp.path(), "kuzu-chunks"),
+    };
+    let mock = MockEmbedder::new(sink.handle.vector_store.dim()).with_chunking(12);
+    let tok = mock.chunking_tokenizer().unwrap().expect("tokenizer");
+    let long: String = (0..95).map(|i| format!("w{i} ")).collect();
+    let k = chunk_text(&tok, &long, 12).expect("chunks").len();
+    assert!(k > 1, "{k} chunks");
+    let mapped = |content: &str| MappedMemory {
+        source_key: "kuzu-memory/m-9".to_string(),
+        memory_id: "m-9".to_string(),
+        store: "/tmp/store".to_string(),
+        content: content.to_string(),
+        hash: "h9".to_string(),
+        created_at: None,
+        importance: 0.5,
+        tags: vec![],
+        refused_tags: vec![],
+    };
+    let id = sink
+        .insert_drawer(&mapped("a drawer the importer will rewrite"))
+        .await
+        .expect("insert");
+    let rows = |sink: &HandleSink| {
+        let shapes = sink.handle.vector_store.chunk_shapes().expect("shapes");
+        shapes.get(&id).map(|s| (s.rows, s.max_index))
+    };
+
+    sink.update_memory_with(&mock, id, &mapped(&long))
+        .await
+        .expect("long rewrite");
+    assert_eq!(rows(&sink), Some((k, (k - 1) as u32)), "one row per chunk");
+    sink.update_memory_with(&mock, id, &mapped("short again"))
+        .await
+        .expect("short rewrite");
+    assert_eq!(rows(&sink), Some((1, 0)), "no stale chunk row survives");
+}
