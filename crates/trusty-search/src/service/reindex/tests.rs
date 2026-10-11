@@ -1264,6 +1264,7 @@ async fn skip_vector_index_never_embeds() {
 /// Walks every transition via `mark_*` helpers directly so the test
 /// doesn't have to race the reindex pipeline.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_capabilities_grows_as_stages_complete() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1391,6 +1392,7 @@ async fn walk_diagnostics_error_set_when_zero_files() {
 /// interactive) requires a live reindex task and is documented in the module
 /// header as needing runtime verification.
 #[test]
+#[serial_test::parallel]
 fn reindex_semaphore_selection_routes_by_priority() {
     let interactive = reindex_semaphore_for(true) as *const Semaphore;
     let background = reindex_semaphore_for(false) as *const Semaphore;
@@ -1432,6 +1434,7 @@ fn reindex_semaphore_selection_routes_by_priority() {
 /// promptly while 44 background tasks queue) requires a running daemon and
 /// is documented as needing manual/integration verification.
 #[tokio::test]
+#[serial_test::parallel]
 async fn interactive_not_blocked_when_background_semaphore_full() {
     // Local semaphores with the same capacities as the global ones so
     // this test is isolated from other parallel tests.
@@ -1479,6 +1482,7 @@ async fn interactive_not_blocked_when_background_semaphore_full() {
 /// obtained) is exercised by `spawn_reindex_with_cleanup` at runtime — the
 /// atomics themselves are standard and don't need separate concurrency tests.
 #[test]
+#[serial_test::parallel]
 fn background_reindex_queue_depth_counts_waiting_tasks() {
     // Save initial value and restore afterward so parallel tests are unaffected.
     let initial = BACKGROUND_QUEUE_DEPTH.load(std::sync::atomic::Ordering::Relaxed);
@@ -1513,6 +1517,7 @@ fn background_reindex_queue_depth_counts_waiting_tasks() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_guard_fires_on_early_return() {
     let progress = Arc::new(ReindexProgress::new());
     // Subscribe before dropping so we can receive the broadcast.
@@ -1557,6 +1562,7 @@ fn reindex_guard_fires_on_early_return() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_guard_uses_captured_failure_reason() {
     let progress = Arc::new(ReindexProgress::new());
     let mut rx = progress.sender.subscribe();
@@ -1601,6 +1607,7 @@ fn reindex_guard_uses_captured_failure_reason() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_guard_failure_reason_is_none_by_default() {
     let progress = Arc::new(ReindexProgress::new());
     let mut rx = progress.sender.subscribe();
@@ -1635,6 +1642,7 @@ fn reindex_guard_failure_reason_is_none_by_default() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_guard_omits_index_id_when_never_stamped() {
     let progress = Arc::new(ReindexProgress::new());
     let mut rx = progress.sender.subscribe();
@@ -1673,6 +1681,7 @@ fn reindex_guard_omits_index_id_when_never_stamped() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_guard_does_not_fire_after_disarm() {
     let progress = Arc::new(ReindexProgress::new());
     let mut rx = progress.sender.subscribe();
@@ -1713,6 +1722,7 @@ fn reindex_guard_does_not_fire_after_disarm() {
 ///
 /// Test: this test (issue #839).
 #[test]
+#[serial_test::parallel]
 fn incremental_reindex_no_durable_data_loss() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -1888,6 +1898,7 @@ fn incremental_reindex_no_durable_data_loss() {
 ///
 /// Test: this test (issue #839 hardening).
 #[test]
+#[serial_test::parallel]
 fn incremental_reindex_carryover_failure_aborts() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -2130,6 +2141,7 @@ async fn lexical_chunks_reports_corpus_total_not_pass_count() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn inprocess_embedder_flag_reset_restores_false() {
     // The flag is accessed through the test-only accessors that batch.rs
     // exposes via the mod.rs re-export; this keeps the test coupled only
@@ -2169,6 +2181,7 @@ fn inprocess_embedder_flag_reset_restores_false() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn inprocess_embedder_flag_isolated_across_scenarios() {
     // Scenario A: guard guarantees clean start even after prior tests may
     // have left the flag set.
@@ -2349,6 +2362,7 @@ async fn office_documents_are_indexed_and_lexically_searchable() {
 /// to say the merge failed, which is precisely why `rebuild_kg` could not tell
 /// and marked the stage `Ready` unconditionally.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn reindex_does_not_report_ready_when_the_contrib_merge_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -2421,6 +2435,7 @@ async fn reindex_does_not_report_ready_when_the_contrib_merge_fails() {
 /// Test: this test. Pre-fix it fails on the first assertion with
 /// `left: Complete, right: Failed`.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn reindex_producer_panic_does_not_report_complete() {
     use crate::core::embed::Embedder;
     use crate::core::store::{UsearchStore, VectorStore};

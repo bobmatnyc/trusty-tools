@@ -35,6 +35,7 @@ fn ready_state_with_tracker() -> (Arc<SearchAppState>, Arc<EmbedderStallTracker>
 /// What: build a ready state, call health_handler, assert fields.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_ready_when_no_timeouts() {
     let (state, _tracker) = ready_state_with_tracker();
     let Json(resp) = health_handler(State(state)).await;
@@ -59,6 +60,7 @@ async fn health_reports_ready_when_no_timeouts() {
 /// What: record two timeouts, call health_handler, assert `"stalled"`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_stalled_after_embed_timeouts() {
     let (state, tracker) = ready_state_with_tracker();
 
@@ -91,6 +93,7 @@ async fn health_reports_stalled_after_embed_timeouts() {
 /// What: record timeout then success; assert `"ready"` and count == 0.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_recovers_to_ready_after_stall_clears() {
     let (state, tracker) = ready_state_with_tracker();
 
@@ -130,6 +133,7 @@ async fn health_recovers_to_ready_after_stall_clears() {
 /// What: serialize `HealthResponse` to JSON and verify field presence.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn health_response_contains_stall_fields() {
     use crate::service::server::health::HealthResponse;
     use crate::service::server::state::WarmBootSummary;
@@ -200,6 +204,7 @@ fn health_response_contains_stall_fields() {
 /// What: serialize with `None` and assert the key is missing.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn health_response_omits_last_ok_when_none() {
     use crate::service::server::health::HealthResponse;
     use crate::service::server::state::WarmBootSummary;
@@ -281,6 +286,7 @@ fn health_response_omits_last_ok_when_none() {
 /// creation.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn health_reports_the_deferred_embed_queue_depth_end_to_end() {
     // #6369: `QUEUE_DEPTH` is a process-global gauge, and a detached embed pass
     // from an already-finished sibling test still moves it — the drain poll then

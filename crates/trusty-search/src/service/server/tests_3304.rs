@@ -33,6 +33,7 @@ fn guarded_router() -> axum::Router {
 /// so the router-wide guard MUST reject it with `403` before the handler runs.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn admin_stop_rejects_cross_origin_write() {
     let resp = guarded_router()
         .oneshot(
@@ -56,6 +57,7 @@ async fn admin_stop_rejects_cross_origin_write() {
 /// routes — a loopback `Origin` is trusted and must NOT be 403'd.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn admin_stop_allows_loopback_write() {
     let resp = guarded_router()
         .oneshot(
@@ -80,6 +82,7 @@ async fn admin_stop_allows_loopback_write() {
 /// existing caller breaks. This is the fail-open-on-missing-Origin contract.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn admin_stop_allows_missing_origin() {
     let resp = guarded_router()
         .oneshot(
@@ -103,6 +106,7 @@ async fn admin_stop_allows_missing_origin() {
 /// read cross-origin under the permissive CORS policy).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn read_route_allows_cross_origin() {
     let resp = guarded_router()
         .oneshot(

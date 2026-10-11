@@ -21,6 +21,7 @@ use super::to_corpus_relative_path;
 /// verifies the result matches what the batch loop would produce.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn to_corpus_relative_path_agrees_with_batch_loop() {
     let root = std::path::Path::new("/repo/root");
     let path = std::path::Path::new("/repo/root/src/lib.rs");
@@ -48,6 +49,7 @@ fn to_corpus_relative_path_agrees_with_batch_loop() {
 /// Test: this test.  The actual async guard in `prune_deleted_files_from_staging`
 /// is exercised end-to-end; this unit test validates the guard's predicate.
 #[test]
+#[serial_test::parallel]
 fn disk_existence_guard_skips_live_file() {
     let dir = tempfile::tempdir().unwrap();
     let live_file = dir.path().join("live.rs");
@@ -78,6 +80,7 @@ fn disk_existence_guard_skips_live_file() {
 /// both files appear exactly once even when a file has multiple chunks.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn list_indexed_files_returns_distinct_paths() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -133,6 +136,7 @@ fn list_indexed_files_returns_distinct_paths() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn deleted_file_chunks_persist_without_prune_pass() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -204,6 +208,7 @@ fn deleted_file_chunks_persist_without_prune_pass() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_pass_removes_deleted_file_from_staged_corpus() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -339,6 +344,7 @@ fn prune_pass_removes_deleted_file_from_staged_corpus() {
 ///
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn changed_file_orphan_chunks_removed_before_reinsert() {
     use crate::core::chunker::{ChunkType, RawChunk};
     use crate::core::corpus::CorpusStore;
@@ -580,6 +586,7 @@ async fn flush_and_reopen(handle: &IndexHandle) -> CorpusStore {
 /// exclude `b.rs` while `a.rs` survives intact.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_rebuild_drops_chunks_for_a_deleted_file() {
     let (root, handle, vectors) = colocated_fixture("force-prune-deleted");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
@@ -649,6 +656,7 @@ async fn force_rebuild_drops_chunks_for_a_deleted_file() {
 /// surfaces exclude `b.rs`.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_rebuild_drops_chunks_for_a_file_outside_the_include_set() {
     let (root, handle, vectors) = colocated_fixture("force-prune-excluded");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
@@ -717,6 +725,7 @@ async fn force_rebuild_drops_chunks_for_a_file_outside_the_include_set() {
 /// "keep everything".
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_reconcile_keeps_a_chunk_written_after_the_id_snapshot() {
     let (root, handle, vectors) = colocated_fixture("force-reconcile-race");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha_survives() {}\n").unwrap();
@@ -804,6 +813,7 @@ async fn force_reconcile_keeps_a_chunk_written_after_the_id_snapshot() {
 /// unchanged.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_fails() {
     let (root, handle, _vectors) = colocated_fixture("force-reconcile-scan-err");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
@@ -837,6 +847,7 @@ async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_fails() {
 /// unchanged.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_panics() {
     let (root, handle, _vectors) = colocated_fixture("force-reconcile-scan-panic");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
@@ -870,6 +881,7 @@ async fn force_reconcile_leaves_warm_chunks_alone_when_the_id_scan_panics() {
 /// asserts the in-memory chunk count is unchanged.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_reconcile_leaves_warm_chunks_alone_without_a_corpus() {
     let (root, handle, _vectors) = colocated_fixture("force-reconcile-no-corpus");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
@@ -904,6 +916,7 @@ async fn force_reconcile_leaves_warm_chunks_alone_without_a_corpus() {
 /// Fails with the #8922 fixes disabled: both the excluded and the sops file keep chunks.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn reindex_prunes_a_file_that_became_excluded_and_sops_content() {
     let (root, handle, _vectors) = colocated_fixture("x8922-prune");
     std::fs::create_dir(root.path().join("secrets")).unwrap();
@@ -975,6 +988,7 @@ async fn reindex_prunes_a_file_that_became_excluded_and_sops_content() {
 /// `__init__.py` is not this case: the Python chunker still emits a chunk.)
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_incremental_reindex_of_only_a_chunkless_file_completes() {
     let (root, handle, _vectors) = colocated_fixture("x8922-empty");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha() {}\n").unwrap();
@@ -1029,6 +1043,7 @@ async fn durable_hash_for(handle: &IndexHandle, file: &str) -> Option<String> {
 /// unchanged, the error is counted and neither stamp moved; a clean retry
 /// then prunes it and stamps. Fails against d6529ca1f5: the warm ids left.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps() {
     let (root, handle, _vectors) = colocated_fixture("x9212-prune");
     std::fs::write(root.path().join("a.rs"), "pub fn alpha_9212() {}\n").unwrap();

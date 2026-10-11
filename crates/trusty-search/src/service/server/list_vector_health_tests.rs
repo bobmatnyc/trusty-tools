@@ -206,6 +206,7 @@ async fn list_indexes_details_reports_embed_lag() {
 /// `{"indexes": ["<id>"]}` — one key, an array of strings.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_without_details_is_unchanged() {
     use super::indexes::ListIndexesParams;
     let state = state_with("plain-arm", 17, 0).await;

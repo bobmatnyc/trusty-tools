@@ -41,6 +41,7 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
 /// GET returns the index's current hygiene config with the targeted defaults
 /// surfaced (the data-export skip dirs + the 64 KiB cap).
 #[tokio::test]
+#[serial_test::parallel]
 async fn get_returns_current_config() {
     let state = state_with_index("cfg-get");
     let resp = index_config_handler(State(state), Path("cfg-get".to_string())).await;
@@ -63,6 +64,7 @@ async fn get_returns_current_config() {
 
 /// GET on an unknown index id returns 404.
 #[tokio::test]
+#[serial_test::parallel]
 async fn get_unknown_index_404() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let resp = index_config_handler(State(state), Path("ghost".to_string())).await;
@@ -161,6 +163,7 @@ async fn patch_updates_only_supplied_fields() {
 /// A PATCH with `data_file_max_bytes = 0` is rejected with 400 — a zero cap
 /// would prune every data file.
 #[tokio::test]
+#[serial_test::parallel]
 async fn patch_rejects_zero_cap() {
     let state = state_with_index("cfg-zero");
     let resp = patch_index_config_handler(
@@ -232,6 +235,7 @@ async fn patch_persist_failure_returns_500() {
 
 /// PATCH on an unknown index id returns 404.
 #[tokio::test]
+#[serial_test::parallel]
 async fn patch_unknown_index_404() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let resp = patch_index_config_handler(

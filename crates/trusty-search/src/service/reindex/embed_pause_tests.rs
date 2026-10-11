@@ -340,6 +340,7 @@ async fn a_paused_pass_owes_work_and_a_resumed_one_embeds_only_the_gap() {
 /// The gate a drained daemon hands back is `Drained`, which is what every call
 /// site branches on rather than re-reading the pause flag.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_drained_handle_reports_drained_to_its_call_sites() {
     let gate = EmbeddingPause::new();
     gate.pause();

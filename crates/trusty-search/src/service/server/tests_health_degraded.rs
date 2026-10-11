@@ -26,6 +26,7 @@ use axum::Json;
 /// `warm_boot_degraded = true`, and reports `indexes_corpus_failed == 1`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_when_corpus_open_failed() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -111,6 +112,7 @@ async fn health_reports_degraded_when_corpus_open_failed() {
 /// 0`, and does not spuriously set `warm_boot_degraded`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_stays_ok_when_no_corpus_failed() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -157,6 +159,7 @@ async fn health_stays_ok_when_no_corpus_failed() {
 /// flag flips to `false`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -209,6 +212,7 @@ async fn warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly() {
 /// asserts the flag is `true`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageState};
@@ -263,6 +267,7 @@ async fn warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded() 
 /// false`), recomputes, and asserts the flag stays `false`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn recompute_does_not_flag_an_in_progress_tail_job_as_degraded() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -315,6 +320,7 @@ async fn recompute_does_not_flag_an_in_progress_tail_job_as_degraded() {
 /// stays `0`, and asserts `/health` still reports `status: "degraded"`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_when_tcc_skip_recorded() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -361,6 +367,7 @@ async fn health_reports_degraded_when_tcc_skip_recorded() {
 /// the scenario the test is named for and keeps the original assertion intact.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_when_scan_timeout_recorded() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -417,6 +424,7 @@ async fn health_reports_degraded_when_scan_timeout_recorded() {
 /// stays `0` (neither registered handle has a failed stage).
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_on_mass_index_loss() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -458,6 +466,7 @@ async fn health_reports_degraded_on_mass_index_loss() {
 /// `/health` reports `status: "ok"`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_status_stays_ok_when_no_warm_boot_degraded_condition_holds() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
@@ -498,6 +507,7 @@ async fn health_status_stays_ok_when_no_warm_boot_degraded_condition_holds() {
 /// monitors gate on.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_for_a_stuck_never_walked_index() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
@@ -552,6 +562,7 @@ async fn health_reports_degraded_for_a_stuck_never_walked_index() {
 /// what `health_reports_degraded_for_an_abandoned_mid_walk_index` asserts.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_does_not_flag_a_walked_index_as_stuck() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
@@ -611,6 +622,7 @@ async fn health_does_not_flag_a_walked_index_as_stuck() {
 /// not some other difference between the two fixtures.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};
@@ -682,6 +694,7 @@ async fn health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk() {
 /// than double-count.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_degraded_for_an_abandoned_mid_walk_index() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageStatus};

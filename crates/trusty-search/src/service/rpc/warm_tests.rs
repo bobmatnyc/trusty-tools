@@ -144,6 +144,7 @@ async fn warm_over_the_socket_matches_the_http_body() {
 /// (`400` maps to `invalid_params`), before any run starts (#9027).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_socket_refuses_a_warm_window_past_the_cap() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     state.warm.set_rss_probe(fixed_rss);

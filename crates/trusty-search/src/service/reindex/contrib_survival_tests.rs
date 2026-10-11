@@ -183,6 +183,7 @@ async fn assert_contribution_intact(handle: &IndexHandle, producer: &str, force:
 /// Test: this test. Multi-threaded flavour because the pipeline puts blocking
 /// redb work on `spawn_blocking`.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn contributed_graph_survives_an_incremental_reindex() {
     let tmp = make_root();
     let handle = make_handle(tmp.path(), "contrib-survives-incremental");
@@ -199,6 +200,7 @@ async fn contributed_graph_survives_an_incremental_reindex() {
 /// reindex phase writes `kg_contrib`, only the external ingest endpoint does.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn contributed_graph_survives_a_force_reindex() {
     let tmp = make_root();
     let handle = make_handle(tmp.path(), "contrib-survives-force");
@@ -215,6 +217,7 @@ async fn contributed_graph_survives_a_force_reindex() {
 /// reindex — and the loss would look exactly the same.
 /// Test: this test, alternating force and incremental across three runs.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn contributed_graph_survives_repeated_reindexes() {
     let tmp = make_root();
     let handle = make_handle(tmp.path(), "contrib-survives-repeat");

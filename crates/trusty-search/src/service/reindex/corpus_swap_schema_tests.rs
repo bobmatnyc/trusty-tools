@@ -90,6 +90,7 @@ async fn reopen(handle: &IndexHandle) -> CorpusStore {
 /// Force starts with empty derived rows, but preserves exactly the applied
 /// version; incremental continues carrying both rows and the same version.
 #[tokio::test]
+#[serial_test::parallel]
 async fn staging_preserves_exact_applied_schema_without_advancing_it() {
     for force in [true, false] {
         for version in [0, CURRENT_SCHEMA_VERSION - 1, CURRENT_SCHEMA_VERSION] {
@@ -144,6 +145,7 @@ async fn staging_preserves_exact_applied_schema_without_advancing_it() {
 /// A full force pipeline followed by cold redb/HNSW reopen must not replay
 /// M005 and collapse vector coverage for two files with identical contents.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn force_reindex_preserves_schema_and_vectors_after_reopen() {
     let (root, live) = fixture(CURRENT_SCHEMA_VERSION);
     for file in ["a.rs", "b.rs"] {
@@ -194,6 +196,7 @@ async fn force_reindex_preserves_schema_and_vectors_after_reopen() {
 
 /// Abort discards staged metadata and retains the previous durable corpus.
 #[tokio::test]
+#[serial_test::parallel]
 async fn aborted_staging_preserves_live_schema_and_rows() {
     for force in [true, false] {
         let (_root, handle) = fixture(CURRENT_SCHEMA_VERSION - 1);
@@ -228,6 +231,7 @@ async fn aborted_staging_preserves_live_schema_and_rows() {
 /// Failure to open a force staging file must keep the live corpus installed;
 /// no metadata or derived rows are promoted from the failed staging attempt.
 #[tokio::test]
+#[serial_test::parallel]
 async fn failed_force_staging_preserves_live_schema_and_rows() {
     let (_root, handle) = fixture(CURRENT_SCHEMA_VERSION);
     let tmp = super::staging_corpus_path(
@@ -262,6 +266,7 @@ async fn failed_force_staging_preserves_live_schema_and_rows() {
 /// A metadata read error must take the existing force fallback without
 /// installing or promoting the partial staging corpus over the live bytes.
 #[tokio::test]
+#[serial_test::parallel]
 async fn failed_schema_read_does_not_promote_force_staging() {
     use std::sync::atomic::{AtomicBool, Ordering};
 

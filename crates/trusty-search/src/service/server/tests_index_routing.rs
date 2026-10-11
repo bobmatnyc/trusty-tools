@@ -64,6 +64,8 @@ fn semantic_query() -> crate::core::indexer::SearchQuery {
 /// retries on it would loop forever.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn semantic_stage_on_skip_vector_index_is_503_not_degraded_200() {
     let state = state_with_handle("vec-off", |h| {
         h.skip_vector = true;
@@ -124,6 +126,7 @@ async fn semantic_stage_before_embed_completes_is_503_retryable() {
 /// Why (#5068): the refusal is worthless if it also fires on a working index.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn semantic_stage_on_a_ready_vector_lane_is_not_refused() {
     let ready_stage = StageState {
         status: StageStatus::Ready,
@@ -209,6 +212,7 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 /// fails against the pre-fix commit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_status_503_body_names_search_as_the_restore_path() {
     let state = state_with_cold_index("cold-body");
     let (code, axum::Json(body)) = super::status::index_status_handler(
@@ -234,6 +238,7 @@ async fn cold_parked_status_503_body_names_search_as_the_restore_path() {
 /// collapsed the two states into one bodyless 503 pre-fix.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn restore_failed_status_503_body_is_not_retryable() {
     let state = state_with_cold_index("failed-body");
     let id = IndexId::new("failed-body".to_string());
@@ -264,6 +269,7 @@ async fn restore_failed_status_503_body_is_not_retryable() {
 /// one answer.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_and_status_agree_on_a_cold_parked_index() {
     let state = state_with_cold_index("cold-agree");
     let params: super::files::ChunksParams =
@@ -304,6 +310,7 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
 /// asserted before #5349.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn write_path_cold_parked_index_reports_only_a_failed_load() {
     let state = state_with_cold_index("cold-write");
     let embedder: Arc<dyn crate::core::Embedder> =
@@ -362,6 +369,7 @@ async fn write_path_cold_parked_index_reports_only_a_failed_load() {
 /// the MCP layer would start classifying an unknown index as "not built yet".
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn write_path_unknown_index_is_still_404() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let req: super::router::RemoveFileRequest =
@@ -385,6 +393,7 @@ async fn write_path_unknown_index_is_still_404() {
 /// Widening the body must not widen the status code.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn residency_miss_is_404_only_when_absent_everywhere() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let (code, axum::Json(body)) = super::status::index_status_handler(
@@ -466,6 +475,7 @@ async fn status_semantic_coverage_reports_live_vector_count() {
 /// healthy answer, not a fault.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_semantic_coverage_distinguishes_absent_from_unreadable() {
     let state = state_with_handle("no-store", |_| {});
     let axum::Json(body) = super::status::index_status_handler(
@@ -498,6 +508,7 @@ async fn status_semantic_coverage_distinguishes_absent_from_unreadable() {
 /// one endpoint the whole contract points at was the one not honouring it.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_residency_bodies_match_the_shared_contract() {
     let failed = state_with_cold_index("search-failed");
     failed
@@ -543,6 +554,7 @@ async fn search_residency_bodies_match_the_shared_contract() {
 /// Why: the 404 arm had the same omission as the 503 arm.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_unknown_index_404_carries_index_id() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let query: crate::core::indexer::SearchQuery =
@@ -610,6 +622,7 @@ fn corpus_with_chunks(n: usize) -> (tempfile::TempDir, Arc<crate::core::corpus::
 /// UNKNOWN and must therefore appear in neither counter.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_counts_a_real_corpus_and_excludes_a_corpus_failed_index() {
     use crate::core::indexer::CodeIndexer;
 
@@ -681,6 +694,7 @@ async fn health_counts_a_real_corpus_and_excludes_a_corpus_failed_index() {
 /// the assertion.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_populated_and_empty_index_counts() {
     let registry = IndexRegistry::new();
     for id in ["empty-a", "empty-b"] {

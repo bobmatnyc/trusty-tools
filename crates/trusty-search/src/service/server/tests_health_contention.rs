@@ -35,6 +35,7 @@ use super::*;
 /// to clear the flag.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn recompute_does_not_clear_degraded_when_a_stages_read_is_contended() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageState};
@@ -94,6 +95,7 @@ async fn recompute_does_not_clear_degraded_when_a_stages_read_is_contended() {
 /// stages lock is contended, and `true` when every handle reads cleanly.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn recompute_reports_whether_its_scan_was_conclusive() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};

@@ -151,6 +151,7 @@ async fn create_with_new_roots_on_an_existing_id_is_refused() {
 /// readable registry keeps the on-disk row's fields and swaps in the table.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn an_unreadable_registry_never_yields_a_rebuilt_row() {
     use crate::service::persistence::PersistedIndex;
     let indexer = crate::core::indexer::CodeIndexer::new("row", PathBuf::from("/w/primary"));

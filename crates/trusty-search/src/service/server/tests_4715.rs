@@ -60,6 +60,7 @@ fn state_with_cold_index(id: &str) -> Arc<SearchAppState> {
 ///
 /// Why: 404 would let the MCP layer classify a BUILT index as `not_indexed`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_index_status_is_503_not_404() {
     let state = state_with_cold_index("cold-a");
     let err = super::status::index_status_handler(
@@ -74,6 +75,7 @@ async fn cold_parked_index_status_is_503_not_404() {
 /// A permanently restore-failed index is also 503 — it exists, it just cannot
 /// be served (#1106).
 #[tokio::test]
+#[serial_test::parallel]
 async fn restore_failed_index_status_is_503_not_404() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let id = IndexId::new("failed-a".to_string());
@@ -95,6 +97,7 @@ async fn restore_failed_index_status_is_503_not_404() {
 /// The 404 survives for an id that is in NO store — the case the MCP layer is
 /// entitled to read as "never indexed".
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_404_only_when_absent_from_every_store() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let err = super::status::index_status_handler(
@@ -109,6 +112,7 @@ async fn status_404_only_when_absent_from_every_store() {
 /// `list_chunks` follows the same rule as `index_status` — it is routed
 /// through the same MCP classification.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_index_chunks_is_503_not_404() {
     let state = state_with_cold_index("cold-b");
     let err = super::files::get_index_chunks_handler(
@@ -133,6 +137,7 @@ async fn cold_parked_index_chunks_is_503_not_404() {
 
 /// Per-index `grep` follows the same rule, and says why in the body.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_index_grep_is_503_not_404() {
     let state = state_with_cold_index("cold-c");
     let (code, axum::Json(body)) = super::files::grep_handler(
@@ -168,6 +173,7 @@ async fn cold_parked_index_grep_is_503_not_404() {
 /// `register_with_reason` never consults the failed set and nothing ever
 /// clears it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn restore_failed_index_grep_says_restart_not_retry() {
     let state = state_with_cold_index("failed-c");
     let id = IndexId::new("failed-c".to_string());

@@ -223,6 +223,7 @@ async fn drain(mut items: RpcStreamItems) -> Vec<serde_json::Value> {
 /// fails here rather than in a dashboard.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn reindex_progress_events_match_the_sse_body_frame_for_frame() {
     let (state, http, rpc) = routers(&["rs"]).await;
     let expected = progress_sequence();
@@ -256,6 +257,7 @@ async fn reindex_progress_events_match_the_sse_body_frame_for_frame() {
 /// truncated stream.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_finished_reindex_stream_ends_after_its_replay() {
     let (state, _http, rpc) = routers(&["rs"]).await;
     plant_progress(&state, "rs", ReindexStatus::Complete, &progress_sequence()).await;
@@ -279,6 +281,7 @@ async fn a_finished_reindex_stream_ends_after_its_replay() {
 /// would pass every test above and fail this one.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
     let (state, _http, rpc) = routers(&["rs"]).await;
     let start = serde_json::json!({ "event": "start", "total_files": 3 });
@@ -327,6 +330,7 @@ async fn a_live_reindex_stream_delivers_events_in_order_as_they_are_emitted() {
 /// `a_stream_opening_against_live_pushes_loses_and_repeats_nothing` below.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() {
     let (state, _http, rpc) = routers(&["rs"]).await;
     let before = serde_json::json!({ "event": "start", "total_files": 2 });
@@ -376,6 +380,7 @@ async fn an_event_either_side_of_the_stream_opening_is_delivered_exactly_once() 
 /// missing one, a repeated event as a missing one plus a duplicate.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
 async fn a_stream_opening_against_live_pushes_loses_and_repeats_nothing() {
     /// Below the 256-slot broadcast channel and the 500-event replay cap, so a
     /// lag or a truncation here would be a broken fixture rather than a finding.
@@ -440,6 +445,7 @@ async fn a_stream_opening_against_live_pushes_loses_and_repeats_nothing() {
 /// the same HTTP status.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unknown_index_is_refused_before_the_reindex_stream_opens() {
     let (_state, http, rpc) = routers(&["rs"]).await;
 
@@ -485,6 +491,7 @@ async fn an_unknown_index_is_refused_before_the_reindex_stream_opens() {
 /// subscribed yet".
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_status_stream_opens_with_the_same_connected_frame_sse_writes() {
     let (_state, http, rpc) = routers(&[]).await;
 
@@ -509,6 +516,7 @@ async fn the_status_stream_opens_with_the_same_connected_frame_sse_writes() {
 /// which they can only do by reading one `state.events`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream() {
     let (state, http, rpc) = routers(&[]).await;
 
@@ -571,6 +579,7 @@ async fn a_daemon_event_reaches_both_the_sse_body_and_the_socket_stream() {
 /// permit would leak one per abandoned dashboard, which no later event clears.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
     use trusty_common::uds::server::{serve_until, RpcServeOptions};
 
@@ -680,6 +689,7 @@ async fn a_client_that_drops_mid_stream_leaves_no_producer_subscribed() {
 /// Test: this test. It does not compile on `origin/main`: neither the method
 /// nor `IndexHandle::file_events` exists there.
 #[tokio::test]
+#[serial_test::parallel]
 async fn file_events_replays_the_ring_then_streams_live() {
     let (state, _http, rpc) = routers(&["feed-6524"]).await;
     let handle = state
@@ -723,6 +733,7 @@ async fn file_events_replays_the_ring_then_streams_live() {
 /// is the not-found refusal.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unknown_index_is_refused_before_the_file_events_stream_opens() {
     let (_state, _http, rpc) = routers(&["feed-known-6524"]).await;
 

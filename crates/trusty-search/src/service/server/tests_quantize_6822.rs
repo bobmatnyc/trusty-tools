@@ -93,6 +93,7 @@ async fn status_reports_the_live_vector_quantization() {
 /// live index. Both name the index and its chunk count — the confirmation an
 /// operator acts on.
 #[tokio::test]
+#[serial_test::parallel]
 async fn quantize_converts_the_live_index_and_reports_the_chunk_count() {
     let (state, _root, _snap, store) = seeded("q-convert").await;
 
@@ -143,6 +144,7 @@ async fn quantize_converts_the_live_index_and_reports_the_chunk_count() {
 /// against an index already at that default is therefore a reported no-op, not
 /// a conversion — which is what makes the backfill safe to re-run over a fleet.
 #[tokio::test]
+#[serial_test::parallel]
 async fn quantize_defaults_to_the_env_default() {
     let (state, _root, _snap, _store) = seeded("q-default").await;
     let Json(body) = quantize_handler(State(state), Path("q-default".to_string()), None)
@@ -159,6 +161,7 @@ async fn quantize_defaults_to_the_env_default() {
 /// #6822: a mistyped precision is refused. The env parser degrades to the
 /// default by design; a request for a one-way whole-arena rewrite must not.
 #[tokio::test]
+#[serial_test::parallel]
 async fn quantize_rejects_an_unknown_precision() {
     let (state, _root, _snap, _store) = seeded("q-bad").await;
     let err = quantize_handler(
@@ -200,6 +203,7 @@ async fn quantize_over_socket(
 /// run over the socket answers the body the handler answers, and writes
 /// nothing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn quantize_over_the_socket_matches_the_http_body() {
     let (state, _root, _snap, store) = seeded("q-socket").await;
 
@@ -235,6 +239,7 @@ async fn quantize_over_the_socket_matches_the_http_body() {
 /// unknown precision is `invalid_params`, an unregistered index is not found —
 /// and neither refusal converts anything.
 #[tokio::test]
+#[serial_test::parallel]
 async fn quantize_refusals_over_the_socket_keep_their_codes() {
     use crate::service::rpc::error::CODE_NOT_FOUND;
     use trusty_common::uds::server::CODE_INVALID_PARAMS;

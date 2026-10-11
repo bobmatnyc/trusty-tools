@@ -85,6 +85,7 @@ fn probe_query() -> SearchQuery {
 /// than an empty 200. Against pre-fix code this fails with `Ok(200)`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_against_corpus_failed_index_returns_503_not_empty_200() {
     let (state, embedder) = build_state_with(&[("broken", Some(CorpusOpenFailure::OpenTimeout))]);
     state.install_embedder(embedder).await;
@@ -119,6 +120,7 @@ async fn search_against_corpus_failed_index_returns_503_not_empty_200() {
 /// that the rebuild instruction survives.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn corpus_failure_response_distinguishes_permanent_from_transient() {
     let (state, embedder) =
         build_state_with(&[("rotten", Some(CorpusOpenFailure::FormatIncompatible))]);
@@ -174,6 +176,8 @@ async fn healthy_index_is_unaffected_by_the_corpus_failure_guard() {
 /// exclusion without a count would be the same silence in a different place.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_excludes_and_counts_corpus_failed_indexes() {
     let (state, embedder) = build_state_with(&[
         ("ok-one", None),
@@ -272,6 +276,7 @@ async fn corpus_open_failure_kind_tracks_the_flag() {
 /// which is what feeds `search_all`'s `cold_indexes_skipped`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn timed_out_entry_is_parked_in_cold_store() {
     let (state, _embedder) = build_state_with(&[]);
     let id = IndexId::new("slow-restore".to_string());
@@ -308,6 +313,7 @@ async fn timed_out_entry_is_parked_in_cold_store() {
 /// is parked. Against the pre-fix code the cold store would contain the entry.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn panicked_restore_is_not_parked_in_cold_store() {
     let (state, _embedder) = build_state_with(&[]);
     let id = IndexId::new("panicked-restore".to_string());
@@ -334,6 +340,7 @@ async fn panicked_restore_is_not_parked_in_cold_store() {
 /// `cold_indexes_skipped` for a perfectly healthy fan-out.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn completed_restore_is_not_parked_in_cold_store() {
     let (state, _embedder) = build_state_with(&[]);
 

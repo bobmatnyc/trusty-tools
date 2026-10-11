@@ -21,6 +21,7 @@ use super::*;
 /// What: asserts the default field values.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn default_options_are_sane() {
     let opts = ReindexOptions::default();
     assert!(!opts.verify_after);
@@ -40,6 +41,7 @@ fn default_options_are_sane() {
 /// What: asserts the default field values.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn default_outcome_is_zero() {
     let o = ReindexOutcome::default();
     assert_eq!(o.indexed, 0);
@@ -59,6 +61,7 @@ fn default_outcome_is_zero() {
 /// What: constructs styles for all three states and asserts no panic.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn bar_style_does_not_panic() {
     use super::super::reindex_ui::ReindexUi;
     // Constructing the UI exercises all bar styles.
@@ -92,6 +95,7 @@ fn bar_style_does_not_panic() {
 /// asserts the hard-deadline path would not fire.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn progress_aware_wait_no_hard_deadline_when_implicit() {
     let opts = ReindexOptions {
         timeout_explicit: false,
@@ -128,6 +132,7 @@ fn progress_aware_wait_no_hard_deadline_when_implicit() {
 /// asserts the hard deadline is set.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn progress_aware_wait_hard_deadline_when_explicit() {
     let opts = ReindexOptions {
         timeout_secs: 300,
@@ -161,6 +166,7 @@ fn progress_aware_wait_hard_deadline_when_explicit() {
 /// NOT produce a hard deadline (the `> 0` guard).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn progress_aware_wait_timeout_zero_explicit_means_no_deadline() {
     let opts = ReindexOptions {
         timeout_secs: 0,
@@ -194,6 +200,7 @@ fn progress_aware_wait_timeout_zero_explicit_means_no_deadline() {
 /// asserts the stall condition fires only when the counter is frozen.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn stall_detection_triggers_on_frozen_counter() {
     // Simulate: counter has been at 100 for > stall_secs.
     let last_indexed_snapshot: u64 = 100;
@@ -222,6 +229,7 @@ fn stall_detection_triggers_on_frozen_counter() {
 /// elapsed; asserts the stall condition does NOT fire.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn stall_detection_does_not_trigger_while_progressing() {
     let last_indexed_snapshot: u64 = 100;
     let current_indexed: u64 = 150; // advanced — progressing
@@ -250,6 +258,7 @@ fn stall_detection_does_not_trigger_while_progressing() {
 /// What: stores a value and reads it back via Acquire ordering.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn total_files_atomic_zero_until_set() {
     use std::sync::atomic::{AtomicU64, Ordering};
     let total_files_now = AtomicU64::new(0);
@@ -276,6 +285,7 @@ fn total_files_atomic_zero_until_set() {
 /// the correct strings.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn eta_logic_loading_model_and_zero_denom() {
     use super::super::reindex_ui::ReindexPhase;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -337,6 +347,7 @@ fn eta_logic_loading_model_and_zero_denom() {
 /// asserts slot 2 length is 500 (not 1).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn embed_bar_total_is_set_before_first_batch() {
     use super::super::reindex_ui::{ReindexPhase, ReindexUi};
     let mut ui = ReindexUi::new("idx", false);
@@ -367,6 +378,7 @@ fn embed_bar_total_is_set_before_first_batch() {
 /// at the batch transition; asserts slot 1 is still Active after a batch.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn chunk_bar_not_frozen_at_first_batch() {
     use super::super::reindex_ui::{ReindexPhase, ReindexUi};
     let mut ui = ReindexUi::new("idx", false);
@@ -414,6 +426,7 @@ fn chunk_bar_not_frozen_at_first_batch() {
 /// What: simulates the new guard condition for both modes.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn embedder_ready_fires_for_in_process_embedder() {
     // In-process path: embedder_pid_slot is None, first_batch_ever = true
     let first_batch_ever = true;
@@ -472,6 +485,7 @@ fn conflict(message: &str, data: serde_json::Value) -> RpcError {
 /// a bail — `index --force` reindexes that id.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_root_owned_by_another_index_is_reported_not_bailed() {
     let daemon = mock_daemon(|method, params| {
         assert_eq!(method, "search.index.create");
@@ -509,6 +523,7 @@ async fn a_root_owned_by_another_index_is_reported_not_bailed() {
 /// #9214: today's daemon sends a conflict's body only as its message, so the
 /// owner is found by a lookup of the root — the index registered there.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_conflict_without_data_finds_the_owner_by_root() {
     let root = tempfile::tempdir().expect("root");
     let root_str = root.path().to_string_lossy().into_owned();
@@ -542,6 +557,7 @@ async fn a_conflict_without_data_finds_the_owner_by_root() {
 /// bail rather than become a silently-adopted target.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_conflict_without_an_existing_id_still_bails() {
     let daemon = mock_daemon(|method, _| match method {
         "search.index.create" => Err(RpcError::new(
@@ -570,6 +586,7 @@ async fn a_conflict_without_an_existing_id_still_bails() {
 /// reach them as the daemon's refusal.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_legacy_register_wrapper_still_bails_on_a_root_collision() {
     let daemon =
         mock_daemon(|_, _| Err(conflict("collision", json!({ "existing_id": "owner" })))).await;
@@ -589,6 +606,7 @@ async fn the_legacy_register_wrapper_still_bails_on_a_root_collision() {
 /// #8727: an overlap conflict names the blocking index and its root in its
 /// message; the CLI must print that text.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_overlap_conflict_names_the_blocking_index_and_root() {
     let daemon = mock_daemon(|method, _| match method {
         "search.index.create" => Err(RpcError::new(
@@ -618,6 +636,7 @@ async fn an_overlap_conflict_names_the_blocking_index_and_root() {
 /// #8922: an unparseable exclude glob is refused as invalid params whose
 /// message names the pattern. The CLI must print that text.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_invalid_exclude_glob_refusal_names_the_pattern() {
     let daemon = mock_daemon(|_, _| {
         Err(RpcError::invalid_params(
@@ -642,6 +661,7 @@ async fn an_invalid_exclude_glob_refusal_names_the_pattern() {
 /// and the params carry the filters that differ from the defaults.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_successful_registration_reports_created() {
     let daemon = mock_daemon(|_, params| {
         assert_eq!(params["skip_kg"], true, "{params}");
@@ -672,6 +692,7 @@ async fn a_successful_registration_reports_created() {
 /// exchange is a fault to report, not "the daemon is not running" — every
 /// caller turns `Unreachable` into "start the daemon" or a soft skip.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_broken_exchange_is_an_error_not_unreachable() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let socket = dir.path().join("ts.sock");
@@ -701,6 +722,7 @@ async fn a_broken_exchange_is_an_error_not_unreachable() {
 
 /// #9214 H2: nothing serving the socket is still `Unreachable`, naming it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_absent_socket_is_unreachable_and_named() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let socket = dir.path().join("absent.sock");
@@ -723,6 +745,7 @@ async fn an_absent_socket_is_unreachable_and_named() {
 /// `add`'s per-file write is `search.index.file.put` with the file's path and
 /// content under `body`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_single_file_is_sent_as_file_put() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let file = dir.path().join("a.rs");

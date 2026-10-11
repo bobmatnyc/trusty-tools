@@ -72,6 +72,7 @@ async fn handle_and_chunks(state: &SearchAppState, id: &str) -> (Arc<IndexHandle
 /// the claim refusal it answers `200 queued: true`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_of_a_serve_only_index_is_refused_with_403() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("serve-only-8883", dir.path(), true).await;
@@ -113,6 +114,7 @@ async fn reindex_of_a_serve_only_index_is_refused_with_403() {
 /// progress entry.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_of_a_normal_index_is_still_queued() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("normal-8883", dir.path(), false).await;
@@ -142,6 +144,7 @@ async fn reindex_of_a_normal_index_is_still_queued() {
 /// corpus is unchanged. Against code without the claim refusal it returns `Ok`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn an_internal_reindex_spawn_refuses_a_serve_only_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("serve-only-spawn-8883", dir.path(), true).await;
@@ -172,6 +175,7 @@ async fn an_internal_reindex_spawn_refuses_a_serve_only_index() {
 /// serve-only reason and publishes no progress entry.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_config_release_catch_up_refuses_a_serve_only_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("serve-only-release-8883", dir.path(), true).await;
@@ -198,6 +202,7 @@ async fn a_config_release_catch_up_refuses_a_serve_only_index() {
 /// code without the gate the index is watched.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn no_watcher_starts_for_a_serve_only_index() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = planted("serve-only-watch-8883", dir.path(), true).await;

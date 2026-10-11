@@ -190,6 +190,7 @@ async fn create_index_refuses_a_symlinked_ancestor_of_an_existing_index_root() {
 /// "no overlap, create it" — the fail-open arm is the hazard this guard exists
 /// to close.
 #[test]
+#[serial_test::parallel]
 fn overlap_check_fails_closed_when_the_candidate_cannot_be_canonicalized() {
     let missing = PathBuf::from("/nonexistent-4289/never-created");
 

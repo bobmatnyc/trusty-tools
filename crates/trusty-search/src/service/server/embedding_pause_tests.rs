@@ -63,6 +63,7 @@ async fn rpc_ok(rpc: &RpcRouter, method: &str, id: &str) -> serde_json::Value {
 /// state after each.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pause_then_resume_round_trips_over_the_socket() {
     let (state, rpc) = state_with_index("pause-round-trip").await;
     let handle = state
@@ -104,6 +105,7 @@ async fn pause_then_resume_round_trips_over_the_socket() {
 /// What: dispatches each method twice and asserts both bodies are identical.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pause_and_resume_are_idempotent_over_the_socket() {
     let (_state, rpc) = state_with_index("pause-idempotent").await;
     let first = rpc_ok(
@@ -144,6 +146,7 @@ async fn pause_and_resume_are_idempotent_over_the_socket() {
 /// not-found JSON-RPC code.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pausing_or_resuming_an_unknown_index_is_refused() {
     let (_state, rpc) = state_with_index("pause-known").await;
     for method in [

@@ -326,6 +326,7 @@ impl VectorStore for RefusingStore {
 /// The commit-error arm. Fails against fe7e377e35: the error returned early
 /// and ALPHA's hash survived over a file whose chunks were already removed.
 #[tokio::test]
+#[serial_test::parallel]
 async fn commit_error_clears_the_old_hash() {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
     let store: Arc<dyn VectorStore> = Arc::new(RefusingStore);
@@ -399,6 +400,7 @@ async fn commit_error_clears_the_old_hash() {
 /// does, so it neither counts as indexed nor keeps a hash for chunks redb
 /// lacks. Fails against 8fe9e93737: no error, BRAVO's hash recorded.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_failed_redb_write_fails_the_batch_and_withholds_its_hash() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut indexer = CodeIndexer::new("redb-write-fail-9230", dir.path());
@@ -452,6 +454,7 @@ async fn a_failed_redb_write_fails_the_batch_and_withholds_its_hash() {
 /// asserts ALPHA's ids and rows are unchanged, BRAVO did not land, the hash
 /// is withheld and the failure is counted. Fails against d6529ca1f5.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash() {
     let id = "refused-pre-commit-remove-9212";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -540,6 +543,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCounter {
 /// One summary WARN per batch, not one per file. Fails when the WARN moves
 /// back inside the per-file loop, as it was at fe7e377e35.
 #[tokio::test]
+#[serial_test::parallel]
 async fn withheld_hashes_log_one_summary_warn_per_batch() {
     use tracing_subscriber::layer::SubscriberExt as _;
 

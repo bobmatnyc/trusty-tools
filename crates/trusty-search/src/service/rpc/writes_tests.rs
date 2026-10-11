@@ -735,6 +735,7 @@ const CONTENT: &str = "fn authenticate(token: &str) -> bool { verify(token) }\n"
 /// compared with nothing excused.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (_state, http, rpc) =
@@ -761,6 +762,7 @@ async fn index_file_over_the_socket_matches_the_http_body() {
 /// file answers `indexed: false` with a reason instead of a silent success.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, _rpc) =
@@ -807,6 +809,7 @@ async fn index_file_reports_chunks_and_never_indexes_an_empty_file() {
 /// that refusal is a 500 whose body says `indexed: false`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_error_arm_never_reports_indexed() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let indexer = CodeIndexer::new("cap", tmp.path().to_str().expect("utf8")).with_chunk_cap(1);
@@ -839,6 +842,7 @@ async fn index_file_error_arm_never_reports_indexed() {
 /// What: index `FILE`, tombstone it, read the reply and the corpus.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, _rpc) =
@@ -864,6 +868,7 @@ async fn index_file_tombstone_is_the_one_indexed_reply_with_zero_chunks() {
 /// a network-mounted index.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (_state, http, rpc) =
@@ -896,6 +901,7 @@ async fn remove_file_over_the_socket_matches_the_http_body() {
 /// must refuse rather than register anything on the way past.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
@@ -937,6 +943,7 @@ async fn a_write_against_an_unknown_index_is_refused_and_indexes_nothing() {
 /// the route then answers 200 `indexed: true` for both.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
@@ -984,6 +991,7 @@ async fn index_file_refuses_an_excluded_path_and_sops_content_on_either_transpor
 /// Fails with `reject_invalid_globs` removed from either handler.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn create_and_patch_reject_an_invalid_exclude_glob() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, _rpc) =
@@ -1017,6 +1025,7 @@ async fn create_and_patch_reject_an_invalid_exclude_glob() {
 /// request retries (bounded) while it is refused as `reindex_already_running`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn reindex_over_the_socket_matches_the_http_body() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (_state, http, rpc) =
@@ -1055,6 +1064,7 @@ async fn reindex_over_the_socket_matches_the_http_body() {
 /// taught `code_for` precisely so the refusal does not read as "file a bug".
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wf", tmp.path()))).await;
@@ -1096,6 +1106,7 @@ async fn a_reindex_in_cooldown_is_refused_and_queues_nothing_on_either_transport
 /// failed open (flag, kind, no corpus), then compares the two refusals.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("wq", tmp.path()))).await;
@@ -1139,6 +1150,7 @@ async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_tra
 /// without the claim refusal both transports answer `queued: true`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_serve_only_reindex_is_refused_and_queues_nothing_on_either_transport() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let planted = planted_registry("so", tmp.path());
@@ -1202,6 +1214,7 @@ fn ingest_body(producer: &str) -> serde_json::Value {
 /// nothing excused.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn graph_ingest_over_the_socket_matches_the_http_body() {
     let http_tree = tempfile::tempdir().expect("tempdir");
     let sock_tree = tempfile::tempdir().expect("tempdir");
@@ -1240,6 +1253,7 @@ async fn graph_ingest_over_the_socket_matches_the_http_body() {
 /// traversal can actually reach.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unmerged_contribution_is_refused_identically_and_stays_unqueryable() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let registry = IndexRegistry::new();
@@ -1315,6 +1329,7 @@ async fn an_unmerged_contribution_is_refused_identically_and_stays_unqueryable()
 /// (#41).
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn writes_are_refused_when_the_shared_limiter_is_saturated() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = SearchAppState::new(planted_registry("wf", tmp.path())).with_query_guards(
@@ -1399,6 +1414,7 @@ async fn chunks_for(state: &SearchAppState, id: &str, key: &str) -> Vec<String> 
 /// answers `removed_chunks: 0`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_takes_an_absolute_in_root_path_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
@@ -1451,6 +1467,7 @@ async fn remove_file_takes_an_absolute_in_root_path_9236() {
 /// `CODE_INVALID_PARAMS`; the indexed file keeps every chunk.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_refuses_a_path_outside_the_root_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
@@ -1506,6 +1523,7 @@ async fn remove_file_refuses_a_path_outside_the_root_9236() {
 /// path. Fails with the literal key dropped from `remove_keys`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, _rpc) =
@@ -1537,6 +1555,7 @@ async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
 /// Fails against 3b46800460: every form removes `b.rs`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("root");
@@ -1607,6 +1626,7 @@ async fn remove_file_by_a_symlinked_path_removes_the_link_key_9236() {
 /// Fails against 3b46800460: every refused path answers 200.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_refuses_a_relative_path_outside_the_root_9236() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;

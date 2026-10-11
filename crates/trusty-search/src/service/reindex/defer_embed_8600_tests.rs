@@ -155,6 +155,7 @@ async fn handle_with(
 /// waiting, the task never finished, and the `timeout` below failed.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let redb_path = tmp.path().join("index.redb");
@@ -202,6 +203,7 @@ async fn a_drain_abandons_an_in_flight_embed_wave_and_releases_the_corpus() {
 /// failed.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_never_completing_embedder_aborts_the_pass_within_the_deadline() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let redb_path = tmp.path().join("index.redb");

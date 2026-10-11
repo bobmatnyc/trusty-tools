@@ -762,10 +762,7 @@ pub(crate) async fn search_report(
     // The background write task below updates the map after a successful write so
     // the rate-limit semantics are fully preserved.
     {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_unix = crate::core::project_map::now_unix();
         // Consult the in-memory cache — no disk read.
         let stale = state
             .last_queried_write_cache
@@ -784,13 +781,16 @@ pub(crate) async fn search_report(
             // synchronous file I/O — parking an async worker thread on a lock
             // another blocking writer holds. On the blocking pool that is what
             // the pool is for; on a worker it starves the runtime.
-            tokio::task::spawn_blocking(move || {
+            let _stamp = tokio::task::spawn_blocking(move || {
                 if let Err(e) =
                     crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
                 {
                     tracing::debug!("last_queried_unix update failed for '{id_str}': {e}");
                 }
             });
+            // #9684: a test joins the stamp so it writes inside its serial_test guard.
+            #[cfg(test)]
+            let _ = _stamp.await;
         }
     }
     // Use the same domain-aware classifier as `CodeIndexer::search` so the

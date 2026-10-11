@@ -385,6 +385,7 @@ async fn a_deleted_index_skips_snapshot_writes_without_the_swap_error() {
 /// is neither quarantined nor detached, so only the `deleted` check refuses
 /// its snapshot writes once the delete has detached it.
 #[test]
+#[serial_test::parallel]
 fn a_deleted_indexer_that_never_wired_a_corpus_refuses_snapshot_writes() {
     let root = tempfile::tempdir().expect("root");
     let mut indexer = CodeIndexer::new(INDEX_ID, root.path());

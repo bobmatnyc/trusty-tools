@@ -271,6 +271,7 @@ async fn index_status_over_the_socket_matches_the_http_body() {
 /// object with the same field names.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_config_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -330,6 +331,7 @@ async fn config_over_the_socket_matches_the_http_body() {
 /// consumer. Both modes are asserted, and the `limit` clamp with them.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn chunks_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -378,6 +380,7 @@ async fn chunks_over_the_socket_matches_the_http_body() {
 /// second implementation would most plausibly get wrong.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn graph_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
     const HOST_SAMPLED: [&str; 1] = ["generated_at"];
@@ -415,6 +418,7 @@ async fn graph_over_the_socket_matches_the_http_body() {
 /// transport would hide.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn graph_stats_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -435,6 +439,7 @@ async fn graph_stats_over_the_socket_matches_the_http_body() {
 /// two transports to accept different inputs.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn graph_neighbors_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -476,6 +481,7 @@ fn without_generated_line(report: &str) -> String {
 /// around it. This compares the frame's string against the HTTP text.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn call_chain_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -509,6 +515,7 @@ async fn call_chain_over_the_socket_matches_the_http_body() {
 /// would send a caller looking for a daemon fault.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unknown_index_reports_not_found_on_every_index_scoped_read() {
     let (_state, _http, rpc) = fixture().await;
 
@@ -565,6 +572,7 @@ async fn an_unknown_index_reports_not_found_on_every_index_scoped_read() {
 /// cold-store state through both transports.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_cold_parked_index_reports_the_retryable_unavailable_code() {
     let (_state, http, rpc) = fixture().await;
 
@@ -605,6 +613,7 @@ async fn a_cold_parked_index_reports_the_retryable_unavailable_code() {
 /// 503 would poll forever.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable() {
     let (_state, http, rpc) = fixture().await;
 
@@ -641,6 +650,7 @@ async fn call_chain_over_the_socket_reports_a_kg_disabled_index_as_unavailable()
 /// a bug instead of fixing its request.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_bad_direction_reports_invalid_params_on_both_transports() {
     let (_state, http, rpc) = fixture().await;
 
@@ -667,6 +677,7 @@ async fn a_bad_direction_reports_invalid_params_on_both_transports() {
 /// telling the caller what it left out.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_index_scoped_method_without_an_index_id_reports_invalid_params() {
     let (_state, _http, rpc) = fixture().await;
 

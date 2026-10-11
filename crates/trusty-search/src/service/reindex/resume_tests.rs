@@ -697,6 +697,7 @@ async fn promotion_clears_the_checkpoint_even_when_the_store_was_released_early(
 /// indexed. Uses only pre-#8889 APIs, so it fails at the assertion on the base.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_leftover_staging_directory_does_not_break_the_next_run() {
     let root = make_root(FIXTURE);
     let handle = make_handle(root.path(), "leftover-dir-8889");

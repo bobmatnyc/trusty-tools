@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 #[tokio::test]
+#[serial_test::parallel]
 async fn install_embedder_error_surfaces_in_health() {
     use crate::core::registry::IndexRegistry;
 
@@ -27,6 +28,7 @@ async fn install_embedder_error_surfaces_in_health() {
 /// than the generic "initializing" reason. Callers (CLI, MCP) rely on
 /// the message to surface the underlying cause to operators.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_returns_503_with_error_when_embedder_failed() {
     use crate::core::registry::IndexRegistry;
     use axum::body::to_bytes;
@@ -91,6 +93,7 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
 /// recorded error must be cleared so `/health` reports `"ready"` and not
 /// `"error"` (e.g. if a retry succeeded after a transient failure).
 #[tokio::test]
+#[serial_test::parallel]
 async fn install_embedder_clears_previous_error() {
     use crate::core::embed::MockEmbedder;
     use crate::core::registry::IndexRegistry;
@@ -117,6 +120,7 @@ async fn install_embedder_clears_previous_error() {
 /// `current_switchable_embedder`, independent of (but installed alongside)
 /// the trait-object `embedder_slot`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn switchable_embedder_installed_alongside_embedder() {
     use crate::core::embed::MockEmbedder;
     use crate::core::registry::IndexRegistry;
@@ -159,6 +163,7 @@ async fn switchable_embedder_installed_alongside_embedder() {
 /// call queues successfully.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_handler_rejects_within_cooldown() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -215,6 +220,7 @@ async fn reindex_handler_rejects_within_cooldown() {
 /// load-bearing.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_status_aborted_memory_serializes_lowercase() {
     let status = crate::service::reindex::ReindexStatus::AbortedMemory;
     let json = serde_json::to_string(&status).expect("serialize");
@@ -300,6 +306,7 @@ async fn index_status_reports_indexing_then_ready() {
 /// asserts every new field deserialises with a plausible value.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_includes_resource_fields() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let Json(resp) = health_handler(State(state)).await;
@@ -330,6 +337,7 @@ async fn health_includes_resource_fields() {
 /// `try_current_embedder()` — must return `None` without blocking.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_non_blocking_when_embedder_slot_write_locked() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
 
@@ -369,6 +377,7 @@ async fn health_non_blocking_when_embedder_slot_write_locked() {
 /// `embedder_info` is present (non-None) and the response reports "ready".
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_includes_embedder_info_when_ready() {
     use crate::core::embed::MockEmbedder;
 
@@ -399,6 +408,7 @@ async fn health_includes_embedder_info_when_ready() {
 /// prediction the trait default would produce.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_prefers_real_provider_readback_over_prediction() {
     use async_trait::async_trait;
 
@@ -451,6 +461,7 @@ async fn health_prefers_real_provider_readback_over_prediction() {
 /// prediction exactly as before this slice — no regression for the common
 /// path.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_falls_back_to_predicted_provider_when_no_readback() {
     use crate::core::embed::MockEmbedder;
 
@@ -485,6 +496,7 @@ async fn health_falls_back_to_predicted_provider_when_no_readback() {
 /// used in `main()` so this test guards any future removal of the floor.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn worker_thread_count_at_least_16() {
     use crate::worker_thread_count;
 
@@ -528,6 +540,7 @@ fn worker_thread_count_at_least_16() {
 ///
 /// Test: this test (issue #1097 atomicity fix).
 #[test]
+#[serial_test::parallel]
 fn registry_remove_and_get_returns_handle_atomically() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -566,6 +579,7 @@ fn registry_remove_and_get_returns_handle_atomically() {
 /// Why: DELETE of a non-registered id must degrade gracefully.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn registry_remove_and_get_returns_none_for_missing_id() {
     use crate::core::registry::{IndexId, IndexRegistry};
 
