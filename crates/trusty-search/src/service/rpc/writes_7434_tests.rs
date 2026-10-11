@@ -276,6 +276,7 @@ async fn status_lists_every_root_and_its_watch() {
 /// chunks, and forget that same key's content hash.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn remove_file_maps_an_additional_root_path_to_its_stored_key() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
@@ -351,6 +352,7 @@ async fn planted_with_extra_file(
 /// to `<primary>/@root1/src/extra.rs`, a path that does not exist.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn search_keeps_a_hit_under_an_additional_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
@@ -380,6 +382,7 @@ async fn search_keeps_a_hit_under_an_additional_root() {
 /// under an additional root was silently dropped.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn grep_finds_a_match_under_an_additional_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");

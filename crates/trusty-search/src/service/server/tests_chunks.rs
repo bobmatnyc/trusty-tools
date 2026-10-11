@@ -73,6 +73,7 @@ async fn call_chunks(
 /// Cursor mode: paging forward by `next_cursor` covers every chunk exactly
 /// once, in ascending id order, and terminates with `next_cursor = null`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_endpoint_cursor_pages_full_coverage() {
     let (state, name) = state_with_chunks(&["a:1:1", "b:1:1", "c:1:1", "d:1:1", "e:1:1"]).await;
 
@@ -110,6 +111,7 @@ async fn chunks_endpoint_cursor_pages_full_coverage() {
 /// unchanged, total is preserved, and `next_cursor` is always null (offset
 /// order differs from cursor order, so it must not seed a cursor walk).
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_endpoint_offset_back_compat() {
     let (state, name) = state_with_chunks(&["a:1:1", "b:1:1", "c:1:1"]).await;
 
@@ -150,6 +152,7 @@ async fn chunks_endpoint_offset_back_compat() {
 
 /// An unknown index id is a 404, in both modes.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_endpoint_unknown_index_is_404() {
     let (state, _name) = state_with_chunks(&["a:1:1"]).await;
     let err = get_index_chunks_handler(
@@ -170,6 +173,7 @@ async fn chunks_endpoint_unknown_index_is_404() {
 /// #7677: with no `path_prefix` the body carries exactly the pre-#7677 keys —
 /// the echo must not appear, or an existing client sees a new field.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_endpoint_without_path_prefix_keeps_the_legacy_body() {
     let (state, name) = state_with_chunks(&["a:1:1", "b:1:1"]).await;
     let body = call_chunks(
@@ -201,6 +205,7 @@ async fn chunks_endpoint_without_path_prefix_keeps_the_legacy_body() {
 /// #7677: an ACTIVE `path_prefix` is echoed, so a client can tell a scoped
 /// `total` from a whole-corpus one.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chunks_endpoint_echoes_an_active_path_prefix() {
     let (state, name) = state_with_chunks(&["a:1:1", "b:1:1"]).await;
     let body = call_chunks(

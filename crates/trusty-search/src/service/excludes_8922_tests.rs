@@ -167,6 +167,7 @@ async fn boot_reconcile_delta_honours_the_walker_policy() {
 /// removal arm dropped the file's chunks.
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::parallel]
 async fn boot_reconcile_delta_leaves_an_undetermined_file_alone() {
     let (_temp, root) = tree();
     let booted = Arc::new(handle("x8922-loop", &root, false));
@@ -198,6 +199,7 @@ async fn boot_reconcile_delta_leaves_an_undetermined_file_alone() {
 /// Fails with the #8922 fixes disabled: the sweep kept every file still on disk, and
 /// the sops file's plaintext chunks survived its re-encryption.
 #[tokio::test]
+#[serial_test::parallel]
 async fn rescan_drops_sops_files_and_files_the_policy_now_excludes() {
     let (_temp, root) = tree();
     std::fs::write(root.join(SOPS), PLAIN_YAML).unwrap();

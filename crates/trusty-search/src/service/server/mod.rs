@@ -210,6 +210,9 @@ mod tests_grep;
 mod tests_grep_glob_7674;
 #[cfg(test)]
 mod tests_health;
+// #112 routing tests, split from `tests_health` for the line cap (#9684).
+#[cfg(test)]
+mod routing_mode_tests;
 #[cfg(test)]
 mod tests_health_chat;
 #[cfg(test)]

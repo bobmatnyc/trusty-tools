@@ -135,6 +135,7 @@ fn assert_same_refusal(
 /// resolved.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_empty_message_is_refused_identically_on_both_transports() {
     let (http, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "message": "" });
@@ -158,6 +159,7 @@ async fn an_empty_message_is_refused_identically_on_both_transports() {
 /// permanent sibling, which would tell the UI to stop offering the panel.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn chat_without_a_provider_is_refused_identically_on_both_transports() {
     let (http, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "message": "how does auth work?" });
@@ -182,6 +184,7 @@ async fn chat_without_a_provider_is_refused_identically_on_both_transports() {
 /// on the same provider refusal rather than a `400`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_question_alias_decodes_on_both_transports() {
     let (http, rpc) = routers();
     let body = serde_json::json!({ "index_id": INDEX, "question": "how does auth work?" });
@@ -206,6 +209,7 @@ async fn the_question_alias_decodes_on_both_transports() {
 /// a lane verdict.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn chat_is_a_unary_method_and_not_a_stream() {
     assert!(
         !crate::service::rpc::streams::METHODS.contains(&chat::METHOD_CHAT),

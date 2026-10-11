@@ -213,6 +213,7 @@ fn last_indexed_only_matches_the_mtime_from_the_full_helper() {
 /// chunks.json-only dir returns that file's mtime.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn last_indexed_prefers_redb_then_chunks_json() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
@@ -255,6 +256,7 @@ fn last_indexed_prefers_redb_then_chunks_json() {
 /// What: calls the selector against an empty tempdir and asserts `None`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn last_indexed_none_when_no_candidates_exist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let got = first_existing_mtime_rfc3339(tmp.path(), &["index.redb", "chunks.json"]);
@@ -270,6 +272,7 @@ fn last_indexed_none_when_no_candidates_exist() {
 /// What: builds a BM25-only state, asserts `embedder_info` is `None`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_omits_embedder_info_when_bm25_only() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let Json(resp) = health_handler(State(state)).await;
@@ -287,6 +290,7 @@ async fn health_omits_embedder_info_when_bm25_only() {
 /// with `n=2`, and asserts the tail + `total` count.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn logs_tail_returns_recent_lines() {
     let buffer = trusty_common::log_buffer::LogBuffer::new(100);
     buffer.push("line one".to_string());
@@ -309,6 +313,7 @@ async fn logs_tail_returns_recent_lines() {
 /// both clamp to a valid result.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn logs_tail_clamps_n() {
     let buffer = trusty_common::log_buffer::LogBuffer::new(100);
     for i in 0..5 {
@@ -339,6 +344,7 @@ async fn logs_tail_clamps_n() {
 /// calls `admin_stop_handler` and asserts the JSON body.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn admin_stop_returns_ok() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let _driver = state.shutdown_tx.subscribe();
@@ -358,6 +364,7 @@ async fn admin_stop_returns_ok() {
 /// helpful message — silently resolving it against the daemon's CWD is
 /// the exact bug we are fixing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_rejects_relative_root_path() {
     use crate::core::registry::IndexRegistry;
     use axum::body::to_bytes;
@@ -405,6 +412,7 @@ async fn create_index_rejects_relative_root_path() {
 /// has not been created yet (the reindex walker would see no files,
 /// silently producing an empty index named after a real project).
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_rejects_nonexistent_root_path() {
     use crate::core::registry::IndexRegistry;
     use axum::body::to_bytes;

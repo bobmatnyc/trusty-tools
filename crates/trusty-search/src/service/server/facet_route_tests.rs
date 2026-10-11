@@ -151,6 +151,8 @@ async fn pinned_semantic_on_a_worktree_routes_to_the_base_facet() {
 /// a worse outcome than the `503` it replaces.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn semantic_routing_does_not_cross_repo_identities() {
     let (_dirs, state) = two_facet_state("acme/widget", "acme/unrelated");
     let (code, axum::Json(body)) = super::search::search_handler(

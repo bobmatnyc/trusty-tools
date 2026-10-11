@@ -50,6 +50,7 @@ fn opts() -> ReindexOptions {
 /// Q5: a stream that ends cleanly before any `complete` event is a failed
 /// reindex, not a success.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_stream_ending_without_complete_is_an_error() {
     let (daemon, calls) =
         daemon_streaming(vec![Ok(json!({ "event": "start", "total_files": 3 }))]).await;
@@ -70,6 +71,7 @@ async fn a_stream_ending_without_complete_is_an_error() {
 
 /// Q5: a stream that ends with an error item fails the run and carries it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_stream_error_is_an_error() {
     let (daemon, _) = daemon_streaming(vec![
         Ok(json!({ "event": "start", "total_files": 3 })),
@@ -89,6 +91,7 @@ async fn a_stream_error_is_an_error() {
 
 /// A `complete` event finishes the run and fills the outcome.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_complete_event_finishes_the_run() {
     let (daemon, _) = daemon_streaming(vec![
         Ok(json!({ "event": "start", "total_files": 2 })),
@@ -107,6 +110,7 @@ async fn a_complete_event_finishes_the_run() {
 /// A kickoff the daemon refuses as `not found` names the index and never
 /// opens the stream.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unknown_index_kickoff_names_it() {
     let daemon = mock_daemon_streaming(
         |_, _| Err(RpcError::new(CODE_NOT_FOUND, "unknown index: ghost")),
@@ -125,6 +129,7 @@ async fn an_unknown_index_kickoff_names_it() {
 /// #9214: a status the health check cannot read is "could not verify", not a
 /// 0-chunk unhealthy index.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_status_that_cannot_be_read_is_not_verified() {
     let daemon = mock_daemon(|_, _| Err(RpcError::internal("corpus read failed"))).await;
 
@@ -139,6 +144,7 @@ async fn a_status_that_cannot_be_read_is_not_verified() {
 
 /// A populated index whose sanity query hits verifies.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_healthy_index_verifies() {
     let daemon = mock_daemon(|method, _| match method {
         "search.index.status" => Ok(json!({ "chunk_count": 12 })),

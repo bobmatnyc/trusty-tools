@@ -263,6 +263,7 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
 /// survives.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_refuses_when_the_persisted_registry_cannot_be_read() {
     if !isolate_in_child_process(
         "service::reindex::root_hijack_tests::\

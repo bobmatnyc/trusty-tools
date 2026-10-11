@@ -175,6 +175,7 @@ async fn dial_once(socket: &Path, request: &serde_json::Value, budget: Duration)
 ///
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn rpc_router_registers_every_documented_method() {
     let router = super::build_router(&state_with_indexes(0));
     let mut registered: Vec<&str> = router.method_names().chain(router.stream_names()).collect();
@@ -196,6 +197,7 @@ fn rpc_router_registers_every_documented_method() {
 /// refusal rather than one frame. This pins the table each name lives in.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn rpc_router_registers_the_two_streams_as_streams() {
     let router = super::build_router(&state_with_indexes(0));
     let mut streaming: Vec<&str> = router.stream_names().collect();
@@ -232,6 +234,7 @@ fn rpc_router_registers_the_two_streams_as_streams() {
 /// independent of that test rather than a weaker restatement of it.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn every_family_method_is_spliced_into_the_socket_method_list() {
     for (family, names) in [
         ("health", &[METHOD_HEALTH][..]),
@@ -262,6 +265,7 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
 /// that contract for the names it has not claimed yet.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn rpc_reports_method_not_found_for_an_unknown_method() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");
@@ -305,6 +309,7 @@ async fn rpc_reports_method_not_found_for_an_unknown_method() {
 /// test that fails if it is replaced with a derived `Deserialize`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn rpc_health_answers_with_no_params() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");
@@ -340,6 +345,7 @@ async fn rpc_health_answers_with_no_params() {
 /// deliberate decision rather than a side effect.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn rpc_health_answers_with_a_stray_params_object() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");
@@ -423,6 +429,7 @@ async fn health_over_the_socket_matches_the_http_body() {
 /// `serve_until_shutdown` exists.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn serve_unlinks_its_socket_on_shutdown() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");
@@ -451,6 +458,7 @@ async fn serve_unlinks_its_socket_on_shutdown() {
 /// first is live.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn bind_refuses_a_socket_another_process_is_serving() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");
@@ -498,6 +506,7 @@ async fn bind_refuses_a_socket_another_process_is_serving() {
 /// pins.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn bind_reclaims_a_stale_socket_file() {
     let tmp = TempDir::new().expect("tempdir");
     let dir = tmp.path().join("sockets");
@@ -547,6 +556,7 @@ async fn bind_reclaims_a_stale_socket_file() {
 /// trusty-memory, trusty-review, trusty-analyze and trusty-mpm already follow.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn socket_path_is_the_product_named_socket_under_the_data_dir() {
     let path = socket_path().expect("the data directory must resolve");
     assert_eq!(
@@ -572,6 +582,7 @@ fn socket_path_is_the_product_named_socket_under_the_data_dir() {
 /// tests below meaningful rather than tautological.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn serve_options_carries_the_raised_frame_budget() {
     assert_eq!(
         super::serve_options().max_frame_bytes,
@@ -598,6 +609,7 @@ fn serve_options_carries_the_raised_frame_budget() {
 /// filler is carried by the framing without a decode step of its own.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_default() {
     let dir = TempDir::new().expect("tempdir");
     let raised = dir.path().join("raised.sock");
@@ -668,6 +680,7 @@ async fn a_request_frame_over_the_shared_default_is_accepted_and_refused_at_the_
 /// test can fill to a known size without indexing anything.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
     let dir = TempDir::new().expect("tempdir");
     let socket = dir.path().join("tail.sock");
@@ -721,6 +734,7 @@ async fn a_client_budget_below_this_listeners_refuses_a_response_it_serves() {
 /// pre-fix `socket_path`, the resolved path is the shared one and this fails.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn socket_path_respects_trusty_data_dir() {
     let tmp = TempDir::new().expect("a tempdir must be creatable");
     let dir = tmp.path().to_path_buf();
@@ -752,6 +766,7 @@ fn socket_path_respects_trusty_data_dir() {
 /// the other two and still left the daemons colliding.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn two_data_dirs_yield_distinct_instance_paths() {
     let tmp = TempDir::new().expect("a tempdir must be creatable");
     let a = tmp.path().join("instance-a");
@@ -789,6 +804,7 @@ fn two_data_dirs_yield_distinct_instance_paths() {
 /// `trusty_common::resolve_data_dir`'s own guard for the same shape.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn an_empty_data_dir_override_falls_back_to_the_shared_socket() {
     let empty = std::ffi::OsString::new();
     let path = super::resolve_socket_path(Some(empty.as_os_str()))
@@ -807,6 +823,7 @@ fn an_empty_data_dir_override_falls_back_to_the_shared_socket() {
 /// `--data-dir`; this keeps the socket from being the one path that accepts it.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn a_relative_data_dir_override_is_refused() {
     let relative = std::ffi::OsString::from("relative/data-dir");
     let err = super::resolve_socket_path(Some(relative.as_os_str()))

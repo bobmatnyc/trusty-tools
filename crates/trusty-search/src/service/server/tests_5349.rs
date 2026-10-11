@@ -87,6 +87,7 @@ fn contains_file(files: &[String], rel: &str) -> bool {
 /// regression from passing.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_index_accepts_a_write_by_driving_the_load() {
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-5349-write-");
@@ -201,6 +202,7 @@ async fn cold_parked_index_accepts_a_delete_by_driving_the_load() {
 /// and `retryable` fail against the pre-fix commit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn write_against_an_unloadable_cold_index_fails_loudly() {
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-5349-gone-");
@@ -241,6 +243,7 @@ async fn write_against_an_unloadable_cold_index_fails_loudly() {
 /// what stops the MCP layer classifying an unknown index as "not built yet".
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn unknown_index_is_still_404_after_the_write_path_learned_to_load() {
     let state = mock_state().await;
     let (code, axum::Json(body)) = super::files::index_file_handler(
@@ -266,6 +269,7 @@ async fn unknown_index_is_still_404_after_the_write_path_learned_to_load() {
 /// two outcomes; a pair of `200`s alone would not.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
 async fn concurrent_writes_on_a_cold_index_both_land_in_one_loaded_index() {
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-5349-race-");

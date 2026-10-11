@@ -78,6 +78,7 @@ fn entry_for(id: &str, root: &std::path::Path) -> PersistedIndex {
 /// SECOND sha and the assertion fails on the value, not on a panic.
 /// Test: this IS the test.
 #[test]
+#[serial_test::parallel]
 fn resolve_prefers_the_persisted_head_sha_over_live_git() {
     use std::process::Command;
     let (dir, first_sha) = git_repo_with_commit("a.rs", "fn a() {}");
@@ -237,6 +238,7 @@ fn a_completed_pass_clears_the_pending_marker_durably() {
 /// safe defaults — no stamp, no pass owed.
 /// Test: this IS the test.
 #[test]
+#[serial_test::parallel]
 fn legacy_entries_load_with_both_markers_absent() {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     std::fs::write(
@@ -257,6 +259,7 @@ fn legacy_entries_load_with_both_markers_absent() {
 /// What: table over `(pending, skip_vector, lexical_only, has_embedder)`.
 /// Test: this IS the test.
 #[test]
+#[serial_test::parallel]
 fn rearm_decision_respects_skip_vector_and_embedder_presence() {
     assert!(should_rearm_deferred_embed(true, false, false, true));
     assert!(

@@ -83,6 +83,7 @@ async fn emit_and_read(terminal: ReindexStatus) -> (serde_json::Value, ReindexSt
 /// the batch loop never set `mem_limit_hit` — exactly the run the memory poller
 /// halts on its own tick.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_payload_status_agrees_with_the_terminal_status() {
     let (frame, stored) = emit_and_read(ReindexStatus::AbortedMemory).await;
     assert_eq!(
@@ -102,6 +103,7 @@ async fn the_payload_status_agrees_with_the_terminal_status() {
 
 /// The clean arm is unchanged: no abort, no `aborted_memory` on the wire.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_clean_run_still_reports_complete() {
     let (frame, stored) = emit_and_read(ReindexStatus::Complete).await;
     assert_eq!(stored, ReindexStatus::Complete);

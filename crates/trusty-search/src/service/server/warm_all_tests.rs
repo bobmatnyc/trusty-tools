@@ -81,6 +81,7 @@ async fn wait_for_run_end(state: &Arc<SearchAppState>) -> Value {
 /// What: evicts two indexes, warms, and reads the status before and after.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn warm_all_rehydrates_an_evicted_index_and_reports_it_warm() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "alpha").await;
@@ -123,6 +124,7 @@ async fn warm_all_rehydrates_an_evicted_index_and_reports_it_warm() {
 /// index was pinned.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_failed_index_is_reported_failed_and_the_set_is_not_warm() {
     const CHUNKS_TABLE: redb::TableDefinition<'static, &str, &[u8]> =
         redb::TableDefinition::new("chunks");
@@ -171,6 +173,7 @@ async fn a_failed_index_is_reported_failed_and_the_set_is_not_warm() {
 /// and asserts one run id, `joined: true`, and a `warming` row; then releases.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_second_start_joins_the_running_warm() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "held").await;
@@ -210,6 +213,7 @@ async fn a_second_start_joins_the_running_warm() {
 /// paused clock past the window and asserts the pin is gone.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_warmed_index_is_pinned_for_the_window_then_released() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "pinned").await;
@@ -241,6 +245,7 @@ async fn a_warmed_index_is_pinned_for_the_window_then_released() {
 /// and leaves no run behind.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_start_past_the_memory_ceiling_is_refused_and_runs_nothing() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "big").await;
@@ -261,6 +266,7 @@ async fn a_start_past_the_memory_ceiling_is_refused_and_runs_nothing() {
 /// read after, so each per-index check refuses.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_ceiling_hit_mid_run_fails_the_remaining_indexes() {
     static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn rising() -> Option<u64> {
@@ -299,6 +305,7 @@ async fn a_ceiling_hit_mid_run_fails_the_remaining_indexes() {
 /// names the timeout.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn an_index_that_misses_the_warm_timeout_is_reported_failed() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "stuck").await;
@@ -328,6 +335,7 @@ async fn an_index_that_misses_the_warm_timeout_is_reported_failed() {
 /// Why: each field resolves request, then env, then default.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn warm_config_prefers_the_request_over_the_defaults() {
     let cfg = WarmConfig::resolve(&WarmStartRequest {
         window_secs: Some(90),
@@ -342,6 +350,7 @@ fn warm_config_prefers_the_request_over_the_defaults() {
 /// unbounded concurrency let one wave of loads overshoot it (#9027).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn warm_config_clamps_concurrency_to_the_cap() {
     let cfg = WarmConfig::resolve(&WarmStartRequest {
         window_secs: None,
@@ -357,6 +366,7 @@ fn warm_config_clamps_concurrency_to_the_cap() {
 /// no run behind.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_warm_window_past_the_cap_is_refused_with_400() {
     let state = new_state(IndexRegistry::new());
     let (status, body) = warm_start_report(
@@ -377,6 +387,7 @@ async fn a_warm_window_past_the_cap_is_refused_with_400() {
 /// so a warm ceiling above it filled memory the next sweep took back (#9027).
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn the_default_warm_ceiling_is_the_pressure_high_water_mark() {
     use crate::core::memguard::{high_water_pct, high_water_target_mb, memory_limit_mb};
     if std::env::var(WARM_MAX_RSS_ENV).is_ok() {
@@ -396,6 +407,7 @@ fn the_default_warm_ceiling_is_the_pressure_high_water_mark() {
 /// asserts the pin is already granted; then lets it finish, still pinned.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn an_index_is_pinned_while_it_warms() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "mid").await;
@@ -433,6 +445,7 @@ async fn an_index_is_pinned_while_it_warms() {
 /// `warm_rss_unreadable`, no run is left behind, and nothing is pinned.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_start_with_no_rss_reading_is_refused_and_pins_nothing() {
     fn no_rss() -> Option<u64> {
         None
@@ -458,6 +471,7 @@ async fn a_start_with_no_rss_reading_is_refused_and_pins_nothing() {
 /// What: a probe that reads RSS once (the start check) and never again.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn rss_unreadable_mid_run_fails_the_remaining_indexes_unpinned() {
     static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn vanishing() -> Option<u64> {
@@ -493,6 +507,7 @@ async fn rss_unreadable_mid_run_fails_the_remaining_indexes_unpinned() {
 /// What: `max_rss_mb: None`; the run warms and reports `ceiling_unenforced`.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn a_disabled_ceiling_warms_and_reports_the_ceiling_unenforced() {
     let registry = IndexRegistry::new();
     let _a = add_index(&registry, "open").await;
@@ -513,6 +528,7 @@ async fn a_disabled_ceiling_warms_and_reports_the_ceiling_unenforced() {
 /// empty; a new pin prunes any other expired entry.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+#[serial_test::parallel]
 async fn expired_pins_are_pruned() {
     let state = new_state(IndexRegistry::new());
     state.warm.pin_for_test("gone", Duration::from_secs(1));

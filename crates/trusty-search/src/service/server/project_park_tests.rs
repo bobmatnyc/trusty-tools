@@ -105,6 +105,7 @@ async fn fixture() -> Fixture {
 /// main checkout with a structured conflict.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_map_method_lists_pins_and_parks() {
     let fx = fixture().await;
     let map = fx
@@ -148,6 +149,7 @@ async fn the_map_method_lists_pins_and_parks() {
 /// unparking reloads it and queues its reindex.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
     let fx = fixture().await;
     let id = IndexId::new(WT);
@@ -199,6 +201,7 @@ async fn park_and_unpark_keep_the_corpus_and_queue_a_reindex() {
 /// is refused the same way.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_search_on_a_parked_id_is_a_conflict_naming_the_canonical_index() {
     let fx = fixture().await;
     fx.ok(
@@ -232,6 +235,7 @@ async fn a_search_on_a_parked_id_is_a_conflict_naming_the_canonical_index() {
 /// (an unload that could not run, or a park written by another process).
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_fan_out_skips_a_parked_index_that_is_still_resident() {
     let fx = fixture().await;
     let query = serde_json::json!({ "query": "authenticate" });
@@ -298,6 +302,7 @@ fn park_in_map_only(fx: &Fixture) {
 /// which would send a client in a loop — and drop the pin.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn parking_a_pinned_orphan_names_the_live_winner_and_clears_the_pin() {
     let fx = fixture().await;
     let other = fx.tmp.path().join(OTHER);
@@ -418,6 +423,7 @@ async fn a_deleted_parked_index_recreated_at_its_root_is_served() {
 /// park row, so it refuses and tears nothing down.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_delete_with_a_corrupt_map_refuses_and_keeps_the_index() {
     let fx = fixture().await;
     std::fs::write(map_path(&fx), "garbage [[").expect("corrupt");
@@ -443,6 +449,7 @@ async fn a_delete_with_a_corrupt_map_refuses_and_keeps_the_index() {
 /// fixture really is reapable.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_reaper_never_reaps_a_parked_index_and_reaps_nothing_without_the_map() {
     let fx = fixture().await;
     let id = IndexId::new(WT);
@@ -466,6 +473,7 @@ async fn the_reaper_never_reaps_a_parked_index_and_reaps_nothing_without_the_map
 /// still parks, and says the index is still loaded.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_park_whose_unload_is_refused_reports_unloaded_false() {
     let fx = fixture().await;
     let id = IndexId::new(WT);
@@ -489,6 +497,7 @@ async fn a_park_whose_unload_is_refused_reports_unloaded_false() {
 /// the row and reports why, never `reindex_queued: true`.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unpark_whose_reindex_cannot_queue_reports_the_error() {
     let fx = fixture().await;
     fx.ok(
@@ -517,6 +526,7 @@ async fn an_unpark_whose_reindex_cannot_queue_reports_the_error() {
 /// while the map cannot be read; it is never refused as parked.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_request_by_id_is_served_while_the_map_is_corrupt() {
     let fx = fixture().await;
     park_in_map_only(&fx);

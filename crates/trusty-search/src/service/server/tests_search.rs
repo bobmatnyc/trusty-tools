@@ -12,6 +12,7 @@ use axum::{http::StatusCode, Json};
 /// 400 with `{"error": "query must not be empty"}` for both `""` and `"   "`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_handler_rejects_empty_query() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::{CodeIndexer, SearchQuery, SearchStage};
@@ -74,6 +75,7 @@ async fn search_handler_rejects_empty_query() {
 }
 
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_relative_ok() {
     let root = std::path::Path::new("/Users/me/proj");
     assert!(file_is_within_root("src/auth.rs", root));
@@ -84,6 +86,7 @@ fn file_is_within_root_relative_ok() {
 /// Issue #64: relative paths that climb out via `..` must be rejected,
 /// even though they may resolve inside `root` for some `root` values.
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_rejects_dotdot() {
     let root = std::path::Path::new("/Users/me/proj");
     assert!(!file_is_within_root("../other/file.rs", root));
@@ -95,6 +98,7 @@ fn file_is_within_root_rejects_dotdot() {
 /// daemon ever stores absolute file paths (e.g. legacy chunks from a
 /// misregistered index — see #63).
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_absolute_must_start_with_root() {
     let root = std::path::Path::new("/Users/me/proj");
     assert!(file_is_within_root("/Users/me/proj/src/auth.rs", root));
@@ -109,6 +113,7 @@ fn file_is_within_root_absolute_must_start_with_root() {
 /// never occur in a valid chunk and we don't want them sneaking past
 /// the filter as a benign-looking relative path.
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_rejects_empty() {
     let root = std::path::Path::new("/Users/me/proj");
     assert!(!file_is_within_root("", root));
@@ -124,6 +129,7 @@ fn file_is_within_root_rejects_empty() {
 /// canonicalizes both sides and retries.
 #[cfg(unix)]
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_symlinked_root_does_not_drop_valid_result() {
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
@@ -161,6 +167,7 @@ fn file_is_within_root_symlinked_root_does_not_drop_valid_result() {
 /// Issue #541: a file genuinely outside the root must still be rejected
 /// even after the canonicalize fallback runs.
 #[test]
+#[serial_test::parallel]
 fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
     use tempfile::tempdir;
 
@@ -358,6 +365,8 @@ async fn search_handler_meta_includes_stale_index_root_field() {
 /// `cold_indexes_skipped == 1` in the response.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn test_global_search_surfaces_cold_indexes_skipped() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;
@@ -454,6 +463,7 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
 /// `/knowledge/Jira`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn stale_indexer_root_makes_every_chunk_fail_the_search_post_filter() {
     use crate::core::indexer::helpers::resolve_chunk_file;
 
@@ -496,6 +506,7 @@ fn stale_indexer_root_makes_every_chunk_fail_the_search_post_filter() {
 /// follows.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn reindex_root_override_syncs_indexer_root_path() {
     use crate::core::indexer::CodeIndexer;
 

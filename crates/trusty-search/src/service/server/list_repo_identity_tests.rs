@@ -167,6 +167,7 @@ async fn list_indexes_repo_identity_details_and_filter() {
 /// object-array response contains exactly the two matching ids.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_repo_identity_tree_filter() {
     use super::indexes::ListIndexesParams;
     use crate::core::{

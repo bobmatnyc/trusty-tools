@@ -16,8 +16,17 @@
 //! only: a test that READS the data dir (`persistence::data_dir`, the daemon
 //! dir) without writing it takes `#[serial_test::parallel]`, which excludes
 //! the writers but not other readers (#9233).
+//!
+//! A second ratchet (#9684) covers the registry. A test that reaches
+//! `with_registry_write_lock` resolves `indexes.toml` from `TRUSTY_DATA_DIR`
+//! at write time, so an untagged one can drop `indexes.toml.lock` into the
+//! data dir a `#[serial]` test has just pointed somewhere else. Every test in
+//! a file that names a [`REGISTRY_REACHING`] function carries a group tag, and
+//! so does every test in a module that file mounts (`#[path]` or `mod x;`),
+//! because a child reaches the registry through its parent's harness.
 //! Test: this file IS the test module.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Test files that write the environment outside the unnamed group, each
@@ -137,6 +146,381 @@ fn the_ratchet_detects_a_writer_outside_the_unnamed_group() {
         !check("src/daemon.rs", production),
         "a production write above `#[cfg(test)]` is not a test's"
     );
+}
+
+/// Functions whose call reaches `with_registry_write_lock` on a path resolved
+/// from `TRUSTY_DATA_DIR` at write time (#9684).
+///
+/// Why: the reindex finish (`persist_indexed_head_sha`), the reconcile stamp,
+/// the first-query stamp (`update_last_queried_unix`), the registration and
+/// delete handlers and the boot restore paths all patch `indexes.toml` through
+/// `data_dir()`. The router entry points reach every handler.
+/// What: matched as whole identifiers in test code, so a call, a `use` and a
+/// path all count; `upsert_index_registry_entry_at` does not count as
+/// `upsert_index_registry_entry`, because an explicit path never reads env.
+const REGISTRY_REACHING: &[&str] = &[
+    "spawn_reindex_awaitable",
+    "spawn_reindex",
+    "spawn_claimed_reindex",
+    "spawn_reindex_with_cleanup",
+    "run_reindex",
+    "finish_reindex",
+    "reindex_report",
+    "reconcile_one_index",
+    "stamp_handle",
+    "persist_indexed_head_sha",
+    "persist_deferred_embed_pending",
+    "rearm_deferred_embed_if_pending",
+    "resolve_indexed_head_sha",
+    "run_embed_catch_up",
+    "spawn_deferred_embed_pass",
+    "update_last_queried_unix",
+    "update_last_indexed_unix",
+    "search_handler",
+    "search_report",
+    "create_index_handler",
+    "create_index_report",
+    "delete_index_handler",
+    "delete_index_report",
+    "unregister_index",
+    "unregister_with_map",
+    "relocate_index_handler",
+    "relocate_index_report",
+    "add_index_roots_handler",
+    "add_index_roots_report",
+    "patch_index_config_handler",
+    "patch_index_config_report",
+    "restore_index_on_demand",
+    "resolve_or_load_index",
+    "restore_one_index",
+    "restore_indexes",
+    "heal_boot_orphans",
+    "handle_ambiguous_root",
+    "clear_ambiguous_root_stamp",
+    "reap_orphans_once",
+    "handle_migrate_storage",
+    "upsert_index_registry_entry",
+    "save_index_registry",
+    "remove_index_registry_entry",
+    "remove_index_registry_entries",
+    "build_router",
+    "build_router_on",
+];
+
+/// Attributes that put a test in the unnamed `serial_test` group.
+const GROUP_TAGS: &[&str] = &[
+    "#[serial]",
+    "#[serial_test::serial]",
+    "#[parallel]",
+    "#[serial_test::parallel]",
+];
+
+/// Attribute prefixes that open a test function.
+const TEST_ATTRS: &[&str] = &["#[test]", "#[tokio::test]", "#[tokio::test("];
+
+/// The ratchet — no test that can reach the registry runs outside the group.
+///
+/// Test: this function IS the test;
+/// `the_registry_ratchet_detects_an_untagged_test` proves the detection.
+#[test]
+fn registry_reaching_tests_join_the_unnamed_group() {
+    let files: BTreeMap<String, String> = lib_sources()
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            (relative(&path), text)
+        })
+        .collect();
+    let offenders = registry_offenders(&files);
+    assert!(
+        offenders.is_empty(),
+        "these tests sit in a file that reaches the index registry, and carry no \
+         `#[serial_test::parallel]` / `#[serial_test::serial]` tag (#9684). An untagged test \
+         runs beside a `#[serial]` test that repoints `TRUSTY_DATA_DIR`, and its registry write \
+         lands `indexes.toml.lock` in that test's data dir. Tag each one `parallel`, or \
+         `serial` when it writes the environment.\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The detection fires on an untagged or named-key test in a file that names
+/// a registry-reaching function, and on nothing else.
+///
+/// Test: this function IS the test.
+#[test]
+fn the_registry_ratchet_detects_an_untagged_test() {
+    let check = |rel: &str, s: &str| untagged_registry_tests(rel, &strip_noncode(s));
+
+    let untagged = "use super::spawn_reindex_awaitable;\n#[tokio::test]\nasync fn t() {}\n";
+    assert_eq!(check("src/a_tests.rs", untagged), ["t"]);
+
+    let mixed = concat!(
+        "fn h() { search_report(); }\n",
+        "#[test]\n#[serial_test::parallel]\nfn ok_parallel() {}\n",
+        "#[tokio::test(flavor = \"multi_thread\")]\n#[serial]\nasync fn ok_serial() {}\n",
+        "#[test]\n#[serial_test::serial(watcher_start)]\nfn named_key() {}\n",
+        "#[test]\nfn bare() {}\n",
+    );
+    assert_eq!(check("src/a_tests.rs", mixed), ["bare", "named_key"]);
+
+    let explicit_path = "fn h() { upsert_index_registry_entry_at(p, e); }\n#[test]\nfn t() {}\n";
+    assert!(
+        check("src/a_tests.rs", explicit_path).is_empty(),
+        "an explicit registry path never reads the environment"
+    );
+
+    let prose = "// calls search_report\n#[test]\nfn t() {}\n";
+    assert!(
+        check("src/a_tests.rs", prose).is_empty(),
+        "a comment is not a reach"
+    );
+
+    let production = concat!(
+        "fn serve() { search_report(); }\n",
+        "#[cfg(test)]\nmod tests { #[test] fn t() {} }\n",
+    );
+    assert!(
+        check("src/search.rs", production).is_empty(),
+        "a production call above `#[cfg(test)]` is not a test's"
+    );
+}
+
+/// A child module that names no token itself is still in scope (#9684).
+///
+/// Why: `writes_9510_tests.rs` and `writes_7434_tests.rs` are `#[path]`
+/// children of `writes_tests.rs` and reach the registry through its harness
+/// (`use super::*`), so a per-file token scan never saw their untagged tests.
+/// Test: this function IS the test.
+#[test]
+fn the_registry_ratchet_follows_child_modules() {
+    let files: BTreeMap<String, String> = [
+        (
+            "src/a_tests.rs",
+            concat!(
+                "fn h() { search_report(); }\n",
+                "#[test]\n#[serial_test::parallel]\nfn ok_parent() {}\n",
+                "#[path = \"b_tests.rs\"]\nmod b;\n",
+                "mod c;\n",
+            ),
+        ),
+        (
+            "src/b_tests.rs",
+            "use super::*;\n#[tokio::test]\nasync fn path_child() {}\n#[path = \"../d_tests.rs\"]\nmod d;\n",
+        ),
+        ("src/a_tests/c.rs", "#[test]\nfn mod_child() {}\n"),
+        ("d_tests.rs", "#[test]\nfn grandchild() {}\n"),
+        ("src/e_tests.rs", "#[test]\nfn unrelated() {}\n"),
+        (
+            "src/prod.rs",
+            concat!(
+                "pub mod inner;\n",
+                "#[cfg(test)]\n#[path = \"prod_tests.rs\"]\nmod tests;\n",
+                "#[cfg(test)]\nfn h() { search_report(); }\n",
+            ),
+        ),
+        ("src/prod/inner.rs", "#[test]\nfn production_child() {}\n"),
+        ("src/prod_tests.rs", "#[test]\nfn cfg_test_child() {}\n"),
+    ]
+    .into_iter()
+    .map(|(rel, text)| (rel.to_owned(), text.to_owned()))
+    .collect();
+    assert_eq!(
+        registry_offenders(&files),
+        [
+            "d_tests.rs: grandchild",
+            "src/a_tests/c.rs: mod_child",
+            "src/b_tests.rs: path_child",
+            "src/prod_tests.rs: cfg_test_child",
+        ],
+        "a production module is not a test child"
+    );
+}
+
+/// `rel: test, test` for every untagged test in a file that reaches the
+/// registry or is a child module of one, sorted by path.
+///
+/// What: the seed set is every file whose test code names a
+/// [`REGISTRY_REACHING`] function; [`child_modules`] then widens it to every
+/// module those files mount, transitively. `files` maps crate-relative path
+/// to source text.
+/// Test: `the_registry_ratchet_follows_child_modules`.
+fn registry_offenders(files: &BTreeMap<String, String>) -> Vec<String> {
+    let stripped: BTreeMap<&str, String> = files
+        .iter()
+        .map(|(rel, text)| (rel.as_str(), strip_noncode(text)))
+        .collect();
+    let mut queue: Vec<&str> = stripped
+        .iter()
+        .filter(|(rel, code)| reaches_registry(rel, code))
+        .map(|(rel, _)| *rel)
+        .collect();
+    let mut scope = BTreeSet::new();
+    while let Some(rel) = queue.pop() {
+        if !scope.insert(rel) {
+            continue;
+        }
+        for child in child_modules(rel, &files[rel]) {
+            if let Some((key, _)) = files.get_key_value(&child) {
+                queue.push(key.as_str());
+            }
+        }
+    }
+    scope
+        .into_iter()
+        .filter_map(|rel| {
+            let untagged = untagged_tests(&stripped[rel]);
+            (!untagged.is_empty()).then(|| format!("{rel}: {}", untagged.join(", ")))
+        })
+        .collect()
+}
+
+/// Crate-relative paths of the test-only module files `rel` mounts.
+///
+/// What: a `mod <name>;` counts when `rel` is a test file or the declaration
+/// carries a `cfg(test)` attribute; a production module is never a child. A
+/// `#[path = "<p>"]` attribute resolves `<p>` against `rel`'s directory; a
+/// bare declaration resolves to `<name>.rs` and `<name>/mod.rs` under `rel`'s
+/// module directory, and the caller keeps the candidates that exist.
+/// Line-based on raw text, because [`strip_noncode`] erases the path string.
+/// Test: `the_registry_ratchet_follows_child_modules`.
+fn child_modules(rel: &str, text: &str) -> Vec<String> {
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    let mod_dir = if matches!(file, "mod.rs" | "lib.rs" | "main.rs") {
+        dir.to_owned()
+    } else {
+        join(dir, stem)
+    };
+    let test_file = file.contains("test") || rel.split('/').any(|seg| seg == "tests");
+    let mut path: Option<&str> = None;
+    let mut cfg_test = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut rest = line.trim();
+        if rest.starts_with("//") {
+            continue;
+        }
+        while let Some(attr) = rest.strip_prefix("#[") {
+            let Some(end) = attr.find(']') else { break };
+            let body = &attr[..end];
+            if let Some(p) = body.strip_prefix("path") {
+                path = p.split('"').nth(1);
+            }
+            cfg_test |= body.starts_with("cfg(") && names_identifier(body, "test");
+            rest = attr[end + 1..].trim_start();
+        }
+        if rest.is_empty() {
+            continue;
+        }
+        let decl = rest
+            .strip_prefix("pub(crate) ")
+            .or_else(|| rest.strip_prefix("pub(super) "))
+            .or_else(|| rest.strip_prefix("pub "))
+            .unwrap_or(rest);
+        let name = decl.strip_prefix("mod ").and_then(|d| d.strip_suffix(';'));
+        if let Some(name) = name.filter(|_| test_file || cfg_test) {
+            match path {
+                Some(p) => out.push(join(dir, p)),
+                None => {
+                    out.push(join(&mod_dir, &format!("{}.rs", name.trim())));
+                    out.push(join(&mod_dir, &format!("{}/mod.rs", name.trim())));
+                }
+            }
+        }
+        path = None;
+        cfg_test = false;
+    }
+    out
+}
+
+/// `base/path`, with `.` and `..` segments folded.
+fn join(base: &str, path: &str) -> String {
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in base.split('/').chain(path.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            _ => segs.push(seg),
+        }
+    }
+    segs.join("/")
+}
+
+/// Does this stripped file's test code name a [`REGISTRY_REACHING`] function?
+fn reaches_registry(rel: &str, code: &str) -> bool {
+    let tests = test_code(rel, code);
+    REGISTRY_REACHING
+        .iter()
+        .any(|name| names_identifier(tests, name))
+}
+
+/// Names of the tests in a stripped file that can reach the registry and
+/// carry no unnamed-group tag; empty when the file names no reaching function.
+///
+/// Test: `the_registry_ratchet_detects_an_untagged_test`.
+fn untagged_registry_tests(rel: &str, code: &str) -> Vec<String> {
+    if !reaches_registry(rel, code) {
+        return Vec::new();
+    }
+    untagged_tests(test_code(rel, code))
+}
+
+/// Names of the tests in stripped `tests` that carry no unnamed-group tag.
+///
+/// What: a test's attribute block runs from the item boundary (`{`, `}`, `;`)
+/// before its test attribute to its `fn`; the block must hold a
+/// [`GROUP_TAGS`] entry. A named key is a separate lock and does not count.
+/// Test: `the_registry_ratchet_detects_an_untagged_test`.
+fn untagged_tests(tests: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for attr in TEST_ATTRS {
+        for (at, _) in tests.match_indices(attr) {
+            let Some((fn_at, name)) = next_fn(tests, at) else {
+                continue;
+            };
+            let start = tests[..at].rfind(['{', '}', ';']).map_or(0, |i| i + 1);
+            let block: String = tests[start..fn_at].split_whitespace().collect();
+            if !GROUP_TAGS.iter().any(|tag| block.contains(tag)) {
+                out.push(name.to_owned());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Does `code` hold `name` as a whole identifier?
+fn names_identifier(code: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices(name).any(|(at, _)| {
+        let before = code[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after = code[at + name.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident(c));
+        before && after
+    })
+}
+
+/// The byte offset and name of the first `fn <name>` at or after `from`.
+fn next_fn(code: &str, from: usize) -> Option<(usize, &str)> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    code[from..].match_indices("fn").find_map(|(rel, _)| {
+        let at = from + rel;
+        let before_ok = code[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let rest = &code[at + 2..];
+        let name_start = rest.len() - rest.trim_start().len();
+        if !before_ok || name_start == 0 {
+            return None;
+        }
+        let name = &rest[name_start..];
+        let len = name.find(|c: char| !is_ident(c)).unwrap_or(name.len());
+        (len > 0).then(|| (at, &name[..len]))
+    })
 }
 
 /// Every `.rs` file under `src/`, this file excluded.

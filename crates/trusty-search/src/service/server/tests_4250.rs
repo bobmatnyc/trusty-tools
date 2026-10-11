@@ -53,6 +53,7 @@ async fn state_with_embedder() -> Arc<SearchAppState> {
 /// the timeout cohort while both count as cold.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn cold_store_timed_out_cohort_excludes_deferred_entries() {
     let store = crate::service::lazy_loader::ColdIndexStore::new();
     store.register_cold_entries(vec![PersistedIndex {
@@ -93,6 +94,7 @@ fn cold_store_timed_out_cohort_excludes_deferred_entries() {
 /// registry, runs one pass, asserts it is registered and the cohort drained.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn timed_out_index_is_driven_back_into_the_registry() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("recoverable");
@@ -145,6 +147,7 @@ async fn timed_out_index_is_driven_back_into_the_registry() {
 /// recovery pass leaves it exactly where it is.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn recovery_pass_leaves_deferred_entries_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("deferred-on-purpose");
@@ -183,6 +186,7 @@ async fn recovery_pass_leaves_deferred_entries_alone() {
 /// function the flag stays `true` because it read the frozen counter.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn warm_boot_degraded_clears_once_the_timeout_cohort_drains() {
     let state = state_with_embedder().await;
     if let Ok(mut s) = state.warmboot_summary.lock() {
@@ -208,6 +212,7 @@ async fn warm_boot_degraded_clears_once_the_timeout_cohort_drains() {
 /// What: same setup with one entry STILL parked; asserts the flag stays set.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn warm_boot_degraded_stays_set_while_an_index_is_still_parked() {
     let state = state_with_embedder().await;
     state.cold_store.park_if_parkable(

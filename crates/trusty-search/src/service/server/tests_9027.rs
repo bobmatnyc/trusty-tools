@@ -83,6 +83,8 @@ fn request(query: &str) -> GlobalSearchRequest {
 /// `rehydrating_indexes_skipped`, and `indexes_searched` excludes it.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_skips_an_index_that_misses_the_deadline() {
     let registry = IndexRegistry::new();
     let _fast = add_index(&registry, "fast", None).await;
@@ -141,6 +143,8 @@ async fn global_search_skips_an_index_that_misses_the_deadline() {
 /// the query exactly once and still search all three.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_embeds_the_query_once_for_every_index() {
     let embedder = Arc::new(CountingEmbedder::default());
     let registry = IndexRegistry::new();
@@ -185,6 +189,8 @@ async fn global_search_embeds_the_query_once_for_every_index() {
 /// from the lexical lane and calls the embedder exactly once.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn a_precomputed_embed_failure_degrades_without_re_embedding() {
     let embedder = Arc::new(CountingEmbedder {
         fail: true,
@@ -265,6 +271,8 @@ async fn add_corpus_index(
 /// `partial`).
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn a_slow_embed_degrades_to_lexical_and_still_searches_every_index() {
     let registry = IndexRegistry::new();
     let _one = add_corpus_index(
@@ -312,6 +320,8 @@ async fn a_slow_embed_degrades_to_lexical_and_still_searches_every_index() {
 /// embedded vector; none may be skipped.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn the_fan_out_deadline_starts_after_the_query_embed() {
     let registry = IndexRegistry::new();
     let slow: Arc<dyn Embedder> = Arc::new(SlowEmbedder(Duration::from_millis(800)));
@@ -349,6 +359,8 @@ async fn the_fan_out_deadline_starts_after_the_query_embed() {
 /// index must still be evicted, with no rehydrate started.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn global_search_kicks_rehydrates_only_for_routed_indexes() {
     let embedder: Arc<dyn Embedder> = Arc::new(CountingEmbedder::default());
     let registry = IndexRegistry::new();
@@ -394,6 +406,8 @@ async fn global_search_kicks_rehydrates_only_for_routed_indexes() {
 /// answers from the healthy index and reports `partial: true`.
 /// Test: this test.
 #[tokio::test]
+// #9684: first query stamps last_queried under the global data dir; must not race #[serial] env writers.
+#[serial_test::parallel]
 async fn an_index_whose_search_errors_marks_the_fan_out_partial() {
     let registry = IndexRegistry::new();
     let _ok = add_index(&registry, "ok", None).await;
