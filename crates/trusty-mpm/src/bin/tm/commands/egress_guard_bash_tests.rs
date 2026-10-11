@@ -539,7 +539,7 @@ fn bash_other_residuals_are_not_detected() {
         ("6 IP literal", "curl https://34.202.13.4/api/x".to_owned()),
         ("6 shortener", "curl https://bit.ly/abc123".to_owned()),
         ("8 confusable", confusable),
-        ("find -exec", "find . -exec sendmail bob \\;".to_owned()),
+        ("find -exec", "find . -exec sendmail bob {} +".to_owned()),
         ("ssh", "ssh host sendmail bob".to_owned()),
         ("watch", "watch sendmail bob".to_owned()),
         ("parallel", "parallel sendmail ::: bob".to_owned()),
