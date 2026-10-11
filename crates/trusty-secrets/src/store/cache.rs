@@ -26,7 +26,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::config::{self, CliSettings};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
@@ -132,6 +132,9 @@ impl Fingerprint {
 /// The cache's clock; [`Instant::now`] outside tests.
 pub(crate) type CacheClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+/// The cache's wall clock; [`SystemTime::now`] outside tests (#7520 S2).
+pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
 /// What one cached value is filed under.
 type Slot = (BackendId, VaultName, SecretKey);
 
@@ -177,6 +180,7 @@ pub(crate) struct SecretCache {
     // #7520 S2: no entry answers once this old.
     max_age: Duration,
     now: CacheClock,
+    wall: WallClock,
 }
 
 impl fmt::Debug for SecretCache {
@@ -192,15 +196,16 @@ impl fmt::Debug for SecretCache {
 impl SecretCache {
     /// An empty cache whose entries answer for at most `max_age`.
     pub(crate) fn new(max_age: Duration) -> Self {
-        Self::with_clock(max_age, Arc::new(Instant::now))
+        Self::with_clocks(max_age, Arc::new(Instant::now), Arc::new(SystemTime::now))
     }
 
-    /// [`Self::new`] reading the time from `now`.
-    pub(crate) fn with_clock(max_age: Duration, now: CacheClock) -> Self {
+    /// [`Self::new`] reading the time from `now` and the wall clock `wall`.
+    pub(crate) fn with_clocks(max_age: Duration, now: CacheClock, wall: WallClock) -> Self {
         Self {
             entries: Mutex::default(),
             max_age,
             now,
+            wall,
         }
     }
 
@@ -308,6 +313,7 @@ impl SecretCache {
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     use super::*;
 
@@ -422,5 +428,45 @@ mod tests {
             format!("{cache:?}"),
             "SecretCache { entries: 0, max_age: 600s }"
         );
+    }
+
+    /// Why: #7520 S2 — `Instant` does not advance while the machine sleeps
+    /// (macOS `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`), so after a
+    /// lid-close an entry would outlive its max age by `Instant` alone. An
+    /// entry whose wall-clock age reaches the max age is a miss, and so is
+    /// one whose wall clock stepped back (fail closed).
+    /// Red while age is counted on `Instant` alone (one read for the run).
+    /// Test: itself.
+    #[test]
+    fn entry_expires_on_wall_time_while_instant_stands_still() {
+        let (instant, wall) = (Instant::now(), SystemTime::now());
+        let offset = Arc::new(AtomicI64::new(0));
+        let at = Arc::clone(&offset);
+        let cache = SecretCache::with_clocks(
+            Duration::from_secs(5),
+            Arc::new(move || instant),
+            Arc::new(move || {
+                let secs = at.load(Ordering::SeqCst);
+                let step = Duration::from_secs(secs.unsigned_abs());
+                if secs < 0 { wall - step } else { wall + step }
+            }),
+        );
+        let (op, web, name, under) = (
+            BackendId::onepassword(),
+            vault("trusty/acme/web"),
+            key("K"),
+            account("a"),
+        );
+        let mut reads = 0;
+        // Asleep past the cap at 5 s; the wall clock steps back to 2 s.
+        for (secs, expected) in [(0, 1), (4, 1), (5, 2), (9, 2), (2, 3), (3, 3)] {
+            offset.store(secs, Ordering::SeqCst);
+            let value = cache.read_through(&op, Some(&under), &web, &name, || {
+                reads += 1;
+                found("v")
+            });
+            assert_eq!(value.unwrap().unwrap().expose(), "v");
+            assert_eq!(reads, expected, "backend reads at wall {secs}s");
+        }
     }
 }

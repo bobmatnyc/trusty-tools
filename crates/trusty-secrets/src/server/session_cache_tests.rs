@@ -9,7 +9,7 @@
 //! Test: itself.
 
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use super::*;
 use crate::server::exec;
@@ -451,6 +451,26 @@ fn replace_by_rename(path: &Path, text: &str) {
     std::fs::rename(&staged, path).unwrap();
 }
 
+/// Rewrite the file the symlink `config` points at, in place, to account B,
+/// open B's double, then rewrite it to account A again; the link is not
+/// touched.
+///
+/// What: same length, same inode, so only the target's mtime and ctime
+/// change. The pause first puts the rewrite in a later timestamp tick than
+/// the stamp taken before the open, on filesystems with coarse timestamps.
+fn flip_target_in_place(
+    config: &Path,
+    a: &Arc<Counting>,
+    b: &Arc<Counting>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    let target = std::fs::read_link(config).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(&target, onepassword_account("b.1password.com")).unwrap();
+    let opened = account_named(config, a, b);
+    std::fs::write(&target, onepassword_account("a.1password.com")).unwrap();
+    opened
+}
+
 /// A state whose factory opens `onepassword` from the account machine
 /// config, as the production factory does: account A or account B. Selects
 /// account A.
@@ -473,6 +493,9 @@ fn accounts_state(
             .is_some_and(|flip| flip.swap(false, Ordering::SeqCst))
         {
             return account_named(&config, &a, &b);
+        }
+        if config.is_symlink() {
+            return flip_target_in_place(&config, &a, &b);
         }
         std::fs::hard_link(&config, config.with_extension("first")).unwrap();
         replace_by_rename(&config, &onepassword_account("b.1password.com"));
@@ -624,10 +647,15 @@ fn entry_expires_after_max_age() {
     let debug = format!("{state:?}");
     assert!(debug.contains("max_age: 5s"), "{debug}");
     let (base, elapsed) = (Instant::now(), Arc::new(AtomicU64::new(0)));
-    let clock = Arc::clone(&elapsed);
-    state.cache = Arc::new(SecretCache::with_clock(
+    let (wall, clock, wall_clock) = (
+        SystemTime::now(),
+        Arc::clone(&elapsed),
+        Arc::clone(&elapsed),
+    );
+    state.cache = Arc::new(SecretCache::with_clocks(
         state.settings.cache_max_age,
         Arc::new(move || base + Duration::from_secs(clock.load(Ordering::SeqCst))),
+        Arc::new(move || wall + Duration::from_secs(wall_clock.load(Ordering::SeqCst))),
     ));
     let token = grant_in(&state, &fx.project(), &["API_KEY"]);
 
@@ -636,4 +664,36 @@ fn entry_expires_after_max_age() {
         assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
         assert_eq!(op.gets(), reads, "backend reads after the resolve at {at}s");
     }
+}
+
+/// Why: #7520 S2 — the account config may be a symlink. A flip of the file
+/// it points at, rewritten in place behind an unchanged link, must count as
+/// a change, so the fingerprint stamps the target (`stat`) as well as the
+/// link (`lstat`).
+/// Passes on the fixed code; red when the target stamp is dropped (both
+/// stamps from `lstat`), shown by a mutation run (#7520 S2 fix round).
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn cache_not_filled_across_symlink_target_flip() {
+    let fx = fixture();
+    let (account_a, account_b) = two_accounts(&fx);
+    let flip = Arc::new(AtomicBool::new(false));
+    let state = accounts_state(&fx, &account_a, &account_b, Some(Arc::clone(&flip)));
+    let config = &fx.settings.machine_config;
+    let target = config.with_extension("target");
+    std::fs::rename(config, &target).unwrap();
+    std::os::unix::fs::symlink(&target, config).unwrap();
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+
+    flip.store(true, Ordering::SeqCst);
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-b-value");
+    assert!(!flip.load(Ordering::SeqCst), "the flip did not run");
+    assert!(config.is_symlink(), "the link itself was replaced");
+    assert_eq!(
+        value_of(&state, &token, "API_KEY"),
+        "account-a-value",
+        "a value read under account B answered under account A"
+    );
+    assert_eq!(account_a.gets(), 1);
 }
