@@ -129,6 +129,15 @@ pub(crate) const PM_GUARD_SUFFIX: &str = " hook --pm-guard";
 /// `pm_guard_and_divert_commands_end_in_a_known_argv_tail`.
 pub(crate) const PROMPT_FEEDBACK_SUFFIX: &str = " hook --prompt-feedback";
 
+/// The `hook --egress-guard` argv tail (#8454 G3).
+///
+/// Why: the same one-definition rule as [`PM_GUARD_SUFFIX`] — the writer
+/// (`super::egress::egress_guard_hook_group`), the strips' identity predicates
+/// and [`TM_HOOK_ARGV_TAILS`] here all read this exact string.
+/// What: the literal suffix, including its leading space.
+/// Test: `egress_is_mpm_hook_command_claims_only_the_build_tree_shape`.
+pub(crate) const EGRESS_GUARD_SUFFIX: &str = " hook --egress-guard";
+
 /// Does `cmd` invoke a hook from a binary inside a Cargo build tree?
 ///
 /// Why (#7262): the predicate [`super::is_mpm_hook_command`] consults so every

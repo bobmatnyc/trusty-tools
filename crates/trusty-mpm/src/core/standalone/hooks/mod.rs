@@ -42,6 +42,8 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+// #8454: the `tm hook --egress-guard` entry both tiers' writers add.
+pub mod egress;
 // #8392: the opt-in `Notification` entry and its push target.
 pub mod notification;
 pub mod repoint;

@@ -262,6 +262,11 @@ use doctor_session_profile::check_session_profile;
 #[path = "doctor_pm_guard.rs"]
 mod doctor_pm_guard;
 use doctor_pm_guard::check_pm_guard;
+// #8454: whether every tm-provisioned settings file registers the egress guard.
+#[path = "doctor_egress_guard.rs"]
+mod doctor_egress_guard;
+#[cfg_attr(not(test), allow(unused_imports))]
+use doctor_egress_guard::check_egress_guard;
 // #9091: whether the `[accounts]` org → gh account table reads.
 #[path = "doctor_org_accounts.rs"]
 mod doctor_org_accounts;

@@ -145,6 +145,22 @@ pub(crate) fn decide(
     }
 }
 
+/// The guard's verdict: the trust-anchor floor first, then [`decide`].
+///
+/// Why (#8454 S2, Architect D1): `[pm_guard] enabled = false` leaves the
+/// pm-guard hook out, and with it the #8878 trust-anchor floor; this hook has
+/// no off switch, so it runs that floor itself.
+/// What: when the read is a payload and `anchor` denies it, a
+/// `trust-anchor-write` deny; otherwise [`decide`]'s verdict.
+/// Test: `egress_trust_anchor_verdict_precedes_the_family_check`.
+pub(crate) fn verdict(
+    read: &Result<serde_json::Value, HookStdinError>,
+    table: &FamilyTable,
+    _anchor: impl FnOnce(&serde_json::Value) -> Option<String>,
+) -> Verdict {
+    decide(read, table)
+}
+
 /// Run one guard pass, answering a deny if it panics.
 ///
 /// Why (§4, Architect Q5): Claude Code treats a non-zero hook exit as
