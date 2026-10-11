@@ -316,7 +316,36 @@ pub struct FastEmbedder {
     /// [`resolve_default_embedding_model`] when the primary failed to
     /// initialise and the two-model fallback net kicked in.
     model_name: &'static str,
+    /// HuggingFace repo of the loaded model, e.g. `Qdrant/all-MiniLM-L6-v2-onnx`;
+    /// names the cached tokenizer the chunker loads (#9275).
+    model_code: String,
 }
+
+/// Longest input `FastEmbedder` lets fastembed encode, in tokens including
+/// `[CLS]`/`[SEP]`.
+///
+/// Why: #9275 — fastembed 5 truncates at `min(TextInitOptions::max_length,
+/// model_max_length)` (`common.rs` `load_tokenizer`). The option defaults to
+/// 512, and `model_max_length` comes from the cached snapshot's
+/// `tokenizer_config.json`: 512 at `Qdrant/all-MiniLM-L6-v2-onnx` revision
+/// `5f1b8cd78bc4`, 256 from `944c7f61a294` on. Left at the default, the
+/// truncation length depends on which revision a host cached.
+/// What: the `max_length` [`FastEmbedder::text_init_options`] passes, so
+/// fastembed truncates at 256 with either revision.
+/// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+pub const FASTEMBED_MAX_LENGTH: usize = MINILM_MAX_SEQ_LENGTH;
+
+/// Input window of every all-MiniLM-L6-v2 embedder, in tokens including
+/// `[CLS]`/`[SEP]`.
+///
+/// Why: #9275 — sentence-transformers, the reference implementation, stops
+/// this model at 256 tokens, so chunks stop at 256.
+/// What: `max_seq_length` from the model's sentence-transformers
+/// `sentence_bert_config.json` (`sentence-transformers/all-MiniLM-L6-v2`,
+/// revision `c9745ed1d9f2`). Each MiniLM `input_window` reports it, capped by
+/// what that backend encodes.
+/// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+pub(crate) const MINILM_MAX_SEQ_LENGTH: usize = 256;
 
 impl FastEmbedder {
     /// Construct a new `FastEmbedder` with the default cache size.
@@ -357,6 +386,31 @@ impl FastEmbedder {
         self.model_name
     }
 
+    /// Load the tokenizer of the model this embedder actually loaded, for
+    /// [`super::chunk_text`].
+    ///
+    /// Why: #9275 — chunk bounds must be counted with the tokenizer fastembed
+    /// truncates with, and fastembed keeps its own tokenizer private.
+    /// What: reads the files fastembed already cached for `model_code` from
+    /// the same cache directory ([`super::ChunkTokenizer::for_fastembed_model`]).
+    /// No network; a missing file is an error, never a guessed count.
+    /// Test: `real_tokenizer_chunks_long_text_within_fastembed_window`.
+    pub fn chunk_tokenizer(&self) -> Result<super::ChunkTokenizer, super::ChunkError> {
+        super::ChunkTokenizer::for_fastembed_model(&self.model_code)
+    }
+
+    /// fastembed options for `model` cached in `cache_dir`, truncating at
+    /// [`FASTEMBED_MAX_LENGTH`] (#9275). No side effects.
+    /// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+    pub(super) fn text_init_options(
+        model: EmbeddingModel,
+        cache_dir: std::path::PathBuf,
+    ) -> TextInitOptions {
+        TextInitOptions::new(model)
+            .with_cache_dir(cache_dir)
+            .with_max_length(FASTEMBED_MAX_LENGTH)
+    }
+
     /// Build `TextInitOptions` for the given model. CPU is the default
     /// execution provider everywhere, including Apple Silicon; CoreML is an
     /// explicit opt-in (`TRUSTY_DEVICE=gpu`).
@@ -377,7 +431,8 @@ impl FastEmbedder {
     /// reflects which backend was actually wired in.
     /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
     /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
-    /// always `Cpu`.
+    /// always `Cpu`. `production_init_options_pass_the_minilm_window_to_fastembed`
+    /// pins the truncation length (#9275).
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
@@ -405,7 +460,7 @@ impl FastEmbedder {
         unsafe {
             std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir);
         }
-        let opts = TextInitOptions::new(model).with_cache_dir(cache_dir);
+        let opts = Self::text_init_options(model, cache_dir);
 
         // Always register an explicit CPU EP with the memory arena DISABLED.
         //
@@ -727,6 +782,10 @@ impl FastEmbedder {
         .context("spawn_blocking joined with error during embedder init")??;
 
         let model_name = embedding_model_name(&resolved_model);
+        // #9275: the repo id names the cached tokenizer the chunker loads.
+        let model_code = TextEmbedding::get_model_info(&resolved_model)?
+            .model_code
+            .clone();
         tracing::info!(
             "trusty-embedder: FastEmbedder ready (provider={}, model={}, dim={})",
             provider,
@@ -740,6 +799,7 @@ impl FastEmbedder {
             dim: EMBED_DIM,
             provider,
             model_name,
+            model_code,
         })
     }
 }
@@ -840,5 +900,10 @@ impl super::types::Embedder for FastEmbedder {
 
     fn provider(&self) -> ExecutionProvider {
         self.provider
+    }
+
+    // #9275: the truncation length `text_init_options` configures.
+    fn input_window(&self) -> Option<usize> {
+        Some(FASTEMBED_MAX_LENGTH)
     }
 }

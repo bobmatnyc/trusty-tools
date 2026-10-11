@@ -22,11 +22,20 @@ use async_trait::async_trait;
 /// Test: `mock_embedder_round_trip` confirms shape + determinism.
 pub struct MockEmbedder {
     pub(super) dim: usize,
+    /// What `input_window` reports; `None` unless set (#9275).
+    window: Option<usize>,
 }
 
 impl MockEmbedder {
     pub fn new(dim: usize) -> Self {
-        Self { dim }
+        Self { dim, window: None }
+    }
+
+    /// Report `window` from [`Embedder::input_window`] (#9275).
+    /// Test: `mock_embedder_input_window_is_configurable`.
+    pub fn with_input_window(mut self, window: usize) -> Self {
+        self.window = Some(window);
+        self
     }
 
     pub(super) fn hash_to_vec(&self, text: &str) -> Vec<f32> {
@@ -50,5 +59,10 @@ impl Embedder for MockEmbedder {
 
     fn dimension(&self) -> usize {
         self.dim
+    }
+
+    // #9275: tests choose the window the chunker sees.
+    fn input_window(&self) -> Option<usize> {
+        self.window
     }
 }

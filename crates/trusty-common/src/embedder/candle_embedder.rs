@@ -349,6 +349,12 @@ impl Embedder for CandleEmbedder {
     fn dimension(&self) -> usize {
         self.dim
     }
+
+    // #9275: the tokenizer truncates at `MAX_SEQ_LEN` (128), specials
+    // included, so the window stays below the model's 256.
+    fn input_window(&self) -> Option<usize> {
+        Some(super::fast_embedder::MINILM_MAX_SEQ_LENGTH.min(MAX_SEQ_LEN))
+    }
 }
 
 /// Pick the best available device.

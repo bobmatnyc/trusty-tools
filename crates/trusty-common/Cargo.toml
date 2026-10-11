@@ -388,6 +388,9 @@ url = { workspace = true, optional = true }
 fastembed = { workspace = true, features = ["hf-hub-native-tls"], optional = true }
 lru = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
+# #9275: enabled by `embedder` for the chunker's exact token count. Same
+# version and features as the `tokenizers` fastembed links, so no new crate.
+fastembed-tokenizers = { workspace = true, optional = true }
 # Optional: enabled by the `embedder-candle` feature (issue #54). Candle is
 # an opt-in alternative BERT backend (all-MiniLM-L6-v2) running on Metal or
 # CPU, bypassing the ONNX/CoreML jetsam-kill risk on Apple Silicon. Default
@@ -677,7 +680,15 @@ rpc = []
 # `trusty-embedder` crate. Pulls in fastembed-rs, lru, parking_lot, and
 # the ort direct dep. Defaults to bundled ORT linking — see the
 # `embedder-*` sub-features for AL2023 / CUDA / load-dynamic variants.
-embedder = ["dep:fastembed", "dep:lru", "dep:parking_lot", "dep:ort"]
+# #9275: `fastembed-tokenizers` and `thiserror` back `embedder::chunk`.
+embedder = [
+    "dep:fastembed",
+    "dep:lru",
+    "dep:parking_lot",
+    "dep:ort",
+    "dep:fastembed-tokenizers",
+    "dep:thiserror",
+]
 # Enables the `bm25` module: zero-dependency BM25 lexical index +
 # code-aware tokenizer (issue #156). Pure `std` + `tracing` — no new deps.
 bm25 = []
