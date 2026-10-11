@@ -22,6 +22,8 @@ mod candidates;
 mod id_tokens;
 mod layers;
 pub(crate) mod open_sweep;
+// #9390: the bounded refill past expired slots every recall lane shares.
+mod refill;
 // #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its
 // only length control.
 mod relevance;
@@ -86,6 +88,10 @@ pub use embed_repair::{
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+
+// #9390: the expired-slot refill bound. Public because trusty-memory's BM25
+// warming lane applies the same stop rule.
+pub use refill::next_refill_window;
 
 // #5037: relevance floor. Public because the consumer that must apply it —
 // trusty-memory's prompt-context injection — lives in another crate.

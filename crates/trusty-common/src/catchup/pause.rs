@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::catchup::git::capture_git_status;
+use crate::catchup::sha_scrub::scrub_sha_like;
 use crate::catchup::session_log::{self, SessionLogEntry};
 
 /// Input fields for a single pause snapshot.
@@ -77,7 +78,9 @@ pub struct PauseSnapshotOutcome {
 /// report this pause".
 /// What: joins `items` as `- <item>` lines under `## <header>`; returns `None`
 /// for an empty slice so the caller can skip the section entirely.
-/// Test: `write_pause_snapshot_omits_empty_sections`.
+/// #9390: each item passes through [`scrub_sha_like`], so a head SHA the PM
+/// typed is flagged rather than recorded.
+/// Test: `write_pause_snapshot_omits_empty_sections`, `a_snapshot_contains_no_head_sha`.
 fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     if items.is_empty() {
         return None;
@@ -85,7 +88,7 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     let mut out = format!("## {header}\n");
     for item in items {
         out.push_str("- ");
-        out.push_str(item);
+        out.push_str(&scrub_sha_like(item));
         out.push('\n');
     }
     Some(out)
@@ -106,6 +109,10 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// is the new file's path RELATIVE to the store root. Returns the resolved
 /// absolute path and timestamp.
 ///
+/// #9390: the PM's free text (Summary, Completed, In Progress, Next Steps)
+/// passes through [`scrub_sha_like`]; the code-generated `Last commit:` line
+/// does not, because #7501 reads it as the supersession baseline.
+///
 /// #5272: a session id that cannot be a directory name (see
 /// [`session_log::session_dir_name`]) writes flat at the store root instead,
 /// with a warning — mangling it into a safe name would let two ids share one
@@ -116,7 +123,8 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// `write_pause_snapshot_omits_empty_sections`,
 /// `write_pause_snapshot_appends_log_entry`,
 /// `write_pause_snapshot_writes_under_session_dir`,
-/// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`.
+/// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`,
+/// `a_snapshot_contains_no_head_sha`.
 pub fn write_pause_snapshot(
     project_dir: &Path,
     input: &PauseSnapshotInput<'_>,
@@ -159,7 +167,7 @@ pub fn write_pause_snapshot(
     let mut md = format!(
         "# Session Pause - {}\n\n## Summary\n{}\n\n",
         now.to_rfc3339(),
-        input.summary
+        scrub_sha_like(input.summary) // #9390: PM text keeps identifiers, not heads.
     );
     if let Some(section) = render_bullet_section("Completed", input.completed) {
         md.push_str(&section);
