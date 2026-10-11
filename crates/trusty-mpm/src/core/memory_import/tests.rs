@@ -275,6 +275,9 @@ struct StubState {
     /// #9275: set, a not-ready answer reports a FAILED warm-up with this error
     /// rather than one still in progress.
     warm_failure: Option<String>,
+    /// #9275: the chunk-count check runs even while not ready — as it does
+    /// live when the only drawer asked about has no vector to count.
+    chunk_check_ran: bool,
 }
 
 type Stub = Arc<Mutex<StubState>>;
@@ -374,7 +377,7 @@ fn rpc(state: &Stub, method: &str, params: Value) -> Result<Value, RpcError> {
                 "unknown": unknown,
                 "alias_audit": "clean",
                 // #9275: a warming daemon cannot run the chunk-count check.
-                "chunk_check": if warming { "unavailable" } else { "ran" },
+                "chunk_check": if warming && !st.chunk_check_ran { "unavailable" } else { "ran" },
                 "chunk_check_error": warming
                     .then_some("no embedder has initialised in this process"),
                 "embedder_ready": !warming,
@@ -1072,7 +1075,8 @@ async fn verify_gate_fails_closed_naming_the_cause_when_warm_up_outlasts_the_wai
 /// wait that ends in the same failure minutes later.
 /// What: a daemon that answers "warm-up failed" and names the error, and a
 /// 5 s wait budget. The row fails on the first ask, well inside the budget,
-/// naming the warm-up error and not "still warming".
+/// naming the warm-up error and not "still warming" — also when the drawer
+/// has no vector and the chunk check therefore ran.
 /// Test: itself.
 #[tokio::test]
 async fn verify_gate_fails_closed_at_once_naming_a_failed_warm_up() {
@@ -1107,6 +1111,29 @@ async fn verify_gate_fails_closed_at_once_naming_a_failed_warm_up() {
     assert!(!detail.contains("still warming"), "{detail}");
     assert_eq!(state.lock().unwrap().verify_calls.len(), 1, "asked once");
     assert!(elapsed < budget, "waited {elapsed:?} on a failed warm-up");
+
+    // Live shape (EVO): a drawer with no vector, so the chunk check "ran".
+    // The failed warm-up is still named, since no re-embed can run without it.
+    {
+        let mut st = state.lock().unwrap();
+        st.chunk_check_ran = true;
+        let id = report.files[0].drawer_id.clone().expect("drawer id");
+        st.unembedded.insert(id);
+    }
+    let report = run_import_with_wait(
+        &refresh_opts(dir.path(), daemon.socket(), false),
+        quick_wait(budget),
+    )
+    .await
+    .unwrap();
+    let detail = report.files[0].detail.clone().unwrap_or_default();
+    assert_eq!(report.failed, 1, "{:#?}", report.files);
+    assert!(detail.contains("has no vector"), "{detail}");
+    assert!(detail.contains("warm-up failed"), "{detail}");
+    assert!(
+        detail.contains("FastEmbedder cold init timed out after 180s"),
+        "{detail}"
+    );
 }
 
 #[tokio::test]

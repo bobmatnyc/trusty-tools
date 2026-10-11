@@ -293,14 +293,12 @@ enum WarmUp {
 /// `verify_gate_waits_for_a_warming_daemon`.
 ///
 /// Only an unrun chunk-count check with a `warming` embedder is worth waiting
-/// on. A `failed` embedder fails the row at once, naming `embedder_error`; any
-/// other unrun check (tokenizer, index scan) will not clear by waiting either.
+/// on. A `failed` embedder fails the row at once, naming `embedder_error`,
+/// whatever the other reason — no re-embed runs without an embedder. Any other
+/// unrun check (tokenizer, index scan) will not clear by waiting either.
 fn warm_up(answer: &Value) -> WarmUp {
-    if answer.get("chunk_check").and_then(Value::as_str) != Some("unavailable") {
-        return WarmUp::NotTheCause;
-    }
+    let unrun_check = answer.get("chunk_check").and_then(Value::as_str) == Some("unavailable");
     match answer.get("embedder_state").and_then(Value::as_str) {
-        Some("warming") => WarmUp::InProgress,
         Some("failed") => WarmUp::Failed(
             answer
                 .get("embedder_error")
@@ -308,6 +306,7 @@ fn warm_up(answer: &Value) -> WarmUp {
                 .unwrap_or("the daemon gave no reason")
                 .to_string(),
         ),
+        Some("warming") if unrun_check => WarmUp::InProgress,
         _ => WarmUp::NotTheCause,
     }
 }
