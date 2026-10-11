@@ -63,22 +63,50 @@ struct Report {
     additions: Vec<String>,
 }
 
-/// The `type` of one param schema. A type list is sorted and joined with `|`;
-/// an array records its item type; a schema with no `type` is `any`.
+/// The type of one param schema, as a sorted `|`-joined set. With no `type`
+/// key it is the union of the `oneOf` / `anyOf` members and the JSON types of
+/// the `enum` / `const` literals, so an enum-only string param is `string`.
+/// An array records its item type; a schema that names none is `any`.
 fn param_type(schema: &Value) -> String {
-    let base = match schema.get("type") {
-        Some(Value::String(t)) => t.clone(),
-        Some(Value::Array(types)) => {
-            let mut v: Vec<&str> = types.iter().filter_map(Value::as_str).collect();
-            v.sort_unstable();
-            v.join("|")
+    let mut types: BTreeSet<String> = BTreeSet::new();
+    match schema.get("type") {
+        Some(Value::String(t)) => {
+            types.insert(t.clone());
         }
-        _ => "any".to_string(),
+        Some(Value::Array(list)) => {
+            types.extend(list.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        _ => {
+            for key in ["oneOf", "anyOf"] {
+                types.extend(schema[key].as_array().into_iter().flatten().map(param_type));
+            }
+            let literals = schema["enum"].as_array().into_iter().flatten();
+            types.extend(literals.chain(schema.get("const")).map(json_type));
+        }
+    }
+    let base = if types.is_empty() {
+        "any".to_string()
+    } else {
+        types.into_iter().collect::<Vec<_>>().join("|")
     };
     match schema.get("items") {
         Some(items) if base == "array" => format!("array<{}>", param_type(items)),
         _ => base,
     }
+}
+
+/// The JSON Schema type name of a literal value.
+fn json_type(v: &Value) -> String {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) if n.is_f64() => "number",
+        Value::Number(_) => "integer",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+    .to_string()
 }
 
 fn is_deprecated(tool: &Value) -> bool {
@@ -315,6 +343,31 @@ fn mcp_schema_snapshot_is_deterministic() {
         .reverse();
     assert_eq!(first, render(&snapshot(&reversed)));
     assert_eq!(parse(&first), snapshot(&live));
+}
+
+/// Why: a param recorded as `any` would hide a later type change.
+/// What: plain, listed, enum-only, `oneOf` and typed-array schemas resolve to
+/// their JSON types. Test: this function.
+#[test]
+fn mcp_schema_param_types_resolve() {
+    let cases = [
+        (json!({"type": "integer"}), "integer"),
+        (json!({"type": ["string", "null"]}), "null|string"),
+        (json!({"enum": ["image/png", "image/jpeg"]}), "string"),
+        (json!({"const": 3}), "integer"),
+        (
+            json!({"oneOf": [{"type": "object"}, {"type": "string"}]}),
+            "object|string",
+        ),
+        (
+            json!({"type": "array", "items": {"oneOf": [{"type": "object"}]}}),
+            "array<object>",
+        ),
+        (json!({}), "any"),
+    ];
+    for (schema, expected) in cases {
+        assert_eq!(param_type(&schema), expected, "{schema}");
+    }
 }
 
 /// Why: "a plain run never writes"; a missing snapshot must fail, not appear.
