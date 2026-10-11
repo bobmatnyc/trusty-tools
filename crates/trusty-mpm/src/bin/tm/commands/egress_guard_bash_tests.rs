@@ -913,3 +913,78 @@ fn bash_egress_cap_precedes_the_trust_anchor_floor_9699() {
     });
     assert_deny_with(verdict, "an over-cap command", "64 KiB");
 }
+
+/// #9699: `after_keywords` counts from a prefix of the words that doubles, and
+/// gives the count every word gives, at and around each prefix boundary.
+#[test]
+fn after_keywords_counts_from_a_word_prefix_9699() {
+    let mut cases: Vec<String> = ["", "echo x", "time", "time -p", "coproc", "coproc N"]
+        .map(str::to_owned)
+        .to_vec();
+    for n in [6, 7, 8, 9, 14, 15, 16, 17, 40] {
+        cases.push(format!("{}x y", "! ".repeat(n)));
+        cases.push("! ".repeat(n));
+        cases.push(format!("{}time -p sendmail", "{ ".repeat(n)));
+        cases.push(format!("{}coproc N {{ sendmail", "if ".repeat(n)));
+        cases.push(format!("{}coproc N", "then ".repeat(n)));
+    }
+    for case in cases {
+        let words: Vec<String> = case.split_whitespace().map(str::to_owned).collect();
+        let count = keyword_words(&words, 0).0;
+        let expected = (count > 0).then(|| words[count..].join(" "));
+        let got =
+            after_keywords(&case).map(|rest| rest.split_whitespace().collect::<Vec<_>>().join(" "));
+        assert_eq!(got, expected, "{case:?}");
+    }
+}
+
+/// #9699: `host_hit` reads only the candidates around a `.` and lowercases
+/// only what can match; it answers as the full byte scan it replaced does.
+#[test]
+fn host_hit_reads_the_first_dotted_candidate_9699() {
+    // The scan `host_hit` replaced: every run of host bytes, lowercased.
+    let full_scan = |text: &str| -> Option<Hit> {
+        let lower = text.to_ascii_lowercase();
+        if let Some(url) = SMTP_URLS.iter().find(|url| lower.contains(**url)) {
+            return Some(hit(SMTP, url));
+        }
+        let bytes = lower.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            if !is_host_byte(bytes[start]) {
+                start += 1;
+                continue;
+            }
+            let end = (start..bytes.len())
+                .find(|&i| !is_host_byte(bytes[i]))
+                .unwrap_or(bytes.len());
+            let piece = lower[start..end].trim_matches(['.', '-']);
+            if let Some(found) = family_host(piece).or_else(|| smtp_port_hit(piece, &lower[end..]))
+            {
+                return Some(found);
+            }
+            start = end;
+        }
+        None
+    };
+    for text in [
+        "",
+        "echo ab ab",
+        "curl https://hooks.Slack.COM/x",
+        "a.b c.notion.so d.slack.com",
+        "notslack.com and -slack.com-",
+        "..slack.com. x",
+        "SMTP.example.com 587",
+        "smtp.x.com:465 smtp.y.com 25",
+        "smtp.x.com:80 then mail.google.com",
+        "é.slack.com",
+        "€x.chat.googleapis.com",
+        "googleapis.com storage.googleapis.com",
+        "SMTPS://h and smtp://g",
+        "x://y a.slack-edge.com",
+        "...",
+        "a.",
+    ] {
+        assert_eq!(host_hit(text), full_scan(text), "{text:?}");
+    }
+}

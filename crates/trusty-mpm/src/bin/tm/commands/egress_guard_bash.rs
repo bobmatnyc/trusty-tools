@@ -118,8 +118,9 @@ const CALL_BUDGET: usize = 4096;
 /// near-cap payload ran past the hook timeout. Spending this budget denies and
 /// never falls back to [`raw_hit`] (supervisor ruling, #9699 critic): padding
 /// can steer the raw scan. The size sits above the 4 216 179 bytes that 8 000
-/// `eval if` levels read before the depth bound, and keeps a spent walk under
-/// 3 s in a debug build (8 375 798 bytes took 4.7 s on EVO, 2026-10-11).
+/// `eval if` levels read before the depth bound. Spending it on a near-cap
+/// `time eval` payload took 0.41 s in an EVO debug build once the walk's
+/// per-byte cost was cut (1.19 s before; #9699, 2026-10-11).
 /// Test: `bash_egress_denies_a_near_cap_time_eval_payload_on_the_walk_budget_9699`,
 /// `bash_egress_denies_keyword_nesting_past_the_depth_bound`,
 /// `bash_allows_a_60_kib_heredoc_9699`.
@@ -321,31 +322,43 @@ fn raw_hit(text: &str) -> Option<Hit> {
 
 /// The first family host, SMTP URL or `smtp.*` host on a mail port in `text`.
 ///
-/// What: lowercases `text`, then reads every run of ASCII letters, digits, `.`
-/// and `-` as a host candidate, its leading and trailing `.`/`-` trimmed, so
-/// a family host is matched on whole labels.
+/// What: reads every run of ASCII letters, digits, `.` and `-` as a host
+/// candidate, its leading and trailing `.`/`-` trimmed, so a family host is
+/// matched on whole labels, case-insensitively.
+/// #9699: every family host and every `smtp.*` host holds a `.`, so only a
+/// candidate around a `.` is read, found by the `.` search, and only a `://`
+/// text is lowercased for the SMTP URLs: the walk's per-byte cost no longer
+/// carries a copy or a byte loop over undotted text.
 /// Test: `bash_egress_denies_curl_slack_host`,
-/// `bash_allows_unrelated_notion_substring`, `bash_allows_googleapis_storage`.
+/// `bash_allows_unrelated_notion_substring`, `bash_allows_googleapis_storage`,
+/// `host_hit_reads_the_first_dotted_candidate_9699`.
 fn host_hit(text: &str) -> Option<Hit> {
-    let lower = text.to_ascii_lowercase();
-    if let Some(url) = SMTP_URLS.iter().find(|url| lower.contains(**url)) {
-        return Some(hit(SMTP, url));
+    if text.contains("://") {
+        let lower = text.to_ascii_lowercase();
+        if let Some(url) = SMTP_URLS.iter().find(|url| lower.contains(**url)) {
+            return Some(hit(SMTP, url));
+        }
     }
-    let bytes = lower.as_bytes();
-    let mut start = 0;
-    while start < bytes.len() {
-        if !is_host_byte(bytes[start]) {
-            start += 1;
-            continue;
+    let bytes = text.as_bytes();
+    let mut read_to = 0;
+    while let Some(dot) = text[read_to..].find('.').map(|at| read_to + at) {
+        let mut start = dot;
+        while start > read_to && is_host_byte(bytes[start - 1]) {
+            start -= 1;
         }
-        let end = (start..bytes.len())
-            .find(|&i| !is_host_byte(bytes[i]))
-            .unwrap_or(bytes.len());
-        let piece = lower[start..end].trim_matches(['.', '-']);
-        if let Some(found) = family_host(piece).or_else(|| smtp_port_hit(piece, &lower[end..])) {
-            return Some(found);
+        let mut end = dot + 1;
+        while end < bytes.len() && is_host_byte(bytes[end]) {
+            end += 1;
         }
-        start = end;
+        let piece = text[start..end].trim_matches(['.', '-']);
+        if piece.contains('.') {
+            let piece = piece.to_ascii_lowercase();
+            let found = family_host(&piece).or_else(|| smtp_port_hit(&piece, &text[end..]));
+            if found.is_some() {
+                return found;
+            }
+        }
+        read_to = end;
     }
     None
 }
@@ -490,15 +503,33 @@ fn segment_hits(segment: &str, depth: usize, walk: &Walk) -> Result<Vec<Hit>, Un
 
 /// `segment` past its leading shell keywords as [`keyword_words`] counts them,
 /// `coproc NAME` and `time -p` included; `None` when it has none.
+///
+/// What: [`keyword_words`] reads at most one word past the count it returns,
+/// so a prefix of the words holding two more than that count gives the whole
+/// segment's count; the prefix doubles until it does (#9699: copying every
+/// word of a near-cap segment cost the walk ~2 ms a level).
+/// Test: `after_keywords_counts_from_a_word_prefix_9699`.
 fn after_keywords(segment: &str) -> Option<&str> {
     let first = segment.split_whitespace().next()?;
-    // Most segments lead with no keyword; only those split every word.
+    // Most segments lead with no keyword; only those split more words.
     if keyword_words(&[first.to_owned()], 0).0 == 0 {
         return None;
     }
-    let words: Vec<String> = segment.split_whitespace().map(str::to_owned).collect();
+    let mut take = 8;
+    let count = loop {
+        let words: Vec<String> = segment
+            .split_whitespace()
+            .take(take)
+            .map(str::to_owned)
+            .collect();
+        let count = keyword_words(&words, 0).0;
+        if count + 1 < words.len() || words.len() < take {
+            break count;
+        }
+        take *= 2;
+    };
     let mut rest = segment.trim_start();
-    for _ in 0..keyword_words(&words, 0).0 {
+    for _ in 0..count {
         rest = rest
             .split_once(char::is_whitespace)
             .map_or("", |(_, tail)| tail)
