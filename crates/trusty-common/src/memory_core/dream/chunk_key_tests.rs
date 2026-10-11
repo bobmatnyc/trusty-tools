@@ -11,8 +11,10 @@
 use super::cycle::compact_pass;
 use crate::memory_core::palace::{Palace, PalaceId, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use std::sync::Arc;
+use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 fn open_handle(dir: &std::path::Path, name: &str) -> Arc<PalaceHandle> {
@@ -118,4 +120,97 @@ async fn dream_compact_counts_only_successful_removals_of_a_chunked_orphan() {
     assert_eq!(result.orphans_removed, 3);
     assert_eq!(keys_of(&handle, orphan), 0, "every chunk row is reclaimed");
     assert_eq!(keys_of(&handle, kept), 1);
+}
+
+/// Collects formatted `warn` output from this thread.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Write rows straight into a palace's vector redb before it opens: each
+/// `Some(key)` row is keyed, each `None` row has a vector and no key.
+fn seed_vector_rows(data_dir: &std::path::Path, rows: &[(u64, Option<String>)]) {
+    std::fs::create_dir_all(data_dir).unwrap();
+    let db = redb::Database::create(data_dir.join("index.usearch.redb")).unwrap();
+    let wtx = db.begin_write().unwrap();
+    {
+        let mut vectors = wtx.open_table(VECTORS).unwrap();
+        let mut keys = wtx.open_table(VECTOR_KEYS).unwrap();
+        for (id, key) in rows {
+            let mut v = vec![0.0f32; 384];
+            v[(*id as usize) % 384] = 1.0;
+            let encoded = postcard::to_allocvec(&v).unwrap();
+            vectors.insert(*id, encoded.as_slice()).unwrap();
+            if let Some(key) = key {
+                keys.insert(key.as_str(), *id).unwrap();
+            }
+        }
+    }
+    wtx.commit().unwrap();
+}
+
+/// AC-B7 (#9275): rows the addressable pass cannot enumerate — keys that name
+/// no drawer, and vectors with no key — still count toward the open-time
+/// orphan warning and the dream rebuild trigger, exactly as on main.
+#[tokio::test]
+async fn unparseable_and_keyless_rows_still_trip_the_orphan_warning_and_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "legacy-orphans";
+    let ghost = Uuid::new_v4();
+    seed_vector_rows(
+        &dir.path().join(name),
+        &[
+            (900_001, Some("not-a-drawer".into())),
+            (900_002, Some(format!("{ghost}#0"))),
+            (900_003, Some(format!("{ghost}#01"))),
+            (900_004, None),
+            (900_005, None),
+            (900_006, None),
+        ],
+    );
+
+    // Six entries against zero drawers: over the `drawers + 5` warning bar.
+    let cap = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(cap.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let handle = open_handle(dir.path(), name);
+    drop(guard);
+    let log = String::from_utf8_lossy(&cap.0.lock().unwrap()).into_owned();
+    assert!(
+        log.contains("orphaned entries"),
+        "the open-time orphan warning fires: {log}"
+    );
+
+    // Seven entries against one drawer: over the `2 * drawers + 1` trigger.
+    remember(&handle, "Octopuses taste with their arms").await;
+    assert_eq!(handle.vector_store.index_size(), 7);
+    let removed = compact_pass(&handle, Instant::now(), Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.vector_store.index_size(),
+        1,
+        "the rebuild reset the index and re-embedded the one drawer"
+    );
+    assert_eq!(removed, 6, "the rebuild drops every unenumerable entry");
 }

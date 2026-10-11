@@ -244,6 +244,23 @@ async fn unparseable_key_is_skipped_and_does_not_hide_valid_hits() {
     assert_eq!(store.all_ids(), vec![a], "`#0` and `#01` name no drawer");
 }
 
+/// AC-B4 with malformed rows (#9275): a malformed key nearer the query than
+/// every valid drawer takes none of the `k` slots. With `k = 1`, the one valid
+/// drawer still comes back, so `candidates.rs` never reads "exhausted" early.
+#[tokio::test]
+async fn malformed_key_takes_no_top_k_slot() {
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    raw_row(&store, &format!("{b}#0"), &planar(0.0));
+    raw_row(&store, &format!("{b}#01"), &planar(1.0));
+    raw_row(&store, &a.to_string(), &planar(40.0));
+
+    let hits = store.search(&planar(0.0), 1).await.unwrap();
+    let ids: Vec<Uuid> = hits.iter().map(|h| h.drawer_id).collect();
+    assert_eq!(ids, vec![a], "the valid drawer fills the one slot");
+}
+
 /// R9: `reset` clears chunk rows with the bare ones.
 #[tokio::test]
 async fn reset_clears_chunk_rows() {

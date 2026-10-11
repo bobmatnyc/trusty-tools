@@ -32,6 +32,44 @@ fn chunked(store: &HnswStore, id: &str, vectors: &[Vec<f32>]) {
     }
 }
 
+/// Every key in the store, sorted.
+fn sorted_keys(store: &HnswStore) -> Vec<String> {
+    let mut keys = store.all_keys().expect("all_keys");
+    keys.sort();
+    keys
+}
+
+/// #9275: `replace_group` takes a drawer key, never a row key. An empty key or
+/// one holding `#` is an error, and nothing is written — no rows that the
+/// same call's surplus sweep then deletes behind an `Ok`.
+#[test]
+fn replace_group_rejects_an_empty_or_hash_drawer_key() {
+    let (_dir, store) = open_store(8);
+    let rows = vec![planar_vec(8, 0.0), planar_vec(8, 10.0)];
+    for drawer in ["x#2", ""] {
+        let result = store.replace_group(drawer, &rows);
+        assert!(result.is_err(), "drawer {drawer:?}: {result:?}");
+        assert_eq!(sorted_keys(&store), Vec::<String>::new(), "{drawer:?}");
+    }
+}
+
+/// #9275: `delete_group("{d}#2")` must not delete the whole of drawer `d`, and
+/// an empty key names no drawer. Both are errors and delete nothing.
+#[test]
+fn delete_group_rejects_an_empty_or_hash_drawer_key() {
+    let (_dir, store) = open_store(8);
+    let d = Uuid::new_v4().to_string();
+    let rows = [planar_vec(8, 0.0), planar_vec(8, 5.0), planar_vec(8, 9.0)];
+    chunked(&store, &d, &rows);
+    let before = sorted_keys(&store);
+    assert_eq!(before.len(), 3);
+    for drawer in [format!("{d}#2"), String::new()] {
+        let result = store.delete_group(&drawer);
+        assert!(result.is_err(), "drawer {drawer:?}: {result:?}");
+        assert_eq!(sorted_keys(&store), before, "{drawer:?} deleted rows");
+    }
+}
+
 /// AC-B3: five drawers of four chunks, `k = 3` returns three distinct drawers,
 /// each once, best first — not the nearest drawer's three nearest chunks.
 #[test]
