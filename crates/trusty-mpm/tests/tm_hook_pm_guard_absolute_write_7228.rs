@@ -202,9 +202,16 @@ fn pm_guard_allows_tier_a_verbs_that_write_outside_main_checkout_source() {
 /// A clone (a `.git` directory) at `<base>/<tmp>/scratchpad/clone`; the
 /// returned guard removes it.
 fn scratch_clone(base: &str) -> (tempfile::TempDir, PathBuf) {
+    // `/private/tmp` exists only on macOS; elsewhere the platform temp dir
+    // stands in, so the row still checks a clone outside the main checkout.
+    let base = if std::path::Path::new(base).is_dir() {
+        PathBuf::from(base)
+    } else {
+        std::env::temp_dir()
+    };
     let dir = tempfile::Builder::new()
         .prefix("tm-7228-")
-        .tempdir_in(base)
+        .tempdir_in(&base)
         .expect("scratch dir");
     let clone = dir.path().join("scratchpad/clone");
     std::fs::create_dir_all(clone.join(".git")).expect("mkdir .git");
