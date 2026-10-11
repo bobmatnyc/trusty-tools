@@ -28,6 +28,11 @@ const WORDS: [&str; 8] = [
 /// other word splits into one token per character. The file's own truncation
 /// is 16, so a loader that keeps it under-counts.
 fn small_bert_tokenizer() -> ChunkTokenizer {
+    small_bert_tokenizer_with(&[])
+}
+
+/// [`small_bert_tokenizer`] with `extra` vocab entries appended.
+fn small_bert_tokenizer_with(extra: &[&str]) -> ChunkTokenizer {
     let specials = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"];
     let mut vocab = serde_json::Map::new();
     let mut push = |token: String| {
@@ -44,7 +49,7 @@ fn small_bert_tokenizer() -> ChunkTokenizer {
     for p in [".", ",", "!", "?", "-"] {
         push(p.to_string());
     }
-    for w in WORDS {
+    for w in WORDS.iter().chain(extra) {
         push(w.to_string());
     }
     let added: Vec<serde_json::Value> = specials
@@ -188,6 +193,38 @@ fn unbroken_run_without_whitespace_is_bounded_and_covered() {
     // Punctuation-joined run, and multi-byte CJK characters (one token each).
     assert_bounded_and_covered(&tok, &"a.b-c,".repeat(800), 32);
     assert_bounded_and_covered(&tok, &"漢字".repeat(500), 32);
+}
+
+#[test]
+fn chunk_ends_advance_past_a_word_longer_than_the_step() {
+    // #9275: a chunk that ends at the start of a word longer than
+    // `budget - overlap` tokens must not make the next chunks end there too.
+    let window = 32;
+    let overlap = overlap_tokens(window - 2);
+    assert_eq!(overlap, 3);
+    let long_word = "zulu".repeat(150);
+    let stalled = format!(
+        "alpha bravo charlie delta echo foxtrot golf hotel alpha bravo {long_word}"
+    );
+    // `##q{40}` is one token after `z`, 40 at a word start: the overlap that
+    // starts on it re-counts past the budget, so the overlap is dropped.
+    let q40 = "q".repeat(40);
+    let tok = small_bert_tokenizer_with(&[&format!("##{q40}")]);
+    let ballooning = format!("z{q40} alpha bravo {long_word}");
+    for text in [&stalled, &ballooning] {
+        let chunks = assert_bounded_and_covered(&tok, text, window);
+        for pair in chunks.windows(2) {
+            let shared = &text[pair[1].byte_range.start..pair[0].byte_range.end];
+            let n = tok.count_tokens(shared).expect("count");
+            assert!(n <= overlap, "overlap {shared:?} is {n} tokens > {overlap}");
+        }
+        for (i, a) in chunks.iter().enumerate() {
+            for b in &chunks[i + 1..] {
+                let (a, b) = (&a.byte_range, &b.byte_range);
+                assert!(b.end > a.end, "{b:?} is contained in {a:?}");
+            }
+        }
+    }
 }
 
 #[test]
