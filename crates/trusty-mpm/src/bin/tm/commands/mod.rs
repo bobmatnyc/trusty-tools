@@ -30,6 +30,9 @@ pub(crate) mod daemon;
 pub(crate) mod daemon_pid_identity;
 // #9121: `tm daemon --sandbox` — refuse an unisolated env, skip pollers/secrets.
 pub(crate) mod daemon_sandbox;
+// #9695: an address whose connect fails in the kernel, on every host.
+#[cfg(test)]
+pub(crate) mod dead_addr;
 pub(crate) mod delete;
 // #6887: the bulk-read diversion hook and its cheap worker.
 pub(crate) mod divert;
