@@ -1011,3 +1011,28 @@ fn client_wait_matches_the_direct_method_deadline() {
         assert_eq!(dial::client_wait(name), write, "{name}");
     }
 }
+
+/// Why: #9067 — the Secrets page renders one sentence per upstream kind
+/// (`ui-secrets/src/lib/kinds.js`). A kind the console relays but the page
+/// does not know would fall back to the generic text; one the page knows but
+/// the console never relays is dead. Both sets must match.
+/// What: reads the page's `KIND_TEXT` keys from the source and compares them
+/// with [`UPSTREAM_KINDS`].
+/// Test: itself.
+#[test]
+fn page_kind_texts_cover_every_upstream_kind() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui-secrets/src/lib/kinds.js");
+    let source = std::fs::read_to_string(&path).expect("read kinds.js");
+    let start = source
+        .find("export const KIND_TEXT = {")
+        .expect("KIND_TEXT");
+    let table = &source[start..];
+    let table = &table[..table.find("\n};").expect("end of KIND_TEXT")];
+    let page: HashSet<&str> = table
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.trim().split_once(':').map(|(key, _)| key))
+        .collect();
+    let console: HashSet<&str> = UPSTREAM_KINDS.iter().map(|(kind, _, _)| *kind).collect();
+    assert_eq!(page, console);
+}
