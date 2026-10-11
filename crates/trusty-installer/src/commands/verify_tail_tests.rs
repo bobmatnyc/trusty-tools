@@ -193,7 +193,7 @@ fn verify_one_does_not_kickstart_a_healthy_launchd_daemon() {
 /// regression that a naive "gate on confirmed-down without changing the
 /// transport" would have shipped: an outage that persists.
 ///
-/// What: plants an `http_addr` pointing at a released ephemeral port (so the
+/// What: plants an `http_addr` at `dead_addr` (#9613; its connect fails, so the
 /// probe genuinely observes `Refused`), and asserts exactly one kickstart for
 /// this member. `remaining_budget` is 1s deliberately: `bounded_attempts(1s)` is
 /// 1, so the post-kickstart poll takes exactly one more probe and ZERO

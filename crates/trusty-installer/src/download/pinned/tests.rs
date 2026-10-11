@@ -323,7 +323,7 @@ async fn a_github_prefixed_pin_installs() {
 /// Test: This is the test.
 #[tokio::test]
 async fn a_malformed_pin_is_invalid_not_a_mismatch() {
-    // The crate's existing guaranteed-to-refuse loopback address.
+    // #9613: the crate's address whose connect fails at once on every host.
     let base = format!("http://{}", crate::commands::test_support::dead_addr());
     let dir = tempfile::tempdir().unwrap();
 
@@ -774,7 +774,7 @@ async fn fails_closed_when_the_release_list_is_unreachable() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    // The crate's existing guaranteed-to-refuse loopback address.
+    // #9613: the crate's address whose connect fails at once on every host.
     let base = format!("http://{}", crate::commands::test_support::dead_addr());
     let err = run(&base, &[PinnedTool::new("demo-tool", "1.2.3")], dir.path())
         .await

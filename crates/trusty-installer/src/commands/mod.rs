@@ -50,6 +50,9 @@ pub mod sign;
 pub mod stable_set;
 pub mod stack;
 pub mod status;
+// #9613: an address whose connect fails in the kernel, on every host.
+#[cfg(test)]
+mod dead_addr;
 // #4246: stub servers + stubbed data dir shared by the probe/verify tests.
 #[cfg(test)]
 pub mod test_support;
