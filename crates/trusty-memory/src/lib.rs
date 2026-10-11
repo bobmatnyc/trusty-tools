@@ -49,6 +49,17 @@ use {
     trusty_common::ChatProvider,
 };
 
+/// The memory storage engine: palaces, drawers, the KG, retrieval and stores.
+///
+/// Why: consumers import the engine through trusty-memory, its owning crate,
+/// so the engine can later move here from trusty-common without another
+/// import sweep (#9271).
+/// What: a re-export of `trusty_common::memory_core`, so every item has the
+/// same type through both paths. Unconditional: `memory-core` is always on.
+/// Test: `engine_is_the_trusty_common_memory_core_module`.
+// #9270: the stable engine path for consumers.
+pub use trusty_common::memory_core as engine;
+
 /// Two-phase daemon readiness state (issues #910/#911, revised by #1970).
 ///
 /// Why: The embedder cold-init (CoreML compile, 30-120 s) must never block

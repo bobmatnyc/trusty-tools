@@ -102,7 +102,7 @@ impl Drop for DataDirGuard {
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::serial]
 async fn tctl_probe_sees_a_live_uds_daemon_as_serving() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
     let data = tempfile::tempdir().expect("tempdir");
     let root = data.path().to_path_buf();
