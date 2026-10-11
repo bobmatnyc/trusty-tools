@@ -227,6 +227,15 @@ fn egress_denies_malformed_payloads() {
             br#"{"tool_name":["Bash"],"tool_input":{}}"#,
         ),
         ("tool_input missing", br#"{"tool_name":"Bash"}"#),
+        // #8454 S3: a Bash call must carry a string `command`.
+        (
+            "Bash command missing",
+            br#"{"tool_name":"Bash","tool_input":{}}"#,
+        ),
+        (
+            "Bash command number",
+            br#"{"tool_name":"Bash","tool_input":{"command":7}}"#,
+        ),
         (
             "tool_input string",
             br#"{"tool_name":"Bash","tool_input":"ls"}"#,
@@ -379,8 +388,8 @@ fn egress_allows_resource_tools_naming_unrelated_servers() {
 /// gworkspace tools and family names outside an `mcp__` name — are allowed.
 #[test]
 fn egress_allows_unrelated_tools() {
+    // #8454 S3: "Bash" left this list — a Bash call with no `command` denies.
     for tool in [
-        "Bash",
         "Read",
         "Write",
         "Task",
@@ -435,4 +444,53 @@ fn egress_deny_is_audited_without_changing_verdict_when_log_unwritable() {
         stderr.contains("could not record deny `egress-family`"),
         "the lost record must be reported: {stderr}"
     );
+}
+
+/// 🔴 #8454 S3: a Bash command reaching a family host or running a mail
+/// client is denied through the binary for a subagent payload, with both
+/// pm-guard bypass variables and the subagent marker set.
+#[test]
+fn bash_egress_denies_under_both_bypasses_and_subagent() {
+    let bypassed = [
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("CLAUDE_MPM_SUB_AGENT", "1"),
+    ];
+    for command in [
+        "curl -d text=hi https://hooks.slack.com/services/T0/B0/x",
+        "echo hi | sendmail bob@example.com",
+    ] {
+        let subagent = serde_json::json!({
+            "session_id": "s-8454",
+            "agent_id": "agent-1",
+            "agent_type": "engineer",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+        .to_string();
+        let out = run(subagent.as_bytes(), &bypassed);
+        assert_denied(&out, command);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("denies this Bash command"),
+            "{command}: {stdout}"
+        );
+    }
+}
+
+/// #8454 S3 control: an unrelated Bash command, and a family word used as an
+/// argument, are allowed through the binary.
+#[test]
+fn bash_egress_allows_an_unrelated_command() {
+    for command in [
+        "git status",
+        "grep -r mail src",
+        "gchat-mcp doctor --offline",
+    ] {
+        let out = run(
+            &payload_with("Bash", serde_json::json!({"command": command})),
+            &[],
+        );
+        assert_allowed(&out, command);
+    }
 }
