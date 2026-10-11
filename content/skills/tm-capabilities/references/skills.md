@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-57 bundled skills.
+58 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -25,6 +25,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs. |
 | `rust-delivery-workflow` | agent-reference | no | Rust delivery process under agent dispatch: commit before the gate chain, match the local toolchain to CI's clippy pin, cap concurrent cargo builds, keep gate output to a verdict, and batch installs before live verification. Use when planning or running the gates for a Rust change, not when a build feels slow. |
+| `rust-runtime-performance` | agent-reference | no | Rust runtime performance: measure before changing, cut allocations and data movement, bound async concurrency, and treat tuning as profiled experiments. Use when a Rust program is slow, memory-heavy or stalls under load, not when the build is slow. |
 | `security-scanning` | agent-reference | no | CI security scanning: secrets, deps, SAST, triage, expiring exceptions |
 | `self-improvement-loop` | agent-reference | no | Self-analysis and improvement reporting for a dispatched agent: the post-mortem-routed recommendation block, plus the per-task fast-loop hypothesis record that changes behavior now |
 | `software-patterns` | agent-reference | no | Compare tradeoffs and recommend architectural patterns — dependency injection, service-oriented architecture, repository, domain events, circuit breaker, and anti-corruption layer. Use when choosing between design patterns, planning microservices boundaries, evaluating system design alternatives, or asking 'which pattern should I use' for a specific coupling or resilience problem. |

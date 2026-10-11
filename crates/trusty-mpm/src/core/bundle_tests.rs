@@ -730,11 +730,13 @@ fn bundle_table_is_complete() {
     //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
     // Issue #9011 (-43): the 43 `agents/*.md` rows left the table — the agent
     //   roster is runtime content (`content/agents`). 191 - 43 = 148.
-    assert_eq!(deployed().len(), 148);
+    // Issue #9296 (+1): `skills/rust-runtime-performance.md` is NEW — the
+    //   runtime half of the Rust guidance, loaded on demand. 148 + 1 = 149.
+    assert_eq!(deployed().len(), 149);
     let mut paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 148, "artifact paths must be unique");
+    assert_eq!(paths.len(), 149, "artifact paths must be unique");
     for artifact in deployed() {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

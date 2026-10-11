@@ -33,6 +33,9 @@ const CODING_SKILLS: &[&str] = &[
     // #8214: engineer-only like its sibling `rust-build-performance` — cargo
     // gate ordering and toolchain parity for a Rust change under dispatch.
     "rust-delivery-workflow",
+    // #9296: engineer-only like its siblings — runtime profiling and hot-path
+    // tuning for Rust code.
+    "rust-runtime-performance",
     "security-scanning",
     "software-patterns",
     "systematic-debugging",

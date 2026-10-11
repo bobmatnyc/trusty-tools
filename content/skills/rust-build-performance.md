@@ -3,263 +3,191 @@ name: rust-build-performance
 description: "Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs."
 user-invocable: false
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 category: agent-reference
 effort: low
 ---
 # Rust Build Performance
 
 The big wins live in the **development loop** and the **dependency graph**,
-not in obscure compiler flags. Optimize those two first; treat flags and LTO
-tuning as a last resort for measured hotspots, not a starting point.
+not in compiler flags. Optimize those first; flags and LTO are a last resort
+for measured hotspots.
 
 ## 1. Core Principle
 
-Practical inner loop, in order:
+Inner loop, in order:
 
-1. `cargo check` (or `cargo check -p <crate>`) while writing code — fast,
-   catches type/borrow errors, never blocks on codegen.
-2. Targeted tests for the crate you're touching — `cargo test -p <crate>`.
-3. A full `cargo build` (or `cargo build --workspace`) only occasionally —
-   before a PR, before a release, when you need a runnable binary.
+1. `cargo check -p <crate>` while writing — catches type and borrow errors,
+   never blocks on codegen.
+2. `cargo test -p <crate>` for the crate you touch.
+3. A full build only for a runnable binary, a PR, or a release.
 
-Reach for `cargo check` by default; reach for a full build only when you
-actually need generated code (running the binary, running tests that need it,
-or the project-required shipping gate).
+**Name the objective first**: cold full build, warm incremental rebuild, or
+test-edit-run latency. They want different fixes. Compare variants under the
+same objective, toolchain, features, profile, target dir and cache state, and
+repeat each run; one timing is an anecdote.
 
 ## 2. `cargo check` While Coding
 
-```bash
-cargo check                 # whole workspace, no codegen
-cargo check -p trusty-search # narrow to the crate you're actually editing
-```
+`cargo check` skips codegen. Scope it with `-p <crate>`; widen only for
+cross-crate diagnostics.
 
-`cargo check` checks types and borrows without code generation. Scope it to
-`-p <crate>` unless cross-crate diagnostics are needed.
+**`cargo check` without `-p` covers only the workspace's `default-members`**
+(the root package when there is one). Use `--workspace` when the claim is
+"the whole workspace type-checks".
 
-**The project's risk/stage test ladder defines the shipping gate.** Run its
-required crate, consumer and release checks; prose-only changes need its doc
-gates. Do not add a workspace build merely because work is ready to land.
+The project's risk/stage test ladder defines the shipping gate: its crate,
+consumer and release checks, and doc gates for prose-only changes. Do not add
+a workspace build just because work is ready to land.
 
-**Before a concurrent build**, name the actual assigned `CARGO_TARGET_DIR`,
-job limit, profile/features and lock-wait bound in the brief. Use the existing
-allocator if available; otherwise coordinate ownership with the PM. Do not
-invent a slot command or assume a fixed slot count. On a lock wait, identify
-the holder and report the bound; never kill another session's build or start
-a duplicate. Preserve the assigned cache across compatible runs. See #8021.
+**Before a concurrent build**, name the assigned `CARGO_TARGET_DIR`, job
+limit, profile/features and lock-wait bound in the brief. Use the existing
+allocator if there is one; otherwise coordinate ownership with the PM. On a
+lock wait, identify the holder and report the bound; never kill another
+session's build or start a duplicate. Preserve the assigned cache across
+compatible runs. See #8021.
 
 ## 3. Measure Before Tuning
 
-Never guess at what's slow. Profile first:
-
 ```bash
-cargo build --timings
-# → target/cargo-timings/cargo-timing.html
+cargo build --timings   # → target/cargo-timings/cargo-timing.html
 ```
 
-The HTML report separates codegen, dependency waits, and build-script time.
-Locate serial chains, slow proc-macros, and unnecessary build-script reruns
-before tuning.
-
+The report separates codegen, dependency waits and build-script time. Find
+serial chains, slow proc-macros and needless build-script reruns before tuning.
 Reference: <https://doc.rust-lang.org/cargo/reference/timings.html>
 
 ## 4. Reduce Dependency / Feature Load
 
-Dependencies and proc-macros dominate clean-build time far more than your own
-code usually does. Audit the graph:
+Dependencies and proc-macros dominate clean-build time. Audit the graph:
 
 ```bash
-cargo tree --duplicates       # multiple versions of the same crate = wasted compiles
-cargo tree --edges features   # which features are pulled in, and by what
+cargo tree --duplicates       # each extra version is another compile
+cargo tree --edges features   # which features, pulled in by what
 ```
 
-- Disable default features you don't need
+- Disable default features you do not need
   (`serde = { version = "1", default-features = false, features = ["derive"] }`).
-- Remove heavyweight dependencies that provide marginal value — every crate in
-  the graph is compile time, not just runtime weight.
-- Consolidate duplicate versions of the same crate (`cargo tree --duplicates`)
-  — cargo compiles each distinct version separately.
-- Don't reflexively enable every feature/workspace member during ordinary
-  dev; use `-p <crate>` and feature flags to compile only what you're
-  actually exercising.
-- Cargo's workspace feature resolver (resolver = "2", already the default for
-  this workspace) unifies features per-target rather than globally — verify
-  your `Cargo.toml` isn't accidentally forcing broader unification.
+- Drop heavyweight dependencies with marginal value; unify duplicate versions.
+- Compile only what you exercise: `-p <crate>` and feature flags.
+- Features are additive and unified per resolver: with resolver 2, a feature
+  enabled by any member in the build is on for every user of that crate in that
+  build. Check what a command actually builds with
+  `cargo tree -p <crate> -e features -i <dep>`; a stray feature that builds a
+  second copy of a dependency is a measurable cost.
+- Never pin locally a dependency already in `[workspace.dependencies]`; a
+  duplicate defeats version unification.
 
-**Workspace-specific note:** `[workspace.dependencies]` sharing is already
-this repo's convention (see project `CLAUDE.md`) — never pin a dependency
-locally if it's already in the workspace table; a locally-pinned duplicate
-defeats both dependency-graph hygiene and cargo's version unification.
+**Dev-dependency edges are compile-graph edges.** Separate crates exist for a
+cheaper compile; a test-only edge that welds two crates' graphs defeats that.
 
-**Dev-dependency edges are compile-graph edges, not favors.** The entire
-point of separate crates is a more efficient compilation process; a
-test-only edge that welds two crates' compile graphs together defeats it.
-
-- Never add a workspace crate as a `[dev-dependencies]` or
-  `[build-dependencies]` entry when it is absent from the consumer's normal
-  dependency tree.
-- A test that needs two crates lives in its own `publish = false` test crate
-  that depends on both, or in the crate that already depends on the other.
+- Never add a workspace crate to `[dev-dependencies]` or `[build-dependencies]`
+  when it is absent from the consumer's normal dependency tree.
+- A test needing two crates lives in a `publish = false` test crate that
+  depends on both, or in the crate that already depends on the other.
 - Re-declaring a normal dependency under `[dev-dependencies]` with extra
-  features compiles that crate a second time, under a different feature set.
-  Do this only when the feature must never leak into production, and say why
-  in a manifest comment.
-- Check it without a build: `cargo tree -p <crate> -e dev --prefix none` must
-  add no workspace crate that `-e normal` lacks.
+  features compiles it a second time. Do it only when the feature must never
+  reach production, and say why in a manifest comment.
+- Check without building: `cargo tree -p <crate> -e dev --prefix none` adds no
+  workspace crate that `-e normal` lacks.
 
-See #8341.
-
-Reference: <https://doc.rust-lang.org/cargo/reference/features.html>,
-<https://doc.rust-lang.org/cargo/commands/cargo-tree.html>
+See #8341. Reference: <https://doc.rust-lang.org/cargo/reference/features.html>
 
 ## 5. Preserve Incremental Compilation
 
-The `dev` profile is incremental by default — cargo caches per-crate
-compilation artifacts in `target/` and reuses them across builds. Protect
-that cache:
+The `dev` profile is incremental; cargo reuses per-crate artifacts in
+`target/`. Protect that cache:
 
-- Don't delete `target/` mid-task. A deleted `target/` forces a full cold
-  rebuild of the entire dependency graph.
-- Don't churn `RUSTFLAGS` between builds — a changed flag set invalidates the
-  incremental cache for everything built under it.
-- Don't switch feature sets back and forth on the same crate in the same
-  session — each switch is effectively a different build configuration.
-- Don't switch toolchains mid-task (e.g. stable ↔ nightly, or MSRV bump)
-  without expecting a full rebuild.
+- Do not delete `target/` mid-task (forces a cold rebuild of everything).
+- Do not churn `RUSTFLAGS`, feature sets or toolchains on the same crate.
 
-**Optional faster local dev profile** — for a snappier inner loop, some
-engineers add a lighter debug profile locally:
+A lighter debug profile (`debug = "line-tables-only"`) is a **local,
+uncommitted** override; never commit profile changes to the workspace root
+without team approval.
 
-```toml
-[profile.dev]
-opt-level = 0
-debug = "line-tables-only"
-incremental = true
-```
-
-Treat this as a **local, uncommitted** override
-(`~/.cargo/config.toml` or an untracked `Cargo.toml` edit) — do **not** commit
-profile changes to the workspace root `Cargo.toml` without explicit team
-approval; it affects every contributor's build and debugging experience.
-
-**Worktree caches:** fresh worktrees have empty `target/` directories. Use
-an assigned shared `CARGO_TARGET_DIR` to reuse registry dependencies; path
-crates still rebuild because their absolute source paths differ. Shared
-builds serialize on Cargo's lock: apply the ownership and wait bounds in §2.
-`rust-delivery-workflow` §4 documents setup; use the `tm doctor`
-`rust_build_env` prefix, not a hand-assembled one.
+**Worktree caches:** a fresh worktree has an empty `target/`. An assigned
+shared `CARGO_TARGET_DIR` reuses registry dependencies; path crates still
+rebuild because their absolute source paths differ. Shared builds serialize on
+Cargo's lock: apply the ownership and wait bounds in §2. `rust-delivery-workflow`
+§4 documents setup; use the `tm doctor` `rust_build_env` prefix, not a
+hand-assembled one.
 
 Never delete live build caches. The PM reclaims merged, unowned worktrees via
-`tm session prune-worktrees --merged-prs --force` (#5791, #2919); this is not
+`tm session prune-worktrees --merged-prs --force` (#5791, #2919); it is not
 automatic and must preserve unsaved work and live owners.
-
-Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html#incremental>
 
 ## 6. sccache
 
-[`sccache`](https://github.com/mozilla/sccache) is a shared compilation
-cache — it caches compiler *outputs* keyed by input hash, so identical
-compilation units are never recompiled even across different `target/`
-directories.
+[`sccache`](https://github.com/mozilla/sccache) caches compiler outputs by
+input hash, across `target/` directories. It is **conditional**: adopt it from
+evidence, not by default.
 
-```bash
-cargo install sccache
-```
+- It cannot cache incremental artifacts. Workspace path crates build
+  incrementally under `dev`, so they get no cross-worktree hit unless the
+  wrapped build sets `CARGO_INCREMENTAL=0` (which gives up the incremental win).
+- Non-incremental external dependencies are identical across worktrees with the
+  same `Cargo.lock` and can hit freely.
+- Path-dependent compiler inputs defeat hits; check `sccache --show-stats` for
+  hits, misses and non-cacheable calls, and set `SCCACHE_BASEDIRS` when
+  checkouts live under different roots.
+- Compare before and after under the same objective (§1). No measured gain, no
+  adoption. Inside one tree doing edit-check cycles it only adds overhead.
 
-Wire it in via environment variable or `.cargo/config.toml`:
-
-```bash
-export RUSTC_WRAPPER=sccache
-```
-
-```toml
-# .cargo/config.toml
-[build]
-rustc-wrapper = "sccache"
-```
-
-**Incremental-compilation caveat — read before expecting a workspace-crate
-win:** sccache caches whole-unit compiler *outputs*; it cannot cache
-*incremental* compilation artifacts. This project's dev profile is
-incremental by default, and every workspace-member/path crate (e.g.
-`trusty-common`, `trusty-search`) builds incrementally under it — so by
-default sccache gets **no hit** across worktrees for those crates, because
-each worktree's incremental build produces incremental (not cacheable)
-output. To get cross-worktree hits on path crates, the sccache-wrapped build
-must run with `CARGO_INCREMENTAL=0` (trading away the incremental win to gain
-the cross-worktree cache win instead — a real tradeoff, not a free lunch).
-
-**Where sccache earns its keep unconditionally:** external, non-path
-dependencies — `tokio`, the `aws-smithy-*` family, and the rest of the
-`[workspace.dependencies]` graph. These build non-incrementally by default
-and are byte-identical across every worktree building the same
-`Cargo.lock`-pinned version, so two worktrees compiling the same dependency
-graph hit the sccache cache hard on that (large) portion of the build without
-any `CARGO_INCREMENTAL` tradeoff.
-
-**Where it helps least:** inside a single tree doing normal incremental
-edit-check-edit cycles on a path crate — cargo's own incremental cache
-already covers that case, so sccache adds overhead (hashing, cache lookup)
-without a corresponding win.
-
-Adopting `sccache` machine-wide (e.g. in shell rc files, CI images) is an
-ops decision with tradeoffs (disk usage, cache invalidation, shared-cache
-correctness) — recommend it to the team/operator, don't silently enable it
-as a side effect of an unrelated change.
+Enabling it machine-wide (shell rc, CI images) is an operator decision with
+disk and cache-correctness tradeoffs: recommend it, never enable it as a side
+effect of another change.
 
 ## 7. Restructure Hotspots
 
-When `--timings` (§3) points at a genuine structural bottleneck rather than
-something fixable by §4/§5/§6:
+When `--timings` shows a structural bottleneck that §4 to §6 cannot fix:
 
-- **Split large crates** that create a serial bottleneck in the dependency
-  graph — a huge crate blocks everything downstream of it until it finishes;
-  this project's own 500-SLOC file cap (see `CLAUDE.md`) is a forcing
-  function toward exactly this kind of split.
-- **Separate hot-edit code from stable, expensive-to-compile code.** Code you
-  edit constantly should live in a small crate that recompiles fast; code
-  that rarely changes but is expensive to compile belongs in its own crate so
-  editing the hot path doesn't force recompiling the stable part.
-- **Limit proc-macros and generated code.** Proc-macro crates are
-  disproportionately expensive to compile and often can't be parallelized
-  with the code that uses them. Prefer hand-written code or a
-  build-script-generated file over a proc-macro when compile time matters
-  more than call-site ergonomics.
-- **Watch generic instantiation.** Heavily generic code gets monomorphized
-  per concrete type at every use site — excessive generics can multiply
-  codegen work. Prefer trait objects or fewer type parameters when the
-  compile-time cost outweighs the runtime win.
-- **Keep build scripts deterministic and cheap.** A `build.rs` that
-  re-runs unnecessarily (missing `cargo:rerun-if-changed` directives, or
-  doing expensive work every invocation) defeats incremental compilation for
-  the whole crate it's attached to.
-- **No LTO during iteration.** Link-time optimization is a `--release`-only,
-  ship-time concern — never enable it for the dev/inner-loop profile. Reserve
-  full optimization and LTO for production release builds, measured
-  separately from the dev-loop concerns above.
+- **Split crates on the dependency graph, not on file size.** A file-size cap
+  (such as this project's SLOC cap) splits modules, not compilation units: the
+  crate is still one unit, so a module split buys readability, not build speed.
+  Only a new crate lets downstream crates start earlier or lets edits skip
+  recompiling stable code.
+- Keep hot-edit code in a small crate, and stable expensive code in its own.
+- **Thin generic wrapper over a concrete implementation.** A generic function
+  is compiled per concrete type at each use site. Make the public function a
+  thin generic shim (`fn open(p: impl AsRef<Path>) { open_inner(p.as_ref()) }`)
+  and put the body in a non-generic function, so it compiles once. Find the
+  worst offenders with `cargo llvm-lines` (copies and lines per function) and
+  fix those, not every generic. Trait objects trade runtime cost for fewer
+  copies; measure that too.
+- **Measure generated code rather than banning proc-macros.** A proc-macro
+  crate is not slow by nature. Read `--timings` for the macro crate's compile
+  time, and `cargo llvm-lines` or `cargo expand` for how much code its users
+  get. Replace a macro only when the numbers say it costs more than the
+  hand-written or build-script alternative.
+- **Keep `build.rs` cheap and deterministic.** Emit `cargo:rerun-if-changed`;
+  a script that always reruns invalidates the crate's incremental cache.
+- **No LTO during iteration.** It is a release-profile concern; measure it
+  separately from the dev loop.
 
-Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html>,
-<https://doc.rust-lang.org/cargo/reference/build-scripts.html>
+Reference: <https://doc.rust-lang.org/cargo/reference/profiles.html>
 
 ## 8. Build Output Volume
 
 Run `cargo check -p <crate>` before build or clippy. Use
-`--message-format=short` for one-line diagnostics and `-q` / `--quiet` to
-suppress Cargo progress. Redirect logs; report exit status and final result
-lines per BASE-AGENT's Gate Output rule. Read failure details on non-zero.
-Never pipe a gate into `tail`: that can hide its failure status.
+`--message-format=short` for one-line diagnostics and `-q` to suppress
+progress. Redirect logs; report exit status and final result lines per
+BASE-AGENT's Gate Output rule. Read failure details only on non-zero. Never
+pipe a gate into `tail`: it hides the failure status.
 
 ```bash
 cargo check -q -p <crate> --message-format=short > <scratchpad>/check.log 2>&1
 echo "EXIT=$?"
 ```
 
-Keep `--no-fail-fast` on tests so one failing target cannot hide later targets.
-Redirect the extra output instead of dropping coverage.
+Keep `--no-fail-fast` on tests so one failing target cannot hide later ones.
 
-## 9. macOS / Apple Silicon: Never `nice` a Build
+## 9. macOS / Apple Silicon
 
-Use `CARGO_BUILD_JOBS` to cap concurrency, not `nice`. On the measured
-16-core Apple Silicon host (2026-09-17), `nice -n 10` placed work on four
-efficiency cores while twelve performance cores sat idle: load 27–37,
-CPU 70% idle. Bound jobs while preserving access to performance cores.
+- **Never `nice` a build.** Cap concurrency with `CARGO_BUILD_JOBS`. On a
+  measured Apple Silicon host `nice` parked the work on efficiency cores while
+  performance cores sat idle.
+- **First-launch scan.** macOS scans each new executable on first launch, and a
+  copy at a new path is scanned again. Run test binaries from their cargo paths
+  (integration tests locate the crate's binary through `CARGO_BIN_EXE_*`), and
+  never copy them into fresh temp directories. See the nextest macOS page:
+  <https://nexte.st/docs/installation/macos/>
