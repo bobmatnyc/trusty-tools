@@ -718,6 +718,15 @@ pub struct AppState {
     /// warm-up succeeds.  The transition is one-way and lock-free.
     /// Test: `daemon_readiness_transitions_warming_to_ready`.
     pub daemon_readiness: Arc<AtomicU8>,
+    /// Why the startup embedder warm-up failed, once it has (#9275).
+    ///
+    /// Why: `daemon_readiness` stays `Warming` after a failed warm-up, so it
+    /// cannot tell "still warming" from "will not warm". A caller that waits
+    /// for warm-up must fail at once on the second, naming the cause.
+    /// What: set once by `spawn_startup_tasks` on a failed warm-up; read by
+    /// `palace_verify_embedded` as `embedder_state: "failed"`.
+    /// Test: `verify_embedded_names_the_unrun_chunk_check_while_warming`.
+    pub embedder_warm_failure: Arc<std::sync::OnceLock<String>>,
     /// Total wall-clock ceiling for one MCP write operation (issue #4002).
     ///
     /// Why: a write waits for the per-palace write mutex and then waits again
@@ -855,6 +864,7 @@ impl AppState {
             // Start in Warming state; flipped to Ready by spawn_startup_tasks
             // once the embedder warm-up succeeds (issues #910/#911).
             daemon_readiness: Arc::new(AtomicU8::new(DaemonReadiness::Warming as u8)),
+            embedder_warm_failure: Arc::new(std::sync::OnceLock::new()),
             // #4002: one ceiling for the whole write, read once at construction.
             write_op_budget: trusty_common::memory_core::timeouts::write_op_budget(),
             // #6424: empty at boot, so the first use of each palace after a

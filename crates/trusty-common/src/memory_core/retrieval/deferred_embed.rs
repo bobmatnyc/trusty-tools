@@ -23,11 +23,12 @@
 //! `permanent_failure_writes_a_ledger_row`,
 //! `missing_embedder_does_not_mark_the_drawer`.
 
+use super::embed_store::{chunked_embed_timeout, embed_planned, plan_chunks};
 use super::embedder::shared_embedder;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::memory_core::store::vector::UsearchStore;
 use crate::memory_core::timeouts;
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -165,17 +166,21 @@ where
     Err((last, total))
 }
 
-/// Embed `content` and store the vector under `id`, retrying transient failures.
+/// Embed `content` and store its chunk vectors under `id`, retrying transient
+/// failures.
 ///
 /// Why: this is the single embed+store primitive shared by the write-path
 /// deferred lane and the repair backfill, so a drawer recovered by the backfill
 /// is embedded by exactly the code that would have embedded it at write time.
-/// What: retries `embed_batch` (each attempt under the existing
-/// `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` bound), then retries the vector upsert.
-/// Returns the failing stage in [`EmbedLoss`] so the caller can decide whether
-/// it warrants a durable marker.
+/// What: splits `content` once (#9275: a split error — no tokenizer, over the
+/// chunk cap — is an `Embed` loss after one attempt), retries one
+/// `embed_batch` over every chunk (each attempt under
+/// `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` once per chunk), then retries `upsert_chunks`,
+/// which replaces the drawer's whole group. Returns the failing stage in
+/// [`EmbedLoss`] so the caller can decide whether it warrants a durable marker.
 /// Test: `retry_succeeds_after_transient_failures`,
-/// `permanent_failure_writes_a_ledger_row`.
+/// `permanent_failure_writes_a_ledger_row`,
+/// `embed_and_store_writes_a_chunk_group_and_a_shorter_rewrite_shrinks_it`.
 pub(super) async fn embed_and_store(
     embedder: &Arc<dyn Embedder + Send + Sync>,
     vector_store: &Arc<UsearchStore>,
@@ -183,17 +188,24 @@ pub(super) async fn embed_and_store(
     content: &str,
     policy: &RetryPolicy,
 ) -> Result<u32, EmbedLoss> {
-    let batch = [content.to_string()];
-    let embed_timeout = timeouts::embed_batch_timeout();
-    let (vector, embed_attempts) = with_retry(policy, |_| {
+    // #9275: the split is deterministic, so it runs once, outside the retry.
+    let batch: Vec<String> = plan_chunks(embedder.as_ref(), content)
+        .map_err(|e| EmbedLoss::Embed {
+            reason: format!("{e:#}"),
+            attempts: 1,
+        })?
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    // #9275: the per-attempt ceiling scales with the chunk count.
+    let embed_timeout = chunked_embed_timeout(timeouts::embed_batch_timeout(), batch.len());
+    let (vectors, embed_attempts) = with_retry(policy, |_| {
         let embedder = embedder.clone();
         let batch = &batch;
         async move {
-            match tokio::time::timeout(embed_timeout, embedder.embed_batch(batch)).await {
-                Ok(Ok(v)) => v
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "embedder returned an empty batch".to_string()),
+            match tokio::time::timeout(embed_timeout, embed_planned(embedder.as_ref(), batch)).await
+            {
+                Ok(Ok(v)) => Ok(v),
                 Ok(Err(e)) => Err(format!("{e:#}")),
                 Err(_) => Err(format!("embed_batch timed out after {embed_timeout:?}")),
             }
@@ -203,11 +215,11 @@ pub(super) async fn embed_and_store(
     .map_err(|(reason, attempts)| EmbedLoss::Embed { reason, attempts })?;
 
     let (_, upsert_attempts) = with_retry(policy, |_| {
-        let vector = vector.clone();
+        let vectors = vectors.clone();
         let vector_store = vector_store.clone();
         async move {
             vector_store
-                .upsert(id, vector)
+                .upsert_chunks(id, vectors)
                 .await
                 .map_err(|e| format!("{e:#}"))
         }

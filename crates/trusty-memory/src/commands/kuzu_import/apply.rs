@@ -21,9 +21,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
-use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, RememberOptions};
-use trusty_common::memory_core::store::{Triple, VectorStore as _};
+use trusty_common::memory_core::retrieval::{
+    embed_chunks, shared_embedder, PalaceHandle, RememberOptions,
+};
+use trusty_common::memory_core::store::Triple;
 use uuid::Uuid;
 
 use super::bridge::KuzuExport;
@@ -485,33 +488,7 @@ impl PalaceSink for HandleSink {
 
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
         let embedder = shared_embedder().await.map_err(sink_err)?;
-        let vectors = embedder
-            .embed_batch(std::slice::from_ref(&m.content))
-            .await
-            .map_err(sink_err)?;
-        if let Some(v) = vectors.into_iter().next() {
-            self.handle
-                .vector_store
-                .upsert(id, v)
-                .await
-                .map_err(sink_err)?;
-        }
-        let (content, tags, importance, created) = (
-            m.content.clone(),
-            m.tags.clone(),
-            m.importance,
-            m.created_at,
-        );
-        self.rewrite(id, move |d| {
-            d.set_content(content);
-            // #277 L5: keep tags the importer did not generate.
-            d.tags = merge_tags(&d.tags, &tags);
-            d.importance = importance;
-            if let Some(c) = created {
-                d.created_at = c;
-            }
-        })
-        .await
+        self.update_memory_with(embedder.as_ref(), id, m).await
     }
 
     async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError> {
@@ -530,6 +507,45 @@ impl PalaceSink for HandleSink {
 }
 
 impl HandleSink {
+    /// [`PalaceSink::update_memory`] against an explicit embedder.
+    ///
+    /// Why (#9275): the drawer's whole vector group must follow its new text,
+    /// and the shared embedder cell is seeded with a non-chunking mock in tests.
+    /// What: embeds the new content, replaces the drawer's vectors, then
+    /// rewrites the drawer.
+    /// Test: `update_memory_rewrites_the_whole_chunk_group`.
+    pub(crate) async fn update_memory_with(
+        &self,
+        embedder: &dyn Embedder,
+        id: Uuid,
+        m: &MappedMemory,
+    ) -> Result<(), KuzuImportError> {
+        // #9275: one vector per chunk; `upsert_chunks` replaces the whole
+        // group, so a shorter rewrite leaves no stale chunk rows.
+        let vectors = embed_chunks(embedder, &m.content).await.map_err(sink_err)?;
+        self.handle
+            .vector_store
+            .upsert_chunks(id, vectors)
+            .await
+            .map_err(sink_err)?;
+        let (content, tags, importance, created) = (
+            m.content.clone(),
+            m.tags.clone(),
+            m.importance,
+            m.created_at,
+        );
+        self.rewrite(id, move |d| {
+            d.set_content(content);
+            // #277 L5: keep tags the importer did not generate.
+            d.tags = merge_tags(&d.tags, &tags);
+            d.importance = importance;
+            if let Some(c) = created {
+                d.created_at = c;
+            }
+        })
+        .await
+    }
+
     /// Edit drawer `id` in place: persist it, then replace the in-memory row.
     async fn rewrite(
         &self,

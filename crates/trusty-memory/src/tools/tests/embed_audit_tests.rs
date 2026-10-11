@@ -372,3 +372,48 @@ async fn embed_sweep_opens_palaces_off_the_executor() {
          (#6836). Handle counts observed: {seen:?}"
     );
 }
+
+/// Why (#9275): a drawer with a vector row but fewer (or gapped) chunk rows
+/// than its text needs is unfindable by its tail, so it must fail the deletion
+/// gate exactly as a vectorless drawer does (Architect ruling Q5: reported
+/// under `missing`, no new key).
+/// What: remembers a drawer (one bare row under the test binary's
+/// non-chunking mock, which expects one chunk), adds a stray `#2` row so its
+/// group is gapped, and asks about it.
+/// Test: itself.
+#[tokio::test]
+async fn verify_embedded_is_false_for_a_short_chunk_drawer() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "verify-short"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "verify-short",
+            "text": "Harbour measures the ledger on bay 2, a fact stored as a gapped chunk group.",
+        }),
+    )
+    .await
+    .expect("memory_remember");
+    let id = out["drawer_id"].as_str().expect("drawer_id").to_string();
+    let handle =
+        crate::tools::helpers::open_palace_handle(&state, "verify-short").expect("open palace");
+    let dim = handle.vector_store.dim();
+    handle
+        .vector_store
+        .hnsw_for_test()
+        .upsert(&format!("{id}#2"), &vec![0.5_f32; dim])
+        .expect("stray chunk row");
+
+    let out = dispatch_tool(
+        &state,
+        "palace_verify_embedded",
+        json!({"palace": "verify-short", "drawer_ids": [id.clone()]}),
+    )
+    .await
+    .expect("palace_verify_embedded");
+    assert_eq!(out["missing"], json!([id]), "{out}");
+    assert_eq!(out["verified"], false, "{out}");
+}

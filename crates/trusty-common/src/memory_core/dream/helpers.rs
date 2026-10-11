@@ -6,9 +6,11 @@
 //! `merged_drawer`, `pick_survivor`, `persist_merge`, `rebuild_index_from_drawers`, content blocklist, stop-words.
 //! Test: Indirectly via dream cycle and closet tests.
 
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
-use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
-use crate::memory_core::store::vector::VectorStore;
+use crate::memory_core::retrieval::{
+    ChunkPlanner, PalaceHandle, embed_chunks_within, embed_planned_within, shared_embedder,
+};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -137,11 +139,8 @@ pub(crate) const RULING_TAG: &str = "ruling";
 ///
 /// Why (#9172): without the old 500-byte cut, a near-duplicate that keeps
 /// coming back is appended to the same survivor on every cycle, and the drawer
-/// grows without bound. The survivor is not re-embedded, and the embedder
-/// reads only its first 128 tokens, about 512 bytes of English. 4 KiB is eight
-/// of those windows: past it, at least seven eighths of the drawer is
-/// reachable by keyword search only, so a further merge adds text that vector
-/// recall cannot rank.
+/// grows without bound. #9275: [`persist_merge`] re-embeds the survivor as a
+/// full chunk group, so the bound now caps the chunk count a merge can add.
 /// What: [`merged_drawer`] refuses a merge that would append past this bound.
 /// Test: `a_merge_is_skipped_past_the_byte_bound`,
 /// `dedup_survivor_tests::a_merge_past_the_byte_bound_keeps_both_drawers`.
@@ -215,19 +214,30 @@ pub(crate) fn pick_survivor<'a>(a: &'a Drawer, b: &'a Drawer) -> Option<(&'a Dra
 ///
 /// Why (#9172): the merge changed only the in-memory table, so the loser's
 /// text was lost at the next open while its row was already deleted.
+/// #9275: a merge that appends text left the survivor's old, shorter vector
+/// group in place, so health read it short and its tail was not findable.
 /// What: under the palace write mutex and then the commit-order guard (the
 /// write pipeline's lock order), reads both drawers from the live table,
-/// picks the survivor with [`pick_survivor`], writes [`merged_drawer`] to redb,
-/// and only then mirrors it into the table. Returns `Ok(None)` when either
-/// drawer is gone, the pair must not merge, or the merged text would pass
-/// [`MERGE_MAX_BYTES`]. The caller deletes the loser
+/// picks the survivor with [`pick_survivor`], and builds [`merged_drawer`].
+/// When the merge changed the text, it embeds the new text with
+/// `embed_chunks_within` (the remember path's bounded chunked embed, under
+/// `embed_timeout` per chunk) and replaces the survivor's vector group with
+/// `upsert_chunks`. Then it writes the drawer to redb and mirrors it into the
+/// table. Every failure commits nothing: an embed, split or upsert error
+/// returns before redb is touched, and a redb error after the vector swap
+/// restores the survivor's own group (logged if that fails too). Returns
+/// `Ok(None)` when either drawer is gone, the pair must not merge, or the
+/// merged text would pass [`MERGE_MAX_BYTES`]. The caller deletes the loser
 /// only after `Ok(Some(_))`: a failed persist leaves both drawers intact.
 /// Test: `dedup_survivor_tests::a_dedup_merge_survives_a_palace_reopen`,
-/// `dedup_survivor_tests::a_failed_merge_persist_keeps_the_duplicate`.
+/// `dedup_survivor_tests::a_failed_merge_persist_keeps_the_duplicate`,
+/// `chunk_key_tests::a_dedup_merge_reembeds_the_survivor_as_a_full_chunk_group`.
 pub(crate) async fn persist_merge(
     handle: &Arc<PalaceHandle>,
     a: Uuid,
     b: Uuid,
+    embedder: &(dyn Embedder + Send + Sync),
+    embed_timeout: Duration,
 ) -> Result<Option<(Uuid, Uuid)>> {
     let _write_guard = timeouts::lock_with_timeout(
         &handle.write_mutex,
@@ -255,11 +265,19 @@ pub(crate) async fn persist_merge(
         );
         return Ok(None);
     };
-    handle
-        .kg
-        .upsert_drawer(&merged)
-        .await
-        .with_context(|| format!("persist merged dedup survivor {}", merged.id))?;
+    // #9275: re-embed before anything is committed; a failure keeps both.
+    let reembed = merged.content() != survivor.content();
+    if reembed {
+        replace_group(handle, embedder, merged.id, merged.content(), embed_timeout)
+            .await
+            .with_context(|| format!("re-embed merged dedup survivor {}", merged.id))?;
+    }
+    if let Err(e) = handle.kg.upsert_drawer(&merged).await {
+        if reembed {
+            restore_group(handle, embedder, survivor, embed_timeout).await;
+        }
+        return Err(e).with_context(|| format!("persist merged dedup survivor {}", merged.id));
+    }
     let pair = (survivor.id, loser.id);
     if let Some(row) = handle.drawers.write().iter_mut().find(|d| d.id == pair.0) {
         *row = merged;
@@ -267,24 +285,88 @@ pub(crate) async fn persist_merge(
     Ok(Some(pair))
 }
 
+/// Embed `text` as a full chunk group and make it `id`'s whole group.
+async fn replace_group(
+    handle: &PalaceHandle,
+    embedder: &(dyn Embedder + Send + Sync),
+    id: Uuid,
+    text: &str,
+    embed_timeout: Duration,
+) -> Result<()> {
+    let vecs = embed_chunks_within(embedder, text, embed_timeout).await?;
+    handle.vector_store.upsert_chunks(id, vecs).await
+}
+
+/// Put `survivor`'s own group back after a failed merge commit (#9275).
+async fn restore_group(
+    handle: &PalaceHandle,
+    embedder: &(dyn Embedder + Send + Sync),
+    survivor: &Drawer,
+    embed_timeout: Duration,
+) {
+    let restored = replace_group(
+        handle,
+        embedder,
+        survivor.id,
+        survivor.content(),
+        embed_timeout,
+    )
+    .await;
+    if let Err(e) = restored {
+        tracing::error!(
+            palace = %handle.id, drawer = %survivor.id,
+            "#9275: merge not committed and the survivor's vectors not restored: {e:#}"
+        );
+    }
+}
+
+/// What one index rebuild did (#9275).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RebuildReport {
+    /// Drawers stored again as a whole chunk group.
+    pub(crate) rebuilt: usize,
+    /// Drawers whose split, embed or upsert failed. Each is logged and left
+    /// with no vector, which `embed_health` reports as missing.
+    pub(crate) skipped: usize,
+}
+
 /// Reset the vector index and re-upsert every drawer from the in-memory
-/// drawer table. Returns the number of drawers re-embedded.
+/// drawer table. Returns a [`RebuildReport`].
 ///
 /// Why: When the HNSW index accumulates orphans we can't address through
 /// `key_map` (pre-fix data, partial writes, schema migrations), the cheapest
 /// correct fix is to throw away the index and rebuild from the authoritative
 /// drawer table.
-/// What: Snapshots drawers, calls `UsearchStore::reset` to truncate the
-/// index, then re-embeds and re-upserts each drawer. Respects the budget by
+/// What: Snapshots drawers, resolves the embedder and its chunk planner, calls
+/// `UsearchStore::reset` to truncate the index, then re-embeds and re-upserts
+/// each drawer. #9275: a planner that cannot be built returns the error before
+/// the reset, so the index is untouched; one drawer that fails to split, embed
+/// or upsert is logged and counted in `skipped`, and the rebuild goes on to
+/// the next drawer. Respects the budget by
 /// stopping early — incomplete rebuilds are still safe (the next cycle picks
 /// up where this one left off). #6208: the snapshot→reset→re-upsert runs under
 /// the palace write mutex so a concurrent `remember` cannot land a vector that
 /// `reset()` then wipes without re-adding.
+/// Test: `rebuild_index_keeps_every_chunk_of_a_long_drawer`,
+/// `a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest`,
+/// `a_rebuild_whose_planner_cannot_be_built_leaves_the_index_untouched`.
 pub(crate) async fn rebuild_index_from_drawers(
     handle: &Arc<PalaceHandle>,
     started: std::time::Instant,
     budget: Duration,
-) -> Result<usize> {
+) -> Result<RebuildReport> {
+    rebuild_index_with(handle, None, started, budget).await
+}
+
+/// [`rebuild_index_from_drawers`] with an explicit embedder; `None` resolves
+/// the shared one before the reset (#9275 test seam).
+/// Test: `rebuild_stopping_at_the_budget_leaves_only_complete_groups`.
+pub(crate) async fn rebuild_index_with(
+    handle: &Arc<PalaceHandle>,
+    embedder: Option<&Arc<dyn Embedder + Send + Sync>>,
+    started: std::time::Instant,
+    budget: Duration,
+) -> Result<RebuildReport> {
     // #6208: hold the write mutex across the whole rebuild. `reset()` truncates
     // the entire index; a `remember` that upserts between the snapshot and the
     // re-upsert loop would be dropped by the reset and never re-added, because
@@ -300,39 +382,77 @@ pub(crate) async fn rebuild_index_from_drawers(
     )
     .await?;
     let snapshot: Vec<Drawer> = handle.drawers.read().clone();
-    handle
-        .vector_store
-        .reset()
-        .context("reset vector index for rebuild")?;
-
+    let reset = || {
+        handle
+            .vector_store
+            .reset()
+            .context("reset vector index for rebuild")
+    };
     if snapshot.is_empty() {
-        return Ok(0);
+        reset()?;
+        return Ok(RebuildReport::default());
     }
 
-    let embedder = shared_embedder()
-        .await
-        .context("acquire shared embedder for dream rebuild")?;
+    // #9275: the embedder and planner come before the reset; if either cannot
+    // be built, the index is left as it is.
+    let embedder = match embedder {
+        Some(e) => Arc::clone(e),
+        None => shared_embedder()
+            .await
+            .context("acquire shared embedder for dream rebuild")?,
+    };
+    let planner = ChunkPlanner::for_embedder(embedder.as_ref())
+        .context("build the chunk planner for dream rebuild")?;
+    reset()?;
 
-    let mut rebuilt: usize = 0;
+    let per_chunk = timeouts::embed_batch_timeout();
+    let mut report = RebuildReport::default();
     for drawer in snapshot.iter() {
         if started.elapsed() >= budget {
             break;
         }
-        let body = drawer.content().to_string();
-        let vecs = embedder
-            .embed_batch(std::slice::from_ref(&body))
-            .await
-            .with_context(|| format!("re-embed drawer {}", drawer.id))?;
-        if let Some(v) = vecs.into_iter().next() {
-            handle
-                .vector_store
-                .upsert(drawer.id, v)
-                .await
-                .with_context(|| format!("re-upsert drawer {}", drawer.id))?;
-            rebuilt += 1;
+        // #9275: every chunk of the drawer, stored as one whole group, so a
+        // budget stop never leaves a partial group. One failing drawer is
+        // skipped, never the end of the rebuild.
+        match rebuild_one(
+            handle,
+            embedder.as_ref(),
+            planner.as_ref(),
+            drawer,
+            per_chunk,
+        )
+        .await
+        {
+            Ok(()) => report.rebuilt += 1,
+            Err(e) => {
+                tracing::warn!(
+                    palace = %handle.id, drawer = %drawer.id,
+                    "#9275: dream rebuild skipped a drawer; it has no vector: {e:#}"
+                );
+                report.skipped += 1;
+            }
         }
     }
-    Ok(rebuilt)
+    Ok(report)
+}
+
+/// Split, embed and store one drawer's whole chunk group for the rebuild.
+async fn rebuild_one(
+    handle: &PalaceHandle,
+    embedder: &(dyn Embedder + Send + Sync),
+    planner: Option<&ChunkPlanner>,
+    drawer: &Drawer,
+    per_chunk: Duration,
+) -> Result<()> {
+    let chunks: Vec<String> = match planner {
+        Some(p) => p.split(drawer.content())?,
+        None => vec![drawer.content()],
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let vecs = embed_planned_within(embedder, &chunks, per_chunk).await?;
+    handle.vector_store.upsert_chunks(drawer.id, vecs).await
 }
 
 /// Rebuild closets: simple whitespace tokenization, stop-word filter,

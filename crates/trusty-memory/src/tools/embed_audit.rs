@@ -51,7 +51,7 @@ use crate::AppState;
 /// a palace. Sharing the judgement is what stops the sweep and the per-id check
 /// disagreeing about the same palace.
 /// What: `(drawer_count, vector_count, missing_ids, audit_state, key_rows,
-/// distinct_ids)`. `key_rows`/`distinct_ids` are `None` — never `0` — when the
+/// distinct_ids)`, plus the #9275 `short` count and `chunk_check` state. `key_rows`/`distinct_ids` are `None` — never `0` — when the
 /// audit could not run, because a zero standing in for "I could not tell" is the
 /// false all-clear #5005 documents.
 fn coverage(handle: &trusty_common::memory_core::PalaceHandle) -> Value {
@@ -67,8 +67,25 @@ fn coverage(handle: &trusty_common::memory_core::PalaceHandle) -> Value {
         "distinct_vector_ids": health.alias_audit.counts().map(|(_, ids)| ids),
         "aliased": health.alias_audit.aliased_drawer_ids().map(<[Uuid]>::len),
         "embedder_ready": health.embedder_ready,
+        // #9275: drawers with fewer chunk rows than their text needs, and
+        // whether that comparison ran at all.
+        "short": health.short_chunk_ids.len(),
+        "chunk_check": chunk_state(&health.chunk_check),
+        "chunk_check_error": health.chunk_check.unavailable_reason(),
         "healthy": health.is_healthy(),
     })
+}
+
+/// The chunk-count check as `ran` or `unavailable` (#9275).
+///
+/// `unavailable` means `short` is unknown, not zero.
+pub(crate) fn chunk_state(
+    check: &trusty_common::memory_core::retrieval::ChunkCheck,
+) -> &'static str {
+    match check.unavailable_reason() {
+        Some(_) => "unavailable",
+        None => "ran",
+    }
 }
 
 /// The alias audit as one of three words the caller can branch on.
@@ -95,12 +112,17 @@ fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'s
 /// return.
 ///
 /// What: partitions the requested ids three ways. `embedded` is findable now.
-/// `missing` exists as a drawer with no vector. `unknown` is not a drawer in
+/// `missing` exists as a drawer with no vector, or with fewer chunk rows than
+/// its text needs (#9275). `unknown` is not a drawer in
 /// this palace at all — a distinction a deletion workflow needs, since "already
 /// gone" and "here but unfindable" call for opposite actions. `verified` is the
 /// single boolean to gate on: every requested id embedded AND the alias audit
 /// clean, so an id-collision victim (which HAS a vector key and is still
-/// unreachable) cannot pass.
+/// unreachable) cannot pass, and a chunk-count check that ran (#9275).
+/// `chunk_check`/`chunk_check_error` say whether that check ran and why not.
+/// `embedder_state` (`ready` | `warming` | `failed`, with `embedder_error`
+/// naming a failed warm-up) lets a caller wait on a warm-up in progress and
+/// fail at once on one that failed.
 ///
 /// #6318: this reads, so a call with no `palace` argument and no `--palace`
 /// default succeeds with the palace index instead of erroring. The index is
@@ -118,7 +140,8 @@ fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'s
 /// Test: `verify_embedded_names_the_unembedded_id`,
 /// `verify_embedded_separates_an_unknown_id_from_an_unembedded_one`,
 /// `verify_embedded_refuses_a_malformed_id`,
-/// `every_read_tool_returns_an_index_with_no_palace`.
+/// `every_read_tool_returns_an_index_with_no_palace`,
+/// `verify_embedded_names_the_unrun_chunk_check_while_warming`.
 pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value) -> Result<Value> {
     // #6318: no palace and no default is answered with an index, not an error.
     let palace = match resolve_palace_or_index(state, &args, "palace_verify_embedded").await? {
@@ -150,8 +173,14 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
     let health = handle.embed_health();
     let live: std::collections::HashSet<Uuid> =
         handle.drawers.read().iter().map(|d| d.id).collect();
-    let no_vector: std::collections::HashSet<Uuid> =
-        health.missing_vector_ids.iter().copied().collect();
+    // #9275 (Architect Q5): a drawer short of chunk rows is unfindable by its
+    // tail, so it is reported under `missing` with the vectorless ones.
+    let no_vector: std::collections::HashSet<Uuid> = health
+        .missing_vector_ids
+        .iter()
+        .chain(&health.short_chunk_ids)
+        .copied()
+        .collect();
 
     let (mut embedded, mut missing, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
     for id in requested {
@@ -165,6 +194,14 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
     }
 
     let audit = audit_state(&health.alias_audit);
+    // #9275: a failed startup warm-up is not "warming"; a later lazy init that
+    // succeeded still reads `ready`.
+    let warm_failure = state.embedder_warm_failure.get().map(String::as_str);
+    let (embedder_state, embedder_error) = match (health.embedder_ready, warm_failure) {
+        (true, _) => ("ready", None),
+        (false, Some(e)) => ("failed", Some(e)),
+        (false, None) => ("warming", None),
+    };
     Ok(json!({
         "palace": health.palace_id,
         "embedded": embedded,
@@ -172,9 +209,19 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
         "unknown": unknown,
         "alias_audit": audit,
         "alias_audit_error": health.alias_audit.unavailable_reason(),
+        // #9275: why `verified` is false when no id is missing or unknown.
+        "chunk_check": chunk_state(&health.chunk_check),
+        "chunk_check_error": health.chunk_check.unavailable_reason(),
+        "embedder_ready": health.embedder_ready,
+        "embedder_state": embedder_state,
+        "embedder_error": embedder_error,
         // The one field to gate a deletion on. An aliased or unreadable audit
-        // fails it even when every requested id has a vector key (#5005).
-        "verified": missing.is_empty() && unknown.is_empty() && audit == "clean",
+        // fails it even when every requested id has a vector key (#5005); so
+        // does a chunk check that did not run (#9275).
+        "verified": missing.is_empty()
+            && unknown.is_empty()
+            && audit == "clean"
+            && health.chunk_check.unavailable_reason().is_none(),
     }))
 }
 

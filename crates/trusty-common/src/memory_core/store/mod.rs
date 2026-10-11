@@ -38,7 +38,7 @@ pub mod room_plan;
 pub mod rooms;
 pub mod vector;
 // #9275: `{uuid}#n` chunk-row keys — one drawer, several vectors.
-mod vector_key;
+pub(crate) mod vector_key;
 // ADR-0027 T9: wing record shape, default-wing seeding, create/rename/list.
 pub mod wings;
 pub mod write_deadline;
