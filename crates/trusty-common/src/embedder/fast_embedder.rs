@@ -326,9 +326,22 @@ pub struct FastEmbedder {
 /// Why: #9275 — fastembed truncates every input at its private
 /// `DEFAULT_MAX_LENGTH` (512), capped by the model's `model_max_length`;
 /// a chunker that does not know this value embeds a truncated tail.
-/// What: mirrors fastembed's constant; `FastEmbedder::input_window` reports it.
+/// What: mirrors fastembed's constant; caps `FastEmbedder::input_window`.
 /// Test: `fastembed_window_matches_cached_tokenizer_max_length`.
 pub const FASTEMBED_MAX_LENGTH: usize = 512;
+
+/// Input window of every all-MiniLM-L6-v2 embedder, in tokens including
+/// `[CLS]`/`[SEP]`.
+///
+/// Why: #9275 — sentence-transformers, the reference implementation, stops
+/// this model at 256 tokens; fastembed would encode up to 512, past the
+/// length the reference uses, so chunks stop at 256.
+/// What: `max_seq_length` from the model's sentence-transformers
+/// `sentence_bert_config.json` (`sentence-transformers/all-MiniLM-L6-v2`,
+/// revision `c9745ed1d9f2`). Each MiniLM `input_window` reports it, capped by
+/// what that backend encodes.
+/// Test: `fastembed_window_matches_cached_tokenizer_max_length`.
+pub(crate) const MINILM_MAX_SEQ_LENGTH: usize = 256;
 
 impl FastEmbedder {
     /// Construct a new `FastEmbedder` with the default cache size.
@@ -872,8 +885,8 @@ impl super::types::Embedder for FastEmbedder {
         self.provider
     }
 
-    // #9275: fastembed truncates at this many tokens.
+    // #9275: the model's trained length, within what fastembed encodes.
     fn input_window(&self) -> Option<usize> {
-        Some(FASTEMBED_MAX_LENGTH)
+        Some(MINILM_MAX_SEQ_LENGTH.min(FASTEMBED_MAX_LENGTH))
     }
 }

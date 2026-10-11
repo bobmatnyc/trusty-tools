@@ -441,7 +441,7 @@ pub trait Embedder: Send + Sync {
     /// so a caller must split long text before embedding it. The window is a
     /// property of the backend, so the backend reports it.
     /// What: default `None` means "unknown": the caller does not chunk.
-    /// `FastEmbedder` reports 512, `CandleEmbedder` 128, `MockEmbedder`
+    /// `FastEmbedder` reports 256, `CandleEmbedder` 128, `MockEmbedder`
     /// whatever its builder set. Feed the value to [`super::chunk_text`].
     /// Test: `default_input_window_is_none`,
     /// `mock_embedder_input_window_is_configurable`,

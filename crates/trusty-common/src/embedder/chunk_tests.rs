@@ -7,6 +7,7 @@
 //! accuracy gate.
 
 use super::chunk::overlap_tokens;
+use super::fast_embedder::MINILM_MAX_SEQ_LENGTH;
 use super::test_env::env_lock;
 use super::{
     CHUNK_OVERLAP_PERCENT, ChunkError, ChunkTokenizer, Embedder, FASTEMBED_MAX_LENGTH,
@@ -257,7 +258,7 @@ fn chunk_overlap_is_at_most_ten_percent_of_window() {
         assert!(overlap * 10 <= window, "window {window}: overlap {overlap}");
         assert!(overlap < window - 2, "window {window}: chunks must advance");
     }
-    assert_eq!(overlap_tokens(510), 51);
+    assert_eq!(overlap_tokens(MINILM_MAX_SEQ_LENGTH - 2), 25);
     assert_eq!(overlap_tokens(126), 12);
 }
 
@@ -294,11 +295,13 @@ fn fastembed_cache_without_the_model_is_an_error() {
 
 #[test]
 fn fastembed_window_matches_cached_tokenizer_max_length() {
-    // fastembed truncates at min(512, model_max_length); the window
-    // `FastEmbedder::input_window` reports must be that number.
+    // fastembed truncates at min(512, model_max_length); the MiniLM window
+    // (sentence-transformers `max_seq_length`) must fit inside it.
     let tok = real_tokenizer();
     assert_eq!(tok.max_length(), Some(FASTEMBED_MAX_LENGTH));
     assert_eq!(FASTEMBED_MAX_LENGTH, 512);
+    assert_eq!(MINILM_MAX_SEQ_LENGTH, 256);
+    assert!(Some(MINILM_MAX_SEQ_LENGTH) <= tok.max_length());
     assert_eq!(tok.special_overhead(), 2);
 }
 
@@ -311,12 +314,12 @@ fn real_tokenizer_chunks_long_text_within_fastembed_window() {
         .map(|i| format!("Sentence {i} records that the palace stores drawer number {i}."))
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(tok.count_tokens(&text).expect("count") > 5 * FASTEMBED_MAX_LENGTH);
-    let chunks = assert_bounded_and_covered(&tok, &text, FASTEMBED_MAX_LENGTH);
+    assert!(tok.count_tokens(&text).expect("count") > 5 * MINILM_MAX_SEQ_LENGTH);
+    let chunks = assert_bounded_and_covered(&tok, &text, MINILM_MAX_SEQ_LENGTH);
     assert!(chunks.len() >= 5, "{} chunks", chunks.len());
     // The candle window, and pathological runs with no whitespace.
     assert_bounded_and_covered(&tok, &text, 128);
-    assert_bounded_and_covered(&tok, &"x9-q".repeat(2000), FASTEMBED_MAX_LENGTH);
+    assert_bounded_and_covered(&tok, &"x9-q".repeat(2000), MINILM_MAX_SEQ_LENGTH);
     assert_bounded_and_covered(&tok, &"漢字".repeat(1500), 128);
 }
 
