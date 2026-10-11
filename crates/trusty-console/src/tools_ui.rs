@@ -22,11 +22,14 @@
 //! `tests/search_ui_mount.rs`, `tests/memory_ui_mount.rs` and
 //! `tests/analyze_ui_mount.rs` drive the routes through the real router.
 
+use std::net::SocketAddr;
+
 use axum::{
     body::Body,
-    extract::Path,
-    http::{StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    extract::{ConnectInfo, Path, Request},
+    http::{HeaderValue, StatusCode, header},
+    middleware::Next,
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use rust_embed::{EmbeddedFile, RustEmbed};
 
@@ -232,6 +235,57 @@ pub async fn secrets_ui_index() -> Response {
 /// `tests/secrets_ui_mount.rs`.
 pub async fn secrets_ui_asset(Path(path): Path<String>) -> Response {
     serve_asset(&SECRETS, &path)
+}
+
+/// The page a non-loopback client gets in place of the Secrets page.
+const SECRETS_OFF_LOOPBACK_PAGE: &str = "<!doctype html><html lang=\"en\"><head>\
+<meta charset=\"utf-8\"><title>Secrets page refused</title></head><body>\
+<h1>Secrets page refused</h1><p>The Secrets page is served only to a browser \
+on this machine, over the console's loopback address.</p></body></html>";
+
+/// The layer on every `/tools/secrets/` route (#9067 P3, P5).
+///
+/// Why: P3 — another site must not frame the page that sets credentials.
+/// P5 — until S3b the page is served to loopback clients only; the API
+/// already refuses the tailnet, and this fails closed one step earlier.
+/// What: a request the tailnet listener tagged, or one whose peer address
+/// is known and not loopback, gets a fixed 403 HTML page and never reaches
+/// the bundle. Every response, the 403 included, carries
+/// `Content-Security-Policy: frame-ancestors 'none'` and
+/// `X-Frame-Options: DENY`. A request with no peer address (the loopback
+/// listener reports a pid lookup, not an address) is served.
+/// Test: `every_secrets_page_response_forbids_framing`,
+/// `a_non_loopback_client_gets_a_403_page_for_the_secrets_page`,
+/// `a_tailnet_tagged_request_gets_the_403_page`.
+pub async fn secrets_page_guard(request: Request, next: Next) -> Response {
+    let mut response = if is_off_loopback(&request) {
+        tracing::warn!(
+            route = request.uri().path(),
+            "secrets page refused a non-loopback client"
+        );
+        (StatusCode::FORBIDDEN, Html(SECRETS_OFF_LOOPBACK_PAGE)).into_response()
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    // #9067 P3: never framed, by any site.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+}
+
+/// Whether `request` came from off this machine (#9067 P5).
+fn is_off_loopback(request: &Request) -> bool {
+    let extensions = request.extensions();
+    extensions
+        .get::<crate::tailnet_peer::TailnetRequest>()
+        .is_some()
+        || extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .is_some_and(|ConnectInfo(peer)| !peer.ip().to_canonical().is_loopback())
 }
 
 /// Serve one bundle file, falling back to the shell when it is not one.

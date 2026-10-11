@@ -183,13 +183,15 @@ impl SecretsBridge {
 
     /// Record the console's bound loopback addresses as its own authorities.
     ///
-    /// What: only loopback addresses count; the tailnet listener is refused
-    /// by its tag. Only the first call takes effect.
+    /// What: only loopback addresses count, each with `localhost` on its
+    /// port (#9067 P2); the tailnet listener is refused by its tag. Only the
+    /// first call takes effect.
     pub fn set_authorities(&self, bound: &[SocketAddr]) {
         let own = bound
             .iter()
             .filter(|addr| addr.ip().is_loopback())
-            .map(|addr| SelfAuthorities::new(*addr, None))
+            // #9067 P2: `localhost:PORT` is this listener too.
+            .map(|addr| SelfAuthorities::loopback(*addr))
             .collect();
         // #9066: set once at startup; a second call is ignored.
         let _ = self.authorities.set(own);

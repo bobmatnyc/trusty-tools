@@ -31,6 +31,19 @@ impl SelfAuthorities {
         Self(authorities)
     }
 
+    /// Authorities for a loopback listener on `listen`: its `ip:port` and
+    /// `localhost` on the same port.
+    ///
+    /// Why: #9067 P2 — a page opened at `http://localhost:PORT/` sends
+    /// `Host: localhost:PORT`, which names this listener as surely as the
+    /// IP does. No other name is added.
+    /// What: [`SelfAuthorities::new`] with `localhost` as the name.
+    /// Test: `localhost_on_the_bound_port_is_an_own_authority`,
+    /// `every_other_host_name_is_still_refused`.
+    pub fn loopback(listen: SocketAddr) -> Self {
+        Self::new(listen, Some("localhost"))
+    }
+
     fn contains(&self, authority: &str) -> bool {
         self.0.iter().any(|a| a.eq_ignore_ascii_case(authority))
     }
