@@ -467,6 +467,7 @@ fn a_spoofed_heading_does_not_count_as_a_present_member() {
     // #8533 finding 3: the presence check reads body sentences, so an override
     // that repeats every core heading while the core text is gone is caught.
     let spoof = "## Memory & Instruction Sources\n\n## Customization Surface\n\n\
+                 ## Completion Standard\n\n\
                  ## Detected Project Stack (auto-derived)\n\n\
                  ## Memory Protocol (Context-First)\n\n## Code Search Protocol (Context-First)\n\n\
                  > **Agent selection.**\n\n## Delegation Authority\n";
