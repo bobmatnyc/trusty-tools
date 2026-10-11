@@ -45,8 +45,8 @@ use crate::api::SecretsError;
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
 use crate::store::{INDEX_SUBDIR, platform};
 
-// #9066: defined beside the client, so the `client` feature has them.
-pub use super::client::{SERVE_SUBCOMMAND, SOCKET_SUBPATH};
+/// Socket path under `$HOME` (owner ruling 31).
+pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
 
 /// Overrides the socket path.
 pub const SOCKET_ENV: &str = "TRUSTY_SECRETS_SOCKET";
@@ -86,6 +86,9 @@ pub const CACHE_MAX_AGE_ENV: &str = "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS";
 /// How long a cached 1Password or Keeper value answers before the next
 /// resolve reads the backend again (#7520 S2; provisional, plan §6 point 1).
 pub const DEFAULT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+
+/// The subcommand that serves the socket.
+pub const SERVE_SUBCOMMAND: &str = "serve";
 
 /// A `serve` command line that could not be read.
 #[derive(Debug, thiserror::Error)]

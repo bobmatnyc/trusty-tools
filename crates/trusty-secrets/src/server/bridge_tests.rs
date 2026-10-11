@@ -803,7 +803,11 @@ async fn bridge_audit_disabled_writes_nothing_for_every_method() {
     ];
     for (name, params) in allowed {
         let response = call(socket, name, bridged(params, mapped())).await;
-        assert!(response.error.is_none(), "{name}: {:?}", error_json(&response));
+        assert!(
+            response.error.is_none(),
+            "{name}: {:?}",
+            error_json(&response)
+        );
     }
     let agent = call(
         socket,

@@ -28,12 +28,7 @@ use trusty_common::uds::{
 
 use super::deadline::client_wait;
 use super::errors::ErrorKind;
-
-/// Socket path under `$HOME` (owner ruling 31).
-pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
-
-/// The subcommand that serves the socket.
-pub const SERVE_SUBCOMMAND: &str = "serve";
+use super::settings::{SERVE_SUBCOMMAND, SOCKET_SUBPATH};
 
 /// Binary and service name.
 pub const SECRETS_SERVICE: &str = "trusty-secrets";

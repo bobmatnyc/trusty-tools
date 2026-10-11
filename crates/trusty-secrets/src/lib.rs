@@ -21,12 +21,9 @@
 //! - `ancestry` — the process-ancestry walk ([`ancestry`]): std, `thiserror`
 //!   and libc only, so the console bridge shares the socket's verdict
 //!   without a store (#9066).
-//! - `client` — the spawn-on-first-call client helper
-//!   (`server::client::OnDemandSecrets`) and the fixed error table it reads
-//!   (`server::errors`), with no store (#9066; Unix only).
 //! - `server` — the `secrets.*` methods on an on-demand Unix socket, the
 //!   `trusty-secrets` binary that serves them, and the client helper that
-//!   spawns it ([`server`]; Unix only). It includes `ancestry` and `client`.
+//!   spawns it ([`server`]; Unix only). It includes `ancestry`.
 //!
 //! No item in this crate prints, logs, or formats a secret value. Errors and
 //! `Debug` output carry names and locations only.
@@ -72,8 +69,7 @@ pub mod api;
 #[cfg(feature = "store")]
 pub mod store;
 // #9065: S2 — the on-demand socket. trusty-common's UDS stack is Unix-only.
-// #9066: `client` alone builds only the client helper and its error table.
-#[cfg(all(unix, any(feature = "server", feature = "client")))]
+#[cfg(all(unix, feature = "server"))]
 pub mod server;
 
 #[cfg(feature = "api")]
