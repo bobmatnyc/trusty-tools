@@ -58,6 +58,8 @@ include = [
     "ui-memory-dist/**/*",
     # #6155: the trusty-analyze SPA the console serves at /tools/analyze/.
     "ui-analyze-dist/**/*",
+    # #9067: the Secrets page the console serves at /tools/secrets/.
+    "ui-secrets-dist/**/*",
     "Cargo.toml",
     "README.md",
 ]

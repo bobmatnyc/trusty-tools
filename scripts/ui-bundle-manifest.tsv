@@ -86,3 +86,6 @@ trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist
 trusty-console-search	crates/trusty-console/ui-search,crates/trusty-search/ui	crates/trusty-console/ui-search-dist	docs/design/UI/design-system/components
 trusty-console-memory	crates/trusty-console/ui-memory,crates/trusty-memory/ui	crates/trusty-console/ui-memory-dist
 trusty-console-analyze	crates/trusty-console/ui-analyze,crates/trusty-analyze/ui	crates/trusty-console/ui-analyze-dist
+# #9067: the Secrets page the console serves at /tools/secrets/, the fifth
+# console bundle. New source, so no pre-move path.
+trusty-console-secrets	crates/trusty-console/ui-secrets	crates/trusty-console/ui-secrets-dist

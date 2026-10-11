@@ -326,6 +326,14 @@ fn build_router_inner(
             "/tools/analyze/{*path}",
             get(crate::tools_ui::analyze_ui_asset),
         )
+        // #9067: the Secrets page, served under /tools/secrets/. Its calls go
+        // to /api/secrets/*, the guarded bridge merged below.
+        .route("/tools/secrets", get(crate::tools_ui::secrets_ui_redirect))
+        .route("/tools/secrets/", get(crate::tools_ui::secrets_ui_index))
+        .route(
+            "/tools/secrets/{*path}",
+            get(crate::tools_ui::secrets_ui_asset),
+        )
         .route("/", get(crate::console_ui::spa_index_handler))
         // #6519: /ui/screensaver already reaches the shell through the SPA
         // fallback in the wildcard below; this is the top-level alias, which has

@@ -24,8 +24,9 @@ REPO_ROOT    := $(MAKEFILE_DIR)../..
 SEARCH_UI    := $(MAKEFILE_DIR)ui-search
 MEMORY_UI    := $(MAKEFILE_DIR)ui-memory
 ANALYZE_UI   := $(MAKEFILE_DIR)ui-analyze
+SECRETS_UI   := $(MAKEFILE_DIR)ui-secrets
 
-.PHONY: search-ui memory-ui analyze-ui release-prep
+.PHONY: search-ui memory-ui analyze-ui secrets-ui release-prep
 
 ## Rebuild the embedded search dashboard and re-stamp it.
 ##
@@ -66,10 +67,23 @@ analyze-ui:
 	  cd $(ANALYZE_UI) && npm ci && npm run build; \
 	fi
 
+## Rebuild the embedded Secrets page and re-stamp it (#9067).
+##
+## `pnpm build` is enough: ui-secrets/vite.config.js sets `outDir` to the
+## crate-root ui-secrets-dist/ and runs the stamp plugin on closeBundle.
+secrets-ui:
+	@if command -v pnpm > /dev/null 2>&1; then \
+	  echo ">> pnpm install && pnpm build (in $(SECRETS_UI))"; \
+	  cd $(SECRETS_UI) && pnpm install --frozen-lockfile && pnpm build; \
+	else \
+	  echo ">> npm ci && npm run build (in $(SECRETS_UI))"; \
+	  cd $(SECRETS_UI) && npm ci && npm run build; \
+	fi
+
 ## Everything the committed bundles need before `cargo publish`.
 ##
 ## The console's own ui/dist/ is not rebuilt here: build.rs already rebuilds and
 ## re-stamps it whenever its source moves, and re-stamping it from a target that
 ## did not run the build would record a claim nobody made.
-release-prep: search-ui memory-ui analyze-ui
-	@echo ">> ui-search-dist, ui-memory-dist and ui-analyze-dist rebuilt and stamped. Ready for cargo publish."
+release-prep: search-ui memory-ui analyze-ui secrets-ui
+	@echo ">> ui-search-dist, ui-memory-dist, ui-analyze-dist and ui-secrets-dist rebuilt and stamped. Ready for cargo publish."

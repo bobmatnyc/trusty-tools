@@ -6,6 +6,7 @@
 //! was the only way to its dashboard — #6286 already deleted trusty-memory's,
 //! and #6287 deleted trusty-analyze's, leaving each SPA in a crate with no
 //! listener. All three are served here instead.
+//! #9067: the Secrets page is a fourth mount, at `/tools/secrets/`.
 //! What: `rust_embed` embeds three bundles, each the Vite output of one of this
 //! crate's own UI projects — build.rs builds `ui-search/` → `ui-search-dist/`,
 //! `ui-memory/` → `ui-memory-dist/` and `ui-analyze/` → `ui-analyze-dist/`
@@ -62,6 +63,16 @@ struct MemoryUiAssets;
 #[folder = "ui-analyze-dist/"]
 struct AnalyzeUiAssets;
 
+/// The Secrets page bundle, committed under `ui-secrets-dist/` (#9067).
+///
+/// Same arrangement as [`SearchUiAssets`], one manifest row over:
+/// `trusty-console-secrets`, rebuilt by `make -C crates/trusty-console
+/// secrets-ui`.
+/// Test: `secrets_index_is_embedded` below.
+#[derive(RustEmbed)]
+#[folder = "ui-secrets-dist/"]
+struct SecretsUiAssets;
+
 /// One dashboard's mount: where its bytes are and where its API calls go.
 ///
 /// Why a struct rather than two copies of three handlers: the redirect, the
@@ -114,6 +125,17 @@ const ANALYZE: SpaMount = SpaMount {
     base_global: "__ANALYZE_BASE__",
     api_base: "/api/analyze/",
     remedy: "analyze dashboard assets not bundled — run `make -C crates/trusty-console analyze-ui`.",
+};
+
+/// Where the Secrets page's API calls go (#9067).
+///
+/// Same shape as [`SEARCH`], over `secrets_uds::routes`: `/api/secrets/list`
+/// reaches `secrets.bridge.list`.
+const SECRETS: SpaMount = SpaMount {
+    get: SecretsUiAssets::get,
+    base_global: "__SECRETS_BASE__",
+    api_base: "/api/secrets/",
+    remedy: "secrets page assets not bundled — run `make -C crates/trusty-console secrets-ui`.",
 };
 
 /// `GET /tools/search` — redirect to the trailing-slash form.
@@ -188,6 +210,28 @@ pub async fn analyze_ui_index() -> Response {
 /// `tests/analyze_ui_mount.rs`.
 pub async fn analyze_ui_asset(Path(path): Path<String>) -> Response {
     serve_asset(&ANALYZE, &path)
+}
+
+/// `GET /tools/secrets` — redirect to the trailing-slash form (#9067).
+///
+/// Same reason as [`search_ui_redirect`]: the bundle's asset refs are relative.
+/// Test: `secrets_ui_bare_path_redirects` in `tests/secrets_ui_mount.rs`.
+pub async fn secrets_ui_redirect() -> Redirect {
+    Redirect::permanent("/tools/secrets/")
+}
+
+/// `GET /tools/secrets/` — the Secrets page shell (#9067).
+pub async fn secrets_ui_index() -> Response {
+    serve_index(&SECRETS)
+}
+
+/// `GET /tools/secrets/{*path}` — one bundle file, or the shell on a miss.
+///
+/// Test: `secrets_ui_serves_every_asset_the_shell_references` and
+/// `secrets_ui_unknown_path_falls_back_to_the_shell` in
+/// `tests/secrets_ui_mount.rs`.
+pub async fn secrets_ui_asset(Path(path): Path<String>) -> Response {
+    serve_asset(&SECRETS, &path)
 }
 
 /// Serve one bundle file, falling back to the shell when it is not one.
@@ -325,6 +369,24 @@ mod tests {
         );
     }
 
+    /// Why: #9067 — the Secrets bundle is built from this crate's
+    /// `ui-secrets/`; embedding another tree would serve a dashboard whose
+    /// calls go to a different bridge at `/tools/secrets/`.
+    /// Test: this is the test.
+    #[test]
+    fn secrets_index_is_embedded() {
+        let index = SecretsUiAssets::get("index.html").expect("bundle carries index.html");
+        let html = String::from_utf8_lossy(index.data.as_ref());
+        assert!(
+            html.contains("<title>Trusty Secrets</title>"),
+            "wrong bundle embedded"
+        );
+        assert!(
+            html.contains("./assets/"),
+            "bundle must use relative asset refs so the /tools/secrets/ mount resolves them"
+        );
+    }
+
     /// Why: the three mounts must set DIFFERENT globals at different prefixes,
     /// or one dashboard's API calls reach another's daemon.
     /// Test: this is the test.
@@ -334,6 +396,9 @@ mod tests {
         let search = inject_api_base(html, SEARCH.base_global, SEARCH.api_base);
         let memory = inject_api_base(html, MEMORY.base_global, MEMORY.api_base);
         let analyze = inject_api_base(html, ANALYZE.base_global, ANALYZE.api_base);
+        let secrets = inject_api_base(html, SECRETS.base_global, SECRETS.api_base);
+        assert!(secrets.contains(r#"window.__SECRETS_BASE__ = new URL("/api/secrets/""#));
+        assert!(!secrets.contains("__ANALYZE_BASE__"));
         assert!(search.contains(r#"window.__SEARCH_BASE__ = new URL("/api/search/""#));
         assert!(memory.contains(r#"window.__MEMORY_BASE__ = new URL("/api/memory/""#));
         assert!(analyze.contains(r#"window.__ANALYZE_BASE__ = new URL("/api/analyze/""#));
