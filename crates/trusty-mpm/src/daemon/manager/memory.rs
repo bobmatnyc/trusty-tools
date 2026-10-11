@@ -385,12 +385,13 @@ mod live {
             let palace_id = PalaceId::new(PORTFOLIO_PALACE_ID.to_string());
             // #9659: the intent applies from hydration, so a writer never holds
             // a snapshot and an observer never locks the live files.
-            let registry = PalaceRegistry::open_with_intent(&data_root, intent).map_err(|source| {
-                PortfolioMemoryError::Palace {
-                    palace: palace_id.to_string(),
-                    source,
-                }
-            })?;
+            let registry =
+                PalaceRegistry::open_with_intent(&data_root, intent).map_err(|source| {
+                    PortfolioMemoryError::Palace {
+                        palace: palace_id.to_string(),
+                        source,
+                    }
+                })?;
             let me = Self {
                 registry,
                 data_root,

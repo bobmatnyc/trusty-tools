@@ -39,12 +39,21 @@ pub(super) fn open_observer_copy(path: &Path) -> Result<(Arc<Database>, Snapshot
         );
     }
     let snap = snapshot_path_for(path);
-    std::fs::copy(path, &snap)
-        .with_context(|| format!("copy {} -> {} for an observer", path.display(), snap.display()))?;
+    std::fs::copy(path, &snap).with_context(|| {
+        format!(
+            "copy {} -> {} for an observer",
+            path.display(),
+            snap.display()
+        )
+    })?;
     // Owned by the guard from here, so a failed open still removes the copy.
     let guard = SnapshotGuard::new(snap.clone());
     let db = create_palace_db(&snap).map_err(|e| {
-        anyhow::anyhow!("open observer copy {} of {}: {e}", snap.display(), path.display())
+        anyhow::anyhow!(
+            "open observer copy {} of {}: {e}",
+            snap.display(),
+            path.display()
+        )
     })?;
     tracing::debug!(original = %path.display(), snapshot = %snap.display(),
         "#9659: observer opened a snapshot copy");
@@ -74,7 +83,11 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
     {
         check_format(palace, found, PALACE_FORMAT_SUPPORTED)?;
     }
-    if data_dir.join(MIGRATION_RECORD).try_exists().unwrap_or(false) {
+    if data_dir
+        .join(MIGRATION_RECORD)
+        .try_exists()
+        .unwrap_or(false)
+    {
         return Err(PalaceStoreError::FormatNeedsMigration {
             palace: palace.to_string(),
             found: PALACE_FORMAT_SUPPORTED.saturating_sub(1),
@@ -128,6 +141,9 @@ mod tests {
         drop(create_palace_db(&dir.path().join(KG_FILE)).expect("create kg.redb"));
         observer_gate(dir.path(), "p").expect("a palace with a kg.redb passes");
         std::fs::write(dir.path().join(MIGRATION_RECORD), b"{}").unwrap();
-        assert!(observer_gate(dir.path(), "p").is_err(), "a migration in progress");
+        assert!(
+            observer_gate(dir.path(), "p").is_err(),
+            "a migration in progress"
+        );
     }
 }
