@@ -3,7 +3,7 @@
 use super::*;
 use crate::commands::doctor::CheckStatus;
 use trusty_common::memory_core::store::kg_store::{
-    DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, encode_value,
+    encode_value, KgSchemaMarker, DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY,
 };
 use trusty_common::memory_core::store::palace_format::KG_SCHEMA_PALACE_FORMAT;
 
@@ -129,9 +129,9 @@ fn copy_v1_blob(
 #[test]
 fn the_0_33_0_v1_palace_migrates_to_2_and_its_backup_matches_the_blob() {
     use trusty_common::memory_core::retrieval::PalaceHandle;
-    use trusty_common::memory_core::store::OpenIntent;
-    use trusty_common::memory_core::store::format_backup::{MANIFEST, backup_root, verify_backup};
+    use trusty_common::memory_core::store::format_backup::{backup_root, verify_backup, MANIFEST};
     use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+    use trusty_common::memory_core::store::OpenIntent;
 
     let root = tempfile::tempdir().expect("tempdir");
     let (palace, blob) = copy_v1_blob(root.path());
