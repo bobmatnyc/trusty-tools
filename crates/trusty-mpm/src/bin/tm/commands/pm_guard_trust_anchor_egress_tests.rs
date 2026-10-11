@@ -439,3 +439,17 @@ fn egress_project_settings_incoming_claude_tree_disabling_hooks_is_denied() {
     std::fs::write(evil.join("settings.local.json"), "{}").expect("rewrite evil");
     assert_eq!(pm_bash(&fx, "mv evil/.claude ."), None);
 }
+
+/// 🔴 #8454 S2 (Bob ruling Ded): a write or delete denied only because a
+/// protected name sits in a directory the guard cannot place says so, and
+/// tells the caller to retry with the absolute path.
+#[test]
+fn egress_anchor_protected_name_in_an_unknown_directory_names_the_retry() {
+    let fx = egress_fixture();
+    let reason = pm_bash(&fx, "cd deploy && rm config.yaml").expect("denied");
+    assert!(
+        reason.contains("matches a protected name in a directory the guard cannot place"),
+        "{reason}"
+    );
+    assert!(reason.contains("Retry with the absolute path"), "{reason}");
+}
