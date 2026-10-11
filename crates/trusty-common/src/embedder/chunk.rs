@@ -116,10 +116,11 @@ impl ChunkTokenizer {
     /// What: reads `refs/main`, then the snapshot's `tokenizer.json`,
     /// `tokenizer_config.json` and `special_tokens_map.json`. Mirrors
     /// fastembed's `load_tokenizer`: registers the special-token map and
-    /// records `max_length = min(512, model_max_length)`. A missing file is
+    /// records `max_length = min(FASTEMBED_MAX_LENGTH, model_max_length)`,
+    /// the length fastembed truncates at. A missing file is
     /// [`ChunkError::TokenizerMissing`].
     /// Test: `fastembed_cache_without_the_model_is_an_error`,
-    /// `fastembed_window_matches_cached_tokenizer_max_length`.
+    /// `fastembed_truncates_at_minilm_window_on_every_model_revision`.
     pub fn for_fastembed_model_in(cache_dir: &Path, model_code: &str) -> Result<Self, ChunkError> {
         let repo = cache_dir.join(format!("models--{}", model_code.replace('/', "--")));
         let revision = read_file(&repo.join("refs").join("main"))?;

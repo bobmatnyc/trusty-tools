@@ -445,7 +445,7 @@ pub trait Embedder: Send + Sync {
     /// whatever its builder set. Feed the value to [`super::chunk_text`].
     /// Test: `default_input_window_is_none`,
     /// `mock_embedder_input_window_is_configurable`,
-    /// `fastembed_window_matches_cached_tokenizer_max_length`.
+    /// `fastembed_truncates_at_minilm_window_on_every_model_revision`.
     fn input_window(&self) -> Option<usize> {
         None
     }

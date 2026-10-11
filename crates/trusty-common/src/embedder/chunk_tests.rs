@@ -11,10 +11,11 @@ use super::fast_embedder::MINILM_MAX_SEQ_LENGTH;
 use super::test_env::env_lock;
 use super::{
     CHUNK_OVERLAP_PERCENT, ChunkError, ChunkTokenizer, Embedder, FASTEMBED_MAX_LENGTH,
-    MockEmbedder, TextChunk, chunk_text, resolve_fastembed_cache_dir,
+    FastEmbedder, MockEmbedder, TextChunk, chunk_text, resolve_fastembed_cache_dir,
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use fastembed::EmbeddingModel;
 
 /// The fp32 default model fastembed loads (`EmbeddingModel::AllMiniLML6V2`).
 const DEFAULT_MODEL_CODE: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
@@ -34,6 +35,12 @@ fn small_bert_tokenizer() -> ChunkTokenizer {
 
 /// [`small_bert_tokenizer`] with `extra` vocab entries appended.
 fn small_bert_tokenizer_with(extra: &[&str]) -> ChunkTokenizer {
+    ChunkTokenizer::from_bytes(small_bert_tokenizer_json(extra).as_bytes())
+        .expect("small BERT tokenizer loads")
+}
+
+/// The `tokenizer.json` behind [`small_bert_tokenizer_with`].
+fn small_bert_tokenizer_json(extra: &[&str]) -> String {
     let specials = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"];
     let mut vocab = serde_json::Map::new();
     let mut push = |token: String| {
@@ -76,7 +83,7 @@ fn small_bert_tokenizer_with(extra: &[&str]) -> ChunkTokenizer {
         "model": {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##",
                   "max_input_chars_per_word": 1_000_000, "vocab": vocab}
     });
-    ChunkTokenizer::from_bytes(json.to_string().as_bytes()).expect("small BERT tokenizer loads")
+    json.to_string()
 }
 
 /// The real tokenizer fastembed's default model truncates with.
@@ -292,22 +299,64 @@ fn fastembed_cache_without_the_model_is_an_error() {
     );
 }
 
+/// A fastembed (HuggingFace) cache holding `DEFAULT_MODEL_CODE` with the
+/// small BERT tokenizer and the given `model_max_length`.
+fn fixture_fastembed_cache(model_max_length: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir
+        .path()
+        .join(format!("models--{}", DEFAULT_MODEL_CODE.replace('/', "--")));
+    let snapshot = repo.join("snapshots").join("fixture");
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    std::fs::create_dir_all(repo.join("refs")).expect("refs dir");
+    let files = [
+        (repo.join("refs").join("main"), "fixture".to_string()),
+        (snapshot.join("tokenizer.json"), small_bert_tokenizer_json(&[])),
+        (
+            snapshot.join("tokenizer_config.json"),
+            serde_json::json!({"model_max_length": model_max_length, "pad_token": "[PAD]"})
+                .to_string(),
+        ),
+        (
+            snapshot.join("special_tokens_map.json"),
+            serde_json::json!({"cls_token": "[CLS]", "sep_token": "[SEP]", "pad_token": "[PAD]",
+                               "unk_token": "[UNK]", "mask_token": "[MASK]"})
+            .to_string(),
+        ),
+    ];
+    for (path, body) in files {
+        std::fs::write(&path, body).expect("write fixture file");
+    }
+    dir
+}
+
 #[test]
-fn fastembed_window_matches_cached_tokenizer_max_length() {
-    // fastembed truncates at min(512, model_max_length); the MiniLM window
-    // (sentence-transformers `max_seq_length`) must fit inside it.
-    let tok = real_tokenizer();
-    assert_eq!(tok.max_length(), Some(FASTEMBED_MAX_LENGTH));
-    assert_eq!(FASTEMBED_MAX_LENGTH, 512);
+fn fastembed_truncates_at_minilm_window_on_every_model_revision() {
+    // fastembed 5.13.4 truncates at min(TextInitOptions::max_length,
+    // tokenizer_config.json `model_max_length`) — `common.rs` `load_tokenizer`.
+    let scratch = tempfile::tempdir().expect("tempdir");
+    for model in [EmbeddingModel::AllMiniLML6V2, EmbeddingModel::AllMiniLML6V2Q] {
+        let opts = FastEmbedder::text_init_options(model, scratch.path().to_path_buf());
+        assert_eq!(opts.max_length, MINILM_MAX_SEQ_LENGTH);
+    }
+    assert_eq!(FASTEMBED_MAX_LENGTH, MINILM_MAX_SEQ_LENGTH);
     assert_eq!(MINILM_MAX_SEQ_LENGTH, 256);
-    assert!(Some(MINILM_MAX_SEQ_LENGTH) <= tok.max_length());
-    assert_eq!(tok.special_overhead(), 2);
+    // `model_max_length` is 512 at Qdrant/all-MiniLM-L6-v2-onnx revision
+    // 5f1b8cd78bc4 and 256 from 944c7f61a294 on; a smaller cap still wins.
+    for (model_max, want) in [(512, 256), (256, 256), (128, 128)] {
+        let cache = fixture_fastembed_cache(model_max);
+        let tok = ChunkTokenizer::for_fastembed_model_in(cache.path(), DEFAULT_MODEL_CODE)
+            .expect("fixture cache loads");
+        assert_eq!(tok.max_length(), Some(want), "model_max_length {model_max}");
+        assert_eq!(tok.special_overhead(), 2);
+    }
 }
 
 #[test]
 fn real_tokenizer_chunks_long_text_within_fastembed_window() {
     let tok = real_tokenizer();
-    // tokenizer.json pads to and truncates at 128; both must be off.
+    // The snapshot's tokenizer.json pads and truncates (128 or 256, by
+    // revision); both must be off.
     assert_eq!(tok.count_tokens("hello world").expect("count"), 2);
     let text = (0..400)
         .map(|i| format!("Sentence {i} records that the palace stores drawer number {i}."))

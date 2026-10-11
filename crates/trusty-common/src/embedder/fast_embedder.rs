@@ -321,26 +321,30 @@ pub struct FastEmbedder {
     model_code: String,
 }
 
-/// Longest input fastembed 5 encodes, in tokens including `[CLS]`/`[SEP]`.
+/// Longest input `FastEmbedder` lets fastembed encode, in tokens including
+/// `[CLS]`/`[SEP]`.
 ///
-/// Why: #9275 — fastembed truncates every input at its private
-/// `DEFAULT_MAX_LENGTH` (512), capped by the model's `model_max_length`;
-/// a chunker that does not know this value embeds a truncated tail.
-/// What: mirrors fastembed's constant; caps `FastEmbedder::input_window`.
-/// Test: `fastembed_window_matches_cached_tokenizer_max_length`.
-pub const FASTEMBED_MAX_LENGTH: usize = 512;
+/// Why: #9275 — fastembed 5 truncates at `min(TextInitOptions::max_length,
+/// model_max_length)` (`common.rs` `load_tokenizer`). The option defaults to
+/// 512, and `model_max_length` comes from the cached snapshot's
+/// `tokenizer_config.json`: 512 at `Qdrant/all-MiniLM-L6-v2-onnx` revision
+/// `5f1b8cd78bc4`, 256 from `944c7f61a294` on. Left at the default, the
+/// truncation length depends on which revision a host cached.
+/// What: the `max_length` [`FastEmbedder::text_init_options`] passes, so
+/// fastembed truncates at 256 with either revision.
+/// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+pub const FASTEMBED_MAX_LENGTH: usize = MINILM_MAX_SEQ_LENGTH;
 
 /// Input window of every all-MiniLM-L6-v2 embedder, in tokens including
 /// `[CLS]`/`[SEP]`.
 ///
 /// Why: #9275 — sentence-transformers, the reference implementation, stops
-/// this model at 256 tokens; fastembed would encode up to 512, past the
-/// length the reference uses, so chunks stop at 256.
+/// this model at 256 tokens, so chunks stop at 256.
 /// What: `max_seq_length` from the model's sentence-transformers
 /// `sentence_bert_config.json` (`sentence-transformers/all-MiniLM-L6-v2`,
 /// revision `c9745ed1d9f2`). Each MiniLM `input_window` reports it, capped by
 /// what that backend encodes.
-/// Test: `fastembed_window_matches_cached_tokenizer_max_length`.
+/// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
 pub(crate) const MINILM_MAX_SEQ_LENGTH: usize = 256;
 
 impl FastEmbedder {
@@ -395,6 +399,18 @@ impl FastEmbedder {
         super::ChunkTokenizer::for_fastembed_model(&self.model_code)
     }
 
+    /// fastembed options for `model` cached in `cache_dir`, truncating at
+    /// [`FASTEMBED_MAX_LENGTH`] (#9275). No side effects.
+    /// Test: `fastembed_truncates_at_minilm_window_on_every_model_revision`.
+    pub(super) fn text_init_options(
+        model: EmbeddingModel,
+        cache_dir: std::path::PathBuf,
+    ) -> TextInitOptions {
+        TextInitOptions::new(model)
+            .with_cache_dir(cache_dir)
+            .with_max_length(FASTEMBED_MAX_LENGTH)
+    }
+
     /// Build `TextInitOptions` for the given model. CPU is the default
     /// execution provider everywhere, including Apple Silicon; CoreML is an
     /// explicit opt-in (`TRUSTY_DEVICE=gpu`).
@@ -443,7 +459,7 @@ impl FastEmbedder {
         unsafe {
             std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir);
         }
-        let opts = TextInitOptions::new(model).with_cache_dir(cache_dir);
+        let opts = Self::text_init_options(model, cache_dir);
 
         // Always register an explicit CPU EP with the memory arena DISABLED.
         //
@@ -885,8 +901,8 @@ impl super::types::Embedder for FastEmbedder {
         self.provider
     }
 
-    // #9275: the model's trained length, within what fastembed encodes.
+    // #9275: the truncation length `text_init_options` configures.
     fn input_window(&self) -> Option<usize> {
-        Some(MINILM_MAX_SEQ_LENGTH.min(FASTEMBED_MAX_LENGTH))
+        Some(FASTEMBED_MAX_LENGTH)
     }
 }
