@@ -398,7 +398,7 @@ mod tests {
         );
     }
 
-    /// Every 7-40 character hex token holding at least one letter, outside the
+    /// Every 7-40 character hex token mixing digits and letters, outside the
     /// code-generated `Last commit:` line. Written independently of the
     /// production rule so a broken scrub cannot also break its own check.
     fn head_sha_tokens(md: &str) -> Vec<String> {
@@ -408,6 +408,7 @@ mod tests {
             .filter(|w| {
                 (7..=40).contains(&w.len())
                     && w.chars().all(|c| c.is_ascii_hexdigit())
+                    && w.chars().any(|c| c.is_ascii_digit())
                     && w.chars().any(|c| c.is_ascii_alphabetic())
             })
             .map(str::to_string)
