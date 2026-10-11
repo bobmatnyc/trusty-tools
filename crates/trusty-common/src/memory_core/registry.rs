@@ -290,10 +290,32 @@ impl PalaceRegistry {
     /// `PalaceHandle::open_with_intent`.
     /// What: Consuming builder that sets `open_intent = OpenIntent::Writer`
     /// and returns `self`. All `Arc`-shared state is preserved.
-    /// Test: `with_writer_intent_sets_writer_open_intent`.
+    /// #9659: a read-only handle this registry hydrated before the call (the
+    /// `open(..).with_writer_intent()` order) is dropped and recorded
+    /// unopenable with an ERROR, so a writer registry never serves one; the
+    /// next `open_palace` reopens it as writer. Prefer [`Self::open_with_intent`].
+    /// Test: `with_writer_intent_sets_writer_open_intent`,
+    /// `a_writer_registry_never_hydrates_read_only`.
     #[must_use]
     pub fn with_writer_intent(mut self) -> Self {
         self.open_intent = OpenIntent::Writer;
+        let read_only: Vec<PalaceId> = {
+            let cache = self.handles.lock();
+            cache
+                .iter()
+                .filter(|(_, h)| h.is_read_only())
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in read_only {
+            self.remove(&id);
+            let reason = format!(
+                "palace {id} was hydrated as a read-only snapshot before writer intent was set; \
+                 another process may hold its kg.redb (#9659)"
+            );
+            tracing::error!(palace = %id, "{reason}");
+            self.record_unopenable(id, reason);
+        }
         self
     }
 
@@ -827,6 +849,12 @@ impl PalaceRegistry {
     /// Test: `registry_create_and_open`, `palace_create_refuses_a_live_alias_name`,
     /// `palace_create_fails_when_the_alias_file_is_unreadable`.
     pub fn create_palace(&self, data_root: &Path, mut palace: Palace) -> Result<Arc<PalaceHandle>> {
+        // #9659: an observer registry never creates a palace.
+        anyhow::ensure!(
+            self.open_intent != OpenIntent::Observer,
+            "palace {} does not exist; a read-only observer never creates one",
+            palace.id
+        );
         // #9544: a live alias name stays an alias; creating it would shadow it.
         // An unreadable alias file fails the create rather than skipping the check.
         if let Some(target) =
@@ -895,17 +923,33 @@ impl PalaceRegistry {
     /// Test: `open_hydrates_persisted_palaces` exercises restart by writing,
     /// dropping, and reopening.
     pub fn open(data_root: &Path) -> Result<Self> {
-        std::fs::create_dir_all(data_root)
-            .with_context(|| format!("create registry root {}", data_root.display()))?;
-        let registry = Self::new().with_data_root(data_root);
+        Self::open_with_intent(data_root, OpenIntent::ReadOnlyClient)
+    }
+
+    /// [`Self::open`], hydrating every palace with `intent` from the first open.
+    ///
+    /// Why (#9659): the daemon built its registries as `open(..)` then
+    /// `with_writer_intent()`, so hydration ran read-only: beside another
+    /// holder of `kg.redb` it took a snapshot, and a format-0 palace never
+    /// migrated. `tm sm serve` needs the opposite, an [`OpenIntent::Observer`]
+    /// registry that never touches the live files.
+    /// What: sets `intent` before hydrating. Under `Writer` a palace that fails
+    /// to open logs an ERROR and is recorded unopenable, never a snapshot
+    /// handle. Under `Observer` the root directory is not created.
+    /// Test: `a_writer_registry_never_hydrates_read_only`; the trusty-mpm SM
+    /// and portfolio #9659 tests cover both intents end to end.
+    pub fn open_with_intent(data_root: &Path, intent: OpenIntent) -> Result<Self> {
+        if intent != OpenIntent::Observer {
+            std::fs::create_dir_all(data_root)
+                .with_context(|| format!("create registry root {}", data_root.display()))?;
+        }
+        let mut registry = Self::new().with_data_root(data_root);
+        registry.open_intent = intent;
         let palaces = PalaceStore::list_palaces(data_root)
             .with_context(|| format!("list palaces under {}", data_root.display()))?;
         for palace in palaces {
-            // Use the registry's configured intent (issue #1487). The eager
-            // hydration constructor builds a `ReadOnlyClient` registry via
-            // `Self::new()`, so this preserves the historical snapshot-fallback
-            // behaviour while staying correct if a future caller hydrates a
-            // writer registry.
+            // Use the registry's configured intent (issue #1487); #9659 sets it
+            // before this loop, so a writer never hydrates a snapshot.
             match registry.open_handle(&palace) {
                 Ok(handle) => {
                     // ADR-0027 T2: same additive backfill on the eager path.
@@ -916,7 +960,12 @@ impl PalaceRegistry {
                     // #4911: record it before skipping. A skipped palace is
                     // absent from the handle cache, so without this the palace
                     // is indistinguishable from one that never existed.
-                    tracing::warn!(palace = %palace.id, "skipping palace during registry open: {e:#}");
+                    // #9659: a writer that cannot hold its palace is an error.
+                    if intent == OpenIntent::Writer {
+                        tracing::error!(palace = %palace.id, "writer could not open palace: {e:#}");
+                    } else {
+                        tracing::warn!(palace = %palace.id, "skipping palace during registry open: {e:#}");
+                    }
                     registry
                         .unopenable
                         .insert(palace.id.clone(), format!("{e:#}"));
