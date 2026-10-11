@@ -298,6 +298,11 @@ use doctor_statusline::check_statusline;
 mod doctor_search_pin;
 use doctor_search_pin::check_search_index_pin;
 
+// #9169: read-only rows over trusty-search's `project-map.toml`.
+#[path = "doctor_search_project.rs"]
+mod doctor_search_project;
+use doctor_search_project::check_search_project;
+
 // Split out to keep this file under the 500-SLOC production cap (issue #5007 —
 // the managed-session-store integrity probe; a corrupt `sessions.json` blocks
 // every write and was previously invisible to every diagnostic).
@@ -447,7 +452,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_eight_checks`,
+/// Test: `run_doctor_produces_seventy_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -600,6 +605,9 @@ pub(crate) async fn run_doctor_with_claims(
     // resolves the id `.mcp.json` actually pins, which is what every `search`
     // call in the session sends.
     checks.push(check_search_index_pin(&home, project_dir).await);
+    // #9169: the project map — this project's index, live duplicates, second
+    // checkouts, and whether the daemon can read the map at all.
+    checks.extend(check_search_project(project_dir).await);
     checks.push(check_worktrees(repos_root, worktree_counts).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
@@ -851,7 +859,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_eight_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_two_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
@@ -909,3 +917,8 @@ fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) 
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
 mod tests;
+
+// #9169: the project-map rows end to end through `run_doctor`.
+#[cfg(test)]
+#[path = "doctor_search_project_e2e_tests.rs"]
+mod search_project_e2e_tests;

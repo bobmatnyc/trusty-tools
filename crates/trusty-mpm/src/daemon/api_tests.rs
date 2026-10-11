@@ -1370,6 +1370,11 @@ async fn doctor_endpoint_returns_report() {
         "memory",
         "search",
         "search_index_pin",
+        // #9169: the project-map rows.
+        "search_project_no_index",
+        "search_project_duplicate_index",
+        "search_project_two_checkouts",
+        "search_project_map_unreadable",
         "worktrees",
         "worktree_disk",
         // #7497: the mount that store sits on, against `disk.max_usage_pct`.
