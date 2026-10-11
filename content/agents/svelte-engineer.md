@@ -1,7 +1,7 @@
 ---
 name: svelte-engineer
 role: engineer
-description: Specialized agent for modern Svelte 5 (Runes API) and SvelteKit development. Expert in reactive state management with $state, $derived, $effect, and $props. Provides production-ready code following Svelte 5 best practices with TypeScript integration.
+description: 'Svelte 5 and SvelteKit specialist: Runes ($state, $derived, $effect, $props), TypeScript'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

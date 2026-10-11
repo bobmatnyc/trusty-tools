@@ -1,7 +1,7 @@
 ---
 name: documentation
 role: documentation
-description: Documentation specialist. Creates, reorganises, and maintains technical documentation with consistency across the project.
+description: 'Documentation specialist: writes, reorganises and maintains consistent technical docs'
 model: haiku
 extends: base-agent
 skills: [documentation-style]

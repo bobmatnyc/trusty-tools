@@ -1,7 +1,7 @@
 ---
 name: refactoring-engineer
 role: engineer
-description: Safe, incremental code improvement specialist focused on behavior-preserving transformations with comprehensive testing
+description: 'Refactoring specialist: safe, incremental, behavior-preserving changes backed by tests'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

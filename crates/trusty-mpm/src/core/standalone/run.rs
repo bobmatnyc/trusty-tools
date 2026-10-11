@@ -151,9 +151,12 @@ pub fn build_launch_command_with_prompt(
 /// Why: the one seam where `run_alias` turns the operator's config into the
 /// renderer, split out so a test can drive it from a config root.
 /// What: [`build_launch_command_with_prompt`] with
-/// [`crate::core::alt_screen::configured_alternate_screen_in`].
+/// [`crate::core::alt_screen::configured_alternate_screen_in`], then the
+/// `profile` stamp (#8453, assigned after the builder's scrub so it wins) and
+/// the #8992 tool trim for that profile.
 /// Test: `run_launch_command_follows_the_configured_renderer`,
-/// `run_launch_command_carries_the_prompt_file`.
+/// `run_launch_command_carries_the_prompt_file`,
+/// `run_launch_command_trims_a_pm_and_not_a_supervisor`.
 fn run_launch_command(
     config_root: Option<&Path>,
     repo_path: &Path,
@@ -161,15 +164,22 @@ fn run_launch_command(
     api_key: Option<&str>,
     mcp_config: Option<&Path>,
     prompt_file: &Path,
+    profile: crate::core::session_profile::SessionProfile,
 ) -> Command {
-    build_launch_command_with_prompt(
+    let mut cmd = build_launch_command_with_prompt(
         repo_path,
         claude_config_dir,
         api_key,
         mcp_config,
         prompt_file,
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
-    )
+    );
+    let (stamp_name, stamp_value) = crate::core::session_profile::launch_env(profile);
+    cmd.env(stamp_name, stamp_value);
+    // #8992: `tm run` resolves its profile; a PM drops the unused tools.
+    cmd.envs(crate::core::pm_tool_trim::trim_env(profile));
+    cmd.args(crate::core::pm_tool_trim::trim_args(profile));
+    cmd
 }
 
 /// The 1.7.0 shape of [`build_launch_command_configured`] (#8405).
@@ -352,10 +362,9 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         api_key.as_deref(),
         Some(&mcp_config),
         &prompt_file,
+        // #8286: the stamp and the #8992 trim follow this one resolution.
+        cli.profile,
     );
-    // #8286: assigned after the builder's scrub, so this value wins.
-    let (stamp_name, stamp_value) = crate::core::session_profile::launch_env(cli.profile);
-    cmd.env(stamp_name, stamp_value);
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
     // the child, so mis-attributed consent prompts (media library, App-Data,
@@ -633,6 +642,7 @@ mod tests {
             None,
             None,
             &prompt,
+            Default::default(),
         );
         let args: Vec<String> = cmd
             .get_args()
@@ -670,6 +680,7 @@ mod tests {
                 None,
                 None,
                 &tmp.path().join("p.txt"),
+                Default::default(),
             );
             let carried = cmd
                 .get_envs()
@@ -800,3 +811,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "run_trim_tests.rs"]
+mod trim_tests;

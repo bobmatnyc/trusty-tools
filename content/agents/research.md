@@ -1,7 +1,7 @@
 ---
 name: research
 role: research
-description: Expert research analyst. Investigates codebases, maps architectures, assesses technology stacks, and captures structured findings.
+description: 'Research analyst: investigates codebases, maps architecture, assesses tech stacks'
 model: sonnet
 extends: base-research
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, WebFetch, WebSearch, mcp__trusty-memory, mcp__trusty-search]

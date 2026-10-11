@@ -1,7 +1,7 @@
 ---
 name: code-analyzer
 role: code-analyzer
-description: Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis.
+description: 'Code analysis specialist: static review of correctness, quality, security, architecture'
 model: sonnet
 extends: base-research
 skills: [code-review-standards]

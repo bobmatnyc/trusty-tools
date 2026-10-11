@@ -82,6 +82,8 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
             "CLAUDE_CONFIG_DIR=/h/cfg dir",
             "CLAUDE_CODE_OAUTH_TOKEN=tok",
             "TRUSTY_INDEX=repo",
+            // #8992: no supervisor stamp, so this is a PM launch.
+            "CLAUDE_CODE_DISABLE_ARTIFACT=1",
         ]
     );
     assert_eq!(
@@ -95,11 +97,71 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
             "user,project,local",
             "--mcp-config",
             "/h/mcp.json",
+            "--disallowedTools",
+            "Workflow,DesignSync",
             "--dangerously-skip-permissions",
         ]
     );
     // A CLI launch has no daemon handshake: no session export, no sentinel.
     assert!(spec.session_id.is_empty() && spec.launch_id.is_empty());
+}
+
+/// #8992: a stamp value tm does not recognise resolves to the PM default, so the
+/// launch is trimmed. Only an explicit `supervisor` stamp keeps every tool.
+#[test]
+fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
+    for value in ["Supervisor", "architect", ""] {
+        let env = vec![(
+            crate::core::session_profile::SESSION_PROFILE_ENV.to_owned(),
+            value.to_owned(),
+        )];
+        let launch = CliLaunch {
+            model: None,
+            prompt_file: None,
+            config_dir: None,
+            oauth_token: None,
+            mcp_env: &env,
+            scoped_mcp: None,
+            alternate_screen: false,
+        };
+        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        assert!(
+            env_words(&spec).contains(&"CLAUDE_CODE_DISABLE_ARTIFACT=1".to_owned()),
+            "stamp {value:?}: {:?}",
+            spec.env_set
+        );
+        assert!(
+            spec.args
+                .windows(2)
+                .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
+            "stamp {value:?}: {:?}",
+            spec.args
+        );
+    }
+}
+
+/// #8992: a launch stamped supervisor (the Architect) keeps every tool — no
+/// Artifact switch, no `--disallowedTools`.
+#[test]
+fn a_supervisor_isolated_spec_keeps_every_tool() {
+    use crate::core::session_profile::{SessionProfile, launch_env};
+    let env = vec![launch_env(SessionProfile::Supervisor)];
+    let launch = CliLaunch {
+        model: Some("opus"),
+        prompt_file: None,
+        config_dir: None,
+        oauth_token: None,
+        mcp_env: &env,
+        scoped_mcp: None,
+        alternate_screen: false,
+    };
+    let spec = super::isolated_spec(Path::new("/work"), &launch);
+    assert!(!spec.args.iter().any(|a| a == "--disallowedTools"));
+    assert!(
+        !env_words(&spec)
+            .iter()
+            .any(|w| w.starts_with("CLAUDE_CODE_DISABLE_ARTIFACT"))
+    );
 }
 
 /// #8308: the in-place and client specs carry the same scrub and renderer as

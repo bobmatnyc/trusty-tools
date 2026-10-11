@@ -1,7 +1,7 @@
 ---
 name: secrets-manager
 role: secrets-manager
-description: Secrets specialist. Handles every credential need by vault and key name or `secret://` reference, never a value. No agent-callable secrets client ships yet; the tm secrets CLI and the console page are not built.
+description: 'Secrets specialist: handles credentials by vault and key name or `secret://` ref, never a value'
 model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]

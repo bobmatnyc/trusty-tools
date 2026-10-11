@@ -1,7 +1,7 @@
 ---
 name: python-engineer
 role: engineer
-description: 'Python 3.12+ development specialist: type-safe, async-first, production-ready implementations with SOA and DI patterns'
+description: 'Python 3.12+ specialist: type-safe, async-first production code with SOA and DI patterns'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

@@ -72,6 +72,9 @@ pub mod bundled_pm_package;
 // #6649: one asset name claimed by two entries inside ONE tier — the collision
 // every tier-vs-tier probe is structurally unable to see.
 pub mod asset_duplicates;
+// #8992: orphan agent files in the shared canonical deploy dir —
+// reported by `tm doctor`, removed only by `tm doctor --fix-agents`.
+pub mod agent_orphans;
 // #4442/#4448: the ONE bundled-agent name roster, shared by `tm doctor`'s
 // asset_tier probe (which reports) and the quarantine (which moves).
 pub mod bundled_roster;
@@ -250,6 +253,8 @@ pub mod overseer_config;
 pub mod own_binary_names;
 pub mod paths;
 pub mod pid_registry;
+// #8992: the built-in tools a tm-launched PM does not load.
+pub mod pm_tool_trim;
 // The labels trusty-mpm applies by policy, shared by session launch and
 // `tm issue seed-labels` (#6914). Doc lives in the module's own `//!` header —
 // an outer `///` here would resolve its intra-doc links in THIS scope and break

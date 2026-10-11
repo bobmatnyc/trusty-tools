@@ -1,7 +1,7 @@
 ---
 name: vercel-ops
 role: ops
-description: Vercel platform operations specialist for deployment, edge functions, environment management, and serverless architecture
+description: 'Vercel operations specialist: deployments, edge functions, environments, serverless'
 model: sonnet
 extends: base-ops
 skills: [systematic-debugging]

@@ -666,10 +666,41 @@ fn inplace_session_spec_carries_the_prompt_file() {
         [
             "--append-system-prompt-file",
             "/probe/pm-prompt.txt",
-            "--dangerously-skip-permissions"
+            "--dangerously-skip-permissions",
+            // #8992: the probe is a PM launch, so the tool trim follows.
+            "--disallowedTools",
+            "Workflow,DesignSync"
         ],
         "the in-place launch must carry the PM prompt file"
     );
+}
+
+/// #8992: an in-place PM launch drops the unused built-in tools; a supervisor
+/// stamp keeps them all. Before the fix neither variable nor flag was there.
+#[test]
+fn inplace_pm_session_spec_trims_the_unused_tools() {
+    use trusty_mpm::core::session_profile::{SessionProfile, launch_env};
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let artifact_off = ("CLAUDE_CODE_DISABLE_ARTIFACT".to_owned(), "1".to_owned());
+    let pm = super::inplace_session_spec(
+        std::path::Path::new("/w"),
+        root.path(),
+        &probe_prompt("/p.txt"),
+    );
+    assert!(pm.env_set.contains(&artifact_off), "{:?}", pm.env_set);
+    assert!(
+        pm.args
+            .windows(2)
+            .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
+        "{:?}",
+        pm.args
+    );
+
+    let mut prompt = probe_prompt("/p.txt");
+    prompt.stamp = launch_env(SessionProfile::Supervisor);
+    let sup = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
+    assert!(!sup.env_set.contains(&artifact_off));
+    assert!(!sup.args.iter().any(|a| a == "--disallowedTools"));
 }
 
 /// The composed PM prompt is written and its path comes back.

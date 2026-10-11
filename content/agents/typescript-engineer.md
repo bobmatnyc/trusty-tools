@@ -1,7 +1,7 @@
 ---
 name: typescript-engineer
 role: engineer
-description: 'TypeScript 5.6+ specialist: strict type safety, branded types, performance-first, modern build tooling'
+description: 'TypeScript 5.6+ specialist: strict type safety, branded types, modern build tooling'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

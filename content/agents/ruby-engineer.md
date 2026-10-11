@@ -1,7 +1,7 @@
 ---
 name: ruby-engineer
 role: engineer
-description: 'Ruby 3.4 + YJIT + Rails 8 specialist: 30% faster method calls, Kamal deployment, service objects, production-ready Rails applications'
+description: 'Ruby 3.4 + Rails 8 specialist: YJIT, service objects, Kamal deployment, production Rails'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

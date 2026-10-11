@@ -499,9 +499,11 @@ fn compose_inplace_args(
 /// builds the PM system-prompt file via `build_prompt_file` (#4336 — the
 /// SAME carrier `spawn`/`spawn_resume` use, previously missing from this path
 /// alone; #8286: a write failure is `Err`, never a flag-less relaunch), then
-/// delegates argv composition to [`compose_inplace_args`].
+/// delegates argv composition to [`compose_inplace_args`], then appends the
+/// #8992 [`crate::core::pm_tool_trim::trim_args`] for the resolved profile.
 /// Test: `build_inplace_resume_command_resolves_claude_binary`,
-/// `build_inplace_resume_command_carries_prompt_file`.
+/// `build_inplace_resume_command_carries_prompt_file`,
+/// `inplace_pm_relaunch_trims_the_unused_tools`.
 pub fn build_inplace_resume_command(
     cwd: &Path,
     claude_session_id: Option<&str>,
@@ -560,12 +562,14 @@ fn build_inplace_resume_command_with(
     let (prompt_file, profile) = build_prompt_file_in(&fw.root, prompt_dir, cwd, None);
     // #8286: a relaunched PM pane never runs without its prompt.
     let prompt_file = prompt_file?;
-    let args = compose_inplace_args(
+    let mut args = compose_inplace_args(
         cwd,
         Some(&config_dir),
         claude_session_id,
         Some(prompt_file.as_path()),
     );
+    // #8992: a relaunched PM drops the unused tools; the exec seam sets the env.
+    args.extend(crate::core::pm_tool_trim::trim_args(profile));
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
     let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);

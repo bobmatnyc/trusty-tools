@@ -1,7 +1,7 @@
 ---
 name: golang-engineer
 role: engineer
-description: 'Go 1.23-1.24 specialist: concurrent systems, goroutine patterns, interface-based design, high-performance idiomatic Go'
+description: 'Go 1.23+ specialist: concurrent systems, goroutine patterns, interface design, idiomatic Go'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

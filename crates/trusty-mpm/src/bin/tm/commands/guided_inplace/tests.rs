@@ -1202,3 +1202,45 @@ fn inplace_exec_command_for_follows_the_configured_renderer() {
         );
     }
 }
+
+/// #8992: the bare-`tm` in-place relaunch is a PM resume, so it carries
+/// `CLAUDE_CODE_DISABLE_ARTIFACT=1` and the `--disallowedTools` value; a
+/// supervisor relaunch keeps every tool. Before the fix the exec seam set no
+/// such variable and the composed argv carried no deny flag.
+#[test]
+fn inplace_pm_relaunch_trims_the_unused_tools() {
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let artifact_off = (
+        "CLAUDE_CODE_DISABLE_ARTIFACT".to_owned(),
+        Some("1".to_owned()),
+    );
+    let mut resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    let cwd = std::path::Path::new("/fake/cwd");
+    let pm = build_inplace_exec_command(&resume, cwd, &no_gh(), false);
+    assert!(env_of(&pm).contains(&artifact_off), "{:?}", env_of(&pm));
+    resume.profile = SessionProfile::Supervisor;
+    let sup = build_inplace_exec_command(&resume, cwd, &no_gh(), false);
+    assert!(
+        !env_of(&sup)
+            .iter()
+            .any(|(k, _)| k == "CLAUDE_CODE_DISABLE_ARTIFACT")
+    );
+
+    // The argv half, through the REAL builder; it needs a `claude` install,
+    // so skip without one, as the end-to-end case above does.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fw_home = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_home.path());
+    let Ok(real) = trusty_mpm::runtime::build_inplace_resume_command_under(&fw, tmp.path(), None)
+    else {
+        return;
+    };
+    assert_eq!(real.profile, SessionProfile::Pm);
+    assert!(
+        real.args
+            .windows(2)
+            .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
+        "{:?}",
+        real.args
+    );
+}

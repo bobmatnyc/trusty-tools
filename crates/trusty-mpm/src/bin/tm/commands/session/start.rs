@@ -102,10 +102,12 @@ pub(crate) async fn start_session(
 /// What: [`trusty_mpm::runtime::cli_launch::inplace_spec`] rooted at `cwd`,
 /// carrying `prompt.file` as `--append-system-prompt-file` (#8286) and
 /// `prompt.stamp` as an assigned variable (#8453), with
-/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`].
+/// [`trusty_mpm::core::alt_screen::configured_alternate_screen_at`], plus the
+/// #8992 tool trim when that stamp names a PM.
 /// Test: `inplace_session_spec_follows_the_configured_renderer`,
 /// `inplace_session_spec_carries_the_prompt_file`,
-/// `inplace_session_spec_carries_the_profile_stamp`.
+/// `inplace_session_spec_carries_the_profile_stamp`,
+/// `inplace_pm_session_spec_trims_the_unused_tools`.
 pub(crate) fn inplace_session_spec(
     cwd: &std::path::Path,
     config_root: &std::path::Path,
@@ -118,6 +120,13 @@ pub(crate) fn inplace_session_spec(
     );
     // #8286: the stamp of the profile the prompt was composed for (#8453).
     spec.env_set.push(prompt.stamp.clone());
+    // #8992: that stamp's profile decides the tool trim; a PM drops unused tools.
+    let profile =
+        trusty_mpm::core::pm_tool_trim::stamped_profile(std::slice::from_ref(&prompt.stamp));
+    spec.env_set
+        .extend(trusty_mpm::core::pm_tool_trim::trim_env(profile));
+    spec.args
+        .extend(trusty_mpm::core::pm_tool_trim::trim_args(profile));
     spec
 }
 

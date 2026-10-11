@@ -82,6 +82,11 @@ use doctor_asset_tier::check_asset_tier;
 mod doctor_asset_duplicates;
 use doctor_asset_duplicates::check_asset_duplicates;
 
+// #8992: and this reports agent files the bundle dropped from the shared dir.
+#[path = "doctor_agent_orphans.rs"]
+mod doctor_agent_orphans;
+use doctor_agent_orphans::check_agent_orphans;
+
 // #4467: the same silent-failure shape as #4451, one layer down — a managed
 // spawn that inherits `CLAUDE_CODE_CHILD_SESSION` has transcript saving turned
 // off, so the session is unrecoverable and nothing reported it.
@@ -461,7 +466,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_three_checks`,
+/// Test: `run_doctor_produces_seventy_four_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -555,6 +560,8 @@ pub(crate) async fn run_doctor_with_claims(
         // the question, so it is its own row rather than a fold into the two
         // above. Report-only: tm cannot know which entry the operator meant.
         check_asset_duplicates(&paths, project_dir),
+        // #8992: files in the shared deploy dir the current bundle dropped.
+        check_agent_orphans(&paths),
         // #4467: and this proves the spawn does not silently lose the session's
         // own transcript, which costs it all native --resume/--continue/rewind
         // recovery. No `project_dir`/`paths` input — the invariant is a property
@@ -874,7 +881,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_three_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_four_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

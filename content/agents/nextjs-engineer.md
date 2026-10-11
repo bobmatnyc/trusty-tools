@@ -1,7 +1,7 @@
 ---
 name: nextjs-engineer
 role: engineer
-description: 'Next.js 15+ specialist: App Router, Server Components, Partial Prerendering, performance-first React applications'
+description: 'Next.js 15+ specialist: App Router, Server Components, Partial Prerendering'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]
