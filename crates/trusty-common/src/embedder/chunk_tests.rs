@@ -204,9 +204,8 @@ fn chunk_ends_advance_past_a_word_longer_than_the_step() {
     let overlap = overlap_tokens(window - 2);
     assert_eq!(overlap, 3);
     let long_word = "zulu".repeat(150);
-    let stalled = format!(
-        "alpha bravo charlie delta echo foxtrot golf hotel alpha bravo {long_word}"
-    );
+    let stalled =
+        format!("alpha bravo charlie delta echo foxtrot golf hotel alpha bravo {long_word}");
     // `##q{40}` is one token after `z`, 40 at a word start: the overlap that
     // starts on it re-counts past the budget, so the overlap is dropped.
     let q40 = "q".repeat(40);
