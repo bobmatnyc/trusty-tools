@@ -199,6 +199,74 @@ mod tests {
         git(dir, &["commit", "-m", subject]);
     }
 
+    /// Why (#9390): PM free text loses its SHA-like tokens, and #7501 reads the
+    /// one SHA a snapshot must keep: the code-generated `Last commit:` line.
+    /// What: a snapshot written by the real writer, whose summary also names the
+    /// HEAD commit, keeps `Last commit: <short> <subject>` verbatim and drops the
+    /// summary's copy; a commit made after it is still reported as superseding.
+    /// Test: itself.
+    #[test]
+    fn last_commit_baseline_survives_and_superseded_still_detects_a_moved_head() {
+        use trusty_common::catchup::pause::{PauseSnapshotInput, write_pause_snapshot};
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init"]);
+        git(dir, &["config", "user.email", "t@t.com"]);
+        git(dir, &["config", "user.name", "T"]);
+        commit_file(dir, "a.txt", "first");
+        let rev = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let short = rev(&["log", "-1", "--format=%h"]);
+        // The full id: a 7-char short id can be all digits, which no rule flags.
+        let full = rev(&["rev-parse", "HEAD"]);
+
+        let summary = format!("Paused at {full}; PR #12 head d3963848ab.");
+        let input = PauseSnapshotInput {
+            session_id: "s-7501",
+            summary: &summary,
+            completed: &[],
+            in_progress: &[],
+            next_steps: &[],
+            tmux_window: None,
+        };
+        let snapshot = write_pause_snapshot(dir, &input).unwrap().snapshot_path;
+        let md = std::fs::read_to_string(&snapshot).unwrap();
+
+        assert!(
+            md.lines()
+                .any(|l| l == format!("Last commit: {short} first")),
+            "the #7501 baseline stays exactly as git reports it:\n{md}"
+        );
+        assert_eq!(recorded_commit(&md).as_deref(), Some(short.as_str()));
+        let summary_body = md
+            .split("## Summary\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .unwrap_or_default();
+        assert!(
+            !summary_body.contains(&full) && !summary_body.contains("d3963848ab"),
+            "the PM's copy of a head id is flagged, not kept:\n{md}"
+        );
+        assert_eq!(
+            assess_snapshot(dir, &snapshot),
+            SnapshotFreshness::default(),
+            "nothing landed after the pause yet"
+        );
+
+        commit_file(dir, "b.txt", "landed after the pause");
+        let freshness = assess_snapshot(dir, &snapshot);
+        assert!(freshness.superseded, "a moved HEAD must still be detected");
+        assert_eq!(freshness.total_since, 1);
+    }
+
     #[test]
     fn not_superseded_when_the_snapshot_commit_is_head() {
         let tmp = TempDir::new().unwrap();

@@ -33,6 +33,7 @@ use crate::core::catchup::{CatchupOptions, generate_catchup_json};
 use crate::core::config::MpmConfig;
 use crate::daemon::catchup_payload::{HydrationReceipt, catchup_payload, resolved_note};
 use crate::daemon::catchup_superseded::assess_snapshot;
+use crate::daemon::pause_resume_slot::{ResumeSlotHost, record_resume_slot};
 use crate::daemon::state::DaemonState;
 
 /// The session id to use for a caller that named none.
@@ -465,6 +466,7 @@ pub async fn session_context_pause(
         tmux_window,
         prune_worktrees,
         session_refs_enabled,
+        &ResumeSlotHost::resolve(),
     )
     .await
 }
@@ -538,7 +540,7 @@ mod pause_scope_tests;
 /// Test: `a_failed_ref_publish_is_reported_and_never_fails_the_pause`,
 /// `session_context_pause_writes_snapshot_without_pruning`.
 #[allow(clippy::too_many_arguments)]
-async fn session_context_pause_with(
+pub(crate) async fn session_context_pause_with(
     state: &Arc<DaemonState>,
     project_dir: &str,
     session_id: Option<&str>,
@@ -549,6 +551,7 @@ async fn session_context_pause_with(
     tmux_window: Option<&str>,
     prune_worktrees: bool,
     session_refs_enabled: bool,
+    memory: &ResumeSlotHost,
 ) -> Result<Value, String> {
     let project_path = PathBuf::from(project_dir);
     if !project_path.is_dir() {
@@ -584,6 +587,8 @@ async fn session_context_pause_with(
     };
     let outcome = trusty_common::catchup::pause::write_pause_snapshot(&project_path, &input)
         .map_err(|e| format!("failed to write pause snapshot: {e}"))?;
+    // #9390: identifiers + a re-read command as a Tier C slot; fail-open.
+    let resume_slot = record_resume_slot(memory, &project_path, &input, &outcome).await;
 
     // #7830 / ADR-0062: the snapshot's durable copy is one commit appended to
     // this session's own ref. Fail-open by construction — see the helper.
@@ -654,6 +659,7 @@ async fn session_context_pause_with(
         "ref_name": receipt.ref_name,
         "ref_published": receipt.published,
         "ref_error": receipt.error,
+        "resume_slot": resume_slot, // #9390
     }))
 }
 
@@ -906,8 +912,18 @@ mod tests {
             tmux_window,
             prune_worktrees,
             false,
+            &unreachable_memory(),
         )
         .await
+    }
+
+    /// #9390: a memory socket nothing serves, so no pause test reaches the
+    /// operator's real trusty-memory daemon.
+    fn unreachable_memory() -> crate::daemon::pause_resume_slot::ResumeSlotHost {
+        crate::daemon::pause_resume_slot::ResumeSlotHost {
+            socket: PathBuf::from("/nonexistent/mcp-context-test-memory.sock"),
+            palace: Some("mcp-context-test".to_string()),
+        }
     }
 
     /// Why: `NotTracked` and `NotAGitRepo` both used to render as a bare
@@ -1697,6 +1713,7 @@ mod tests {
             None,
             false,
             true,
+            &unreachable_memory(),
         )
         .await
         .expect("a ref publish failure must not fail the pause");
@@ -1758,6 +1775,7 @@ mod tests {
             None,
             false,
             false,
+            &unreachable_memory(),
         )
         .await
         .unwrap();

@@ -26,6 +26,7 @@ use chrono::Utc;
 
 use crate::catchup::git::capture_git_status;
 use crate::catchup::session_log::{self, SessionLogEntry};
+use crate::catchup::sha_scrub::scrub_sha_like;
 
 /// Input fields for a single pause snapshot.
 ///
@@ -77,7 +78,9 @@ pub struct PauseSnapshotOutcome {
 /// report this pause".
 /// What: joins `items` as `- <item>` lines under `## <header>`; returns `None`
 /// for an empty slice so the caller can skip the section entirely.
-/// Test: `write_pause_snapshot_omits_empty_sections`.
+/// #9390: each item passes through [`scrub_sha_like`], so a head SHA the PM
+/// typed is flagged rather than recorded.
+/// Test: `write_pause_snapshot_omits_empty_sections`, `a_snapshot_contains_no_head_sha`.
 fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     if items.is_empty() {
         return None;
@@ -85,7 +88,7 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
     let mut out = format!("## {header}\n");
     for item in items {
         out.push_str("- ");
-        out.push_str(item);
+        out.push_str(&scrub_sha_like(item));
         out.push('\n');
     }
     Some(out)
@@ -106,6 +109,10 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// is the new file's path RELATIVE to the store root. Returns the resolved
 /// absolute path and timestamp.
 ///
+/// #9390: the PM's free text (Summary, Completed, In Progress, Next Steps)
+/// passes through [`scrub_sha_like`]; the code-generated `Last commit:` line
+/// does not, because #7501 reads it as the supersession baseline.
+///
 /// #5272: a session id that cannot be a directory name (see
 /// [`session_log::session_dir_name`]) writes flat at the store root instead,
 /// with a warning — mangling it into a safe name would let two ids share one
@@ -116,7 +123,8 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// `write_pause_snapshot_omits_empty_sections`,
 /// `write_pause_snapshot_appends_log_entry`,
 /// `write_pause_snapshot_writes_under_session_dir`,
-/// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`.
+/// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`,
+/// `a_snapshot_contains_no_head_sha`.
 pub fn write_pause_snapshot(
     project_dir: &Path,
     input: &PauseSnapshotInput<'_>,
@@ -159,7 +167,7 @@ pub fn write_pause_snapshot(
     let mut md = format!(
         "# Session Pause - {}\n\n## Summary\n{}\n\n",
         now.to_rfc3339(),
-        input.summary
+        scrub_sha_like(input.summary) // #9390: PM text keeps identifiers, not heads.
     );
     if let Some(section) = render_bullet_section("Completed", input.completed) {
         md.push_str(&section);
@@ -387,6 +395,80 @@ mod tests {
         assert_eq!(
             session_log::resolve_session_snapshot(&sessions_dir, "other", "md"),
             None,
+        );
+    }
+
+    /// Every 7-40 character hex token mixing digits and letters, outside the
+    /// code-generated `Last commit:` line. Written independently of the
+    /// production rule so a broken scrub cannot also break its own check.
+    fn head_sha_tokens(md: &str) -> Vec<String> {
+        md.lines()
+            .filter(|line| !line.starts_with("Last commit:"))
+            .flat_map(|line| line.split(|c: char| !c.is_ascii_alphanumeric()))
+            .filter(|w| {
+                (7..=40).contains(&w.len())
+                    && w.chars().all(|c| c.is_ascii_hexdigit())
+                    && w.chars().any(|c| c.is_ascii_digit())
+                    && w.chars().any(|c| c.is_ascii_alphabetic())
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Why (#9390): two of 13 relaunches resumed from snapshots carrying wrong
+    /// PR head SHAs the PM had typed into the free-text sections.
+    /// What: SHA-like tokens in Summary / Completed / In Progress / Next Steps
+    /// are flagged, the code-generated `Last commit:` line keeps its id, and
+    /// branch names, issue numbers, dates, times and hex-looking words survive.
+    /// Test: itself.
+    #[test]
+    fn a_snapshot_contains_no_head_sha() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["log", "-1", "--format=%h"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+        let input = PauseSnapshotInput {
+            session_id: "s1",
+            summary: "On feat/9390-x for #9390, 2026-10-10 21:46: PR #12 head d3963848ab.",
+            completed: &["added the facade; deadbeef and xdeadbeef1x are words".to_string()],
+            in_progress: &[
+                "PR #12 head d3963848ab awaiting CI".to_string(),
+                "compare abc1234..def5678".to_string(),
+            ],
+            next_steps: &["merge `0123456789abcdef0123456789abcdef01234567`".to_string()],
+            tmux_window: None,
+        };
+        let outcome = write_pause_snapshot(tmp.path(), &input).unwrap();
+        let md = std::fs::read_to_string(&outcome.snapshot_path).unwrap();
+
+        assert_eq!(
+            head_sha_tokens(&md),
+            Vec::<String>::new(),
+            "no head SHA may survive outside `Last commit:`:\n{md}"
+        );
+        for kept in [
+            "feat/9390-x",
+            "#9390",
+            "2026-10-10",
+            "21:46",
+            "PR #12",
+            "added the facade",
+            "deadbeef",
+            "xdeadbeef1x",
+        ] {
+            assert!(md.contains(kept), "{kept:?} must survive:\n{md}");
+        }
+        assert!(md.contains("<sha?>"), "a stripped id is flagged:\n{md}");
+        assert!(
+            md.lines()
+                .any(|l| l.starts_with(&format!("Last commit: {head} "))),
+            "the #7501 baseline keeps its commit id:\n{md}"
         );
     }
 
