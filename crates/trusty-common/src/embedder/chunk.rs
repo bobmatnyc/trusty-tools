@@ -209,13 +209,15 @@ impl ChunkTokenizer {
 /// What: text whose count fits returns one chunk equal to the input (empty
 /// input included). Longer text is cut at token boundaries, preferring word
 /// starts; every chunk is re-counted with `tokenizer` and shrunk until
-/// `count + special_overhead <= window`. Consecutive chunks share
-/// [`CHUNK_OVERLAP_PERCENT`] of the budget; ranges start at 0, end at
-/// `text.len()` and leave no gap. Errors when the window has no room past
-/// the special tokens or a single token span cannot fit.
+/// `count + special_overhead <= window`. Each chunk ends past the previous
+/// chunk's end. Consecutive chunks share at most [`CHUNK_OVERLAP_PERCENT`] of
+/// the budget (none when the overlap alone re-counts past it); ranges start
+/// at 0, end at `text.len()` and leave no gap. Errors when the window has no
+/// room past the special tokens or a single token span cannot fit.
 /// Test: `text_within_window_is_one_chunk_equal_to_input`,
 /// `long_multi_sentence_text_is_bounded_and_covered`,
 /// `unbroken_run_without_whitespace_is_bounded_and_covered`,
+/// `chunk_ends_advance_past_a_word_longer_than_the_step`,
 /// `consecutive_chunks_overlap_by_the_fixed_constant`,
 /// `real_tokenizer_chunks_long_text_within_fastembed_window`.
 pub fn chunk_text<'a>(
@@ -243,14 +245,17 @@ pub fn chunk_text<'a>(
     let overlap = overlap_tokens(budget);
 
     let mut chunks = Vec::new();
-    let (mut start_tok, mut start_byte) = (0, 0);
+    let (mut start_tok, mut start_byte, mut prev_end_tok) = (0, 0, 0);
     loop {
+        // #9275: cut past the previous chunk's end, so every chunk ends later
+        // than the one before and none sits inside it.
+        let lo = start_tok.max(prev_end_tok);
         let mut end_tok = (start_tok + budget).min(total);
         if end_tok < total {
-            end_tok = word_start_at_or_before(word_ids, start_tok, end_tok);
+            end_tok = word_start_at_or_before(word_ids, lo, end_tok);
         }
         // Re-count the slice itself: a cut inside a word can re-tokenize longer.
-        let (end_byte, slice) = loop {
+        let fitted = loop {
             let end_byte = if end_tok == total {
                 text.len()
             } else {
@@ -260,16 +265,28 @@ pub fn chunk_text<'a>(
                 && end_byte > start_byte
                 && tokenizer.count_tokens(s)? <= budget
             {
-                break (end_byte, s);
+                break Ok((end_byte, s));
             }
-            if end_tok <= start_tok + 1 {
+            if end_tok <= lo + 1 {
+                break Err(end_byte);
+            }
+            end_tok = word_start_at_or_before(word_ids, lo, end_tok - 1);
+        };
+        let (end_byte, slice) = match fitted {
+            Ok(fit) => fit,
+            // The overlap alone re-counts past the budget: drop it.
+            Err(_) if start_tok < prev_end_tok => {
+                start_tok = prev_end_tok;
+                start_byte = offsets[start_tok].0;
+                continue;
+            }
+            Err(end) => {
                 return Err(ChunkError::Unsplittable {
                     start: start_byte,
-                    end: end_byte,
+                    end,
                     budget,
                 });
             }
-            end_tok = word_start_at_or_before(word_ids, start_tok, end_tok - 1);
         };
         chunks.push(TextChunk {
             byte_range: start_byte..end_byte,
@@ -278,6 +295,7 @@ pub fn chunk_text<'a>(
         if end_tok == total {
             return Ok(chunks);
         }
+        prev_end_tok = end_tok;
         start_tok = end_tok.saturating_sub(overlap).max(start_tok + 1);
         start_byte = offsets[start_tok].0;
     }
