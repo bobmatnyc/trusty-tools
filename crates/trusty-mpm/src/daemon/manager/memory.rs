@@ -109,8 +109,8 @@ impl PortfolioPalace {
     /// What: under `manager-memory`, opens (or creates) the single portfolio
     /// palace at `<framework_root>/manager/palace` with `access` (the daemon as
     /// writer, `tm sm serve` read-only, #9274); on success stores the live
-    /// binding and marks available, on failure logs a warning and marks
-    /// unavailable with the error string. Without the feature, returns an
+    /// binding and marks available, on failure marks unavailable with a
+    /// path-free reason, logged at ERROR for the writer (#9659), else WARN. Without the feature, returns an
     /// unavailable handle whose reason names the missing feature.
     /// Test: `portfolio_palace_reports_unavailable_without_feature`,
     /// `portfolio_palace_provisions_and_is_idempotent`.
@@ -135,13 +135,24 @@ impl PortfolioPalace {
                     // detail to stderr for the operator, but surface only a generic
                     // reason so the curl-observable capabilities stub never leaks a
                     // filesystem path.
-                    tracing::warn!(
-                        "portfolio manager palace unavailable: {e}; palace features disabled"
-                    );
+                    // #9659: the daemon that cannot hold the palace fails loud;
+                    // the reason reaches `GET /manager/version`.
+                    let reason = if access == PalaceAccess::Writer {
+                        tracing::error!(
+                            "portfolio manager palace: writer open failed: {e}; palace \
+                             features disabled"
+                        );
+                        "palace writer open failed; another process may hold it (see daemon logs)"
+                    } else {
+                        tracing::warn!(
+                            "portfolio manager palace unavailable: {e}; palace features disabled"
+                        );
+                        "palace open failed (see daemon logs)"
+                    };
                     Self {
                         id,
                         available: false,
-                        reason: Some("palace open failed (see daemon logs)".to_string()),
+                        reason: Some(reason.to_string()),
                         memory: None,
                     }
                 }
@@ -372,16 +383,14 @@ mod live {
         ) -> PortfolioMemoryResult<Self> {
             let data_root = data_root.into();
             let palace_id = PalaceId::new(PORTFOLIO_PALACE_ID.to_string());
-            // #9274: the caller picks the intent; the registry defaults to read-only.
-            let mut registry = PalaceRegistry::open(&data_root).map_err(|source| {
+            // #9659: the intent applies from hydration, so a writer never holds
+            // a snapshot and an observer never locks the live files.
+            let registry = PalaceRegistry::open_with_intent(&data_root, intent).map_err(|source| {
                 PortfolioMemoryError::Palace {
                     palace: palace_id.to_string(),
                     source,
                 }
             })?;
-            if intent == OpenIntent::Writer {
-                registry = registry.with_writer_intent();
-            }
             let me = Self {
                 registry,
                 data_root,
@@ -433,7 +442,10 @@ mod live {
             // anyway. Fail closed: anything other than a definite `Ok(false)` —
             // present, or a probe we could not complete — propagates instead.
             let palace_dir = self.data_root.join(self.palace_id.as_str());
-            if !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false)) {
+            // #9659: an observer (`tm sm serve`) never creates the palace.
+            if self.registry.open_intent() == OpenIntent::Observer
+                || !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false))
+            {
                 return Err(PortfolioMemoryError::Palace {
                     palace: self.palace_id.to_string(),
                     source: open_err,

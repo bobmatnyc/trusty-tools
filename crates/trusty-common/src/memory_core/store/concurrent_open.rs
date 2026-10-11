@@ -40,11 +40,11 @@ use std::sync::Arc;
 /// its writes against a throw-away copy — a correctness disaster. Passing
 /// `OpenIntent` lets the function fail loud (Err) for writers while
 /// preserving the snapshot fallback for genuine read-only clients.
-/// What: Two-variant enum selecting the recovery policy on two conditions —
+/// What: Enum selecting the recovery policy on two conditions —
 /// lock contention and an incompatible on-disk format. `Writer` → error on
 /// contention, destructive rename-aside-and-recreate on an incompatible
 /// format. `ReadOnlyClient` → snapshot fallback on contention, error on an
-/// incompatible format.
+/// incompatible format. `Observer` (#9659) → always a snapshot copy.
 ///
 /// Scope of the read-only guarantee (issue #4911): `ReadOnlyClient` guarantees
 /// that *this function* never moves, replaces, or truncates the file at
@@ -70,6 +70,20 @@ pub enum OpenIntent {
     /// file is in an incompatible format, return `Err` — never rename the
     /// caller's store aside (issue #4911).
     ReadOnlyClient,
+    /// The caller only reads, and must never hold the live file (#9659).
+    ///
+    /// Why: `tm sm serve` opened the daemon's palaces as a `ReadOnlyClient`.
+    /// Uncontended, that takes redb's exclusive lock on the live file for the
+    /// whole process life, so a daemon started second fell back to a snapshot
+    /// (or never migrated a format-0 palace) and every daemon write failed.
+    /// What: always copies the live file to a process-local snapshot and opens
+    /// the copy, read-only, whether or not another process holds it. A missing
+    /// live file is an `Err`: an observer never creates a store, a palace
+    /// directory, or a recall log, and never reads a marker on the live file.
+    /// An incompatible format is refused, as for `ReadOnlyClient`.
+    /// Test: `an_observer_open_never_locks_the_live_file`,
+    /// `an_observer_open_of_a_missing_file_creates_nothing`.
+    Observer,
 }
 
 /// Number of `Database::create` attempts the `Writer` path makes before it
@@ -187,7 +201,7 @@ impl SnapshotGuard {
     /// for the read/write path so call sites can store a uniform type.
     /// What: Constructs a guard owning `path`; on drop the file is removed.
     /// Test: Indirect via `try_open_or_snapshot`.
-    fn new(path: PathBuf) -> Self {
+    pub(super) fn new(path: PathBuf) -> Self {
         Self { path: Some(path) }
     }
 
@@ -241,7 +255,7 @@ static SNAPSHOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// What: `<tmpdir>/trusty-memory-snapshot-<pid>-<seq>-<filename>`.
 /// Test: `snapshot_path_is_unique_per_process`,
 /// `snapshot_path_is_unique_per_call`.
-fn snapshot_path_for(original: &Path) -> PathBuf {
+pub(super) fn snapshot_path_for(original: &Path) -> PathBuf {
     let tmp = std::env::temp_dir();
     let pid = std::process::id();
     let seq = SNAPSHOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -316,6 +330,10 @@ fn open_with_policy(
     intent: OpenIntent,
     recreate: bool,
 ) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    // #9659: an observer never opens the live file, contended or not.
+    if intent == OpenIntent::Observer {
+        return super::observer_open::open_observer_copy(path);
+    }
     // #7106: every palace-scoped open goes through the bounded page-cache
     // builder — a bare `Database::create` here takes redb's 1 GiB ceiling.
     match create_palace_db(path) {
@@ -331,7 +349,9 @@ fn open_with_policy(
             OpenIntent::Writer => Err(refuse_incompatible_primary(path, &e)),
             // #4911: this recovery relocates the caller's store, so it belongs
             // to the writer that owns the file, not to a read-only client.
-            OpenIntent::ReadOnlyClient => Err(refuse_incompatible_file(path, &e)),
+            OpenIntent::ReadOnlyClient | OpenIntent::Observer => {
+                Err(refuse_incompatible_file(path, &e))
+            }
         },
         Err(DatabaseError::DatabaseAlreadyOpen) => match intent {
             // Issue #1152, Tier 3 + #1487: a writer that hits the lock must
@@ -339,7 +359,7 @@ fn open_with_policy(
             // retry to absorb a graceful launchd handoff's flock overlap.
             OpenIntent::Writer => open_writer_with_handoff_retry(path),
             // Original fallback for read-only clients (issue #59).
-            OpenIntent::ReadOnlyClient => open_read_only_snapshot(path),
+            OpenIntent::ReadOnlyClient | OpenIntent::Observer => open_read_only_snapshot(path),
         },
         Err(e) => Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
     }

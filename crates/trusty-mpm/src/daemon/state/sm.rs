@@ -38,10 +38,13 @@ const SM_DATA_SUBDIR: &str = "sm";
 /// over the same root. Only one process can hold a palace's `kg.redb` as
 /// writer, so the daemon owns the palaces and `tm sm serve` reads beside it.
 /// What: `Writer` opens with `OpenIntent::Writer`, so a format-0 palace
-/// migrates; `ReadOnly` opens with `OpenIntent::ReadOnlyClient`, which falls
-/// back to a snapshot while another process holds the palace.
+/// migrates; `ReadOnly` opens with `OpenIntent::Observer` (#9659), which reads
+/// a snapshot copy and never locks the live files, whether or not a daemon
+/// runs. It cannot create a palace or read a format-0 one.
 /// Test: `a_read_only_open_recalls_while_a_writer_holds_the_palace`,
-/// `an_existing_format_0_sm_palace_migrates_at_open`.
+/// `an_existing_format_0_sm_palace_migrates_at_open`,
+/// `sm_serve_first_then_daemon_gets_the_writer_lock`,
+/// `daemon_not_running_sm_serve_still_recalls`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PalaceAccess {
     /// The daemon: the owner of the palaces.
@@ -57,7 +60,8 @@ impl PalaceAccess {
         use trusty_common::memory_core::store::OpenIntent;
         match self {
             Self::Writer => OpenIntent::Writer,
-            Self::ReadOnly => OpenIntent::ReadOnlyClient,
+            // #9659: `tm sm serve` must leave the live files to the daemon.
+            Self::ReadOnly => OpenIntent::Observer,
         }
     }
 }
@@ -133,7 +137,8 @@ pub(super) fn build_session_manager_agent(
 /// — the chat turn still composes prompt + context + provider.
 /// What: calls [`SmMemory::open_with_intent`](crate::core::sm::memory::SmMemory::open_with_intent)
 /// rooted at `data_root` with the config's memory settings and the caller's
-/// [`PalaceAccess`]; logs and returns `None` on error.
+/// [`PalaceAccess`]; returns `None` on error, logged at ERROR for the writer
+/// (#9659) and at WARN for `tm sm serve`.
 /// Test: covered indirectly by the daemon construction tests (which run without
 /// the feature) and by the SM-4 memory tests (under the feature).
 #[cfg(feature = "sm-memory")]
@@ -150,6 +155,14 @@ fn open_sm_memory(
         intent,
     ) {
         Ok(mem) => Some(mem),
+        // #9659: the daemon that cannot hold its SM palace fails loud.
+        Err(e) if access == PalaceAccess::Writer => {
+            tracing::error!(
+                "session-manager memory palace: writer open failed: {e}; SM recall and \
+                 remember are unavailable until the other holder exits and the daemon restarts"
+            );
+            None
+        }
         Err(e) => {
             tracing::warn!("session-manager memory palace unavailable: {e}; recall disabled");
             None
