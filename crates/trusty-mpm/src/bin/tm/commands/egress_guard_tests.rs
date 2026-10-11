@@ -147,3 +147,53 @@ fn egress_config_patterns_add_and_never_remove() {
         Classification::Unrelated
     );
 }
+
+/// 🔴 #8454 S2 (drift guard): the registered timeout exceeds S1's worst case —
+/// the gateway probe, the stdin budget and the audit POST. A hook killed at its
+/// timeout is non-blocking, an allow, so lowering the timeout or raising any
+/// budget past it trips this test.
+#[test]
+fn egress_hook_timeout_exceeds_the_guard_budget() {
+    use crate::commands::hook_stdin::PM_GUARD_STDIN_TIMEOUT;
+    use crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
+    use trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT;
+    use trusty_mpm::core::standalone::hooks::egress::EGRESS_GUARD_TIMEOUT_SECS;
+
+    let budget = GATEWAY_PROBE_TIMEOUT + PM_GUARD_STDIN_TIMEOUT + AUDIT_POST_TIMEOUT;
+    let registered = std::time::Duration::from_secs(EGRESS_GUARD_TIMEOUT_SECS);
+    assert!(
+        registered > budget,
+        "egress hook timeout {registered:?} must exceed the guard's worst case {budget:?}"
+    );
+}
+
+/// 🔴 #8454 S2 (Architect D1): the trust-anchor floor answers before the
+/// family check, so an anchor write is denied as one; an anchor allow leaves
+/// the family verdict as it was.
+#[test]
+fn egress_trust_anchor_verdict_precedes_the_family_check() {
+    let table = FamilyTable::builtin();
+    let write = Ok(serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": { "file_path": "/x/config.yaml", "content": "x" },
+    }));
+    match verdict(&write, &table, |_| Some("anchored".to_owned())) {
+        Verdict::Deny { check, reason } => {
+            assert_eq!(check, "trust-anchor-write");
+            assert_eq!(reason, "anchored");
+        }
+        Verdict::Allow => panic!("an anchor deny must deny"),
+    }
+    assert_eq!(verdict(&write, &table, |_| None), Verdict::Allow);
+    let slack = Ok(serde_json::json!({
+        "tool_name": "mcp__slack__send_message",
+        "tool_input": {},
+    }));
+    assert!(matches!(
+        verdict(&slack, &table, |_| None),
+        Verdict::Deny {
+            check: "egress-family",
+            ..
+        }
+    ));
+}

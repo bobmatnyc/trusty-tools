@@ -20,13 +20,18 @@
 //! block, the PM-enforcement guard, the lifecycle triad, and (#6887, when the
 //! manifest opts in) the bulk-read diversion groups into one value;
 //! [`is_project_managed_hook_command`] recognises a command from ANY of those
-//! four sources.
+//! four sources. #8454: the `hook --egress-guard` group is appended on every
+//! call, and the predicate claims it too.
 //! Test: `project_hooks_tests.rs`.
 
 use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 // #7688: the prompt-feedback capture's groups and its identity predicate.
 use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedback_hook_groups};
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
+// #8454: the egress-guard group, written whatever the toggles say.
+use crate::core::standalone::hooks::egress::{
+    is_egress_guard_hook_command, push_egress_guard_group,
+};
 use crate::core::standalone::hooks::{
     is_mpm_hook_command, mpm_hook_additions_with_exe, resolve_stable_hook_exe,
 };
@@ -123,8 +128,10 @@ pub(super) fn project_managed_hook_additions_with_prompt_feedback(
 /// (and the divert groups when on). The writer's strip domain still covers
 /// [`PM_GUARD_SUFFIX`], so a guard entry a prior launch wrote is removed.
 /// `true` builds exactly what the function above builds.
+/// #8454: the egress-guard group is appended whatever any toggle says.
 /// Test: `a_disabled_guard_is_left_out_of_the_additions`,
-/// `launch_with_the_guard_disabled_removes_an_existing_entry`.
+/// `launch_with_the_guard_disabled_removes_an_existing_entry`,
+/// `egress_settings_writer_adds_entry_even_when_pm_guard_disabled`.
 pub(super) fn project_managed_hook_additions_with_pm_guard(
     exe_override: Option<&std::path::Path>,
     inject_prompt_context: bool,
@@ -171,8 +178,23 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
         }
     }
 
-    // #6887: APPENDED last, and only onto `PreToolUse`, so the PM-guard and
-    // lifecycle-triad groups above keep byte-identical positions and
+    // #7688 fix round: resolved by the SAME rule the triad above uses, so the
+    // egress guard and the capture honour `exe_override` and carry the
+    // installed absolute path — never the bare `tm` the statusline resolver
+    // falls back to, which no-ops under Claude Code's minimal PATH (#1914). A
+    // refusal propagates here for the #7244 reason it does above: write nothing
+    // rather than a command tm cannot vouch for.
+    let exe = resolve_stable_hook_exe(exe_override)?;
+
+    // #8454: unconditional — no toggle, `[pm_guard] enabled` included, may
+    // leave the egress guard out (Architect D3). Appended BEFORE the divert
+    // groups, so turning `[divert] enabled` on still only appends (#6887).
+    if let Some(hooks_obj) = hooks.as_object_mut() {
+        push_egress_guard_group(hooks_obj, &exe);
+    }
+
+    // #6887: APPENDED last, and only onto `PreToolUse`, so the PM-guard,
+    // lifecycle-triad and egress groups above keep byte-identical positions and
     // content whether the toggle is on or off. Never `insert`
     // `PreToolUse` — that clobbers both (module doc above).
     if divert_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
@@ -192,24 +214,15 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
     // above keeps byte-identical position and content whether the flag is on or
     // off. The lifecycle triad already owns a group on both events — these are
     // additive to it, never a replacement, so the daemon's relay is untouched.
-    if prompt_feedback_enabled {
-        // #7688 fix round: resolved by the SAME rule the triad above uses, so
-        // the capture honours `exe_override` and carries the installed absolute
-        // path — never the bare `tm` the statusline resolver falls back to,
-        // which no-ops under Claude Code's minimal PATH (#1914). A refusal
-        // propagates here for the #7244 reason it does above: write nothing
-        // rather than a command tm cannot vouch for.
-        let exe = resolve_stable_hook_exe(exe_override)?;
-        if let Some(hooks_obj) = hooks.as_object_mut() {
-            for (event, group) in prompt_feedback_hook_groups(&exe) {
-                let target = hooks_obj
-                    .entry(event.to_string())
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-                if let Some(target_arr) = target.as_array_mut()
-                    && !target_arr.contains(&group)
-                {
-                    target_arr.push(group);
-                }
+    if prompt_feedback_enabled && let Some(hooks_obj) = hooks.as_object_mut() {
+        for (event, group) in prompt_feedback_hook_groups(&exe) {
+            let target = hooks_obj
+                .entry(event.to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(target_arr) = target.as_array_mut()
+                && !target_arr.contains(&group)
+            {
+                target_arr.push(group);
             }
         }
     }
@@ -284,8 +297,9 @@ const EVENT_KEY_PROBE_EXE: &str = "/usr/local/bin/tm";
 /// ([`is_mpm_hook_command`]), a `trusty-memory ` command, a PM-guard command
 /// (ends with [`PM_GUARD_SUFFIX`]), a diversion-check command (#6887,
 /// [`is_divert_hook_command`]), or a prompt-feedback capture (#7688,
-/// [`is_prompt_feedback_hook_command`]).
+/// [`is_prompt_feedback_hook_command`]), or (#8454) an egress-guard command.
 /// Test: `is_project_managed_hook_command_recognises_all_three_sources`,
+/// `egress_is_project_managed_hook_command_claims_the_egress_suffix`,
 /// `is_project_managed_hook_command_recognises_divert_check`,
 /// `is_project_managed_hook_command_recognises_prompt_feedback`.
 pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
@@ -296,6 +310,8 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         || is_divert_hook_command(cmd)
         // #7688: likewise for a stale capture group when the flag flips off.
         || is_prompt_feedback_hook_command(cmd)
+        // #8454: a stale exe path is replaced, never duplicated.
+        || is_egress_guard_hook_command(cmd)
 }
 
 /// Recognise a hook command only the PROJECT tier ever writes.

@@ -941,10 +941,11 @@ fn test_write_project_hooks_collapses_stale_hash_and_mvp_entries() {
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
     let pre = val["hooks"]["PreToolUse"].as_array().unwrap();
 
-    // Raw length (NOT predicate-filtered): 1 preserved non-MPM + 1 canonical MPM.
+    // Raw length (NOT predicate-filtered): 1 preserved non-MPM + 1 canonical MPM
+    // + 1 egress-guard group (#8454).
     assert_eq!(
         pre.len(),
-        2,
+        3,
         "all stale MPM variants must collapse to one canonical group, found {}: {pre:?}",
         pre.len()
     );
@@ -1054,10 +1055,11 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
     let pre = hooks["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be present");
+    // #8454: plus the one egress-guard group.
     assert_eq!(
         pre.len(),
-        2,
-        "PreToolUse must have exactly 2 groups (1 non-MPM + 1 MPM), found {}: {pre:?}",
+        3,
+        "PreToolUse must have exactly 3 groups (1 non-MPM + 1 MPM + 1 egress), found {}: {pre:?}",
         pre.len()
     );
     let pre_commands: Vec<&str> = pre
@@ -1418,10 +1420,12 @@ fn write_project_hooks_replaces_a_build_tree_group_instead_of_duplicating_it() {
         "SessionEnd",
     ] {
         let groups = val["hooks"][event].as_array().unwrap();
+        // #8454: `PreToolUse` also carries the one egress-guard group, last.
+        let want = if event == "PreToolUse" { 2 } else { 1 };
         assert_eq!(
             groups.len(),
-            1,
-            "{event} must collapse to one group, got {groups:?}"
+            want,
+            "{event} must collapse to one tm group, got {groups:?}"
         );
         assert_eq!(
             groups[0]["hooks"][0]["command"],

@@ -254,6 +254,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Warns when a tm-provisioned project `.claude/settings*.json` carries NO tm hook group for one of the six lifecycle events, naming the file and each missing event. Only `prepare_session` wrote those groups and no resume or in-place relaunch reached it, so a project provisioned before an event existed never gained it — a missing `SessionStart` means `tm hook` never fires, no savings row is written under the live Claude session id, and the 💸 statusline segment stays hidden. `tm doctor --fix` previews merging the groups back in and `--yes` applies it, preserving every other entry and snapshotting the file first (issue #7490).",
     ),
     (
+        "egress_guard",
+        "Whether every tm-provisioned settings file still registers the `tm hook --egress-guard` `PreToolUse` group, which denies outbound-channel MCP tools (Slack, Gmail, Notion, Google Chat). Reads each project `.claude/settings*.json` the hygiene probe reaches and the managed `claude-config/settings*.json`. `Fail` when a provisioned file lacks the group, carries it with a timeout under 10 s or a narrowed matcher, or sets `disableAllHooks`; `Unknown` when a file cannot be read or parsed; `Ok` otherwise, including a foreign project with no tm hook. Never reads `[pm_guard]` — the entry has no off switch. Read-only (issue #8454).",
+    ),
+    (
         "tcc_taint",
         "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
     ),

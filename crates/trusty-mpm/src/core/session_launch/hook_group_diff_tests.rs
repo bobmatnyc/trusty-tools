@@ -361,3 +361,33 @@ fn a_flipped_off_flag_is_a_stale_group() {
     );
     assert!(gaps.missing.is_empty(), "nothing is missing: {gaps:?}");
 }
+
+/// 🔴 #8454 S2: a tm-provisioned project file without the egress group is
+/// reported missing it, so `tm validate --repair` and `tm doctor` name the gap.
+#[test]
+fn egress_hook_group_diff_reports_a_missing_group() {
+    let exe = std::path::Path::new(STABLE_HOOK_EXE);
+    let expected = || {
+        super::super::project_hooks::project_managed_hook_additions_with_pm_guard(
+            Some(exe),
+            true,
+            false,
+            false,
+            true,
+        )
+    };
+    let mut settings = settings_from(&expected().expect("additions"));
+    crate::core::standalone::hooks::strip_hook_entries_matching_for_events(
+        &mut settings,
+        None,
+        |cmd| cmd.ends_with(" hook --egress-guard"),
+    );
+    let gaps = project_hook_group_gaps_with(&settings, expected).expect("gaps");
+    let want = format!("{STABLE_HOOK_EXE} hook --egress-guard");
+    assert!(
+        gaps.missing
+            .iter()
+            .any(|(event, cmd)| event == "PreToolUse" && *cmd == want),
+        "{gaps:?}"
+    );
+}

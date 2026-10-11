@@ -42,6 +42,8 @@ mod tests;
 pub(crate) mod backup;
 pub mod build_tree;
 pub mod cleanup;
+// #8454: the `tm hook --egress-guard` entry both tiers' writers add.
+pub mod egress;
 // #8392: the opt-in `Notification` entry and its push target.
 pub mod notification;
 pub mod repoint;
@@ -952,11 +954,19 @@ pub(crate) fn strip_hook_entries_matching_for_events(
 /// `write_project_hooks_backs_up_a_malformed_managed_file`,
 /// `write_project_hooks_refuses_when_the_copy_cannot_be_written`,
 /// `write_project_hooks_takes_no_copy_for_a_valid_file`.
+///
+/// #8454: the additions also carry the `hook --egress-guard` group
+/// ([`egress::with_egress_guard_group`]), whose stale copy is replaced by
+/// identity. Test: `egress_user_tier_writer_is_idempotent_across_an_exe_path_change`.
 pub fn write_project_hooks(
     settings_path: &Path,
     exe_override: Option<&Path>,
 ) -> anyhow::Result<bool> {
-    write_project_hooks_with(settings_path, mpm_hook_additions_with_exe(exe_override))
+    // #8454: the egress group rides with the triad, unconditionally.
+    write_project_hooks_with(
+        settings_path,
+        egress::with_egress_guard_group(mpm_hook_additions_with_exe(exe_override), exe_override),
+    )
 }
 
 /// [`write_project_hooks`], honouring the `[pm_guard] enabled` config key.
@@ -971,12 +981,19 @@ pub fn write_project_hooks(
 /// observability `tm hook` groups and foreign entries are untouched.
 /// Test: `write_project_hooks_honoring_pm_guard_strips_the_guard_when_off`,
 /// `write_project_hooks_honoring_pm_guard_keeps_the_guard_when_on`.
+///
+/// #8454: the egress group is added either way, and the pm-guard strip's
+/// exact-suffix match never reaches it.
+/// Test: `egress_user_tier_writer_adds_the_group_even_when_pm_guard_disabled`,
+/// `egress_entry_survives_pm_guard_removal_clean_and_strip`.
 pub fn write_project_hooks_honoring_pm_guard(
     settings_path: &Path,
     exe_override: Option<&Path>,
     pm_guard_enabled: bool,
 ) -> anyhow::Result<bool> {
-    let additions = mpm_hook_additions_with_exe(exe_override)?;
+    // #8454: the egress group is added whatever `pm_guard_enabled` says.
+    let additions =
+        egress::with_egress_guard_group(mpm_hook_additions_with_exe(exe_override), exe_override)?;
     crate::core::settings_lock::with_settings_lock(settings_path, || {
         write_project_hooks_locked(settings_path, &additions, !pm_guard_enabled)
     })?
@@ -1043,6 +1060,12 @@ fn write_project_hooks_locked(
     if let Some(events) = additions.get("hooks").and_then(|h| h.as_object()) {
         let event_keys: Vec<String> = events.keys().cloned().collect();
         strip_mpm_hook_entries_for_events(&mut base, Some(&event_keys));
+    }
+    // #8454: replace-by-identity for the egress entry across an exe-path
+    // change — only when a fresh one is merged below, so this writer is never
+    // a path that removes it.
+    if egress::has_egress_guard_entry(additions) {
+        egress::strip_egress_guard_entries(&mut base);
     }
     // #9018: `[pm_guard] enabled = false` — the guard entry is identified by
     // the same suffix the session writer's strip uses.

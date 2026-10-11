@@ -180,12 +180,22 @@ pub(crate) fn evaluate(
 ) -> Option<String> {
     let tool_name = payload.get("tool_name").and_then(Value::as_str)?;
     let writes = call_writes(tool_name, payload.get("tool_input"))?;
+    let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
+    // #8454 D2: the project-settings content rule binds the Architect too.
+    if let Some(reason) = egress::project_settings_verdict(
+        tool_name,
+        payload.get("tool_input"),
+        &writes,
+        cwd,
+        env.home.as_deref(),
+    ) {
+        return Some(reason);
+    }
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
         return None;
     };
-    let cwd = payload.get("cwd").and_then(Value::as_str).map(Path::new);
     decide(writes, cwd, env.home.as_deref()).map(|reason| with_identity(reason, why))
 }
 
@@ -282,8 +292,8 @@ struct Anchors {
     /// them: the config, and the arming directory whenever it resolves — so
     /// `twin/` and `twin/armed/` are protected even with no record live.
     guarded: Vec<PathBuf>,
-    /// The config's identity, when it exists.
-    config_id: Option<FileId>,
+    /// The identities of the config and the #8454 anchors that exist.
+    ids: Vec<FileId>,
     /// The live arming records, when the directory holds a `*.json` (or
     /// cannot be read).
     armed: Option<ArmedAnchors>,
@@ -324,9 +334,13 @@ impl Anchors {
         let Resolved::Path(config) = resolve(&lexical) else {
             return Err(lexical);
         };
+        // #8454: `config.yaml` and the managed settings, same rules.
+        let extra = egress::EgressAnchors::locate(home)?;
         let armed_lexical = root.join(ARMED_DIR);
         let mut guarded = vec![config.clone()];
+        guarded.extend(extra.guarded);
         let mut paths = vec![lexical, config.clone(), armed_lexical.clone()];
+        paths.extend(extra.paths);
         let (armed, fence) = match resolve(&armed_lexical) {
             Resolved::Path(dir) => {
                 guarded.push(dir.clone());
@@ -374,7 +388,7 @@ impl Anchors {
         names.push(GRANT_DIR.to_owned());
         Ok(Self {
             guarded,
-            config_id: file_id(&config),
+            ids: file_id(&config).into_iter().chain(extra.ids).collect(),
             records_live,
             armed,
             fence,
@@ -392,7 +406,7 @@ impl Anchors {
             return true;
         }
         let id = file_id(resolved);
-        if id.is_some() && id == self.config_id {
+        if id.is_some_and(|id| self.ids.contains(&id)) {
             return true;
         }
         self.armed.as_ref().is_some_and(|armed| {
@@ -449,6 +463,7 @@ impl Anchors {
                 dest_too,
             } => self.judge_into(dest, names, *dest_too, base, home),
             AnchorWrite::IntoUnnamed(dir) => self.judge_unnamed(dir, base, home),
+            AnchorWrite::Delete(word) => self.judge_delete(word, base, home),
             AnchorWrite::DirChange => None,
         }
     }
@@ -577,7 +592,8 @@ fn live_armed(dir: PathBuf) -> Option<ArmedAnchors> {
 
 /// The closing sentence every deny carries.
 const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
-     `~/.trusty-mpm/architect-launch/` and, while any exist, \
+     `~/.trusty-mpm/architect-launch/`, `~/.trusty-tools/trusty-mpm/config.yaml` and the managed \
+     `claude-config/settings.json` and `settings.local.json` (#8454), and, while any exist, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session.";
@@ -600,7 +616,25 @@ fn unresolvable_reason(target: &str) -> String {
 }
 
 /// The deny for a target whose directory the guard cannot place.
+///
+/// #8454 (Bob ruling Ded): when the file name is literal, the deny is only the
+/// unknown directory, so the text says the name is protected and asks for the
+/// absolute path.
+/// Test: `egress_anchor_protected_name_in_an_unknown_directory_names_the_retry`.
 fn unknown_reason(target: &str) -> String {
+    let name = target
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(target);
+    let literal = !matches!(name, "" | "." | "..") && !has_shell_pattern(name);
+    if literal && !name.starts_with('~') {
+        return format!(
+            "Trust-anchor write denied (#8878, #8454): `{target}` matches a protected name in a \
+             directory the guard cannot place (after a `cd`, or behind an expansion). Retry with \
+             the absolute path. {REMEDY}"
+        );
+    }
     format!(
         "Trust-anchor write denied (#8878): `{target}` depends on a shell expansion, glob, `~user` \
          or `cd` the guard does not evaluate, and its file name could name a trust anchor. Spell \
@@ -633,6 +667,14 @@ fn unplaceable_reason(what: UnplaceableWrite) -> String {
     )
 }
 
+// #8454 S2: the egress-guard anchors, delete verbs and project-settings rule.
+#[path = "pm_guard_trust_anchor_egress.rs"]
+mod egress;
+
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "pm_guard_trust_anchor_egress_tests.rs"]
+mod egress_tests;

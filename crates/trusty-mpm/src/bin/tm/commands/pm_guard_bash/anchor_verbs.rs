@@ -14,7 +14,8 @@
 //! ([`AnchorWrite::File`]), a copy verb's destination ([`AnchorWrite::Into`]),
 //! the sources of `ln`, `mv`, `cp -l`/`-s` and `install -l`
 //! ([`AnchorWrite::Source`]), each `sed -i` file operand, `install -d`
-//! directories, and a `cd`/`pushd`/`popd` ([`AnchorWrite::DirChange`]), after
+//! directories, each `rm`/`rmdir`/`unlink` operand ([`AnchorWrite::Delete`],
+//! #8454), and a `cd`/`pushd`/`popd` ([`AnchorWrite::DirChange`]), after
 //! which the caller cannot place a relative path. A verb segment that will not
 //! tokenize, and a Q2 write run by `xargs` (which appends operands the guard
 //! never sees), is an [`UnplaceableWrite`]; the one exception is `xargs cp -t
@@ -63,6 +64,9 @@ pub(crate) enum AnchorWrite {
     IntoUnnamed(String),
     /// A `cd`, `pushd` or `popd`: relative paths no longer name the hook cwd.
     DirChange,
+    /// An `rm`, `rmdir` or `unlink` operand (#8454): a glob in it deletes
+    /// entries of its literal parent.
+    Delete(String),
 }
 
 /// A verb segment the guard could not lex (#8878).
@@ -82,6 +86,7 @@ enum Verb {
     Install,
     Sed,
     Cd,
+    Rm,
 }
 
 /// Every write `command` makes that the trust-anchor rule judges.
@@ -113,6 +118,7 @@ fn segment_anchor_writes(segment: &str) -> Result<Vec<AnchorWrite>, UnplaceableW
     let args = operands(&argv[at + 1..]);
     match verb {
         Verb::Cd => out.push(AnchorWrite::DirChange),
+        Verb::Rm => out.extend(delete_operands(&args).map(AnchorWrite::Delete)),
         Verb::Sed => out.extend(
             sed_edits(&args)
                 .unwrap_or_default()
@@ -165,6 +171,7 @@ fn verb_of(word: &str) -> Option<Verb> {
         "install" | "ginstall" => Some(Verb::Install),
         "sed" | "gsed" => Some(Verb::Sed),
         "cd" | "pushd" | "popd" => Some(Verb::Cd),
+        "rm" | "grm" | "rmdir" | "grmdir" | "unlink" | "gunlink" => Some(Verb::Rm),
         _ => None,
     }
 }
@@ -221,6 +228,9 @@ fn xargs_writes(tail: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
     let args = operands(&tail[at + 1..]);
     match verb {
         Verb::Sed if sed_edits(&args).is_none() => Ok(Vec::new()),
+        // #8454 residual: `xargs rm` deletes what stdin names; refusing it
+        // would refuse routine cleanup, so it is left to the root-delete floor.
+        Verb::Rm => Ok(Vec::new()),
         Verb::Cp | Verb::Install => {
             let parsed = CopyArgs::parse(verb, &args);
             match parsed.target_dir {
@@ -333,6 +343,18 @@ impl CopyArgs {
             }
         }
     }
+}
+
+/// The operands of a delete verb: every word but options before `--`.
+fn delete_operands(args: &[String]) -> impl Iterator<Item = String> + '_ {
+    let mut options = true;
+    args.iter().filter_map(move |word| {
+        if options && word == "--" {
+            options = false;
+            return None;
+        }
+        (!(options && word.starts_with('-') && word.len() > 1)).then(|| word.clone())
+    })
 }
 
 /// The writes a `cp`/`mv`/`ln`/`install` segment makes.

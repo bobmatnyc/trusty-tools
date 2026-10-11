@@ -1497,10 +1497,11 @@ fn write_project_hooks_registers_pm_guard() {
     let groups = value["hooks"]["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
+    // #8454: plus the egress-guard group every writer adds.
     assert_eq!(
         groups.len(),
-        2,
-        "PreToolUse must carry the PM-guard group plus the lifecycle-triad group"
+        3,
+        "PreToolUse must carry the PM-guard, lifecycle-triad and egress-guard groups"
     );
     let guard = groups
         .iter()
