@@ -185,3 +185,56 @@ async fn a_verify_record_failure_is_reported_as_stored_without_verify() {
         "{result}"
     );
 }
+
+/// The PR numbers a pause's free text names, by the module's rule.
+fn prs_of(summary: &str, rest: &[&str]) -> Vec<u64> {
+    let completed: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+    super::pr_numbers(&trusty_common::catchup::pause::PauseSnapshotInput {
+        session_id: "s",
+        summary,
+        completed: &completed,
+        in_progress: &[],
+        next_steps: &[],
+        tmux_window: None,
+    })
+}
+
+#[test]
+fn pr_numbers_come_from_pr_mentions_only() {
+    assert_eq!(
+        prs_of(
+            "PR #12, pr 7, PR#5, PRs #40 and https://github.com/o/r/pull/9",
+            &["PR #12 again", "issue #9390 is not a PR"],
+        ),
+        vec![12, 7, 5, 40, 9]
+    );
+    for none in ["prune #3", "approve 12", "PR #12abc", "PR #0", "spr 4"] {
+        assert_eq!(prs_of(none, &[]), Vec::<u64>::new(), "{none:?}");
+    }
+}
+
+#[test]
+fn an_unsafe_branch_gets_no_command() {
+    for safe in ["main", "feat/9390-x", "release-1.2"] {
+        assert!(super::is_safe_branch(safe), "{safe:?}");
+    }
+    for unsafe_name in ["HEAD", "-x", "a;rm -rf", "a$(id)", "a..b", "a b", ""] {
+        assert!(!super::is_safe_branch(unsafe_name), "{unsafe_name:?}");
+    }
+    assert_eq!(super::verify_command(&[], None), None);
+}
+
+/// The marker matched against the socket error is the text PR B's error
+/// renders, so a reworded message cannot silently turn into `memory_error`.
+#[cfg(feature = "sm-memory")]
+#[test]
+fn the_verify_not_stored_marker_matches_the_error_text() {
+    let missed = trusty_common::memory_core::retrieval::VerifyNotStored {
+        drawer: uuid::Uuid::nil(),
+        reason: "kg write failed".to_string(),
+    };
+    assert!(
+        missed.to_string().contains(super::VERIFY_NOT_STORED_MARKER),
+        "{missed}"
+    );
+}
