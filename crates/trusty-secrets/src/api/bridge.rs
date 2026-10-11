@@ -42,7 +42,9 @@ pub mod method {
     pub const SET_AGENTS_MAY_USE: &str = "secrets.bridge.set_agents_may_use";
 }
 
-/// The direct method a bridged method runs; `None` for any other name.
+/// The direct method a bridged method runs; `None` for any other name and
+/// for [`method::BACKENDS`], which has no direct form (#9067) and answers
+/// under its own name.
 ///
 /// What: the server answers a bridged call's errors under this name and
 /// gives it this method's deadline, so the console sees what a direct

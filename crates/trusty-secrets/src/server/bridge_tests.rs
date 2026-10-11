@@ -769,7 +769,16 @@ async fn bridge_methods_answer_as_their_direct_method() {
     let fx = fixture();
     let server = fx.start().await;
     for (name, _) in crate::server::bridge::METHODS {
-        let direct = crate::api::bridge::direct_method(name).expect("a direct method");
+        // #9067 P1: `backends` has no direct method; it answers under its own
+        // name with a read's deadline.
+        let direct = match name {
+            BRIDGE_BACKENDS => {
+                assert_eq!(crate::api::bridge::direct_method(name), None);
+                assert_eq!(request_deadline(name), request_deadline(method::LIST));
+                name
+            }
+            _ => crate::api::bridge::direct_method(name).expect("a direct method"),
+        };
         assert_eq!(request_deadline(name), request_deadline(direct), "{name}");
         assert_eq!(client_wait(name), client_wait(direct), "{name}");
         let response = call(&fx.settings.socket, name, json!(SENTINEL_VALUE)).await;
