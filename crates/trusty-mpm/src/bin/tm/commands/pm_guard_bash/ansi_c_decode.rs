@@ -50,15 +50,19 @@ pub(crate) fn decode_ansi_c(command: &str) -> Decoded {
     }
 }
 
-/// [`decode_ansi_c`] that never refuses: each escape it would refuse reads as
-/// a space, `$"` reads as `"`, and an unterminated quote closes at the end.
+/// [`decode_ansi_c`] that never refuses: it also reads `\cX` and an ASCII
+/// `\u`/`\U` escape, drops a quote's text past a NUL as bash does, reads each
+/// other escape it would refuse as a space, `$"` as `"`, and closes an
+/// unterminated quote at the end.
 ///
-/// Why (#8454 S3 critic round 1): the egress guard must still judge the
+/// Why (#8454 S3 critic rounds 1 and 2): the egress guard must still judge the
 /// decodable quotes of a command that also carries a refused one, or one
-/// undecodable `$'hi\n'` hides a decodable `$'…\x73lack.com'`.
+/// undecodable `$'hi\n'` hides a decodable `$'…\x73lack.com'`; and it must
+/// read `$'\u0073endmail'` and `$'sendmail\0'` as the `sendmail` bash runs.
 /// What: the [`decode_ansi_c`] walk in lenient mode; `command` unchanged when
 /// it holds no live quote.
-/// Test: `lenient_decode_reads_past_a_refused_escape`.
+/// Test: `lenient_decode_reads_past_a_refused_escape`,
+/// `bash_egress_denies_ansi_c_beside_an_undecodable_quote`.
 pub(crate) fn decode_ansi_c_lenient(command: &str) -> String {
     match rewrite(command, true) {
         Ok(Some(text)) => text,
@@ -192,9 +196,10 @@ fn token(rest: &[char], quote: char) -> String {
 
 /// Decode an ANSI-C body up to its closing `'`: the text and the number of
 /// chars consumed, closing quote included. `None` fails closed. `lenient`
-/// reads each refused escape as a space and closes an unterminated body.
+/// reads [`lenient_escape`], drops the text past a NUL, reads each refused
+/// escape as a space and closes an unterminated body.
 fn ansi_c_body(body: &[char], lenient: bool) -> Option<(String, usize)> {
-    let (mut out, mut i) = (String::new(), 0);
+    let (mut out, mut i, mut nul) = (String::new(), 0, false);
     loop {
         let Some(c) = body.get(i) else {
             return lenient.then_some((out, body.len()));
@@ -202,25 +207,62 @@ fn ansi_c_body(body: &[char], lenient: bool) -> Option<(String, usize)> {
         match c {
             '\'' => return Some((out, i + 1)),
             '\\' => {
-                let decoded = escape(&body[i + 1..]);
+                let rest = &body[i + 1..];
+                let decoded = if lenient {
+                    lenient_escape(rest)
+                } else {
+                    escape(rest)
+                };
+                // #8454 S3 critic round 2: bash drops a quote's text past a NUL.
+                nul |= lenient && decoded.is_some_and(|(byte, _)| byte == 0);
                 // #9001: NUL truncates in bash; a newline would move segment cuts.
                 let byte = decoded
                     .map(|(byte, _)| byte)
                     .filter(|&b| b != 0 && b <= 0x7f && b != b'\n' && b != b'\r');
                 let len = decoded.map_or(1.min(body.len() - i - 1), |(_, len)| len);
                 match byte {
-                    Some(byte) => out.push(char::from(byte)),
-                    None if lenient => out.push(' '),
-                    None => return None,
+                    Some(byte) if !nul => out.push(char::from(byte)),
+                    None if !lenient => return None,
+                    None if !nul => out.push(' '),
+                    _ => {}
                 }
                 i += 1 + len;
             }
             c => {
-                out.push(*c);
+                if !nul {
+                    out.push(*c);
+                }
                 i += 1;
             }
         }
     }
+}
+
+/// [`escape`], plus what only the lenient walk reads: `\cX` as bash's control
+/// byte, and `\u`/`\U` when the code point is ASCII (#8454 S3 critic round 2).
+fn lenient_escape(rest: &[char]) -> Option<(u8, usize)> {
+    let max = match rest.first()? {
+        'c' => {
+            // `\c'` leaves the quote's close alone; `\c\` is left refused.
+            let x = rest.get(1).filter(|x| !matches!(x, '\'' | '\\'))?;
+            let byte = match x {
+                '?' => 0x7f,
+                x => u8::try_from(x.to_ascii_uppercase()).ok()? & 0x1f,
+            };
+            return Some((byte, 2));
+        }
+        'u' => 4,
+        'U' => 8,
+        _ => return escape(rest),
+    };
+    let digits: String = rest[1..]
+        .iter()
+        .take(max)
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    let value = u32::from_str_radix(&digits, 16).ok()?;
+    let byte = u8::try_from(value).ok().filter(u8::is_ascii)?;
+    Some((byte, 1 + digits.len()))
 }
 
 /// One escape after its backslash: the byte and the chars it used.
