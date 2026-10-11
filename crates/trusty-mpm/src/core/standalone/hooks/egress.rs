@@ -117,3 +117,7 @@ pub fn egress_guard_state(_settings: &Value) -> EgressGuardState {
 pub fn disables_all_hooks(_settings: &Value) -> bool {
     false
 }
+
+#[cfg(test)]
+#[path = "egress_tests.rs"]
+mod tests;

@@ -636,3 +636,7 @@ fn unplaceable_reason(what: UnplaceableWrite) -> String {
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "pm_guard_trust_anchor_egress_tests.rs"]
+mod egress_tests;
