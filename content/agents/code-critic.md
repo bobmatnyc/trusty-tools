@@ -1,7 +1,7 @@
 ---
 name: code-critic
 role: qa
-description: Adversarial code review using a structured rubric. Outputs APPROVE/WARN/BLOCK verdict with line-level citations. Independent of implementer to avoid anchoring bias.
+description: 'Adversarial code reviewer: rubric-based APPROVE/WARN/BLOCK verdict with line-level citations'
 model: sonnet
 extends: base-qa
 skills: [code-review-standards, contract-driven-testing]

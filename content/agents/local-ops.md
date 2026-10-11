@@ -1,7 +1,7 @@
 ---
 name: local-ops
 role: ops
-description: Local development environment specialist for process supervision, Docker, database lifecycle, and quality gates
+description: 'Local dev environment specialist: process supervision, Docker, database lifecycle, quality gates'
 model: sonnet
 extends: base-ops
 skills: [systematic-debugging]

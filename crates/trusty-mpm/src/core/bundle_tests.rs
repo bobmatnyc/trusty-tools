@@ -2390,6 +2390,38 @@ fn every_deployed_agent_composed_body_stays_within_its_resident_budget() {
     }
 }
 
+/// #8992 (ruling D07): the listing-description cap every bundled agent shares.
+const AGENT_DESCRIPTION_CAP_CHARS: usize = 100;
+
+/// Every bundled agent's `description:` is listed in every session's agent
+/// listing, so its length is paid on every turn (#8992). Composed, because the
+/// composed frontmatter is what deploys and what Claude Code lists.
+#[test]
+fn every_bundled_agent_description_fits_the_listing_cap_8992() {
+    use crate::core::agent_builder::compose_agent;
+    use trusty_agents_common::agents::metadata::agent_metadata_from_str;
+
+    let stems = deployed_agent_stems();
+    assert!(stems.len() > 20, "the roster must be read: {stems:?}");
+    let mut over: Vec<String> = Vec::new();
+    for stem in &stems {
+        let composed = compose_agent(stem, agent_assets_dir())
+            .unwrap_or_else(|e| panic!("compose_agent({stem}): {e}"));
+        let description = agent_metadata_from_str(&composed)
+            .description
+            .unwrap_or_else(|| panic!("{stem} has no description"));
+        let chars = description.chars().count();
+        if chars > AGENT_DESCRIPTION_CAP_CHARS {
+            over.push(format!("{stem} ({chars} chars): {description}"));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "bundled agent descriptions over the {AGENT_DESCRIPTION_CAP_CHARS}-char listing cap \
+         (#8992) — shorten by meaning, keep each specific enough to route on: {over:#?}"
+    );
+}
+
 #[test]
 fn base_agent_prose_rules_survive_composition() {
     // Output styles do NOT apply to subagents (they run their own system

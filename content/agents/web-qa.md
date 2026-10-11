@@ -1,7 +1,7 @@
 ---
 name: web-qa
 role: qa
-description: Progressive 6-phase web testing with UAT mode for business intent verification, behavioral testing, and comprehensive acceptance validation alongside technical testing
+description: 'Web QA: 6-phase browser testing plus a UAT mode that verifies business intent and acceptance'
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]

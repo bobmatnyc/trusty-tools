@@ -101,12 +101,14 @@ fn base(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
 /// Why: the structured twin of
 /// [`crate::core::model_inject::build_claude_command_with_configured`], so the
 /// token and the paths leave the typed line.
-/// What: [`base`], then `CLAUDE_CONFIG_DIR`, the OAuth token and `mcp_env` in
-/// that order; argv `[--model m] [--append-system-prompt-file p]
-/// --setting-sources … [--mcp-config f] --dangerously-skip-permissions`, every
-/// token unquoted because no shell parses it.
+/// What: [`base`], then `CLAUDE_CONFIG_DIR`, the OAuth token, `mcp_env` and,
+/// for a PM, the #8992 trim variable, in that order; argv `[--model m]
+/// [--append-system-prompt-file p] --setting-sources … [--mcp-config f]
+/// [--disallowedTools …] --dangerously-skip-permissions`, every token unquoted
+/// because no shell parses it. The profile is the one `mcp_env`'s stamp names.
 /// Test: `isolated_spec_matches_the_shell_line_it_replaces`,
-/// `worst_case_cli_launch_line_is_short_and_carries_no_token`.
+/// `worst_case_cli_launch_line_is_short_and_carries_no_token`,
+/// `a_supervisor_isolated_spec_keeps_every_tool`.
 pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
     let mut spec = base(cwd, launch.alternate_screen);
     if let Some(dir) = launch.config_dir {
@@ -120,6 +122,10 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
         ));
     }
     spec.env_set.extend(launch.mcp_env.iter().cloned());
+    // #8992: the stamp in `mcp_env` names the profile; a PM drops unused tools.
+    let profile = crate::core::pm_tool_trim::stamped_profile(launch.mcp_env);
+    spec.env_set
+        .extend(crate::core::pm_tool_trim::trim_env(profile));
     if let Some(model) = launch.model {
         spec.args.extend(["--model".to_owned(), model.to_owned()]);
     }
@@ -132,6 +138,8 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
         .extend(crate::core::session_mcp_scope::mcp_config_argv(
             launch.scoped_mcp,
         ));
+    spec.args
+        .extend(crate::core::pm_tool_trim::trim_args(profile));
     spec.args
         .extend(split(crate::core::model_inject::PERMISSION_MODE_FLAG));
     spec

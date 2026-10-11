@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_seventy_three_checks() {
+async fn run_doctor_produces_seventy_four_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -476,6 +476,7 @@ async fn run_doctor_produces_seventy_three_checks() {
     // #8994 adds worktree_registry (sixty-seven → sixty-eight).
     // #9169 adds the four search_project_* rows (sixty-eight → seventy-two).
     // #8454 adds egress_guard (seventy-two → seventy-three).
+    // #8992 adds agent_orphans (seventy-three → seventy-four).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -491,6 +492,8 @@ async fn run_doctor_produces_seventy_three_checks() {
         "asset_tier",
         // #6649: one asset name claimed twice inside ONE tier.
         "asset_duplicates",
+        // #8992: agent files the bundle dropped from the shared dir.
+        "agent_orphans",
         "transcript_saving",
         "skills",
         "skill_source",

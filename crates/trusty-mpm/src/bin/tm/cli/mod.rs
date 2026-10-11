@@ -1733,8 +1733,8 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_skills: bool,
 
-    /// Sweep the project tier of stranded bundled AGENT copies. DRY RUN unless
-    /// `--yes`.
+    /// Sweep the project tier of stranded bundled AGENT copies, and the shared
+    /// agent dir of orphans the bundle dropped. DRY RUN unless `--yes`.
     ///
     /// Why (#6649, owner ruling 2026-09-02): the `asset_tier` probe reports a
     /// tm-owned agent in a project's own `.claude/agents/` and, being
@@ -1748,8 +1748,12 @@ pub struct DoctorFlags {
     /// bundled-named DIRECTORY, an untracked file, a ledger entry the operator
     /// owns, and a copy hand-edited after deployment. Every removal is backed
     /// up first under `~/.trusty-mpm/backup-doctor-remediation-<ts>/` and
-    /// confirmed by re-reading disk. It never touches the canonical deploy tier
-    /// or the operator's `~/.claude/agents`, and `--fix` does not run it.
+    /// confirmed by re-reading disk. It never touches the operator's
+    /// `~/.claude/agents`, and `--fix` does not run it.
+    /// #8992: it then sweeps the shared canonical deploy dir for ORPHANS —
+    /// agent files the current bundle no longer ships — under the same
+    /// ledger/origin/checksum rule (`core::agent_orphans`), refusing the whole
+    /// dir on a missing or corrupt ledger. Never run at launch or deploy.
     #[arg(long)]
     pub fix_agents: bool,
 

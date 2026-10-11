@@ -1339,6 +1339,8 @@ async fn doctor_endpoint_returns_report() {
         "asset_tier",
         // #6649: one asset name claimed twice inside ONE tier.
         "asset_duplicates",
+        // #8992: agent files the bundle dropped from the shared dir.
+        "agent_orphans",
         "transcript_saving",
         "skills",
         "skill_source",

@@ -274,9 +274,11 @@ impl DaemonClient {
 /// What: composes the prompt for `workdir`, writes it with
 /// [`crate::core::model_inject::write_pm_prompt_file_in`] (production: the
 /// process temp dir; `action` is "launch" or "connect" in the refusal text), and returns [`client_claude_spec`] carrying that file;
-/// `Err` names the file, the I/O cause and `workdir`.
+/// `Err` names the file, the I/O cause and `workdir`. The profile the prompt was
+/// composed for also decides the #8992 tool trim.
 /// Test: `launch_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
-/// `connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`.
+/// `connect_prompt_spec_refuses_when_the_prompt_file_cannot_be_written`,
+/// `client_prompt_spec_trims_a_pm_launch`.
 fn client_prompt_spec(
     dir: &std::path::Path,
     workdir: &str,
@@ -287,9 +289,23 @@ fn client_prompt_spec(
     // #9012: the PM instructions are runtime content; none refuses the launch.
     let content = crate::core::content_source::framework_content_for(project)
         .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
-    let prompt = crate::core::session_launch::build_system_prompt_for(&content, project);
+    // #8992: resolve the profile once, so the prompt and the tool trim agree.
+    // This is the resolution `build_system_prompt_for` performs internally.
+    let profile = crate::core::session_profile::resolve_ambient(project);
+    let prompt = crate::core::session_launch::build_system_prompt_for_profile(
+        &content,
+        project,
+        None,
+        crate::core::output_style::claude_supports_native_output_style(),
+        profile,
+    );
     let file = crate::core::model_inject::write_pm_prompt_file_in(dir, &prompt, project, action)?;
-    Ok(client_claude_spec(project, config_root, Some(&file)))
+    let mut spec = client_claude_spec(project, config_root, Some(&file));
+    spec.env_set
+        .extend(crate::core::pm_tool_trim::trim_env(profile));
+    spec.args
+        .extend(crate::core::pm_tool_trim::trim_args(profile));
+    Ok(spec)
 }
 
 /// The launch spec the daemon client starts a fresh pane with (#8405, #8308).
@@ -341,6 +357,31 @@ mod prompt_refusal_tests {
         let (err, file) = refusal("connect");
         assert!(err.contains(&file) && err.contains("os error"), "{err}");
         assert!(err.contains("refusing to connect"), "{err}");
+    }
+
+    /// #8992: a project with no supervisor grant launches a PM, so both
+    /// `DaemonClient` paths carry the Artifact switch and the deny flag.
+    /// Before the fix the client spec carried neither.
+    #[test]
+    fn client_prompt_spec_trims_a_pm_launch() {
+        let project = tempfile::tempdir().expect("project");
+        let dir = tempfile::tempdir().expect("prompt dir");
+        let workdir = project.path().to_string_lossy().into_owned();
+        for action in ["launch", "connect"] {
+            let spec = super::client_prompt_spec(dir.path(), &workdir, None, action)
+                .expect("a writable prompt dir builds the spec");
+            assert!(
+                spec.env_set
+                    .contains(&("CLAUDE_CODE_DISABLE_ARTIFACT".to_owned(), "1".to_owned())),
+                "{spec:?}"
+            );
+            assert!(
+                spec.args
+                    .windows(2)
+                    .any(|w| w == ["--disallowedTools", "Workflow,DesignSync"]),
+                "{spec:?}"
+            );
+        }
     }
 }
 

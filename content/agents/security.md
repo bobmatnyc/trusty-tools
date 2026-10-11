@@ -1,7 +1,7 @@
 ---
 name: security
 role: security
-description: Security specialist. Performs vulnerability assessment, attack vector detection, secret scanning, and compliance review.
+description: 'Security specialist: vulnerability assessment, attack vectors, secret scanning, compliance'
 model: sonnet
 extends: base-agent
 skills: [security-scanning]
