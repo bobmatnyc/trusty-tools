@@ -308,25 +308,20 @@ async fn a_malformed_resolve_answer_is_not_checked_not_clean() {
                 "duplicates": [{ "index_id": "b", "root_path": "/src/b", "parked": false }] }),
         ),
     ];
+    // Every case runs, so one failing case never hides another.
+    let mut failures = Vec::new();
     for (field, body) in cases {
         let d = daemon(Ok(map_body(&["a"], "migration")), Ok(body.clone())).await;
         let rows = check_search_project_at(d.socket(), None, FAST).await;
         for name in [DUPLICATE, TWO_CHECKOUTS] {
             let r = row(&rows, name);
-            assert_eq!(
-                r.status,
-                CheckStatus::Warn,
-                "{name} over {body}: {}",
-                r.message
-            );
-            assert!(
-                r.message
-                    .contains(&format!("resolve answered without `{field}`")),
-                "{name} over {body}: {}",
-                r.message
-            );
+            let reason = format!("resolve answered without `{field}`");
+            if r.status != CheckStatus::Warn || !r.message.contains(&reason) {
+                failures.push(format!("{name} over {body}: {:?} {}", r.status, r.message));
+            }
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 /// Hang guard: the total budget, not the per-call bound, stops a fan-out of
@@ -394,16 +389,21 @@ async fn a_map_answer_that_cannot_be_read_is_never_ok() {
             "refused (-32004): nope",
         ),
     ];
+    // Every case runs, so one failing case never hides another.
+    let mut failures = Vec::new();
     for (answer, why) in cases {
         let d = daemon(answer, Ok(resolved("a", serde_json::json!([])))).await;
         let rows = check_search_project_at(d.socket(), None, FAST).await;
         let map = row(&rows, MAP_UNREADABLE);
-        assert_eq!(map.status, CheckStatus::Warn, "{}", map.message);
-        assert!(map.message.contains(why), "{why}: {}", map.message);
+        if map.status != CheckStatus::Warn || !map.message.contains(why) {
+            failures.push(format!("map ({why}): {:?} {}", map.status, map.message));
+        }
         for name in [DUPLICATE, TWO_CHECKOUTS] {
             let r = row(&rows, name);
-            assert_eq!(r.status, CheckStatus::Warn, "{name} ({why}): {}", r.message);
-            assert!(r.message.starts_with("not checked"), "{}", r.message);
+            if r.status != CheckStatus::Warn || !r.message.starts_with("not checked") {
+                failures.push(format!("{name} ({why}): {:?} {}", r.status, r.message));
+            }
         }
     }
+    assert!(failures.is_empty(), "{failures:#?}");
 }
