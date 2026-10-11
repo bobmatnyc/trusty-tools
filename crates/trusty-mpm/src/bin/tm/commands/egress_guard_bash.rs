@@ -24,8 +24,8 @@
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
 use crate::commands::pm_guard_bash::{
-    Decoded, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient, shell_segments_map,
-    split_heredoc_bodies, tokenize,
+    Decoded, MAX_SUBSTITUTION_DEPTH, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient,
+    shell_segments_map, split_heredoc_bodies, tokenize,
 };
 use crate::commands::pm_guard_secret_positions::LIST_INTRODUCERS;
 use crate::commands::program_word::{Unresolved, resolve_program_word};
@@ -102,6 +102,9 @@ const LEADING_KEYWORDS: &[&str] = &["if", "while", "until", "!"];
 /// The per-segment error for a segment that will not tokenize.
 const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
 
+/// The per-segment error for shell keywords nested past the depth bound.
+const TOO_DEEP: UnplaceableWrite = "shell keywords nested deeper than the guard follows";
+
 /// One outbound-channel name a Bash command carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Hit {
@@ -164,7 +167,7 @@ fn text_hit(text: &str) -> Option<Hit> {
     if let Some(found) = host_hit(text) {
         return Some(found);
     }
-    match shell_segments_map(text, &segment_hits) {
+    match shell_segments_map(text, &|segment: &str| segment_hits(segment, 0)) {
         Ok(hits) => hits.into_iter().next(),
         // #8454 plan §5: unlexable or too deep denies only on a family token.
         Err(_) => raw_hit(text),
@@ -276,18 +279,28 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// The program word ([`resolve_program_word`]) is judged by
 /// [`program_position_hit`]; a lookup (`command -v`) runs nothing; when an
 /// unmeasurable wrapper option hides it, every word stands in for it.
-/// A leading shell keyword ([`after_keyword`]) is skipped and the rest mapped
-/// again.
+/// Leading shell keywords ([`after_keyword`]) are skipped and the rest mapped
+/// again one `depth` deeper; past [`MAX_SUBSTITUTION_DEPTH`] that is an `Err`.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
 /// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
-/// `bash_egress_denies_program_behind_a_shell_keyword`.
-fn segment_hits(segment: &str) -> Result<Vec<Hit>, UnplaceableWrite> {
+/// `bash_egress_denies_program_behind_a_shell_keyword`,
+/// `bash_egress_denies_keyword_nesting_past_the_depth_bound`.
+fn segment_hits(segment: &str, depth: usize) -> Result<Vec<Hit>, UnplaceableWrite> {
     if segment.is_empty() {
         return Ok(Vec::new());
     }
     // #8454 critic round 1: `then sendmail …` runs `sendmail`.
-    if let Some(rest) = after_keyword(segment) {
-        return shell_segments_map(rest, &segment_hits);
+    let mut rest = segment;
+    while let Some(next) = after_keyword(rest) {
+        rest = next;
+    }
+    if rest.len() < segment.len() {
+        // #8454 critic round 2: each re-map starts the walk's own depth at 0,
+        // so this depth bounds the recursion and too deep fails closed.
+        if depth >= MAX_SUBSTITUTION_DEPTH {
+            return Err(TOO_DEEP);
+        }
+        return shell_segments_map(rest, &|inner: &str| segment_hits(inner, depth + 1));
     }
     let (text, bodies) = split_heredoc_bodies(segment);
     let argv = tokenize(&text).map_err(|_| UNLEXABLE_SEGMENT)?;

@@ -318,6 +318,9 @@ fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
     assert_denies(&evals, "SMTP mail");
     let braces = format!("{}sendmail bob{}", "{ ".repeat(10_000), "; }".repeat(10_000));
     assert_denies(&braces, "SMTP mail");
+    // Each keyword level re-maps with the walk's own bound: the product holds.
+    let product = format!("{}sendmail bob", format!("{}if ", "eval ".repeat(31)).repeat(40));
+    assert_denies(&product, "SMTP mail");
 }
 
 /// 🔴 #8454 S3 (plan §5, fail closed): a command the guard cannot lex or nest
