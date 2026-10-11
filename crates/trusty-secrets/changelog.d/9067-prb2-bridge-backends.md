@@ -1,2 +1,0 @@
-Added
-- `secrets.bridge.backends`: the console bridge's backend list for the Secrets page's copy dialog. It answers `secrets.doctor`'s rows for the named project as id and availability only, plus the backend the project's writes use (`BackendsResponse`, `BackendChoice`); no path, reason or detail. It is refused with `bridge_refused` from any peer that is not the verified console, leaves one `secrets.backends` audit record per call, and is refused with `audit_unavailable` when that record cannot be written. It has no direct method (#9067).
