@@ -5,9 +5,10 @@
 //! is a tripwire for those direct forms, for every tm-launched session; S5's
 //! `permissions.deny` and an OS sandbox are the boundary. It reads no bypass
 //! variable and no `agent_id`.
-//! What: [`bash_egress_hit`] names the first outbound-channel token a command
-//! carries. A family host denies in any word; a family program denies only in
-//! command position, so `grep mail f` is allowed. A command over
+//! What: [`bash_egress_deny`] names why the Bash arm denies a command — the
+//! first outbound-channel token it carries, or a spent walk budget. A family
+//! host denies in any word; a family program denies only in command position,
+//! so `grep mail f` is allowed. A command over
 //! [`MAX_COMMAND_BYTES`] is denied unread, and so is one whose walk reads past
 //! [`WALK_BYTE_BUDGET`] (#9699). It reuses the pm-guard shell
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
