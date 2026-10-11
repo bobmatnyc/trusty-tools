@@ -28,6 +28,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -53,6 +54,9 @@ use super::{SessionBackend, SessionInput};
 /// What: the literal `"ANTHROPIC_API_KEY"`.
 /// Test: `build_command_removes_api_key`, `build_command_removes_key_even_if_set`.
 pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// How long `recv` waits for the worker to exit once its stdout closes (#9725).
+const EXIT_WAIT_BOUND: Duration = Duration::from_secs(5);
 
 /// Build the `claude` stream-JSON [`std::process::Command`] for a session.
 ///
@@ -148,15 +152,34 @@ impl StreamJsonBackend {
         prompt_file: Option<PathBuf>,
     ) -> Result<Self> {
         let std_cmd = build_claude_command(&workdir, prompt_file.as_deref());
-
-        let spawned = disclaimed_piped_spawn(std_cmd).with_context(|| {
+        let sid = session_id.clone();
+        Self::spawn_command(session_id, std_cmd, EXIT_WAIT_BOUND).with_context(|| {
             format!(
                 "failed to spawn 'claude' for session {} in {}",
-                session_id,
+                sid,
                 workdir.display()
             )
-        })?;
+        })
+    }
 
+    /// Spawn an already-built command as the session's worker.
+    ///
+    /// Why: #9725 — `spawn` hard-codes `claude`, which left the worker-exit
+    /// paths of `recv` with no test seam. This takes any piped command and an
+    /// injectable stdout-EOF exit-wait bound, so tests drive `sh -c` workers
+    /// through the same [`disclaimed_piped_spawn`] path `claude` uses.
+    /// What: spawns `cmd` via [`disclaimed_piped_spawn`] and wraps the handles.
+    /// `exit_wait_bound` caps how long `recv` waits for the child to exit
+    /// after its stdout closes.
+    /// Test: `recv_reports_nonzero_exit_before_any_output_as_error`,
+    /// `recv_times_out_when_stdout_closes_but_child_lives_and_reaps_it`.
+    pub(crate) fn spawn_command(
+        session_id: ControlSessionId,
+        cmd: std::process::Command,
+        exit_wait_bound: Duration,
+    ) -> std::io::Result<Self> {
+        let _ = exit_wait_bound;
+        let spawned = disclaimed_piped_spawn(cmd)?;
         Ok(Self {
             session_id,
             child: spawned.handle,
@@ -386,6 +409,135 @@ mod tests {
             .collect();
         assert!(args.contains(&"--append-system-prompt-file".to_string()));
         assert!(args.contains(&"/tmp/prompt.md".to_string()));
+    }
+
+    // ── #9725: worker exit status at stdout EOF ──────────────────────────────
+
+    /// Spawn `sh -c <script>` as a worker through the disclaimed spawn path.
+    fn spawn_sh(script: &str, exit_wait_bound: Duration) -> StreamJsonBackend {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        StreamJsonBackend::spawn_command(ControlSessionId::new("exit", 0), cmd, exit_wait_bound)
+            .expect("sh must spawn")
+    }
+
+    /// The worker's raw pid, read from the live handle.
+    fn worker_pid(backend: &StreamJsonBackend) -> i32 {
+        match &backend.child {
+            ChildHandle::Native(c) => c.id().and_then(|p| i32::try_from(p).ok()),
+            #[cfg(target_os = "macos")]
+            ChildHandle::Disclaimed { pid, .. } => Some(*pid),
+        }
+        .expect("a freshly spawned worker has a pid")
+    }
+
+    /// Name a `recv` outcome for an assertion message.
+    fn outcome(o: &Option<Result<Vec<SessionEvent>>>) -> String {
+        match o {
+            None => "None".into(),
+            Some(Ok(ev)) => format!("Some(Ok({} events))", ev.len()),
+            Some(Err(e)) => format!("Some(Err({e:#}))"),
+        }
+    }
+
+    /// Await one `recv`, bounded so a hang fails instead of stalling the run.
+    async fn recv_bounded(backend: &mut StreamJsonBackend) -> Option<Result<Vec<SessionEvent>>> {
+        tokio::time::timeout(Duration::from_secs(10), backend.recv())
+            .await
+            .expect("recv must return within 10 s")
+    }
+
+    #[tokio::test]
+    async fn recv_reports_nonzero_exit_before_any_output_as_error() {
+        let mut backend = spawn_sh("exit 2", Duration::from_secs(5));
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("exit status: 2"),
+                "the failure must name exit code 2: {e:#}"
+            ),
+            other => panic!("exit 2 must be Some(Err), got {}", outcome(other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn recv_reports_signal_exit_as_error() {
+        let mut backend = spawn_sh("kill -9 $$", Duration::from_secs(5));
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("signal: 9"),
+                "the failure must name signal 9: {e:#}"
+            ),
+            other => panic!(
+                "a SIGKILLed worker must be Some(Err), got {}",
+                outcome(other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn recv_keeps_fast_clean_exit_as_none() {
+        let mut backend = spawn_sh(
+            r#"echo '{"type":"result"}'; exit 0"#,
+            Duration::from_secs(5),
+        );
+        let first = recv_bounded(&mut backend).await;
+        assert!(
+            matches!(&first, Some(Ok(ev)) if ev.len() == 1),
+            "the result line must arrive first, got {}",
+            outcome(&first)
+        );
+        let second = recv_bounded(&mut backend).await;
+        assert!(
+            second.is_none(),
+            "exit 0 must end in None, got {}",
+            outcome(&second)
+        );
+
+        let mut silent = spawn_sh("exit 0", Duration::from_secs(5));
+        let only = recv_bounded(&mut silent).await;
+        assert!(
+            only.is_none(),
+            "a silent exit 0 must be None, got {}",
+            outcome(&only)
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_times_out_when_stdout_closes_but_child_lives_and_reaps_it() {
+        let bound = Duration::from_millis(200);
+        let mut backend = spawn_sh("exec >&-; sleep 30", bound);
+        let pid = worker_pid(&backend);
+        let started = std::time::Instant::now();
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("still running"),
+                "the failure must say the worker outlived the bound: {e:#}"
+            ),
+            other => panic!(
+                "a worker alive after stdout EOF must be Some(Err), got {}",
+                outcome(other)
+            ),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "recv must give up near the {bound:?} bound, took {:?}",
+            started.elapsed()
+        );
+        // A live process or an unreaped zombie both answer signal 0; ESRCH
+        // proves the worker was killed AND reaped.
+        let probe = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None);
+        assert_eq!(
+            probe,
+            Err(nix::errno::Errno::ESRCH),
+            "worker pid {pid} must be gone (killed and reaped)"
+        );
     }
 
     /// Verify that spawning when `claude` is absent returns a descriptive error.
