@@ -596,7 +596,8 @@ put in an error message.
 > - `secrets.set`, `secrets.delete` and `secrets.copy` evict the (vault, key)
 >   they write, under every backend, after the write. An eviction also stops
 >   a read already in flight from storing the old value.
-> - `Debug` shows the entry count only; values stay `SecretValue`.
+> - `Debug` shows the entry count and the max age (S2); values stay
+>   `SecretValue`.
 > - A poisoned lock is a miss and stores nothing.
 > - Each backend's entries belong to the settings its section of the
 >   account machine config held when they were filled. A read under other
@@ -608,7 +609,12 @@ put in an error message.
 > - Max age: an entry is never served once it is as old as the max age,
 >   counted from the start of the read that filled it, even while the
 >   server stays busy and never reaches its idle exit. The next resolve
->   reads the backend again. The default is 600 s (provisional, plan §6
+>   reads the backend again. Age is counted on both the monotonic clock and
+>   the wall clock, and the entry is a miss when either reaches the max age:
+>   the monotonic clock does not advance while the machine sleeps (macOS
+>   `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`), so after a lid-close the
+>   wall clock bounds it. A wall clock now earlier than the fill (stepped
+>   back) is also a miss. The default is 600 s (provisional, plan §6
 >   point 1). `trusty-secrets serve --cache-max-age-secs N` sets it;
 >   `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` may only shorten it, because the
 >   on-demand client passes the first spawner's environment to the shared
