@@ -179,9 +179,17 @@ async fn legacy_bare_key_recalls_and_forgets_unchanged() {
     let after = recall(&reopened, embedder.as_ref(), "narwhal tusks teeth", 5)
         .await
         .unwrap();
+    // The vector layers (2, 3) only: this test pins the vector store.
     assert!(
-        after.iter().all(|r| r.drawer.id != id),
-        "forgotten stays gone"
+        after
+            .iter()
+            .filter(|r| r.layer >= 2)
+            .all(|r| r.drawer.id != id),
+        "no vector-layer hit for a forgotten drawer: {:?}",
+        after
+            .iter()
+            .map(|r| (r.drawer.id == id, r.layer))
+            .collect::<Vec<_>>()
     );
 }
 

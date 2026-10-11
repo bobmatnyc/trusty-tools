@@ -340,3 +340,145 @@ async fn alias_audit_names_a_drawer_once_for_two_colliding_chunk_rows() {
         scan.unnameable_keys
     );
 }
+
+/// AC-B1 and AC-B8 through the drawer-level writer: `upsert_chunks` writes
+/// `{id}`, `{id}#1`, ... and a shorter rewrite leaves exactly its own rows.
+#[tokio::test]
+async fn upsert_chunks_replaces_the_group_and_shrinks() {
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    let id = Uuid::new_v4();
+    let four: Vec<Vec<f32>> = [30.0, 20.0, 10.0, 0.0].iter().map(|d| planar(*d)).collect();
+    store.upsert_chunks(id, four).await.unwrap();
+    assert_eq!(
+        keys_of(&store, id),
+        vec![
+            id.to_string(),
+            format!("{id}#1"),
+            format!("{id}#2"),
+            format!("{id}#3"),
+        ]
+    );
+    assert_eq!(store.index_size(), 4, "one row per chunk");
+    assert_eq!(store.drawer_count().unwrap(), 1, "one drawer");
+    let hits = store.search(&planar(0.0), 5).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        hits[0].score > 0.99,
+        "`#3` equals the query: {}",
+        hits[0].score
+    );
+
+    store
+        .upsert_chunks(id, vec![planar(60.0), planar(50.0)])
+        .await
+        .unwrap();
+    assert_eq!(keys_of(&store, id), vec![id.to_string(), format!("{id}#1")]);
+    assert_eq!(
+        store.index_size(),
+        2,
+        "the stale `#2` and `#3` rows are gone"
+    );
+    let hits = store.search(&planar(0.0), 5).await.unwrap();
+    assert!(
+        (hits[0].score - 50f32.to_radians().cos()).abs() < 0.01,
+        "the old tail no longer matches, got {}",
+        hits[0].score
+    );
+}
+
+/// AC-B9 error arm: one wrong-dimension chunk fails the whole write before
+/// anything is written; the drawer's previous rows are unchanged.
+#[tokio::test]
+async fn upsert_chunks_with_one_bad_dimension_changes_nothing() {
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    let id = Uuid::new_v4();
+    store
+        .upsert_chunks(id, vec![planar(40.0), planar(0.0)])
+        .await
+        .unwrap();
+
+    let bad = vec![planar(70.0), vec![1.0; DIM + 1], planar(80.0)];
+    let err = store.upsert_chunks(id, bad).await.unwrap_err();
+    assert!(format!("{err:#}").contains("dimension"), "{err:#}");
+    assert_eq!(keys_of(&store, id), vec![id.to_string(), format!("{id}#1")]);
+    assert_eq!(store.index_size(), 2);
+    let hits = store.search(&planar(0.0), 5).await.unwrap();
+    assert!(
+        hits[0].score > 0.99,
+        "`#1` still matches: {}",
+        hits[0].score
+    );
+}
+
+/// Q4 error arm: zero chunks and more than the cap are hard errors that write
+/// nothing; exactly the cap is accepted.
+#[tokio::test]
+async fn upsert_chunks_rejects_empty_and_over_cap() {
+    use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    let dir = tempdir().unwrap();
+    let store = open(dir.path());
+    let id = Uuid::new_v4();
+    let many = |n: usize| -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| planar(i as f32 * 360.0 / n as f32))
+            .collect()
+    };
+
+    assert!(store.upsert_chunks(id, Vec::new()).await.is_err());
+    let over = store
+        .upsert_chunks(id, many(MAX_CHUNKS_PER_DRAWER + 1))
+        .await
+        .unwrap_err();
+    assert!(format!("{over:#}").contains("4096"), "{over:#}");
+    assert!(
+        keys_of(&store, id).is_empty(),
+        "a refused write writes nothing"
+    );
+
+    store
+        .upsert_chunks(id, many(MAX_CHUNKS_PER_DRAWER))
+        .await
+        .unwrap();
+    assert_eq!(store.index_size(), MAX_CHUNKS_PER_DRAWER);
+    assert_eq!(store.drawer_count().unwrap(), 1);
+}
+
+/// Fail-open check 4 (#9275): freeing the rest of a drawer runs in the SAME
+/// transaction as freeing its colliding row. When it fails, `unalias` returns
+/// `Err` and changes nothing — never a smaller `freed` list over a drawer left
+/// half-present.
+#[tokio::test]
+async fn unalias_reports_error_when_a_group_delete_fails() {
+    let dir = tempdir().unwrap();
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    seed_file(
+        dir.path(),
+        &[
+            (a.to_string(), 1, planar(0.0)),
+            (format!("{a}#1"), 2, planar(5.0)),
+            (format!("{a}#2"), 3, planar(10.0)),
+            (b.to_string(), 3, planar(10.0)),
+        ],
+    );
+    let store = open(dir.path());
+
+    HnswStore::fail_group_removal_for_test(true);
+    let result = store.unalias();
+    HnswStore::fail_group_removal_for_test(false);
+    assert!(
+        result.is_err(),
+        "a failed group removal is an error: {result:?}"
+    );
+    assert_eq!(keys_of(&store, a).len(), 3, "nothing of drawer a was freed");
+    assert_eq!(keys_of(&store, b).len(), 1);
+    assert!(
+        !store.alias_audit().unwrap().aliased_drawer_ids.is_empty(),
+        "the collision is still there for the next repair to find"
+    );
+
+    let outcome = store.unalias().unwrap();
+    assert_eq!(outcome.freed.len(), 2, "the retry frees both drawers");
+    assert!(keys_of(&store, a).is_empty());
+}
