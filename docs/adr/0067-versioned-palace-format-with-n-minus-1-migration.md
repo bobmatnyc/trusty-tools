@@ -219,9 +219,13 @@ size. Recovering one is a manual step that the E14 guide documents.
     the palace's `index.usearch.redb`. The vector index is derived and is not
     backed up; left in place after a restore it can hold chunk rows under a
     format-1 palace, which a format-1 binary misreads. Then run the
-    `palace_reembed` tool to embed the drawers into a fresh index.
-  - **Binaries older than trusty-memory 0.33.0** carry no format gate, so no
-    stamp can fence them off. Do not open a format-2 palace with one.
+    `palace_reembed` tool with `dry_run: false` to embed the drawers into a
+    fresh index. In 0.33.0 `dry_run` defaults to `true`, which re-embeds
+    nothing.
+  - **trusty-memory 0.32.0 and 0.32.1** gate at format 0, so they already
+    refuse a format-1 or format-2 palace (`FormatTooNew`). **Binaries older
+    than 0.32.0** carry no format gate, so no stamp can fence them off. Do not
+    open a format-2 palace with one.
 - **Memory sync** (1.x, DOC-80). The change is N → N+1 on primary data. It
   adds the typed drawer fields (OQ-4), the outbox table, tombstones and
   suppression markers. It needs a bump, not a backfill, because an older 1.x
