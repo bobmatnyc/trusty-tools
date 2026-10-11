@@ -738,4 +738,134 @@ mod tests {
              (5 s stagger must not be paid on reject path)"
         );
     }
+
+    // ── #9704: project hooks are written before any worker is spawned ──
+
+    use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
+    use crate::test_support::{STABLE_HOOK_EXE, hermetic_temp_dir};
+
+    /// A registry whose hook exe is pinned to [`STABLE_HOOK_EXE`].
+    ///
+    /// The pin is absolute, outside every build and temp root, and named `tm`,
+    /// so `resolve_stable_hook_exe` accepts it on its first branch and never
+    /// consults `PATH` — the tests behave the same with or without an
+    /// installed `tm`.
+    fn pinned_registry(cap: u32, stagger_ms: u64) -> SessionRegistry {
+        SessionRegistry::with_config(ControlPlaneConfig {
+            max_concurrent_sessions: cap,
+            launch_stagger_ms: stagger_ms,
+            hook_exe: Some(PathBuf::from(STABLE_HOOK_EXE)),
+            ..Default::default()
+        })
+    }
+
+    fn run_params(workdir: PathBuf, backend: BackendKind) -> RunParams {
+        RunParams {
+            project_id: "p".into(),
+            workdir,
+            backend,
+            prompt_file: None,
+            claude_cmd: None,
+        }
+    }
+
+    /// The id the registry would hand out next; `p-0` means none was spent.
+    async fn next_session_number(registry: &SessionRegistry) -> String {
+        registry.inner.write().await.counter.next("p").to_string()
+    }
+
+    /// Drive `run_session` to its stagger sleep, read the workdir's settings,
+    /// then fill the registry so the write-lock re-check refuses the launch.
+    ///
+    /// The paused clock never advances while the test task is runnable, so
+    /// the stagger cannot elapse between the two reads: whatever is on disk
+    /// was written before the write lock, the id allocation and every backend.
+    async fn assert_hooks_written_before_any_backend(backend: BackendKind) {
+        let dir = hermetic_temp_dir();
+        let registry = pinned_registry(1, 60_000);
+        let run = tokio::spawn({
+            let registry = registry.clone();
+            let params = run_params(dir.path().to_path_buf(), backend);
+            async move { registry.run_session(params).await }
+        });
+
+        let settings = dir.path().join(".claude").join("settings.json");
+        for _ in 0..64 {
+            if settings.is_file() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            settings.is_file(),
+            "run_session must write {} before it builds a {backend:?} backend",
+            settings.display()
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
+                .expect("settings is JSON");
+        assert_eq!(egress_guard_state(&value), EgressGuardState::Present);
+
+        let blocker = ControlSessionId::new("blocker", 0);
+        registry
+            .register(blocker.clone(), make_handle(&blocker))
+            .await;
+        let err = run
+            .await
+            .expect("run_session task")
+            .expect_err("the write-lock re-check must refuse at cap");
+        assert_eq!(
+            err.downcast_ref::<AdmissionError>(),
+            Some(&AdmissionError::CapReached { live: 1, cap: 1 })
+        );
+        assert_eq!(next_session_number(&registry).await, "p-0");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_session_writes_hooks_before_any_stream_json_backend() {
+        assert_hooks_written_before_any_backend(BackendKind::StreamJson).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_session_writes_hooks_before_any_tmux_backend() {
+        assert_hooks_written_before_any_backend(BackendKind::Tmux).await;
+    }
+
+    /// Fail-Open Check, error arm: a refused run spawns nothing, registers
+    /// nothing, spends no session number, and names the hooks in its error.
+    async fn assert_refused_without_spawn(registry: &SessionRegistry, workdir: PathBuf) {
+        let err = registry
+            .run_session(run_params(workdir, BackendKind::StreamJson))
+            .await
+            .expect_err("a worker without its project hooks must not spawn");
+        assert!(
+            format!("{err:#}").contains("hooks"),
+            "the refusal must name the hooks: {err:#}"
+        );
+        assert!(registry.list_ids().await.is_empty());
+        assert_eq!(next_session_number(registry).await, "p-0");
+    }
+
+    #[tokio::test]
+    async fn run_session_refuses_and_spawns_nothing_when_hook_write_fails() {
+        // `.claude` is a regular file, so the writer cannot create the dir.
+        let dir = hermetic_temp_dir();
+        std::fs::write(dir.path().join(".claude"), b"not a directory").expect("seed");
+        let registry = pinned_registry(5, 0);
+        assert_refused_without_spawn(&registry, dir.path().to_path_buf()).await;
+    }
+
+    #[tokio::test]
+    async fn run_session_refuses_and_spawns_nothing_when_settings_unparseable() {
+        // The writer leaves an unparseable file untouched and returns Ok.
+        let dir = hermetic_temp_dir();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).expect("create .claude");
+        let settings = claude.join("settings.json");
+        let garbage = b"{ \"permissions\": { }, // trailing comment\n";
+        std::fs::write(&settings, garbage).expect("seed");
+        let registry = pinned_registry(5, 0);
+        assert_refused_without_spawn(&registry, dir.path().to_path_buf()).await;
+        assert_eq!(std::fs::read(&settings).expect("read"), garbage);
+    }
 }

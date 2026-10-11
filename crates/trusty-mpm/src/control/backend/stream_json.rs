@@ -371,9 +371,34 @@ mod tests {
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
-        assert!(args.contains(&"--workdir".to_string()));
+        // #9704: claude has no `--workdir`; the cwd carries the workdir.
+        assert!(!args.contains(&"--workdir".to_string()));
         // No prompt file → no --append-system-prompt-file flag.
         assert!(!args.contains(&"--append-system-prompt-file".to_string()));
+    }
+
+    /// #9704: `claude` 2.1.296 exits with `error: unknown option '--workdir'`,
+    /// so the worker died before its first event. The workdir reaches the child
+    /// as its cwd only, with or without a prompt file.
+    #[test]
+    fn build_command_does_not_pass_workdir_flag() {
+        let pf = PathBuf::from("/tmp/prompt.md");
+        for prompt_file in [None, Some(pf.as_path())] {
+            let cmd = build_claude_command(Path::new("/tmp/wd"), prompt_file);
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !args.iter().any(|a| a.starts_with("--workdir")),
+                "claude rejects --workdir; argv was {args:?}"
+            );
+            assert!(
+                !args.contains(&"/tmp/wd".to_string()),
+                "the workdir must not ride in argv: {args:?}"
+            );
+            assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/wd")));
+        }
     }
 
     #[test]
