@@ -289,11 +289,39 @@ fn snapshot_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(SNAPSHOT)
 }
 
+/// Why: the verdict `mcp_schema_matches_snapshot` asserts, callable on a
+/// synthetic snapshot. What: compares the snapshot text with the live payload;
+/// a break is an error. Test: `mcp_schema_unpinned_additions_fail`.
+fn gate(golden: &str, live: &Value) -> Result<(), String> {
+    let report = check(&parse(golden), live);
+    if !report.breaks.is_empty() {
+        return Err(format!(
+            "trusty-memory MCP contract broken (ADR-0066 D1.1, guard #9276):\n  - {}\n\n\
+             The 1.x MCP schema changes additively only. To retire a tool, keep it and \
+             mark it with the ADR-0066 D3 deprecation notice instead.\n\
+             Refreshing the snapshot over a break IS a contract break: it needs a major \
+             version and Bob's override (ADR-0066 D6), plus a `Breaking` changelog \
+             fragment. Only then refresh with:\n    {REFRESH_CMD}\nand commit {SNAPSHOT}.",
+            report.breaks.join("\n  - "),
+        ));
+    }
+    if !report.additions.is_empty() {
+        eprintln!(
+            "note: the MCP schema gained {} item(s) the snapshot does not pin yet. \
+             Additive changes are allowed in 1.x (ADR-0066 D3); pin them with \
+             `{REFRESH_CMD}` together with a changelog fragment that names the \
+             addition (ADR-0066 D4):\n  {}",
+            report.additions.len(),
+            report.additions.join("\n  ")
+        );
+    }
+    Ok(())
+}
+
 /// Why: the guard ADR-0066 D4 assigns to the MCP surface.
-/// What: compares `tests/snapshots/mcp_schema_contract.jsonl` with the live
-/// default `tool_definitions()`; with `UPDATE_MCP_SCHEMA_CONTRACT=1` it
-/// rewrites the snapshot instead. Additions pass with a note.
-/// Test: this function.
+/// What: runs [`gate`] on `tests/snapshots/mcp_schema_contract.jsonl` and the
+/// live default `tool_definitions()`; with `UPDATE_MCP_SCHEMA_CONTRACT=1` it
+/// rewrites the snapshot instead. Test: this function.
 #[test]
 fn mcp_schema_matches_snapshot() {
     let path = snapshot_path();
@@ -305,26 +333,63 @@ fn mcp_schema_matches_snapshot() {
         return;
     }
     let golden = read_golden(&path).unwrap_or_else(|e| panic!("{e}"));
-    let report = check(&parse(&golden), &live);
-    if !report.additions.is_empty() {
-        eprintln!(
-            "note: the MCP schema gained {} item(s) the snapshot does not pin yet. \
-             Additive changes are allowed in 1.x (ADR-0066 D3); pin them with \
-             `{REFRESH_CMD}` together with a changelog fragment that names the \
-             addition (ADR-0066 D4):\n  {}",
-            report.additions.len(),
-            report.additions.join("\n  ")
-        );
+    if let Err(e) = gate(&golden, &live) {
+        panic!("{e}");
     }
+}
+
+/// Why: an addition the snapshot does not pin would let a later removal of it
+/// pass, and an empty snapshot would pin nothing. What: [`gate`] accepts the
+/// pinned payload, and rejects an empty snapshot file (every tool is an
+/// addition) and one unpinned optional param, naming each addition and the
+/// refresh command. Test: this function.
+#[test]
+fn mcp_schema_unpinned_additions_fail() {
+    let live = tool_definitions();
+    let pinned = render(&snapshot(&live));
+    assert_eq!(gate(&pinned, &live), Ok(()));
+    let (tool, _, _) = target(&live);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = dir.path().join("empty.jsonl");
+    std::fs::write(&empty, "").expect("write empty snapshot");
+    let empty = read_golden(&empty).expect("an empty snapshot file reads");
+    let every_tool: Vec<String> = snapshot(&live)
+        .iter()
+        .map(|r| format!("new tool: {{\"name\":\"{}\"", r.name))
+        .collect();
+    let with_param = edit_tool(&live, &tool, |x| {
+        x["inputSchema"]["properties"]["y_9276"] = json!({"type": "boolean"});
+    });
+    let cases: Vec<(&str, String, Value, Vec<String>)> = vec![
+        ("empty snapshot", empty, live.clone(), every_tool),
+        (
+            "unpinned optional param",
+            pinned,
+            with_param,
+            vec![format!("tool `{tool}`: new optional param `y_9276`")],
+        ),
+    ];
+    let missed: Vec<String> = cases
+        .into_iter()
+        .filter_map(
+            |(name, golden, changed, expected)| match gate(&golden, &changed) {
+                Ok(()) => Some(format!("{name}: passed the gate")),
+                Err(e) => {
+                    let absent: Vec<&str> = expected
+                        .iter()
+                        .map(String::as_str)
+                        .chain([REFRESH_CMD])
+                        .filter(|s| !e.contains(*s))
+                        .collect();
+                    (!absent.is_empty()).then(|| format!("{name}: message lacks {absent:?}:\n{e}"))
+                }
+            },
+        )
+        .collect();
     assert!(
-        report.breaks.is_empty(),
-        "trusty-memory MCP contract broken (ADR-0066 D1.1, guard #9276):\n  - {}\n\n\
-         The 1.x MCP schema changes additively only. To retire a tool, keep it and \
-         mark it with the ADR-0066 D3 deprecation notice instead.\n\
-         Refreshing the snapshot over a break IS a contract break: it needs a major \
-         version and Bob's override (ADR-0066 D6), plus a `Breaking` changelog \
-         fragment. Only then refresh with:\n    {REFRESH_CMD}\nand commit {SNAPSHOT}.",
-        report.breaks.join("\n  - "),
+        missed.is_empty(),
+        "unpinned additions not rejected:\n{}",
+        missed.join("\n")
     );
 }
 
