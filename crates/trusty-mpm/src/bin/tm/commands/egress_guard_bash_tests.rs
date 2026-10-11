@@ -301,6 +301,10 @@ fn bash_egress_denies_program_behind_a_shell_keyword() {
         ("! sendmail bob", "SMTP mail"),
         ("while gws x; do :; done", "Google Workspace"),
         ("if ! tm slack send x; then :; fi", "Slack"),
+        // Critic round 2: `coproc` and `time`, with `time -p` still read.
+        ("coproc sendmail bob </dev/null", "SMTP mail"),
+        ("time ! sendmail bob", "SMTP mail"),
+        ("time -p sendmail bob", "SMTP mail"),
     ] {
         assert_denies(command, service);
     }
