@@ -27,8 +27,9 @@ use std::sync::Arc;
 /// Why: an observer must never take the live file's lock (#9659).
 /// What: `Err` when `path` does not exist, so nothing is created. Otherwise
 /// copies it to a per-call snapshot path and opens that, returning
-/// [`OpenMode::Snapshot`] and a guard that deletes the copy on drop. The copy
-/// is a point-in-time read; a write against it is rejected by the store.
+/// [`OpenMode::Snapshot`] and a guard that deletes the copy on drop. A failed
+/// copy or open deletes the copy before returning `Err`. The copy is a
+/// point-in-time read; a write against it is rejected by the store.
 /// Test: `an_observer_open_never_locks_the_live_file`,
 /// `an_observer_open_of_a_missing_file_creates_nothing`,
 /// `a_failed_observer_copy_leaves_no_snapshot_file`.
@@ -49,6 +50,9 @@ fn open_observer_copy_with(
         );
     }
     let snap = snapshot_path_for(path);
+    // #9659: the guard owns the path before the copy, so a partial copy or a
+    // failed open never survives this call.
+    let guard = SnapshotGuard::new(snap.clone());
     copy(path, &snap).with_context(|| {
         format!(
             "copy {} -> {} for an observer",
@@ -56,8 +60,6 @@ fn open_observer_copy_with(
             snap.display()
         )
     })?;
-    // Owned by the guard from here, so a failed open still removes the copy.
-    let guard = SnapshotGuard::new(snap.clone());
     let db = create_palace_db(&snap).map_err(|e| {
         anyhow::anyhow!(
             "open observer copy {} of {}: {e}",
