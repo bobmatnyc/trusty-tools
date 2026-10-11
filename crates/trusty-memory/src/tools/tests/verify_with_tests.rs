@@ -115,7 +115,11 @@ async fn a_verify_command_round_trips_through_memory_list() {
 
     let drawers = list(&state, "vw1").await;
     assert_eq!(verify_of(&drawers, &id), Some(json!(CMD_A)), "{drawers:?}");
-    assert_eq!(verify_of(&drawers, &plain), Some(Value::Null), "{drawers:?}");
+    assert_eq!(
+        verify_of(&drawers, &plain),
+        Some(Value::Null),
+        "{drawers:?}"
+    );
 }
 
 /// A second write to the slot without `verify` retires the first drawer's
@@ -142,8 +146,16 @@ async fn a_retired_slot_loses_its_verify_command() {
     .await;
 
     let drawers = list(&state, "vw2").await;
-    assert_eq!(verify_of(&drawers, &first), Some(Value::Null), "{drawers:?}");
-    assert_eq!(verify_of(&drawers, &second), Some(Value::Null), "{drawers:?}");
+    assert_eq!(
+        verify_of(&drawers, &first),
+        Some(Value::Null),
+        "{drawers:?}"
+    );
+    assert_eq!(
+        verify_of(&drawers, &second),
+        Some(Value::Null),
+        "{drawers:?}"
+    );
 }
 
 /// A second write with its own command: the new drawer lists only that
@@ -169,8 +181,16 @@ async fn a_superseding_write_carries_only_its_own_verify_command() {
     .await;
 
     let drawers = list(&state, "vw3").await;
-    assert_eq!(verify_of(&drawers, &first), Some(Value::Null), "{drawers:?}");
-    assert_eq!(verify_of(&drawers, &second), Some(json!(CMD_B)), "{drawers:?}");
+    assert_eq!(
+        verify_of(&drawers, &first),
+        Some(Value::Null),
+        "{drawers:?}"
+    );
+    assert_eq!(
+        verify_of(&drawers, &second),
+        Some(json!(CMD_B)),
+        "{drawers:?}"
+    );
 }
 
 /// `verify` without `fact_key`, or a blank `verify`, is an error on both write
@@ -182,20 +202,29 @@ async fn verify_without_fact_key_is_refused() {
 
     let text = "PR 9390 head is 5a6a8e3613 on the stacked branch";
     let cases = [
-        ("memory_remember", json!({ "text": text, "force": true, "verify": CMD_A })),
+        (
+            "memory_remember",
+            json!({ "text": text, "force": true, "verify": CMD_A }),
+        ),
         ("memory_note", json!({ "content": text, "verify": CMD_A })),
         (
             "memory_remember",
             json!({ "text": text, "force": true, "fact_key": KEY, "verify": "  \t " }),
         ),
-        ("memory_note", json!({ "content": text, "fact_key": KEY, "verify": "" })),
+        (
+            "memory_note",
+            json!({ "content": text, "fact_key": KEY, "verify": "" }),
+        ),
     ];
     for (tool, mut args) in cases {
         args["palace"] = json!("vw4");
         let err = dispatch_tool(&state, tool, args.clone())
             .await
             .expect_err("a verify command with no slot, or a blank one, must be refused");
-        assert!(format!("{err:#}").contains("verify"), "{tool} {args}: {err:#}");
+        assert!(
+            format!("{err:#}").contains("verify"),
+            "{tool} {args}: {err:#}"
+        );
     }
     let drawers = list(&state, "vw4").await;
     assert!(drawers.is_empty(), "nothing may be stored: {drawers:?}");

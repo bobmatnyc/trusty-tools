@@ -33,8 +33,8 @@ use std::sync::Arc;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
-use crate::memory_core::palace::{Drawer, PalaceId};
 use super::tier_c_verify::{close_retired_verify_command, record_verify_command};
+use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::share::assert_superseded_by;
 use crate::memory_core::store::kg::KnowledgeGraph;
 

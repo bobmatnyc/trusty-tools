@@ -75,9 +75,14 @@ async fn a_refused_slot_stores_no_verify_command() {
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
 
-    let refused = write(&handle, "a fact under a key with no domain", Some("bad"), CMD)
-        .await
-        .expect("a refused slot still stores the drawer");
+    let refused = write(
+        &handle,
+        "a fact under a key with no domain",
+        Some("bad"),
+        CMD,
+    )
+    .await
+    .expect("a refused slot still stores the drawer");
     let admitted = write(
         &handle,
         "PR 9390 is open on the stacked branch",
@@ -93,7 +98,11 @@ async fn a_refused_slot_stores_no_verify_command() {
         .await
         .unwrap();
     assert_eq!(held.get(&refused), None, "{held:?}");
-    assert_eq!(held.get(&admitted).map(String::as_str), Some(CMD), "{held:?}");
+    assert_eq!(
+        held.get(&admitted).map(String::as_str),
+        Some(CMD),
+        "{held:?}"
+    );
 }
 
 /// Each write to the slot retires the prior occupant's command and records only
@@ -109,16 +118,25 @@ async fn slot_retirement_closes_the_retirees_verify_command() {
     let first = write(&handle, "PR 9390 is open at head a38e511d", Some(SLOT), CMD)
         .await
         .unwrap();
-    let second = write(&handle, "PR 9390 was rebased to head 5a6a8e36", Some(SLOT), other)
-        .await
-        .unwrap();
+    let second = write(
+        &handle,
+        "PR 9390 was rebased to head 5a6a8e36",
+        Some(SLOT),
+        other,
+    )
+    .await
+    .unwrap();
     let held = handle
         .kg
         .verify_with_many(vec![first, second])
         .await
         .unwrap();
     assert_eq!(held.get(&first), None, "{held:?}");
-    assert_eq!(held.get(&second).map(String::as_str), Some(other), "{held:?}");
+    assert_eq!(
+        held.get(&second).map(String::as_str),
+        Some(other),
+        "{held:?}"
+    );
 
     let third = handle
         .remember_with_options(
