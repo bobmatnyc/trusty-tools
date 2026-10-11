@@ -10,8 +10,9 @@
    * from `backends`, never a fixed list. A refused toggle reverts. Delete and
    * copy each run only from a separate confirm step that Cancel or Escape
    * closes; the confirm sits away from the button that opened it and ignores
-   * the second click of a double-click. The copy confirm names both backends
-   * and the project vault's key count, and sends the backends it named.
+   * the second click of a double-click. The copy confirm names the project,
+   * both backends and the project vault's key count, and sends the project
+   * and backends it named (#9712).
    * Test: `src/App.test.js`.
    */
   import { onMount } from 'svelte';
@@ -37,6 +38,9 @@
   let toBackend = $state('');
   let pendingCopy = $state(null);
   let copied = $state(null);
+  // #9712: bumped whenever a copy confirm is dropped; a count that answers
+  // under an older value opens nothing. Not reactive: no markup reads it.
+  let copyTicket = 0;
 
   const available = $derived(backends.filter((b) => b.available === true));
 
@@ -48,13 +52,19 @@
     notice = { tone: 'ok', lines: [text] };
   }
 
+  /** Close the copy confirm and void any copy count still in flight. */
+  function dropCopy() {
+    copyTicket += 1;
+    pendingCopy = null;
+  }
+
   /** Forget every one-shot result before a new action. */
   function clearResults() {
     notice = null;
     masked = null;
     copied = null;
     pendingDelete = null;
-    pendingCopy = null;
+    dropCopy();
   }
 
   /**
@@ -69,7 +79,7 @@
   function onKey(event) {
     if (event.key !== 'Escape') return;
     pendingDelete = null;
-    pendingCopy = null;
+    dropCopy();
   }
 
   /** Focus the safe choice when a confirm step opens. */
@@ -115,6 +125,7 @@
   }
 
   async function chooseScope(next) {
+    dropCopy(); // #9712: a scope switch voids a copy count in flight.
     vault = next;
     await refresh();
   }
@@ -179,10 +190,15 @@
   /**
    * #9067: Copy only opens the confirm step. Copy writes every key of the
    * project vault, so the count comes from that vault, not the shown scope.
+   * #9712: the confirm carries the project it counted, and a count that
+   * answers after the confirm was dropped (project or scope switch, Escape,
+   * any new action) opens nothing.
    */
   async function submitCopy(event) {
     event.preventDefault();
     clearResults();
+    const ticket = copyTicket;
+    const counted = project;
     const from = fromBackend;
     const to = toBackend;
     const projectVault = scopes.find((s) => s.kind === 'project')?.vault;
@@ -191,19 +207,21 @@
       return;
     }
     try {
-      const count = ((await api.list(project, projectVault)).keys ?? []).length;
-      pendingCopy = { from, to, count };
+      const count = ((await api.list(counted, projectVault)).keys ?? []).length;
+      if (ticket !== copyTicket || counted !== project) return;
+      pendingCopy = { project: counted, from, to, count };
     } catch (err) {
-      fail(err);
+      if (ticket === copyTicket && counted === project) fail(err);
     }
   }
 
   async function confirmCopy(event) {
     if (!deliberate(event) || !pendingCopy) return;
-    const { from, to } = pendingCopy;
+    // #9712: send the project the confirm named, never the live one.
+    const { project: counted, from, to } = pendingCopy;
     clearResults();
     try {
-      copied = await api.copy(project, from, to);
+      copied = await api.copy(counted, from, to);
       await refresh();
     } catch (err) {
       fail(err);
@@ -351,13 +369,14 @@
       {#if pendingCopy}
         <div class="confirm" role="alertdialog" aria-label="Confirm copy" data-testid="copy-confirm">
           <p>
-            Copy {pendingCopy.count} {pendingCopy.count === 1 ? 'key' : 'keys'} of this project from
+            Copy {pendingCopy.count} {pendingCopy.count === 1 ? 'key' : 'keys'} of project
+            <span class="mono">{pendingCopy.project}</span> from
             <span class="mono">{pendingCopy.from}</span> to <span class="mono">{pendingCopy.to}</span>?
             This overwrites the {pendingCopy.count === 1 ? 'value' : 'values'} of
             {pendingCopy.count === 1 ? 'that key' : `those ${pendingCopy.count} keys`} in
             <span class="mono">{pendingCopy.to}</span>.
           </p>
-          <button data-testid="cancel-copy" use:focusOnMount onclick={() => (pendingCopy = null)}>Cancel</button>
+          <button data-testid="cancel-copy" use:focusOnMount onclick={dropCopy}>Cancel</button>
           <button data-testid="confirm-copy" onclick={confirmCopy}>Copy {pendingCopy.count} to {pendingCopy.to}</button>
         </div>
       {/if}
