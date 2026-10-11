@@ -685,23 +685,19 @@ async fn exec_argv_never_carries_a_value_or_token() {
 }
 
 /// Why: on a terminal nothing is scrubbed (Architect ruling Q3).
+/// What: tm's stdout is a pty slave; a thread reads the master until the
+/// first line, and that line carries the value.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_leaves_terminal_output_unscrubbed() {
     let fx = Fixture::new(Script::new()).await;
-    let (master, slave) = open_pty();
-    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", r#"echo "$FOO""#]);
-    cmd.stdout(slave);
-    let child = cmd.spawn().expect("spawn tm");
-    // Close this side's copy of the slave, so the master sees the end.
-    drop(cmd);
-    let out = child.wait_with_output().await.expect("tm output");
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    let shown = tokio::task::spawn_blocking(move || {
+    let (mut master, slave) = open_pty();
+    // #9693: macOS discards unread pty output at the last slave close, so
+    // read the master while tm runs, as a terminal does.
+    let terminal = std::thread::spawn(move || {
         use std::io::Read;
-        let mut master = master;
         let mut all = Vec::new();
         let mut buf = [0u8; 4096];
-        // Linux answers EIO once the slave side is closed.
+        // The slave side closed: EOF on macOS, EIO on Linux.
         while let Ok(n) = master.read(&mut buf) {
             if n == 0 {
                 break;
@@ -712,9 +708,18 @@ async fn exec_leaves_terminal_output_unscrubbed() {
             }
         }
         all
-    })
-    .await
-    .expect("read pty");
+    });
+    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", r#"echo "$FOO""#]);
+    cmd.stdout(slave);
+    let child = cmd.spawn().expect("spawn tm");
+    // Close this side's copy of the slave, so the master sees the end.
+    drop(cmd);
+    let out = child.wait_with_output().await.expect("tm output");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let shown = tokio::task::spawn_blocking(move || terminal.join())
+        .await
+        .expect("join the pty reader")
+        .expect("read pty");
     assert!(
         text(&shown).contains(VALUE),
         "terminal output was scrubbed: {}",
