@@ -23,6 +23,7 @@
 //! `credential_print_tests::allows_script_operands_and_comments`,
 //! `heredoc_operators_skip_comments_escapes_and_expansions`.
 
+use super::super::heredoc::scan_work::{Site, charge};
 use super::super::heredoc::{delimiter_word, is_terminator};
 use super::{Heredoc, input_is_program_text};
 
@@ -118,6 +119,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
         let b = bytes[i];
         let at_word_start = std::mem::replace(&mut word_start, false);
         let depth = stack.len();
+        charge(Site::PendingLow, pending.len());
         for p in &mut pending {
             p.low = p.low.min(depth);
         }
@@ -424,6 +426,7 @@ fn read_operator(text: &str, at: usize) -> Option<Pending> {
         j += 1;
     }
     let line_end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    charge(Site::LineEnd, line_end - at);
     let (word, quoted, op_end) = match delimiter_word(&bytes[..line_end], j) {
         Some((word, _, _)) if word.is_empty() => return None,
         Some((word, quoted, end)) => (Some(word), quoted, end),

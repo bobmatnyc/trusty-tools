@@ -11,6 +11,7 @@
 
 use super::super::credential_print::OperatorCtx;
 use super::super::shell_lex::QuoteScan;
+use super::scan_work::{Site, charge};
 
 /// A here-document delimiter word plus its `<<-` tab-stripping mode.
 pub(super) struct Delimiter {
@@ -61,7 +62,10 @@ pub(super) fn delimiters_on(
             i += 3;
             continue;
         }
-        let Some(&(_, ctx)) = ops.iter().find(|(pos, _)| *pos == at + i) else {
+        let Some(&(_, ctx)) = ops.iter().find(|(pos, _)| {
+            charge(Site::OperatorLookup, 1);
+            *pos == at + i
+        }) else {
             // #9150: a comment, `${…}` text or `\<<` opens no body.
             i += 2;
             continue;

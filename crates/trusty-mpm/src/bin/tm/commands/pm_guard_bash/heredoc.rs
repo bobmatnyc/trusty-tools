@@ -28,9 +28,13 @@ use super::shell_lex::QuoteScan;
 
 #[path = "heredoc_delimiter.rs"]
 mod heredoc_delimiter;
+// #9720: the inner-loop work counters the linear-time tests read.
+#[path = "scan_work.rs"]
+pub(super) mod scan_work;
 
 pub(super) use heredoc_delimiter::delimiter_word;
 use heredoc_delimiter::{Delimiter, delimiters_on};
+use scan_work::{Site, charge};
 
 /// One here-document body and the line that opened it (#8756).
 ///
@@ -294,6 +298,7 @@ impl HeredocBodies {
                 if delimiter.ambiguous {
                     // #9150: a shell that reads this `<<` as an operator
                     // ends its body at a line the guard cannot place.
+                    charge(Site::AmbiguousEnd, lines.len().saturating_sub(line));
                     if !matches!(body_span(command, &lines, line, &delimiter), Ok(None)) {
                         return Err(Abandon::Delimiter);
                     }
@@ -377,7 +382,14 @@ impl HeredocBodies {
     pub(super) fn shell_body_starting_at(&self, idx: usize) -> Option<usize> {
         self.spans
             .iter()
-            .find(|span| span.0 == idx && !self.data.iter().any(|d| d.span == **span))
+            .find(|span| {
+                charge(Site::SpanProbe, 1);
+                span.0 == idx
+                    && !self.data.iter().any(|d| {
+                        charge(Site::SpanProbe, 1);
+                        d.span == **span
+                    })
+            })
             .map(|span| span.1)
     }
 
@@ -412,9 +424,10 @@ impl HeredocBodies {
     ///
     /// Test: `heredoc_bodies_exclude_the_operator_line`.
     pub(super) fn contains(&self, idx: usize) -> bool {
-        self.spans
-            .iter()
-            .any(|(start, end)| idx >= *start && idx < *end)
+        self.spans.iter().any(|(start, end)| {
+            charge(Site::SpanProbe, 1);
+            idx >= *start && idx < *end
+        })
     }
 
     /// Whether byte `idx` is here-document framing, so a separator there is
@@ -434,9 +447,10 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
     /// `split_shell_segments_keeps_a_heredoc_body_whole`.
     pub(super) fn suppresses_separator(&self, idx: usize) -> bool {
-        self.frames
-            .iter()
-            .any(|(start, end)| idx >= *start && idx < *end)
+        self.frames.iter().any(|(start, end)| {
+            charge(Site::SpanProbe, 1);
+            idx >= *start && idx < *end
+        })
     }
 }
 
@@ -676,3 +690,8 @@ pub(super) fn is_terminator(line: &str, word: &str, strip_tabs: bool, last: bool
 #[cfg(test)]
 #[path = "heredoc_tests.rs"]
 mod tests;
+
+// #9720: the pre-fix verdicts the linear-time rewrite must keep.
+#[cfg(test)]
+#[path = "heredoc_golden_tests.rs"]
+mod golden_tests;
