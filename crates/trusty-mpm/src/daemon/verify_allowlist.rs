@@ -55,8 +55,17 @@ impl AllowedCommand {
     /// doubled space or a leading option, is refused.
     /// Test: `the_allowlist_refuses_every_other_shape`.
     pub(crate) fn parse(line: &str) -> Option<Self> {
-        let _ = line; // #9390 RED: nothing parses yet.
-        None
+        if !line.bytes().all(|b| (b' '..=b'~').contains(&b)) {
+            return None;
+        }
+        let tokens: Vec<&str> = line.split(' ').collect();
+        match tokens.as_slice() {
+            ["gh", "pr", "view", number, "--json", fields] if *fields == GH_FIELDS => {
+                pr_number(number).map(Self::GhPrView)
+            }
+            ["git", "rev-parse", branch] => Self::git_rev_parse(branch),
+            _ => None,
+        }
     }
 
     /// The program to execute: `gh` or `git`, resolved on `PATH`.

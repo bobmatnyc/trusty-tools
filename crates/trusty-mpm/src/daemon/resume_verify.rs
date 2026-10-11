@@ -99,8 +99,15 @@ pub(crate) async fn resume_verify(
     project_dir: &Path,
     snapshot: Option<&Path>,
 ) -> Value {
-    let _ = (host, socket, project_dir, snapshot); // #9390 RED: the pass does not run yet.
-    Value::Null
+    let Some(snapshot) = snapshot else {
+        return Value::Null;
+    };
+    let deadline = Instant::now() + host.pass_timeout;
+    let pass = verify_pass(host, socket, project_dir, snapshot, deadline);
+    match tokio::time::timeout(host.pass_timeout + GUARD_GRACE, pass).await {
+        Ok(report) => report,
+        Err(_) => unverified(None, "pass_timeout", "the verify pass outlived its bound"),
+    }
 }
 
 /// The pass itself; see [`resume_verify`].
