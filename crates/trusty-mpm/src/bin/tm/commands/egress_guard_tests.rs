@@ -51,6 +51,10 @@ fn egress_family_match_normalizes_case_and_separators() {
         ("mcp__G-Chat__x", "gchat"),
         ("MCP__Slack__x", "slack"),
         ("mcp__google-mail__x", "googlemail"),
+        // #8454 final round: a gmail tool is a mail tool whatever the server.
+        ("mcp__mcp-gsuite__create_gmail_draft", "gmail"),
+        ("mcp__mcp-gsuite__reply_gmail_email", "gmail"),
+        ("mcp__workspace-mcp__send_gmail_message", "gmail"),
         ("mcp__claude_ai_Google_Mail__x", "googlemail"),
     ] {
         assert_eq!(family_of(tool), family, "{tool}");
@@ -69,10 +73,13 @@ fn egress_gworkspace_denies_only_mail_chat_message_tools() {
         "mcp__gworkspace__list_message_attachments",
         "mcp__google_workspace__send_gmail_message",
         "mcp__Google-Workspace__send_chat_message",
+        "mcp__mcp-gsuite__send_chat_message",
     ] {
         assert_eq!(family_of(tool), "gworkspace", "{tool}");
     }
     for tool in [
+        "mcp__mcp-gsuite__list_calendars",
+        "mcp__workspace-mcp__search_drive_files",
         "mcp__google_workspace__create_document",
         "mcp__gworkspace-mcp__create_document",
         "mcp__gworkspace-mcp__search_drive_files",

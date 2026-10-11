@@ -154,6 +154,11 @@ const FAMILY_TOOLS: &[&str] = &[
     "mcp__Google-Workspace__send_chat_message",
     "mcp__google-mail__send",
     "mcp__claude_ai_Google_Mail__search_threads",
+    // #8454 final round: a gmail tool on an unlisted server, and `gsuite`.
+    "mcp__mcp-gsuite__create_gmail_draft",
+    "mcp__mcp-gsuite__reply_gmail_email",
+    "mcp__workspace-mcp__send_gmail_message",
+    "mcp__mcp-gsuite__send_chat_message",
 ];
 
 /// 🔴 #8454 S1: every family tool is denied, whatever its casing or separators.
@@ -387,6 +392,8 @@ fn egress_allows_unrelated_tools() {
         "mcp__gworkspace-mcp__create_document",
         "mcp__gworkspace-mcp__search_drive_files",
         "mcp__gworkspace-mcp__manage_events",
+        "mcp__mcp-gsuite__list_calendars",
+        "mcp__workspace-mcp__search_drive_files",
     ] {
         assert_allowed(&run(&payload(tool), &[]), tool);
     }
