@@ -542,6 +542,21 @@ fn socket_parent(path: &Path) -> Result<&Path, UdsSecurityError> {
 /// `bind_hardened_rejects_an_over_long_path`,
 /// `hardened_sockets_hold_far_more_in_flight_than_the_platform_default`.
 pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
+    bind_hardened_with(path, || {})
+}
+
+/// [`bind_hardened`]'s body, with a hook run right after `UnixListener::bind`.
+///
+/// Why: lets a test inspect the final path inside the bind-to-chmod gap with
+/// no sleep standing in for the interleaving, the same seam
+/// `singleton::bind_singleton_with` gives the takeover race.
+/// What: identical to [`bind_hardened`]; `after_bind` runs once, after the
+/// bind and before the chmod.
+/// Test: `bind_hardened_never_exposes_the_final_path_below_0600`.
+pub(crate) fn bind_hardened_with(
+    path: &Path,
+    after_bind: impl FnOnce(),
+) -> Result<UnixListener, UdsSecurityError> {
     check_sun_path_budget(path)?;
     prepare_socket_dir(socket_parent(path)?)?;
 
@@ -549,6 +564,7 @@ pub fn bind_hardened(path: &Path) -> Result<UnixListener, UdsSecurityError> {
         path: path.to_path_buf(),
         source,
     })?;
+    after_bind();
 
     std::fs::set_permissions(path, Permissions::from_mode(SOCKET_MODE)).map_err(|source| {
         UdsSecurityError::Chmod {

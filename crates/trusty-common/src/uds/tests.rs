@@ -346,6 +346,41 @@ async fn bind_hardened_sets_socket_0600_and_dir_0700() {
 }
 
 #[tokio::test]
+async fn bind_hardened_never_exposes_the_final_path_below_0600() {
+    // #9714: a client that dials between `bind` and `chmod` used to find the
+    // final path at the umask mode, and `verify_socket_for_connect` refused it
+    // as untrusted. The hook runs inside that gap; the final path must be
+    // either absent there or already 0600 and trusted.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("t.sock");
+
+    let mut observed = None;
+    let _listener = bind_hardened_with(&sock, || {
+        observed = Some(match std::fs::symlink_metadata(&sock) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("stat failed: {e}")),
+            Ok(meta) => {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode != SOCKET_MODE {
+                    Err(format!("final path visible at mode {mode:04o}"))
+                } else {
+                    verify_socket_for_connect(&sock).map_err(|e| e.to_string())
+                }
+            }
+        });
+    })
+    .expect("bind hardened listener");
+
+    let observed = observed.expect("the after-bind hook must run");
+    assert_eq!(
+        observed,
+        Ok(()),
+        "a dialler must never see the final socket path below 0600"
+    );
+    assert_eq!(mode_of(&sock), SOCKET_MODE, "socket must end at 0600");
+}
+
+#[tokio::test]
 async fn bind_hardened_socket_is_connectable_after_hardening() {
     // Why: narrowing to 0600 must not break the same-uid client the socket
     // exists for — a fix that made the socket unusable would also pass a
