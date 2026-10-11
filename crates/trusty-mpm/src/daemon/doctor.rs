@@ -909,3 +909,8 @@ fn is_managed_workspace(project_dir: &Path, active_workspace_paths: &[PathBuf]) 
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
 mod tests;
+
+// #9169: the project-map rows end to end through `run_doctor`.
+#[cfg(test)]
+#[path = "doctor_search_project_e2e_tests.rs"]
+mod search_project_e2e_tests;
