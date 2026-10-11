@@ -320,7 +320,7 @@ async fn run_pipeline(
             .await
             .context("acquire shared embedder for remember")?;
         // #9275: one vector per window-sized chunk, so a fact late in a long
-        // drawer is findable.
+        // drawer is findable; the embed ceiling scales with the chunk count.
         let vecs = super::embed_store::embed_chunks_within(
             embedder.as_ref(),
             &content,

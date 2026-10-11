@@ -311,7 +311,7 @@ async fn rebuild_index_keeps_every_chunk_of_a_long_drawer() {
     )
     .await
     .unwrap();
-    assert_eq!(rebuilt, 2);
+    assert_eq!((rebuilt.rebuilt, rebuilt.skipped), (2, 0));
     assert_eq!((shape(&handle, long), shape(&handle, short)), before);
 }
 
@@ -460,14 +460,15 @@ async fn a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest() {
 
     let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
         Arc::new(chunking_mock(&handle));
-    let result = super::helpers::rebuild_index_with(
+    let report = super::helpers::rebuild_index_with(
         &handle,
         Some(&e),
         Instant::now(),
         Duration::from_secs(60),
     )
-    .await;
-    assert!(result.is_ok(), "{result:?}");
+    .await
+    .unwrap();
+    assert_eq!((report.rebuilt, report.skipped), (2, 1), "{report:?}");
     let k = chunks_at(&handle, &words(30, "a"));
     for id in good {
         assert_eq!(shape(&handle, id), Some((k, (k - 1) as u32)));

@@ -14,6 +14,7 @@ use crate::memory_core::embed::Embedder;
 use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How one embedder splits drawer text: its window and its tokenizer.
 ///
@@ -109,15 +110,53 @@ pub async fn embed_chunks(embedder: &dyn Embedder, text: &str) -> Result<Vec<Vec
     embed_planned(embedder, &chunks).await
 }
 
-/// [`embed_chunks`] under an embed ceiling of `per_chunk`.
+/// The embed ceiling for `chunks` inputs: `per_chunk` once per chunk.
+///
+/// Why (#9275 fix round): `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` was sized for one
+/// input. Applied once to a whole drawer's chunks, it timed out a long drawer
+/// that got one vector before chunking, and it then got none.
+/// What: `per_chunk × max(chunks, 1)`, saturating. Bounded, because a split
+/// never yields more than `MAX_CHUNKS_PER_DRAWER` chunks.
+/// Test: `a_multi_chunk_drawer_inside_the_scaled_embed_timeout_gets_every_vector`,
+/// `a_wedged_chunked_embed_ends_at_the_scaled_bound`.
+pub(crate) fn chunked_embed_timeout(per_chunk: Duration, chunks: usize) -> Duration {
+    per_chunk.saturating_mul(u32::try_from(chunks.max(1)).unwrap_or(u32::MAX))
+}
+
+/// [`embed_chunks`] under [`chunked_embed_timeout`]: the one bounded chunked
+/// embed the remember path and the dream merge share.
+/// Test: `a_multi_chunk_drawer_inside_the_scaled_embed_timeout_gets_every_vector`.
 pub(crate) async fn embed_chunks_within(
     embedder: &dyn Embedder,
     text: &str,
-    per_chunk: std::time::Duration,
+    per_chunk: Duration,
 ) -> Result<Vec<Vec<f32>>> {
-    tokio::time::timeout(per_chunk, embed_chunks(embedder, text))
+    let chunks: Vec<String> = plan_chunks(embedder, text)?
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    embed_planned_within(embedder, &chunks, per_chunk).await
+}
+
+/// [`embed_planned`] under [`chunked_embed_timeout`] for `chunks`.
+/// Test: `a_wedged_chunked_embed_ends_at_the_scaled_bound`.
+pub(crate) async fn embed_planned_within(
+    embedder: &dyn Embedder,
+    chunks: &[String],
+    per_chunk: Duration,
+) -> Result<Vec<Vec<f32>>> {
+    // #9275: the ceiling scales with the chunk count.
+    let bound = chunked_embed_timeout(per_chunk, chunks.len());
+    tokio::time::timeout(bound, embed_planned(embedder, chunks))
         .await
-        .map_err(|_| anyhow::anyhow!("embed timed out after {per_chunk:?}"))?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "embedding {} chunks timed out after {bound:?} ({per_chunk:?} per chunk); \
+                 increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately take \
+                 longer on this host",
+                chunks.len()
+            )
+        })?
 }
 
 /// One `embed_batch` over `chunks`; a vector count other than the chunk count

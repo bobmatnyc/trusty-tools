@@ -98,6 +98,8 @@ pub use embed_repair::{
     VectorBackfillOptions, VectorBackfillReport,
 };
 pub use embed_store::embed_chunks;
+// #9275: the dream merge and rebuild share the bounded chunked embed.
+pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_within};
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};

@@ -23,7 +23,7 @@
 //! `permanent_failure_writes_a_ledger_row`,
 //! `missing_embedder_does_not_mark_the_drawer`.
 
-use super::embed_store::{embed_planned, plan_chunks};
+use super::embed_store::{chunked_embed_timeout, embed_planned, plan_chunks};
 use super::embedder::shared_embedder;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, PalaceId};
@@ -174,8 +174,8 @@ where
 /// is embedded by exactly the code that would have embedded it at write time.
 /// What: splits `content` once (#9275: a split error — no tokenizer, over the
 /// chunk cap — is an `Embed` loss after one attempt), retries one
-/// `embed_batch` over every chunk (each attempt under the existing
-/// `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` bound), then retries `upsert_chunks`,
+/// `embed_batch` over every chunk (each attempt under
+/// `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` once per chunk), then retries `upsert_chunks`,
 /// which replaces the drawer's whole group. Returns the failing stage in
 /// [`EmbedLoss`] so the caller can decide whether it warrants a durable marker.
 /// Test: `retry_succeeds_after_transient_failures`,
@@ -197,7 +197,8 @@ pub(super) async fn embed_and_store(
         .into_iter()
         .map(str::to_string)
         .collect();
-    let embed_timeout = timeouts::embed_batch_timeout();
+    // #9275: the per-attempt ceiling scales with the chunk count.
+    let embed_timeout = chunked_embed_timeout(timeouts::embed_batch_timeout(), batch.len());
     let (vectors, embed_attempts) = with_retry(policy, |_| {
         let embedder = embedder.clone();
         let batch = &batch;
