@@ -354,6 +354,10 @@ impl HeredocBodies {
                 line = body.next_line;
             }
         }
+        // #9720: the span queries binary-search these, so each must be in
+        // order and disjoint, as the forward line walk pushes them.
+        let ordered = |r: &[(usize, usize)]| r.windows(2).all(|w| w[0].1 <= w[1].0);
+        debug_assert!(ordered(&spans) && ordered(&frames), "spans out of order");
         Ok(Self {
             spans,
             frames,
@@ -381,19 +385,20 @@ impl HeredocBodies {
     /// The end of the body that starts at `idx`, when its operator line hands
     /// it to a shell (`bash <<'EOF'`), so the body is shell source (#8730).
     ///
-    /// Test: `write_targets_read_a_shell_heredoc_body`.
+    /// #9720: `spans` and `data` are in order with distinct starts, so both
+    /// lookups are binary searches.
+    /// Test: `write_targets_read_a_shell_heredoc_body`,
+    /// `heredoc_bodies_answer_span_queries_in_log_work_9720`.
     pub(super) fn shell_body_starting_at(&self, idx: usize) -> Option<usize> {
-        self.spans
-            .iter()
-            .find(|span| {
-                charge(Site::SpanProbe, 1);
-                span.0 == idx
-                    && !self.data.iter().any(|d| {
-                        charge(Site::SpanProbe, 1);
-                        d.span == **span
-                    })
-            })
-            .map(|span| span.1)
+        let span = self.spans.get(self.spans.partition_point(|s| {
+            charge(Site::SpanProbe, 1);
+            s.0 < idx
+        }))?;
+        let data = self.data.get(self.data.partition_point(|d| {
+            charge(Site::SpanProbe, 1);
+            d.span.0 < idx
+        }));
+        (span.0 == idx && data.is_none_or(|d| d.span != *span)).then_some(span.1)
     }
 
     /// Every claimed body's half-open span, in order (#9155); #9180: the
@@ -425,12 +430,11 @@ impl HeredocBodies {
 
     /// Whether byte `idx` is here-document body content.
     ///
-    /// Test: `heredoc_bodies_exclude_the_operator_line`.
+    /// Test: `heredoc_bodies_exclude_the_operator_line`,
+    /// `heredoc_bodies_answer_span_queries_in_log_work_9720`.
     pub(super) fn contains(&self, idx: usize) -> bool {
-        self.spans.iter().any(|(start, end)| {
-            charge(Site::SpanProbe, 1);
-            idx >= *start && idx < *end
-        })
+        // #9720: callers ask per byte; a binary search, not a scan.
+        covers(&self.spans, idx)
     }
 
     /// Whether byte `idx` is here-document framing, so a separator there is
@@ -450,11 +454,21 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
     /// `split_shell_segments_keeps_a_heredoc_body_whole`.
     pub(super) fn suppresses_separator(&self, idx: usize) -> bool {
-        self.frames.iter().any(|(start, end)| {
-            charge(Site::SpanProbe, 1);
-            idx >= *start && idx < *end
-        })
+        // #9720: callers ask per byte; a binary search, not a scan.
+        covers(&self.frames, idx)
     }
+}
+
+/// Whether one of `ranges`, half-open, in order and disjoint, holds `idx`
+/// (#9720): only the first range ending past `idx` can.
+///
+/// Test: `heredoc_bodies_answer_span_queries_in_log_work_9720`.
+fn covers(ranges: &[(usize, usize)], idx: usize) -> bool {
+    let first = ranges.partition_point(|(_, end)| {
+        charge(Site::SpanProbe, 1);
+        *end <= idx
+    });
+    ranges.get(first).is_some_and(|(start, _)| *start <= idx)
 }
 
 /// Separate `command` into the text a word scan may read as argv and the
