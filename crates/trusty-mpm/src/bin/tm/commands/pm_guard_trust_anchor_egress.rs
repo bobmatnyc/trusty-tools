@@ -316,9 +316,7 @@ fn edited(input: &Value, current: &str) -> Option<String> {
         })
     };
     match input.get("edits").and_then(Value::as_array) {
-        Some(edits) => edits
-            .iter()
-            .try_fold(current.to_owned(), |text, edit| apply(text, edit)),
+        Some(edits) => edits.iter().try_fold(current.to_owned(), &apply),
         None => apply(current.to_owned(), input),
     }
 }
