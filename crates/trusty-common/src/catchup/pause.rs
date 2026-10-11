@@ -390,6 +390,79 @@ mod tests {
         );
     }
 
+    /// Every 7-40 character hex token holding at least one letter, outside the
+    /// code-generated `Last commit:` line. Written independently of the
+    /// production rule so a broken scrub cannot also break its own check.
+    fn head_sha_tokens(md: &str) -> Vec<String> {
+        md.lines()
+            .filter(|line| !line.starts_with("Last commit:"))
+            .flat_map(|line| line.split(|c: char| !c.is_ascii_alphanumeric()))
+            .filter(|w| {
+                (7..=40).contains(&w.len())
+                    && w.chars().all(|c| c.is_ascii_hexdigit())
+                    && w.chars().any(|c| c.is_ascii_alphabetic())
+            })
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Why (#9390): two of 13 relaunches resumed from snapshots carrying wrong
+    /// PR head SHAs the PM had typed into the free-text sections.
+    /// What: SHA-like tokens in Summary / Completed / In Progress / Next Steps
+    /// are flagged, the code-generated `Last commit:` line keeps its id, and
+    /// branch names, issue numbers, dates, times and hex-looking words survive.
+    /// Test: itself.
+    #[test]
+    fn a_snapshot_contains_no_head_sha() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(tmp.path());
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["log", "-1", "--format=%h"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+        let input = PauseSnapshotInput {
+            session_id: "s1",
+            summary: "On feat/9390-x for #9390, 2026-10-10 21:46: PR #12 head d3963848ab.",
+            completed: &["added the facade; deadbeef and xdeadbeef1x are words".to_string()],
+            in_progress: &[
+                "PR #12 head d3963848ab awaiting CI".to_string(),
+                "compare abc1234..def5678".to_string(),
+            ],
+            next_steps: &["merge `0123456789abcdef0123456789abcdef01234567`".to_string()],
+            tmux_window: None,
+        };
+        let outcome = write_pause_snapshot(tmp.path(), &input).unwrap();
+        let md = std::fs::read_to_string(&outcome.snapshot_path).unwrap();
+
+        assert_eq!(
+            head_sha_tokens(&md),
+            Vec::<String>::new(),
+            "no head SHA may survive outside `Last commit:`:\n{md}"
+        );
+        for kept in [
+            "feat/9390-x",
+            "#9390",
+            "2026-10-10",
+            "21:46",
+            "PR #12",
+            "added the facade",
+            "deadbeef",
+            "xdeadbeef1x",
+        ] {
+            assert!(md.contains(kept), "{kept:?} must survive:\n{md}");
+        }
+        assert!(md.contains("<sha?>"), "a stripped id is flagged:\n{md}");
+        assert!(
+            md.lines()
+                .any(|l| l.starts_with(&format!("Last commit: {head} "))),
+            "the #7501 baseline keeps its commit id:\n{md}"
+        );
+    }
+
     #[test]
     fn write_pause_snapshot_nonrepo_still_writes() {
         // No git init at all — capture_git_status fails-open to all-None, and

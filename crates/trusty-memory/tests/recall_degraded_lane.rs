@@ -302,3 +302,91 @@ async fn an_expired_slot_is_not_returned_by_the_warming_path() {
         .unwrap_or_else(|| panic!("expired slot still listed: {listed:#}"));
     assert_eq!(row["fact_key"], json!("pr:1/state"), "{listed:#}");
 }
+
+/// Why (#9390, PR A critic MEDIUM): the warming path asks BM25 for a fixed
+/// window and drops expired hits after the fetch. Expired Tier C slots are
+/// never deleted (ADR-0028 D6), so a pile of them that out-scores the live slot
+/// fills that window and the live slot is never hydrated.
+/// What: a cold, `Warming` state with the in-process BM25 lane, one live slot
+/// and 40 expired slots on other keys whose shorter text out-scores it on BM25
+/// (the window is 20 at `top_k` 10). All three recall tools must return the
+/// live slot and no expired one.
+#[tokio::test]
+async fn recall_returns_the_live_slot_past_twenty_expired_ones_while_warming() {
+    use trusty_common::memory_core::palace::{Drawer, PalaceId};
+    use trusty_memory::bm25_lane::Bm25Lane;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = Bm25Lane::new(tmp.path().join("bm25"));
+    let state = cold_warming_state(&tmp).with_bm25_lane(lane.clone());
+    let palace = "warmtest-refill";
+    let cwd = tmp.path().to_string_lossy().to_string();
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": palace, "force": true, "cwd": cwd}),
+    )
+    .await
+    .expect("palace_create");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+
+    let now = chrono::Utc::now();
+    let mut slots = Vec::new();
+    let mut slot = |key: String, text: String, expires_at: chrono::DateTime<chrono::Utc>| {
+        let mut d = Drawer::new(uuid::Uuid::new_v4(), &text);
+        d.fact_key = Some(key);
+        d.expires_at = Some(expires_at);
+        let id = d.id;
+        handle.add_drawer(d);
+        slots.push((id, text));
+        id
+    };
+    let live = slot(
+        "pr:999/state".to_string(),
+        "release head sha for the live resume slot".to_string(),
+        now + chrono::Duration::days(1),
+    );
+    let expired: Vec<uuid::Uuid> = (0..40)
+        .map(|n| {
+            slot(
+                format!("pr:{n}/state"),
+                format!("release head sha {n}"),
+                now - chrono::Duration::hours(1),
+            )
+        })
+        .collect();
+    for (id, text) in &slots {
+        lane.index(palace, &id.to_string(), text)
+            .await
+            .expect("index");
+    }
+
+    for tool in ["memory_recall", "memory_recall_deep", "memory_recall_all"] {
+        let args = if tool == "memory_recall_all" {
+            json!({"q": "release head sha", "top_k": 10})
+        } else {
+            json!({"palace": palace, "query": "release head sha", "top_k": 10})
+        };
+        let result = dispatch_tool(&state, tool, args)
+            .await
+            .expect("recall while warming");
+        assert_no_vector_lane(&result, tool);
+        let ids: Vec<String> = result["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|r| r["drawer_id"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            ids.contains(&live.to_string()),
+            "{tool}: the live slot must be recalled past 40 expired ones: {result:#}"
+        );
+        assert!(
+            !expired.iter().any(|id| ids.contains(&id.to_string())),
+            "{tool}: an expired slot was recalled: {result:#}"
+        );
+    }
+}
