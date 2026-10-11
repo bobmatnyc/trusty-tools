@@ -780,8 +780,8 @@ async fn bridge_methods_answer_as_their_direct_method() {
 }
 
 /// Why: owner ruling Ddf (2026-10-11), every arm — with `secrets.audit:
-/// false` no bridged method writes a record: `list`, `set`, `delete`,
-/// `copy` and `set_agents_may_use` allowed, a `set_agents_may_use` ON
+/// false` no bridged method writes a record: `list`, `scopes`, `set`,
+/// `delete`, `copy` and `set_agents_may_use` allowed, a `set_agents_may_use` ON
 /// refused for an agent client, and an `invalid_params` refusal of a
 /// malformed assertion. Each still answers as it does with the audit on.
 /// Red when any bridged arm skips the machine suppression.
@@ -805,6 +805,7 @@ async fn bridge_audit_disabled_writes_nothing_for_every_method() {
                       "keys": ["API_KEY"]});
     let allowed = [
         ("secrets.bridge.list", list_params(&fx)),
+        (BRIDGE_SCOPES, json!({"project": project})),
         (BRIDGE_SET, set_params(&fx, "NEW_KEY", OPEN_VALUE)),
         ("secrets.bridge.delete", delete),
         ("secrets.bridge.copy", copy),
@@ -939,4 +940,39 @@ async fn bridge_scopes_returns_only_project_and_owner_kinds() {
     assert_eq!(all[0]["decision"], "allow");
     assert_eq!(all[0]["source"], "unmappable");
     assert_eq!(all[0]["agent_parent"], true);
+}
+
+/// Why: #9067 review — a bridged scopes call is admitted fail-closed like a
+/// bridged list: when the audit log cannot be written it is refused with
+/// `audit_unavailable` and returns no scopes. A direct scopes on the same
+/// server still answers; it leaves no record, so it needs none.
+/// Red when the bridged scopes skips `Gate::admit`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_scopes_refuses_when_audit_unwritable() {
+    let fx = fixture();
+    let (state, _grants) = state_with(&fx, console_procs());
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    let _restore = RestoreMode(dir);
+    let server = fx.start_state(state).await;
+    let socket = &fx.settings.socket;
+    let bridge = call(
+        socket,
+        BRIDGE_SCOPES,
+        bridged(json!({"project": fx.project()}), assertion(false, "mapped")),
+    )
+    .await;
+    let direct = call(socket, method::SCOPES, json!({"project": fx.project()})).await;
+    server.stop().await;
+
+    assert_eq!(kind(&bridge).as_deref(), Some("audit_unavailable"));
+    assert!(bridge.result.is_none(), "{:?}", bridge.result);
+    assert!(
+        !wire(&bridge).contains(r#""kind":"project""#),
+        "{}",
+        wire(&bridge)
+    );
+    assert_eq!(ok(direct)["scopes"][0]["vault"], PROJECT_VAULT);
 }

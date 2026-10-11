@@ -121,7 +121,8 @@ pub(crate) fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 /// call leaves no record. #9067: a console bridge call is audited like a
 /// bridged `list`: admitted fail-closed, one record per call.
 /// Test: `server_scopes_round_trip_over_a_real_socket`,
-/// `bridge_scopes_returns_only_project_and_owner_kinds`.
+/// `bridge_scopes_returns_only_project_and_owner_kinds`,
+/// `bridge_scopes_refuses_when_audit_unwritable`.
 pub(crate) fn scopes(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     let body = |gate: Option<&mut Gate<'_>>| -> Result<Value, ErrorKind> {
         let (dir, rest) = split_project(params)?;
