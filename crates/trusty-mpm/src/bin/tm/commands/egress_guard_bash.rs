@@ -141,6 +141,9 @@ pub(crate) const MAX_COMMAND_BYTES: usize = 64 * 1024;
 /// strips (#9699 (a)).
 const QUOTING: &[char] = &['\'', '"', '\\'];
 
+/// A backslash-newline, which bash removes before it splits words (#9699).
+const LINE_CONTINUATION: &str = "\\\n";
+
 /// Why the Bash arm denies a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BashDeny {
@@ -289,18 +292,30 @@ fn text_hit(text: &str) -> Option<BashDeny> {
     }
 }
 
-/// [`host_hit`], then [`raw_word_hit`], over `text` and over `text` with its
-/// [`QUOTING`] bytes removed: the fail-closed judgement of a text the parsers
+/// [`host_hit`], then [`raw_word_hit`], over `text`, over `text` with its
+/// [`QUOTING`] bytes removed, and over `text` with each [`LINE_CONTINUATION`]
+/// removed before its quoting: the fail-closed judgement of a text the parsers
 /// cannot read.
 ///
 /// Why (#9699 (a)): the raw words split at quotes, so `se''ndmail` read as
 /// `se` and `ndmail`; the shell removes those quotes and runs `sendmail`.
+/// #9699 critic: bash also drops `\`+newline, so `se\<newline>ndmail` runs
+/// `sendmail`. Each form only adds text to judge.
 /// Test: `bash_egress_denies_quote_split_names_in_the_raw_scan_9699`,
-/// `bash_allows_quote_separated_words_in_the_raw_scan_9699`.
+/// `bash_allows_quote_separated_words_in_the_raw_scan_9699`,
+/// `raw_hit_joins_line_continuations_9699`.
 fn raw_hit(text: &str) -> Option<Hit> {
-    let unquoted: String = text.chars().filter(|c| !QUOTING.contains(c)).collect();
-    [text, unquoted.as_str()]
+    let unquote = |text: &str| -> String {
+        text.chars().filter(|c| !QUOTING.contains(c)).collect()
+    };
+    let unquoted = unquote(text);
+    // #9699: joined before quote stripping, as bash joins before it splits.
+    let joined = text
+        .contains(LINE_CONTINUATION)
+        .then(|| unquote(&text.replace(LINE_CONTINUATION, "")));
+    [Some(text), Some(unquoted.as_str()), joined.as_deref()]
         .into_iter()
+        .flatten()
         .find_map(|text| host_hit(text).or_else(|| raw_word_hit(text)))
 }
 
@@ -377,7 +392,12 @@ fn smtp_port_hit(piece: &str, after: &str) -> Option<Hit> {
 /// Why (plan §5): the fail-closed arm for a command the parsers cannot read.
 /// It reads every word, not only command position, because the command
 /// position is unknown.
-/// Test: `bash_egress_denies_unlexable_with_family_token`.
+/// What: a `tm` word's subcommand is found past its flags by
+/// [`tm_subcommand_at`], as the walk finds it (#9699 critic). A `tm` inside a
+/// run an earlier `tm` already read is a flag value, and reading from it
+/// gives the same answer, so it is skipped: the scan stays linear.
+/// Test: `bash_egress_denies_unlexable_with_family_token`,
+/// `raw_word_hit_skips_tm_flags_9699`.
 fn raw_word_hit(text: &str) -> Option<Hit> {
     let lower = text.to_ascii_lowercase();
     if lower.contains(SMTPLIB) {
@@ -387,12 +407,19 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
         .split(|c: char| c.is_whitespace() || RAW_SEPARATORS.contains(&c))
         .filter(|word| !word.is_empty())
         .collect();
+    let mut tm_read_to = 0;
     words.iter().enumerate().find_map(|(i, word)| {
         let name = basename(word);
-        match name.as_str() {
-            "tm" => words.get(i + 1).and_then(|next| tm_subcommand_hit(next)),
-            _ => program_hit(&name),
+        if name != "tm" {
+            return program_hit(&name);
         }
+        if i < tm_read_to {
+            return None;
+        }
+        let rest = &words[i + 1..];
+        let at = tm_subcommand_at(rest);
+        tm_read_to = i + 1 + at.unwrap_or(rest.len());
+        at.and_then(|at| tm_subcommand_hit(rest[at]))
     })
 }
 
@@ -502,7 +529,7 @@ fn program_position_hit(argv: &[String], at: usize, bodies: &[String]) -> Option
         return Some(found);
     }
     if name == "tm" {
-        return tm_subcommand(rest).and_then(tm_subcommand_hit);
+        return tm_subcommand_at(rest).and_then(|at| tm_subcommand_hit(&rest[at]));
     }
     if !is_interpreter(&name) {
         return None;
@@ -526,15 +553,19 @@ fn program_hit(name: &str) -> Option<Hit> {
         .map(|(program, service)| hit(service, program))
 }
 
-/// `tm`'s subcommand word: the first word that is neither a flag nor a
-/// [`TM_VALUED_FLAGS`] value.
-fn tm_subcommand(rest: &[String]) -> Option<&str> {
-    let mut words = rest.iter();
-    while let Some(word) = words.next() {
-        if TM_VALUED_FLAGS.contains(&word.as_str()) {
-            words.next();
+/// The index in `rest` of `tm`'s subcommand word: the first word that is
+/// neither a flag nor a [`TM_VALUED_FLAGS`] value. Generic so the walk's argv
+/// and the raw scan's words share it (#9699 critic).
+/// Test: `bash_egress_denies_tm_slack_subcommand`, `raw_word_hit_skips_tm_flags_9699`.
+fn tm_subcommand_at<S: AsRef<str>>(rest: &[S]) -> Option<usize> {
+    let mut at = 0;
+    while let Some(word) = rest.get(at).map(|word| -> &str { word.as_ref() }) {
+        if TM_VALUED_FLAGS.contains(&word) {
+            at += 2;
         } else if !word.starts_with('-') {
-            return Some(word);
+            return Some(at);
+        } else {
+            at += 1;
         }
     }
     None
