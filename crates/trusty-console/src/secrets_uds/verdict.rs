@@ -10,7 +10,9 @@
 //! [`PidResolver`] finds the pid behind a loopback TCP peer; the per-OS
 //! implementation is `pid_map`. [`judge`] turns an accepted peer into a
 //! [`BridgeAssertion`] against the process table *at request time*:
-//! - no pid: `unmappable` (a non-agent, Dd7 B);
+//! - no pid: `unmappable`, asserted `agent_parent: true` (#9067, Architect
+//!   Q5: fail closed), so toggle-ON is refused. This covers every client on
+//!   a platform with no socket table (`pid_map`);
 //! - a pid whose start time was unreadable at accept, differs now, or whose
 //!   chain cannot be read: `unreadable` (`agent_parent: true`), never
 //!   `unmappable`;
@@ -19,7 +21,7 @@
 //! [`PeerLookup`] runs the accept-time lookup on tokio's blocking pool, and
 //! [`judge_in_time`] waits for it and the judgement under [`VERDICT_BOUND`].
 //!
-//! Test: `verdict_without_a_pid_is_unmappable_and_not_an_agent`,
+//! Test: `verdict_without_a_pid_is_unmappable_and_an_agent`,
 //! `verdict_with_an_unreadable_chain_is_unreadable`,
 //! `verdict_for_a_pid_reused_after_accept_is_unreadable`,
 //! `verdict_reads_the_agent_ancestor`.
@@ -82,11 +84,13 @@ impl AcceptedPeer {
 
 /// The assertion for `peer`, judged against `table` now.
 ///
-/// What: see the module docs. Never answers `{mapped, false}` for a pid
-/// whose chain or start time could not be read.
+/// What: see the module docs. Never answers `agent_parent: false` for a
+/// client with no pid, or for a pid whose chain or start time could not be
+/// read.
 /// Test: the `verdict_*` tests in `tests.rs`.
 pub fn judge(table: &dyn ProcessTable, peer: AcceptedPeer) -> BridgeAssertion {
     let AcceptedPeer::Found { pid, start } = peer else {
+        // #9067 Architect Q5: `unmappable` carries `agent_parent: true`.
         return BridgeAssertion::unmappable();
     };
     // #9066 A9: a pid found at accept is never downgraded to `unmappable`.

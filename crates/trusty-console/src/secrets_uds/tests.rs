@@ -878,6 +878,9 @@ async fn tailnet_requests_are_refused_before_any_lookup() {
     let bridge = bridge_at(&socket, Arc::clone(&table) as Arc<dyn ProcessTable>);
     for path in [
         "/api/secrets/session",
+        // #9067: the picker routes are refused on the tailnet too.
+        "/api/secrets/projects",
+        "/api/secrets/scopes",
         "/api/secrets/list",
         "/api/secrets/set",
         "/api/secrets/delete",

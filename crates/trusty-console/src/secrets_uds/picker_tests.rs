@@ -282,3 +282,26 @@ async fn projects_route_answers_an_empty_list_for_an_absent_or_empty_registry() 
         assert!(!body.contains("SECRET-LOOKING-TEXT"), "{body}");
     }
 }
+
+/// Why: #9067 — the registry is where tm keeps it: under `TRUSTY_MPM_ROOT`
+/// when set, else `~/.trusty-mpm`; with neither there is no registry, never
+/// a path relative to the console's working directory.
+/// Test: itself.
+#[test]
+fn registry_file_follows_the_tm_root() {
+    use super::projects::registry_file_for;
+    let home = Some(std::path::PathBuf::from("/home/u"));
+    assert_eq!(
+        registry_file_for(Some("/opt/tm".into()), home.clone()),
+        Some("/opt/tm/project-paths.json".into())
+    );
+    assert_eq!(
+        registry_file_for(Some("".into()), home.clone()),
+        Some("/home/u/.trusty-mpm/project-paths.json".into())
+    );
+    assert_eq!(
+        registry_file_for(None, home),
+        Some("/home/u/.trusty-mpm/project-paths.json".into())
+    );
+    assert_eq!(registry_file_for(None, None), None);
+}
