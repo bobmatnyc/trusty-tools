@@ -321,14 +321,14 @@ pub fn config_read() -> Result<Value, String> {
 /// identity overrides, and — since #2196 — the global/per-project untracked-
 /// secret-file sync allowlist, all without touching the legacy
 /// `~/.trusty-mpm/config.toml` or requiring the operator to hand-edit YAML.
-/// What: loads the current config, applies [`apply_config_write`] (the
-/// testable merge step), writes it back via
-/// [`trusty_common::crate_config::save`], and returns the merged config (with
-/// the resolved root) on success.
+/// What: resolves the config path and runs [`config_write_at`] with
+/// [`apply_config_write`] (the testable merge step), returning the merged
+/// config (with the resolved root) on success.
 /// Test: `config_write_merges_and_persists` covers `apply_config_write`
 /// directly (no real filesystem I/O against the operator's real config file —
 /// see that function's own doc for why `config_write` itself is not unit
-/// tested against the real file).
+/// tested against the real file); `config_save_preserves_channels_section`
+/// runs the same load, merge and save against a temp file (#8454 S2c).
 #[allow(clippy::too_many_arguments)]
 pub fn config_write(
     workspace_root_template: Option<&str>,
@@ -344,26 +344,62 @@ pub fn config_write(
     untracked_sync_patterns: Option<Vec<String>>,
     untracked_sync_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    let mut config = TrustyToolsConfig::load();
-    apply_config_write(
-        &mut config,
-        workspace_root_template,
-        auto_resume,
-        default_model,
-        project_name,
-        github_config_dir,
-        github_token_env,
-        github_account,
-        github_host,
-        commit_name,
-        commit_email,
-        untracked_sync_patterns,
-        untracked_sync_enabled,
-    )?;
+    let path = trusty_common::crate_config::crate_config_path(trusty_tools_config::CRATE_NAME)
+        .ok_or("persisting trusty-mpm config: home directory unavailable")?;
+    config_write_at(&path, |config| {
+        apply_config_write(
+            config,
+            workspace_root_template,
+            auto_resume,
+            default_model,
+            project_name,
+            github_config_dir,
+            github_token_env,
+            github_account,
+            github_host,
+            commit_name,
+            commit_email,
+            untracked_sync_patterns,
+            untracked_sync_enabled,
+        )
+    })
+}
 
-    trusty_common::crate_config::save(trusty_tools_config::CRATE_NAME, &config)
+/// [`config_write`] against the config file at `path`: load, `merge`, save.
+///
+/// Why: `config_write` resolves the operator's real file; this seam lets a
+/// test run the same load and save against a temp file.
+/// What: loads `path` (absent → defaults), applies `merge`, saves atomically
+/// with [`trusty_common::crate_config::save_at`] and returns the merged
+/// config as JSON. A file that cannot be read or parsed is an error and is
+/// never written: a save over defaults would replace every section in it.
+/// The refusal names the path only, never the parser message or file content.
+/// Test: `config_write_refuses_a_file_it_cannot_parse`,
+/// `config_write_refusal_never_echoes_file_content`.
+pub(crate) fn config_write_at(
+    path: &Path,
+    merge: impl FnOnce(&mut TrustyToolsConfig) -> Result<(), String>,
+) -> Result<Value, String> {
+    use trusty_common::crate_config::ConfigError;
+    // #8454 Q2: the erroring loader, never load_or_default.
+    let mut config: TrustyToolsConfig = trusty_common::crate_config::load_at(path)
+        .map_err(|e| match e {
+            // #8454: serde_yaml quotes the scalar it rejects, which can be a token.
+            ConfigError::Yaml { path, .. } => format!(
+                "refusing to save trusty-mpm config: {} does not parse; fix the file first \
+                 (tm doctor names the fault)",
+                path.display()
+            ),
+            ConfigError::Io { path, source } => format!(
+                "refusing to save trusty-mpm config: cannot read {}: {}; fix the file first",
+                path.display(),
+                source.kind()
+            ),
+        })?
+        .unwrap_or_default();
+    merge(&mut config)?;
+    trusty_common::crate_config::save_at(path, &config)
         .map_err(|e| format!("persisting trusty-mpm config: {e}"))?;
-
     Ok(config_to_json(&config))
 }
 
