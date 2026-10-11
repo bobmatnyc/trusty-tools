@@ -25,6 +25,7 @@ use std::panic::AssertUnwindSafe;
 
 use futures::FutureExt as _;
 
+use crate::commands::egress_guard_bash::{BASH_CHECK, bash_deny_reason, bash_egress_hit};
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
@@ -73,7 +74,8 @@ fn unclassifiable(detail: &str) -> String {
 /// Why (§4 of the G3 plan): fail closed. Each fault a payload can carry is a
 /// deny, never a default — no `unwrap_or_default` on a missing field.
 /// What: an `Err` read, a `tool_name` that is missing, empty or not a string,
-/// and a `tool_input` that is not an object each deny. A [`RESOURCE_TOOLS`]
+/// and a `tool_input` that is not an object each deny. A `Bash` call is
+/// judged by [`bash_verdict`] (#8454 S3). A [`RESOURCE_TOOLS`]
 /// call is judged by its `tool_input.server`, and denies when that is missing,
 /// empty or not a string. Otherwise the [`FamilyTable`] classifies the tool:
 /// a family or a malformed `mcp__` name denies, anything else allows.
@@ -157,8 +159,25 @@ pub(crate) fn decide(
 }
 
 /// The Bash arm of [`decide`] (#8454 S3).
-fn bash_verdict(_input: &serde_json::Value) -> Verdict {
-    Verdict::Allow
+///
+/// Why (§4 fail closed): Claude Code always sends a string `command`, so any
+/// other shape is a delivery fault, denied like a malformed payload.
+/// What: a missing or non-string `tool_input.command` denies as
+/// `egress-unclassifiable-payload`; a command [`bash_egress_hit`] names a hit
+/// in denies as [`BASH_CHECK`] with the plan §6 text; anything else allows.
+/// Test: `bash_egress_denies_missing_or_non_string_command`,
+/// `bash_egress_trust_anchor_verdict_precedes_the_bash_arm`.
+fn bash_verdict(input: &serde_json::Value) -> Verdict {
+    let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
+        return deny(
+            "egress-unclassifiable-payload",
+            unclassifiable("a Bash `tool_input.command` is missing or not a string"),
+        );
+    };
+    match bash_egress_hit(command) {
+        Some(hit) => deny(BASH_CHECK, bash_deny_reason(&hit)),
+        None => Verdict::Allow,
+    }
 }
 
 /// The guard's verdict: the trust-anchor floor first, then [`decide`].
