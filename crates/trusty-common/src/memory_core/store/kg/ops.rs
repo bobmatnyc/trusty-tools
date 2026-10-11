@@ -54,6 +54,23 @@ impl KnowledgeGraph {
             .context("superseded_by_many spawn_blocking join error")?
     }
 
+    /// The active `verify_with` command of each drawer in `ids` (#9390).
+    ///
+    /// Why: `memory_list` reports a command per listed drawer; one batched
+    /// read keeps that off the async runtime and out of a per-row loop.
+    /// What: runs `KgStoreRedb::verify_with_many` on the blocking pool. The map
+    /// holds `drawer -> command` for each id with an active command.
+    /// Test: `slot_retirement_closes_the_retirees_verify_command`.
+    pub async fn verify_with_many(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<std::collections::HashMap<Uuid, String>> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.verify_with_many(&ids))
+            .await
+            .context("verify_with_many spawn_blocking join error")?
+    }
+
     /// List up to `limit` distinct subjects with at least one active triple.
     ///
     /// Why: KG Explorer UI browses subjects without knowing one upfront.

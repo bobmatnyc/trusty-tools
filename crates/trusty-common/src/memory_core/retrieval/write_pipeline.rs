@@ -49,6 +49,7 @@
 
 use super::handle::PalaceHandle;
 use super::tier_c;
+use super::tier_c_verify;
 use super::types::RememberOptions;
 use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
@@ -226,6 +227,9 @@ async fn run_pipeline(
     importance: f32,
     opts: RememberOptions,
 ) -> Result<Uuid> {
+    // #9390: a verify command needs a slot and a non-blank, secret-free body;
+    // refuse it before anything is written.
+    let verify = tier_c_verify::check_verify_command(&opts)?;
     // Issue #61: signal/noise gate. `force == true` bypasses the QUALITY
     // gates (noise patterns, short-content, non-alphabetic ratio) below.
     // `enforce_min_tokens` lets `memory_note` keep the noise patterns
@@ -284,6 +288,9 @@ async fn run_pipeline(
     // have written it. See `tier_c::apply_admission`.
     tier_c::apply_admission(&mut drawer, &opts, &handle.id);
     let id = drawer.id;
+    // #9390: a refused slot (Tier E) has nothing to re-verify, so its command
+    // is dropped with the slot.
+    let verify = verify.filter(|_| drawer.fact_key.is_some());
 
     // Embed and upsert. Use the process-wide shared embedder so we don't
     // spin up a fresh ONNX session per call (issue #57). The
@@ -362,9 +369,11 @@ async fn run_pipeline(
     // The guard is deliberately NOT the write mutex: that one must release on
     // timeout (it is what unblocks the queue), and this one must not.
     let order = handle.commit_mutex.clone().lock_owned().await;
-    tokio::spawn(tier_c::commit_and_mirror(
+    // #9390: a missed verify record is reported after the post-commit steps.
+    let verify_missed = tokio::spawn(tier_c::commit_and_mirror(
         handle.commit_ctx(),
         drawer,
+        verify,
         order,
     ))
     .await
@@ -387,5 +396,8 @@ async fn run_pipeline(
     // new drawer without waiting for a dream cycle.
     handle.rebuild_closets();
 
-    Ok(id)
+    match verify_missed {
+        Some(missed) => Err(missed.into()),
+        None => Ok(id),
+    }
 }

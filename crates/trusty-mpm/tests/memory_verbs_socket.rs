@@ -298,6 +298,50 @@ async fn a_refused_slot_warns_and_exits_with_the_refusal_code() {
     }
 }
 
+/// Why (#9390): a slot's re-verify command is only stored if `--verify`
+/// reaches trusty-memory under its schema key `verify`, on both write verbs.
+/// Without `--fact-key` the flag is refused before any RPC, since a command on
+/// a non-slot has nothing to re-check.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_verify_command_reaches_the_write_request() {
+    const CMD: &str = "gh pr view 9390 --json headRefOid";
+    for (verb, method) in [("remember", "memory_remember"), ("note", "memory_note")] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("memory.sock");
+        let body = json!({ "palace": "p", "status": "stored", "drawer_id": "d9", "tier": "C" });
+        let (_stop, calls) = serve(&socket, body).await;
+
+        let out = run_tm(
+            &socket,
+            Some("p"),
+            &[
+                verb,
+                "PR 9390 is open on the stacked branch",
+                "--fact-key",
+                "pr:9390/state",
+                "--verify",
+                CMD,
+                "--json",
+            ],
+        )
+        .await;
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let (sent, params) = only_call(&calls);
+        assert_eq!(sent, method);
+        assert_eq!(params["fact_key"], json!("pr:9390/state"), "{params}");
+        assert_eq!(params["verify"], json!(CMD), "{params}");
+
+        let out = run_tm(&socket, Some("p"), &[verb, "no slot here", "--verify", CMD]).await;
+        assert!(!out.status.success(), "{verb}: --verify without --fact-key");
+        assert_eq!(calls.lock().expect("calls").len(), 1, "no second RPC");
+    }
+}
+
 /// A drawer id in the shape trusty-memory mints (#9340).
 const DRAWER: &str = "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21";
 

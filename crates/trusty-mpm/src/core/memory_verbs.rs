@@ -158,13 +158,14 @@ pub fn slot_refusal(verb: &MemoryVerb, result: &Value) -> Option<String> {
 /// current one in recall for weeks. Writing it under a stable `fact_key`
 /// (`ws:<session>/resume`, `pr:<n>/state`) makes the next write to that key
 /// supersede it.
-/// What: `fact_key` and `expires_at`, sent verbatim under trusty-memory's own
-/// `memory_remember`/`memory_note` schema keys of the same names
-/// (`crates/trusty-memory/src/tools/definitions.rs`). Both `None` sends neither
+/// What: `fact_key`, `expires_at` and `verify` (#9390), sent verbatim under
+/// trusty-memory's own `memory_remember`/`memory_note` schema keys of the same
+/// names (`crates/trusty-memory/src/tools/definitions.rs`). All `None` sends no
 /// key, so the request is the pre-#9142 one. The daemon owns the slot grammar
 /// and the 24-hour default expiry; this side only rejects an unparseable or
 /// past timestamp before anything is sent.
 /// Test: `a_fact_key_and_expiry_reach_the_request`,
+/// `a_verify_command_reaches_the_write_request`,
 /// `a_write_without_slot_flags_sends_the_old_request`,
 /// `a_bad_expires_at_is_refused_before_any_rpc`,
 /// `a_past_expires_at_is_refused_before_any_rpc`.
@@ -174,6 +175,8 @@ pub struct FactSlot {
     pub fact_key: Option<String>,
     /// `--expires-at`: RFC 3339 timestamp after which the fact stops being current.
     pub expires_at: Option<String>,
+    /// `--verify`: the command that re-reads this slot's fact (#9390).
+    pub verify: Option<String>,
 }
 
 impl FactSlot {
@@ -205,6 +208,7 @@ impl FactSlot {
     fn insert_into(&self, args: &mut Map<String, Value>) {
         insert_opt(args, "fact_key", self.fact_key.clone().map(Value::from));
         insert_opt(args, "expires_at", self.expires_at.clone().map(Value::from));
+        insert_opt(args, "verify", self.verify.clone().map(Value::from));
     }
 }
 

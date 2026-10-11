@@ -88,6 +88,8 @@ pub mod task_ops;
 pub mod wing_definitions;
 #[cfg(feature = "server")]
 pub mod wing_ops;
+// #9144 / #9390: write-tool properties spliced in for the recursion limit.
+mod write_property_definitions;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep

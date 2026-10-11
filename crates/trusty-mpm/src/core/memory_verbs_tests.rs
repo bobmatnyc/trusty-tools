@@ -323,6 +323,7 @@ async fn a_fact_key_and_expiry_reach_the_request() {
     let slot = FactSlot {
         fact_key: Some("ws:s1/resume".to_string()),
         expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+        verify: None,
     };
     for (verb, _) in writes(&slot) {
         let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
@@ -367,6 +368,7 @@ async fn a_bad_expires_at_is_refused_before_any_rpc() {
     let slot = FactSlot {
         fact_key: Some("pr:9254/state".to_string()),
         expires_at: Some("tomorrow".to_string()),
+        verify: None,
     };
     for (verb, _) in writes(&slot) {
         let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
@@ -392,6 +394,7 @@ async fn a_past_expires_at_is_refused_before_any_rpc() {
     let slot = FactSlot {
         fact_key: Some("pr:9254/state".to_string()),
         expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+        verify: None,
     };
     for (verb, _) in writes(&slot) {
         let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;

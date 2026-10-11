@@ -577,6 +577,8 @@ mod palace_index_tests;
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.
 mod remember_type_tests;
+// #9390: a Tier C slot's `verify` command, end to end through the dispatcher.
+mod verify_with_tests;
 mod write_budget_tests;
 // #4001: a write stalled on the palace lock must reach `memory.health`.
 mod write_liveness_tests;

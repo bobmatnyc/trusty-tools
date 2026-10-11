@@ -223,6 +223,9 @@ pub struct PalaceHandle {
     /// `registry_tests::open_does_not_reset_idle_clock`,
     /// `registry_tests::touch_after_open_makes_handle_recent`.
     pub last_accessed: Arc<AtomicU64>,
+    /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub(crate) fail_next_verify_record: Arc<AtomicBool>,
 }
 
 impl PalaceHandle {
@@ -285,7 +288,16 @@ impl PalaceHandle {
             // Never stalled in production; a test opts in per commit.
             #[cfg(test)]
             commit_delay: None,
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::clone(&self.fail_next_verify_record),
         }
+    }
+
+    /// #9390 test seam: the next slot write's verify record fails after its
+    /// drawer commits, as a failed KG write would.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn fail_next_verify_record_for_test(&self) {
+        self.fail_next_verify_record.store(true, Ordering::SeqCst);
     }
 
     /// Construct a new `PalaceHandle` with empty drawer table and L1 cache.
@@ -320,6 +332,8 @@ impl PalaceHandle {
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
         }
     }
 
@@ -589,6 +603,8 @@ impl PalaceHandle {
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             // #7087: an on-disk open is not an access — see the field doc.
             last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
         };
         Ok(Arc::new(handle))
     }

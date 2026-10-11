@@ -66,7 +66,7 @@ argument, and no verb prints a value. `list`, `remove`, `import`, `copy` and
 `tm memory forget` deletes one trusty-memory drawer by id, or by its slot with
 `--fact-key`. `tm memory remember` and `tm memory note` take `--fact-key` and
 `--expires-at`, so a new write under a key supersedes the previous fact in that
-slot.
+slot. `--verify <cmd>` stores the command that re-reads the slot's fact.
 
 `tm fleet init` resumes the Architect's earlier Claude conversation when it
 relaunches the Architect. `tm pr open` tags a phase pull request with the

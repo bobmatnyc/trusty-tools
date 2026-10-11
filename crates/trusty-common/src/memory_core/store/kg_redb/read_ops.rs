@@ -12,8 +12,9 @@
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::share::SUPERSEDED_BY;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TripleValue, decode_triple_key,
-    decode_u64, decode_value, prefix_range_end, subject_predicate_prefix, subject_prefix,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TripleValue, VERIFY_WITH,
+    decode_triple_key, decode_u64, decode_value, prefix_range_end, subject_predicate_prefix,
+    subject_prefix,
 };
 use anyhow::{Context, Result};
 use redb::{ReadableDatabase, ReadableTable};
@@ -413,13 +414,48 @@ impl KgStoreRedb {
     /// D6), and it asks about a whole result window at once. One read
     /// transaction for the window keeps the cost at one snapshot plus one
     /// b-tree seek per id, instead of one transaction per id.
-    /// What: for each id, a range scan over the `(drawer:{id}, superseded_by)`
-    /// prefix. The first active row whose object is `drawer:{uuid}`, naming a
-    /// drawer other than the subject, is that id's replacement. An id with no
-    /// such row is absent from the map. An object that is not a drawer
-    /// reference is skipped; an undecodable row is an error.
+    /// What: the first active `(drawer:{id}, superseded_by)` row whose object
+    /// is `drawer:{uuid}`, naming a drawer other than the subject, is that id's
+    /// replacement. An id with no such row is absent from the map. An object
+    /// that is not a drawer reference is skipped; an undecodable row is an
+    /// error.
     /// Test: `superseded_by_many_maps_only_active_drawer_edges`.
     pub fn superseded_by_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, Uuid>> {
+        self.first_active_object_many(ids, SUPERSEDED_BY, |id, object| {
+            object
+                .strip_prefix("drawer:")
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .filter(|r| *r != id)
+        })
+    }
+
+    /// The active `verify_with` command of each drawer in `ids` (#9390).
+    ///
+    /// Why: `memory_list` reports each listed drawer's re-verify command, and a
+    /// read per row would open one transaction per drawer.
+    /// What: the first active `(drawer:{id}, verify_with)` row's object, keyed
+    /// by drawer id. An id with no active row is absent from the map.
+    /// Test: `a_refused_slot_stores_no_verify_command`, `slot_retirement_closes_the_retirees_verify_command`.
+    pub fn verify_with_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
+        self.first_active_object_many(ids, VERIFY_WITH, |_, object| Some(object.to_string()))
+    }
+
+    /// Map each id in `ids` to its first accepted active object at `predicate`.
+    ///
+    /// Why: the batched per-drawer reads share one shape and must share one
+    /// read transaction, so they share this scan.
+    /// What: for each id, a range scan over the `(drawer:{id}, predicate)`
+    /// prefix, skipping closed rows. `accept` turns an object into a value or
+    /// rejects it; the first accepted value wins. An undecodable row is an
+    /// error.
+    /// Test: `superseded_by_many_maps_only_active_drawer_edges`,
+    /// `slot_retirement_closes_the_retirees_verify_command`.
+    fn first_active_object_many<T>(
+        &self,
+        ids: &[Uuid],
+        predicate: &str,
+        accept: impl Fn(Uuid, &str) -> Option<T>,
+    ) -> Result<HashMap<Uuid, T>> {
         let mut out = HashMap::new();
         if ids.is_empty() {
             return Ok(out);
@@ -427,29 +463,25 @@ impl KgStoreRedb {
         let rtx = self
             .db()
             .begin_read()
-            .context("begin superseded_by_many txn")?;
+            .with_context(|| format!("begin {predicate} batch read txn"))?;
         let triples = rtx
             .open_table(TRIPLES)
-            .context("open triples table for superseded_by_many")?;
+            .with_context(|| format!("open triples table for {predicate} batch read"))?;
         for &id in ids {
-            let prefix = subject_predicate_prefix(&format!("drawer:{id}"), SUPERSEDED_BY);
+            let prefix = subject_predicate_prefix(&format!("drawer:{id}"), predicate);
             let end = prefix_range_end(&prefix);
             let range = triples
                 .range::<&[u8]>(prefix.as_slice()..end.as_slice())
-                .context("range scan for superseded_by_many")?;
+                .with_context(|| format!("range scan for {predicate} batch read"))?;
             for entry in range {
-                let (_k, v) = entry.context("read row in superseded_by_many")?;
-                let value: TripleValue =
-                    decode_value(v.value()).context("decode TripleValue in superseded_by_many")?;
+                let (_k, v) = entry.with_context(|| format!("read row in {predicate} batch"))?;
+                let value: TripleValue = decode_value(v.value())
+                    .with_context(|| format!("decode TripleValue in {predicate} batch"))?;
                 if value.valid_to_ms.is_some() {
                     continue;
                 }
-                let replacement = value
-                    .object
-                    .strip_prefix("drawer:")
-                    .and_then(|s| Uuid::parse_str(s).ok());
-                if let Some(r) = replacement.filter(|r| *r != id) {
-                    out.insert(id, r);
+                if let Some(found) = accept(id, &value.object) {
+                    out.insert(id, found);
                     break;
                 }
             }
