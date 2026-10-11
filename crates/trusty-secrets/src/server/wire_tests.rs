@@ -22,6 +22,10 @@ use crate::server::router::serving_ends;
 #[path = "flag_tests.rs"]
 mod flag_tests;
 
+// #9066: S3a, the console bridge's verdict; it shares this module's helpers.
+#[path = "bridge_tests.rs"]
+mod bridge_tests;
+
 // #7520: the per-session value cache; it shares this module's helpers.
 #[path = "session_cache_tests.rs"]
 mod session_cache_tests;
