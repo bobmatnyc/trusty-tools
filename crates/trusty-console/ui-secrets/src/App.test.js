@@ -3,7 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import App from './App.svelte';
 import { createApi } from './lib/api.js';
 import { AGENT_HINT, KIND_TEXT } from './lib/kinds.js';
-import { PROJECT, fakeConsole } from './lib/fake.js';
+import { PROJECT, VAULT, fakeConsole } from './lib/fake.js';
 
 const SECRET = 'SPECIMEN-VALUE-9067-zz';
 
@@ -48,6 +48,14 @@ function type(el, value) {
   el.dispatchEvent(new Event('input', { bubbles: true }));
   flushSync();
 }
+
+/** A click with its click count: detail 2 is the second click of a double-click. */
+function click(el, detail) {
+  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail }));
+  flushSync();
+}
+
+const button = (text) => [...target.querySelectorAll('button')].find((b) => b.textContent.trim() === text);
 
 async function submit(form) {
   form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -127,27 +135,104 @@ describe('the Secrets page', () => {
     expect(q('notice').textContent).not.toMatch(/pid|\/proc|\d{3,}/i);
   });
 
-  test('copy offers the reported available backends and sends no vault', async () => {
-    const fake = await open();
+  test('copy offers the reported available backends', async () => {
+    await open();
     const options = [...q('copy-from').querySelectorAll('option')].map((o) => o.value);
     expect(options).toEqual(['keychain', 'file']);
+  });
+
+  // #9067: copy overwrites every key of the project in the destination.
+  test('copy sends no call until the confirmation', async () => {
+    const fake = await open();
     await submit(q('copy-form'));
-    const copy = fake.calls.find((c) => c.verb === 'copy');
-    expect(copy.body).toEqual({ project: PROJECT, from_backend: 'keychain', to_backend: 'file', keys: [] });
-    expect('vault' in copy.body).toBe(false);
+    expect(fake.calls.some((c) => c.verb === 'copy')).toBe(false);
+    expect(q('confirm-copy')).not.toBeNull();
+  });
+
+  test('the copy confirmation names both backends and the key count', async () => {
+    const fake = await open({
+      list: (body) => [200, { vault: body.vault, keys: ['A', 'B', 'C'].map((name) => ({ name, length: 1, updated_at: 't' })) }],
+    });
+    await submit(q('copy-form'));
+    const text = q('copy-confirm').textContent;
+    expect(text).toContain('keychain');
+    expect(text).toContain('file');
+    expect(text).toContain('3 keys');
+    // The count is the project vault's: the one copy reads from.
+    expect(fake.calls.filter((c) => c.verb === 'list').pop().body.vault).toBe(VAULT);
+  });
+
+  test('confirming a copy sends exactly one call, with no vault', async () => {
+    const fake = await open();
+    await submit(q('copy-form'));
+    click(q('confirm-copy'), 2);
+    await settle();
+    expect(fake.calls.some((c) => c.verb === 'copy')).toBe(false);
+    click(q('confirm-copy'), 1);
+    await settle();
+    const copies = fake.calls.filter((c) => c.verb === 'copy');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].body).toEqual({ project: PROJECT, from_backend: 'keychain', to_backend: 'file', keys: [] });
+    expect('vault' in copies[0].body).toBe(false);
     expect(q('copied').textContent).toContain('Copied 1');
   });
 
-  test('delete asks once more, then deletes', async () => {
+  test('cancelling a copy sends nothing', async () => {
     const fake = await open();
-    q('delete').click();
-    flushSync();
-    expect(fake.calls.some((c) => c.verb === 'delete')).toBe(false);
-    q('confirm-delete').click();
+    await submit(q('copy-form'));
+    click(q('cancel-copy'), 1);
     await settle();
-    expect(fake.calls.find((c) => c.verb === 'delete').body).toEqual({
-      project: PROJECT, vault: 'trusty/acme/web', key: 'API_KEY',
+    expect(q('copy-confirm')).toBeNull();
+    expect(fake.calls.some((c) => c.verb === 'copy')).toBe(false);
+  });
+
+  test('copy defaults from to the selected backend', async () => {
+    await open({
+      backends: () => [200, {
+        selected: 'file',
+        backends: [{ id: 'keychain', available: true }, { id: 'file', available: true }],
+      }],
     });
+    expect(q('copy-from').value).toBe('file');
+    expect(q('copy-to').value).toBe('keychain');
+  });
+
+  // #9067: a Keychain delete cannot be undone.
+  test('a double-click on Delete sends no delete call', async () => {
+    const fake = await open();
+    const slot = q('delete').closest('td');
+    click(q('delete'), 1);
+    // The second click lands where the pointer is, or on a confirm button
+    // that appeared there.
+    click(slot.querySelector('button'), 2);
+    if (q('confirm-delete')) click(q('confirm-delete'), 2);
+    await settle();
+    expect(fake.calls.some((c) => c.verb === 'delete')).toBe(false);
+  });
+
+  test('delete then confirm sends exactly one delete call', async () => {
+    const fake = await open();
+    click(q('delete'), 1);
+    expect(fake.calls.some((c) => c.verb === 'delete')).toBe(false);
+    click(q('confirm-delete'), 1);
+    await settle();
+    const deletes = fake.calls.filter((c) => c.verb === 'delete');
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].body).toEqual({ project: PROJECT, vault: VAULT, key: 'API_KEY' });
+  });
+
+  test('cancel or Escape leaves the key untouched', async () => {
+    const fake = await open();
+    click(q('delete'), 1);
+    click(button('Cancel'), 1);
+    expect(q('confirm-delete')).toBeNull();
+    click(q('delete'), 1);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    flushSync();
+    expect(q('confirm-delete')).toBeNull();
+    await settle();
+    expect(fake.calls.some((c) => c.verb === 'delete')).toBe(false);
+    expect(q('keys').querySelector('[data-key="API_KEY"]')).not.toBeNull();
   });
 
   test('a console refusal with no kind renders its text', async () => {
