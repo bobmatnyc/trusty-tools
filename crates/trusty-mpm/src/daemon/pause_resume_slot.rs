@@ -100,12 +100,17 @@ pub(crate) async fn record_resume_slot(
         .snapshot_path
         .strip_prefix(project_path)
         .unwrap_or(&outcome.snapshot_path);
-    let prs_text: Vec<String> = prs.iter().map(|n| format!("#{n}")).collect();
+    let prs_text = if prs.is_empty() {
+        "(none)".to_string()
+    } else {
+        let named: Vec<String> = prs.iter().map(|n| format!("#{n}")).collect();
+        named.join(", ")
+    };
     let text = format!(
         "Resume slot for session {}: branch {}; PRs {}; snapshot {}; expires_at {expires_at}.",
         input.session_id,
         branch.as_deref().unwrap_or("(none)"),
-        if prs.is_empty() { "(none)".to_string() } else { prs_text.join(", ") },
+        prs_text,
         snapshot.display(),
     );
     let mut args = json!({
@@ -143,7 +148,10 @@ fn is_safe_branch(branch: &str) -> bool {
     branch != "HEAD"
         && branch.len() <= 200
         && !branch.contains("..")
-        && branch.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && branch
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
         && branch
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))

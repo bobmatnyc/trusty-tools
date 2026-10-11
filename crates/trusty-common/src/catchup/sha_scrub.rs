@@ -90,7 +90,10 @@ mod tests {
             ("added the facade, deadbeef", "added the facade, deadbeef"),
             ("xdeadbeef1x and 0x1a2b3c4d5", "xdeadbeef1x and 0x1a2b3c4d5"),
             ("2026-10-10 21:46 20261010", "2026-10-10 21:46 20261010"),
-            ("feat/9390-x #9390 feat/fix-1a2b3c4d", "feat/9390-x #9390 feat/fix-1a2b3c4d"),
+            (
+                "feat/9390-x #9390 feat/fix-1a2b3c4d",
+                "feat/9390-x #9390 feat/fix-1a2b3c4d",
+            ),
             (
                 "session 7bd5c27a-475b-41df-9e9f-a6f630801717",
                 "session 7bd5c27a-475b-41df-9e9f-a6f630801717",

@@ -1525,7 +1525,11 @@ async fn l2_and_l3_refill_past_expired_drawers() {
         .unwrap();
     for (layer, results) in [("L2", l2), ("L3", l3)] {
         let ids: Vec<Uuid> = results.iter().map(|r| r.drawer.id).collect();
-        assert_eq!(ids, vec![live_id], "{layer} must refill past the expired pile");
+        assert_eq!(
+            ids,
+            vec![live_id],
+            "{layer} must refill past the expired pile"
+        );
     }
 }
 

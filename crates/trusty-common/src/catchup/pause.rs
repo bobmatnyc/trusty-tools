@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 
 use crate::catchup::git::capture_git_status;
-use crate::catchup::sha_scrub::scrub_sha_like;
 use crate::catchup::session_log::{self, SessionLogEntry};
+use crate::catchup::sha_scrub::scrub_sha_like;
 
 /// Input fields for a single pause snapshot.
 ///

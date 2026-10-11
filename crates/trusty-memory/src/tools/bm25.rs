@@ -334,7 +334,10 @@ pub(crate) fn fuse_bm25_into_recall(
 pub(crate) fn bm25_hits_to_recall_results(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     bm25_hits: &[BM25Hit],
-) -> (Vec<trusty_common::memory_core::retrieval::RecallResult>, usize) {
+) -> (
+    Vec<trusty_common::memory_core::retrieval::RecallResult>,
+    usize,
+) {
     let drawers = handle.drawers.read();
     let now = chrono::Utc::now();
     let mut expired = 0;

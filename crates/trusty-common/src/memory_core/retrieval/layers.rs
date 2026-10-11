@@ -359,9 +359,16 @@ pub async fn retrieve_l2_scoped(
     // #9279: one scorer for L2 and L3, so both apply the id-token rarity rule.
     let query_tokens: Vec<String> = extract_keywords(query);
     // #9390: refills past expired slots, which ADR-0028 D6 never deletes.
-    let mut results =
-        search_live_candidates(handle, &query_vec, overfetch, top_k, &allowed, &query_tokens, 2)
-            .await?;
+    let mut results = search_live_candidates(
+        handle,
+        &query_vec,
+        overfetch,
+        top_k,
+        &allowed,
+        &query_tokens,
+        2,
+    )
+    .await?;
 
     // #9280: id tiebreak, so tied drawers rank the same on every open.
     results.sort_by(rank_order);
