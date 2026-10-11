@@ -149,6 +149,11 @@ const FAMILY_TOOLS: &[&str] = &[
     "mcp__gworkspace-mcp__list_message_attachments",
     "mcp__GWorkspace__send_chat_message",
     "MCP__Slack__send",
+    // #8454 fix round: the spelled-out server names.
+    "mcp__google_workspace__send_gmail_message",
+    "mcp__Google-Workspace__send_chat_message",
+    "mcp__google-mail__send",
+    "mcp__claude_ai_Google_Mail__search_threads",
 ];
 
 /// 🔴 #8454 S1: every family tool is denied, whatever its casing or separators.
@@ -271,6 +276,94 @@ fn egress_denies_a_stdin_left_open_past_the_deadline() {
         stderr: Vec::new(),
     };
     assert_denied(&out, "stdin held open");
+}
+
+/// A `PreToolUse` payload for `tool` with `input` as its `tool_input`.
+fn payload_with(tool: &str, input: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({
+        "session_id": "s-8454",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": input,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// 🔴 #8454 S1 (Bob ruling 4): Claude Code's MCP resource tools name their
+/// server in `tool_input.server`, not in `tool_name`; a family server there is
+/// denied like a family tool.
+#[test]
+fn egress_denies_family_mcp_resource_tools() {
+    for (tool, input) in [
+        (
+            "ReadMcpResourceTool",
+            serde_json::json!({"server": "slack-mcp", "uri": "slack://channel/C1"}),
+        ),
+        (
+            "ReadMcpResourceTool",
+            serde_json::json!({"server": "Google_Workspace", "uri": "doc://1"}),
+        ),
+        (
+            "ListMcpResourcesTool",
+            serde_json::json!({"server": "claude_ai_Gmail"}),
+        ),
+        (
+            "ListMcpResourcesTool",
+            serde_json::json!({"server": "notion"}),
+        ),
+    ] {
+        assert_denied(
+            &run(&payload_with(tool, input.clone()), &[]),
+            &format!("{tool} {input}"),
+        );
+    }
+}
+
+/// 🔴 #8454 S1 (§4 fail closed): a resource tool that names no server string
+/// denies. A `ListMcpResourcesTool` with no server lists every server's
+/// resources, family servers included.
+#[test]
+fn egress_denies_resource_tools_naming_no_server() {
+    for (tool, input) in [
+        ("ListMcpResourcesTool", serde_json::json!({})),
+        ("ListMcpResourcesTool", serde_json::json!({"server": ""})),
+        ("ListMcpResourcesTool", serde_json::json!({"server": 7})),
+        ("ReadMcpResourceTool", serde_json::json!({"uri": "x://y"})),
+        (
+            "ReadMcpResourceTool",
+            serde_json::json!({"server": null, "uri": "x://y"}),
+        ),
+        (
+            "ReadMcpResourceTool",
+            serde_json::json!({"server": ["slack"], "uri": "x://y"}),
+        ),
+    ] {
+        assert_denied(
+            &run(&payload_with(tool, input.clone()), &[]),
+            &format!("{tool} {input}"),
+        );
+    }
+}
+
+/// #8454 S1 control: a resource tool naming a non-family server is allowed.
+#[test]
+fn egress_allows_resource_tools_naming_unrelated_servers() {
+    for (tool, input) in [
+        (
+            "ReadMcpResourceTool",
+            serde_json::json!({"server": "trusty-memory", "uri": "memory://palace"}),
+        ),
+        (
+            "ListMcpResourcesTool",
+            serde_json::json!({"server": "trusty-memory"}),
+        ),
+    ] {
+        assert_allowed(
+            &run(&payload_with(tool, input.clone()), &[]),
+            &format!("{tool} {input}"),
+        );
+    }
 }
 
 /// #8454 S1 control: tools outside the families — including non-mail
