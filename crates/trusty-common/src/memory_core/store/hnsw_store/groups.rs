@@ -129,14 +129,33 @@ impl HnswStore {
     /// `single_upsert_drops_stale_chunk_rows`,
     /// `replace_group_rejects_an_empty_or_hash_drawer_key`.
     pub fn replace_group(&self, drawer: &str, vectors: &[Vec<f32>]) -> Result<Vec<u64>> {
+        self.replace_group_capped(drawer, vectors, MAX_CHUNKS_PER_DRAWER)
+    }
+
+    /// [`Self::replace_group`] with the chunk-count cap passed in.
+    ///
+    /// Why: a test at the production cap inserts 4096 points in one call and
+    /// outran the 60 s HNSW op budget on CI; a small cap tests the same
+    /// boundary in milliseconds.
+    /// What: `cap` must be at most [`MAX_CHUNKS_PER_DRAWER`], so a chunk
+    /// index fits the `u32` key suffix. A count outside `1..=cap` is
+    /// [`HnswStoreError::ChunkCount`] naming `cap`, before any write.
+    /// Test: `upsert_chunks_rejects_empty_and_over_cap`.
+    // #9275: cap seam so the boundary test fits the op budget.
+    pub(crate) fn replace_group_capped(
+        &self,
+        drawer: &str,
+        vectors: &[Vec<f32>],
+        cap: usize,
+    ) -> Result<Vec<u64>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
         check_drawer_key(drawer)?;
-        if vectors.is_empty() || vectors.len() > MAX_CHUNKS_PER_DRAWER {
+        if vectors.is_empty() || vectors.len() > cap {
             return Err(HnswStoreError::ChunkCount {
                 got: vectors.len(),
-                max: MAX_CHUNKS_PER_DRAWER,
+                max: cap,
             });
         }
         if let Some(bad) = vectors.iter().find(|v| v.len() != self.dim) {
@@ -167,7 +186,7 @@ impl HnswStore {
             let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
             let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
             for (n, bytes) in encoded.iter().enumerate() {
-                // n < MAX_CHUNKS_PER_DRAWER, so it fits u32.
+                // n < cap <= MAX_CHUNKS_PER_DRAWER, so it fits u32.
                 let key = vector_key::format(drawer, n as u32);
                 let existing = keys.get(key.as_str())?.map(|g| g.value());
                 let id = match existing {
