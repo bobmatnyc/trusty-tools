@@ -37,6 +37,8 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
+// #8454 S3: the Bash arm — a family host or program in a Bash command.
+pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
