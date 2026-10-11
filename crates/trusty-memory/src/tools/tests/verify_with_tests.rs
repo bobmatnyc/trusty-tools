@@ -307,7 +307,10 @@ async fn a_failed_verify_record_still_indexes_the_drawer() {
 
     let drawers = list(&state, "vw6").await;
     assert_eq!(drawers.len(), 1, "{drawers:?}");
-    let id = drawers[0]["drawer_id"].as_str().expect("drawer_id").to_string();
+    let id = drawers[0]["drawer_id"]
+        .as_str()
+        .expect("drawer_id")
+        .to_string();
     assert_eq!(drawers[0]["fact_key"], json!(KEY), "{drawers:?}");
     assert_eq!(drawers[0]["verify"], Value::Null, "{drawers:?}");
 
@@ -346,5 +349,8 @@ async fn a_failed_verify_record_still_indexes_the_drawer() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(backfilled, "the deferred embed must backfill the drawer's vector");
+    assert!(
+        backfilled,
+        "the deferred embed must backfill the drawer's vector"
+    );
 }
