@@ -104,6 +104,8 @@ mod worktree_remove_deadline;
 mod worktree_remove_rechecks;
 // #8730: the files a command writes — `tee`, substitution and subshell bodies.
 mod write_targets;
+// #7228: copy-verb, `dd of=` and `sed -i` destinations for the write boundary.
+mod write_verbs;
 // #8878: the trust-anchor floor's reading — the classifier plus copy verbs.
 mod anchor_verbs;
 // #8902: the Architect pane floor — no tmux verb aimed at the Architect's pane.

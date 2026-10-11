@@ -168,6 +168,15 @@ fn pm_guard_allows_tier_a_verbs_that_write_outside_main_checkout_source() {
     let clone = fx.root.join("scratchpad/clone");
     std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone");
     let (clone, home) = (clone.display(), fx.home.display());
+    // A symlink outside the main checkout that resolves into the worktree.
+    let link = fx.root.join("wt-link");
+    std::os::unix::fs::symlink(&fx.worktree, &link).expect("symlink");
+    let link = link.display();
+    // Scratchpad clones under /tmp and /private/tmp (#7778 exempts only a
+    // clone under a `scratchpad` segment; a bare /tmp clone is a checkout).
+    let (_tmp_dir, tmp) = scratch_clone("/tmp");
+    let (_private_dir, private) = scratch_clone("/private/tmp");
+    let (tmp, private) = (tmp.display(), private.display());
     for command in [
         format!("cp {main}/src/lib.rs {wt}/src/lib.rs"),
         format!("cp {main}/src/lib.rs src/lib.rs"),
@@ -177,6 +186,10 @@ fn pm_guard_allows_tier_a_verbs_that_write_outside_main_checkout_source() {
         format!("cp {main}/src/lib.rs {clone}/src/lib.rs"),
         format!("cp notes.md {main}/docs/notes.md"),
         format!("sed -i '' 's/a/b/' {main}/README.md"),
+        format!("cp notes.toml {main}/config/app.toml"),
+        format!("cp {main}/src/lib.rs {link}/src/lib.rs"),
+        format!("cp {main}/src/lib.rs {tmp}/src/lib.rs"),
+        format!("rsync -a {main}/src/ {private}/src/"),
         format!("cp src/lib.rs {root}/repo-other/src/lib.rs"),
         format!("cp src/lib.rs {home}/.trusty-mpm/probe.rs"),
         "sed -i '' 's/a/b/' src/lib.rs".to_string(),
@@ -184,6 +197,19 @@ fn pm_guard_allows_tier_a_verbs_that_write_outside_main_checkout_source() {
         let stdout = run(&fx, &command, &fx.worktree, AGENT);
         assert_eq!(stdout, "", "`{command}` must stay allowed");
     }
+}
+
+/// A clone (a `.git` directory) at `<base>/<tmp>/scratchpad/clone`; the
+/// returned guard removes it.
+fn scratch_clone(base: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("tm-7228-")
+        .tempdir_in(base)
+        .expect("scratch dir");
+    let clone = dir.path().join("scratchpad/clone");
+    std::fs::create_dir_all(clone.join(".git")).expect("mkdir .git");
+    std::fs::create_dir_all(clone.join("src")).expect("mkdir src");
+    (dir, clone)
 }
 
 // #7905 composes with #7228: an operator-listed documents repo has no source

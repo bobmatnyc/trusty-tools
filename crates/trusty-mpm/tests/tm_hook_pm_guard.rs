@@ -2924,7 +2924,8 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
     for command in [
         "npm install token-bucket token-bucket",
         "grep -rn credentials src/ > out.md",
-        "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
+        // #7228: a `.rs` destination is a main-checkout source write (ADR-0044).
+        "cp crates/trusty-audit/src/grounding/secrets.rs renamed.md",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, session),

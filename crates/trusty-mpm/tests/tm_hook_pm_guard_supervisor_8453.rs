@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 /// A direct in-place edit: allowed three times per turn for a PM, then denied.
-const SED_EDIT: &str = "sed -i s/a/b/ src/lib.rs";
+/// #7228: a non-source target, since `sed -i` on source is an ADR-0044 deny.
+const SED_EDIT: &str = "sed -i s/a/b/ notes.md";
 
 /// The session's launch-time inputs the hook reads.
 struct Session {

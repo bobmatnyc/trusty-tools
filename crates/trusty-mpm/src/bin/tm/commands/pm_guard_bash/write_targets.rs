@@ -26,6 +26,7 @@
 
 use super::bash_tokens::{RedirectRole, redirect_role, tokenize};
 use super::heredoc::{HeredocBodies, split_heredoc_bodies};
+use super::write_verbs;
 use super::{
     MAX_SUBSTITUTION_DEPTH, scan_file_write_redirects, shell_lex, split_shell_segments_raw,
 };
@@ -48,17 +49,32 @@ const UNLEXABLE_WRAPPER: UnplaceableWrite =
 /// Why (#7399, #8468 option B, #8730): the boundary asks WHERE a write lands,
 /// so it needs each file a command names as a write, from every segment and
 /// every nested body — not only the first. A redirect, a git write option and
-/// a `tee` operand each NAME the file created; the sed/awk trailing token stays
-/// out because a read occupies that same position. No target is ever resolved
-/// against a directory a `cd` moved to (#8468; following `cd` is #8704).
-/// What: [`targets_at`] from depth 0. `Ok(empty)` when nothing names a write.
-/// `Err` when a write-bearing construct cannot be parsed; the caller denies.
+/// a `tee` operand each NAME the file created, and so (#7228) do a copy verb's
+/// destination, `dd of=` and a `sed -i` file operand; a plain sed/awk trailing
+/// token stays out because a read occupies that same position. No target is
+/// ever resolved against a directory a `cd` moved to (#8468; following `cd`
+/// is #8704).
+/// What: [`targets_at`] from depth 0, reading each segment with
+/// [`segment_write_targets`] then [`write_verbs::verb_write_targets`];
+/// `is_dir` answers whether a bare copy destination is an existing directory.
+/// `Ok(empty)` when nothing names a write. `Err` when a write-bearing
+/// construct cannot be parsed; the caller denies.
 /// Test: `shell_write_targets_reads_redirects_and_git_output`,
 /// `shell_write_targets_collects_every_segments_write`,
 /// `write_targets_read_tee_substitution_and_subshell_writes`,
-/// `write_targets_refuse_what_they_cannot_place`.
-pub(crate) fn shell_write_targets(command: &str) -> Result<Vec<String>, UnplaceableWrite> {
-    shell_segments_map(command, &segment_write_targets)
+/// `write_targets_refuse_what_they_cannot_place`,
+/// `write_targets_read_cp_and_mv_destination`.
+pub(crate) fn shell_write_targets(
+    command: &str,
+    is_dir: &dyn Fn(&str) -> bool,
+) -> Result<Vec<String>, UnplaceableWrite> {
+    // #7228: the boundary alone reads copy verbs; `segment_write_targets` stays
+    // the classifier `anchor_verbs` and `extract_shell_edit_target` share.
+    shell_segments_map(command, &|segment| {
+        let mut out = segment_write_targets(segment)?;
+        out.extend(write_verbs::verb_write_targets(segment, is_dir)?);
+        Ok(out)
+    })
 }
 
 /// `per_segment` over every segment of `command`, at every nesting depth.
@@ -386,7 +402,7 @@ mod tests {
     use super::*;
 
     fn targets(command: &str) -> Vec<String> {
-        shell_write_targets(command).unwrap_or_else(|e| panic!("`{command}`: {e}"))
+        shell_write_targets(command, &|_| false).unwrap_or_else(|e| panic!("`{command}`: {e}"))
     }
 
     // #8730: each shape below wrote `src/lib.rs` with no target the boundary
@@ -434,10 +450,13 @@ mod tests {
             "echo `echo x > src/lib.rs",
             "echo x | tee 'src/lib.rs",
         ] {
-            assert!(shell_write_targets(command).is_err(), "{command}");
+            assert!(
+                shell_write_targets(command, &|_| false).is_err(),
+                "{command}"
+            );
         }
         let deep = format!("{}echo x > src/lib.rs{}", "$(".repeat(40), ")".repeat(40));
-        assert_eq!(shell_write_targets(&deep), Err(TOO_DEEP));
+        assert_eq!(shell_write_targets(&deep, &|_| false), Err(TOO_DEEP));
     }
 
     // #8730: what is not a live body stays out, and nothing here is refused —
@@ -619,6 +638,18 @@ mod tests {
         }
     }
 
+    // #7228: a bare destination the filesystem reports as a directory
+    // receives each source under its name; `-T` keeps it the file itself.
+    #[test]
+    fn write_targets_expand_an_existing_directory_destination() {
+        let is_dir = |dest: &str| dest == "out";
+        let read = |command: &str| shell_write_targets(command, &is_dir).expect(command);
+        assert_eq!(read("cp a.rs x/b.rs out"), vec!["out/a.rs", "out/b.rs"]);
+        assert_eq!(read("rsync -a a.rs out"), vec!["out/a.rs"]);
+        assert_eq!(read("cp -T a.rs out"), vec!["out"]);
+        assert_eq!(read("cp a.rs other"), vec!["other"]);
+    }
+
     // #7228: `dd` writes only the file its `of=` operand names.
     #[test]
     fn write_targets_read_dd_of() {
@@ -711,7 +742,10 @@ mod tests {
             "rsync a.rs 'src/",
             "install a.rs 'src/lib.rs",
         ] {
-            assert!(shell_write_targets(command).is_err(), "{command}");
+            assert!(
+                shell_write_targets(command, &|_| false).is_err(),
+                "{command}"
+            );
         }
     }
 }
