@@ -6,7 +6,8 @@
 //! across multiple user messages without the overhead of a new process per
 //! message, and uses Max OAuth billing by unsetting `ANTHROPIC_API_KEY` (§9.1).
 //! What: [`StreamJsonBackend`] spawns `claude -p --output-format stream-json
-//! [--append-system-prompt-file …] --workdir <dir>` with `ANTHROPIC_API_KEY`
+//! [--append-system-prompt-file …]` in the session's workdir (its cwd, #9704)
+//! with `ANTHROPIC_API_KEY`
 //! removed from the child environment via [`build_claude_command`] (the §9.1
 //! no-key-leak seam) and implements [`super::SessionBackend`]. The spawn
 //! itself goes through [`crate::core::spawn_disclaim::disclaimed_piped_spawn`]
@@ -65,9 +66,11 @@ pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 /// an explicit removal, making it test-observable) AND, belt-and-braces, the
 /// child never inherits a re-added key because we never call `env()` for it.
 /// What: returns a `std::process::Command` for
-/// `claude -p --output-format stream-json [--append-system-prompt-file <f>]
-/// --workdir <dir>` with `ANTHROPIC_API_KEY` removed from the child env,
-/// stdin/stdout piped, stderr captured, and the working directory set. The
+/// `claude -p --output-format stream-json [--append-system-prompt-file <f>]`
+/// with `ANTHROPIC_API_KEY` removed from the child env,
+/// stdin/stdout piped, stderr captured, and the working directory set to
+/// `workdir` — the only way the workdir reaches claude, which has no
+/// `--workdir` option (#9704). The
 /// caller converts it to a `tokio::process::Command` to spawn.
 ///
 /// Issue #4467: the same `env_remove` seam also strips Claude Code's inherited
@@ -77,7 +80,8 @@ pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 /// Claude Code session the leaked `CLAUDE_CODE_CHILD_SESSION` reached every
 /// headless `claude` it spawned and disabled transcript saving.
 /// Test: `build_command_removes_api_key`, `build_command_has_stream_json_args`,
-/// `build_command_scrubs_inherited_session_markers`.
+/// `build_command_scrubs_inherited_session_markers`,
+/// `build_command_does_not_pass_workdir_flag`.
 pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::process::Command {
     // Invoke `claude` directly (not via the `env -u` shell wrapper). Using
     // Command::env_remove makes the key-removal an explicit, inspectable part
@@ -94,7 +98,7 @@ pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::
     if let Some(pf) = prompt_file {
         cmd.arg("--append-system-prompt-file").arg(pf);
     }
-    cmd.arg("--workdir").arg(workdir);
+    // #9704: no `--workdir` — claude rejects it; `current_dir` below sets it.
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -131,7 +135,7 @@ impl StreamJsonBackend {
     /// before the session is registered with the HTTP API.
     /// What: delegates to [`build_claude_command`] (the §9.1 no-key-leak seam)
     /// for `claude -p --output-format stream-json
-    /// [--append-system-prompt-file <prompt_file>] --workdir <workdir>` with
+    /// [--append-system-prompt-file <prompt_file>]` with cwd `workdir` and
     /// `ANTHROPIC_API_KEY` removed from the child environment, then spawns it
     /// via [`disclaimed_piped_spawn`] (issue #2997 — disclaims TCC
     /// responsibility on macOS; an unchanged `tokio::process::Command` spawn

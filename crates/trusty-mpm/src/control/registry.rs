@@ -13,7 +13,7 @@
 //! `registry_monotonic_ids` in the inline test module.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -30,6 +30,8 @@ use crate::control::classifier::{ActivityClassifier, ClassifierGate, OpenRouterC
 use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
+use crate::core::session_launch::ensure_project_hooks;
+use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
 
 /// Parameters for spawning a new session via `SessionRegistry::run_session`.
 ///
@@ -286,15 +288,20 @@ impl SessionRegistry {
     /// the stagger delay).
     /// What: (1) acquires a write lock and performs a fast-fail cap check —
     /// returning [`AdmissionError::CapReached`] immediately (no stagger) if
-    /// `live >= cap`; (2) on the admit path, releases the lock, sleeps the
+    /// `live >= cap`; (2) on the admit path, releases the lock, writes the
+    /// workdir's project hooks via [`ensure_worker_hooks`] and returns its
+    /// error unspawned (#9704), sleeps the
     /// configured `launch_stagger_ms`, then re-acquires the write lock and
     /// re-checks the cap authoritatively (preventing a concurrent launch that
     /// slipped in during the stagger from exceeding the cap); (3) holds that
     /// second lock for ID allocation, backend construction, actor spawn, and
     /// handle insertion so `get(&id)` is never `None` for a returned ID.
     /// Returns the allocated `ControlSessionId`.
-    /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`,
-    /// `registry_run_session_rejects_when_capped`, `registry_cap_reject_is_immediate`.
+    /// Test: `registry_run_session_id_visible_immediately`,
+    /// `registry_run_session_rejects_when_capped`, `registry_cap_reject_is_immediate`,
+    /// `run_session_writes_hooks_before_any_stream_json_backend`,
+    /// `run_session_writes_hooks_before_any_tmux_backend`,
+    /// `run_session_refuses_and_spawns_nothing_when_hook_write_fails`.
     pub async fn run_session(&self, params: RunParams) -> Result<ControlSessionId> {
         // §9.2 fast-fail cap check — under the read lock (cheap; no writers
         // blocked). A stale count that causes a false-admit is caught by the
@@ -314,6 +321,12 @@ impl SessionRegistry {
                 return Err(AdmissionError::CapReached { live, cap }.into());
             }
         }
+
+        // #9704: the worker runs `claude` with its default tools, so its
+        // project hooks (egress guard included) must be on disk before it
+        // exists. Fail closed, and before the stagger and the write lock: a
+        // refusal pays no stagger, spends no session number, spawns nothing.
+        ensure_worker_hooks(&params.workdir, self.config.hook_exe.as_deref())?;
 
         // §9.2 launch stagger — applied ONLY on the admit path, AFTER the
         // cap check, so rejected launches pay zero delay. Tests inject zero
@@ -396,6 +409,43 @@ impl SessionRegistry {
 impl Default for SessionRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Write the project-tier tm hooks into `workdir` and confirm the egress
+/// guard landed.
+///
+/// Why (#9704): a control-plane worker runs `claude` in `workdir` with its
+/// default tools, and no other path writes that project's hooks before it
+/// starts. [`ensure_project_hooks`] returns `Ok` without writing when the
+/// existing settings file is unparseable, so its `Ok` alone does not prove the
+/// guard is on disk.
+/// What: runs [`ensure_project_hooks`]`(workdir, hook_exe)`, then reads
+/// `<workdir>/.claude/settings.json` back and requires
+/// [`EgressGuardState::Present`]. A write error, an unreadable or unparseable
+/// file, or a missing or weakened guard is an `Err`; the caller spawns nothing.
+/// Test: `run_session_refuses_and_spawns_nothing_when_hook_write_fails`,
+/// `run_session_refuses_and_spawns_nothing_when_settings_unparseable`,
+/// `run_session_writes_hooks_before_any_stream_json_backend`.
+fn ensure_worker_hooks(workdir: &Path, hook_exe: Option<&Path>) -> Result<()> {
+    let refusal = || {
+        format!(
+            "refusing to spawn: project hooks not in place for {}",
+            workdir.display()
+        )
+    };
+    ensure_project_hooks(workdir, hook_exe).with_context(refusal)?;
+    let path = workdir.join(".claude").join("settings.json");
+    let text = std::fs::read_to_string(&path).with_context(refusal)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{}: {} is not valid JSON", refusal(), path.display()))?;
+    match egress_guard_state(&value) {
+        EgressGuardState::Present => Ok(()),
+        state => anyhow::bail!(
+            "{}: egress guard {state:?} in {}",
+            refusal(),
+            path.display()
+        ),
     }
 }
 
@@ -741,7 +791,6 @@ mod tests {
 
     // ── #9704: project hooks are written before any worker is spawned ──
 
-    use crate::core::standalone::hooks::egress::{EgressGuardState, egress_guard_state};
     use crate::test_support::{STABLE_HOOK_EXE, hermetic_temp_dir};
 
     /// A registry whose hook exe is pinned to [`STABLE_HOOK_EXE`].
