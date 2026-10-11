@@ -574,6 +574,33 @@ put in an error message.
 > on first use (§10.1, §15.5). The sketch below is the 2026-09-11 draft;
 > `preload` is withdrawn from it.
 
+> **Amended 2026-10-10 (#7520 S1).** The cache is server-side, not a client
+> type. The client-side `SessionSecretCache` sketch below, with `preload`,
+> `resolve` and `known_values`, is superseded and kept for the record. What
+> ships:
+>
+> - `SecretCache` (`crates/trusty-secrets/src/store/cache.rs`), crate-private,
+>   one per trusty-secrets server process, held in the server's `State`
+>   beside the grant registry. It dies with the server. No wire or public
+>   API changed.
+> - Entries are keyed by (backend id, vault, key), so a value never answers
+>   a lookup in another vault or from another backend. Only `onepassword`
+>   and `keeper` reads are kept; `keychain` and `file` reads go to the
+>   backend every time.
+> - It fills lazily on a successful read inside `SecretStore::read_located`,
+>   which runs after the grant check, the ancestry check, the write-ahead
+>   audit record and the agents-flag gate. Those still run on every
+>   `secrets.resolve`; a hit skips only the backend read.
+> - A failed read is not cached, so a declined unlock is asked again on the
+>   next call. This replaces the "one prompt, one outcome" paragraph below.
+> - `secrets.set`, `secrets.delete` and `secrets.copy` evict the (vault, key)
+>   they write, under every backend, after the write. An eviction also stops
+>   a read already in flight from storing the old value.
+> - `Debug` shows the entry count only; values stay `SecretValue`.
+> - A poisoned lock is a miss and stores nothing.
+> - A max age and the cache's lifecycle on idle exit, including zeroize,
+>   are S2, pending owner rulings.
+
 ```rust
 /// Populated once per `tm` session (daemon-side) or once per process (a bare
 /// `tm secrets` CLI invocation with no daemon), from exactly one backend

@@ -1,0 +1,2 @@
+Added
+- The `trusty-secrets` server keeps the values `secrets.resolve` reads from 1Password or Keeper for the rest of its session, so a second resolve of the same key does not run `op` or `keeper` again or ask for another unlock. Keychain and file values are never cached, and neither is a failed read. The grant, ancestry, agents-flag and audit checks still run on every call; a cache hit skips only the backend read. Entries are keyed by backend, vault and key, and `secrets.set`, `secrets.delete` and `secrets.copy` evict the key they write (#7520).

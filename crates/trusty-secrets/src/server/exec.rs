@@ -21,6 +21,7 @@
 //! Test: `wire_tests.rs` beside `server_tests.rs`.
 
 use std::slice;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -39,8 +40,8 @@ use crate::api::methods::{
     ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
     RevokeResponse,
 };
-use crate::store::SecretStore;
 use crate::store::resolve::{require_agent_use, resolve_reference};
+use crate::store::{OpenedUnder, SecretStore};
 
 /// Fold a registry error into its wire kind.
 ///
@@ -167,7 +168,8 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// by a racing caller since the check answers [`ErrorKind::GrantRefused`].
 /// So a one-shot grant is never spent by a refusal, an audit failure or a
 /// backend failure. A refusal before the allow record leaves one deny
-/// record, best-effort.
+/// record, best-effort. #7520: a CLI-backed value goes through the
+/// session's cache, so a hit skips the backend read and nothing else.
 ///
 /// [`GrantRegistry::check_scoped`]: super::grant::GrantRegistry::check_scoped
 /// [`GrantRegistry::spend`]: super::grant::GrantRegistry::spend
@@ -182,7 +184,9 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// `one_shot_grant_survives_an_audit_failure`,
 /// `one_shot_grant_survives_a_backend_failure`,
 /// `resolve_that_loses_the_one_shot_race_returns_no_value`,
-/// `resolve_against_a_dead_childs_grant_is_refused`.
+/// `resolve_against_a_dead_childs_grant_is_refused`,
+/// `resolve_second_call_does_not_reread_cli_backend`,
+/// `warm_cache_still_refuses_revoked_token`.
 pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
         state,
@@ -213,7 +217,17 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             // so an audit log that cannot be written refuses with no read;
             // it also precedes the spend, so an audit failure spends nothing.
             gate.write_ahead()?;
-            let store = SecretStore::new(project.backend(state)?, state.index.clone());
+            // #7520: every check above ran; a cache hit skips only the read.
+            // #7520 M1: the account config's settings for this backend, read
+            // on both sides of the open; a change between them is unknown.
+            let id = project.resolved_config().backend;
+            let account = state.file_consent_config.as_deref();
+            let before = OpenedUnder::read(account, &id);
+            let backend = project.backend(state)?;
+            let opened_under =
+                before.filter(|before| OpenedUnder::read(account, &id).as_ref() == Some(before));
+            let store = SecretStore::new(backend, state.index.clone())
+                .with_cache(Arc::clone(&state.cache), opened_under);
             let reference = SecretRef::Unscoped {
                 key: request.key.clone(),
             };
