@@ -27,6 +27,8 @@ use trusty_common::catchup::pause::{PauseSnapshotInput, PauseSnapshotOutcome};
 use trusty_common::memory_rpc::{MemoryRpcError, call_memory_tool_at_with_timeout};
 
 use crate::core::memory_verbs::{MemoryVerbOptions, REMEMBER_METHOD, resolve_palace_for};
+// #9390: the reader runs only these shapes, so the writer formats with them too.
+use crate::daemon::verify_allowlist::{AllowedCommand, MAX_PRS, is_safe_branch};
 
 /// How long the slot write may hold the pause. A pause is interactive, and the
 /// snapshot file, already written, is what it must not lose.
@@ -34,9 +36,6 @@ const SLOT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The slot's lifetime: ADR-0028's 24-hour Tier C default, stated explicitly.
 const RESUME_SLOT_TTL_HOURS: i64 = 24;
-
-/// The most PR numbers one slot names; a longer list is noise, not a plan.
-const MAX_PRS: usize = 10;
 
 /// Part of the text trusty-memory's `VerifyNotStored` renders. The type does
 /// not cross the socket, only its message does.
@@ -133,7 +132,7 @@ pub(crate) async fn record_resume_slot(
 }
 
 /// `ws:<session>/resume`, when the session id fits the slot-key grammar.
-fn slot_key(session_id: &str) -> Option<String> {
+pub(crate) fn slot_key(session_id: &str) -> Option<String> {
     let fits = !session_id.is_empty()
         && session_id
             .bytes()
@@ -143,29 +142,17 @@ fn slot_key(session_id: &str) -> Option<String> {
     (fits && key.len() <= 128).then_some(key)
 }
 
-/// A branch name safe to put in a command: no shell metacharacter, no option.
-fn is_safe_branch(branch: &str) -> bool {
-    branch != "HEAD"
-        && branch.len() <= 200
-        && !branch.contains("..")
-        && branch
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && branch
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
-}
-
 /// One re-read command per identifier, one per line; `None` when there are none.
 fn verify_command(prs: &[u64], branch: Option<&str>) -> Option<String> {
     let mut lines: Vec<String> = prs
         .iter()
-        .map(|n| format!("gh pr view {n} --json headRefOid,state"))
+        .map(|n| AllowedCommand::GhPrView(*n).line())
         .collect();
-    if let Some(branch) = branch {
-        lines.push(format!("git rev-parse {branch}"));
-    }
+    lines.extend(
+        branch
+            .and_then(AllowedCommand::git_rev_parse)
+            .map(|c| c.line()),
+    );
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 

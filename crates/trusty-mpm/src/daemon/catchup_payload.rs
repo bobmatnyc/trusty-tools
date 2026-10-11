@@ -74,7 +74,11 @@ pub(crate) fn resolved_note(
 ///
 /// #8408: `resolved_note` is added only when `note` is `Some` (see
 /// [`resolved_note`]); every other response omits the key.
-/// Test: `catchup_payload_carries_the_undatable_drop_count`,
+///
+/// #9390: `resume_verify` is always present: `null` with no resolved snapshot,
+/// else the resume verify pass's report (see
+/// [`crate::daemon::resume_verify::resume_verify`]).
+/// Test: `a_resume_reads_the_live_values_and_reports_the_stale_ones`, `catchup_payload_carries_the_undatable_drop_count`,
 /// `session_context_catchup_returns_expected_shape`,
 /// `catchup_payload_bounds_an_oversized_store`,
 /// `catchup_payload_announces_what_it_withheld`,
@@ -87,6 +91,7 @@ pub(crate) fn catchup_payload(
     note: Option<&'static str>,
     session_refs: HydrationReceipt,
     freshness: SnapshotFreshness,
+    resume_verify: Value,
 ) -> Value {
     let (snapshot, via) = match resolved {
         Some(r) => (Some(r.path.display().to_string()), Some(r.via.as_str())),
@@ -115,6 +120,8 @@ pub(crate) fn catchup_payload(
         "resolved_snapshot_superseded": freshness.superseded,
         "commits_since_snapshot": freshness.commits_since,
         "commits_since_snapshot_total": freshness.total_since,
+        // #9390: what the resume relies on, re-read live; it only reports.
+        "resume_verify": resume_verify,
         "undatable_sessions_dropped": undatable_sessions_dropped,
         "watermark_advanced": false,
         // #7830 review: hydration used to fail into `tracing::debug!`, below
@@ -218,6 +225,7 @@ mod tests {
                 note,
                 HydrationReceipt::default(),
                 SnapshotFreshness::default(),
+                Value::Null,
             )
         };
         let noted = body(Some(TMUX_SESSION_ROUTE_NOT_TRIED));

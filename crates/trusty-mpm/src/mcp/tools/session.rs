@@ -351,6 +351,21 @@ pub(super) fn session_tools() -> Vec<Value> {
              `commits_since_snapshot_total`) before re-planning any of them. It \
              is false whenever the answer cannot be established, so false means \
              \"not shown to be stale\", never \"proven current\". \
+             `resume_verify` (#9390) re-reads what the resume relies on. It is \
+             null when no snapshot resolved; otherwise it reads the \
+             `ws:<session>/resume` slot of the session that wrote the snapshot \
+             and runs its `verify` commands, ONLY `gh pr view <n> --json \
+             headRefOid,state` and `git rev-parse <branch>`, argv-only, in \
+             `project_dir`, each command and the whole pass time-bounded. Each \
+             `checks` entry carries `command`, `claimed`, `returned` and \
+             `verdict`: `verified`, `stale` (the PR is MERGED or CLOSED, or the \
+             branch tip moved off the snapshot's recorded commit), or \
+             `unverified:<reason>`. Act on `returned`, the live head, never on a \
+             head in the snapshot, and read `unverified` as unknown, never as \
+             confirmed. `status` is `ran`, or `unverified:<reason>` when no \
+             command could be read (memory daemon unreachable, no live slot, no \
+             verify command). The pass only reports: it edits no slot, and a \
+             failure never fails the catch-up. \
              Before any of that is read, the local session cache is \
              rebuilt from THIS caller's own append-only git ref \
              `refs/tm/sessions/<user-id>/<session-key>` (ADR-0062, #7830), so a \
@@ -461,7 +476,14 @@ pub(super) fn session_tools() -> Vec<Value> {
              non-null `ref_error` is yours to REPORT to the operator, not to \
              retry. With `[session_refs] enabled = false` in \
              `~/.trusty-mpm/config.toml` no ref is written at all and both \
-             `ref_name` and `ref_error` are null. Also \
+             `ref_name` and `ref_error` are null. `resume_slot` (#9390) reports \
+             the `ws:<session>/resume` Tier C slot the pause writes over the \
+             memory socket for the next `session_context_catchup` to re-verify: \
+             a 24-hour expiry, the branch, PR numbers and snapshot path plus \
+             their re-read commands, never a head SHA. It is `stored`, \
+             `stored_without_verify:<reason>`, `stored_unslotted:slot_refused` \
+             or `skipped:<reason>`; the write is fail-open and never fails the \
+             pause. Also \
              prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
