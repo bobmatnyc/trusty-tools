@@ -276,6 +276,8 @@ fn bash_egress_denies_ansi_c_quoted_names() {
 /// 🔴 #8454 S3 critic round 1 (CRITICAL): a command whose other quote the
 /// decoder refuses is still judged on its decodable quotes. The raw scan
 /// splits `hooks.\x73lack.com` at the backslash, so it alone allowed these.
+/// Critic round 2 (CRITICAL): the lenient decode reads `\u`/`\U` as bash does,
+/// and a NUL (`\0`, `\c@`) ends the quote's text.
 #[test]
 fn bash_egress_denies_ansi_c_beside_an_undecodable_quote() {
     assert_denies(
@@ -283,6 +285,10 @@ fn bash_egress_denies_ansi_c_beside_an_undecodable_quote() {
         "Slack",
     );
     assert_denies("$'\\x73endmail' bob $\"x\"", "SMTP mail");
+    assert_denies("$'\\u0073endmail' bob", "SMTP mail");
+    assert_denies("curl https://hooks.$'\\U00000073'lack.com/x", "Slack");
+    assert_denies("$'\\x73endmail\\0' bob", "SMTP mail");
+    assert_denies("$'\\x73endmail\\c@' bob", "SMTP mail");
 }
 
 /// 🔴 #8454 S3 critic round 1 (HIGH): a shell keyword in front of the program
