@@ -616,7 +616,25 @@ fn unresolvable_reason(target: &str) -> String {
 }
 
 /// The deny for a target whose directory the guard cannot place.
+///
+/// #8454 (Bob ruling Ded): when the file name is literal, the deny is only the
+/// unknown directory, so the text says the name is protected and asks for the
+/// absolute path.
+/// Test: `egress_anchor_protected_name_in_an_unknown_directory_names_the_retry`.
 fn unknown_reason(target: &str) -> String {
+    let name = target
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(target);
+    let literal = !matches!(name, "" | "." | "..") && !has_shell_pattern(name);
+    if literal && !name.starts_with('~') {
+        return format!(
+            "Trust-anchor write denied (#8878, #8454): `{target}` matches a protected name in a \
+             directory the guard cannot place (after a `cd`, or behind an expansion). Retry with \
+             the absolute path. {REMEDY}"
+        );
+    }
     format!(
         "Trust-anchor write denied (#8878): `{target}` depends on a shell expansion, glob, `~user` \
          or `cd` the guard does not evaluate, and its file name could name a trust anchor. Spell \

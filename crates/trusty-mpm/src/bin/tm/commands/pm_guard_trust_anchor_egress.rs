@@ -446,6 +446,7 @@ fn project_reason(target: &str, why: &str) -> String {
 fn unplaceable_reason(target: &str) -> String {
     project_reason(
         target,
-        "the path depends on a `cd`, expansion or glob the guard does not evaluate",
+        "the name matches a protected name in a directory the guard cannot place (after a `cd`, \
+         or behind an expansion or glob). Retry with the absolute path",
     )
 }
