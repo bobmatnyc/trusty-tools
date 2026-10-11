@@ -104,7 +104,8 @@ pub(super) fn strip_comments_and_heredocs(text: &str, heredocs: &mut Vec<Heredoc
 }
 
 /// The walk behind [`strip_comments_and_heredocs`]; every `<<` it reads as
-/// an operator lands in `ops` (#9150).
+/// an operator lands in `ops` (#9150). #9720: its work is linear in the text
+/// however many `<<` wait on one line ([`note_depth`]).
 fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorCtx)>) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -118,11 +119,8 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
         let top = stack.last().copied().unwrap_or(Ctx::Code(0));
         let b = bytes[i];
         let at_word_start = std::mem::replace(&mut word_start, false);
-        let depth = stack.len();
-        charge(Site::PendingLow, pending.len());
-        for p in &mut pending {
-            p.low = p.low.min(depth);
-        }
+        // #9720: only the newest waiting operator's low moves per byte.
+        note_depth(pending.last_mut().map(|p| &mut p.low), stack.len());
         match top {
             Ctx::Single => {
                 if b == b'\'' {
@@ -190,6 +188,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                 b'\n' if !pending.is_empty() => {
                     // #9150: a `<<` whose `$(…)` or backtick closed on its
                     // line reads no body from the next lines.
+                    settle_lows(pending.iter_mut().map(|p| &mut p.low));
                     pending.retain(|p| {
                         let live = p.low >= p.depth;
                         if !live {
@@ -234,6 +233,36 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
     }
     out.push_str(&text[copied.min(text.len())..]);
     out
+}
+
+/// Lower the newest waiting operator's low-water mark to `depth` (#9720).
+///
+/// Why: lowering every waiting operator's mark on every byte cost bytes x
+/// operators, ~2e8 steps on one 64 KiB line of `<<`. An operator's mark is
+/// the lowest depth since it was read: the lowest over its own stretch, up to
+/// the next operator, folded with every later operator's mark. Only the
+/// newest stretch is still open.
+/// What: one comparison per byte; [`settle_lows`] does the fold.
+/// Test: `heredoc_operators_track_pending_lows_in_linear_work_9720`,
+/// `pending_lows_match_the_per_byte_model_9720`.
+fn note_depth(newest: Option<&mut usize>, depth: usize) {
+    charge(Site::PendingLow, 1);
+    if let Some(low) = newest {
+        *low = (*low).min(depth);
+    }
+}
+
+/// Fold each waiting operator's low-water mark into the older ones', newest
+/// first, so each holds the lowest depth since it was read (#9720).
+///
+/// Test: `pending_lows_match_the_per_byte_model_9720`.
+fn settle_lows<'a>(lows: impl DoubleEndedIterator<Item = &'a mut usize>) {
+    let mut newer = usize::MAX;
+    for low in lows.rev() {
+        charge(Site::PendingLow, 1);
+        newer = newer.min(*low);
+        *low = newer;
+    }
 }
 
 /// Where the walk resumes after a byte of code context.
@@ -507,4 +536,50 @@ fn find_terminator(text: &str, from: usize, p: &Pending) -> Option<(usize, usize
         start = end + 1;
     }
     None
+}
+
+#[cfg(test)]
+mod low_tests {
+    use super::{note_depth, settle_lows};
+
+    /// #9720 equivalence: tracking only the newest operator's low per byte,
+    /// then folding at the newline, gives every operator the low the old
+    /// per-byte loop over all of them gave. Events are drawn from a fixed
+    /// generator: a byte at some depth, sometimes reading an operator there
+    /// (the walk reads one only at the depth that byte was noted at), and
+    /// sometimes the newline that settles and clears the list.
+    #[test]
+    fn pending_lows_match_the_per_byte_model_9720() {
+        let mut state: u64 = 9720;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        let (mut model, mut fast): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let mut settled = 0;
+        for _ in 0..200_000 {
+            let depth = 1 + next(6) as usize;
+            for low in &mut model {
+                *low = (*low).min(depth);
+            }
+            note_depth(fast.last_mut(), depth);
+            match next(10) {
+                0..=2 => {
+                    model.push(depth);
+                    fast.push(depth);
+                }
+                3 => {
+                    settle_lows(fast.iter_mut());
+                    assert_eq!(fast, model);
+                    settled += model.len();
+                    model.clear();
+                    fast.clear();
+                }
+                _ => {}
+            }
+        }
+        assert!(settled > 10_000, "only {settled} lows compared");
+    }
 }
