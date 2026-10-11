@@ -13,10 +13,11 @@
 //! What: [`drain_unposted_stops`] replays each parked body through the same
 //! [`crate::daemon::rpc::sessions_legacy_ops::ingest_hook`] a live POST would
 //! have reached, so a recovered stop terminalizes its delegation by exactly the
-//! path the hook's own POST does. Every record is discarded after its replay,
-//! including one the daemon refuses — a body this daemon cannot accept will not
-//! become acceptable on the next tick, and leaving it would wedge the directory
-//! against [`crate::core::stop_spool::MAX_UNPOSTED_STOPS`].
+//! path the hook's own POST does. A replayed record is discarded. A record the
+//! daemon REFUSES is kept for the next tick (#6556: discarding it lost the stop
+//! and left its delegation `Running`). It cannot wedge the directory against
+//! [`crate::core::stop_spool::MAX_UNPOSTED_STOPS`] for long: [`replay_target`]
+//! discards it once no live record carries its `agent_id`.
 //!
 //! Test: the module's `#[cfg(test)]` suite.
 
@@ -32,8 +33,9 @@ use crate::daemon::state::DaemonState;
 /// Why: see the module header.
 /// What: reads `<framework-root>/unposted-stops/` oldest first, deserializes
 /// each body as a [`HookPost`], and ingests it. Returns how many were replayed
-/// successfully. Unparsable and refused records are discarded too, and counted
-/// separately only in the log — the caller's number is "stops recovered".
+/// successfully. Unparsable records are discarded, and counted separately only
+/// in the log — the caller's number is "stops recovered". #6556: a record the
+/// daemon refuses is KEPT for the next tick, never discarded.
 ///
 /// **A replay only ever terminalizes an EXACT `agent_id` match** (critic HIGH on
 /// PR #8052). Reached through `ingest_hook`, a stop whose id no record carries
@@ -52,8 +54,29 @@ use crate::daemon::state::DaemonState;
 /// `a_parked_non_stop_event_is_discarded_unreplayed`,
 /// `a_replay_cannot_reassert_an_idle_parking_nudge`,
 /// `a_corrupt_record_is_discarded_rather_than_wedging_the_drain`,
-/// `an_empty_spool_drains_nothing`, `the_drain_sweeps_temp_litter_before_replaying`.
+/// `an_empty_spool_drains_nothing`, `the_drain_sweeps_temp_litter_before_replaying`,
+/// `a_refused_replay_keeps_the_parked_stop`.
 pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
+    drain_unposted_stops_with(state, |state, post| async move {
+        crate::daemon::rpc::sessions_legacy_ops::ingest_hook(&state, post)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// [`drain_unposted_stops`] with the ingest injected (#6556).
+///
+/// Why: `ingest_hook` cannot refuse a `SubagentStop` today (the overseer only
+/// reviews tool events), so the refusal arm needs a seam to be tested at all.
+/// What: as [`drain_unposted_stops`], replaying through `ingest`.
+/// Test: `a_refused_replay_keeps_the_parked_stop`.
+pub(crate) async fn drain_unposted_stops_with<F, Fut>(state: &Arc<DaemonState>, ingest: F) -> usize
+where
+    F: Fn(Arc<DaemonState>, HookPost) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let root = state.framework_root().to_path_buf();
     // Before the read, and before the empty-spool return: a tree holding only
     // litter still needs it swept (critic LOW on PR #8052).
@@ -75,19 +98,20 @@ pub async fn drain_unposted_stops(state: &Arc<DaemonState>) -> usize {
             .and_then(|v| serde_json::from_value::<HookPost>(v).ok())
             .and_then(|post| replay_target(state, post))
         {
-            Some(post) => {
-                match crate::daemon::rpc::sessions_legacy_ops::ingest_hook(state, post).await {
-                    Ok(_) => replayed += 1,
-                    Err(e) => {
-                        discarded += 1;
-                        tracing::warn!(
-                            record = %path.display(),
-                            "stop-spool: the daemon refused a parked SubagentStop ({e}); discarding \
-                             it rather than retrying a body that cannot become acceptable (#6556)"
-                        );
-                    }
+            Some(post) => match ingest(Arc::clone(state), post).await {
+                Ok(()) => replayed += 1,
+                Err(e) => {
+                    // #6556: fail closed — discarding a refused stop loses it and
+                    // leaves its delegation Running. Kept; `replay_target` drops
+                    // it once no live record carries its agent_id.
+                    tracing::warn!(
+                        record = %path.display(),
+                        "stop-spool: the daemon refused a parked SubagentStop ({e}); keeping it \
+                         for the next reap tick (#6556)"
+                    );
+                    continue;
                 }
-            }
+            },
             None => {
                 discarded += 1;
                 tracing::warn!(
@@ -190,6 +214,34 @@ mod stop_spool_drain_tests {
             stop_spool::read_unposted_stops(&root).is_empty(),
             "a replayed record must not replay again"
         );
+    }
+
+    /// 🔴 REGRESSION (#6556): a replay the daemon refuses must not lose the
+    /// stop. Before the fix the refused record was discarded, so its delegation
+    /// stayed `Running` with nothing left to end it.
+    #[tokio::test]
+    async fn a_refused_replay_keeps_the_parked_stop() {
+        let (state, dir, session) = hermetic();
+        running(&state, session, "agent-1");
+        let root = FrameworkPaths::under(dir.path()).root;
+        stop_spool::record_unposted_stop(&root, &parked_body(session, "agent-1")).expect("parked");
+
+        let refuse = |_state: Arc<DaemonState>, _post: HookPost| async {
+            Err::<(), String>("refused".into())
+        };
+        assert_eq!(drain_unposted_stops_with(&state, refuse).await, 0);
+
+        assert_eq!(
+            stop_spool::read_unposted_stops(&root).len(),
+            1,
+            "a refused stop is kept for the next tick, not discarded"
+        );
+        assert!(state.delegations_for(session)[0].status.is_live());
+
+        // The next tick, with a daemon that accepts it, recovers the stop.
+        assert_eq!(drain_unposted_stops(&state).await, 1);
+        assert!(!state.delegations_for(session)[0].status.is_live());
+        assert!(stop_spool::read_unposted_stops(&root).is_empty());
     }
 
     /// 🔴 REGRESSION (critic HIGH on PR #8052): a replay whose `agent_id` no
