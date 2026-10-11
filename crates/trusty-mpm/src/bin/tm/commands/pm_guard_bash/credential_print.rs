@@ -98,8 +98,10 @@ use credential_print_heredoc::strip_comments_and_heredocs;
 pub(super) use credential_print_heredoc::{OperatorCtx, heredoc_operators};
 pub(super) use credential_print_programs::{basename, code_operands, evaluator_name};
 use credential_print_programs::{
-    consumes_stdin, credential_fds, enables_xtrace, first_credential_program, keyword_words,
+    consumes_stdin, credential_fds, enables_xtrace, first_credential_program,
 };
+// #8454 S3 critic round 2: the egress Bash arm peels the same leading keywords.
+pub(crate) use credential_print_programs::keyword_words;
 // #8756: re-exported for `substitutions`, which asks which bodies run as code.
 pub(super) use credential_print_programs::is_evaluator;
 // #9001 critic r2: the tmux floors reuse the evaluator and grammar readings.

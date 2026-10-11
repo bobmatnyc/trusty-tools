@@ -19,7 +19,7 @@
 //! Limits, by design of a name match: Unicode confusables (a Cyrillic `а` in
 //! `slаck`) are dropped by the normalization, not mapped, so they evade it; a
 //! generic proxy server (a Zapier-style `run_action`) is not a family until
-//! configuration adds it; Bash egress is slice S3.
+//! configuration adds it; Bash egress is `egress_guard_bash` (S3).
 //! Test: `egress_guard_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
