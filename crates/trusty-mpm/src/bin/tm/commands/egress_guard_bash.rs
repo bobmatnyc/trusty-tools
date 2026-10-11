@@ -305,9 +305,8 @@ fn text_hit(text: &str) -> Option<BashDeny> {
 /// `bash_allows_quote_separated_words_in_the_raw_scan_9699`,
 /// `raw_hit_joins_line_continuations_9699`.
 fn raw_hit(text: &str) -> Option<Hit> {
-    let unquote = |text: &str| -> String {
-        text.chars().filter(|c| !QUOTING.contains(c)).collect()
-    };
+    let unquote =
+        |text: &str| -> String { text.chars().filter(|c| !QUOTING.contains(c)).collect() };
     let unquoted = unquote(text);
     // #9699: joined before quote stripping, as bash joins before it splits.
     let joined = text
@@ -445,7 +444,11 @@ fn segment_hits(segment: &str, depth: usize, walk: &Walk) -> Result<Vec<Hit>, Un
     // #8454 critic round 3: the walk also re-reads a wrapper's inner command,
     // so depth alone does not bound the total work. #9699 (b): nor does a
     // count of calls, each of which may read the whole command.
-    let bytes = walk.bytes.get().checked_sub(segment.len()).ok_or(BYTES_SPENT)?;
+    let bytes = walk
+        .bytes
+        .get()
+        .checked_sub(segment.len())
+        .ok_or(BYTES_SPENT)?;
     walk.bytes.set(bytes);
     let calls = walk.calls.get().checked_sub(1).ok_or(TOO_DEEP)?;
     walk.calls.set(calls);

@@ -830,7 +830,11 @@ fn bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699() {
     let prefix = "sendmail bob; ".to_owned() + &"time eval ".repeat(12);
     let command = format!("{prefix}{}", padded(65_000 - prefix.len(), "ab "));
     let verdict = bash_within(command, LARGE_INPUT_BOUND);
-    assert_deny_with(verdict, "sendmail; `time eval`×12", "it reaches SMTP mail (");
+    assert_deny_with(
+        verdict,
+        "sendmail; `time eval`×12",
+        "it reaches SMTP mail (",
+    );
 }
 
 /// 🔴 #9699 critic: `:;` padding spends the walk's call budget, so the raw
