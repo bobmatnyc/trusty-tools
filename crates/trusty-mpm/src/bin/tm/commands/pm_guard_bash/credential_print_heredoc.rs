@@ -23,6 +23,7 @@
 //! `credential_print_tests::allows_script_operands_and_comments`,
 //! `heredoc_operators_skip_comments_escapes_and_expansions`.
 
+use super::super::heredoc::scan_work::{Site, charge};
 use super::super::heredoc::{delimiter_word, is_terminator};
 use super::{Heredoc, input_is_program_text};
 
@@ -103,13 +104,15 @@ pub(super) fn strip_comments_and_heredocs(text: &str, heredocs: &mut Vec<Heredoc
 }
 
 /// The walk behind [`strip_comments_and_heredocs`]; every `<<` it reads as
-/// an operator lands in `ops` (#9150).
+/// an operator lands in `ops` (#9150). #9720: its work is linear in the text
+/// however many `<<` wait on one line ([`note_depth`]).
 fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorCtx)>) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     let mut stack = vec![Ctx::Code(0)];
     let mut pending: Vec<Pending> = Vec::new();
+    let mut line_end = LineEnd::default();
     // #8596 round 3: `#` opens a comment only at the start of a word.
     let mut word_start = true;
     let mut i = 0;
@@ -117,10 +120,8 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
         let top = stack.last().copied().unwrap_or(Ctx::Code(0));
         let b = bytes[i];
         let at_word_start = std::mem::replace(&mut word_start, false);
-        let depth = stack.len();
-        for p in &mut pending {
-            p.low = p.low.min(depth);
-        }
+        // #9720: only the newest waiting operator's low moves per byte.
+        note_depth(pending.last_mut().map(|p| &mut p.low), stack.len());
         match top {
             Ctx::Single => {
                 if b == b'\'' {
@@ -188,6 +189,7 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                 b'\n' if !pending.is_empty() => {
                     // #9150: a `<<` whose `$(…)` or backtick closed on its
                     // line reads no body from the next lines.
+                    settle_lows(pending.iter_mut().map(|p| &mut p.low));
                     pending.retain(|p| {
                         let live = p.low >= p.depth;
                         if !live {
@@ -211,7 +213,9 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
                 }
                 _ => {
                     let waiting = pending.len();
-                    if let Some(step) = code_byte(text, i, &mut stack, &mut pending, ops) {
+                    if let Some(step) =
+                        code_byte(text, i, &mut stack, &mut pending, ops, &mut line_end)
+                    {
                         if let Some(p) = pending.get_mut(waiting) {
                             (p.index, p.depth, p.low) = (ops.len() - 1, stack.len(), stack.len());
                             // Copy the operator now: a comment after it on
@@ -234,6 +238,36 @@ fn walk(text: &str, heredocs: &mut Vec<Heredoc>, ops: &mut Vec<(usize, OperatorC
     out
 }
 
+/// Lower the newest waiting operator's low-water mark to `depth` (#9720).
+///
+/// Why: lowering every waiting operator's mark on every byte cost bytes x
+/// operators, ~2e8 steps on one 64 KiB line of `<<`. An operator's mark is
+/// the lowest depth since it was read: the lowest over its own stretch, up to
+/// the next operator, folded with every later operator's mark. Only the
+/// newest stretch is still open.
+/// What: one comparison per byte; [`settle_lows`] does the fold.
+/// Test: `heredoc_operators_track_pending_lows_in_linear_work_9720`,
+/// `pending_lows_match_the_per_byte_model_9720`.
+fn note_depth(newest: Option<&mut usize>, depth: usize) {
+    charge(Site::PendingLow, 1);
+    if let Some(low) = newest {
+        *low = (*low).min(depth);
+    }
+}
+
+/// Fold each waiting operator's low-water mark into the older ones', newest
+/// first, so each holds the lowest depth since it was read (#9720).
+///
+/// Test: `pending_lows_match_the_per_byte_model_9720`.
+fn settle_lows<'a>(lows: impl DoubleEndedIterator<Item = &'a mut usize>) {
+    let mut newer = usize::MAX;
+    for low in lows.rev() {
+        charge(Site::PendingLow, 1);
+        newer = newer.min(*low);
+        *low = newer;
+    }
+}
+
 /// Where the walk resumes after a byte of code context.
 struct Step {
     next: usize,
@@ -251,6 +285,7 @@ fn code_byte(
     stack: &mut Vec<Ctx>,
     pending: &mut Vec<Pending>,
     ops: &mut Vec<(usize, OperatorCtx)>,
+    line_end: &mut LineEnd,
 ) -> Option<Step> {
     let bytes = text.as_bytes();
     let step = |next, word_start| Some(Step { next, word_start });
@@ -278,7 +313,7 @@ fn code_byte(
                 return step(i + 3, true);
             }
             ops.push((i, OperatorCtx::Code));
-            match read_operator(text, i) {
+            match read_operator(text, i, line_end) {
                 Some(p) => {
                     // #9150: after a refused word the walk reads that word.
                     let (next, word_start) = (p.op.1, p.word.is_none());
@@ -404,6 +439,32 @@ fn set_top(stack: &mut [Ctx], ctx: Ctx) {
     }
 }
 
+/// The end of the line the walk is on, found once per line (#9720).
+///
+/// Why: each operator searched from its own `<<` to the line's end, so a line
+/// of `n` operators cost `n` searches of the line.
+/// What: [`LineEnd::from`] keeps the first newline at or after the last `at`
+/// it searched from, and reuses it while `at` has not passed it. The walk
+/// only moves forward, so no newline lies between a later `at` and that one.
+/// Test: `heredoc_operators_find_each_line_end_once_9720`.
+#[derive(Default)]
+struct LineEnd(Option<usize>);
+
+impl LineEnd {
+    /// The byte offset of the first newline at or after `at`, or the length.
+    fn from(&mut self, text: &str, at: usize) -> usize {
+        if let Some(end) = self.0
+            && at <= end
+        {
+            return end;
+        }
+        let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+        charge(Site::LineEnd, end - at);
+        self.0 = Some(end);
+        end
+    }
+}
+
 /// Read a here-document operator starting at the `<<` at byte `at`.
 ///
 /// What: `None` when no delimiter word follows. #9150: the word is read by
@@ -412,8 +473,9 @@ fn set_top(stack: &mut [Ctx], ctx: Ctx) {
 /// refuses still yields a [`Pending`], with no `word` and an `op` covering
 /// only the `<<`: the walk reads the word's bytes as code, the operator can
 /// still turn [`OperatorCtx::Ambiguous`], and [`consume_bodies`] strips no
-/// body from that operator on.
-fn read_operator(text: &str, at: usize) -> Option<Pending> {
+/// body from that operator on. #9720: `line_end` finds the line's end once
+/// for every operator on it.
+fn read_operator(text: &str, at: usize, line_end: &mut LineEnd) -> Option<Pending> {
     let bytes = text.as_bytes();
     let mut j = at + 2;
     let strip_tabs = bytes.get(j) == Some(&b'-');
@@ -423,7 +485,7 @@ fn read_operator(text: &str, at: usize) -> Option<Pending> {
     while matches!(bytes.get(j), Some(b' ' | b'\t')) {
         j += 1;
     }
-    let line_end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    let line_end = line_end.from(text, at);
     let (word, quoted, op_end) = match delimiter_word(&bytes[..line_end], j) {
         Some((word, _, _)) if word.is_empty() => return None,
         Some((word, quoted, end)) => (Some(word), quoted, end),
@@ -504,4 +566,50 @@ fn find_terminator(text: &str, from: usize, p: &Pending) -> Option<(usize, usize
         start = end + 1;
     }
     None
+}
+
+#[cfg(test)]
+mod low_tests {
+    use super::{note_depth, settle_lows};
+
+    /// #9720 equivalence: tracking only the newest operator's low per byte,
+    /// then folding at the newline, gives every operator the low the old
+    /// per-byte loop over all of them gave. Events are drawn from a fixed
+    /// generator: a byte at some depth, sometimes reading an operator there
+    /// (the walk reads one only at the depth that byte was noted at), and
+    /// sometimes the newline that settles and clears the list.
+    #[test]
+    fn pending_lows_match_the_per_byte_model_9720() {
+        let mut state: u64 = 9720;
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        let (mut model, mut fast): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        let mut settled = 0;
+        for _ in 0..200_000 {
+            let depth = 1 + next(6) as usize;
+            for low in &mut model {
+                *low = (*low).min(depth);
+            }
+            note_depth(fast.last_mut(), depth);
+            match next(10) {
+                0..=2 => {
+                    model.push(depth);
+                    fast.push(depth);
+                }
+                3 => {
+                    settle_lows(fast.iter_mut());
+                    assert_eq!(fast, model);
+                    settled += model.len();
+                    model.clear();
+                    fast.clear();
+                }
+                _ => {}
+            }
+        }
+        assert!(settled > 10_000, "only {settled} lows compared");
+    }
 }

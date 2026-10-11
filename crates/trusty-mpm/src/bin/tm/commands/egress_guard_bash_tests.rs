@@ -1037,3 +1037,42 @@ fn host_hit_reads_the_first_dotted_candidate_9699() {
         assert_eq!(host_hit(text), full_scan(text), "{text:?}");
     }
 }
+
+/// `prefix`, then `unit` repeated while the command stays within the 64 KiB
+/// cap (#9720).
+fn filled_9720(prefix: &str, unit: &str) -> String {
+    let mut command = prefix.to_string();
+    while command.len() + unit.len() <= 65_536 {
+        command.push_str(unit);
+    }
+    command
+}
+
+/// The bound on the issue's `time eval` x12 repro (#9720): ten times its
+/// 3.8 s EVO debug-build time after the fix. The walk re-reads that command
+/// about 70 times at ~50 ms a read, so it does not fit [`LARGE_INPUT_BOUND`].
+/// Before the fix it took 170 s.
+const EVAL_REPRO_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// 🔴 #9720: here-document payloads dense in `<<`, each at the cap, are
+/// judged within the bound. Each read of the walk ran here-document scans
+/// that were quadratic in the `<<` count, and the walk re-reads a `time eval`
+/// x12 command many times: the issue's repro took 129 to 170 s on EVO, past
+/// the hook's 10 s timeout, and a killed hook is an allow. The other payloads
+/// took 2.8 to 4.7 s a read; after the fix each takes at most 113 ms.
+#[test]
+fn bash_judges_dense_heredoc_payloads_within_the_bound_9720() {
+    let eval = "time eval ".repeat(12);
+    let shifts = format!("echo $((1{}))", "<<a".repeat(4_000));
+    for (command, bound) in [
+        (filled_9720("", "<<x a.b "), LARGE_INPUT_BOUND),
+        (filled_9720("", "cat <<x\na\nx\n"), LARGE_INPUT_BOUND),
+        (
+            filled_9720(&format!("{eval}{shifts}"), "\n"),
+            LARGE_INPUT_BOUND,
+        ),
+        (filled_9720(&eval, "<<x a.b "), EVAL_REPRO_BOUND_9720),
+    ] {
+        bash_within(command, bound);
+    }
+}

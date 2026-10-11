@@ -26,16 +26,16 @@ use super::credential_print::{OperatorCtx, heredoc_operators};
 use super::heredoc_line::line_runs_a_shell;
 use super::shell_lex::QuoteScan;
 
-/// A here-document delimiter word plus its `<<-` tab-stripping mode.
-struct Delimiter {
-    word: String,
-    /// `<<-` lets the terminator line be indented with tabs.
-    strip_tabs: bool,
-    /// #8756: a quoted delimiter (`<<'EOF'`) leaves the body unexpanded.
-    quoted: bool,
-    /// #9150: an [`OperatorCtx::Ambiguous`] `<<`, read loosely.
-    ambiguous: bool,
-}
+#[path = "heredoc_delimiter.rs"]
+mod heredoc_delimiter;
+// #9720: the inner-loop work counters the linear-time tests read.
+#[path = "scan_work.rs"]
+pub(super) mod scan_work;
+
+pub(super) use heredoc_delimiter::delimiter_word;
+use heredoc_delimiter::{Delimiter, delimiters_on};
+use scan_work::{Site, charge};
+use std::collections::HashMap;
 
 /// One here-document body and the line that opened it (#8756).
 ///
@@ -166,6 +166,9 @@ impl HeredocBodies {
 
     /// [`HeredocBodies::scan`] against the command's operators `ops`.
     fn scan_with(command: &str, ops: &[(usize, OperatorCtx)]) -> Self {
+        // #9720: `delimiters_on` binary-searches `ops`, which the walk pushes
+        // in byte order.
+        debug_assert!(ops.windows(2).all(|w| w[0].0 < w[1].0), "ops out of order");
         let quotes = QuoteScan::new(command);
         if quotes.balanced {
             return Self::settle(Self::collect(command, Some(&quotes), ops));
@@ -259,6 +262,7 @@ impl HeredocBodies {
         let mut data = Vec::new();
         let mut expanding = Vec::new();
         let mut bodies = Vec::new();
+        let mut later: Option<LineIndex> = None;
         let mut line = 0;
         while line < lines.len() {
             let (start, mut end) = lines[line];
@@ -299,7 +303,9 @@ impl HeredocBodies {
                 if delimiter.ambiguous {
                     // #9150: a shell that reads this `<<` as an operator
                     // ends its body at a line the guard cannot place.
-                    if !matches!(body_span(command, &lines, line, &delimiter), Ok(None)) {
+                    // #9720: one index of the lines answers every such `<<`.
+                    let index = later.get_or_insert_with(|| LineIndex::new(command, &lines));
+                    if index.ends_from(line, &delimiter) {
                         return Err(Abandon::Delimiter);
                     }
                     continue;
@@ -351,6 +357,10 @@ impl HeredocBodies {
                 line = body.next_line;
             }
         }
+        // #9720: the span queries binary-search these, so each must be in
+        // order and disjoint, as the forward line walk pushes them.
+        let ordered = |r: &[(usize, usize)]| r.windows(2).all(|w| w[0].1 <= w[1].0);
+        debug_assert!(ordered(&spans) && ordered(&frames), "spans out of order");
         Ok(Self {
             spans,
             frames,
@@ -378,12 +388,20 @@ impl HeredocBodies {
     /// The end of the body that starts at `idx`, when its operator line hands
     /// it to a shell (`bash <<'EOF'`), so the body is shell source (#8730).
     ///
-    /// Test: `write_targets_read_a_shell_heredoc_body`.
+    /// #9720: `spans` and `data` are in order with distinct starts, so both
+    /// lookups are binary searches.
+    /// Test: `write_targets_read_a_shell_heredoc_body`,
+    /// `heredoc_bodies_answer_span_queries_in_log_work_9720`.
     pub(super) fn shell_body_starting_at(&self, idx: usize) -> Option<usize> {
-        self.spans
-            .iter()
-            .find(|span| span.0 == idx && !self.data.iter().any(|d| d.span == **span))
-            .map(|span| span.1)
+        let span = self.spans.get(self.spans.partition_point(|s| {
+            charge(Site::SpanProbe, 1);
+            s.0 < idx
+        }))?;
+        let data = self.data.get(self.data.partition_point(|d| {
+            charge(Site::SpanProbe, 1);
+            d.span.0 < idx
+        }));
+        (span.0 == idx && data.is_none_or(|d| d.span != *span)).then_some(span.1)
     }
 
     /// Every claimed body's half-open span, in order (#9155); #9180: the
@@ -415,11 +433,11 @@ impl HeredocBodies {
 
     /// Whether byte `idx` is here-document body content.
     ///
-    /// Test: `heredoc_bodies_exclude_the_operator_line`.
+    /// Test: `heredoc_bodies_exclude_the_operator_line`,
+    /// `heredoc_bodies_answer_span_queries_in_log_work_9720`.
     pub(super) fn contains(&self, idx: usize) -> bool {
-        self.spans
-            .iter()
-            .any(|(start, end)| idx >= *start && idx < *end)
+        // #9720: callers ask per byte; a binary search, not a scan.
+        covers(&self.spans, idx)
     }
 
     /// Whether byte `idx` is here-document framing, so a separator there is
@@ -439,10 +457,21 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
     /// `split_shell_segments_keeps_a_heredoc_body_whole`.
     pub(super) fn suppresses_separator(&self, idx: usize) -> bool {
-        self.frames
-            .iter()
-            .any(|(start, end)| idx >= *start && idx < *end)
+        // #9720: callers ask per byte; a binary search, not a scan.
+        covers(&self.frames, idx)
     }
+}
+
+/// Whether one of `ranges`, half-open, in order and disjoint, holds `idx`
+/// (#9720): only the first range ending past `idx` can.
+///
+/// Test: `heredoc_bodies_answer_span_queries_in_log_work_9720`.
+fn covers(ranges: &[(usize, usize)], idx: usize) -> bool {
+    let first = ranges.partition_point(|(_, end)| {
+        charge(Site::SpanProbe, 1);
+        *end <= idx
+    });
+    ranges.get(first).is_some_and(|(start, _)| *start <= idx)
 }
 
 /// Separate `command` into the text a word scan may read as argv and the
@@ -559,167 +588,58 @@ fn line_spans(command: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// The here-document delimiters opened by one line, in the order the shell
-/// reads their bodies.
+/// The command's lines indexed by text, to ask whether an arithmetic `<<`'s
+/// word could end a body (#9720).
 ///
-/// What: scans for an unquoted `<<` that is not the `<<<` here-string
-/// operator, honours the `<<-` tab-stripping form, and reads the delimiter
-/// word with its quoting removed (`<<'PY'`, `<<"PY"`, and `<<PY` name the same
-/// terminator). `at` is the line's byte offset in the command and the offset
-/// `quotes` was built over: the whole command's, or `0` for the line's own.
-///
-/// #9150: a `<<` opens a body only where [`heredoc_operators`] read it as
-/// shell code; one in a comment, `${…}` text or after a `\` is skipped, and an
-/// [`OperatorCtx::Ambiguous`] one is read loosely for [`HeredocBodies::collect`]
-/// to refuse. `None` — no confidence — when a code `<<` has a word
-/// [`delimiter_word`] does not accept.
-/// Test: `heredoc_bodies_ignore_a_here_string`,
-/// `heredoc_bodies_ignore_quoted_operator`,
-/// `heredoc_bodies_handle_tab_stripped_delimiter`,
-/// `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`,
-/// `heredoc_bodies_skip_an_operator_outside_code`.
-fn delimiters_on(
-    line: &str,
-    (at, offset): (usize, usize),
-    quotes: &QuoteScan,
-    ops: &[(usize, OperatorCtx)],
-) -> Option<Vec<Delimiter>> {
-    let bytes = line.as_bytes();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if !quotes.is_unquoted(offset + i) || bytes[i] != b'<' || bytes[i + 1] != b'<' {
-            i += 1;
-            continue;
-        }
-        if bytes.get(i + 2) == Some(&b'<') {
-            // `<<<` is a here-string: its word is on this line, no body follows.
-            i += 3;
-            continue;
-        }
-        let Some(&(_, ctx)) = ops.iter().find(|(pos, _)| *pos == at + i) else {
-            // #9150: a comment, `${…}` text or `\<<` opens no body.
-            i += 2;
-            continue;
+/// Why: [`body_span`] compared each such `<<` with every later line, so a
+/// line of shifts above many lines cost shifts x lines: 4.7 s for 5 000
+/// shifts over 50 000 lines on EVO, per scan.
+/// What: the last line index holding each text, as is and with leading tabs
+/// dropped. [`LineIndex::ends_from`] answers what [`body_span`] answers for a
+/// quoted delimiter, which reads no continuation: whether a line from `from`
+/// on is the word — or, last of all, the word with a trailing `\r` dropped.
+/// Test: `heredoc_bodies_check_arithmetic_shifts_in_linear_work_9720`,
+/// `heredoc_scan_matches_the_pre_9720_golden_table`.
+struct LineIndex<'a> {
+    exact: HashMap<&'a str, usize>,
+    untabbed: HashMap<&'a str, usize>,
+    last: Option<&'a str>,
+    count: usize,
+}
+
+impl<'a> LineIndex<'a> {
+    fn new(command: &'a str, lines: &[(usize, usize)]) -> Self {
+        charge(Site::AmbiguousEnd, lines.len());
+        let mut index = Self {
+            exact: HashMap::new(),
+            untabbed: HashMap::new(),
+            last: lines.last().map(|(s, e)| &command[*s..*e]),
+            count: lines.len(),
         };
-        let mut j = i + 2;
-        let strip_tabs = bytes.get(j) == Some(&b'-');
-        if strip_tabs {
-            j += 1;
+        for (at, (start, end)) in lines.iter().enumerate() {
+            let text = &command[*start..*end];
+            index.exact.insert(text, at);
+            index.untabbed.insert(text.trim_start_matches('\t'), at);
         }
-        while matches!(bytes.get(j), Some(b' ' | b'\t')) {
-            j += 1;
-        }
-        let ambiguous = ctx == OperatorCtx::Ambiguous;
-        let (word, quoted, end) = if ambiguous {
-            loose_word(bytes, j)
+        index
+    }
+
+    /// Whether a line at index `from` or later ends `delimiter`'s body.
+    fn ends_from(&self, from: usize, delimiter: &Delimiter) -> bool {
+        charge(Site::AmbiguousEnd, 1);
+        debug_assert!(delimiter.quoted, "an ambiguous word is read quoted");
+        let (lines, last) = if delimiter.strip_tabs {
+            (
+                &self.untabbed,
+                self.last.map(|t| t.trim_start_matches('\t')),
+            )
         } else {
-            delimiter_word(bytes, j)?
+            (&self.exact, self.last)
         };
-        if !word.is_empty() {
-            found.push(Delimiter {
-                word,
-                strip_tabs,
-                quoted,
-                ambiguous,
-            });
-        }
-        i = end.max(i + 2);
+        let word = delimiter.word.as_str();
+        lines.get(word).is_some_and(|at| *at >= from)
+            || (from < self.count && last == Some(word.trim_end_matches('\r')))
     }
-    Some(found)
-}
-
-/// The delimiter word starting at `start`: the word, whether any of it was
-/// quoted (#8756), and where it ends.
-///
-/// What: an allowlist (#9150). The word is a run of [`is_word_byte`] bytes,
-/// `'…'` or `"…"` around such bytes, and `\` before one, in any
-/// concatenation (`E'O'F`); it ends at a blank, `<`, `>`, `|`, `;`, `&`, `)`
-/// or the line's end. Anything else — `$`, a backtick, `(`, `<(`, a `\` inside
-/// quotes, an empty quoted word, a quote left open — is `None`, because the
-/// shell's word there is not one this scan can compare a line with. An empty
-/// unquoted word is `Some` and opens no body. `bytes` is the operator line,
-/// newline excluded, so a CRLF line's `\r` is its last byte.
-///
-/// #9150: the credential-print walk reads its operators through this too,
-/// so both scanners split a delimiter word one way.
-/// Test: `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`,
-/// `credential_print_tests::denies_a_body_behind_a_refused_delimiter`.
-pub(super) fn delimiter_word(bytes: &[u8], start: usize) -> Option<(String, bool, usize)> {
-    let mut word = String::new();
-    let mut quoted = false;
-    let mut j = start;
-    while let Some(&byte) = bytes.get(j) {
-        match byte {
-            b'\'' | b'"' => {
-                let len = bytes[j + 1..].iter().position(|b| *b == byte)?;
-                let inner = &bytes[j + 1..j + 1 + len];
-                if inner.is_empty() || !inner.iter().all(|b| is_word_byte(*b)) {
-                    return None;
-                }
-                word.extend(inner.iter().map(|b| char::from(*b)));
-                quoted = true;
-                j += len + 2;
-            }
-            b'\\' => {
-                let next = bytes.get(j + 1).filter(|b| is_word_byte(**b))?;
-                word.push(char::from(*next));
-                quoted = true;
-                j += 2;
-            }
-            // A CRLF line keeps its `\r`, as the shell's word does.
-            b'\r' if j + 1 == bytes.len() => {
-                word.push('\r');
-                j += 1;
-            }
-            // A `<(…)` or `>(…)` is process substitution inside the word.
-            b'<' | b'>' if bytes.get(j + 1) == Some(&b'(') => return None,
-            b' ' | b'\t' | b'<' | b'>' | b'|' | b';' | b'&' | b')' => break,
-            _ if is_word_byte(byte) => {
-                word.push(char::from(byte));
-                j += 1;
-            }
-            _ => return None,
-        }
-    }
-    Some((word, quoted, j))
-}
-
-/// Whether `byte` may appear in a delimiter word: `[A-Za-z0-9_.-]` (#9150).
-fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
-}
-
-/// An ambiguous `<<`'s word read loosely — quotes and `\` removed, cut at an
-/// unquoted break byte — only to ask whether a later line matches it (#9150).
-fn loose_word(bytes: &[u8], start: usize) -> (String, bool, usize) {
-    let mut word = Vec::new();
-    let mut quote = None;
-    let mut j = start;
-    while let Some(&byte) = bytes.get(j) {
-        match quote {
-            Some(open) if byte == open => quote = None,
-            Some(_) => word.push(byte),
-            None if byte == b'\'' || byte == b'"' => quote = Some(byte),
-            None if byte == b'\\' => {
-                j += 1;
-                word.extend(bytes.get(j));
-            }
-            None if is_word_break(byte) => break,
-            None => word.push(byte),
-        }
-        j += 1;
-    }
-    let word = String::from_utf8_lossy(&word).into_owned();
-    (word, true, j.min(bytes.len()))
-}
-
-/// Whether `byte` ends a loosely read word.
-fn is_word_break(byte: u8) -> bool {
-    matches!(
-        byte,
-        b' ' | b'\t' | b'<' | b'>' | b'|' | b';' | b'&' | b'(' | b')' | b']'
-    )
 }
 
 /// One located here-document body.
@@ -844,3 +764,8 @@ pub(super) fn is_terminator(line: &str, word: &str, strip_tabs: bool, last: bool
 #[cfg(test)]
 #[path = "heredoc_tests.rs"]
 mod tests;
+
+// #9720: the pre-fix verdicts the linear-time rewrite must keep.
+#[cfg(test)]
+#[path = "heredoc_golden_tests.rs"]
+mod golden_tests;

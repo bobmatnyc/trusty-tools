@@ -2608,3 +2608,89 @@ fn an_unknown_git_global_option_does_not_hide_a_denied_verb() {
         Some(WORKTREE_TMP_REASON)
     );
 }
+
+/// `prefix`, then `unit` repeated while the command stays within the egress
+/// guard's 64 KiB cap (#9720).
+fn filled_9720(prefix: &str, unit: &str) -> String {
+    let mut command = prefix.to_string();
+    while command.len() + unit.len() <= 65_536 {
+        command.push_str(unit);
+    }
+    command
+}
+
+/// The #9720 payloads, each near the 64 KiB cap: the one-line `<<` run, the
+/// issue's `time eval` x12 repro, a run of terminated bodies, and arithmetic
+/// shifts followed by many lines, behind `time eval` x12.
+fn dense_heredoc_payloads_9720() -> [(&'static str, String); 4] {
+    let eval = "time eval ".repeat(12);
+    let shifts = format!("echo $((1{}))", "<<a".repeat(4_000));
+    [
+        ("one line of `<<x a.b `", filled_9720("", "<<x a.b ")),
+        (
+            "`time eval` x12 + `<<x a.b `",
+            filled_9720(&eval, "<<x a.b "),
+        ),
+        (
+            "terminated `cat <<x` bodies",
+            filled_9720("", "cat <<x\na\nx\n"),
+        ),
+        (
+            "`time eval` x12 + 4 000 shifts + newlines",
+            filled_9720(&format!("{eval}{shifts}"), "\n"),
+        ),
+    ]
+}
+
+/// The bound on a #9720 verdict: ten times the slowest payload's 0.48 s EVO
+/// debug-build time after the fix, and below the hook's 10 s timeout.
+const DENSE_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 🔴 #9720: the pm-guard classifier judges each dense here-document payload
+/// within the bound. Each one took 1.5 to 16 s on EVO before the fix, and a
+/// hook killed at its timeout lets the command through.
+#[test]
+fn evaluate_bash_command_judges_dense_heredocs_in_bounded_time_9720() {
+    for (name, command) in dense_heredoc_payloads_9720() {
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(evaluate_bash_command(&command));
+        });
+        let verdict = recv.recv_timeout(DENSE_BOUND_9720);
+        assert!(
+            verdict.is_ok(),
+            "{name}: no verdict within {DENSE_BOUND_9720:?}"
+        );
+    }
+}
+
+/// #9720 measurement probe, not a gate: prints each scan layer's time on the
+/// dense payloads.
+#[test]
+#[ignore = "timing probe for #9720; run with --nocapture"]
+fn heredoc_density_timings_9720_profile() {
+    use crate::commands::egress_guard::{Verdict, decide};
+    use crate::commands::egress_guard_families::FamilyTable;
+    use std::time::Instant;
+    for (name, command) in dense_heredoc_payloads_9720() {
+        let t = Instant::now();
+        let ops = super::credential_print::heredoc_operators(&command).len();
+        let walk = t.elapsed();
+        let t = Instant::now();
+        let spans = super::heredoc::HeredocBodies::scan(&command).data().len();
+        let scan = t.elapsed();
+        let t = Instant::now();
+        let pm = evaluate_bash_command(&command).is_some();
+        let pm_time = t.elapsed();
+        let t = Instant::now();
+        let read =
+            Ok(serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } }));
+        let egress = decide(&read, &FamilyTable::builtin()) == Verdict::Allow;
+        let egress_time = t.elapsed();
+        println!(
+            "9720-probe {name}: bytes={} ops={ops} data={spans} walk={walk:?} scan={scan:?} \
+             pm={pm_time:?} (deny={pm}) egress={egress_time:?} (allow={egress})",
+            command.len(),
+        );
+    }
+}
