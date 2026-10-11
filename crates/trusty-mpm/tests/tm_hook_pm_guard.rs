@@ -254,6 +254,21 @@ fn pm_guard_allows_write_tool_within_budget_then_denies() {
     );
 }
 
+/// A scratch project shaped like a linked worktree: `.git` is a FILE (#7228).
+///
+/// Why: `run_pm_guard` inherits the runner's cwd, so a budget-counted `sed -i`
+/// on a source file was allowed from a linked worktree and denied from a plain
+/// clone (CI, EVO) by the ADR-0044 main-checkout rule, which `main_checkout_root`
+/// keys on a `.git` DIRECTORY. The budget tests are about the per-turn counter,
+/// not the checkout rule, so they pin a project where the rule cannot fire.
+/// What: a tempdir holding a `.git` file; pass its path as the guard's cwd.
+/// Test: the three budget tests below.
+fn linked_worktree_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
+    dir
+}
+
 #[test]
 fn pm_guard_file_change_budget_shared_across_edit_and_bash() {
     // The budget counts ALL budget-eligible file changes together, whether
@@ -264,12 +279,21 @@ fn pm_guard_file_change_budget_shared_across_edit_and_bash() {
     let edit = r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#;
     let sed = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ app/main.py"}}"#;
 
-    assert_eq!(run_pm_guard(edit, &[("HOME", &home_s)]).trim(), "");
-    assert_eq!(run_pm_guard(sed, &[("HOME", &home_s)]).trim(), "");
-    assert_eq!(run_pm_guard(edit, &[("HOME", &home_s)]).trim(), "");
+    let project = linked_worktree_project();
+    let run = |payload: &str| {
+        run_pm_guard_at_with_env(
+            payload,
+            UNREACHABLE_DAEMON,
+            project.path(),
+            &[("HOME", &home_s)],
+        )
+    };
+    assert_eq!(run(edit).trim(), "");
+    assert_eq!(run(sed).trim(), "");
+    assert_eq!(run(edit).trim(), "");
     // 4th combined file change denies, routed by the 4th call's own target
     // (the sed's app/main.py -> python-engineer).
-    let stdout = run_pm_guard(sed, &[("HOME", &home_s)]);
+    let stdout = run(sed);
     assert_denied(&stdout);
     assert!(
         stdout.contains("budget 3/3"),
@@ -289,10 +313,19 @@ fn pm_guard_budget_exhausted_routes_docs_target_to_documentation_agent() {
     // three shell-based edits, then trip a shell-based edit on a docs file.
     let sed_rs = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ src/lib.rs"}}"#;
     let redirect_md = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo x > docs/reference/notes.md"}}"#;
+    let project = linked_worktree_project();
+    let run = |payload: &str| {
+        run_pm_guard_at_with_env(
+            payload,
+            UNREACHABLE_DAEMON,
+            project.path(),
+            &[("HOME", &home_s)],
+        )
+    };
     for _ in 1..=3 {
-        assert_eq!(run_pm_guard(sed_rs, &[("HOME", &home_s)]).trim(), "");
+        assert_eq!(run(sed_rs).trim(), "");
     }
-    let stdout = run_pm_guard(redirect_md, &[("HOME", &home_s)]);
+    let stdout = run(redirect_md);
     assert_denied(&stdout);
     assert!(
         stdout.contains("documentation agent"),
@@ -339,10 +372,19 @@ fn pm_guard_denies_forbidden_bash_verb_after_budget_exhausted() {
     let home = isolated_home();
     let home_s = home.path().to_string_lossy().to_string();
     let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ src/lib.rs"}}"#;
+    let project = linked_worktree_project();
+    let run = || {
+        run_pm_guard_at_with_env(
+            payload,
+            UNREACHABLE_DAEMON,
+            project.path(),
+            &[("HOME", &home_s)],
+        )
+    };
     for _ in 1..=3 {
-        assert_eq!(run_pm_guard(payload, &[("HOME", &home_s)]).trim(), "");
+        assert_eq!(run().trim(), "");
     }
-    let stdout = run_pm_guard(payload, &[("HOME", &home_s)]);
+    let stdout = run();
     assert_denied(&stdout);
 }
 
@@ -2924,7 +2966,8 @@ fn pm_guard_denies_a_secret_laundered_to_an_unsuspicious_name() {
     for command in [
         "npm install token-bucket token-bucket",
         "grep -rn credentials src/ > out.md",
-        "mv crates/trusty-audit/src/grounding/secrets.rs renamed.rs",
+        // #7228: a `.rs` destination is a main-checkout source write (ADR-0044).
+        "cp crates/trusty-audit/src/grounding/secrets.rs renamed.md",
     ] {
         let stdout = run_pm_guard_at(
             &bash_payload_at(command, &repo, session),

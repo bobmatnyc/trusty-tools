@@ -92,21 +92,20 @@
 //! filesystem can answer; a component created between this check and the write
 //! is not seen, the TOCTOU window every `PreToolUse` path check has. The `Bash` half sees only the
 //! shapes that NAME their target unambiguously — a redirect, a git write
-//! option, and a `tee` operand, in every segment, subshell and substitution
-//! (#8730) — so everything else keeps only the `SHELL_EDIT_REASON` treatment
+//! option, a `tee` operand (#8730), and (#7228) the destination of `cp`, `mv`,
+//! `install` and `rsync`, a `dd of=` file and each `sed -i` file operand, in
+//! every segment, subshell and substitution. A copy's SOURCE is a read and is
+//! never judged. Everything else keeps only the `SHELL_EDIT_REASON` treatment
 //! and gets no WHERE dimension:
 //!
 //! * `git apply` and `git am` write the files a patch names, and the patch
 //!   names them, not the argv.
-//! * `cp`, `mv`, `install` and `dd` write a target that is an ordinary
-//!   argument, indistinguishable here from the source they read.
-//! * `sed -i` and the awk family put their target in the trailing position,
-//!   which a read (`sed -n '1,5p' <file>`) occupies identically.
+//! * The awk family, `perl -i` and `ln` are not read; a plain `sed` trailing
+//!   token is a read (`sed -n '1,5p' <file>`) and stays out.
+//! * Operands an `xargs` appends or `find -exec` substitutes are not in the
+//!   argv, and a recursive copy of a directory names only the directory.
 //! * An interpreter (`python -c`, `node -e`) carries its write inside a
 //!   program string this guard does not parse.
-//!
-//! Each is a candidate for the same detector rather than a second rule; none
-//! is closed here.
 //!
 //! **What an unexpanded expansion costs, exactly (#7838).** Three leading
 //! forms ARE resolved, because this process holds their values rather than
@@ -202,8 +201,13 @@ fn evaluate_main_checkout_write_with(
     cwd: &Path,
     home: Option<&str>,
 ) -> Option<String> {
+    // #7228: a bare copy destination is a directory when one exists there,
+    // with its base expanded as `deny_reason_for_target` expands the target.
+    let is_dir = |dest: &str| {
+        expand_leading_base(dest, cwd, home).is_some_and(|dest| cwd.join(dest).is_dir())
+    };
     // #8730: fail closed — a write whose target cannot be placed is refused.
-    let targets = match write_targets(tool_name, tool_input) {
+    let targets = match write_targets(tool_name, tool_input, &is_dir) {
         Ok(targets) => targets,
         Err(what) => return Some(unplaceable_write_reason(what)),
     };
@@ -364,16 +368,20 @@ pub(crate) fn scratchpad_root(path: &Path) -> Option<PathBuf> {
 /// What: `tool_input.file_path` for an [`EDIT_TOOLS`] member (at most one), and
 /// for `Bash` every positively identified write target of its command
 /// ([`shell_write_targets`]) — redirects, git write options and `tee` operands,
-/// in every segment, subshell and substitution (#8730). Empty for every other
+/// in every segment, subshell and substitution (#8730), plus copy-verb
+/// destinations, `dd of=` and `sed -i` files (#7228), where `is_dir` says
+/// whether a bare copy destination is a directory. Empty for every other
 /// tool, and for a command that names no write. `Err` when the command holds a
 /// write the guard cannot place.
 /// Test: `denies_a_git_output_write_in_a_main_checkout`,
 /// `denies_a_shell_redirect_into_a_main_checkout`,
 /// `denies_a_second_segments_source_write_when_the_first_writes_elsewhere`,
-/// `denies_a_tee_write_in_a_main_checkout`.
+/// `denies_a_tee_write_in_a_main_checkout`,
+/// `denies_a_cp_of_a_source_into_a_main_checkout`.
 fn write_targets(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
+    is_dir: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<String>, UnplaceableWrite> {
     if EDIT_TOOLS.contains(&tool_name) {
         return Ok(edit_tool_target_path(tool_input)
@@ -390,7 +398,7 @@ fn write_targets(
     else {
         return Ok(Vec::new());
     };
-    shell_write_targets(command)
+    shell_write_targets(command, is_dir)
 }
 
 /// This process's home directory, read once at the ambient entry point.
@@ -559,6 +567,11 @@ fn unplaceable_write_reason(what: UnplaceableWrite) -> String {
          written), or flatten the nesting, and run it again."
     )
 }
+
+// #7228: the copy-verb and `sed -i` rows, beside the module they pin.
+#[cfg(test)]
+#[path = "pm_guard_write_boundary_verb_tests.rs"]
+mod verb_tests;
 
 #[cfg(test)]
 mod tests {

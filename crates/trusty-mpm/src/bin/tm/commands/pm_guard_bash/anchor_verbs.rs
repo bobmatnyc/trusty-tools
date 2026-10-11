@@ -79,7 +79,8 @@ const XARGS_WRITE: UnplaceableWrite = "a `cp`/`mv`/`ln`/`install`/`sed -i` run b
 
 /// The verbs this module reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verb {
+// #7228: shared with `write_verbs`, which reads the same argv for the boundary.
+pub(super) enum Verb {
     Cp,
     Mv,
     Ln,
@@ -157,7 +158,7 @@ fn program_argv(segment: &str) -> Result<Option<(Vec<String>, usize)>, Unplaceab
 }
 
 /// A program word's basename, a leading `\` dropped.
-fn program_name(word: &str) -> &str {
+pub(super) fn program_name(word: &str) -> &str {
     let word = word.strip_prefix('\\').unwrap_or(word);
     word.rsplit('/').next().unwrap_or(word)
 }
@@ -183,7 +184,7 @@ fn is_xargs(word: &str) -> bool {
 
 /// `words` without redirections: the redirect scan reads output targets, and
 /// an input redirect's source is never a destination.
-fn operands(words: &[String]) -> Vec<String> {
+pub(super) fn operands(words: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut skip_next = false;
     for word in words {
@@ -246,22 +247,22 @@ fn xargs_writes(tail: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
 
 /// A `cp`/`mv`/`ln`/`install` argv with its options read.
 #[derive(Debug, Default)]
-struct CopyArgs {
+pub(super) struct CopyArgs {
     /// The operands, in order.
-    positional: Vec<String>,
+    pub(super) positional: Vec<String>,
     /// `-t DIR` / `--target-directory`.
-    target_dir: Option<String>,
+    pub(super) target_dir: Option<String>,
     /// `-T` / `--no-target-directory`.
-    no_target: bool,
+    pub(super) no_target: bool,
     /// `install -d`: every operand is a directory to create.
-    dirs: bool,
+    pub(super) dirs: bool,
     /// `cp -l`/`-s`, `install -l`: the destination becomes a link to the source.
     link: bool,
     /// The link is symbolic (`ln -s`, `cp -s`, `install -l`): its text is read
     /// from the link's own directory.
     symbolic: bool,
     /// `cp --parents`: a source keeps its whole relative path.
-    parents: bool,
+    pub(super) parents: bool,
 }
 
 impl CopyArgs {
@@ -270,7 +271,7 @@ impl CopyArgs {
     /// What: `-t`, and `install`'s `-m -o -g -B -f`, consume a value; every
     /// other short option takes none — BSD `install -S` is a flag, and a GNU
     /// `-S SUFFIX` then only adds an operand (#8878 finding 2).
-    fn parse(verb: Verb, args: &[String]) -> Self {
+    pub(super) fn parse(verb: Verb, args: &[String]) -> Self {
         let mut out = Self::default();
         let mut options = true;
         let mut words = args.iter();
@@ -424,7 +425,7 @@ fn source_writes(source: &str, dest: &str, symbolic: bool) -> Vec<AnchorWrite> {
 
 /// The path a source takes inside a destination directory: its basename, or
 /// with `cp --parents` its whole relative path (#8878 finding 6).
-fn source_name(source: &str, parents: bool) -> String {
+pub(super) fn source_name(source: &str, parents: bool) -> String {
     let trimmed = source.trim_end_matches('/');
     if parents {
         return trimmed.trim_start_matches('/').to_string();
@@ -433,7 +434,7 @@ fn source_name(source: &str, parents: bool) -> String {
 }
 
 /// Whether a `cp` of `source` merges its contents into the destination.
-fn copies_contents(source: &str) -> bool {
+pub(super) fn copies_contents(source: &str) -> bool {
     source.ends_with('/') || source.ends_with("/.") || source == "."
 }
 
@@ -446,7 +447,7 @@ fn copies_contents(source: &str) -> bool {
 /// bare `-i` followed by an empty word or one starting with `.` consumes it as
 /// the BSD suffix — and, since GNU reads that word as a file, a non-empty one
 /// is returned too. Every remaining operand is an edited file.
-fn sed_edits(args: &[String]) -> Option<Vec<String>> {
+pub(super) fn sed_edits(args: &[String]) -> Option<Vec<String>> {
     let (mut in_place, mut script_given, mut options) = (false, false, true);
     let (mut files, mut suffixes) = (Vec::new(), Vec::new());
     let mut i = 0;
