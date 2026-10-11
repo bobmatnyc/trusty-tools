@@ -22,6 +22,8 @@
 //! control: records appear) and once with `secrets.audit: false` (none
 //! appear). Values are never printed. Run on a host that is not itself under
 //! Claude Code, or the console is refused as a bridge peer.
+//! [`live_page_flow_over_real_server_honours_registry`] (#9067 PR C) reuses
+//! the `console` role and makes the page's calls from the test process.
 //! Test: itself (`#[ignore]`; `--include-ignored`).
 
 #![cfg(unix)]
@@ -45,6 +47,9 @@ const REGISTRY: &str = "TC_LIVE_REGISTRY";
 const CLIENT: &str = "TC_LIVE_CLIENT";
 const VAULT: &str = "trusty/acme/web";
 const KEY: &str = "API_KEY";
+// #9067 PR C: the second key the page counts, and the key an unlisted call names.
+const KEY_B: &str = "DB_URL";
+const UNLISTED_KEY: &str = "UNLISTED_KEY";
 const VALUE: &str = "live-9066-value-Hx7Pq2";
 const CSRF: &str = "x-trusty-secrets-csrf";
 
@@ -95,18 +100,7 @@ impl Live {
             children: Vec::new(),
         };
         let repo = live.path("repo");
-        std::fs::create_dir(&repo).expect("repo");
-        for args in [
-            vec!["init", "-q"],
-            vec!["remote", "add", "origin", "git@github.com:Acme/Web.git"],
-        ] {
-            let ok = Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(&args)
-                .status();
-            assert!(ok.expect("git").success(), "git {args:?}");
-        }
+        init_checkout(&repo);
         // #9067: the console dials only for a project the tm registry lists.
         let rows = json!([{ "alias": "web", "path": repo }]);
         std::fs::write(live.path("registry.json"), rows.to_string()).expect("registry");
@@ -181,6 +175,18 @@ impl Live {
             .expect("run parent");
         assert!(status.success(), "{parent} run failed");
         serde_json::from_str(&std::fs::read_to_string(&out).expect("report")).expect("json")
+    }
+}
+
+/// A git checkout at `dir` whose origin maps to [`VAULT`].
+fn init_checkout(dir: &Path) {
+    std::fs::create_dir(dir).expect("checkout");
+    for args in [
+        vec!["init", "-q"],
+        vec!["remote", "add", "origin", "git@github.com:Acme/Web.git"],
+    ] {
+        let ok = Command::new("git").arg("-C").arg(dir).args(&args).status();
+        assert!(ok.expect("git").success(), "git {args:?}");
     }
 }
 
@@ -390,4 +396,206 @@ fn live_bridge_is_judged_by_the_real_server() {
             );
         }
     }
+}
+
+/// The page's side of #9067 PR C: its CSRF token and the server's audit log.
+struct Page {
+    addr: SocketAddr,
+    csrf: String,
+    audit_log: PathBuf,
+}
+
+impl Page {
+    /// One `POST /api/secrets/<route>` with the page's headers.
+    fn call(&self, route: &str, body: Value) -> (u16, Value) {
+        post(
+            self.addr,
+            Some(&self.csrf),
+            &format!("/api/secrets/{route}"),
+            &body,
+        )
+    }
+
+    /// [`Page::call`], plus the audit records the server wrote for it.
+    fn traced(&self, route: &str, body: Value) -> (u16, Value, Vec<Value>) {
+        let before = records(&self.audit_log).len();
+        let (status, answer) = self.call(route, body);
+        let mut after = records(&self.audit_log);
+        (status, answer, after.split_off(before))
+    }
+}
+
+/// The key names a `list` answer carries.
+fn key_names(list: &Value) -> Vec<&str> {
+    list["keys"]
+        .as_array()
+        .expect("keys")
+        .iter()
+        .filter_map(|meta| meta["name"].as_str())
+        .collect()
+}
+
+/// Why: #9067 PR C — the picker, scopes, backends, the registry gate and
+/// the copy wire contract were proven only against a stub socket; only the
+/// real server shows what reaches it.
+/// What: T24's temp root and `console` role over an audit-on `file` server,
+/// with a second checkout of the same repo that the registry does not list.
+/// This process is the HTTP client. A refused call that never dialled is
+/// one with no new audit record. Linux only: a macOS run returns before
+/// spawning anything, so no Keychain is opened (ruling Q3).
+/// Test: itself (`#[ignore]`; run by name with `--ignored --exact` on EVO).
+#[test]
+#[ignore = "live: real trusty-secrets binary; Linux only (EVO); run by name"]
+fn live_page_flow_over_real_server_honours_registry() {
+    if cfg!(target_os = "macos") {
+        eprintln!("skipped: Linux only, so no macOS run opens the Keychain (#9067 PR C, Q3)");
+        return;
+    }
+    eprintln!("trusty-secrets: {}", server_binary().display());
+    let mut live = Live::new();
+    let (repo, unlisted) = (live.path("repo"), live.path("unlisted"));
+    init_checkout(&unlisted);
+    let repo_s = repo.to_str().expect("utf-8").to_owned();
+    let unlisted_s = unlisted.to_str().expect("utf-8").to_owned();
+    let registry = live.path("registry.json");
+    let rows = json!([
+        { "alias": "web", "path": repo },
+        { "alias": "ghost", "path": live.path("ghost") },
+        { "alias": "relative", "path": "relative/web" },
+    ]);
+    std::fs::write(&registry, rows.to_string()).expect("registry");
+    let (socket, audit_log) = live.serve("page", true);
+    let addr = live.console("page", &socket);
+    let (_, session) = post(addr, None, "/api/secrets/session", &json!({}));
+    let csrf = session["csrf"].as_str().expect("csrf").to_owned();
+    let page = Page {
+        addr,
+        csrf,
+        audit_log,
+    };
+    let listed = json!({ "project": repo_s });
+    let vault = |project: &str| json!({ "project": project, "vault": VAULT });
+
+    // (1) The picker lists the one real registered directory and never dials.
+    let (status, picked, new) = page.traced("projects", json!({}));
+    assert_eq!(status, 200, "projects: {picked}");
+    let only_repo = json!({ "projects": [{ "name": "web", "path": repo_s }] });
+    assert_eq!(picked, only_repo, "the picker lists only the real dir");
+    assert!(new.is_empty(), "the picker dialled: {new:?}");
+
+    // (2) An unlisted checkout is refused on every project route, undialled.
+    let entry = |key: &str| {
+        let mut body = vault(&unlisted_s);
+        body["key"] = json!(key);
+        body
+    };
+    let mut set = entry(UNLISTED_KEY);
+    set["value"] = json!(VALUE);
+    let copy = json!({ "project": unlisted_s, "from_backend": "file", "to_backend": "file" });
+    for (route, body) in [
+        ("list", vault(&unlisted_s)),
+        ("delete", entry(UNLISTED_KEY)),
+        ("copy", copy),
+        ("scopes", json!({ "project": unlisted_s })),
+        ("backends", json!({ "project": unlisted_s })),
+        ("set", set),
+    ] {
+        let (status, answer, new) = page.traced(route, body);
+        assert_eq!(status, 400, "unlisted {route} was not refused: {answer}");
+        assert!(
+            new.is_empty(),
+            "unlisted {route} reached the server: {new:?}"
+        );
+    }
+    for route in ["list", "scopes", "backends"] {
+        let body = if route == "list" {
+            vault(&repo_s)
+        } else {
+            listed.clone()
+        };
+        let (status, answer) = page.call(route, body);
+        assert_eq!(status, 200, "listed {route}, the control: {answer}");
+    }
+    // Same remote, same vault: a key the unlisted `set` stored would list here.
+    let (_, held) = page.call("list", vault(&repo_s));
+    assert!(key_names(&held).is_empty(), "the server holds {held}");
+
+    // (3) A registry that cannot be read fails closed; restored, it serves.
+    std::fs::write(&registry, "not json {").expect("garbage registry");
+    let (status, answer, new) = page.traced("list", vault(&repo_s));
+    assert_eq!(status, 503, "a garbage registry: {answer}");
+    assert!(new.is_empty(), "a garbage registry dialled: {new:?}");
+    std::fs::write(&registry, rows.to_string()).expect("restore registry");
+    let (status, answer) = page.call("list", vault(&repo_s));
+    assert_eq!(status, 200, "a restored registry: {answer}");
+
+    // (4) Scopes: project and owner only, the project scope on this repo's vault.
+    let (status, scopes) = page.call("scopes", listed.clone());
+    assert_eq!(status, 200, "scopes: {scopes}");
+    let scopes = scopes["scopes"].as_array().expect("scopes").clone();
+    let kinds: Vec<&str> = scopes.iter().filter_map(|s| s["kind"].as_str()).collect();
+    assert_eq!(kinds, ["project", "owner"], "{scopes:?}");
+    assert_eq!(scopes[0]["vault"], VAULT, "{scopes:?}");
+
+    // (5) Backends: ids and availability only; the file backend is selected.
+    let (status, backends) = page.call("backends", listed.clone());
+    assert_eq!(status, 200, "backends: {backends}");
+    let fields = |v: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(fields(&backends), ["backends", "selected"], "{backends}");
+    assert_eq!(backends["selected"], "file", "{backends}");
+    let rows_out = backends["backends"].as_array().expect("backends");
+    assert!(
+        rows_out
+            .iter()
+            .all(|row| fields(row) == ["available", "id"]),
+        "{backends}"
+    );
+    let file = rows_out.iter().find(|row| row["id"] == "file");
+    assert_eq!(file.map(|row| &row["available"]), Some(&json!(true)));
+
+    // (6) Copy wire contract: the page's count, then the project it counted.
+    for key in [KEY, KEY_B] {
+        let mut body = vault(&repo_s);
+        body["key"] = json!(key);
+        body["value"] = json!(VALUE);
+        let (status, answer) = page.call("set", body);
+        assert_eq!(status, 200, "set {key}: {answer}");
+    }
+    let (_, listing) = page.call("list", vault(&repo_s));
+    assert_eq!(key_names(&listing), [KEY, KEY_B], "the page's count");
+    let copy =
+        |from: &str| json!({ "project": repo_s, "from_backend": from, "to_backend": "file" });
+    // Q4: the server refuses a same-backend copy, before it resolves the project.
+    let (status, answer, new) = page.traced("copy", copy("file"));
+    assert_eq!((status, &answer["kind"]), (400, &json!("same_backend")));
+    let [record] = new.as_slice() else {
+        panic!("same-backend copy records: {new:?}")
+    };
+    assert_eq!(record["method"], "secrets.copy", "{record}");
+    assert_eq!(record["reason"], "same_backend", "{record}");
+    // A Linux build has no Keychain, so this copy fails after the server has
+    // resolved the project; its record names the checkout it acted on.
+    let (status, answer, new) = page.traced("copy", copy("keychain"));
+    assert_eq!((status, &answer["kind"]), (422, &json!("unknown_backend")));
+    let canonical = std::fs::canonicalize(&repo).expect("canonical repo");
+    let [record] = new.as_slice() else {
+        panic!("keychain copy records: {new:?}")
+    };
+    assert_eq!(record["method"], "secrets.copy", "{record}");
+    assert_eq!(
+        record["project_root"],
+        json!(canonical),
+        "copy acted on another project"
+    );
+    let other = json!({ "project": unlisted_s, "from_backend": "file", "to_backend": "file" });
+    let (status, answer, new) = page.traced("copy", other);
+    assert_eq!(status, 400, "copy naming an unlisted project: {answer}");
+    assert!(
+        new.is_empty(),
+        "copy naming an unlisted project dialled: {new:?}"
+    );
 }
