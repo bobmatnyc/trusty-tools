@@ -591,12 +591,7 @@ impl HnswStore {
     /// mapping are applied by the caller, `groups::group_rows`.
     /// Test: `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
     /// `search_widens_until_k_drawers_in_the_graph_arm`.
-    fn ranked(
-        &self,
-        query: &[f32],
-        k: usize,
-        keys: &key_cache::KeyMap,
-    ) -> Result<Vec<(u64, f32)>> {
+    fn ranked(&self, query: &[f32], k: usize, keys: &key_cache::KeyMap) -> Result<Vec<(u64, f32)>> {
         let (reverse, tombstones) = (&keys.reverse, &keys.tombstones);
 
         // #5171: `reverse.len()` is the LIVE row count — `get_nb_point()`
