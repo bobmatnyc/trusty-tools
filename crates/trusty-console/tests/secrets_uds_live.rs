@@ -17,7 +17,8 @@
 //!
 //! The server is the `trusty-secrets` binary built beside this test binary,
 //! else the one `bin_resolve` finds; its `HOME` and machine config are under
-//! one temp root, with the `file` backend. Run once with the audit on (the
+//! one temp root, with the `file` backend. The console reads a tm registry
+//! under the same root that lists the checkout (#9067 PR B1). Run once with the audit on (the
 //! control: records appear) and once with `secrets.audit: false` (none
 //! appear). Values are never printed. Run on a host that is not itself under
 //! Claude Code, or the console is refused as a bridge peer.
@@ -40,6 +41,7 @@ const SOCKET: &str = "TC_LIVE_SOCKET";
 const OUT: &str = "TC_LIVE_OUT";
 const ADDR: &str = "TC_LIVE_ADDR";
 const PROJECT: &str = "TC_LIVE_PROJECT";
+const REGISTRY: &str = "TC_LIVE_REGISTRY";
 const CLIENT: &str = "TC_LIVE_CLIENT";
 const VAULT: &str = "trusty/acme/web";
 const KEY: &str = "API_KEY";
@@ -105,6 +107,9 @@ impl Live {
                 .status();
             assert!(ok.expect("git").success(), "git {args:?}");
         }
+        // #9067: the console dials only for a project the tm registry lists.
+        let rows = json!([{ "alias": "web", "path": repo }]);
+        std::fs::write(live.path("registry.json"), rows.to_string()).expect("registry");
         let exe = std::env::current_exe().expect("exe");
         for name in ["trusty-console", "claude", "notclaude"] {
             std::fs::copy(&exe, live.path(name)).expect("copy test binary");
@@ -154,6 +159,7 @@ impl Live {
         let out = self.path(tag).join("addr");
         let console = role(&self.path("trusty-console"), "console")
             .env(SOCKET, socket)
+            .env(REGISTRY, self.path("registry.json"))
             .env(OUT, &out)
             .spawn()
             .expect("spawn console");
@@ -213,13 +219,15 @@ fn run_console() {
     use trusty_console::secrets_uds::verdict::PeerLookup;
     let socket = PathBuf::from(std::env::var_os(SOCKET).expect("socket"));
     let out = PathBuf::from(std::env::var_os(OUT).expect("out"));
+    let registry = PathBuf::from(std::env::var_os(REGISTRY).expect("registry"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("runtime");
     runtime.block_on(async move {
-        let bridge =
-            SecretsBridge::new(SecretsDial::new(socket).with_external(true)).expect("mint");
+        let bridge = SecretsBridge::new(SecretsDial::new(socket).with_external(true))
+            .expect("mint")
+            .with_registry(Some(registry));
         let state = trusty_console::server::AppState::new(Vec::new()).with_secrets(bridge);
         let secrets = state.secrets();
         let app = trusty_console::server::build_router(state);

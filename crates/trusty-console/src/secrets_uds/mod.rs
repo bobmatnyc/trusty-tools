@@ -26,6 +26,8 @@ mod mount_tests;
 #[cfg(test)]
 mod picker_tests;
 #[cfg(test)]
+mod registry_check_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt;
