@@ -6,6 +6,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.6] — 2026-10-11
+
+### Added
+
+- The `trusty-secrets` server keeps the values `secrets.resolve` reads from 1Password or Keeper for up to the cache max age (600 s by default, counted in both wall time and awake time), so a second resolve of the same key does not run `op` or `keeper` again or ask for another unlock. Keychain and file values are never cached, and neither is a failed read. The grant, ancestry, agents-flag and audit checks still run on every call; a cache hit skips only the backend read, and a one-shot grant is spent by a hit as by a read. Entries are keyed by backend, vault and key, and `secrets.set`, `secrets.delete` and `secrets.copy` evict the key they write (#7520).
+- A cached value is dropped when the backend's section of the account machine config changes, or when that file changes at all (by a stat fingerprint), so a value read under one 1Password or Keeper account never answers under another, even if the file is switched and switched back while a backend opens (#7520).
+- A cached value is never served once it is 600 s old by wall time or by awake time, so neither a busy server nor a machine asleep with the server running keeps it longer, and a wall clock stepped back is a miss; the next resolve reads the backend again. `trusty-secrets serve --cache-max-age-secs N` sets the max age, and `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` can shorten it but not lengthen it. A value changed outside the server is seen once its entry reaches the max age or the server exits (#7520).
+- A value the server's cache drops — by max age, by an eviction, by a settings change, by replacement, or when the server exits — is overwritten with zeros first, and the server sets its core-dump limit to 0 (soft and hard) at start, before it reads any secret; it exits 1 if it cannot (#7520).
+- The `ancestry` feature: the process-ancestry walk (`ancestry::has_agent_ancestor`, `ProcessTable`, `OsProcessTable`, `StartTime`) with std, `thiserror` and libc only, so trusty-console judges its HTTP client with the same walk the socket server uses and links no store, keychain, server or trusty-common. `server` includes it, and `server::ancestry` still resolves to it (#9066).
+- `secrets.bridge.list`, `secrets.bridge.set`, `secrets.bridge.delete`, `secrets.bridge.copy` and `secrets.bridge.set_agents_may_use`: the console bridge's entries. Each carries the console's verdict on its HTTP client in a `bridge` field (`agent_parent` and a `source` of `mapped`, `unmappable` or `unreadable`) and gets the direct method's verdict, error text and deadline. Every bridge call is audited: it leaves the direct method's records, and an allowed `secrets.bridge.list`, which leaves none when direct, leaves one allow record; an unwritable audit log refuses every allowed bridge call, list included, with `audit_unavailable`. Like the direct socket, the bridge writes no record and refuses nothing for the audit when the machine config sets `secrets.audit: false`. The server takes the verdict only from a peer running the `trusty-console` executable outside any Claude Code process tree; any other peer is refused with the new `bridge_refused` kind (-32084), and a malformed assertion with `invalid_params`, each with a deny record naming the vault and key the params carried (#9066).
+- Audit records of a bridge call carry `source` (`mapped`, `unmappable`, `unreadable` or `malformed`) and the asserted `agent_parent`; a direct call's record is unchanged.
+- `api::mask_secret`, `api::BridgeAssertion` and `api::BridgeSource`, so a caller that links only `api` can mask a value and build the assertion. `store::mask_secret` still resolves.
+- `ProcessTable::executable`, a provided method that reads the executable a pid runs; the default refuses.
+- `secrets.bridge.scopes`: the console bridge's form of `secrets.scopes`, for the Secrets page's scope picker. It is refused with `bridge_refused` from any peer that is not the verified console, answers what a direct `secrets.scopes` answers (project and owner scopes only), and, like every bridge call, leaves one `secrets.scopes` audit record and is refused with `audit_unavailable` when the record cannot be written. A direct `secrets.scopes` still leaves no record (#9067).
+- `secrets.bridge.backends`: the console bridge's backend list for the Secrets page's copy dialog. It answers `secrets.doctor`'s rows for the named project as id and availability only, plus the backend the project's writes use (`BackendsResponse`, `BackendChoice`); no path, reason or detail. It is refused with `bridge_refused` from any peer that is not the verified console, leaves one `secrets.backends` audit record per call, and is refused with `audit_unavailable` when that record cannot be written. It has no direct method (#9067).
+
+### Changed
+
+- A bridge assertion with `source: unmappable` must now carry `agent_parent: true`, and `BridgeAssertion::unmappable()` builds it that way: a client the console cannot map is treated as an agent, so `secrets.bridge.set_agents_may_use` ON is `agent_use_refused` and OFF is allowed. `unmappable` with `agent_parent: false` is now `invalid_params` (#9067).
+
 ## [0.1.5] — 2026-10-10
 
 ### Added
