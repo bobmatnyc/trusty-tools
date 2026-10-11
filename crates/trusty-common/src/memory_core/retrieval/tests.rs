@@ -1480,6 +1480,59 @@ async fn expired_drawer_is_excluded_from_l2() {
     );
 }
 
+/// #9390: expired slots are never deleted (ADR-0028 D6), so a pile of them
+/// that out-scores a live drawer fills the window L2 and L3 fetch. Both layers
+/// refill past the pile instead of returning nothing.
+#[tokio::test]
+async fn l2_and_l3_refill_past_expired_drawers() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let room_id = Uuid::new_v4();
+    let past = chrono::Utc::now() - chrono::Duration::hours(1);
+
+    // Ten expired drawers closer to the query than the live one, against a
+    // first window of 3 (L2) and 1 (L3) at `top_k` 1.
+    let mut texts: Vec<(String, bool)> = (0..10)
+        .map(|n| (format!("release head sha {n}"), true))
+        .collect();
+    texts.push(("release head sha for the live drawer".to_string(), false));
+    let mut live_id = None;
+    for (text, expired) in texts {
+        let mut drawer = Drawer::new(room_id, &text);
+        if expired {
+            drawer.expires_at = Some(past);
+        } else {
+            live_id = Some(drawer.id);
+        }
+        let vecs = embedder.embed_batch(&[text]).await.unwrap();
+        handle
+            .vector_store
+            .upsert(drawer.id, vecs[0].clone())
+            .await
+            .unwrap();
+        handle.add_drawer(drawer);
+    }
+    let live_id = live_id.unwrap();
+
+    let query = "release head sha";
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 1)
+        .await
+        .unwrap();
+    let l3 = retrieve_l3(&handle, embedder.as_ref(), query, None, 1)
+        .await
+        .unwrap();
+    for (layer, results) in [("L2", l2), ("L3", l3)] {
+        let ids: Vec<Uuid> = results.iter().map(|r| r.drawer.id).collect();
+        assert_eq!(
+            ids,
+            vec![live_id],
+            "{layer} must refill past the expired pile"
+        );
+    }
+}
+
 /// #4885: read-time enforcement FILTERS, it does not delete. The expired
 /// drawer stays in the store — reclamation belongs to `purge_expired` and the
 /// open-time sweep — so a recall can never fail because a cleanup failed.

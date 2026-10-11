@@ -40,7 +40,7 @@
 //! Cost of the choice: an expired drawer keeps its row and its vector slot
 //! until a sweep runs. That is storage, not correctness.
 
-use super::candidates::score_candidates;
+use super::candidates::search_live_candidates;
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
 use super::id_tokens::query_id_tokens;
@@ -49,7 +49,6 @@ use super::types::{CrossPalaceRecall, CrossPalaceResult, RecallResult};
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
-use crate::memory_core::store::vector::VectorStore;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -340,7 +339,6 @@ pub async fn retrieve_l2_scoped(
     };
 
     let overfetch = top_k.saturating_mul(3).max(top_k);
-    let hits = handle.vector_store.search(&query_vec, overfetch).await?;
 
     // Issue #3274: this used to be a silent no-op (empty if-body) — a
     // caller-supplied `room_filter` was accepted but never applied, so
@@ -359,7 +357,17 @@ pub async fn retrieve_l2_scoped(
 
     // #9279: one scorer for L2 and L3, so both apply the id-token rarity rule.
     let query_tokens: Vec<String> = extract_keywords(query);
-    let mut results = score_candidates(handle, &hits, &allowed, &query_tokens, 2);
+    // #9390: refills past expired slots, which ADR-0028 D6 never deletes.
+    let mut results = search_live_candidates(
+        handle,
+        &query_vec,
+        overfetch,
+        top_k,
+        &allowed,
+        &query_tokens,
+        2,
+    )
+    .await?;
 
     // #9280: id tiebreak, so tied drawers rank the same on every open.
     results.sort_by(rank_order);
@@ -440,9 +448,10 @@ pub async fn retrieve_l3_scoped(
     } else {
         top_k
     };
-    let hits = handle.vector_store.search(&query_vec, fetch).await?;
-
-    let mut results = score_candidates(handle, &hits, &allowed, &query_tokens, 3);
+    // #9390: refills past expired slots, as L2 does.
+    let mut results =
+        search_live_candidates(handle, &query_vec, fetch, top_k, &allowed, &query_tokens, 3)
+            .await?;
 
     // #9280: id tiebreak, so tied drawers rank the same on every open.
     results.sort_by(rank_order);

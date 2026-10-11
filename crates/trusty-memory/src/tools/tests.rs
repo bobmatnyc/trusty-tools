@@ -2392,7 +2392,8 @@ fn bm25_hits_hydrate_from_handle_during_warmup() {
         },
     ];
 
-    let results = bm25_hits_to_recall_results(&handle, &hits);
+    let (results, expired) = bm25_hits_to_recall_results(&handle, &hits);
+    assert_eq!(expired, 0, "nothing here is past its expiry");
     assert_eq!(
         results.len(),
         1,

@@ -327,16 +327,21 @@ pub(crate) fn fuse_bm25_into_recall(
 /// (e.g. forgotten since the BM25 snapshot was built) are skipped, and so
 /// are drawers past their `expires_at` (#9390), judged by the same
 /// `Drawer::is_expired_at` the L0/L1 and L2/L3 layers use. They are skipped,
-/// not deleted: an expired Tier C slot stays in the store.
+/// not deleted: an expired Tier C slot stays in the store. The second value is
+/// how many hits were skipped as expired, for the #9390 refill.
 /// Test: `bm25_hits_hydrate_from_handle_during_warmup`,
 /// `an_expired_slot_is_not_returned_by_the_warming_path`.
 pub(crate) fn bm25_hits_to_recall_results(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     bm25_hits: &[BM25Hit],
-) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
+) -> (
+    Vec<trusty_common::memory_core::retrieval::RecallResult>,
+    usize,
+) {
     let drawers = handle.drawers.read();
     let now = chrono::Utc::now();
-    bm25_hits
+    let mut expired = 0;
+    let results = bm25_hits
         .iter()
         .filter_map(|hit| {
             let drawer_id = uuid::Uuid::parse_str(&hit.doc_id).ok()?;
@@ -344,6 +349,7 @@ pub(crate) fn bm25_hits_to_recall_results(
             // #9390: the BM25 corpus keeps an expired drawer's text, so the
             // lexical lane must apply the read-time expiry filter itself.
             if drawer.is_expired_at(now) {
+                expired += 1;
                 return None;
             }
             let drawer = drawer.clone();
@@ -353,5 +359,43 @@ pub(crate) fn bm25_hits_to_recall_results(
                 layer: 4,
             })
         })
-        .collect()
+        .collect();
+    (results, expired)
+}
+
+/// The warming lane's live BM25 hits, refilled past expired slots (#9390).
+///
+/// Why: ADR-0028 D6 never deletes an expired Tier C slot, and the hydration
+/// above drops one only after the fetch, so a pile of them that out-scores the
+/// live slot can fill the window and the live slot is never hydrated.
+/// What: searches `window` hits, hydrates them, keeps those `admits` accepts,
+/// and while expired hits were dropped, fewer than `window` live hits survived
+/// and the lane returned a full window, searches again with the window
+/// `next_refill_window` gives (capped at 1024, see trusty-common
+/// `retrieval::refill`). `None` when the lane is off or its first search
+/// fails; a failed refill round keeps the hits already found. With no expired
+/// hit this is the single search it was before.
+/// Test: `recall_returns_the_live_slot_past_twenty_expired_ones_while_warming`.
+pub(crate) async fn bm25_live_hits(
+    state: &AppState,
+    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    query: &str,
+    window: usize,
+    admits: impl Fn(&trusty_common::memory_core::palace::Drawer) -> bool,
+) -> Option<Vec<trusty_common::memory_core::retrieval::RecallResult>> {
+    use trusty_common::memory_core::retrieval::next_refill_window;
+    let mut fetch = window;
+    let mut live = None;
+    // #5036: key the lane on the RESOLVED palace id, read off the handle.
+    while let Some(hits) = bm25_search_optional(state, handle.id.as_str(), query, fetch).await {
+        let (hydrated, expired) = bm25_hits_to_recall_results(handle, &hits);
+        let found: Vec<_> = hydrated.into_iter().filter(|r| admits(&r.drawer)).collect();
+        let next = next_refill_window(fetch, hits.len(), found.len(), expired, window);
+        live = Some(found);
+        match next {
+            Some(wider) => fetch = wider,
+            None => break,
+        }
+    }
+    live
 }
