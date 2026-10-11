@@ -30,7 +30,7 @@ use axum::serve::IncomingStream;
 use tokio::net::TcpListener;
 use trusty_secrets::ancestry::OsProcessTable;
 
-use super::verdict::{AcceptedPeer, PeerLookup, PidResolver};
+use super::verdict::{PeerLookup, PidResolver};
 
 /// The host's own socket table.
 #[derive(Debug, Clone, Copy, Default)]
@@ -79,15 +79,25 @@ impl Connected<IncomingStream<'_, TcpListener>> for PeerLookup {
     /// Start resolving the client when axum accepts the connection (A9).
     ///
     /// What: constant-time work only; the lookup runs on the blocking pool
-    /// (#9066 F1). An unreadable local address gives [`AcceptedPeer::Unfound`].
+    /// (#9066 F1). See [`lookup_at_accept`].
     /// Test: `a_loopback_request_is_judged_from_the_pid_found_at_accept`,
     /// `a_slow_lookup_delays_no_accept_and_no_other_route`.
     fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
-        let peer = *stream.remote_addr();
-        match stream.io().local_addr() {
-            Ok(local) => Self::start(OsPidMap, Arc::new(OsProcessTable), local, peer),
-            Err(_) => Self::ready(AcceptedPeer::Unfound),
-        }
+        lookup_at_accept(stream.io().local_addr(), *stream.remote_addr())
+    }
+}
+
+/// The lookup for a connection from `peer` accepted on the address `local`
+/// read back from the socket.
+///
+/// What: starts the [`OsPidMap`] lookup; an unreadable local address gives a
+/// failed lookup, judged `unreadable`.
+/// Test: `a_getsockname_failure_at_accept_is_unreadable`.
+pub(super) fn lookup_at_accept(local: std::io::Result<SocketAddr>, peer: SocketAddr) -> PeerLookup {
+    match local {
+        Ok(local) => PeerLookup::start(OsPidMap, Arc::new(OsProcessTable), local, peer),
+        // #9066: a getsockname failure is a wiring fault, never "no pid found".
+        Err(_) => PeerLookup::failed(),
     }
 }
 

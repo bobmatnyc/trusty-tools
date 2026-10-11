@@ -144,6 +144,11 @@ impl PeerLookup {
         Self(task.map(Result::ok).boxed().shared())
     }
 
+    /// A lookup that could not run, judged `unreadable` (#9066).
+    pub fn failed() -> Self {
+        Self(future::ready(None).boxed().shared())
+    }
+
     /// A lookup that already found `peer`.
     pub fn ready(peer: AcceptedPeer) -> Self {
         Self(future::ready(Some(peer)).boxed().shared())

@@ -750,6 +750,20 @@ async fn a_request_without_a_lookup_is_unreadable() {
     );
 }
 
+#[tokio::test]
+async fn a_getsockname_failure_at_accept_is_unreadable() {
+    let peer: SocketAddr = "127.0.0.1:50000".parse().expect("addr");
+    let local = Err(std::io::Error::other("getsockname failed"));
+    let lookup = super::pid_map::lookup_at_accept(local, peer);
+    let (status, sent) = wire_assertion_for(Arc::new(family()), Some(lookup)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sent,
+        json!({ "agent_parent": true, "source": "unreadable" }),
+        "an unreadable local address is a wiring fault, never `unmappable`"
+    );
+}
+
 // ─── T15, T16, A11: reachability ─────────────────────────────────────────────
 
 #[tokio::test]
