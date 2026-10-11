@@ -65,13 +65,18 @@ fn egress_family_match_normalizes_case_and_separators() {
 /// tools only; its documents, drive and calendar tools are not this family.
 #[test]
 fn egress_gworkspace_denies_only_mail_chat_message_tools() {
+    // #8454 final round: a gmail tool reports the gmail family on any server.
     for tool in [
         "mcp__gworkspace-mcp__search_gmail_messages",
+        "mcp__google_workspace__send_gmail_message",
+    ] {
+        assert_eq!(family_of(tool), "gmail", "{tool}");
+    }
+    for tool in [
         "mcp__gworkspace-mcp__compose_email",
         "mcp__gworkspace-mcp__send_draft",
         "mcp__G_Workspace__list_chat_spaces",
         "mcp__gworkspace__list_message_attachments",
-        "mcp__google_workspace__send_gmail_message",
         "mcp__Google-Workspace__send_chat_message",
         "mcp__mcp-gsuite__send_chat_message",
     ] {
