@@ -22,7 +22,7 @@
 
 /// Process-wide lock serialising tests that mutate global env vars.
 ///
-/// Why: `TRUSTY_DATA_DIR_OVERRIDE`, `HTTP_PROXY`, `TCTL_ENSURE_WAIT_*` are all
+/// Why: `TRUSTY_DATA_DIR_OVERRIDE` and `TCTL_ENSURE_WAIT_*` are
 /// process-global, so tests in different modules would race each other — and
 /// `cargo test` runs them on a thread pool by default. A single crate-shared
 /// lock, held for the whole duration of each env-mutating test, is what makes
