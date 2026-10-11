@@ -1,0 +1,2 @@
+Changed
+- Every bridged secrets call (`scopes`, `list`, `set`, `delete`, `copy`, `agents_may_use`) now names a project the tm project registry lists, matched byte for byte against a row's path, or it is refused 400 with the existing bad-body text and the secrets socket is never dialled. The registry is read fresh on every call; one that is missing, unreadable or malformed, or has no known location, answers 503 and dials nothing (#9067).

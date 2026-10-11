@@ -10,7 +10,8 @@
 //! result is relayed as the server sent it — for `set`, the server's mask
 //! text; an error passes only through the closed kind table. #9067: the
 //! `scopes` result must decode as project and owner scopes before it is
-//! relayed; `projects` reads the tm registry and dials nothing.
+//! relayed; `projects` reads the tm registry and dials nothing; every
+//! bridged call's project must be one the registry lists (PR B1).
 //! Test: `each_route_dials_its_bridged_method_with_an_assertion`,
 //! `malformed_bodies_never_echo_the_value`,
 //! `upstream_errors_relay_only_the_kind`,
@@ -29,7 +30,7 @@ use trusty_secrets::api::{BRIDGE_FIELD, BackendId, SecretKey, SecretValue, Vault
 
 use super::dial::DialError;
 use super::errors::{Refusal, upstream_response};
-use super::projects::read_registry;
+use super::projects::{read_registry, registry_lists};
 use super::verdict::{PeerLookup, judge_in_time};
 use super::{MAX_BODY_BYTES, SecretsBridge};
 
@@ -218,6 +219,11 @@ where
         return Err(Refusal::BadBody.into_response());
     };
     drop(body);
+    // #9067: an unlisted project, or an unreadable registry, never dials.
+    let Some(Value::String(project)) = params.get("project") else {
+        return Err(Refusal::BadBody.into_response());
+    };
+    require_registered(bridge, project.clone()).await?;
     // #9066 F1: the lookup and the ancestry walk run off the async threads.
     let assertion = judge_in_time(bridge.table(), lookup).await;
     let Ok(assertion) = serde_json::to_value(assertion) else {
@@ -229,5 +235,28 @@ where
         Err(DialError::Unavailable) => Err(Refusal::Unavailable.into_response()),
         Err(DialError::Transport) => Err(Refusal::Transport.into_response()),
         Err(DialError::Rpc { kind }) => Err(upstream_response(kind.as_deref())),
+    }
+}
+
+/// Refuse a bridged call whose project the tm registry does not list.
+///
+/// Why: #9067 PR B1, Architect ruling — the secrets server acts on whatever
+/// checkout the call names, so the console admits only registered ones.
+/// What: reads the registry fresh on the blocking pool. A listed project is
+/// `Ok`; an unlisted one is [`Refusal::BadBody`] (400). A registry with no
+/// known location, or one that is missing, unreadable or malformed, and a
+/// failed blocking task are all [`Refusal::RegistryUnavailable`] (503):
+/// the check fails closed. The answer names no path and echoes no value.
+/// Test: `an_unlisted_project_is_refused_on_every_route_without_a_dial`,
+/// `an_unreadable_registry_refuses_every_route_without_a_dial`,
+/// `a_listed_project_is_dialled_once_per_route`.
+async fn require_registered(bridge: &SecretsBridge, project: String) -> Result<(), Response> {
+    let Some(file) = bridge.registry().map(ToOwned::to_owned) else {
+        return Err(Refusal::RegistryUnavailable.into_response());
+    };
+    match tokio::task::spawn_blocking(move || registry_lists(&file, &project)).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err(Refusal::BadBody.into_response()),
+        Ok(Err(_)) | Err(_) => Err(Refusal::RegistryUnavailable.into_response()),
     }
 }
