@@ -1,8 +1,9 @@
 /*
  * Test-only: a fake console for the page and client tests (#9067).
- * What: `fakeConsole(overrides)` returns `{ fetchImpl, calls }`. Each call
- * records its verb, headers and decoded body; each verb answers from a
- * handler `(body) => [status, json]`, overridable per test.
+ * What: `fakeConsole(overrides)` returns `{ fetchImpl, calls, hold }`. Each
+ * call records its verb, headers and decoded body; each verb answers from a
+ * handler `(body) => [status, json]`, overridable per test. `hold(verb)`
+ * holds the next call of that verb until the returned `release()` runs.
  */
 
 export const TOKEN = 'ab'.repeat(32);
@@ -50,10 +51,22 @@ export function defaultHandlers() {
 export function fakeConsole(overrides = {}) {
   const handlers = { ...defaultHandlers(), ...overrides };
   const calls = [];
+  const gates = {};
+  // #9712: a held call is recorded at once and answers only on release.
+  function hold(verb) {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    (gates[verb] ??= []).push(gate);
+    return () => release();
+  }
   async function fetchImpl(url, init) {
     const verb = new URL(url).pathname.split('/').pop();
     const body = JSON.parse(init.body);
     calls.push({ verb, url, method: init.method, headers: { ...init.headers }, body });
+    const gate = gates[verb]?.shift();
+    if (gate) await gate;
     const handler = handlers[verb];
     const [status, json] = handler ? handler(body) : [404, { error: 'no such secrets route' }];
     return {
@@ -62,5 +75,5 @@ export function fakeConsole(overrides = {}) {
       json: async () => json,
     };
   }
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, hold };
 }
