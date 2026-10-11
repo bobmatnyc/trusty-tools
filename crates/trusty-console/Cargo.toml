@@ -32,7 +32,11 @@ name        = "trusty-console"
 # external struct-literal construction stops compiling.
 # 0.12.1 (#8271, PR #8621): patch — test-only fix (shared-open-budget test
 # runs on a paused clock); no public API change.
-version     = "0.12.5"
+# 0.12.6 (#9066): patch — additive. New public module `secrets_uds` (the
+# `/api/secrets/*` bridge to the trusty-secrets socket), `AppState::with_secrets`
+# and `AppState::secrets`; `ServeArgs` and `serve_tailnet` are unchanged.
+# Publish after trusty-secrets 0.1.6, which carries the `ancestry` feature.
+version     = "0.12.6"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -107,6 +111,13 @@ base64             = { workspace = true }
 # filenames (`chrono::NaiveDate`) — production code, not just test fixtures,
 # so this moved out of dev-dependencies.
 chrono             = { workspace = true }
+# #9066 (owner ruling Df0): the wire vocabulary and the ancestry walk only —
+# no `server`, no `store`, so no keychain and no second trusty-common edge.
+trusty-secrets     = { workspace = true, features = ["api", "ancestry"] }
+# #9066: the per-launch CSRF token comes from the OS CSPRNG.
+rand_core          = { workspace = true }
+# #9066 (Architect Q2): `proc_pidinfo` for the macOS peer-pid lookup.
+libc               = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }

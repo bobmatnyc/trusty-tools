@@ -908,8 +908,9 @@ terminal output is not captured (§3 G-6).
 ## 11. Consumers and Migration
 
 > **Amended 2026-10-01.** Consumers depend on the `trusty-secrets` crate
-> (§15.2): `api` for names and types, `store` for in-process resolution,
-> `client` for UDS resolution inside an exec grant (§15.8).
+> (§15.2): `api` for names and types, `store` for in-process resolution.
+> UDS resolution inside an exec grant (§15.8) needs no feature; the caller
+> links its own UDS client over the `api` types (owner ruling Df0, #9066).
 
 - **`tm`** reaches the cache directly (in-process, same binary).
 - **`trusty-agents`** and **`trusty-code`** reach it exactly the way they
@@ -1088,13 +1089,18 @@ search dashboard backend items
 ### 15.2 The `trusty-secrets` crate and its host
 
 A new library crate, `trusty-secrets`, holds the store abstraction, scope
-resolution, masking and the exec-grant logic. It has three features:
+resolution, masking and the exec-grant logic. It has these library features
+(`server`, the socket, is described under **Host** below):
 
 | Feature | Contents | Who depends on it |
 |---|---|---|
-| `api` | Key names, scope and method types only. No store code. | trusty-console's bridge, any caller that only names keys |
+| `api` | Key names, scope and method types only. No store code. | trusty-console's bridge (with `ancestry`), any caller that only names keys |
 | `store` | `SecretBackend` implementations, scope resolution, `mask_secret`, the CLI-source cache | The tm daemon and the `tm` CLI |
-| `client` | A UDS client for `secrets.resolve` inside an exec grant (§15.8). No new dependencies. | Rust app code (S9) |
+| `ancestry` | The process-ancestry walk alone: `ProcessTable`, `OsProcessTable`, `has_agent_ancestor`. std, `thiserror` and `libc`; no store, keychain, server or trusty-common (#9066). | trusty-console's bridge (with `api`); `server` includes it |
+
+There is no `client` feature (owner ruling Df0, 2026-10-11). A caller that
+dials the socket links its own `trusty-common`; `api` is the wire vocabulary
+it shares.
 
 **Host (owner ruling 24, 2026-10-02).** `trusty-secrets` owns and serves its
 own on-demand socket. The tm daemon and the console are clients of that socket;
@@ -1442,7 +1448,7 @@ Tier 3 must not widen the limit.
 
 | Language | Package | Dependencies |
 |---|---|---|
-| Rust | `client` feature of `trusty-secrets` | None new |
+| Rust | `trusty-secrets` with `api` only, plus the caller's own UDS client (no `client` feature, Df0) | None new |
 | Python | `trusty-secrets` on PyPI | Standard library only (`socket`, `json`, `os`) |
 | JS/TS | `@trusty-tools/secrets` on npm | Node built-ins only (`node:net`) |
 | Go | Later | — |
@@ -1471,7 +1477,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S6+ | One PR per integration: 1Password, Vercel, GitHub Actions, Keeper | 4 each | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
-| S9 | Rust `client` feature | 4 | S8 |
+| S9 | Rust client: shape decided at S9, no `client` feature (Df0) | 4 | S8 |
 | S10 | Python and npm clients, plus their publish workflows | 3 each | S8 |
 
 ### 15.10 Child re-scope

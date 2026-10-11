@@ -270,6 +270,13 @@ pub async fn guard_tailnet_peer(
     next.run(req).await
 }
 
+/// The tag on every request the tailnet listener serves (#9066).
+///
+/// Why: the secrets bridge serves the console's own loopback page only; a
+/// tailnet request is refused before any pid lookup (A2).
+#[derive(Debug, Clone, Copy)]
+pub struct TailnetRequest;
+
 /// Serve `router` on the tailnet listener behind the peer gate.
 ///
 /// Why: the one serve path for a tailnet listener, so tests drive the exact
@@ -286,10 +293,14 @@ pub async fn serve_tailnet(
 ) -> std::io::Result<()> {
     let listen = listener.local_addr()?;
     // #9035: the tailnet listener must never serve an unauthenticated peer.
-    let app = router.layer(axum::middleware::from_fn_with_state(
-        TailnetGuard { gate, listen },
-        guard_tailnet_peer,
-    ));
+    // #9066: every request here is tagged, so the secrets bridge refuses it.
+    let app =
+        router
+            .layer(axum::Extension(TailnetRequest))
+            .layer(axum::middleware::from_fn_with_state(
+                TailnetGuard { gate, listen },
+                guard_tailnet_peer,
+            ));
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
