@@ -195,6 +195,8 @@ fn egress_denies_malformed_payloads() {
         ("empty stdin", b""),
         ("whitespace stdin", b"  \n\t "),
         ("non-JSON stdin", b"not json"),
+        // A read error: `read_to_string` refuses bytes that are not UTF-8.
+        ("non-UTF-8 stdin", &[0xff, 0xfe, 0x7b]),
         ("truncated JSON", br#"{"tool_name":"Bash""#),
         ("array JSON", br#"["mcp__slack__send"]"#),
         ("string JSON", br#""mcp__slack__send""#),
