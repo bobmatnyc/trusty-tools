@@ -16,28 +16,33 @@
 //!    that is not is [`ErrorKind::BridgeRefused`];
 //! 3. refuses a malformed assertion with [`ErrorKind::InvalidParams`];
 //! 4. otherwise runs the direct body with the verdict on its [`Caller`], so
-//!    the body leaves the records a direct call leaves, plus `source` and
-//!    `agent_parent`, and `set_agents_may_use` takes the console's verdict
-//!    in place of its own ancestry walk.
+//!    every record it leaves carries `source` and `agent_parent`, and
+//!    `set_agents_may_use` takes the console's verdict in place of its own
+//!    ancestry walk.
 //!
-//! Each refusal in steps 2 and 3 leaves one deny record, best-effort like
-//! every other refusal. An allowed change keeps its direct method's
-//! fail-closed audit, so an unwritable log changes nothing.
+//! Every bridge call is audited. An allowed change keeps its direct
+//! method's fail-closed audit; a bridged `list`, which leaves no allow
+//! record when direct, leaves one and is admitted fail-closed like `set`
+//! (see `methods::list`). So an unwritable log refuses every allowed bridge
+//! call with `audit_unavailable` and changes or lists nothing. Each refusal
+//! in steps 2 and 3 leaves one deny record, best-effort like every other
+//! refusal, naming the vault and key the params carried when they decode.
 //! Test: `bridge_tests.rs` beside `wire_tests.rs`.
 
 use std::ffi::OsStr;
 
+use serde::de::{Deserialize, DeserializeOwned};
 use serde_json::{Map, Value};
 
 use super::agents_flag;
 use super::ancestry::{ProcessTable, has_agent_ancestor};
 use super::audit::{AuditMethod, AuditSource};
 use super::errors::ErrorKind;
-use super::gate::{Recording, audited};
+use super::gate::{Gate, Recording, audited};
 use super::methods::{self, Caller, MethodFn};
 use super::router::State;
 use crate::api::bridge::method as bridged;
-use crate::api::{BRIDGE_FIELD, BridgeAssertion};
+use crate::api::{BRIDGE_FIELD, BridgeAssertion, SecretKey, VaultName};
 
 /// The file name of the one executable whose assertion is believed.
 ///
@@ -147,6 +152,7 @@ fn set_agents_may_use(state: &State, caller: Caller, params: Value) -> Result<Va
 /// What: steps 1–4 of the module docs. A refusal is one deny record for
 /// `method`, carrying the verdict's `source` and `agent_parent`.
 /// Test: `bridge_assertion_from_non_console_peer_is_refused`,
+/// `bridge_console_with_unreadable_chain_is_refused`,
 /// `bridge_malformed_assertion_is_refused_and_audited`,
 /// `bridge_with_no_peer_pid_is_refused`,
 /// `bridge_call_is_audited_allow_and_deny`.
@@ -163,12 +169,38 @@ fn bridged(
     // #9066: identity first; a non-console peer is refused whatever it sent.
     let checked = verify_console(state, caller).and_then(|()| match verdict.source() {
         AuditSource::Malformed => Err(ErrorKind::InvalidParams),
-        _ => Ok(rest),
+        _ => Ok(()),
     });
     match checked {
-        Ok(rest) => body(state, caller, Value::Object(rest)),
-        Err(kind) => audited(state, caller, method, Recording::DenyOnly, |_| Err(kind)),
+        Ok(()) => body(state, caller, Value::Object(rest)),
+        Err(kind) => audited(state, caller, method, Recording::DenyOnly, |gate| {
+            name_attempted(gate, &rest);
+            Err(kind)
+        }),
     }
+}
+
+/// Name on the deny record the vault and key a refused call attempted.
+///
+/// What: best-effort — a `vault` or `key` that is missing or does not
+/// decode is left off; the refusal stands either way (#9066).
+/// Test: `bridge_assertion_from_non_console_peer_is_refused`,
+/// `bridge_malformed_assertion_is_refused_and_audited`.
+fn name_attempted(gate: &mut Gate<'_>, fields: &Map<String, Value>) {
+    let key = field::<SecretKey>(fields, "key");
+    match field::<VaultName>(fields, "vault") {
+        Some(vault) => gate.name(&vault, key.as_ref()),
+        None => {
+            if let Some(key) = &key {
+                gate.key(key);
+            }
+        }
+    }
+}
+
+/// The field `name` of `fields` as a `T`, or `None`.
+fn field<T: DeserializeOwned>(fields: &Map<String, Value>, name: &str) -> Option<T> {
+    T::deserialize(fields.get(name)?).ok()
 }
 
 /// Take the [`BRIDGE_FIELD`] assertion out of `params`.
@@ -198,6 +230,7 @@ fn split_assertion(params: Value) -> (BridgeVerdict, Map<String, Value>) {
 /// ancestry must be readable and hold no Claude Code process. Any failure is
 /// [`ErrorKind::BridgeRefused`].
 /// Test: `bridge_assertion_from_non_console_peer_is_refused`,
+/// `bridge_console_with_unreadable_chain_is_refused`,
 /// `bridge_with_no_peer_pid_is_refused`.
 fn verify_console(state: &State, caller: Caller) -> Result<(), ErrorKind> {
     let pid = caller.pid().ok_or(ErrorKind::BridgeRefused)?;

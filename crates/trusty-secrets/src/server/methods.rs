@@ -134,38 +134,42 @@ pub(crate) fn scopes(state: &State, _caller: Caller, params: Value) -> Result<Va
 /// unknown — the index listing is returned with every flag OFF. A failed
 /// flag lookup on an opened backend is an error. Never reads a value. A
 /// denied call leaves one audit record; an allowed one leaves none (#4567).
+/// #9066: a console bridge call is audited like `set` instead — admitted
+/// fail-closed before the listing, one record per call.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_list_lists_flags_off_when_the_backend_does_not_open`,
 /// `server_corrupt_index_is_a_fixed_error`,
-/// `audit_list_records_only_denials_and_scopes_doctor_none`.
+/// `audit_list_records_only_denials_and_scopes_doctor_none`,
+/// `bridge_list_allow_is_audited`,
+/// `bridge_list_refuses_when_audit_unwritable`.
 pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
-    audited(
-        state,
-        caller,
-        AuditMethod::List,
-        Recording::DenyOnly,
-        |gate| {
-            let (dir, rest) = split_project(params)?;
-            let request: ListRequest = decode(rest)?;
-            gate.name(&request.vault, None);
-            let project = ProjectContext::resolve(state, &dir)?;
-            gate.project(&project);
-            project.require_in_scope(&request.vault)?;
-            // #9070: the flag is the backend's. A backend that does not open
-            // vouches for no flag, so the index listing stands with every flag
-            // OFF; a list that worked before the flag moved keeps working.
-            let keys = match project.backend(state) {
-                Ok(backend) => {
-                    SecretStore::new(backend, state.index.clone()).list(&request.vault)?
-                }
-                Err(_) => state.index.list(&request.vault)?,
-            };
-            to_json(&ListResponse {
-                vault: request.vault,
-                keys,
-            })
-        },
-    )
+    // #9066: every bridge call is audited; the direct list stays deny-only.
+    let recording = match caller.bridge() {
+        Some(_) => Recording::Once,
+        None => Recording::DenyOnly,
+    };
+    audited(state, caller, AuditMethod::List, recording, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: ListRequest = decode(rest)?;
+        gate.name(&request.vault, None);
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        project.require_in_scope(&request.vault)?;
+        if recording == Recording::Once {
+            gate.admit()?;
+        }
+        // #9070: the flag is the backend's. A backend that does not open
+        // vouches for no flag, so the index listing stands with every flag
+        // OFF; a list that worked before the flag moved keeps working.
+        let keys = match project.backend(state) {
+            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
+            Err(_) => state.index.list(&request.vault)?,
+        };
+        to_json(&ListResponse {
+            vault: request.vault,
+            keys,
+        })
+    })
 }
 
 /// `secrets.set`: upsert one key; answer S1's masked confirmation once.
