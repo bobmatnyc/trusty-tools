@@ -343,9 +343,11 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// key, or `null` for an unslotted drawer and for one a later write to its
 /// slot displaced (retirement clears the displaced drawer's own key).
 /// `verify` is always present too (#9390): the drawer's re-verify command from
-/// one batched KG read, or `null`.
+/// one batched KG read, or `null`. A drawer with no `fact_key` always reports
+/// `null`, whatever triples the KG holds.
 /// Test: `memory_list_reports_a_slotted_drawers_fact_key`,
 /// `a_verify_command_round_trips_through_memory_list`,
+/// `a_displaced_drawer_never_lists_a_verify_command`,
 /// `memory_list_reports_null_fact_key_for_an_unslotted_drawer`,
 /// `memory_list_reports_the_key_only_on_the_slots_current_occupant`.
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
@@ -388,8 +390,9 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
                 "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
                 // #9340: read-only slot report; `null` when the drawer holds no slot.
                 "fact_key": d.fact_key,
-                // #9390: the slot's re-verify command; `null` when it has none.
-                "verify": verify.get(&d.id),
+                // #9390: only a slot holder reports a command, so a displaced
+                // drawer shows `null` even when closing its triple failed.
+                "verify": verify.get(&d.id).filter(|_| d.fact_key.is_some()),
             })
         })
         .collect();

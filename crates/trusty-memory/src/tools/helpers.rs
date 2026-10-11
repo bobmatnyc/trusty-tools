@@ -18,7 +18,9 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
 use trusty_common::memory_core::palace::{DrawerType, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{admit_tier_c, RememberOptions, TierCAdmission};
+use trusty_common::memory_core::retrieval::{
+    admit_tier_c, RememberOptions, TierCAdmission, VerifyNotStored,
+};
 use trusty_common::memory_core::timeouts::{self, OpBudget};
 use uuid::Uuid;
 
@@ -647,7 +649,9 @@ pub(crate) struct WriteDrawerParams<'a> {
 /// What: opens the palace handle, calls `remember_with_options`, fires the
 /// BM25 index task, emits `DrawerAdded` + the aggregate status event, and
 /// runs the auto-KG-extraction pass (best-effort). Returns the new drawer
-/// id on success; any underlying error propagates via `anyhow::Result`.
+/// id on success; any underlying error propagates via `anyhow::Result`. A
+/// `VerifyNotStored` error still runs every step for its committed drawer and
+/// is returned after them (#9390).
 ///
 /// **A write-pipeline timeout error does not mean the write did not land**
 /// (#6366): the durable commit, once dispatched, completes regardless of the
@@ -683,7 +687,7 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
     // #6366: the write mutex is held for this whole call. Pass the daemon's
     // configured ceiling so a slow commit fails with a named reason and
     // releases the mutex, instead of stalling every other writer on this palace.
-    let drawer_id = handle
+    let written = handle
         .remember_with_options_within(
             content,
             room,
@@ -692,8 +696,16 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
             opts,
             state.write_pipeline_budget,
         )
-        .await
-        .context("PalaceHandle::remember_with_options")?;
+        .await;
+    // #9390: a slot whose verify command was not stored is still committed, so
+    // it is indexed and announced like any drawer before the error returns.
+    let (drawer_id, verify_missed) = match written {
+        Ok(id) => (id, None),
+        Err(e) => match e.downcast_ref::<VerifyNotStored>() {
+            Some(missed) => (missed.drawer, Some(e)),
+            None => return Err(e.context("PalaceHandle::remember_with_options")),
+        },
+    };
     // Issue #156 + #231: opt-in BM25 lexical lane. Enqueue onto the
     // bounded indexer channel so the redb write returns immediately;
     // a full queue is dropped + logged rather than allowed to grow
@@ -730,7 +742,10 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
         room_label_for_kg.as_deref(),
     )
     .await;
-    Ok(drawer_id)
+    match verify_missed {
+        Some(e) => Err(e),
+        None => Ok(drawer_id),
+    }
 }
 
 /// Build a JSON "skipped" envelope used by both write handlers when a gate
