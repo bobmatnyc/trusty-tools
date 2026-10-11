@@ -181,10 +181,14 @@ impl JsonRpcResponse {
     /// `LiveAliasError` (#9544: a create refused because the id is a live
     /// alias), the error's own code when it carries a `RenameError` (#9544:
     /// `palace_rename`'s table, including `NOT_FOUND` for a missing source),
+    /// `REFUSED` when it carries a palace-format refusal (#9665, the
+    /// `is_format_refusal` test `api_error::open_handle` uses),
     /// `INTERNAL_ERROR` otherwise; message = `format!("{e:#}")` always.
     /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`,
     /// `from_anyhow_maps_live_alias_to_refused`,
-    /// `from_anyhow_maps_palace_rename_errors`.
+    /// `from_anyhow_maps_palace_rename_errors`,
+    /// `format_too_new_tool_error_is_refused_on_the_wire`,
+    /// `from_anyhow_maps_every_format_refusal_to_refused`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
         let code = if let Some(rename) = e.downcast_ref::<crate::service::rename::RenameError>() {
             rename.rpc_code()
@@ -196,6 +200,9 @@ impl JsonRpcResponse {
             error_codes::REFUSED
         } else if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
             error_codes::NOT_FOUND
+        } else if trusty_common::memory_core::store::palace_format::is_format_refusal(&e) {
+            // #9665: a format refusal no retry can clear answered -32603.
+            error_codes::REFUSED
         } else {
             error_codes::INTERNAL_ERROR
         };
