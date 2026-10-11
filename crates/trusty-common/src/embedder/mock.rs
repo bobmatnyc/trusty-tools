@@ -60,4 +60,9 @@ impl Embedder for MockEmbedder {
     fn dimension(&self) -> usize {
         self.dim
     }
+
+    // #9275: tests choose the window the chunker sees.
+    fn input_window(&self) -> Option<usize> {
+        self.window
+    }
 }

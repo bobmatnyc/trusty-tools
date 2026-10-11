@@ -121,15 +121,52 @@ impl ChunkTokenizer {
     /// Test: `fastembed_cache_without_the_model_is_an_error`,
     /// `fastembed_window_matches_cached_tokenizer_max_length`.
     pub fn for_fastembed_model_in(cache_dir: &Path, model_code: &str) -> Result<Self, ChunkError> {
-        // #9275 red stub.
-        let _ = (cache_dir, model_code, FASTEMBED_MAX_LENGTH);
-        Err(ChunkError::Encode("stub".to_string()))
+        let repo = cache_dir.join(format!("models--{}", model_code.replace('/', "--")));
+        let revision = read_file(&repo.join("refs").join("main"))?;
+        let snapshot = repo.join("snapshots").join(revision.trim());
+
+        let tokenizer_path = snapshot.join("tokenizer.json");
+        let mut tokenizer = Tokenizer::from_bytes(read_file(&tokenizer_path)?).map_err(|e| {
+            ChunkError::TokenizerLoad {
+                path: tokenizer_path.clone(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        let config_path = snapshot.join("tokenizer_config.json");
+        let config = read_json(&config_path)?;
+        let model_max =
+            config["model_max_length"]
+                .as_f64()
+                .ok_or_else(|| ChunkError::TokenizerLoad {
+                    path: config_path.clone(),
+                    reason: "model_max_length is not a number".to_string(),
+                })?;
+        // `as` saturates: BGE-style 1e30 maxima become usize::MAX.
+        let max_length = FASTEMBED_MAX_LENGTH.min(model_max as usize);
+
+        let specials = read_json(&snapshot.join("special_tokens_map.json"))?;
+        let added: Vec<AddedToken> = specials
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.values())
+            .filter_map(special_token)
+            .collect();
+        tokenizer.add_special_tokens(&added);
+
+        Self::from_tokenizer(tokenizer, Some(max_length))
     }
 
-    fn from_tokenizer(tokenizer: Tokenizer, max_length: Option<usize>) -> Result<Self, ChunkError> {
+    fn from_tokenizer(
+        mut tokenizer: Tokenizer,
+        max_length: Option<usize>,
+    ) -> Result<Self, ChunkError> {
         // The MiniLM tokenizer.json truncates at 128; a capped count would
         // hide an over-window chunk.
-        // #9275 red stub: truncation and padding left on.
+        tokenizer
+            .with_truncation(None)
+            .map_err(|e| ChunkError::Encode(e.to_string()))?;
+        tokenizer.with_padding(None);
         let special_overhead = tokenizer
             .encode("", true)
             .map_err(|e| ChunkError::Encode(e.to_string()))?
@@ -186,16 +223,69 @@ pub fn chunk_text<'a>(
     text: &'a str,
     window: usize,
 ) -> Result<Vec<TextChunk<'a>>, ChunkError> {
-    // #9275 red stub.
-    let _ = (tokenizer, text, window);
-    Ok(Vec::new())
+    let budget = window
+        .checked_sub(tokenizer.special_overhead)
+        .filter(|b| *b > 0)
+        .ok_or(ChunkError::WindowTooSmall {
+            window,
+            overhead: tokenizer.special_overhead,
+        })?;
+    let encoding = tokenizer.encode(text)?;
+    let total = encoding.len();
+    if total <= budget {
+        return Ok(vec![TextChunk {
+            byte_range: 0..text.len(),
+            text,
+        }]);
+    }
+    let offsets = encoding.get_offsets();
+    let word_ids = encoding.get_word_ids();
+    let overlap = overlap_tokens(budget);
+
+    let mut chunks = Vec::new();
+    let (mut start_tok, mut start_byte) = (0, 0);
+    loop {
+        let mut end_tok = (start_tok + budget).min(total);
+        if end_tok < total {
+            end_tok = word_start_at_or_before(word_ids, start_tok, end_tok);
+        }
+        // Re-count the slice itself: a cut inside a word can re-tokenize longer.
+        let (end_byte, slice) = loop {
+            let end_byte = if end_tok == total {
+                text.len()
+            } else {
+                offsets[end_tok].0
+            };
+            if let Some(s) = text.get(start_byte..end_byte)
+                && end_byte > start_byte
+                && tokenizer.count_tokens(s)? <= budget
+            {
+                break (end_byte, s);
+            }
+            if end_tok <= start_tok + 1 {
+                return Err(ChunkError::Unsplittable {
+                    start: start_byte,
+                    end: end_byte,
+                    budget,
+                });
+            }
+            end_tok = word_start_at_or_before(word_ids, start_tok, end_tok - 1);
+        };
+        chunks.push(TextChunk {
+            byte_range: start_byte..end_byte,
+            text: slice,
+        });
+        if end_tok == total {
+            return Ok(chunks);
+        }
+        start_tok = end_tok.saturating_sub(overlap).max(start_tok + 1);
+        start_byte = offsets[start_tok].0;
+    }
 }
 
 /// Overlap, in tokens, for a chunk budget of `budget` tokens.
 pub(super) fn overlap_tokens(budget: usize) -> usize {
-    // #9275 red stub.
-    let _ = budget;
-    0
+    budget * CHUNK_OVERLAP_PERCENT / 100
 }
 
 /// Largest token index in `(lo, hi]` that starts a word, else `hi`.
