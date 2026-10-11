@@ -25,9 +25,8 @@
 
 use crate::commands::pm_guard_bash::{
     Decoded, MAX_SUBSTITUTION_DEPTH, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient,
-    shell_segments_map, split_heredoc_bodies, tokenize,
+    keyword_words, shell_segments_map, split_heredoc_bodies, tokenize,
 };
-use crate::commands::pm_guard_secret_positions::LIST_INTRODUCERS;
 use crate::commands::program_word::{Unresolved, resolve_program_word};
 
 /// The audit slug of a Bash egress deny.
@@ -95,9 +94,6 @@ const SMTPLIB: &str = "smtplib";
 const RAW_SEPARATORS: &[char] = &[
     ';', '|', '&', '(', ')', '{', '}', '<', '>', '\'', '"', '`', '$', '=', ',', '\\',
 ];
-
-/// Keywords that lead a command, besides the [`LIST_INTRODUCERS`].
-const LEADING_KEYWORDS: &[&str] = &["if", "while", "until", "!"];
 
 /// The per-segment error for a segment that will not tokenize.
 const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
@@ -279,7 +275,7 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
 /// The program word ([`resolve_program_word`]) is judged by
 /// [`program_position_hit`]; a lookup (`command -v`) runs nothing; when an
 /// unmeasurable wrapper option hides it, every word stands in for it.
-/// Leading shell keywords ([`after_keyword`]) are skipped and the rest mapped
+/// Leading shell keywords ([`after_keywords`]) are skipped and the rest mapped
 /// again one `depth` deeper; past [`MAX_SUBSTITUTION_DEPTH`] that is an `Err`.
 /// Test: `bash_egress_denies_wrapped_in_sh_c`, `bash_egress_denies_pipe_and_xargs`,
 /// `bash_egress_denies_command_substitution_body`, `bash_egress_denies_eval_string`,
@@ -289,9 +285,10 @@ fn segment_hits(segment: &str, depth: usize) -> Result<Vec<Hit>, UnplaceableWrit
     if segment.is_empty() {
         return Ok(Vec::new());
     }
-    // #8454 critic round 1: `then sendmail …` runs `sendmail`.
+    // #8454 critic rounds 1 and 2: `then sendmail …`, `coproc sendmail …` and
+    // `time -p sendmail …` each run `sendmail`.
     let mut rest = segment;
-    while let Some(next) = after_keyword(rest) {
+    while let Some(next) = after_keywords(rest) {
         rest = next;
     }
     if rest.len() < segment.len() {
@@ -316,12 +313,23 @@ fn segment_hits(segment: &str, depth: usize) -> Result<Vec<Hit>, UnplaceableWrit
     Ok(found.into_iter().collect())
 }
 
-/// `segment` past its first word, when that word is a shell keyword that only
-/// leads a command: a [`LIST_INTRODUCERS`] word or a [`LEADING_KEYWORDS`] one.
-fn after_keyword(segment: &str) -> Option<&str> {
-    let (first, rest) = segment.split_once(char::is_whitespace)?;
-    (LIST_INTRODUCERS.contains(&first) || LEADING_KEYWORDS.contains(&first))
-        .then(|| rest.trim_start())
+/// `segment` past its leading shell keywords as [`keyword_words`] counts them,
+/// `coproc NAME` and `time -p` included; `None` when it has none.
+fn after_keywords(segment: &str) -> Option<&str> {
+    let first = segment.split_whitespace().next()?;
+    // Most segments lead with no keyword; only those split every word.
+    if keyword_words(&[first.to_owned()], 0).0 == 0 {
+        return None;
+    }
+    let words: Vec<String> = segment.split_whitespace().map(str::to_owned).collect();
+    let mut rest = segment.trim_start();
+    for _ in 0..keyword_words(&words, 0).0 {
+        rest = rest
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, tail)| tail)
+            .trim_start();
+    }
+    Some(rest)
 }
 
 /// The hit of the program at `argv[at]`, given the segment's data bodies.

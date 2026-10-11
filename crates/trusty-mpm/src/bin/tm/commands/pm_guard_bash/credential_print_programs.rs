@@ -372,7 +372,7 @@ pub(crate) const COMPOUND_OPENERS: &[&str] =
 /// coproc's own command is the one judged. `coproc NAME ( … )` loses its
 /// parens to `ungroup` and keeps NAME as the program; the caller's carrying
 /// refusal covers that shape.
-pub(super) fn keyword_words(argv: &[String], from: usize) -> (usize, bool) {
+pub(crate) fn keyword_words(argv: &[String], from: usize) -> (usize, bool) {
     let mut at = from;
     let mut coproc = false;
     while let Some(word) = argv.get(at).map(String::as_str)

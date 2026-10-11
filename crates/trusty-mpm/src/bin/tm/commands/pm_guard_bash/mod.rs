@@ -149,6 +149,8 @@ pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 pub(crate) use write_targets::{UnplaceableWrite, shell_write_targets};
 // #8454 S3: the egress Bash arm walks the same segments and nested bodies.
 pub(crate) use write_targets::shell_segments_map;
+// #8454 S3 critic round 2: and peels the same leading shell keywords.
+pub(crate) use credential_print::keyword_words;
 // #7266: the secret-read guard frames here-document bodies through the SAME
 // scan the write-redirection check uses, rather than growing a second parser.
 pub(crate) use heredoc::split_heredoc_bodies;
