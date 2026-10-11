@@ -1056,6 +1056,7 @@ pub(crate) async fn evaluate_with_cwd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::dead_addr::dead_addr;
 
     /// The checkout roster (#9011) every classifier in this suite reads.
     fn r() -> &'static trusty_mpm::core::content_source::AgentRoster {
@@ -1409,7 +1410,9 @@ mod tests {
         // delegation can be registered through this daemon at all and denying
         // would block every dispatch on a machine with no daemon running. The
         // reply must be an answered-shaped empty list, never `Unknown`.
-        assert!(writers_of(claim_against("http://127.0.0.1:1").await).is_empty());
+        // #9695: `127.0.0.1:1` can hang past the connect timeout on Linux.
+        let url = format!("http://{}", dead_addr());
+        assert!(writers_of(claim_against(&url).await).is_empty());
     }
 
     /// A bound listener that never accepts, and its base URL (#8492).
@@ -1638,7 +1641,8 @@ mod tests {
         // dispatch at all.
         let verdict = evaluate_with_cwd(
             r(),
-            "http://127.0.0.1:1",
+            // #9695: a refusal that cannot time out, unlike `127.0.0.1:1`.
+            &format!("http://{}", dead_addr()),
             Some(PathBuf::from("/repo")),
             &serde_json::json!({"tool_use_id": "toolu_X"}),
             "Agent",
@@ -1692,7 +1696,9 @@ mod tests {
         // every failure would have broken: with nothing listening the guard
         // cannot function at all, and denying would block every dispatch from a
         // main checkout on a machine running no daemon.
-        assert_eq!(granted_against("http://127.0.0.1:1").await, None);
+        // #9695: a refusal that cannot time out, unlike `127.0.0.1:1`.
+        let url = format!("http://{}", dead_addr());
+        assert_eq!(granted_against(&url).await, None);
     }
 
     #[tokio::test]
