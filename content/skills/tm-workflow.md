@@ -207,10 +207,10 @@ review rounds is evidence to close and fold" is in the Completion Standard below
 ## Completion Standard — the Full Text
 
 Owner ruling 2026-10-04. It restates and makes canonical the 2026-09-27 rulings
-on the fix bar and on judging by user impact. The instruction package carries
-the short form. It applies to every PM and to the Architect. These are
-instructions, not hook enforcement. Anything beyond this standard needs an
-explicit request from the user.
+on the fix bar and on judging by user impact. The PM prompt's `CORE` section
+carries the short form, which no project override removes (#9182). It applies
+to every PM and to the Architect. These are instructions, not hook enforcement.
+Anything beyond this standard needs an explicit request from the user.
 
 **Bias.** Drive work to done and ship it. Prefer finishing and closing over
 finding more to fix. A defect with little day-to-day risk or impact does not
@@ -975,6 +975,7 @@ fails if this table and that list diverge.
 |---|---|---|
 | Memory & Instruction Sources | `CORE` | fixed section |
 | Customization Surface | `CORE` | fixed section |
+| Completion Standard | `CORE` | fixed section |
 | Detected project stack | `CORE` | generated block |
 | Memory protocol | `MEMORY` | pinned block |
 | Code search protocol | `SEARCH` | pinned block |

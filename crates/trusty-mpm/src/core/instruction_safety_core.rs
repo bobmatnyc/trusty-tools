@@ -57,14 +57,14 @@ pub struct SafetyCoreMember {
 /// The safety core: the only prompt content a project override cannot remove.
 ///
 /// Why: see the module docs — this is the single enumeration.
-/// What: seven members in prompt order. Adding one here without the matching
+/// What: eight members in prompt order. Adding one here without the matching
 /// manifest flag or docs row fails `the_manifest_pins_exactly_the_safety_core`
 /// or `the_docs_name_every_safety_core_member`.
 /// Test: `the_manifest_pins_exactly_the_safety_core`,
 /// `the_docs_name_every_safety_core_member`,
 /// `a_safety_core_override_is_declined_for_each_core_section`,
 /// `overriding_every_overridable_section_keeps_the_safety_core`.
-pub const SAFETY_CORE: [SafetyCoreMember; 7] = [
+pub const SAFETY_CORE: [SafetyCoreMember; 8] = [
     SafetyCoreMember {
         name: "Memory & Instruction Sources",
         section: SectionId::Core,
@@ -76,6 +76,13 @@ pub const SAFETY_CORE: [SafetyCoreMember; 7] = [
         section: SectionId::Core,
         kind: SafetyCoreKind::FixedSection,
         marker: "Ad-hoc override channels are BANNED",
+    },
+    // #9182: owner-directed, so a WORKFLOW override cannot drop the core bar.
+    SafetyCoreMember {
+        name: "Completion Standard",
+        section: SectionId::Core,
+        kind: SafetyCoreKind::FixedSection,
+        marker: "a finding blocks ONLY if it causes or leaves unguarded",
     },
     SafetyCoreMember {
         name: "Detected project stack",
