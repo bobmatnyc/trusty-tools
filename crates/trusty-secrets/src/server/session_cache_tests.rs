@@ -1,4 +1,4 @@
-//! The per-session cache of CLI-backed values (#7520, S1).
+//! The per-session cache of CLI-backed values (#7520, S1 and S2).
 //!
 //! A child of `wire_tests`, so it shares that module's fixture and helpers:
 //! every path is under a `TempDir`, the backends are in memory, and the
@@ -8,9 +8,13 @@
 //!
 //! Test: itself.
 
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::time::{Instant, SystemTime};
+
 use super::*;
 use crate::server::exec;
 use crate::server::methods::{self, Caller};
+use crate::store::SecretCache;
 
 /// The project vault of the second fixture repo, `Acme/Api`.
 const API_VAULT: &str = "trusty/acme/api";
@@ -237,8 +241,8 @@ fn cache_is_namespaced_per_vault() {
     assert_eq!(keeper.gets(), 1);
 }
 
-/// Why: #7520 AC3 — the cache shows in `State`'s `Debug` as an entry count,
-/// never a value.
+/// Why: #7520 AC3 — the cache shows in `State`'s `Debug` as an entry count
+/// (and, since S2, its max age), never a value.
 /// Red while `State` holds no cache (no count in its `Debug`).
 /// Test: itself.
 #[test]
@@ -257,7 +261,7 @@ fn cache_debug_never_prints_value() {
             .split_whitespace()
             .collect::<String>()
             .replace(",}", "}");
-        assert!(compact.contains("SecretCache{entries:1}"), "{debug}");
+        assert!(compact.contains("SecretCache{entries:1,"), "{debug}");
     }
 }
 
@@ -404,13 +408,109 @@ fn failed_read_is_not_cached() {
 /// Select `onepassword` under 1Password account `account` in the account
 /// machine config, the file the server's factory opens CLI backends from.
 fn select_onepassword_account(fx: &Fixture, account: &str) {
-    std::fs::write(
-        &fx.settings.machine_config,
-        format!(
-            "secrets:\n  default_backend: onepassword\n  onepassword:\n    account: {account}\n"
-        ),
-    )
-    .unwrap();
+    std::fs::write(&fx.settings.machine_config, onepassword_account(account)).unwrap();
+}
+
+/// The machine config text selecting `onepassword` under `account`.
+fn onepassword_account(account: &str) -> String {
+    format!("secrets:\n  default_backend: onepassword\n  onepassword:\n    account: {account}\n")
+}
+
+/// Two `onepassword` doubles, accounts A and B, each holding its own
+/// `API_KEY` in the project vault.
+fn two_accounts(fx: &Fixture) -> (Arc<Counting>, Arc<Counting>) {
+    let account_a = Counting::new(BackendId::onepassword());
+    let account_b = Counting::new(BackendId::onepassword());
+    put(fx, &account_a, PROJECT_VAULT, "API_KEY", "account-a-value");
+    put(fx, &account_b, PROJECT_VAULT, "API_KEY", "account-b-value");
+    (account_a, account_b)
+}
+
+/// Which double the account machine config at `config` names.
+fn account_named(
+    config: &Path,
+    a: &Arc<Counting>,
+    b: &Arc<Counting>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    let machine = crate::store::config::load_machine_at(config)?.unwrap_or_default();
+    let account = machine.onepassword.and_then(|section| section.account);
+    match account.as_deref() {
+        Some("a.1password.com") => Ok(Arc::clone(a) as Arc<dyn SecretBackend>),
+        Some("b.1password.com") => Ok(Arc::clone(b) as Arc<dyn SecretBackend>),
+        _ => Err(SecretsError::BackendNotEnabled {
+            backend: BackendId::ONEPASSWORD.to_string(),
+        }),
+    }
+}
+
+/// Replace `path` with a new file holding `text`, by rename, as an editor
+/// that saves atomically does.
+fn replace_by_rename(path: &Path, text: &str) {
+    let staged = path.with_extension("staged");
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+/// Rewrite the file the symlink `config` points at, in place, to account B,
+/// open B's double, then rewrite it to account A again; the link is not
+/// touched.
+///
+/// What: same length, same inode, so only the target's mtime and ctime
+/// change. The pause first puts the rewrite in a later timestamp tick than
+/// the stamp taken before the open, on filesystems with coarse timestamps.
+fn flip_target_in_place(
+    config: &Path,
+    a: &Arc<Counting>,
+    b: &Arc<Counting>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    let target = std::fs::read_link(config).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(&target, onepassword_account("b.1password.com")).unwrap();
+    let opened = account_named(config, a, b);
+    std::fs::write(&target, onepassword_account("a.1password.com")).unwrap();
+    opened
+}
+
+/// A state whose factory opens `onepassword` from the account machine
+/// config, as the production factory does: account A or account B. Selects
+/// account A.
+///
+/// What: when `flip` is set, the next open clears it, replaces the config
+/// with account B, opens B's double, then replaces the config with account
+/// A's text again — the A→B→A flip of #7520 S2. A's first file is kept
+/// linked aside, so the restored file is a new inode.
+fn accounts_state(
+    fx: &Fixture,
+    account_a: &Arc<Counting>,
+    account_b: &Arc<Counting>,
+    flip: Option<Arc<AtomicBool>>,
+) -> State {
+    let config = fx.settings.machine_config.clone();
+    let (a, b) = (Arc::clone(account_a), Arc::clone(account_b));
+    let factory: BackendFactory = Arc::new(move |_: &BackendId| {
+        if !flip
+            .as_ref()
+            .is_some_and(|flip| flip.swap(false, Ordering::SeqCst))
+        {
+            return account_named(&config, &a, &b);
+        }
+        if config.is_symlink() {
+            return flip_target_in_place(&config, &a, &b);
+        }
+        std::fs::hard_link(&config, config.with_extension("first")).unwrap();
+        replace_by_rename(&config, &onepassword_account("b.1password.com"));
+        let opened = account_named(&config, &a, &b);
+        replace_by_rename(&config, &onepassword_account("a.1password.com"));
+        opened
+    });
+    select_onepassword_account(fx, "a.1password.com");
+    let mut state = fx.state(factory);
+    state.grants = Arc::new(GrantRegistry::new(
+        procs_with_me(),
+        Arc::new(FakeClock::at(T0)),
+        DEFAULT_MAX_TTL,
+    ));
+    state
 }
 
 /// Why: #7520 M1 — `backends_with` rereads the account machine config on
@@ -424,30 +524,8 @@ fn select_onepassword_account(fx: &Fixture, account: &str) {
 #[test]
 fn cache_cleared_when_cli_account_settings_change() {
     let fx = fixture();
-    let account_a = Counting::new(BackendId::onepassword());
-    let account_b = Counting::new(BackendId::onepassword());
-    put(&fx, &account_a, PROJECT_VAULT, "API_KEY", "account-a-value");
-    put(&fx, &account_b, PROJECT_VAULT, "API_KEY", "account-b-value");
-    let config = fx.settings.machine_config.clone();
-    let (a, b) = (Arc::clone(&account_a), Arc::clone(&account_b));
-    let factory: BackendFactory = Arc::new(move |id: &BackendId| {
-        let machine = crate::store::config::load_machine_at(&config)?.unwrap_or_default();
-        let account = machine.onepassword.and_then(|section| section.account);
-        match account.as_deref() {
-            Some("a.1password.com") => Ok(Arc::clone(&a) as Arc<dyn SecretBackend>),
-            Some("b.1password.com") => Ok(Arc::clone(&b) as Arc<dyn SecretBackend>),
-            _ => Err(SecretsError::BackendNotEnabled {
-                backend: id.to_string(),
-            }),
-        }
-    });
-    select_onepassword_account(&fx, "a.1password.com");
-    let mut state = fx.state(factory);
-    state.grants = Arc::new(GrantRegistry::new(
-        procs_with_me(),
-        Arc::new(FakeClock::at(T0)),
-        DEFAULT_MAX_TTL,
-    ));
+    let (account_a, account_b) = two_accounts(&fx);
+    let state = accounts_state(&fx, &account_a, &account_b, None);
     let token = grant_in(&state, &fx.project(), &["API_KEY"]);
     assert_eq!(value_of(&state, &token, "API_KEY"), "account-a-value");
     assert_eq!(value_of(&state, &token, "API_KEY"), "account-a-value");
@@ -466,4 +544,156 @@ fn cache_cleared_when_cli_account_settings_change() {
     assert_eq!(account_b.gets(), 1, "account B's backend was not read");
     assert_eq!(value_of(&state, &token, "API_KEY"), "account-b-value");
     assert_eq!(account_b.gets(), 1, "account B's value was not cached");
+}
+
+/// Why: #7520 S2 — the account config is read before and after the backend
+/// opens, and the open reads it a third time. If the file goes A→B→A in
+/// that window, the backend opened under B but both reads see A; B's value
+/// must not be filed under A. A stat fingerprint of the file closes this.
+/// Red while the before/after comparison looks at the settings alone (the
+/// second resolve answers B's value from the cache).
+/// Test: itself.
+#[test]
+fn cache_not_filled_across_account_file_flip() {
+    let fx = fixture();
+    let (account_a, account_b) = two_accounts(&fx);
+    let flip = Arc::new(AtomicBool::new(false));
+    let state = accounts_state(&fx, &account_a, &account_b, Some(Arc::clone(&flip)));
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+
+    flip.store(true, Ordering::SeqCst);
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-b-value");
+    assert!(!flip.load(Ordering::SeqCst), "the flip did not run");
+    assert_eq!(
+        value_of(&state, &token, "API_KEY"),
+        "account-a-value",
+        "a value read under account B answered under account A"
+    );
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-a-value");
+    assert_eq!(account_a.gets(), 1, "account A's value was not cached");
+}
+
+/// Why: #7520 M2 — the write-ahead audit record precedes the cache, so a
+/// warm cache with an audit log that cannot be written refuses the resolve
+/// and serves nothing; once the log is writable the cache answers again.
+/// Pins behaviour that already holds at S1 (b774b6feea): a later move of
+/// the cache lookup ahead of `write_ahead` would serve unaudited values.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn warm_cache_with_unwritable_audit_serves_nothing() {
+    let fx = fixture();
+    let op = Counting::new(BackendId::onepassword());
+    put(&fx, &op, PROJECT_VAULT, "API_KEY", SENTINEL_VALUE);
+    let state = cache_state(&fx, std::slice::from_ref(&op), procs_with_me());
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+    assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
+    assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
+    assert_eq!(op.gets(), 1, "the cache was not warm");
+
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    set_mode(&dir, 0o755);
+    let restore = RestoreMode(dir);
+    let refused = resolve_in(&state, &token, "API_KEY");
+    drop(restore);
+    assert_eq!(refused, Err(ErrorKind::AuditUnavailable));
+    assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
+    assert_eq!(op.gets(), 1, "the cache did not answer after the refusal");
+}
+
+/// Why: #7520 M2 — a one-shot grant is spent by a resolve the cache
+/// answers, exactly as by one that reads the backend: the second use is
+/// refused.
+/// Pins behaviour that already holds at S1 (b774b6feea): the spend follows
+/// the read whichever path served it, and a hit that skipped the spend
+/// would make a one-shot grant reusable.
+/// Test: itself.
+#[test]
+fn one_shot_grant_is_spent_by_a_cache_hit() {
+    let fx = fixture();
+    let op = Counting::new(BackendId::onepassword());
+    put(&fx, &op, PROJECT_VAULT, "API_KEY", SENTINEL_VALUE);
+    let state = cache_state(&fx, std::slice::from_ref(&op), procs_with_me());
+    let warm = grant_in(&state, &fx.project(), &["API_KEY"]);
+    assert_eq!(value_of(&state, &warm, "API_KEY"), SENTINEL_VALUE);
+
+    let params = json!({"project": fx.project(), "child_pid": me(), "keys": ["API_KEY"],
+        "ttl_secs": 600, "one_shot": true});
+    let answer = exec::grant(&state, caller(), params).unwrap();
+    let once = answer["token"].as_str().unwrap().to_owned();
+    assert_eq!(value_of(&state, &once, "API_KEY"), SENTINEL_VALUE);
+    assert_eq!(op.gets(), 1, "the one-shot resolve was not a cache hit");
+    let spent = resolve_in(&state, &once, "API_KEY");
+    assert_eq!(
+        spent,
+        Err(ErrorKind::GrantRefused),
+        "a cache hit spent nothing"
+    );
+}
+
+/// Why: #7520 S2 — idle exit alone does not bound how long a value is
+/// served, since a busy server never goes idle. An entry as old as the
+/// configured max age is not served: the next resolve reads the backend
+/// again and refills it. `State::new` takes the max age from the settings.
+/// Red while entries never expire (one read for the whole run).
+/// Test: itself.
+#[test]
+fn entry_expires_after_max_age() {
+    let mut fx = fixture();
+    fx.settings.cache_max_age = Duration::from_secs(5);
+    let op = Counting::new(BackendId::onepassword());
+    put(&fx, &op, PROJECT_VAULT, "API_KEY", SENTINEL_VALUE);
+    let mut state = cache_state(&fx, std::slice::from_ref(&op), procs_with_me());
+    let debug = format!("{state:?}");
+    assert!(debug.contains("max_age: 5s"), "{debug}");
+    let (base, elapsed) = (Instant::now(), Arc::new(AtomicU64::new(0)));
+    let (wall, clock, wall_clock) = (
+        SystemTime::now(),
+        Arc::clone(&elapsed),
+        Arc::clone(&elapsed),
+    );
+    state.cache = Arc::new(SecretCache::with_clocks(
+        state.settings.cache_max_age,
+        Arc::new(move || base + Duration::from_secs(clock.load(Ordering::SeqCst))),
+        Arc::new(move || wall + Duration::from_secs(wall_clock.load(Ordering::SeqCst))),
+    ));
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+
+    for (at, reads) in [(0, 1), (4, 1), (5, 2), (9, 2), (10, 3)] {
+        elapsed.store(at, Ordering::SeqCst);
+        assert_eq!(value_of(&state, &token, "API_KEY"), SENTINEL_VALUE);
+        assert_eq!(op.gets(), reads, "backend reads after the resolve at {at}s");
+    }
+}
+
+/// Why: #7520 S2 — the account config may be a symlink. A flip of the file
+/// it points at, rewritten in place behind an unchanged link, must count as
+/// a change, so the fingerprint stamps the target (`stat`) as well as the
+/// link (`lstat`).
+/// Passes on the fixed code; red when the target stamp is dropped (both
+/// stamps from `lstat`), shown by a mutation run (#7520 S2 fix round).
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn cache_not_filled_across_symlink_target_flip() {
+    let fx = fixture();
+    let (account_a, account_b) = two_accounts(&fx);
+    let flip = Arc::new(AtomicBool::new(false));
+    let state = accounts_state(&fx, &account_a, &account_b, Some(Arc::clone(&flip)));
+    let config = &fx.settings.machine_config;
+    let target = config.with_extension("target");
+    std::fs::rename(config, &target).unwrap();
+    std::os::unix::fs::symlink(&target, config).unwrap();
+    let token = grant_in(&state, &fx.project(), &["API_KEY"]);
+
+    flip.store(true, Ordering::SeqCst);
+    assert_eq!(value_of(&state, &token, "API_KEY"), "account-b-value");
+    assert!(!flip.load(Ordering::SeqCst), "the flip did not run");
+    assert!(config.is_symlink(), "the link itself was replaced");
+    assert_eq!(
+        value_of(&state, &token, "API_KEY"),
+        "account-a-value",
+        "a value read under account B answered under account A"
+    );
+    assert_eq!(account_a.gets(), 1);
 }

@@ -625,7 +625,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         let outcome = super::hook_post::post_hook_with_retry(url, &body).await;
         super::hook_post::emit_hook_post_log(&outcome);
         if !outcome.delivered {
-            super::hook_post::spool_undelivered_stop(&body);
+            // #6556: a stop neither delivered nor parked fails the hook (exit 1).
+            super::hook_post::spool_undelivered_stop(&body)?;
         }
         return Ok(());
     }

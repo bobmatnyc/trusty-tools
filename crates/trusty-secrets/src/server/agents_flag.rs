@@ -8,9 +8,9 @@
 //! Claude Code process cannot turn a flag on; turning one off is allowed,
 //! because it narrows access. The allow record is written before the backend
 //! call (Architect ruling 2026-10-10), and a failed backend call adds a deny
-//! record with its kind. Known limit: a process with no agent ancestor that
-//! acts for an agent (the console, called by an agent's `curl`) is not seen
-//! by this rule; the console route needs its own gate (#9066, #9067).
+//! record with its kind. #9066: a call through the console bridge is judged
+//! on the console's verdict about its HTTP client instead of the peer's own
+//! ancestry (`bridge`), so the console route gets the same rule.
 //! Test: `flag_tests.rs` beside `server_tests.rs`.
 
 use serde_json::Value;
@@ -34,7 +34,8 @@ use crate::store::SecretStore;
 /// be in the project's scope. To turn the flag on, [`has_agent_ancestor`]
 /// is read on the caller's own ancestry from the registry's process table: a
 /// read error is [`ErrorKind::GrantRefused`], an agent ancestor is
-/// [`ErrorKind::AgentUseRefused`]. Each refusal is one deny record. Then
+/// [`ErrorKind::AgentUseRefused`]. #9066: a bridge call takes that answer
+/// from the console's verdict (`BridgeVerdict::judged`) instead. Each refusal is one deny record. Then
 /// under the key's index lock (#9621), after its row check,
 /// [`super::gate::Gate::write_ahead`] appends the allow record; if the log
 /// cannot be opened or the record appended, the reply is
@@ -50,7 +51,8 @@ use crate::store::SecretStore;
 /// `set_flag_append_failure_after_open_changes_nothing`,
 /// `set_flag_backend_failure_leaves_a_deny_after_the_allow_record`,
 /// `set_flag_on_unindexed_key_leaves_one_deny_and_no_allow`,
-/// `set_flag_unreadable_ancestry_refuses_on`.
+/// `set_flag_unreadable_ancestry_refuses_on`,
+/// `bridge_verdict_parity_with_direct_socket_table`.
 pub(crate) fn set_agents_may_use(
     state: &State,
     caller: Caller,
@@ -72,9 +74,13 @@ pub(crate) fn set_agents_may_use(
             gate.project(&project);
             project.require_in_scope(&request.vault)?;
             if request.allowed {
-                // #9070: an unreadable ancestor refuses; it is never skipped.
-                let agent_parent = has_agent_ancestor(state.grants.processes(), peer)
-                    .map_err(|_| ErrorKind::GrantRefused)?;
+                let agent_parent = match caller.bridge() {
+                    // #9066: the console judged the client it serves.
+                    Some(verdict) => verdict.judged()?,
+                    // #9070: an unreadable ancestor refuses; never skipped.
+                    None => has_agent_ancestor(state.grants.processes(), peer)
+                        .map_err(|_| ErrorKind::GrantRefused)?,
+                };
                 gate.agent_parent(agent_parent);
                 if agent_parent {
                     return Err(ErrorKind::AgentUseRefused);

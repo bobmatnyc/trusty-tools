@@ -494,7 +494,7 @@ mod tests {
         // The stall is what makes this test discriminating — see the doc above.
         let mut ctx = handle.commit_ctx();
         ctx.commit_delay = Some(COMMIT_STALL);
-        let tail_a = tokio::spawn(tier_c::commit_and_mirror(ctx, a, guard));
+        let tail_a = tokio::spawn(tier_c::commit_and_mirror(ctx, a, None, guard));
 
         // Writer B goes through the real pipeline while A's commit is in
         // flight. Its own commit must queue behind A's on the order guard.

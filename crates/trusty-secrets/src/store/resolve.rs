@@ -8,7 +8,11 @@
 //! What: [`resolve_reference`] and [`resolve_env`], with [`EnvEntry`] as
 //! input and [`ResolvedVar`] as output. Lookup is [`SecretStore::read`]'s own
 //! path: project vault, then owner vault, an explicit reference pins one of
-//! those two vaults (#9328), and the backend read is uncached (§15.3, §15.5).
+//! those two vaults (#9328), and the value is read through
+//! `SecretStore::read_located` (§15.3, §15.5). #7520: only the server's
+//! `secrets.resolve` builds its store with the session cache, which keeps
+//! 1Password and Keeper values and is consulted after every gate here; a
+//! store built without one reads the backend every time.
 //! Test: `resolve_tests.rs` beside this file.
 
 use std::fmt;
@@ -34,7 +38,9 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// the flag is the backend's flag item, never the index row's field; a
 /// failed flag lookup is an error, never ON. Without `agent_parent` the
 /// flag is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
-/// mode, and the backend is not read. Otherwise the uncached backend read.
+/// mode, and the backend is not read. Otherwise the value read, which a
+/// store built with a session cache may answer from it (#7520; the cache is
+/// consulted only after the flag gate above).
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
 /// `resolve_pinned_reference_outside_the_scopes_is_refused`,

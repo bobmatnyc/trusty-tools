@@ -130,11 +130,16 @@ pub enum ErrorKind {
     /// The server already holds its most live exec grants.
     // #9070: the next unused value.
     GrantLimitReached = 35,
+    /// A console bridge call came from a peer that is not the verified
+    /// console.
+    // #9066: the next unused value; its own kind, so it never reads as a
+    // grant or agent refusal.
+    BridgeRefused = 36,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 36] = [
+    pub(crate) const ALL: [Self; 37] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -171,6 +176,7 @@ impl ErrorKind {
         Self::BackendTimeout,
         Self::GrantRefused,
         Self::GrantLimitReached,
+        Self::BridgeRefused,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -218,6 +224,7 @@ impl ErrorKind {
             Self::BackendTimeout => "backend_timeout",
             Self::GrantRefused => "grant_refused",
             Self::GrantLimitReached => "grant_limit_reached",
+            Self::BridgeRefused => "bridge_refused",
             Self::Internal => "internal",
         }
     }
@@ -307,6 +314,10 @@ impl ErrorKind {
             Self::GrantLimitReached => {
                 "the server holds the most live exec grants it allows; revoke one or wait for one to expire"
             }
+            // #9066: names no check, as `GrantRefused` names none.
+            Self::BridgeRefused => {
+                "a console bridge call is accepted only from the verified trusty-console process, running outside any Claude Code process tree; this caller was not verified"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -361,6 +372,8 @@ impl ErrorKind {
             // #9070: the next unused codes.
             Self::GrantRefused => -32082,
             Self::GrantLimitReached => -32083,
+            // #9066: the next unused code.
+            Self::BridgeRefused => -32084,
         }
     }
 

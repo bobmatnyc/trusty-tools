@@ -3072,6 +3072,7 @@ fn cli_parses_memory_remember_with_tags() {
         "Planning",
         "--fact-key=ws:s1/resume",
         "--expires-at=2026-10-06T12:00:00Z",
+        "--verify=gh pr view 1 --json headRefOid",
     ])
     .expect("`tm memory remember <text>` must parse");
     match cli.command.unwrap() {
@@ -3084,6 +3085,7 @@ fn cli_parses_memory_remember_with_tags() {
                     tags,
                     fact_key,
                     expires_at,
+                    verify,
                     json,
                     memory_socket,
                 },
@@ -3091,6 +3093,7 @@ fn cli_parses_memory_remember_with_tags() {
             assert_eq!(text, "the ledger is owned by ops");
             assert_eq!(fact_key.as_deref(), Some("ws:s1/resume")); // #9142
             assert_eq!(expires_at.as_deref(), Some("2026-10-06T12:00:00Z"));
+            assert_eq!(verify.as_deref(), Some("gh pr view 1 --json headRefOid")); // #9390
             assert!(palace.is_none());
             assert_eq!(room.as_deref(), Some("Planning"));
             assert_eq!(tags, vec!["ownership".to_string(), "ledger".to_string()]);

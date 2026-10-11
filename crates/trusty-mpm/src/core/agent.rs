@@ -327,6 +327,17 @@ pub struct Delegation {
     /// `subagent_tool_calls_track_the_current_working_directory`.
     #[serde(default)]
     pub last_agent_cwd: Option<std::path::PathBuf>,
+    /// When this subagent's most recent own hook event arrived (UTC) (#6556).
+    ///
+    /// Why: the quiet-bound pass
+    /// (`daemon::services::delegation_quiet_stale`) stales a `Running` record
+    /// only after a bound with no hook event, and `started_at` alone would
+    /// measure from the dispatch rather than from the agent's last sign of life.
+    /// What: stamped on every hook event carrying this delegation's `agent_id`.
+    /// `None` until the subagent's first tool call.
+    /// Test: `a_subagent_tool_call_stamps_its_last_hook_event`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Whether this record was staled by matching a `SubagentStop`'s
     /// `agent_type` rather than its `agent_id` (#6556).
     ///
@@ -423,6 +434,7 @@ impl Delegation {
             cwd: None,
             worktree_path: None,
             last_agent_cwd: None,
+            last_event_at: None,
             stale_by_agent_type: false,
             isolation: None,
             builder_slot: None,
@@ -469,6 +481,7 @@ impl Delegation {
             cwd: None,
             worktree_path: None,
             last_agent_cwd: None,
+            last_event_at: None,
             stale_by_agent_type: false,
             isolation: None,
             builder_slot: None,

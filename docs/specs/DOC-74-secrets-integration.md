@@ -596,10 +596,58 @@ put in an error message.
 > - `secrets.set`, `secrets.delete` and `secrets.copy` evict the (vault, key)
 >   they write, under every backend, after the write. An eviction also stops
 >   a read already in flight from storing the old value.
-> - `Debug` shows the entry count only; values stay `SecretValue`.
+> - `Debug` shows the entry count and the max age (S2); values stay
+>   `SecretValue`.
 > - A poisoned lock is a miss and stores nothing.
-> - A max age and the cache's lifecycle on idle exit, including zeroize,
->   are S2, pending owner rulings.
+> - Each backend's entries belong to the settings its section of the
+>   account machine config held when they were filled. A read under other
+>   settings drops them, and a resolve whose settings change while the
+>   backend opens stores nothing.
+>
+> **Amended 2026-10-10 (#7520 S2).**
+>
+> - Max age: an entry is never served once it is as old as the max age,
+>   counted from the start of the read that filled it, even while the
+>   server stays busy and never reaches its idle exit. The next resolve
+>   reads the backend again. Age is counted on both the monotonic clock and
+>   the wall clock, and the entry is a miss when either reaches the max age:
+>   the monotonic clock does not advance while the machine sleeps (macOS
+>   `CLOCK_UPTIME_RAW`, Linux `CLOCK_MONOTONIC`), so after a lid-close the
+>   wall clock bounds it. A wall clock now earlier than the fill (stepped
+>   back) is also a miss. The default is 600 s (provisional, plan §6
+>   point 1). `trusty-secrets serve --cache-max-age-secs N` sets it;
+>   `TRUSTY_SECRETS_CACHE_MAX_AGE_SECS` may only shorten it, because the
+>   on-demand client passes the first spawner's environment to the shared
+>   server.
+> - Writes made outside the server: a value changed by `op`, the 1Password
+>   app, Keeper or another machine is not seen by a running server while
+>   its entry is cached. The old value answers until the entry reaches the
+>   max age or the server exits, whichever comes first. Writes through
+>   `secrets.set`, `secrets.delete` and `secrets.copy` evict at once.
+> - Account file fingerprint: the settings an entry belongs to include a
+>   stat fingerprint of the account machine config (device, inode, length,
+>   mtime and ctime, of the path and of its symlink target). Any change to
+>   that file drops the backend's entries, and a file replaced and replaced
+>   back while the backend opens (A→B→A) counts as a change, so nothing read
+>   in that window is stored. A filesystem with coarse timestamps can miss
+>   an in-place rewrite of the same length within one timestamp tick; a
+>   rename, which editors use to save, always changes the inode or ctime.
+>   Off unix there is no fingerprint and nothing is cached.
+> - Failures are still not cached. The idle exit is unchanged and is not
+>   deferred while the cache holds values; the cache dies with the server.
+> - Zeroize-on-drop (owner ruling Dd8, 2026-10-11): the cache keeps its own
+>   copy of each value in a buffer that is overwritten with zeros when the
+>   entry is dropped — by max age, by an eviction, by a settings or
+>   fingerprint change, by a replacing insert, and with the whole cache when
+>   the server exits. This covers the cache's copies only. A value still
+>   passes through the backend CLI's output, the `SecretValue` a resolve
+>   returns, and the response buffer, and those are not zeroed.
+> - Core dumps (ruling Dd8): the server sets `RLIMIT_CORE` to 0, soft and
+>   hard, first thing at start, before it reads the 1Password token or any
+>   secret, on every unix build. It fails closed: if the limit cannot be
+>   set, or reads back other than (0, 0), the binary exits 1 without
+>   serving. Lowering a limit needs no privilege, so this does not fail on
+>   a working system.
 
 ```rust
 /// Populated once per `tm` session (daemon-side) or once per process (a bare
@@ -1070,6 +1118,7 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
 | `secrets.revoke` | Removes an exec grant (§15.8, S8) | Whether a live grant matched |
 | `secrets.set_agents_may_use` | Turns one key's "agents may use" flag on or off (§15.8, S8) | The vault, the key and the flag as set |
+| `secrets.bridge.list`, `.set`, `.delete`, `.copy`, `.set_agents_may_use` | The direct method, run under the console's verdict on its HTTP client; verified console peer only (§15.6, S3a) | What the direct method returns |
 
 **Request deadline and client wait (#7524 P2-M1).** The server gives each
 request one whole-operation deadline, counted from its arrival: 120 s for
@@ -1203,7 +1252,56 @@ trusty-console adds a `secrets_uds` bridge at `/api/secrets/*` and a page at
 `/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket and spawn contract per ruling 31, 2026-10-05: §15.2).
 The console never opens a store.
 
-**Masking.** A new `mask_secret` in `trusty-secrets`:
+**Bridge verdict (S3a, #9066; owner Dd7 option B and Architect ruling
+2026-10-11).** A bridged call gets the verdict a direct socket call gets.
+The socket's peer is the console, not the HTTP client it serves, so the
+console makes the ancestry judgment and the server checks who made it.
+
+- The bridge forwards `list`, `set`, `delete`, `copy` and
+  `set_agents_may_use` as `secrets.bridge.<method>`. `scopes` and `doctor`
+  read no credential and go direct. `resolve` has no console route.
+- Each bridged call carries a `bridge` field beside the method's own
+  params: `agent_parent` (a boolean) and `source`. `mapped` means the
+  console found the client's pid and read its chain. `unmappable` means it
+  found no pid: a non-agent, and `agent_parent` must be `false`.
+  `unreadable` means it found a pid but could not read the chain:
+  `agent_parent` must be `true`, and the server treats the call as the
+  direct socket treats an unreadable chain, so `set_agents_may_use` ON is
+  `grant_refused` and OFF is allowed. The server never takes a pid as a
+  parameter.
+- **Verified console.** The server reads the socket peer's pid from the
+  kernel, as for every call, then reads that pid's executable from the
+  process table (`/proc/<pid>/exe` on Linux, `proc_pidpath` on macOS). The
+  file name must be `trusty-console`, and the peer's own parent chain must
+  be readable and hold no Claude Code process. This is the identity the
+  existing peer code already reads; a launch credential would need a secret
+  shared with a server any client may spawn first. Any other peer is
+  refused with `bridge_refused` (-32084), whatever it asserted. Known
+  limit: a same-uid process outside any agent tree can run a binary named
+  `trusty-console`. On Linux a console whose binary was replaced on disk
+  reads as `trusty-console (deleted)` and is refused until it restarts.
+- A missing, undecodable or contradictory assertion, or one with an
+  unknown field, is `invalid_params`.
+- Every bridge call is audited, and every bridge record carries `source`
+  (`mapped`, `unmappable`, `unreadable`, or `malformed` for a refused
+  assertion) and the asserted `agent_parent`. A refused call leaves one
+  deny record, naming the vault and key its params carried when they
+  decode. An accepted `set`, `delete`, `copy` or `set_agents_may_use` runs
+  the direct method body and leaves the direct call's records. An accepted
+  `list` leaves one record, allow or deny; a direct `list` leaves a record
+  only when denied. Every allowed bridge call, `list` included, is admitted
+  fail-closed: when the audit log cannot be written it is refused with
+  `audit_unavailable` and no backend call runs. Bridge auditing follows the
+  machine config's `secrets.audit`, as the direct socket's does (owner
+  ruling Ddf, 2026-10-11): with `audit: false` no bridge call writes a
+  record, allow or deny, and an unwritable log refuses nothing. Errors
+  answer under the direct method's name, with its deadline, so a bridged
+  error is the same wire error a direct caller gets.
+- There is no human-presence or confirm step. Tailnet requests are
+  non-agent; that is S3b's concern (§15.7).
+
+**Masking.** A new `mask_secret` in `trusty-secrets`, exported from the
+`api` feature, which is all the bridge links (#9066):
 
 - `secrets.list` shows length and `updated_at` only.
 - `secrets.set` shows the first 8 characters and the length, once.
@@ -1305,10 +1403,13 @@ console toggle that calls it is
 whose own parent chain includes Claude Code may turn the flag off but not on
 (`agent_use_refused`); an unreadable chain refuses. The allow record is
 written before the backend call, and a backend failure after it adds a deny
-record with its kind, so no flag change exists without a record. Known
-limit: a caller with no agent ancestor that acts for an agent, such as the
-console process serving an agent's `curl`, is not seen by this rule; the
-console route needs its own gate (#9066, #9067). `exec` never
+record with its kind, so no flag change exists without a record. The
+console process has no agent ancestor even when it serves an agent's
+`curl`, so its route has its own gate: the bridge verdict (§15.6, #9066).
+The console judges its HTTP client's chain and sends the answer with the
+call; the server applies this rule to that answer, and takes it only from
+the verified console. The console toggle is
+[#9067](https://github.com/bobmatnyc/trusty-tools/issues/9067). `exec` never
 injects a key into a process whose parent chain includes Claude Code unless
 that key carries the flag. The rule covers env injection (tiers 1 and 2) and
 grant contents (tier 3). It is enforced from the day each `exec` path ships.

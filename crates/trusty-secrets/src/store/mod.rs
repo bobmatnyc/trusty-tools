@@ -35,7 +35,6 @@ mod index;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod keeper;
 mod keychain;
-mod mask;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 // #7519: the 1Password backend; spawns `op` through `cli`.
@@ -68,7 +67,8 @@ pub use dotenv::parse_dotenv;
 pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
-pub use mask::{MASK_HEAD_CHARS, mask_secret};
+// #9066: `mask_secret` moved to `api` for the console bridge; same path here.
+pub use crate::api::{MASK_HEAD_CHARS, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};

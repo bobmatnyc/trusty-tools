@@ -352,3 +352,65 @@ fn api_set_agents_may_use_request_matches_the_wire_shape() {
         );
     }
 }
+
+/// Why: #9066 — the console builds the bridge assertion with `api` only; the
+/// wire shape is pinned, the constructors are consistent, an unknown field
+/// (a pid) is refused, and every bridged name runs its direct method.
+/// Test: itself.
+#[test]
+fn api_bridge_assertion_wire_shape_and_consistency() {
+    use super::bridge::{direct_method, method as bridged};
+    use super::methods::method;
+    let wire = serde_json::to_value(BridgeAssertion::mapped(true)).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"agent_parent": true, "source": "mapped"})
+    );
+    for built in [
+        BridgeAssertion::mapped(false),
+        BridgeAssertion::mapped(true),
+        BridgeAssertion::unmappable(),
+        BridgeAssertion::unreadable(),
+    ] {
+        assert!(built.is_consistent(), "{built:?}");
+    }
+    let unmappable_agent: BridgeAssertion =
+        serde_json::from_str(r#"{"agent_parent":true,"source":"unmappable"}"#).unwrap();
+    assert!(!unmappable_agent.is_consistent());
+    let unreadable_clear: BridgeAssertion =
+        serde_json::from_str(r#"{"agent_parent":false,"source":"unreadable"}"#).unwrap();
+    assert!(!unreadable_clear.is_consistent());
+    for bad in [
+        r#"{"agent_parent":false,"source":"mapped","pid":1}"#,
+        r#"{"agent_parent":false,"source":"trusted"}"#,
+        r#"{"agent_parent":false}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<BridgeAssertion>(bad).is_err(),
+            "{bad}"
+        );
+    }
+    assert_eq!(BRIDGE_FIELD, "bridge");
+    for (name, direct) in [
+        (bridged::LIST, method::LIST),
+        (bridged::SET, method::SET),
+        (bridged::DELETE, method::DELETE),
+        (bridged::COPY, method::COPY),
+        (bridged::SET_AGENTS_MAY_USE, method::SET_AGENTS_MAY_USE),
+    ] {
+        assert_eq!(direct_method(name), Some(direct));
+    }
+    assert_eq!(direct_method(method::SET), None);
+    assert_eq!(direct_method("secrets.bridge.resolve"), None);
+}
+
+/// Why: #9066 — `mask_secret` is reachable from `api`, the only feature the
+/// console bridge links, and masks a specimen there as `store` does.
+/// Test: itself.
+#[test]
+fn api_mask_secret_masks_a_specimen_value() {
+    const SPECIMEN: &str = "SPECIMEN-9066-value-Qx7Lm2";
+    let masked = mask_secret(SPECIMEN);
+    assert!(!masked.contains(SPECIMEN), "{masked}");
+    assert_eq!(masked, "SPECIMEN… [26 chars]");
+}
