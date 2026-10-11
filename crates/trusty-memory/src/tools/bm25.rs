@@ -324,18 +324,29 @@ pub(crate) fn fuse_bm25_into_recall(
 /// `handle.drawers`, and emits a `RecallResult` carrying the BM25 score and
 /// `layer: 4` (the same lexical-lane marker `fuse_bm25_into_recall` uses).
 /// Hits whose `doc_id` doesn't parse or no longer resolves to a drawer
-/// (e.g. forgotten since the BM25 snapshot was built) are skipped.
-/// Test: `bm25_hits_hydrate_from_handle_during_warmup`.
+/// (e.g. forgotten since the BM25 snapshot was built) are skipped, and so
+/// are drawers past their `expires_at` (#9390), judged by the same
+/// `Drawer::is_expired_at` the L0/L1 and L2/L3 layers use. They are skipped,
+/// not deleted: an expired Tier C slot stays in the store.
+/// Test: `bm25_hits_hydrate_from_handle_during_warmup`,
+/// `an_expired_slot_is_not_returned_by_the_warming_path`.
 pub(crate) fn bm25_hits_to_recall_results(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     bm25_hits: &[BM25Hit],
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
     let drawers = handle.drawers.read();
+    let now = chrono::Utc::now();
     bm25_hits
         .iter()
         .filter_map(|hit| {
             let drawer_id = uuid::Uuid::parse_str(&hit.doc_id).ok()?;
-            let drawer = drawers.iter().find(|d| d.id == drawer_id)?.clone();
+            let drawer = drawers.iter().find(|d| d.id == drawer_id)?;
+            // #9390: the BM25 corpus keeps an expired drawer's text, so the
+            // lexical lane must apply the read-time expiry filter itself.
+            if drawer.is_expired_at(now) {
+                return None;
+            }
+            let drawer = drawer.clone();
             Some(trusty_common::memory_core::retrieval::RecallResult {
                 drawer,
                 score: hit.score,
