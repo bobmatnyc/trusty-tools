@@ -1,4 +1,4 @@
-//! The `cli-backends` feature never reaches trusty-common.
+//! The `cli-backends` and `ancestry` features never reach trusty-common.
 //!
 //! Why: #7519, owner ruling 2026-10-07 — "Secrets should have no common
 //! dependencies." The CLI runner duplicates trusty-common's `external_cli`
@@ -106,4 +106,31 @@ fn cli_backends_feature_closure_never_reaches_trusty_common() {
     for line in manifest.lines().filter(|l| l.starts_with("trusty-common")) {
         assert!(line.contains("optional = true"), "{line}");
     }
+}
+
+/// Why: #9066, Architect ruling Q1 (2026-10-11) — trusty-console links
+/// `ancestry` to judge its HTTP client, and must never link a store, a
+/// keychain, the server or trusty-common (#7519, "no common dependencies").
+/// A later edit that widens the closure fails here. `server` is the positive
+/// control: it implies `ancestry` and reaches the store and trusty-common.
+/// Test: itself.
+#[test]
+fn ancestry_feature_reaches_no_store_server_or_trusty_common() {
+    let table = features(&manifest());
+    let entries = table
+        .get("ancestry")
+        .expect("the `ancestry` feature exists");
+    assert_eq!(entries, &["dep:thiserror", "dep:libc"]);
+    let ancestry = reached_deps(&table, "ancestry");
+    let expected: BTreeSet<String> = ["thiserror", "libc"].map(String::from).into();
+    assert_eq!(ancestry, expected);
+
+    let server = table.get("server").expect("the `server` feature exists");
+    assert!(server.iter().any(|e| e == "ancestry"), "{server:?}");
+    let server = reached_deps(&table, "server");
+    assert!(server.is_superset(&ancestry), "{server:?}");
+    assert!(
+        server.contains("keyring") && server.contains("trusty-common"),
+        "positive control: {server:?}"
+    );
 }

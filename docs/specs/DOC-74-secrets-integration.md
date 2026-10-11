@@ -1301,7 +1301,7 @@ console makes the ancestry judgment and the server checks who made it.
   non-agent; that is S3b's concern (§15.7).
 
 **Masking.** A new `mask_secret` in `trusty-secrets`, exported from the
-`api` feature, which is all the bridge links (#9066):
+`api` feature. The bridge links `api` and `ancestry` only (#9066):
 
 - `secrets.list` shows length and `updated_at` only.
 - `secrets.set` shows the first 8 characters and the length, once.
