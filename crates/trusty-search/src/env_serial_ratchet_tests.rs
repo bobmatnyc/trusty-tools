@@ -21,9 +21,12 @@
 //! `with_registry_write_lock` resolves `indexes.toml` from `TRUSTY_DATA_DIR`
 //! at write time, so an untagged one can drop `indexes.toml.lock` into the
 //! data dir a `#[serial]` test has just pointed somewhere else. Every test in
-//! a file that names a [`REGISTRY_REACHING`] function carries a group tag.
+//! a file that names a [`REGISTRY_REACHING`] function carries a group tag, and
+//! so does every test in a module that file mounts (`#[path]` or `mod x;`),
+//! because a child reaches the registry through its parent's harness.
 //! Test: this file IS the test module.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Test files that write the environment outside the unnamed group, each
@@ -221,16 +224,15 @@ const TEST_ATTRS: &[&str] = &["#[test]", "#[tokio::test]", "#[tokio::test("];
 /// `the_registry_ratchet_detects_an_untagged_test` proves the detection.
 #[test]
 fn registry_reaching_tests_join_the_unnamed_group() {
-    let mut offenders = Vec::new();
-    for path in lib_sources() {
-        let rel = relative(&path);
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let untagged = untagged_registry_tests(&rel, &strip_noncode(&text));
-        if !untagged.is_empty() {
-            offenders.push(format!("{rel}: {}", untagged.join(", ")));
-        }
-    }
+    let files: BTreeMap<String, String> = lib_sources()
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            (relative(&path), text)
+        })
+        .collect();
+    let offenders = registry_offenders(&files);
     assert!(
         offenders.is_empty(),
         "these tests sit in a file that reaches the index registry, and carry no \
@@ -284,21 +286,195 @@ fn the_registry_ratchet_detects_an_untagged_test() {
     );
 }
 
+/// A child module that names no token itself is still in scope (#9684).
+///
+/// Why: `writes_9510_tests.rs` and `writes_7434_tests.rs` are `#[path]`
+/// children of `writes_tests.rs` and reach the registry through its harness
+/// (`use super::*`), so a per-file token scan never saw their untagged tests.
+/// Test: this function IS the test.
+#[test]
+fn the_registry_ratchet_follows_child_modules() {
+    let files: BTreeMap<String, String> = [
+        (
+            "src/a_tests.rs",
+            concat!(
+                "fn h() { search_report(); }\n",
+                "#[test]\n#[serial_test::parallel]\nfn ok_parent() {}\n",
+                "#[path = \"b_tests.rs\"]\nmod b;\n",
+                "mod c;\n",
+            ),
+        ),
+        (
+            "src/b_tests.rs",
+            "use super::*;\n#[tokio::test]\nasync fn path_child() {}\n#[path = \"../d_tests.rs\"]\nmod d;\n",
+        ),
+        ("src/a_tests/c.rs", "#[test]\nfn mod_child() {}\n"),
+        ("d_tests.rs", "#[test]\nfn grandchild() {}\n"),
+        ("src/e_tests.rs", "#[test]\nfn unrelated() {}\n"),
+        (
+            "src/prod.rs",
+            concat!(
+                "pub mod inner;\n",
+                "#[cfg(test)]\n#[path = \"prod_tests.rs\"]\nmod tests;\n",
+                "#[cfg(test)]\nfn h() { search_report(); }\n",
+            ),
+        ),
+        ("src/prod/inner.rs", "#[test]\nfn production_child() {}\n"),
+        ("src/prod_tests.rs", "#[test]\nfn cfg_test_child() {}\n"),
+    ]
+    .into_iter()
+    .map(|(rel, text)| (rel.to_owned(), text.to_owned()))
+    .collect();
+    assert_eq!(
+        registry_offenders(&files),
+        [
+            "d_tests.rs: grandchild",
+            "src/a_tests/c.rs: mod_child",
+            "src/b_tests.rs: path_child",
+            "src/prod_tests.rs: cfg_test_child",
+        ],
+        "a production module is not a test child"
+    );
+}
+
+/// `rel: test, test` for every untagged test in a file that reaches the
+/// registry or is a child module of one, sorted by path.
+///
+/// What: the seed set is every file whose test code names a
+/// [`REGISTRY_REACHING`] function; [`child_modules`] then widens it to every
+/// module those files mount, transitively. `files` maps crate-relative path
+/// to source text.
+/// Test: `the_registry_ratchet_follows_child_modules`.
+fn registry_offenders(files: &BTreeMap<String, String>) -> Vec<String> {
+    let stripped: BTreeMap<&str, String> = files
+        .iter()
+        .map(|(rel, text)| (rel.as_str(), strip_noncode(text)))
+        .collect();
+    let mut queue: Vec<&str> = stripped
+        .iter()
+        .filter(|(rel, code)| reaches_registry(rel, code))
+        .map(|(rel, _)| *rel)
+        .collect();
+    let mut scope = BTreeSet::new();
+    while let Some(rel) = queue.pop() {
+        if !scope.insert(rel) {
+            continue;
+        }
+        for child in child_modules(rel, &files[rel]) {
+            if let Some((key, _)) = files.get_key_value(&child) {
+                queue.push(key.as_str());
+            }
+        }
+    }
+    scope
+        .into_iter()
+        .filter_map(|rel| {
+            let untagged = untagged_tests(&stripped[rel]);
+            (!untagged.is_empty()).then(|| format!("{rel}: {}", untagged.join(", ")))
+        })
+        .collect()
+}
+
+/// Crate-relative paths of the test-only module files `rel` mounts.
+///
+/// What: a `mod <name>;` counts when `rel` is a test file or the declaration
+/// carries a `cfg(test)` attribute; a production module is never a child. A
+/// `#[path = "<p>"]` attribute resolves `<p>` against `rel`'s directory; a
+/// bare declaration resolves to `<name>.rs` and `<name>/mod.rs` under `rel`'s
+/// module directory, and the caller keeps the candidates that exist.
+/// Line-based on raw text, because [`strip_noncode`] erases the path string.
+/// Test: `the_registry_ratchet_follows_child_modules`.
+fn child_modules(rel: &str, text: &str) -> Vec<String> {
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    let mod_dir = if matches!(file, "mod.rs" | "lib.rs" | "main.rs") {
+        dir.to_owned()
+    } else {
+        join(dir, stem)
+    };
+    let test_file = file.contains("test") || rel.split('/').any(|seg| seg == "tests");
+    let mut path: Option<&str> = None;
+    let mut cfg_test = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut rest = line.trim();
+        if rest.starts_with("//") {
+            continue;
+        }
+        while let Some(attr) = rest.strip_prefix("#[") {
+            let Some(end) = attr.find(']') else { break };
+            let body = &attr[..end];
+            if let Some(p) = body.strip_prefix("path") {
+                path = p.split('"').nth(1);
+            }
+            cfg_test |= body.starts_with("cfg(") && names_identifier(body, "test");
+            rest = attr[end + 1..].trim_start();
+        }
+        if rest.is_empty() {
+            continue;
+        }
+        let decl = rest
+            .strip_prefix("pub(crate) ")
+            .or_else(|| rest.strip_prefix("pub(super) "))
+            .or_else(|| rest.strip_prefix("pub "))
+            .unwrap_or(rest);
+        let name = decl.strip_prefix("mod ").and_then(|d| d.strip_suffix(';'));
+        if let Some(name) = name.filter(|_| test_file || cfg_test) {
+            match path {
+                Some(p) => out.push(join(dir, p)),
+                None => {
+                    out.push(join(&mod_dir, &format!("{}.rs", name.trim())));
+                    out.push(join(&mod_dir, &format!("{}/mod.rs", name.trim())));
+                }
+            }
+        }
+        path = None;
+        cfg_test = false;
+    }
+    out
+}
+
+/// `base/path`, with `.` and `..` segments folded.
+fn join(base: &str, path: &str) -> String {
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in base.split('/').chain(path.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            _ => segs.push(seg),
+        }
+    }
+    segs.join("/")
+}
+
+/// Does this stripped file's test code name a [`REGISTRY_REACHING`] function?
+fn reaches_registry(rel: &str, code: &str) -> bool {
+    let tests = test_code(rel, code);
+    REGISTRY_REACHING
+        .iter()
+        .any(|name| names_identifier(tests, name))
+}
+
 /// Names of the tests in a stripped file that can reach the registry and
 /// carry no unnamed-group tag; empty when the file names no reaching function.
+///
+/// Test: `the_registry_ratchet_detects_an_untagged_test`.
+fn untagged_registry_tests(rel: &str, code: &str) -> Vec<String> {
+    if !reaches_registry(rel, code) {
+        return Vec::new();
+    }
+    untagged_tests(test_code(rel, code))
+}
+
+/// Names of the tests in stripped `tests` that carry no unnamed-group tag.
 ///
 /// What: a test's attribute block runs from the item boundary (`{`, `}`, `;`)
 /// before its test attribute to its `fn`; the block must hold a
 /// [`GROUP_TAGS`] entry. A named key is a separate lock and does not count.
 /// Test: `the_registry_ratchet_detects_an_untagged_test`.
-fn untagged_registry_tests(rel: &str, code: &str) -> Vec<String> {
-    let tests = test_code(rel, code);
-    if !REGISTRY_REACHING
-        .iter()
-        .any(|name| names_identifier(tests, name))
-    {
-        return Vec::new();
-    }
+fn untagged_tests(tests: &str) -> Vec<String> {
     let mut out = Vec::new();
     for attr in TEST_ATTRS {
         for (at, _) in tests.match_indices(attr) {

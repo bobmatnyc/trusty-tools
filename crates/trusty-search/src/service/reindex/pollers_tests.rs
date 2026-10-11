@@ -87,6 +87,7 @@ async fn wait_for(budget: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// then a further 500ms because the sidecar poller was only signalled after the
 /// first join returned).
 #[tokio::test]
+#[serial_test::parallel]
 async fn stop_pollers_returns_without_waiting_out_the_tick() {
     let fx = spawn_both(None);
     tokio::time::sleep(SETTLE).await;
@@ -118,6 +119,7 @@ async fn stop_pollers_returns_without_waiting_out_the_tick() {
 /// regression. `stop_pollers` returning at all proves both `JoinHandle`s
 /// resolved; the peak assertions prove neither task was cut short of its work.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stop_pollers_still_joins_both_pollers() {
     let fx = spawn_both(None);
 
@@ -149,6 +151,7 @@ async fn stop_pollers_still_joins_both_pollers() {
 /// The memory poller's reason for existing still works: it trips `mem_abort`
 /// when RSS crosses the limit, and teardown after that is still prompt.
 #[tokio::test]
+#[serial_test::parallel]
 async fn memory_poller_still_trips_abort_then_stops_promptly() {
     // 1 MB — this test process is always over it, so the first sample trips.
     let fx = spawn_both(Some(1));
@@ -197,6 +200,7 @@ async fn memory_poller_still_trips_abort_then_stops_promptly() {
 /// are isolated by `stop_pollers_returns_without_waiting_out_the_tick` and
 /// `stop_pollers_signals_both_before_awaiting_either` respectively.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stop_signalled_before_the_poller_parks_still_stops_it() {
     /// Enough rounds that one lost wakeup per round blows the budget outright.
     const RACE_ROUNDS: u32 = 8;
@@ -237,6 +241,7 @@ async fn stop_signalled_before_the_poller_parks_still_stops_it() {
 /// fails on any machine at any load, because the flag never becomes true rather
 /// than becoming true late.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stop_pollers_signals_both_before_awaiting_either() {
     let memory_stop = PollerStop::new();
     let sidecar_stop = PollerStop::new();
@@ -271,6 +276,7 @@ async fn stop_pollers_signals_both_before_awaiting_either() {
 /// The sidecar poller is absent whenever no embedderd PID slot exists; teardown
 /// must handle the `None` arms and stay prompt.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stop_pollers_handles_absent_sidecar_poller() {
     let fx = spawn_both(None);
     fx.sidecar.1.signal();

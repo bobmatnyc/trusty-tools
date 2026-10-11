@@ -138,6 +138,7 @@ fn delivered(replay: &[String], live: &mut tokio::sync::broadcast::Receiver<Stri
 ///
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
 async fn no_event_is_lost_or_duplicated_when_a_stream_opens_against_live_pushes() {
     // The fixture must not be able to lag or truncate on its own: a lag or a
     // dropped replay entry would read as a lost event and accuse the code wrongly.
@@ -213,6 +214,7 @@ async fn no_event_is_lost_or_duplicated_when_a_stream_opens_against_live_pushes(
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_event_pushed_either_side_of_an_open_arrives_on_exactly_one_path() {
     let progress = ReindexProgress::new();
     progress.push(serde_json::json!({ "seq": 0 })).await;
@@ -262,6 +264,7 @@ async fn an_event_pushed_either_side_of_an_open_arrives_on_exactly_one_path() {
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_subscriber_that_outruns_the_channel_still_reports_its_lag() {
     let progress = ReindexProgress::new();
     let (_replay, _status, mut live) = progress.subscribe_with_replay().await;
@@ -295,6 +298,7 @@ async fn a_subscriber_that_outruns_the_channel_still_reports_its_lag() {
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_replay_buffer_still_drops_its_oldest_at_the_cap() {
     let progress = ReindexProgress::new();
     let overshoot = 5;
@@ -334,6 +338,7 @@ async fn the_replay_buffer_still_drops_its_oldest_at_the_cap() {
 ///
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_terminal_status_is_not_observable_before_its_event_is_in_the_replay() {
     let progress = Arc::new(ReindexProgress::new());
     progress.push(serde_json::json!({ "seq": 0 })).await;
@@ -407,6 +412,7 @@ async fn a_terminal_status_is_not_observable_before_its_event_is_in_the_replay()
 ///
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
 async fn a_stream_opened_across_the_terminal_transition_always_gets_the_terminal_frame() {
     for trial in 0..TERMINAL_RACE_TRIALS {
         let progress = Arc::new(ReindexProgress::new());
@@ -469,6 +475,7 @@ async fn a_stream_opened_across_the_terminal_transition_always_gets_the_terminal
 ///
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_open_reports_the_status_beside_the_replay_it_snapshotted() {
     let progress = ReindexProgress::new();
     progress.push(serde_json::json!({ "seq": 0 })).await;

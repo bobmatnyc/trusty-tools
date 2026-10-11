@@ -83,6 +83,7 @@ fn staged_index(
 /// first half a detection of the holder rather than of the file.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_held_live_corpus_refuses_promotion() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("index.redb");
@@ -102,6 +103,7 @@ async fn a_held_live_corpus_refuses_promotion() {
 
 /// The gate must not wedge an ordinary promotion shut.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unheld_live_corpus_is_promotable() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("index.redb");
@@ -122,6 +124,7 @@ async fn an_unheld_live_corpus_is_promotable() {
 
 /// A first promotion has no live file, so nothing can be holding one.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_missing_live_corpus_is_promotable() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("index.redb");
@@ -232,6 +235,7 @@ async fn a_deferred_promotion_is_reported_in_status_and_is_not_complete() {
 
 /// A promotion that lands must clear an earlier deferral.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_landed_promotion_clears_an_earlier_deferral() {
     use super::corpus_swap::commit_staged_corpus_swap;
 
@@ -267,6 +271,7 @@ async fn a_landed_promotion_clears_an_earlier_deferral() {
 /// quarantined, and the live corpus is byte-identical.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_rename_failure_quarantines_and_is_not_reported_as_a_deferral() {
     let (_dir, handle, live, tmp, live_before, outcome) =
         drive_promotion_over_a_readonly_parent("rename-fail-7991").await;
@@ -315,6 +320,7 @@ async fn a_rename_failure_quarantines_and_is_not_reported_as_a_deferral() {
 /// the verdict is neither `Complete` nor the deferral's status.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_rename_failure_is_not_a_completed_reindex() {
     use super::finish::settled_promotion_status;
     use super::progress::ReindexStatus;
@@ -424,6 +430,7 @@ async fn drive_promotion_over_a_readonly_parent(
 /// it neither adopts nor keeps the file.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_next_runs_probe_discards_a_deferred_runs_staging_corpus() {
     use super::checkpoint::{probe_resume, ReindexCheckpoint};
     use super::corpus_swap::commit_staged_corpus_swap;
@@ -476,6 +483,7 @@ async fn the_next_runs_probe_discards_a_deferred_runs_staging_corpus() {
 /// error that is neither `NotFound` nor a lock outcome.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unopenable_live_path_refuses_promotion() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("index.redb");

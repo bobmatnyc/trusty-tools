@@ -65,6 +65,7 @@ fn warmboot_summary_of(resp: &HealthResponse) -> Value {
 /// must not quietly stop a lane failure from degrading the daemon.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure() {
     let (registry, handle) = registry_with_one_index("semantic-failed-5927");
     {
@@ -122,6 +123,7 @@ async fn health_does_not_count_a_semantic_lane_failure_as_a_corpus_failure() {
 /// counters read `1`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_counts_a_corpus_open_failure_under_both_names() {
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
 
@@ -180,6 +182,7 @@ async fn health_counts_a_corpus_open_failure_under_both_names() {
 /// lane counter and the top-level status both still report the failure.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_stays_degraded_when_the_corpus_flag_read_is_contended() {
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
 
@@ -243,6 +246,7 @@ async fn health_stays_degraded_when_the_corpus_flag_read_is_contended() {
 /// the counter it is derived from.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_names_the_indexes_with_a_failed_lane() {
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
 
@@ -323,6 +327,7 @@ async fn health_names_the_indexes_with_a_failed_lane() {
 /// and asserts the key is missing from the JSON object.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_omits_the_failing_index_ids_when_nothing_is_failing() {
     let (registry, _handle) = registry_with_one_index("healthy-6688");
 

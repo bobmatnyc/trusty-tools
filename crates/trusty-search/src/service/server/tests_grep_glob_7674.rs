@@ -64,6 +64,7 @@ fn files(resp: &crate::service::grep::GrepResponse) -> Vec<String> {
 /// sibling directory. Before #7674 this held; it is pinned so the normalization
 /// work cannot regress the case that already worked.
 #[tokio::test]
+#[serial_test::parallel]
 async fn sibling_directories_answer_an_identically_shaped_glob_identically() {
     let (state, _tmp) = both_siblings().await;
 
@@ -91,6 +92,7 @@ async fn sibling_directories_answer_an_identically_shaped_glob_identically() {
 /// design (ripgrep's rule for a glob containing `/`), so selecting nothing is
 /// CORRECT — what was wrong is that it could not be told apart from a miss.
 #[tokio::test]
+#[serial_test::parallel]
 async fn every_glob_shape_selects_the_documented_file_set() {
     let (state, tmp) = both_siblings().await;
     let absolute = tmp.path().join(BROKEN_SIBLING);
@@ -125,6 +127,7 @@ async fn every_glob_shape_selects_the_documented_file_set() {
 
 /// A basename-only glob reaches a file at any depth (`rg -g` parity).
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_honours_a_basename_only_glob_at_any_depth() {
     let (state, _tmp) = both_siblings().await;
     let resp = grep(state, Some("savings.rs")).await;
@@ -142,6 +145,7 @@ async fn grep_honours_a_basename_only_glob_at_any_depth() {
 /// An absolute glob — the spelling `search`/`search_lexical` report in their
 /// own `file` field — works verbatim when pasted into `grep`'s `glob`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_honours_an_absolute_glob_as_search_reports_it() {
     let (state, tmp) = both_siblings().await;
     let absolute = tmp
@@ -161,6 +165,7 @@ async fn grep_honours_an_absolute_glob_as_search_reports_it() {
 /// absent from the corpus must report `glob_matched_files: 0` and say in words
 /// that the filter, not the pattern, produced the empty result.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unindexed_directory_reports_glob_matched_files_zero_with_a_note() {
     // Only the working sibling is indexed; the statusline sibling exists on
     // disk but was never chunked — exactly the state L3 hit.
@@ -196,6 +201,7 @@ async fn an_unindexed_directory_reports_glob_matched_files_zero_with_a_note() {
 /// An anchored mid-path glob is empty by ripgrep's own rule, and the note is
 /// what tells the caller that rather than leaving a bare `[]`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_reports_a_glob_that_selected_no_files() {
     let (state, _tmp) = both_siblings().await;
     let resp = grep(state, Some("src/**/*.rs")).await;
@@ -213,6 +219,7 @@ async fn grep_reports_a_glob_that_selected_no_files() {
 /// Fail-Open Check: a glob that will not parse is a `400`, never an empty
 /// result set wearing a diagnostic.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_glob_that_fails_to_parse_is_an_error_not_an_empty_result() {
     let (state, _tmp) = both_siblings().await;
     let err = grep_handler(
@@ -236,6 +243,7 @@ async fn a_glob_that_fails_to_parse_is_an_error_not_an_empty_result() {
 /// A request with no glob carries no diagnostic — `meta` is not noise on the
 /// common path.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_request_without_a_glob_carries_no_meta() {
     let (state, _tmp) = both_siblings().await;
     let resp = grep(state, None).await;
@@ -245,6 +253,7 @@ async fn a_request_without_a_glob_carries_no_meta() {
 
 /// The global fan-out reports the same diagnostic as the index-scoped path.
 #[tokio::test]
+#[serial_test::parallel]
 async fn global_grep_reports_the_glob_diagnostic_too() {
     let (state, _tmp) = both_siblings().await;
     let Json(resp) = global_grep_handler(State(state), Json(req(Some("src/**/*.rs"))))

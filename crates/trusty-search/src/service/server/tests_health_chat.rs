@@ -10,6 +10,7 @@ use super::*;
 /// The local-model probe is disabled so the result depends on the key alone.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_chat_available_only_with_a_provider() {
     let build = |key: &str| {
         let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
@@ -34,6 +35,7 @@ async fn health_reports_chat_available_only_with_a_provider() {
 /// and a completed `true` passes through (so the helper is not constant).
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn chat_availability_fails_closed_when_resolution_does_not_finish() {
     use super::health::resolve_chat_available;
     use std::time::Duration;
@@ -53,6 +55,7 @@ async fn chat_availability_fails_closed_when_resolution_does_not_finish() {
 /// `chat_provider()` resolves it.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -99,6 +102,7 @@ async fn a_health_call_before_the_provider_exists_does_not_decide_it() {
 /// probe off), then asserts `health_report` says `true`.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reads_a_provider_the_cell_already_holds() {
     let mut state = SearchAppState::new(crate::core::registry::IndexRegistry::new())
         .with_openrouter_api_key("sk-test-9030");

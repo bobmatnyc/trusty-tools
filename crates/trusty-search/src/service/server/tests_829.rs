@@ -30,6 +30,7 @@ use std::sync::Arc;
 ///
 /// Test: this test (tokio).
 #[tokio::test]
+#[serial_test::parallel]
 async fn pid_slot_forwarder_does_not_leak_tasks() {
     use crate::core::registry::IndexRegistry;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -81,6 +82,7 @@ async fn pid_slot_forwarder_does_not_leak_tasks() {
 ///
 /// Test: this test (tokio).
 #[tokio::test]
+#[serial_test::parallel]
 async fn admin_stop_triggers_graceful_shutdown() {
     use crate::core::registry::IndexRegistry;
 
@@ -133,6 +135,7 @@ async fn admin_stop_triggers_graceful_shutdown() {
 ///
 /// Test: this test (tokio).
 #[tokio::test]
+#[serial_test::parallel]
 async fn validate_root_path_is_non_blocking_and_async() {
     use std::path::Path;
 
@@ -181,6 +184,7 @@ async fn validate_root_path_is_non_blocking_and_async() {
 ///
 /// Test: this test (tokio multi-thread).
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn file_is_within_root_slow_path_does_not_block_executor() {
     use super::helpers::file_is_within_root;
     use std::path::Path;

@@ -29,6 +29,7 @@ use serde_json::Value;
 /// `ActiveBackend`, calls `/health`, and asserts the JSON body.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_switchable_python_backend_info() {
     let state = SearchAppState::new(IndexRegistry::new());
     let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
@@ -66,6 +67,7 @@ async fn health_reports_switchable_python_backend_info() {
 /// prediction.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_switchable_ort_backend_info() {
     for quantized in [false, true] {
         let state = SearchAppState::new(IndexRegistry::new());
@@ -107,6 +109,7 @@ async fn health_reports_switchable_ort_backend_info() {
 /// `bootstrap_state_str`'s mapping.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_reports_embedder_bootstrap_state() {
     for (bootstrap, expected) in [
         (BootstrapState::NotApplicable, "n/a"),
@@ -153,6 +156,7 @@ async fn health_reports_embedder_bootstrap_state() {
 /// too, since that path reports `"n/a"` through a different branch.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_is_degraded_when_the_embedder_backend_permanently_downgraded() {
     for (bootstrap, expected_status) in [
         (BootstrapState::Failed, "degraded"),

@@ -49,6 +49,7 @@ fn rooted(tmp: &Path) -> (PathBuf, PathBuf) {
 /// total grows with each absolute re-add.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, alias) = rooted(tmp.path());
@@ -108,6 +109,7 @@ async fn index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510() {
 /// unchanged. Fails before the fix: these answer 403 or 200.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, alias) = rooted(tmp.path());
@@ -161,6 +163,7 @@ async fn index_file_refuses_an_absolute_path_outside_the_root_9510() {
 /// gate (#8922) answers. Passes before and after the fix by design.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_keeps_a_relative_path_unchanged_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());
@@ -188,6 +191,7 @@ async fn index_file_keeps_a_relative_path_unchanged_9510() {
 /// before the purge: the old copy stays and the total doubles.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());
@@ -244,6 +248,7 @@ async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
 /// fix: the planted copy survives the 403.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (root, _alias) = rooted(tmp.path());

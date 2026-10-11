@@ -4,6 +4,7 @@ use super::*;
 use axum::extract::{Query, State};
 use axum::Json;
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_flat_default_unchanged() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -50,6 +51,7 @@ async fn list_indexes_flat_default_unchanged() {
 /// `GET /indexes?format=tree` returns an object-array with hierarchy
 /// fields (`parent_id`, `children`, `priority_boost`, `is_sub_index`).
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_tree_format_shape() {
     use crate::core::{
         indexer::CodeIndexer,

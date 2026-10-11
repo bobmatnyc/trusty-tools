@@ -65,6 +65,7 @@ fn grep_req(pattern: &str) -> crate::service::grep::GrepRequest {
 /// `POST /indexes/:id/grep` returns line-accurate matches read fresh from
 /// the on-disk files the index knows about.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_endpoint_returns_matches() {
     let (state, _id, _tmp) = stage_grep_index(&[
         ("src/auth.rs", "// header\nfn authenticate() {}\n"),
@@ -89,6 +90,7 @@ async fn grep_endpoint_returns_matches() {
 
 /// The glob filter restricts which indexed files are read.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_endpoint_honours_glob() {
     let (state, _id, _tmp) = stage_grep_index(&[
         ("src/auth.rs", "fn target() {}\n"),
@@ -107,6 +109,7 @@ async fn grep_endpoint_honours_glob() {
 
 /// A malformed regex yields `400 Bad Request` with a JSON error body.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_endpoint_bad_regex_is_400() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
     let err = grep_handler(
@@ -122,6 +125,7 @@ async fn grep_endpoint_bad_regex_is_400() {
 
 /// An unknown index id yields `404 Not Found`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_endpoint_unknown_index_is_404() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
     let err = grep_handler(
@@ -136,6 +140,7 @@ async fn grep_endpoint_unknown_index_is_404() {
 
 /// `POST /grep` (global) fans out across every registered index.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_global_fans_out() {
     let (state, _id, _tmp) = stage_grep_index(&[("src/auth.rs", "fn authenticate() {}\n")]).await;
     let Json(resp) = global_grep_handler(State(state), Json(grep_req("authenticate")))
@@ -148,6 +153,7 @@ async fn grep_global_fans_out() {
 /// Global grep with an `index_id` that doesn't exist returns an empty set
 /// (tolerant fan-out), not a 404.
 #[tokio::test]
+#[serial_test::parallel]
 async fn grep_global_respects_index_filter() {
     let (state, _id, _tmp) = stage_grep_index(&[("a.rs", "fn x() {}\n")]).await;
     let mut req = grep_req("x");

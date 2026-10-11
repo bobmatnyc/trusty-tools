@@ -45,6 +45,7 @@ fn names(files: &[PathBuf]) -> Vec<String> {
 /// root's file is returned and the additional root contributes nothing.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn walk_covers_every_index_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
@@ -76,6 +77,7 @@ fn walk_covers_every_index_root() {
 /// root, or every additional-root file fails the filter's `strip_prefix`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn walk_applies_path_filter_per_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
@@ -104,6 +106,7 @@ fn walk_applies_path_filter_per_root() {
 /// pass both call, then each key decoded back.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn additional_root_file_is_stored_root_relative() {
     let primary = tempfile::tempdir().expect("tempdir");
     let extra = tempfile::tempdir().expect("tempdir");
@@ -129,6 +132,7 @@ fn additional_root_file_is_stored_root_relative() {
 /// Error arm of `walk_roots`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn walk_records_a_missing_additional_root() {
     let primary = tempfile::tempdir().expect("tempdir");
     write_source(primary.path(), "src/in_primary.rs");
@@ -152,6 +156,7 @@ fn walk_records_a_missing_additional_root() {
 /// with multi-root indexes the claim can sit in any slot.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn collision_guard_sees_additional_roots() {
     use crate::service::server::helpers::identifies_any_same_root;
 
@@ -184,6 +189,7 @@ fn collision_guard_sees_additional_roots() {
 /// root, and the prune keeps the first and still prunes the second.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_missing_additional_root_keeps_its_chunks() {
     let primary = tempfile::tempdir().expect("tempdir");
     let store = tempfile::tempdir().expect("tempdir");

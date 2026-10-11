@@ -134,6 +134,7 @@ async fn assert_roots_untouched(fx: &Fixture, id: &str) {
 /// asserts `409` naming `indexes.toml`.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_override_is_refused_when_the_registry_cannot_be_parsed() {
     let id = "atlassian-5357-registry";
     let fx = fixture(id, "ts-5357-registry-").await;
@@ -173,6 +174,7 @@ async fn reindex_override_is_refused_when_the_registry_cannot_be_parsed() {
 /// the same override, and asserts `409`.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_override_is_refused_when_the_indexed_root_cannot_be_read() {
     let id = "atlassian-5357-corpus";
     let fx = fixture(id, "ts-5357-corpus-").await;
