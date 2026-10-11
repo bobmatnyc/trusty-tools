@@ -744,13 +744,40 @@ fn bash_egress_judges_an_open_quote_and_many_parens_within_bound_9699() {
     assert_deny_with(verdict, "`echo 'x ((…`", "it reaches SMTP mail (");
 }
 
-/// #9699 (b): the walk's budget counts calls, not bytes. Under the cap its
-/// worst case — `time eval` doubling the reads of a near-cap payload — is
-/// still judged within the bound.
+/// 🔴 #9699 (b): `time eval` doubles the reads of its payload per level. A
+/// budget of calls alone let a near-cap payload run past the bound; the
+/// budget now counts the bytes each call reads too.
 #[test]
 fn bash_egress_judges_a_near_cap_time_eval_payload_within_bound_9699() {
     let prefix = "time eval ".repeat(12);
     let command = format!("{prefix}{}", padded(65_536 - prefix.len(), "ab "));
     assert_eq!(command.len(), 65_536);
     assert_eq!(bash_within(command, LARGE_INPUT_BOUND), Verdict::Allow);
+}
+
+/// 🔴 #9699 (b): when the byte-counting budget ends the walk over a near-cap
+/// `time eval` payload, the raw scan still denies the spliced program after it.
+#[test]
+fn bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699() {
+    let prefix = "time eval ".repeat(12);
+    let tail = "; se''ndmail bob";
+    let filler = padded(65_000 - prefix.len() - tail.len(), "ab ");
+    let command = format!("{prefix}{filler}{tail}");
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(
+        verdict,
+        "`time eval`×12 … se''ndmail",
+        "it reaches SMTP mail (",
+    );
+}
+
+/// 🔴 #9699: an over-cap Bash command is denied before the trust-anchor floor
+/// runs, so no parser reads it and its size cannot outlast the hook timeout.
+#[test]
+fn bash_egress_cap_precedes_the_trust_anchor_floor_9699() {
+    let read = bash_read(serde_json::json!({ "command": padded(65_537, "a") }));
+    let verdict = verdict(&read, &FamilyTable::builtin(), |_| {
+        panic!("the trust-anchor floor must not read an over-cap command")
+    });
+    assert_deny_with(verdict, "an over-cap command", "64 KiB");
 }
