@@ -494,3 +494,58 @@ fn bash_egress_allows_an_unrelated_command() {
         assert_allowed(&out, command);
     }
 }
+
+/// The issue's #9720 repro: `time eval` x12, then `<<x a.b ` up to the
+/// guard's 64 KiB cap.
+pub(crate) fn time_eval_heredoc_repro_9720() -> String {
+    let mut command = "time eval ".repeat(12);
+    while command.len() + 8 <= 65_536 {
+        command.push_str("<<x a.b ");
+    }
+    command
+}
+
+/// The bound on a hook's verdict on [`time_eval_heredoc_repro_9720`]: ten
+/// times the slower hook's 3.5 s EVO debug-build time after #9720. Before the
+/// fix the egress hook took 129 to 170 s.
+pub(crate) const REPRO_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// Wait for `child` until `bound`, killing it and panicking past the bound:
+/// Claude Code kills a hook at its timeout, and a killed hook is an allow.
+pub(crate) fn wait_within_9720(
+    mut child: std::process::Child,
+    bound: std::time::Duration,
+) -> Output {
+    let started = std::time::Instant::now();
+    while child.try_wait().expect("poll the hook").is_none() {
+        if started.elapsed() >= bound {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the hook gave no verdict within {bound:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    eprintln!("#9720: the hook answered in {:?}", started.elapsed());
+    child.wait_with_output().expect("hook output")
+}
+
+/// 🔴 #9720: the binary judges the issue's repro within the bound. Its
+/// here-document scans were quadratic in the `<<` count, and the walk
+/// re-reads a `time eval` command many times.
+#[test]
+fn bash_egress_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
+    let data = tempfile::tempdir().expect("data dir");
+    let stdin = payload_with(
+        "Bash",
+        serde_json::json!({ "command": time_eval_heredoc_repro_9720() }),
+    );
+    let mut child = guard_command(data.path(), &[])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn tm hook --egress-guard");
+    let mut pipe = child.stdin.take().expect("child stdin");
+    let _ = pipe.write_all(&stdin);
+    drop(pipe);
+    let out = wait_within_9720(child, REPRO_BOUND_9720);
+    assert!(out.status.success(), "the guard exits 0: {out:?}");
+}

@@ -481,3 +481,101 @@ fn heredoc_bodies_scan_a_long_continued_body_in_linear_time_9180() {
     let spans = recv.recv_timeout(std::time::Duration::from_secs(2));
     assert_eq!(spans, Ok(1), "no scan within 2 s");
 }
+
+/// #9720: 64 KiB of `<<x a.b ` operators on one line, the issue's shape, and
+/// a newline, so every operator waits for its body to the line's end.
+fn dense_operator_line() -> String {
+    format!("{}\n", "<<x a.b ".repeat(8_192))
+}
+
+/// 🔴 #9720 site 1: the walk lowered every waiting operator's low-water mark
+/// on every byte, ~2.7e8 steps for 8 192 operators on one 64 KiB line. The
+/// work is now at most two steps per byte.
+#[test]
+fn heredoc_operators_track_pending_lows_in_linear_work_9720() {
+    use super::scan_work::{Site, take};
+    let command = dense_operator_line();
+    take(Site::PendingLow);
+    let ops = super::super::credential_print::heredoc_operators(&command);
+    let work = take(Site::PendingLow);
+    assert_eq!(ops.len(), 8_192);
+    let bound = 2 * command.len() as u64;
+    assert!(work <= bound, "{work} steps for {} bytes", command.len());
+}
+
+/// 🔴 #9720 site 3: each operator searched from its own `<<` to the end of
+/// the line, ~2.7e8 bytes for the same line. Each byte is now searched once.
+#[test]
+fn heredoc_operators_find_each_line_end_once_9720() {
+    use super::scan_work::{Site, take};
+    let command = dense_operator_line();
+    take(Site::LineEnd);
+    super::super::credential_print::heredoc_operators(&command);
+    let work = take(Site::LineEnd);
+    let bound = command.len() as u64;
+    assert!(work <= bound, "{work} bytes searched in {}", command.len());
+}
+
+/// 🔴 #9720 site 2: each `<<` on a line was looked up in the walk's operator
+/// list from its start, ~1.3e8 steps for 16 384 operators. It is now a binary
+/// search, at most 32 steps an operator.
+#[test]
+fn heredoc_bodies_look_up_operators_in_log_work_9720() {
+    use super::scan_work::{Site, take};
+    let command = "<<a ".repeat(16_384);
+    let ops = super::super::credential_print::heredoc_operators(&command);
+    assert_eq!(ops.len(), 16_384);
+    take(Site::OperatorLookup);
+    HeredocBodies::scan_with(&command, &ops);
+    let work = take(Site::OperatorLookup);
+    let bound = 32 * ops.len() as u64;
+    assert!(work <= bound, "{work} steps for {} operators", ops.len());
+}
+
+/// 🔴 #9720 site 4: `contains`, `suppresses_separator` and
+/// `shell_body_starting_at` scanned every body for each byte a caller asked
+/// about, ~6e8 steps for 5 000 bodies. Each is now a binary search, at most
+/// 64 steps for the three queries on one byte.
+#[test]
+fn heredoc_bodies_answer_span_queries_in_log_work_9720() {
+    use super::scan_work::{Site, take};
+    let command = "cat <<x\na\nx\n".repeat(5_000);
+    let bodies = HeredocBodies::scan(&command);
+    assert_eq!(bodies.spans().len(), 5_000);
+    take(Site::SpanProbe);
+    let mut answers = 0;
+    for idx in 0..command.len() {
+        answers += usize::from(bodies.contains(idx));
+        answers += usize::from(bodies.suppresses_separator(idx));
+        answers += usize::from(bodies.shell_body_starting_at(idx).is_some());
+    }
+    let work = take(Site::SpanProbe);
+    // Each body is `a` and its newline; its frame adds the newline before it
+    // and the `x` terminator. No body is handed to a shell.
+    assert_eq!(answers, 5_000 * (2 + 4));
+    let bound = 64 * command.len() as u64;
+    assert!(work <= bound, "{work} steps for {} bytes", command.len());
+}
+
+/// 🔴 #9720 site 5: each arithmetic `<<` on a line compared every later line
+/// with its word, 2.5e8 comparisons for 5 000 shifts over 50 000 lines. The
+/// later lines are now indexed once per scan.
+#[test]
+fn heredoc_bodies_check_arithmetic_shifts_in_linear_work_9720() {
+    use super::scan_work::{Site, take};
+    let command = format!(
+        "echo $((1{}))\n{}",
+        "<<a".repeat(5_000),
+        "\n".repeat(50_000)
+    );
+    take(Site::AmbiguousEnd);
+    let bodies = HeredocBodies::scan(&command);
+    let work = take(Site::AmbiguousEnd);
+    assert!(!bodies.is_unscannable() && bodies.spans().is_empty());
+    let bound = 2 * command.len() as u64;
+    assert!(
+        work <= bound,
+        "{work} lines compared in {} bytes",
+        command.len()
+    );
+}

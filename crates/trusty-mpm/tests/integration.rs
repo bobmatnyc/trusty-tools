@@ -79,6 +79,8 @@ mod tm_hook_pm_guard_false_positives;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
+// #9720: a `<<`-dense command is judged inside the hook timeout.
+mod tm_hook_pm_guard_heredoc_density_9720;
 mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
 mod tm_hook_pm_guard_refusing_daemon_9526;
