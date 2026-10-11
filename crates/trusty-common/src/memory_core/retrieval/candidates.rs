@@ -33,7 +33,7 @@ use super::types::RecallResult;
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::MIN_KEYWORD_CHARS;
 use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::vector::VectorHit;
+use crate::memory_core::store::vector::{VectorHit, VectorStore};
 
 /// Closet tag boost: a query token names a closet keyword holding the drawer.
 const CLOSET_BOOST: f32 = 0.15;

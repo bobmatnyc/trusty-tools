@@ -49,7 +49,6 @@ use super::types::{CrossPalaceRecall, CrossPalaceResult, RecallResult};
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
-use crate::memory_core::store::vector::VectorStore;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
