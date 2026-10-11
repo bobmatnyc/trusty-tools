@@ -34,9 +34,9 @@ pub(super) const TWO_CHECKOUTS: &str = "search_project_two_checkouts";
 pub(super) const MAP_UNREADABLE: &str = "search_project_map_unreadable";
 
 /// The map, as stored (B1).
-const METHOD_MAP: &str = "search.project.map";
+pub(super) const METHOD_MAP: &str = "search.project.map";
 /// A project to its one live index (B1).
-const METHOD_RESOLVE: &str = "search.project.resolve";
+pub(super) const METHOD_RESOLVE: &str = "search.project.resolve";
 
 /// Bounds on the per-group resolve fan-out.
 ///
@@ -80,7 +80,7 @@ pub(super) enum Rpc {
 }
 
 /// Make one bounded call and classify it.
-async fn call(socket: &Path, method: &str, params: Value, timeout: Duration) -> Rpc {
+pub(super) async fn call(socket: &Path, method: &str, params: Value, timeout: Duration) -> Rpc {
     match search_rpc::call_at(socket, method, params, timeout).await {
         Ok(body) => Rpc::Answer(body),
         Err(e) => match e.downcast_ref::<SearchRpcError>() {
@@ -108,8 +108,12 @@ pub(super) struct Pin {
 /// What `search.project.map` told us.
 #[derive(Debug, Clone)]
 pub(super) enum MapRead {
-    /// The map's path and its pins.
-    Readable { path: String, pins: Vec<Pin> },
+    /// The map's path, its pins, and the ids it lists as parked (#9664).
+    Readable {
+        path: String,
+        pins: Vec<Pin>,
+        parked: Vec<String>,
+    },
     /// The daemon answered that it cannot read the map; its message names the
     /// file and the remedy.
     Unreadable(String),
@@ -163,7 +167,15 @@ pub(super) fn read_map(rpc: Rpc) -> MapRead {
         });
     }
     let path = field(&body, "path").unwrap_or_else(|| "project-map.toml".to_string());
-    MapRead::Readable { path, pins }
+    // #9664: `--fix` reports a flagged id the map already parks as parked.
+    let parked = body
+        .get("parked")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| field(row, "index_id"))
+        .collect();
+    MapRead::Readable { path, pins, parked }
 }
 
 /// One group's live duplicates, sorted by what fixes them.
@@ -175,6 +187,8 @@ pub(super) struct GroupFinding {
     pub answer: String,
     /// Parkable: worktree, orphaned, or sharing a root with another member.
     pub parkable: Vec<String>,
+    /// `(index_id, root_path)` of each `parkable` entry, in order (#9664).
+    pub parkable_members: Vec<(String, String)>,
     /// Not parkable: another main checkout (or an unprobed root).
     pub checkouts: Vec<String>,
     /// Who pinned the answer.
@@ -241,6 +255,7 @@ pub(super) fn classify(pin: &Pin, body: &Value) -> Result<GroupFinding, String> 
         let label = format!("`{id}` ({kind}, {root})");
         if shares_root || kind == "worktree" || kind == "orphaned" {
             finding.parkable.push(label);
+            finding.parkable_members.push((id.clone(), root.clone()));
         } else {
             finding.checkouts.push(label);
         }
@@ -489,7 +504,7 @@ fn group_row(
 /// `a_group_whose_resolve_fails_is_not_ok`.
 pub(super) fn build_group_rows(map: &MapRead, fanout: Option<&Fanout>) -> [DoctorCheck; 3] {
     let map_row = match map {
-        MapRead::Readable { path, pins } => DoctorCheck::new(
+        MapRead::Readable { path, pins, .. } => DoctorCheck::new(
             MAP_UNREADABLE,
             CheckStatus::Ok,
             format!("{path} is readable; {} project(s) pinned", pins.len()),
