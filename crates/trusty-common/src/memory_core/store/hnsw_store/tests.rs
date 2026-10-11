@@ -2053,3 +2053,6 @@ mod determinism_tests;
 // #9487: concurrent search + upsert must not deadlock.
 #[path = "concurrency_tests.rs"]
 mod concurrency_tests;
+// #9275: chunk-row (`{uuid}#n`) search grouping.
+#[path = "chunk_tests.rs"]
+mod chunk_tests;

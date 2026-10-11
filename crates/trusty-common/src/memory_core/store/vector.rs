@@ -37,6 +37,7 @@ use crate::memory_core::store::concurrent_open::{
 use crate::memory_core::store::hnsw_store::HnswStore;
 use crate::memory_core::store::hnsw_store::op_budget::OpBreaker;
 use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
+use crate::memory_core::store::vector_key;
 use crate::memory_core::store::write_deadline::palace_label;
 
 /// Bundle of state shared between every `UsearchStore` clone that points
@@ -198,12 +199,13 @@ pub struct VectorHit {
 /// Test: `a_collision_whose_keys_do_not_parse_is_never_clean`.
 #[derive(Debug, Clone, Default)]
 pub struct AliasScan {
-    /// Rows in `VECTOR_KEYS` — one per drawer with a vector.
+    /// Rows in `VECTOR_KEYS` — one per stored vector; a chunked drawer has
+    /// one per chunk (#9275).
     pub key_rows: usize,
     /// Distinct vector ids those rows point at. Below `key_rows` exactly when
     /// drawers share an id.
     pub distinct_vector_ids: usize,
-    /// Drawers caught in a collision group.
+    /// Drawers caught in a collision group, each once.
     pub aliased_drawer_ids: Vec<Uuid>,
     /// Keys in a collision group that are not valid uuids, so no drawer id can
     /// be reported for them. Non-empty means `aliased_drawer_ids` is short.
@@ -236,7 +238,8 @@ pub struct UnaliasOutcome {
 /// can render progress like "checked 644 vectors, removed 541 orphans (84%)"
 /// without re-deriving totals from the store.
 /// What: Plain data: total tracked vector ids inspected, count removed as
-/// orphans, and the index size before/after compaction.
+/// orphans, and the index size before/after compaction. Every count is in
+/// rows: a chunked drawer contributes one per chunk (#9275).
 /// Test: `compact_orphans_removes_only_missing_ids` exercises the values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompactionResult {
@@ -458,27 +461,64 @@ impl UsearchStore {
     /// which depended on a session-only `key_map` populated by upserts —
     /// the redb-backed `HnswStore` can enumerate persisted keys directly.
     /// What: Reads the `VECTOR_KEYS` table via `HnswStore::all_keys` and
-    /// parses each string back into a `Uuid`. Skips (and logs) any row
-    /// that fails to parse so a single corrupt entry doesn't make the
+    /// parses each key with `vector_key::parse`, returning each drawer once
+    /// however many chunk rows it has (#9275), in key order. Skips (and logs)
+    /// any row that fails to parse so a single corrupt entry doesn't make the
     /// whole list unreadable.
-    /// Test: `dream_cycle_compacts_orphaned_vectors` exercises this path.
+    /// Test: `dream_cycle_compacts_orphaned_vectors`,
+    /// `all_ids_returns_each_drawer_once`.
     pub fn all_ids(&self) -> Vec<Uuid> {
         match self.inner.all_keys() {
-            Ok(keys) => keys
-                .into_iter()
-                .filter_map(|s| match Uuid::parse_str(&s) {
-                    Ok(u) => Some(u),
-                    Err(e) => {
-                        tracing::warn!(key = %s, "all_ids: skipping unparseable uuid: {e}");
-                        None
-                    }
-                })
-                .collect(),
+            Ok(keys) => drawer_ids(&keys),
             Err(e) => {
                 tracing::warn!("all_ids: redb scan failed: {e}");
                 Vec::new()
             }
         }
+    }
+
+    /// [`Self::index_size`] with each drawer's chunk rows counted once.
+    ///
+    /// Why (#9275): the dream rebuild trigger and the open-time orphan warning
+    /// compare the index with the drawer table. A chunked drawer has one row
+    /// per chunk, so a row count flags a healthy chunked palace. Rows that
+    /// name no drawer (malformed or non-uuid keys, keyless vectors) are what
+    /// those checks exist to catch, so they still count, as on main.
+    /// What: `HnswStore::entry_count`; a read failure is an error, not zero.
+    /// Test: `unparseable_and_keyless_rows_still_trip_the_orphan_warning_and_rebuild`,
+    /// `drawer_count_ignores_chunk_rows_and_dream_does_not_rebuild_a_chunked_palace`,
+    /// `upsert_chunks_replaces_the_group_and_shrinks`.
+    pub(crate) fn entry_count(&self) -> Result<usize> {
+        Ok(self.inner.entry_count()?)
+    }
+
+    /// Store `chunks` as the whole of drawer `id`: chunk `n` under
+    /// `{id}#n` (bare `{id}` for chunk 0), replacing every earlier row.
+    ///
+    /// Why (#9275): a drawer longer than the embedder's window is embedded
+    /// as several vectors; search, remove and repair treat them as one drawer.
+    /// What: one redb write transaction via `HnswStore::replace_group`.
+    /// Validates the count (1..=4096) and every dimension first, so a bad
+    /// input returns `Err` and leaves the drawer's previous rows unchanged.
+    /// No production writer calls this yet (PR C wires the embed pipeline).
+    /// Test: `upsert_chunks_replaces_the_group_and_shrinks`,
+    /// `upsert_chunks_with_one_bad_dimension_changes_nothing`,
+    /// `upsert_chunks_rejects_empty_and_over_cap`.
+    pub async fn upsert_chunks(&self, id: Uuid, chunks: Vec<Vec<f32>>) -> Result<()> {
+        if self.is_read_only() {
+            anyhow::bail!(READ_ONLY_ERROR_MSG);
+        }
+        let inner = self.inner.clone();
+        let key = id.to_string();
+        // #9487: joined within the op budget; a tripped store spawns nothing.
+        self.inner
+            .run_bounded("upsert", move || -> Result<()> {
+                inner
+                    .replace_group(&key, &chunks)
+                    .with_context(|| format!("upsert {} chunk vectors for {key}", chunks.len()))?;
+                Ok(())
+            })
+            .await
     }
 
     /// Drawer ids whose vector has been overwritten by another drawer's.
@@ -513,8 +553,10 @@ impl UsearchStore {
             ..Default::default()
         };
         for key in audit.aliased.iter().flat_map(|(_, uuids)| uuids.iter()) {
-            match Uuid::parse_str(key) {
-                Ok(u) => scan.aliased_drawer_ids.push(u),
+            match vector_key::parse(key) {
+                // #9275: two colliding chunk rows of one drawer name it once.
+                Ok((u, _)) if scan.aliased_drawer_ids.contains(&u) => {}
+                Ok((u, _)) => scan.aliased_drawer_ids.push(u),
                 Err(e) => {
                     tracing::error!(
                         key = %key,
@@ -534,18 +576,24 @@ impl UsearchStore {
     /// group is no more trustworthy than the unreachable ones, so the repair
     /// has to free the whole group.
     /// What: delegates to `HnswStore::unalias` and splits the freed raw keys
-    /// into parseable drawer ids and unnameable leftovers. The freed drawers
-    /// then read as ordinary "missing" to `embed_health`. Callers should route
+    /// into parseable drawer ids, each once, and unnameable leftovers. A
+    /// collision on one chunk row frees every row of that drawer (#9275), in
+    /// the same transaction, so no drawer is left half-present. The freed
+    /// drawers then read as ordinary "missing" to `embed_health`. Callers should route
     /// through [`PalaceHandle::repair_aliases`](crate::memory_core::PalaceHandle::repair_aliases), which adds the dry run and the
     /// post-repair verification; this is the raw primitive.
     /// Test: `unalias_marks_the_whole_group_for_reembed`,
-    /// `repair_aliases_never_reports_success_over_a_partial_repair`.
+    /// `repair_aliases_never_reports_success_over_a_partial_repair`,
+    /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`,
+    /// `unalias_reports_error_when_a_group_delete_fails`.
     pub fn unalias(&self) -> Result<UnaliasOutcome> {
         let raw = self.inner.unalias().context("unalias: free aliased keys")?;
         let mut out = UnaliasOutcome::default();
         for key in raw {
-            match Uuid::parse_str(&key) {
-                Ok(u) => out.freed.push(u),
+            match vector_key::parse(&key) {
+                // #9275: every row of a drawer is freed; name the drawer once.
+                Ok((u, _)) if out.freed.contains(&u) => {}
+                Ok((u, _)) => out.freed.push(u),
                 Err(e) => {
                     tracing::error!(
                         key = %key,
@@ -568,7 +616,8 @@ impl UsearchStore {
     /// `valid_ids` as deleted, then physically compacts the redb store.
     /// Returns a `CompactionResult` with the inspected count, the orphan
     /// count, and the index size before/after.
-    /// Test: `compact_orphans_removes_only_missing_ids`.
+    /// Test: `compact_orphans_removes_only_missing_ids`,
+    /// `compact_orphans_reclaims_chunk_rows_of_a_deleted_drawer`.
     pub fn compact_orphans(&self, valid_ids: &HashSet<Uuid>) -> Result<CompactionResult> {
         let index_size_before = self.inner.len().unwrap_or(0);
 
@@ -579,8 +628,9 @@ impl UsearchStore {
         let total_checked = keys.len();
         let mut orphans_removed = 0usize;
         for key in keys {
-            let drawer_id = match Uuid::parse_str(&key) {
-                Ok(u) => u,
+            // #9275: a `{id}#n` row belongs to drawer `id`.
+            let drawer_id = match vector_key::parse(&key) {
+                Ok((u, _)) => u,
                 Err(e) => {
                     tracing::warn!(key = %key, "compact_orphans: unparseable uuid: {e}");
                     continue;
@@ -677,8 +727,9 @@ impl VectorStore for UsearchStore {
         // #9487: joined within the op budget; a tripped store spawns nothing.
         self.inner
             .run_bounded("upsert", move || -> Result<()> {
+                // #9275: one vector is a one-chunk drawer; stale `#n` rows go.
                 inner
-                    .upsert(&key, &embedding)
+                    .replace_group(&key, &[embedding])
                     .with_context(|| format!("upsert vector {key}"))?;
                 Ok(())
             })
@@ -694,8 +745,9 @@ impl VectorStore for UsearchStore {
                 let raw = inner.search(&query, top_k).context("hnsw search")?;
                 let mut hits = Vec::with_capacity(raw.len());
                 for (uuid_str, distance) in raw {
-                    let drawer_id = match Uuid::parse_str(&uuid_str) {
-                        Ok(u) => u,
+                    // #9275: hits are already one per drawer; see `HnswStore::search`.
+                    let drawer_id = match vector_key::parse(&uuid_str) {
+                        Ok((u, _)) => u,
                         Err(e) => {
                             tracing::warn!(key = %uuid_str, "search: unparseable uuid: {e}");
                             continue;
@@ -729,13 +781,32 @@ impl VectorStore for UsearchStore {
         // #9487: joined within the op budget; a tripped store spawns nothing.
         self.inner
             .run_bounded("remove", move || -> Result<()> {
+                // #9275: every row of the drawer, bare and `#n`, in one txn.
                 let _ = inner
-                    .delete(&key)
+                    .delete_group(&key)
                     .with_context(|| format!("delete vector {key}"))?;
                 Ok(())
             })
             .await
     }
+}
+
+/// Each drawer named by `keys` once, in key order; unparseable keys are logged
+/// and skipped (#9275).
+fn drawer_ids(keys: &[String]) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for key in keys {
+        match vector_key::parse(key) {
+            Ok((u, _)) => {
+                if seen.insert(u) {
+                    out.push(u);
+                }
+            }
+            Err(e) => tracing::warn!("all_ids: skipping a vector key: {e}"),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

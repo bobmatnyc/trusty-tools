@@ -555,7 +555,8 @@ impl PalaceHandle {
         );
 
         // Surface orphaned vectors so operators can re-ingest if needed.
-        let index_count = vector_store.index_size();
+        // #9275: a chunked drawer's rows count once; see `entry_count`.
+        let index_count = vector_store.entry_count().unwrap_or(0);
         let drawer_count = all_drawers.len();
         if index_count > drawer_count + 5 {
             tracing::warn!(
