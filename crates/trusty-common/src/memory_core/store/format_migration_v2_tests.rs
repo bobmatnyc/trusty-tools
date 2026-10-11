@@ -48,18 +48,23 @@ fn refused_too_new_by_format_1(r: Result<FormatState, PalaceStoreError>) -> bool
     )
 }
 
-/// T3: a format-0 palace is two behind. Every intent refuses it `FormatTooOld`
-/// naming the release line that reads it; nothing under it changes and no
-/// backup starts.
+/// T3: a format-0 palace is two behind. The writer and read-only intents
+/// refuse it `FormatTooOld` naming the release line that reads it; nothing
+/// under it changes and no backup starts. The observer intent refuses it too:
+/// the fixture has no vector index, and an observer never creates one.
 #[test]
 fn a_format_0_palace_is_refused_too_old_under_every_intent_bytes_unchanged() {
     let v0 = build_v0("v0-too-old");
     let before = hash_tree(v0.dir());
-    for intent in [
-        OpenIntent::Writer,
-        OpenIntent::ReadOnlyClient,
-        OpenIntent::Observer,
-    ] {
+    let err = open(&v0, OpenIntent::Observer)
+        .err()
+        .expect("an observer open of a format-0 palace is refused");
+    assert_eq!(
+        before,
+        hash_tree(v0.dir()),
+        "observer: a byte changed: {err:#}"
+    );
+    for intent in [OpenIntent::Writer, OpenIntent::ReadOnlyClient] {
         let err = open(&v0, intent)
             .err()
             .unwrap_or_else(|| panic!("{intent:?}: a format-0 palace must be refused"));
@@ -323,16 +328,21 @@ async fn put_long_drawer(handle: &PalaceHandle) {
 }
 
 /// Write chunk rows into `palace` and assert the format-1 gate then refuses it.
-async fn chunk_and_check(palace: &Palace, kg: &Path) {
+///
+/// The runtime is dropped before the marker is read: a task it spawned can
+/// still hold the palace's `kg.redb`.
+fn chunk_and_check(palace: &Palace, kg: &Path) {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
     let handle = PalaceHandle::open_with_intent(palace, OpenIntent::Writer).expect("open");
     assert_eq!(
         chunk_rows(&handle),
         0,
         "no chunk row before the first write"
     );
-    put_long_drawer(&handle).await;
+    rt.block_on(put_long_drawer(&handle));
     assert!(chunk_rows(&handle) > 0, "the long drawer wrote chunk rows");
     drop(handle);
+    drop(rt);
     assert_eq!(marker(kg), Some(2), "chunk rows under a marker below 2");
     assert!(refused_too_new_by_format_1(classify_with(
         &palace.data_dir,
@@ -344,8 +354,8 @@ async fn chunk_and_check(palace: &Palace, kg: &Path) {
 /// T13: the stamp precedes the first chunk row. A migrated palace reads 2 in
 /// both markers after its writer open and before any write; a new palace is
 /// born at 2. No chunk row ever exists while the marker is 1.
-#[tokio::test]
-async fn the_stamp_precedes_the_first_chunk_row() {
+#[test]
+fn the_stamp_precedes_the_first_chunk_row() {
     let v1: Fixture = build_v1("v1-chunks");
     assert_eq!(marker(&v1.kg()), Some(1));
     assert!(
@@ -358,7 +368,7 @@ async fn the_stamp_precedes_the_first_chunk_row() {
         (Some(2), Some(2)),
         "stamped before any write"
     );
-    chunk_and_check(&v1.palace, &v1.kg()).await;
+    chunk_and_check(&v1.palace, &v1.kg());
 
     let root = tempfile::tempdir().expect("tempdir");
     let fresh = Palace {
@@ -372,5 +382,5 @@ async fn the_stamp_precedes_the_first_chunk_row() {
     let kg = fresh.data_dir.join("kg.redb");
     drop(PalaceHandle::open_with_intent(&fresh, OpenIntent::Writer).expect("create"));
     assert_eq!(marker(&kg), Some(2), "a new palace is born at 2");
-    chunk_and_check(&fresh, &kg).await;
+    chunk_and_check(&fresh, &kg);
 }
