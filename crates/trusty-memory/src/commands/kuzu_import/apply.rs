@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
 use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, RememberOptions};
 use trusty_common::memory_core::store::{Triple, VectorStore as _};
@@ -485,6 +486,38 @@ impl PalaceSink for HandleSink {
 
     async fn update_memory(&self, id: Uuid, m: &MappedMemory) -> Result<(), KuzuImportError> {
         let embedder = shared_embedder().await.map_err(sink_err)?;
+        self.update_memory_with(embedder.as_ref(), id, m).await
+    }
+
+    async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError> {
+        self.handle.kg.assert(t).await.map_err(sink_err)
+    }
+
+    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError> {
+        // One object only: a sibling edge on the same predicate stays (#5396).
+        self.handle
+            .kg
+            .retract_triple(&t.subject, &t.predicate, &t.object)
+            .await
+            .map(drop)
+            .map_err(sink_err)
+    }
+}
+
+impl HandleSink {
+    /// [`PalaceSink::update_memory`] against an explicit embedder.
+    ///
+    /// Why (#9275): the drawer's whole vector group must follow its new text,
+    /// and the shared embedder cell is seeded with a non-chunking mock in tests.
+    /// What: embeds the new content, replaces the drawer's vectors, then
+    /// rewrites the drawer.
+    /// Test: `update_memory_rewrites_the_whole_chunk_group`.
+    pub(crate) async fn update_memory_with(
+        &self,
+        embedder: &dyn Embedder,
+        id: Uuid,
+        m: &MappedMemory,
+    ) -> Result<(), KuzuImportError> {
         let vectors = embedder
             .embed_batch(std::slice::from_ref(&m.content))
             .await
@@ -514,22 +547,6 @@ impl PalaceSink for HandleSink {
         .await
     }
 
-    async fn assert_triple(&self, t: Triple) -> Result<(), KuzuImportError> {
-        self.handle.kg.assert(t).await.map_err(sink_err)
-    }
-
-    async fn retract_triple(&self, t: &Triple) -> Result<(), KuzuImportError> {
-        // One object only: a sibling edge on the same predicate stays (#5396).
-        self.handle
-            .kg
-            .retract_triple(&t.subject, &t.predicate, &t.object)
-            .await
-            .map(drop)
-            .map_err(sink_err)
-    }
-}
-
-impl HandleSink {
     /// Edit drawer `id` in place: persist it, then replace the in-memory row.
     async fn rewrite(
         &self,

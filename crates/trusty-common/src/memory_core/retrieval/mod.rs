@@ -13,8 +13,10 @@
 // #4906: the deferred-embed lane (retry + durable failure ledger) and the
 // vector-coverage health/repair surface that answers "which drawers have no
 // vector" and re-embeds them.
+mod chunk_health;
 mod deferred_embed;
 mod embed_repair;
+mod embed_store;
 mod embedder;
 mod handle;
 // #9279: L2/L3 candidate scoring and the exact short-id token boost.
@@ -66,7 +68,7 @@ mod write_pipeline_tests;
 
 // Shared embedder
 #[cfg(any(test, feature = "embedder-test-support"))]
-pub use embedder::seed_shared_embedder_with_mock;
+pub use embedder::{seed_shared_embedder_with, seed_shared_embedder_with_mock};
 pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
@@ -84,10 +86,14 @@ pub use handle::PalaceHandle;
 // public because a caller choosing to run a longer policy than the write-path
 // default is a legitimate operator decision.
 pub use deferred_embed::RetryPolicy;
+// #9275: the chunk-count verdict on `EmbedHealth`, and the chunked embed
+// primitive trusty-memory's kuzu import writes a drawer's vectors with.
+pub use chunk_health::ChunkCheck;
 pub use embed_repair::{
     AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
     VectorBackfillOptions, VectorBackfillReport,
 };
+pub use embed_store::embed_chunks;
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};

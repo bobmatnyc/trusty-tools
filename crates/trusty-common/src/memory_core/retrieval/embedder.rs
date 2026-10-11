@@ -120,3 +120,16 @@ pub fn seed_shared_embedder_with_mock() {
     // `set` returns Err if already initialised — that is the desired no-op.
     let _ = SHARED_EMBEDDER.set(mock);
 }
+
+/// Pre-seed the shared embedder with a caller-built embedder.
+///
+/// Why: #9275 — an integration test of the chunked pipeline needs a chunking
+/// embedder behind `shared_embedder()`, which [`seed_shared_embedder_with_mock`]
+/// cannot supply.
+/// What: `OnceCell::set`; a no-op when the cell is already set (first caller
+/// wins), exactly like the mock seeder.
+/// Test: `needle_in_the_last_chunk_is_recalled_at_rank_1` seeds with it.
+#[cfg(any(test, feature = "embedder-test-support"))]
+pub fn seed_shared_embedder_with(embedder: Arc<dyn Embedder + Send + Sync>) {
+    let _ = SHARED_EMBEDDER.set(embedder);
+}

@@ -923,6 +923,8 @@ fn alias_audit_failure_is_never_reported_as_clean() {
         recorded_failures: Vec::new(),
         embedder_ready: true,
         alias_audit: unavailable,
+        short_chunk_ids: Vec::new(),
+        chunk_check: super::chunk_health::ChunkCheck::Ran,
     };
     assert!(
         !health.is_healthy(),

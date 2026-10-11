@@ -319,6 +319,8 @@ pub struct FastEmbedder {
     /// HuggingFace repo of the loaded model, e.g. `Qdrant/all-MiniLM-L6-v2-onnx`;
     /// names the cached tokenizer the chunker loads (#9275).
     model_code: String,
+    /// [`Self::chunk_tokenizer`], loaded once on first use (#9275).
+    tokenizer: OnceLock<Arc<super::ChunkTokenizer>>,
 }
 
 /// Longest input `FastEmbedder` lets fastembed encode, in tokens including
@@ -800,6 +802,7 @@ impl FastEmbedder {
             provider,
             model_name,
             model_code,
+            tokenizer: OnceLock::new(),
         })
     }
 }
@@ -905,5 +908,17 @@ impl super::types::Embedder for FastEmbedder {
     // #9275: the truncation length `text_init_options` configures.
     fn input_window(&self) -> Option<usize> {
         Some(FASTEMBED_MAX_LENGTH)
+    }
+
+    // #9275: cached after the first load; a load error is returned every
+    // time and never cached, so a later call can succeed once the files land.
+    fn chunking_tokenizer(
+        &self,
+    ) -> std::result::Result<Option<Arc<super::ChunkTokenizer>>, super::ChunkError> {
+        if let Some(tok) = self.tokenizer.get() {
+            return Ok(Some(Arc::clone(tok)));
+        }
+        let loaded = Arc::new(self.chunk_tokenizer()?);
+        Ok(Some(Arc::clone(self.tokenizer.get_or_init(|| loaded))))
     }
 }

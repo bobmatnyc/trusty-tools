@@ -6,6 +6,7 @@
 //! `merged_drawer`, `pick_survivor`, `persist_merge`, `rebuild_index_from_drawers`, content blocklist, stop-words.
 //! Test: Indirectly via dream cycle and closet tests.
 
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::store::vector::VectorStore;
@@ -280,8 +281,21 @@ pub(crate) async fn persist_merge(
 /// up where this one left off). #6208: the snapshot→reset→re-upsert runs under
 /// the palace write mutex so a concurrent `remember` cannot land a vector that
 /// `reset()` then wipes without re-adding.
+/// Test: `rebuild_index_keeps_every_chunk_of_a_long_drawer`.
 pub(crate) async fn rebuild_index_from_drawers(
     handle: &Arc<PalaceHandle>,
+    started: std::time::Instant,
+    budget: Duration,
+) -> Result<usize> {
+    rebuild_index_with(handle, None, started, budget).await
+}
+
+/// [`rebuild_index_from_drawers`] with an explicit embedder; `None` resolves
+/// the shared one after the reset, as before (#9275 test seam).
+/// Test: `rebuild_stopping_at_the_budget_leaves_only_complete_groups`.
+pub(crate) async fn rebuild_index_with(
+    handle: &Arc<PalaceHandle>,
+    embedder: Option<&Arc<dyn Embedder + Send + Sync>>,
     started: std::time::Instant,
     budget: Duration,
 ) -> Result<usize> {
@@ -309,9 +323,12 @@ pub(crate) async fn rebuild_index_from_drawers(
         return Ok(0);
     }
 
-    let embedder = shared_embedder()
-        .await
-        .context("acquire shared embedder for dream rebuild")?;
+    let embedder = match embedder {
+        Some(e) => Arc::clone(e),
+        None => shared_embedder()
+            .await
+            .context("acquire shared embedder for dream rebuild")?,
+    };
 
     let mut rebuilt: usize = 0;
     for drawer in snapshot.iter() {
