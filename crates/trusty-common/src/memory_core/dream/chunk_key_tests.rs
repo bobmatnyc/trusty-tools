@@ -214,3 +214,127 @@ async fn unparseable_and_keyless_rows_still_trip_the_orphan_warning_and_rebuild(
     );
     assert_eq!(removed, 6, "the rebuild drops every unenumerable entry");
 }
+
+// ── #9275 PR C: the rebuild re-embeds every chunk ────────────────────────────
+
+/// Window of the chunking mock below: ten words per chunk.
+const WINDOW: usize = 12;
+
+async fn remember_forced(handle: &PalaceHandle, text: &str) -> Uuid {
+    handle
+        .remember_with_options(
+            text.into(),
+            RoomType::General,
+            vec![],
+            0.5,
+            crate::memory_core::retrieval::RememberOptions::forced(),
+        )
+        .await
+        .unwrap()
+}
+
+fn words(n: usize, tag: &str) -> String {
+    (0..n)
+        .map(|i| format!("{tag}{i}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn chunking_mock(handle: &PalaceHandle) -> crate::embedder::MockEmbedder {
+    crate::embedder::MockEmbedder::new(handle.vector_store.dim()).with_chunking(WINDOW)
+}
+
+/// Chunk count of `text` at [`WINDOW`], from `chunk_text` directly.
+fn chunks_at(handle: &PalaceHandle, text: &str) -> usize {
+    use crate::memory_core::embed::Embedder;
+    let tok = chunking_mock(handle).chunking_tokenizer().unwrap().unwrap();
+    crate::embedder::chunk_text(&tok, text, WINDOW)
+        .unwrap()
+        .len()
+}
+
+fn shape(handle: &PalaceHandle, id: Uuid) -> Option<(usize, u32)> {
+    let shapes = handle.vector_store.chunk_shapes().unwrap();
+    shapes.get(&id).map(|s| (s.rows, s.max_index))
+}
+
+/// Embedder whose second call sleeps past the rebuild budget.
+struct SlowSecondCall {
+    inner: crate::embedder::MockEmbedder,
+    calls: std::sync::atomic::AtomicUsize,
+    stall: Duration,
+}
+
+#[async_trait::async_trait]
+impl crate::memory_core::embed::Embedder for SlowSecondCall {
+    async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 1 {
+            tokio::time::sleep(self.stall).await;
+        }
+        self.inner.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+    fn input_window(&self) -> Option<usize> {
+        self.inner.input_window()
+    }
+    fn chunking_tokenizer(
+        &self,
+    ) -> Result<Option<Arc<crate::embedder::ChunkTokenizer>>, crate::embedder::ChunkError> {
+        self.inner.chunking_tokenizer()
+    }
+}
+
+/// The Architect's PR B ruling: the dream rebuild must keep every chunk.
+#[tokio::test]
+async fn rebuild_index_keeps_every_chunk_of_a_long_drawer() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = open_handle(dir.path(), "rebuild-chunks");
+    let (long_text, short_text) = (words(100, "w"), words(5, "s"));
+    let long = remember_forced(&handle, &long_text).await;
+    let short = remember_forced(&handle, &short_text).await;
+    let k = chunks_at(&handle, &long_text);
+    assert!(k > 1, "{k} chunks");
+    add_chunk_rows(&handle, long, k - 1);
+    let before = (shape(&handle, long), shape(&handle, short));
+    assert_eq!(before, (Some((k, (k - 1) as u32)), Some((1, 0))));
+
+    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+        Arc::new(chunking_mock(&handle));
+    let rebuilt = super::helpers::rebuild_index_with(
+        &handle,
+        Some(&e),
+        Instant::now(),
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rebuilt, 2);
+    assert_eq!((shape(&handle, long), shape(&handle, short)), before);
+}
+
+#[tokio::test]
+async fn rebuild_stopping_at_the_budget_leaves_only_complete_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = open_handle(dir.path(), "rebuild-budget");
+    let mut ids = Vec::new();
+    for tag in ["a", "b", "c", "d"] {
+        ids.push(remember_forced(&handle, &words(100, tag)).await);
+    }
+    let k = chunks_at(&handle, &words(100, "a"));
+    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> = Arc::new(SlowSecondCall {
+        inner: chunking_mock(&handle),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        stall: Duration::from_secs(2),
+    });
+    // The second drawer's embed outlasts the budget: two drawers land whole,
+    // the loop stops before the third.
+    super::helpers::rebuild_index_with(&handle, Some(&e), Instant::now(), Duration::from_secs(1))
+        .await
+        .unwrap();
+    let shapes: Vec<_> = ids.iter().map(|id| shape(&handle, *id)).collect();
+    let whole = Some((k, (k - 1) as u32));
+    assert_eq!(shapes, vec![whole, whole, None, None]);
+}

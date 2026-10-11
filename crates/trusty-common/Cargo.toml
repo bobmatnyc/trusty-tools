@@ -303,6 +303,13 @@ name = "memory_palace"
 path = "tests/memory_palace.rs"
 required-features = ["memory-core", "embedder-test-support"]
 
+# #9275 PR C: the chunked embed pipeline end to end. Its own process, so the
+# shared embedder is seeded with a chunking mock before any palace opens.
+[[test]]
+name = "chunked_embed_9275"
+path = "tests/chunked_embed_9275.rs"
+required-features = ["memory-core", "embedder-test-support"]
+
 # #7106 ratchet: no palace-scoped redb open may bypass the bounded page-cache
 # builder. Scans the memory-core sources, so it needs that feature on to be
 # meaningful (and to match the tree it is asserting about).
