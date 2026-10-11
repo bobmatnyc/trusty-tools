@@ -14,8 +14,9 @@
 //! config file's stat fingerprint; a read under other settings, or after
 //! that file changed, drops them and advances the epoch the same way. An
 //! entry as old as the max age, by `Instant` or by wall time, is never
-//! served (#7520 S2). A poisoned lock
-//! or unknown settings fail closed: every lookup misses and nothing is
+//! served (#7520 S2). Each value is held in a [`Held`] buffer that is
+//! zeroed when it leaves the map, however it leaves (#7520 S2). A poisoned
+//! lock or unknown settings fail closed: every lookup misses and nothing is
 //! stored. `Debug` shows the entry count and the max age only. The
 //! cache is not a gate: [`super::SecretStore`] consults it only after the
 //! grant, ancestry, agents-flag and audit checks have passed.
@@ -28,6 +29,8 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
+
+use zeroize::Zeroizing;
 
 use super::config::{self, CliSettings};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
@@ -140,6 +143,16 @@ pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// What one cached value is filed under.
 type Slot = (BackendId, VaultName, SecretKey);
 
+/// One cached plaintext; zeroed when dropped.
+///
+/// Why: #7520 S2, owner ruling Dd8 — a value the cache lets go of must not
+/// stay readable in freed memory. A [`SecretValue`] does not zero itself.
+/// What: expiry, eviction, a settings change, a replacing insert and the
+/// cache's own drop all drop the entry, and so zero these bytes.
+/// Test: `cache_zeroizes_every_value_it_drops`,
+/// `cached_value_type_zeroizes_on_drop`.
+type Held = Zeroizing<String>;
+
 /// When the read that filled an entry started, on both clocks (#7520 S2).
 ///
 /// Why: `Instant` does not advance while the machine sleeps (macOS
@@ -171,7 +184,7 @@ impl Filled {
 #[derive(Default)]
 struct Entries {
     /// Each value with the time the read that filled it started.
-    values: HashMap<Slot, (SecretValue, Filled)>,
+    values: HashMap<Slot, (Held, Filled)>,
     /// Advanced by every eviction; a read stores its value only when the
     /// epoch it started under is still current.
     epoch: u64,
@@ -301,7 +314,7 @@ impl SecretCache {
                     .values
                     .retain(|_, (_, filled)| filled.younger_than(&now, max_age));
                 match entries.values.get(&slot) {
-                    Some((value, _)) => return Ok(Some(value.clone())),
+                    Some((held, _)) => return Ok(Some(SecretValue::new(held.as_str()))),
                     None => Some(entries.epoch),
                 }
             }
@@ -314,7 +327,9 @@ impl SecretCache {
             && let Some(mut entries) = self.lock()
             && entries.epoch == epoch
         {
-            entries.values.insert(slot, (value.clone(), now));
+            // #7520 S2: the cache's own copy; a replaced one is zeroed.
+            let held = Held::new(value.expose().to_owned());
+            entries.values.insert(slot, (held, now));
         }
         Ok(value)
     }

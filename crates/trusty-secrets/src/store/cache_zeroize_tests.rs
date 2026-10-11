@@ -8,7 +8,8 @@
 //! so only the cache's own copies are ever freed. Only align-1 buffers of at
 //! most 256 bytes are read: they hold bytes only (no padding), and the zeroed
 //! allocation means none is uninitialized.
-//! Test: `cache_zeroizes_every_value_it_drops`.
+//! Test: `cache_zeroizes_every_value_it_drops`,
+//! `cached_value_type_zeroizes_on_drop`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::mem::forget;
@@ -129,4 +130,13 @@ fn cache_zeroizes_every_value_it_drops() {
     assert!(cache.count() >= 1, "the cache holds a value to drop");
     drop(cache);
     assert_eq!(freed(), 0, "a value held at cache drop was freed unzeroed");
+}
+
+/// Why: #7520 S2 — the entry type itself zeroes on drop, so no new removal
+/// path can skip it.
+/// Test: itself.
+#[test]
+fn cached_value_type_zeroizes_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<Held>();
 }
