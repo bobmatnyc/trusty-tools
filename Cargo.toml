@@ -216,6 +216,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 fastembed = { version = "5", default-features = false }
+# #9275: the `tokenizers` release fastembed 5 itself links (0.22, onig), under
+# its own key so the embedder chunker counts tokens with the tokenizer fastembed
+# truncates with. The `tokenizers` key below (0.21) stays the candle/NER pin.
+fastembed-tokenizers = { package = "tokenizers", version = "0.22", default-features = false, features = ["onig"] }
 lru = "0.16"
 parking_lot = "0.12"
 dirs = "5"

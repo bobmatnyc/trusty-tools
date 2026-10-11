@@ -433,6 +433,22 @@ pub trait Embedder: Send + Sync {
     fn provider(&self) -> ExecutionProvider {
         ExecutionProvider::Cpu
     }
+
+    /// Longest input, in tokens including special tokens, this embedder
+    /// encodes before it truncates.
+    ///
+    /// Why: #9275 — text past the window is silently dropped from the vector,
+    /// so a caller must split long text before embedding it. The window is a
+    /// property of the backend, so the backend reports it.
+    /// What: default `None` means "unknown": the caller does not chunk.
+    /// `FastEmbedder` reports 512, `CandleEmbedder` 128, `MockEmbedder`
+    /// whatever its builder set. Feed the value to [`super::chunk_text`].
+    /// Test: `default_input_window_is_none`,
+    /// `mock_embedder_input_window_is_configurable`,
+    /// `fastembed_window_matches_cached_tokenizer_max_length`.
+    fn input_window(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// Convenience helper: embed a single text via `embed_batch` and return the

@@ -316,7 +316,19 @@ pub struct FastEmbedder {
     /// [`resolve_default_embedding_model`] when the primary failed to
     /// initialise and the two-model fallback net kicked in.
     model_name: &'static str,
+    /// HuggingFace repo of the loaded model, e.g. `Qdrant/all-MiniLM-L6-v2-onnx`;
+    /// names the cached tokenizer the chunker loads (#9275).
+    model_code: String,
 }
+
+/// Longest input fastembed 5 encodes, in tokens including `[CLS]`/`[SEP]`.
+///
+/// Why: #9275 — fastembed truncates every input at its private
+/// `DEFAULT_MAX_LENGTH` (512), capped by the model's `model_max_length`;
+/// a chunker that does not know this value embeds a truncated tail.
+/// What: mirrors fastembed's constant; `FastEmbedder::input_window` reports it.
+/// Test: `fastembed_window_matches_cached_tokenizer_max_length`.
+pub const FASTEMBED_MAX_LENGTH: usize = 512;
 
 impl FastEmbedder {
     /// Construct a new `FastEmbedder` with the default cache size.
@@ -355,6 +367,19 @@ impl FastEmbedder {
     /// real ONNX model).
     pub fn model_name(&self) -> &'static str {
         self.model_name
+    }
+
+    /// Load the tokenizer of the model this embedder actually loaded, for
+    /// [`super::chunk_text`].
+    ///
+    /// Why: #9275 — chunk bounds must be counted with the tokenizer fastembed
+    /// truncates with, and fastembed keeps its own tokenizer private.
+    /// What: reads the files fastembed already cached for `model_code` from
+    /// the same cache directory ([`super::ChunkTokenizer::for_fastembed_model`]).
+    /// No network; a missing file is an error, never a guessed count.
+    /// Test: `real_tokenizer_chunks_long_text_within_fastembed_window`.
+    pub fn chunk_tokenizer(&self) -> Result<super::ChunkTokenizer, super::ChunkError> {
+        super::ChunkTokenizer::for_fastembed_model(&self.model_code)
     }
 
     /// Build `TextInitOptions` for the given model. CPU is the default
@@ -727,6 +752,10 @@ impl FastEmbedder {
         .context("spawn_blocking joined with error during embedder init")??;
 
         let model_name = embedding_model_name(&resolved_model);
+        // #9275: the repo id names the cached tokenizer the chunker loads.
+        let model_code = TextEmbedding::get_model_info(&resolved_model)?
+            .model_code
+            .clone();
         tracing::info!(
             "trusty-embedder: FastEmbedder ready (provider={}, model={}, dim={})",
             provider,
@@ -740,6 +769,7 @@ impl FastEmbedder {
             dim: EMBED_DIM,
             provider,
             model_name,
+            model_code,
         })
     }
 }
@@ -840,5 +870,10 @@ impl super::types::Embedder for FastEmbedder {
 
     fn provider(&self) -> ExecutionProvider {
         self.provider
+    }
+
+    // #9275: fastembed truncates at this many tokens.
+    fn input_window(&self) -> Option<usize> {
+        Some(FASTEMBED_MAX_LENGTH)
     }
 }

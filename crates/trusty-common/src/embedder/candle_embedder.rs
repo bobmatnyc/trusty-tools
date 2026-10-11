@@ -349,6 +349,11 @@ impl Embedder for CandleEmbedder {
     fn dimension(&self) -> usize {
         self.dim
     }
+
+    // #9275: the tokenizer truncates at `MAX_SEQ_LEN`, specials included.
+    fn input_window(&self) -> Option<usize> {
+        Some(MAX_SEQ_LEN)
+    }
 }
 
 /// Pick the best available device.
