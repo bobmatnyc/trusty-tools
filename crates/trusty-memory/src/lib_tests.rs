@@ -106,7 +106,8 @@ async fn tools_list_returns_all_tools() {
     // #5000 / #4786 add `palace_verify_embedded` and `palace_embed_sweep`.
     // #7370 adds `chat_asset_capabilities`, `chat_asset_put`, `chat_asset_get`
     // — #7654: the count was left at 49 when they landed.
-    assert_eq!(tools.len(), 52);
+    // #9544 adds `palace_rename`.
+    assert_eq!(tools.len(), 53);
 }
 
 #[tokio::test]
@@ -1483,3 +1484,222 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
 // the daemon wrote the OS-standard one; ADR-0032 removed both writes, and
 // `transport::uds::remove_retired_discovery_files` deletes whichever of them a
 // machine still carries.
+
+/// Create palace `canonical` on disk and register `alias -> canonical`.
+///
+/// Why (#9544): the two alias choke-point tests below need the same live
+/// alias, and a wrong shape (an alias directory, a missing target) silently
+/// disables the redirect, so the helper asserts the redirect fires.
+/// Test: used by `palace_write_lock_follows_a_live_alias`,
+/// `session_store_follows_a_live_alias_and_creates_no_alias_dir`,
+/// `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir` and
+/// `session_store_fails_open_when_the_alias_dir_store_cannot_be_read`.
+fn live_alias(state: &AppState, canonical: &str, alias: &str) {
+    let palace = trusty_common::memory_core::Palace {
+        id: trusty_common::memory_core::palace::PalaceId::new(canonical),
+        name: canonical.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(canonical),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create canonical palace");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        alias,
+        canonical,
+    )
+    .expect("register alias");
+    assert_eq!(
+        trusty_common::palace_alias::canonical_palace_id(&state.data_root, alias),
+        canonical,
+        "the alias must be live"
+    );
+}
+
+/// Why (#9544): the dedup gate is atomic only per mutex. Keyed on the raw id,
+/// a write through an alias and a write through its target took two mutexes
+/// for one store, and both could pass the gate.
+/// What: a live alias and its target return the same `Arc`; a dead alias (its
+/// target has no `palace.json`) and an unknown id keep their own keys.
+/// Test: this test.
+#[tokio::test]
+async fn palace_write_lock_follows_a_live_alias() {
+    let (state, _tmp) = test_state();
+    live_alias(&state, "lock-canonical", "lock-alias");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        "lock-dead-alias",
+        "lock-never-created",
+    )
+    .expect("register dead alias");
+
+    let canonical = state.palace_write_lock("lock-canonical");
+    assert!(
+        Arc::ptr_eq(&canonical, &state.palace_write_lock("lock-alias")),
+        "a live alias must share its target's write mutex"
+    );
+    let dead = state.palace_write_lock("lock-dead-alias");
+    let unknown = state.palace_write_lock("lock-unknown");
+    assert!(
+        !Arc::ptr_eq(&dead, &canonical),
+        "a dead alias keeps its own key"
+    );
+    assert!(
+        !Arc::ptr_eq(&unknown, &canonical),
+        "an unknown id keeps its own key"
+    );
+    assert!(!Arc::ptr_eq(&dead, &unknown), "distinct ids stay distinct");
+    assert!(Arc::ptr_eq(
+        &dead,
+        &state.palace_write_lock("lock-dead-alias")
+    ));
+}
+
+/// Why (#9544): `session_store` keyed its cache and its directory on the raw
+/// id, so a chat call through an alias created `<root>/<alias>/` and a second
+/// `chat_sessions.redb` for one palace.
+/// What: the alias and the target return the same store; a session created
+/// through the alias reads back through the target; no alias dir exists.
+/// Test: this test.
+#[tokio::test]
+async fn session_store_follows_a_live_alias_and_creates_no_alias_dir() {
+    let (state, _tmp) = test_state();
+    live_alias(&state, "chat-canonical", "chat-alias");
+
+    let via_alias = state.session_store("chat-alias").expect("store via alias");
+    let session = via_alias
+        .create_session(Some("through the alias".to_string()))
+        .expect("create session");
+    let via_canonical = state
+        .session_store("chat-canonical")
+        .expect("store via canonical");
+
+    assert!(
+        Arc::ptr_eq(&via_alias, &via_canonical),
+        "a live alias must share its target's session store"
+    );
+    assert!(
+        via_canonical
+            .get_session(&session)
+            .expect("get session")
+            .is_some(),
+        "a session created through the alias must read back through the target"
+    );
+    assert!(
+        !state.data_root.join("chat-alias").exists(),
+        "no directory may be created under the alias name"
+    );
+}
+
+/// Size and mtime of a file, read without opening it.
+fn size_and_mtime(path: &std::path::Path) -> (u64, std::time::SystemTime) {
+    let md = std::fs::metadata(path).expect("stat seeded store");
+    (md.len(), md.modified().expect("mtime"))
+}
+
+/// Why (#9612): before #9544 a chat call through an alias wrote
+/// `<root>/<alias>/chat_sessions.redb`. The redirect now opens the target's
+/// store, so that file is never read again and nothing said so.
+/// What: a seeded alias-dir store is flagged in exactly one warn naming its
+/// path, size and target, however often the alias is used; a clean alias and
+/// a direct call are silent; the stray file's size and mtime do not change.
+/// Test: this test.
+#[tokio::test]
+async fn session_store_flags_a_chat_store_stranded_in_a_live_alias_dir() {
+    let (state, _tmp) = test_state();
+    let stray = state.data_root.join("a").join("chat_sessions.redb");
+    {
+        let old = ChatSessionStore::open(&state.data_root.join("a").join("chat_sessions.db"))
+            .expect("seed the pre-#9544 alias-dir store");
+        old.create_session(Some("written before the redirect".to_string()))
+            .expect("seed a session");
+    }
+    live_alias(&state, "stranded-target", "a");
+    live_alias(&state, "clean-target", "a2");
+    let before = size_and_mtime(&stray);
+
+    let (log, _guard) = crate::service::core_tests::LogCapture::install();
+    let first = state.session_store("a").expect("store via alias");
+    let second = state.session_store("a").expect("store via alias again");
+    state.session_store("a2").expect("store via clean alias");
+    state
+        .session_store("stranded-target")
+        .expect("store via target");
+
+    assert!(Arc::ptr_eq(&first, &second), "the redirect still proceeds");
+    let flags = log.lines_naming("#9612");
+    assert_eq!(flags.len(), 1, "exactly one flag per alias: {flags:?}");
+    let flag = &flags[0];
+    assert!(flag.contains("WARN"), "the flag is a warn: {flag}");
+    assert!(
+        flag.contains(&stray.display().to_string()),
+        "the flag names the stray path: {flag}"
+    );
+    assert!(
+        flag.contains(&format!("{} bytes", before.0)),
+        "the flag names the stray size: {flag}"
+    );
+    assert!(
+        flag.contains("stranded-target"),
+        "the flag names the target palace: {flag}"
+    );
+    assert!(
+        flag.contains("back up the file"),
+        "the flag tells the operator what to do: {flag}"
+    );
+    let clean_dir = state.data_root.join("a2").display().to_string();
+    assert!(
+        !flags.iter().any(|l| l.contains(&clean_dir)),
+        "a clean alias is never flagged"
+    );
+    assert_eq!(
+        size_and_mtime(&stray),
+        before,
+        "the stray store must not be touched"
+    );
+    assert!(
+        !state.data_root.join("a2").exists(),
+        "no directory may be created under a clean alias"
+    );
+}
+
+/// Why (#9612): a stat failure other than NotFound must not block chat; the
+/// check is advisory, so it fails open.
+/// What: a self-referencing symlink at the alias-dir store path makes the
+/// stat fail with ELOOP while `palace.json` stays absent, so the redirect
+/// still fires; the failure is logged at warn and the target store opens.
+/// Test: this test.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_store_fails_open_when_the_alias_dir_store_cannot_be_read() {
+    let (state, _tmp) = test_state();
+    let alias_dir = state.data_root.join("loop-alias");
+    std::fs::create_dir_all(&alias_dir).expect("alias dir");
+    let stray = alias_dir.join("chat_sessions.redb");
+    std::os::unix::fs::symlink(&stray, &stray).expect("self-referencing symlink");
+    live_alias(&state, "loop-target", "loop-alias");
+
+    let (log, _guard) = crate::service::core_tests::LogCapture::install();
+    let via_alias = state
+        .session_store("loop-alias")
+        .expect("redirect proceeds");
+    let via_target = state
+        .session_store("loop-target")
+        .expect("store via target");
+
+    assert!(
+        Arc::ptr_eq(&via_alias, &via_target),
+        "the redirect proceeds"
+    );
+    let flags = log.lines_naming("#9612");
+    assert_eq!(flags.len(), 1, "one warn for the failed stat: {flags:?}");
+    assert!(flags[0].contains("WARN"), "logged at warn: {}", flags[0]);
+    assert!(
+        flags[0].contains(&stray.display().to_string()),
+        "the warn names the path it could not stat: {}",
+        flags[0]
+    );
+}

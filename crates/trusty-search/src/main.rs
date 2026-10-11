@@ -438,10 +438,12 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search start
-    ///   trusty-search start --port 7878
-    ///   trusty-search start --foreground --port 7878   # launchd / systemd
+    ///   trusty-search start --foreground               # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
-    ///   trusty-search start --no-http                  # rpc socket only, no TCP port
+    ///
+    /// #9214: the daemon serves its Unix socket only and binds no TCP port.
+    /// #9536: `--port` and `--no-http` are unknown arguments now, and
+    /// `TRUSTY_SEARCH_NO_HTTP` is not read.
     ///
     /// #8176: an isolated instance started against an explicit data directory
     /// (`--data-dir` or `TRUSTY_DATA_DIR`) does NOT auto-discover, on its first
@@ -466,50 +468,33 @@ enum Commands {
     #[command(display_order = 21)]
     Stop,
 
-    /// Start MCP server (stdio by default; add --with-http for an HTTP listener)
+    /// Start the MCP server over stdio
     ///
-    /// Stdio MCP is always served on the process's stdin/stdout for Claude
-    /// Code, which pipes JSON-RPC directly and needs nothing more — so the
-    /// HTTP listener is OFF by default (issue #123).
-    ///
-    /// Pass `--with-http` to additionally bind an HTTP/SSE transport on
-    /// 127.0.0.1:<port> (port 0 = OS-chosen free port). The bound address is
-    /// written to `~/.trusty-search/mcp_http_addr` so admin clients can
-    /// discover it.
+    /// Serves MCP on the process's stdin/stdout for Claude Code, which pipes
+    /// JSON-RPC directly. #9542 retired the HTTP/SSE transport: `--with-http`,
+    /// `--http` and `--port` exit 1 naming the issue, and nothing is bound.
     ///
     /// Examples:
-    ///   trusty-search serve                       # MCP stdio only (Claude hook)
-    ///   trusty-search serve --with-http           # MCP stdio + HTTP on :0
-    ///   trusty-search serve --with-http --port 7878  # MCP stdio + HTTP on :7878
-    ///   trusty-search serve --http 0.0.0.0:8080   # legacy: explicit bind addr
+    ///   trusty-search serve                       # MCP stdio (Claude hook)
     ///
-    /// `--no-http` is accepted but ignored — HTTP is already off by default.
+    /// `--no-http` is accepted but ignored — there is no HTTP transport.
     #[command(display_order = 22)]
     Serve {
-        /// Enable the HTTP/SSE listener in addition to MCP stdio.
-        ///
-        /// Off by default: Claude Code MCP hooks pipe JSON-RPC over
-        /// stdin/stdout and never need the HTTP admin panel, so binding it
-        /// would just waste a port. Opt in with this flag when you want the
-        /// HTTP transport (e.g. for the browser admin panel).
-        #[arg(long, default_value_t = false)]
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true, default_value_t = false)]
         with_http: bool,
 
-        /// Deprecated no-op: HTTP is now OFF by default (issue #123), so
-        /// `--no-http` does nothing. Kept as a hidden, accepted flag so
+        /// Deprecated no-op (issue #123). Kept as a hidden, accepted flag so
         /// existing `.mcp.json` configs that still pass it don't break.
         #[arg(long, hide = true, default_value_t = false)]
         no_http: bool,
 
-        /// Port for the HTTP/SSE MCP transport (default: 0 = OS picks).
-        ///
-        /// Only used when `--with-http` is set.
-        #[arg(long, default_value_t = 0)]
-        port: u16,
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true)]
+        port: Option<u16>,
 
-        /// Legacy: explicit "host:port" bind address. When set, overrides
-        /// `--port`. Kept for backward compatibility with older docs.
-        #[arg(long)]
+        /// Retired by #9542; refused by `handle_serve`.
+        #[arg(long, hide = true)]
         http: Option<String>,
 
         /// Pin this MCP session to a single index id (issue #1373).
@@ -565,8 +550,9 @@ enum Commands {
     ///
     /// Starts the daemon if none runs, asks it over its socket which HTTP
     /// address it bound, then opens `http://<addr>/ui` in the default browser.
-    /// Falls back to printing the URL if the browser fails to launch. Errors,
-    /// naming the socket, against a socket-only (`--no-http`) daemon.
+    /// Falls back to printing the URL if the browser fails to launch. #9214:
+    /// a current daemon is socket-only and serves no dashboard, so this
+    /// errors naming the socket and trusty-console, which serves it.
     ///
     /// Examples:
     ///   trusty-search dashboard
@@ -870,6 +856,19 @@ enum Commands {
         action: commands::config::ConfigAction,
     },
 
+    /// Show or change which index each project resolves to (#9169)
+    ///
+    /// `map` prints `project-map.toml`; `pin` chooses a project's index;
+    /// `park` sets a duplicate index aside without deleting it; `unpark`
+    /// undoes that and queues a reindex; `rebuild-map` (operator only) moves a
+    /// damaged map aside and rebuilds it from the registry.
+    ///
+    /// Examples:
+    ///   trusty-search project map
+    ///   trusty-search project park apex-feat-x
+    ///   trusty-search project pin apex-9a4a584b
+    Project(commands::project::ProjectCommand),
+
     /// Monitor the trusty-search daemon via web UI or terminal dashboard
     ///
     /// `monitor web` prints the admin panel URL of the running daemon (and
@@ -886,15 +885,15 @@ enum Commands {
         target: MonitorTarget,
     },
 
-    /// Print the daemon's listening port (or address) to stdout.
+    /// Print the daemon's HTTP port (or address) to stdout, if it has one.
     ///
     /// Asks the running daemon over its socket which HTTP address it bound.
-    /// Useful for shell substitution:
-    ///   curl http://127.0.0.1:$(trusty-search port)/health
+    /// #9214: a current daemon binds none, so this exits 1 naming the socket;
+    /// only a daemon from an older build still reports a port.
     ///
     /// Exits 1 (with a message on stderr) when no daemon answers on the
-    /// socket, or when the daemon serves no HTTP listener (`start --no-http`),
-    /// so substitution fails cleanly. Never starts a daemon.
+    /// socket, or when the daemon serves no HTTP listener, so shell
+    /// substitution fails cleanly. Never starts a daemon.
     ///
     /// Examples:
     ///   trusty-search port               # bare port: 7879
@@ -1250,7 +1249,7 @@ async fn run() -> Result<()> {
 
         Commands::Serve {
             with_http,
-            no_http: _, // deprecated no-op (issue #123): HTTP is opt-in now
+            no_http: _, // deprecated no-op (issue #123)
             port,
             http,
             index,
@@ -1344,6 +1343,7 @@ async fn run() -> Result<()> {
         Commands::Config { action } => {
             commands::config::handle_config(action).await?;
         }
+        Commands::Project(cmd) => commands::project::handle_project(cmd).await?,
 
         Commands::Monitor { target } => match target {
             MonitorTarget::Web => {

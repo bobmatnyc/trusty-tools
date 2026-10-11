@@ -191,8 +191,14 @@ fn temp_path(path: &Path) -> PathBuf {
 /// perfectly good document with nothing — a total data loss dressed up as
 /// success.
 /// What: `NotFound` yields `T::default()`; every other error propagates.
-fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> Result<T, JsonRmwError> {
+fn read_or_default<T: DeserializeOwned + Default>(
+    path: &Path,
+    blank_is_absent: bool,
+) -> Result<T, JsonRmwError> {
     match std::fs::read(path) {
+        // #9544: a whitespace-only file holds no data; the opt-in callers
+        // treat it as absent so it cannot wedge their writes.
+        Ok(raw) if blank_is_absent && raw.iter().all(u8::is_ascii_whitespace) => Ok(T::default()),
         Ok(raw) => serde_json::from_slice(&raw).map_err(|e| JsonRmwError::serialize(path, e)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(JsonRmwError::io(path, e)),
@@ -272,10 +278,38 @@ where
     E: From<JsonRmwError>,
     F: FnOnce(&mut T) -> Result<R, E>,
 {
+    update_impl(path, false, f)
+}
+
+/// [`update`], but a whitespace-only document is read as absent.
+///
+/// Why (#9544): `palace_aliases.json` readers have always accepted a blank
+/// file as an empty map. Its writers moving onto [`update`] must not start
+/// refusing that file, or a `tm` launch that registers an alias fails on it.
+/// What: the same lock, re-read, mutation and publish as [`update`]; only a
+/// file whose bytes are all ASCII whitespace starts from [`Default`]. Any
+/// other unparsable content is still an error with the file unchanged.
+/// Test: `update_blank_as_absent_accepts_a_whitespace_only_file`.
+pub fn update_blank_as_absent<T, R, E, F>(path: &Path, f: F) -> Result<R, E>
+where
+    T: DeserializeOwned + Serialize + Default,
+    E: From<JsonRmwError>,
+    F: FnOnce(&mut T) -> Result<R, E>,
+{
+    update_impl(path, true, f)
+}
+
+/// Shared body of [`update`] and [`update_blank_as_absent`].
+fn update_impl<T, R, E, F>(path: &Path, blank_is_absent: bool, f: F) -> Result<R, E>
+where
+    T: DeserializeOwned + Serialize + Default,
+    E: From<JsonRmwError>,
+    F: FnOnce(&mut T) -> Result<R, E>,
+{
     // #5344: the lock itself lives in `crate::file_lock` so `indexes.toml`'s
     // TOML writers serialise against the same primitive.
     crate::file_lock::with_exclusive_lock(path, || -> Result<R, E> {
-        let mut value: T = read_or_default(path)?;
+        let mut value: T = read_or_default(path, blank_is_absent)?;
         let result = f(&mut value)?;
         let bytes =
             serde_json::to_vec_pretty(&value).map_err(|e| JsonRmwError::serialize(path, e))?;

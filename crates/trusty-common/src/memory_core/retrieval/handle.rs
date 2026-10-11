@@ -18,9 +18,9 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::memory_core::store::concurrent_open::OpenIntent;
+use crate::memory_core::store::format_migration;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
-use crate::memory_core::store::palace_format;
 use crate::memory_core::store::palace_store::PalaceStore;
 use crate::memory_core::store::vector::{CompactionResult, UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
@@ -223,6 +223,9 @@ pub struct PalaceHandle {
     /// `registry_tests::open_does_not_reset_idle_clock`,
     /// `registry_tests::touch_after_open_makes_handle_recent`.
     pub last_accessed: Arc<AtomicU64>,
+    /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub(crate) fail_next_verify_record: Arc<AtomicBool>,
 }
 
 impl PalaceHandle {
@@ -285,7 +288,16 @@ impl PalaceHandle {
             // Never stalled in production; a test opts in per commit.
             #[cfg(test)]
             commit_delay: None,
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::clone(&self.fail_next_verify_record),
         }
+    }
+
+    /// #9390 test seam: the next slot write's verify record fails after its
+    /// drawer commits, as a failed KG write would.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn fail_next_verify_record_for_test(&self) {
+        self.fail_next_verify_record.store(true, Ordering::SeqCst);
     }
 
     /// Construct a new `PalaceHandle` with empty drawer table and L1 cache.
@@ -320,6 +332,8 @@ impl PalaceHandle {
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
         }
     }
 
@@ -431,8 +445,8 @@ impl PalaceHandle {
         purge_expired: bool,
     ) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
-        // #9274: refuse a newer palace format before any store writes a byte.
-        palace_format::gate_palace(data_dir, palace.id.as_str())?;
+        // #9274: refuse a newer format, or migrate a format-0 palace (writer).
+        format_migration::open_gate(data_dir, palace.id.as_str(), intent)?;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
 
@@ -589,6 +603,8 @@ impl PalaceHandle {
             commit_mutex: Arc::new(tokio::sync::Mutex::new(())),
             // #7087: an on-disk open is not an access — see the field doc.
             last_accessed: Arc::new(AtomicU64::new(NEVER_ACCESSED)),
+            #[cfg(any(test, feature = "embedder-test-support"))]
+            fail_next_verify_record: Arc::default(),
         };
         Ok(Arc::new(handle))
     }

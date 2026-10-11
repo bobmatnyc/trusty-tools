@@ -181,7 +181,11 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         METHOD_INDEXES_LIST,
         ListIndexesParams,
         serde_json::Value,
-        |s, p| list_indexes_report(&s, &p).await
+        // #9169: parked indexes are listed with `parked: true`.
+        |s, p| {
+            let body = list_indexes_report(&s, &p).await;
+            crate::service::server::with_map_parked(&s, &p, body).await
+        }
     );
     let r = fallible!(
         r,

@@ -24,22 +24,27 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::Semaphore;
 use trusty_common::uds::server::{
-    IdleTracker, RpcRouter, RpcServeOptions, ServeExit as UdsServeExit, serve_until_idle,
+    IdleTracker, RpcRouter, RpcServeOptions, ServeExit as UdsServeExit, request_peer_pid,
+    serve_until_idle,
 };
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
+use super::agents_flag;
 use super::audit::AuditSink;
+use super::bridge;
 use super::deadline::{BODY_GRACE, request_deadline};
 use super::doctor;
 use super::errors::ErrorKind;
-use super::methods::{self, MethodFn};
+use super::exec;
+use super::grant::GrantRegistry;
+use super::methods::{self, Caller, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at_in,
-    platform,
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
+    open_backend_at_in, platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -204,9 +209,10 @@ pub(crate) fn account_machine(path: Option<&Path>) -> Option<MachineSecretsConfi
 /// [`ServerSettings::index_root`], the backend factory, the audit log at
 /// [`ServerSettings::audit_log`] (#4567), whether this server acts as a
 /// Keychain build (#7524), and the account's own machine config, the one
-/// file that may consent to `file` writes there (#7524 H1). `Debug` shows
-/// settings and the index root only.
-// #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
+/// file that may consent to `file` writes there (#7524 H1), and the
+/// in-memory exec-grant registry (#9070), and the session's value cache
+/// (#7520). `Debug` shows settings, the index root and the cache's entry
+/// count only.
 #[non_exhaustive]
 pub struct State {
     /// Paths and the idle window.
@@ -235,6 +241,13 @@ pub struct State {
     /// Raised when [`serve_state`] ends, by return or drop; every method
     /// body's CLI calls watch it (#9572).
     pub(crate) cancel: Arc<AtomicBool>,
+    /// The exec grants `secrets.grant` mints and `secrets.resolve` checks.
+    // #9070: memory only (Architect ruling 2026-10-10); a crate-private field
+    // so tests can give it a fake process table and clock.
+    pub(crate) grants: Arc<GrantRegistry>,
+    /// The session's cache of CLI-backed values `secrets.resolve` read.
+    // #7520: lives and dies with this server; set, delete and copy evict.
+    pub(crate) cache: Arc<SecretCache>,
 }
 
 impl State {
@@ -246,6 +259,8 @@ impl State {
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
         let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
+        // #7520 S2: entries answer for at most the configured max age.
+        let cache = Arc::new(SecretCache::new(settings.cache_max_age));
         Self {
             settings,
             index,
@@ -258,6 +273,8 @@ impl State {
             deadline_override: None,
             admission_cap_override: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            grants: Arc::new(GrantRegistry::os_default()),
+            cache,
         }
     }
 
@@ -278,6 +295,8 @@ impl fmt::Debug for State {
         f.debug_struct("State")
             .field("settings", &self.settings)
             .field("index_root", &self.index.root())
+            // #7520 AC3: the cache's `Debug` is its entry count only.
+            .field("cache", &self.cache)
             .finish_non_exhaustive()
     }
 }
@@ -298,13 +317,19 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 6] = [
+pub(crate) const METHODS: [(&str, MethodFn); 10] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
     (method::DELETE, methods::delete),
     (method::COPY, methods::copy),
     (doctor::DOCTOR, doctor::doctor),
+    // #9070: S8 slice 2, the exec-grant methods.
+    (method::GRANT, exec::grant),
+    (method::RESOLVE, exec::resolve),
+    (method::REVOKE, exec::revoke),
+    // #9070: S8 slice 3, the agents flag.
+    (method::SET_AGENTS_MAY_USE, agents_flag::set_agents_may_use),
 ];
 
 /// The `secrets.*` router over `state`.
@@ -318,14 +343,19 @@ pub(crate) const METHODS: [(&str, MethodFn); 6] = [
 /// the call arrives and is set on the body's thread, so every CLI call the
 /// body makes is bounded by it (`store::deadline`). #9572: every method
 /// shares one admission semaphore of [`State::admission_cap`] permits; see
-/// [`run_blocking`].
+/// [`run_blocking`]. #9070: the request's peer pid is read here, in the
+/// handler's own task, because `request_peer_pid`'s task-local does not
+/// cross onto the blocking pool; it reaches the body as a [`Caller`].
 /// Test: `server_error_text_is_fixed_per_method_and_kind`,
+/// `resolve_without_grant_returns_no_value_and_one_deny_record`,
 /// `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`,
 /// `server_stuck_backend_calls_do_not_starve_a_later_request`.
 pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
     let admission = Arc::new(Semaphore::new(state.admission_cap()));
     METHODS
         .into_iter()
+        // #9066: the console bridge's entries share the admission cap.
+        .chain(bridge::METHODS)
         .fold(RpcRouter::new(), |router, (name, body)| {
             let state = Arc::clone(&state);
             let admission = Arc::clone(&admission);
@@ -333,11 +363,16 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
                 let state = Arc::clone(&state);
                 let admission = Arc::clone(&admission);
                 async move {
+                    // #9070: read in the handler's task, before the body
+                    // moves to the blocking pool where the task-local is gone.
+                    let caller = Caller::new(request_peer_pid());
                     // #7524 P2-M1: one deadline for the whole request.
                     let deadline = Instant::now() + state.deadline_for(name);
-                    run_blocking(state, admission, deadline, body, params)
+                    // #9066: a bridged call answers as its direct method.
+                    let reply_as = crate::api::bridge::direct_method(name).unwrap_or(name);
+                    run_blocking(state, admission, deadline, body, caller, params)
                         .await
-                        .map_err(|kind| kind.to_rpc(name))
+                        .map_err(|kind| kind.to_rpc(reply_as))
                 }
             })
         })
@@ -365,6 +400,7 @@ pub(crate) async fn run_blocking(
     admission: Arc<Semaphore>,
     deadline: Instant,
     body: MethodFn,
+    caller: Caller,
     params: Value,
 ) -> Result<Value, ErrorKind> {
     let until = tokio::time::Instant::from_std(deadline);
@@ -386,7 +422,7 @@ pub(crate) async fn run_blocking(
         // #9572: the body's CLI calls also watch the server's cancel flag.
         let cancel = Arc::clone(&state.cancel);
         crate::store::deadline::within(deadline, || {
-            crate::store::deadline::cancellable(cancel, || body(&state, params))
+            crate::store::deadline::cancellable(cancel, || body(&state, caller, params))
         })
     });
     // See #9572: past the deadline and its grace the request answers
@@ -471,7 +507,9 @@ pub enum ServeError {
 /// `bind_singleton_hardened`, which takes over only a socket the kernel
 /// proves nobody serves and refuses a live one, so a second instance never
 /// clobbers the first. Serves with an [`IdleTracker`] of
-/// [`ServerSettings::idle_timeout`]. On return, removes the socket file
+/// [`ServerSettings::idle_timeout`]; #9070: an idle window that ends while
+/// an exec grant is live is followed by another ([`serving_ends`]).
+/// On return, removes the socket file
 /// before the listener drops (the order trusty-common's `RpcServer` uses).
 ///
 /// # Errors
@@ -552,19 +590,47 @@ pub(crate) async fn serve_state(
             path: socket.clone(),
             source: Box::new(source),
         })?;
-    let idle = IdleTracker::new(state.settings.idle_timeout);
+    let idle_timeout = state.settings.idle_timeout;
+    let grants = Arc::clone(&state.grants);
     let router = Arc::new(build_router(Arc::new(state)));
-    let exit = serve_until_idle(
-        &listener,
-        router,
-        RpcServeOptions::default(),
-        shutdown,
-        Some(idle),
-    )
-    .await;
+    let mut shutdown = std::pin::pin!(shutdown);
+    let exit = loop {
+        let exit = serve_until_idle(
+            &listener,
+            Arc::clone(&router),
+            RpcServeOptions::default(),
+            shutdown.as_mut(),
+            Some(IdleTracker::new(idle_timeout)),
+        )
+        .await;
+        // #9070: an idle window that ends with a live grant starts another;
+        // the listener stays bound throughout.
+        if serving_ends(exit, &grants) {
+            break exit;
+        }
+    };
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))
+}
+
+/// Whether [`serve_state`] stops after one serve window ended with `exit`.
+///
+/// Why: grants live in memory only (Architect ruling 2026-10-10), so an idle
+/// exit would end every live grant early and a long-running granted child
+/// would lose `secrets.resolve`. Ruling 31's 60 s idle exit is deferred
+/// while a grant is unexpired, not removed (#9070).
+/// What: a shutdown always stops. An idle exit stops unless
+/// [`GrantRegistry::has_unexpired`] is `true`; then [`serve_state`] serves
+/// another window, so the exit comes at most one window after the last grant
+/// expires or is revoked. A registry error stops: the server exits and every
+/// grant goes with it, the fail-closed state.
+/// Test: `idle_exit_deferred_while_grant_live`.
+pub(crate) fn serving_ends(exit: UdsServeExit, grants: &GrantRegistry) -> bool {
+    match exit {
+        UdsServeExit::Shutdown => true,
+        UdsServeExit::Idle => !grants.has_unexpired().unwrap_or(false),
+    }
 }
 
 /// How long the process waits at exit for blocking threads still running.

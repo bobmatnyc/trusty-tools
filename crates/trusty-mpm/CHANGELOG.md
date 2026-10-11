@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.8.2] — 2026-10-10
+
+### Added
+
+- `tm memory rename <old> <new> [--replace-empty]`: move a trusty-memory palace to a new id over the daemon socket. It checks the daemon protocol first, reports a daemon that predates `palace_rename`, and prints the daemon's reason for a refusal (#9544).
+
+### Fixed
+
+- `tm secrets set` no longer hangs on a stuck paste tool or runs one found through `PATH`. It runs `pbpaste`, `wl-paste`, `xclip` or `xsel` only from fixed system directories, kills the tool and its whole process group after 5 seconds, and refuses clipboard text over 1 MiB. A timeout or oversize is an error and stores nothing; when no tool is found, the error names the directories searched and points to `--value -` (#7524).
+
+### Changed
+
+- `tm doctor`'s `tcp_listeners` row cites #9214 instead of #6285 when it warns about a trusty-search TCP listener. It still warns rather than fails, because a trusty-search older than 0.59.0 binds 7878. The `scripts/check_no_tcp_listeners.sh` allowlist keeps only the `serve --with-http` and `bind_with_auto_port` source sites for trusty-search.
+- The `tcp_listeners` doctor-row description says the trusty-search daemon binds no TCP port from 0.59.0 (#9214).
+- `tm doctor`'s `tcp_listeners` row fails, not warns, on a trusty-search TCP listener: its allowlist row is gone, because no trusty-search process binds TCP since #9214 and #9542. A trusty-search older than 0.59.0 still binding 7878 now grades FAIL; upgrade it.
+
+## [1.8.1] — 2026-10-10
+
+### Fixed
+
+- A bare `tm` run inside a live agent's pane, such as from the agent's Bash tool, no longer gets the session reactivated in place, so it never execs a second `claude --resume` of a live session. The daemon now reads the caller pane's foreground command and refuses with 409 unless it is `tm` or an idle shell, for Active and Stopped records alike. Relaunching a dead claude from its own pane still works (#9566).
+
 ## [1.8.0] — 2026-10-10
 
 ### Breaking

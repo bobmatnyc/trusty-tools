@@ -191,7 +191,8 @@ fn fix_stale_lock_leaves_a_held_lock_in_place() {
 }
 
 /// #9214: the listener check reads what `search.health` reports; it dials
-/// nothing, and a socket-only daemon is healthy.
+/// nothing, a socket-only daemon is healthy, and one still bound to HTTP is
+/// an older build that wants a restart.
 #[test]
 fn check_http_listener_reports_the_bound_address_or_socket_only() {
     let bound = serde_json::json!({"transport": {"http_addr": "127.0.0.1:7001"}});
@@ -199,7 +200,7 @@ fn check_http_listener_reports_the_bound_address_or_socket_only() {
     assert_eq!(addr.as_deref(), Some("127.0.0.1:7001"));
     assert!(matches!(
         check_http_listener(true, addr.as_deref()),
-        CheckResult::Ok(m) if m.contains("127.0.0.1:7001")
+        CheckResult::Warn(m) if m.contains("127.0.0.1:7001") && m.contains("restart")
     ));
     let socket_only = serde_json::json!({"transport": {"http_addr": null}});
     assert_eq!(health_http_addr(&socket_only), None);
@@ -224,7 +225,7 @@ async fn probe_daemon_health_is_none_when_the_socket_is_absent() {
 /// directly (the #3673/#3686 fix). An audit for #3697 confirmed every other
 /// `TRUSTY_DATA_DIR`-mutating test in this ~314-test binary already carries
 /// the same bare `#[serial]` tag (`commands/migrate_storage/*`,
-/// `commands/start/tests.rs`, `commands/daemon_utils.rs`,
+/// `commands/start/tests.rs`,
 /// `service/data_dir.rs`, `service/daemon_tests.rs`,
 /// `service/server/*_tests.rs`, `service/reindex/root_hijack_tests.rs`,
 /// `service/warm_boot/warm_boot_tests.rs`) — so that logical race was

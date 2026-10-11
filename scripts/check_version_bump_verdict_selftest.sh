@@ -204,10 +204,13 @@ check_workflow() {
     "$(printf '%s\n' "${block}" |
       grep -ci 'success without running the real check' || true)"
 
-  # #6243 closure condition 2 — workflow level, outside the job block.
+  # #6243 closure condition 2 — workflow level, outside the job block. Matches
+  # `edited` as a whole token (`!= 'edited'`, a `contains(fromJSON(...))` list),
+  # not any `github.event.action` clause: #9189's `ready_for_review` carve-out
+  # is permitted.
   assert_eq "duplicates-collapse: no edited carve-out in cancel-in-progress" "0" \
     "$(grep -E '^  cancel-in-progress:' "${wf}" |
-      grep -c "github.event.action" || true)"
+      grep -cE '(^|[^[:alnum:]_])edited([^[:alnum:]_]|$)' || true)"
 }
 
 # --- single-file mode: check one workflow, no battery -----------------------

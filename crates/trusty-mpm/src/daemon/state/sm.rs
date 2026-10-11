@@ -18,6 +18,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use super::DaemonState;
 use crate::core::config::MpmConfig;
 use crate::core::sm::SessionManagerAgent;
 use crate::core::sm::providers::ProviderRegistry;
@@ -31,6 +32,61 @@ use crate::core::sm::providers::ProviderRegistry;
 /// Test: exercised via `build_session_manager_agent`.
 const SM_DATA_SUBDIR: &str = "sm";
 
+/// The open intent a process takes on the SM and portfolio palaces (#9274).
+///
+/// Why: `tm daemon run` and `tm sm serve --stdio` both build a [`DaemonState`]
+/// over the same root. Only one process can hold a palace's `kg.redb` as
+/// writer, so the daemon owns the palaces and `tm sm serve` reads beside it.
+/// What: `Writer` opens with `OpenIntent::Writer`, so a format-0 palace
+/// migrates; `ReadOnly` opens with `OpenIntent::ReadOnlyClient`, which falls
+/// back to a snapshot while another process holds the palace.
+/// Test: `a_read_only_open_recalls_while_a_writer_holds_the_palace`,
+/// `an_existing_format_0_sm_palace_migrates_at_open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PalaceAccess {
+    /// The daemon: the owner of the palaces.
+    Writer,
+    /// `tm sm serve --stdio`: a reader beside a running daemon.
+    ReadOnly,
+}
+
+impl PalaceAccess {
+    /// The trusty-common open intent for this access.
+    #[cfg(any(feature = "sm-memory", feature = "manager-memory"))]
+    pub(crate) fn open_intent(self) -> trusty_common::memory_core::store::OpenIntent {
+        use trusty_common::memory_core::store::OpenIntent;
+        match self {
+            Self::Writer => OpenIntent::Writer,
+            Self::ReadOnly => OpenIntent::ReadOnlyClient,
+        }
+    }
+}
+
+impl DaemonState {
+    /// Construct default state under `root`, opening the palaces as writer.
+    ///
+    /// Why: the daemon (`tm daemon run`, through [`Self::new`]) owns the SM and
+    /// portfolio palaces, so a format-0 palace migrates when it opens (#9274).
+    /// What: `Self::with_root_access` with [`PalaceAccess::Writer`].
+    /// Test: `pairing_persists_to_disk`, `pairing_reset_clears_disk`.
+    pub fn with_root(root: std::path::PathBuf) -> Self {
+        Self::with_root_access(root, PalaceAccess::Writer)
+    }
+
+    /// Default state for `tm sm serve --stdio`, opening the palaces read-only.
+    ///
+    /// Why: with the daemon running, a writer open of a palace it holds fails
+    /// after the handoff retry, and `tm sm serve` would lose SM recall, the goal
+    /// store and the portfolio palace (#9274).
+    /// What: `Self::with_root_access` over the default framework root with
+    /// [`PalaceAccess::ReadOnly`], wrapped in an `Arc`.
+    /// Test: `a_read_only_open_recalls_while_a_writer_holds_the_palace`.
+    pub fn shared_read_only() -> Arc<Self> {
+        let root = super::overseer::default_framework_root();
+        Arc::new(Self::with_root_access(root, PalaceAccess::ReadOnly))
+    }
+}
+
 /// Build the daemon's [`SessionManagerAgent`] rooted under `framework_root`.
 ///
 /// Why: SM-7 wires the SM into the daemon. This is the single place that turns
@@ -43,22 +99,27 @@ const SM_DATA_SUBDIR: &str = "sm";
 /// constructs the agent with `data_root = <framework_root>/sm`. Under
 /// `sm-memory`, also opens the dedicated SM palace under that root (a palace-open
 /// failure is logged and the agent is built WITHOUT recall rather than failing
-/// daemon startup). Returns an `Arc` for cheap sharing into handlers.
+/// daemon startup). `access` is the open intent for that palace (#9274).
+/// Returns an `Arc` for cheap sharing into handlers.
 /// Test: `sm_agent_built_disabled_by_default`.
-pub(super) fn build_session_manager_agent(framework_root: &Path) -> Arc<SessionManagerAgent> {
+pub(super) fn build_session_manager_agent(
+    framework_root: &Path,
+    access: PalaceAccess,
+) -> Arc<SessionManagerAgent> {
     let config = MpmConfig::load(framework_root).session_manager;
     let resolver = Arc::new(ProviderRegistry::from_env());
     let data_root = framework_root.join(SM_DATA_SUBDIR);
 
     #[cfg(feature = "sm-memory")]
     {
-        let memory = open_sm_memory(&data_root, &config);
+        let memory = open_sm_memory(&data_root, &config, access);
         Arc::new(SessionManagerAgent::with_runtime(
             config, resolver, data_root, memory,
         ))
     }
     #[cfg(not(feature = "sm-memory"))]
     {
+        let _ = access;
         Arc::new(SessionManagerAgent::with_runtime(
             config, resolver, data_root,
         ))
@@ -70,17 +131,24 @@ pub(super) fn build_session_manager_agent(framework_root: &Path) -> Arc<SessionM
 /// Why: recall enriches the working prompt but must never block daemon startup;
 /// a palace-open failure (unwritable root, corrupt store) degrades to "no recall"
 /// — the chat turn still composes prompt + context + provider.
-/// What: calls [`SmMemory::open`](crate::core::sm::memory::SmMemory::open) rooted
-/// at `data_root` with the config's memory settings; logs and returns `None` on
-/// error.
+/// What: calls [`SmMemory::open_with_intent`](crate::core::sm::memory::SmMemory::open_with_intent)
+/// rooted at `data_root` with the config's memory settings and the caller's
+/// [`PalaceAccess`]; logs and returns `None` on error.
 /// Test: covered indirectly by the daemon construction tests (which run without
 /// the feature) and by the SM-4 memory tests (under the feature).
 #[cfg(feature = "sm-memory")]
 fn open_sm_memory(
     data_root: &Path,
     config: &crate::core::sm::SessionManagerConfig,
+    access: PalaceAccess,
 ) -> Option<crate::core::sm::memory::SmMemory> {
-    match crate::core::sm::memory::SmMemory::open(data_root.join("palace"), &config.memory) {
+    // #9274: the daemon opens as writer, `tm sm serve` as a read-only client.
+    let intent = access.open_intent();
+    match crate::core::sm::memory::SmMemory::open_with_intent(
+        data_root.join("palace"),
+        &config.memory,
+        intent,
+    ) {
         Ok(mem) => Some(mem),
         Err(e) => {
             tracing::warn!("session-manager memory palace unavailable: {e}; recall disabled");

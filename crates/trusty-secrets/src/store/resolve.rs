@@ -8,13 +8,18 @@
 //! What: [`resolve_reference`] and [`resolve_env`], with [`EnvEntry`] as
 //! input and [`ResolvedVar`] as output. Lookup is [`SecretStore::read`]'s own
 //! path: project vault, then owner vault, an explicit reference pins one of
-//! those two vaults (#9328), and the backend read is uncached (§15.3, §15.5).
+//! those two vaults (#9328), and the value is read through
+//! `SecretStore::read_located` (§15.3, §15.5). #7520: only the server's
+//! `secrets.resolve` builds its store with the session cache, which keeps
+//! 1Password and Keeper values and is consulted after every gate here; a
+//! store built without one reads the backend every time.
 //! Test: `resolve_tests.rs` beside this file.
 
 use std::fmt;
 
 use super::{ScopeSet, SecretStore};
-use crate::api::{SCHEME, SecretRef, SecretValue, SecretsError};
+use crate::api::methods::KeyMeta;
+use crate::api::{SCHEME, SecretRef, SecretValue, SecretsError, VaultName};
 
 /// The `reference` text of an [`SecretsError::EnvResolution`] whose raw
 /// value did not parse. The raw text itself is never reported.
@@ -33,7 +38,9 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// the flag is the backend's flag item, never the index row's field; a
 /// failed flag lookup is an error, never ON. Without `agent_parent` the
 /// flag is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
-/// mode, and the backend is not read. Otherwise the uncached backend read.
+/// mode, and the backend is not read. Otherwise the value read, which a
+/// store built with a session cache may answer from it (#7520; the cache is
+/// consulted only after the flag gate above).
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
 /// `resolve_pinned_reference_outside_the_scopes_is_refused`,
@@ -53,17 +60,42 @@ pub fn resolve_reference(
         // #9070: no agent parent, no gate, so no flag lookup.
         return store.read(reference, scopes);
     }
-    store.read_admitted(reference, scopes, |vault, row| {
-        // #7525: judged on the located row, before any read. #9070: the
-        // row's flag was filled from the backend by `read_admitted`.
-        if !row.agents_may_use {
-            return Err(SecretsError::AgentUseRefused {
-                key: row.name.to_string(),
-                vault: vault.to_string(),
-            });
-        }
-        Ok(())
-    })
+    // #7525: judged on the located row, before any read. #9070: the row's
+    // flag was filled from the backend by `read_admitted`.
+    store.read_admitted(reference, scopes, admit_for_agent)
+}
+
+/// Refuse a reference whose key is not flagged "agents may use", reading
+/// no value.
+///
+/// Why: DOC-74 §15.8 — the flag rule covers grant contents (tier 3), so
+/// `secrets.grant` refuses such a key when its registrar runs under Claude
+/// Code (#9070), by the same rule [`resolve_reference`] applies to a read.
+/// What: locates the key as [`resolve_reference`] does and reads its flag
+/// from the backend; flag OFF is [`SecretsError::AgentUseRefused`]. A key
+/// with no index row is [`SecretsError::NotFound`]; a failed flag lookup
+/// is its error, never ON.
+/// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`.
+// Only the `server` feature's `secrets.grant` calls it.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn require_agent_use(
+    store: &SecretStore,
+    scopes: &ScopeSet,
+    reference: &SecretRef,
+) -> Result<(), SecretsError> {
+    let (vault, row) = store.locate_flagged(reference, scopes)?;
+    admit_for_agent(&vault, &row)
+}
+
+/// The agents gate on a located row: flag OFF is a refusal.
+fn admit_for_agent(vault: &VaultName, row: &KeyMeta) -> Result<(), SecretsError> {
+    if !row.agents_may_use {
+        return Err(SecretsError::AgentUseRefused {
+            key: row.name.to_string(),
+            vault: vault.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// One `NAME=raw` entry of a child env map, before resolution.

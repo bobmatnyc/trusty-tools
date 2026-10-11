@@ -61,6 +61,8 @@ mod tm_doctor_standalone;
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #8454: `tm hook --egress-guard`, the outbound-channel family deny.
+mod tm_hook_egress_guard_8454;
 mod tm_hook_idle_parking;
 mod tm_hook_notification_8392;
 // #8531: `tm hook` SessionStart over the socket, HTTP only on Unreachable.
@@ -87,6 +89,9 @@ mod tm_hook_pretooluse_rewrite;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 mod tm_ls_state_colors;
+// #9621: `tm secrets exec` on a fake socket, and live on a real server.
+mod tm_secrets_exec;
+mod tm_secrets_exec_live;
 mod tm_session_disk_cli;
 mod tm_sessions_alias_notice;
 mod tm_sessions_instructions_diagnostics;

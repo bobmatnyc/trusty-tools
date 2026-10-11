@@ -58,6 +58,7 @@ pub(crate) mod health;
 mod health_verdicts;
 pub(crate) mod index;
 pub(crate) mod index_directory;
+pub(crate) mod lexical_args;
 pub(crate) mod misc;
 pub(crate) mod not_ready;
 // #9168: `project` → index id through the daemon's resolver.
@@ -437,6 +438,8 @@ mod tests_byte_cap;
 mod tests_bool_flags;
 #[cfg(test)]
 mod tests_lane;
+#[cfg(test)]
+mod tests_lexical_args;
 // Issue #138: tools/list completeness and per-lane dispatch validation.
 #[cfg(test)]
 mod tests_tools_list;

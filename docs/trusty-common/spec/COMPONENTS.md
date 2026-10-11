@@ -20,11 +20,10 @@ for product framing see [PRD.md](./PRD.md).
 ## 1. Core utilities — `src/lib.rs` *(default)*
 
 **Responsibility.** The always-on daemon-lifecycle primitives every trusty-*
-binary shares: bind a port, find a data directory, record/discover the daemon
+binary shares: find a data directory, record/discover the daemon
 address, refuse to start a duplicate, initialise tracing, control colour.
 
 **Key types/modules.**
-- `bind_with_auto_port(addr, max_attempts)` — `src/lib.rs:283`.
 - `resolve_data_dir(app_name)` + `DATA_DIR_OVERRIDE_ENV` — `src/lib.rs:323`, `:352`.
 - `write_daemon_addr` / `read_daemon_addr` — `src/lib.rs:390`, `:406`.
 - `probe_health` / `check_already_running` — `src/lib.rs:433`, `:470`.

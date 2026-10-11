@@ -252,18 +252,22 @@ pub(crate) fn emit_hook_post_log(outcome: &HookPostOutcome) {
 /// waits out `RUNNING_STALE_AFTER_SECS`.
 /// What: writes `body` through
 /// [`trusty_mpm::core::stop_spool::record_unposted_stop`] under the framework
-/// root, and prints what happened either way. The stderr line is a breadcrumb,
-/// not the alarm: Claude Code does not surface an exit-0 hook's stderr, so the
-/// operator-visible surface for a spool that is unwritable or at its cap is the
+/// root and prints the park line to stderr. #6556: a park that fails is an
+/// `Err`, so `tm hook` exits non-zero and Claude Code reports a hook error
+/// instead of an exit-0 hook whose stderr nobody sees. Exit 1 on
+/// `SubagentStop` is a non-blocking hook error; only exit 2 would hold the
+/// subagent open, and an `anyhow` error from `main` never exits 2. The
 /// `stop_spool` `tm doctor` row
-/// ([`trusty_mpm::core::stop_spool::check_stop_spool`]).
+/// ([`trusty_mpm::core::stop_spool::check_stop_spool`]) stays the standing
+/// surface for a spool that is unwritable or at its cap.
 /// Test: `a_parked_stop_lands_where_the_daemon_drains_it`,
-/// `an_unusable_root_reports_the_stop_as_lost` — both through
+/// `a_stop_that_cannot_be_parked_fails_the_hook` — both through
 /// [`spool_undelivered_stop_under`], which carries everything this function does
 /// except the `$HOME` lookup.
-pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) {
+pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) -> anyhow::Result<()> {
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
-    eprintln!("{}", spool_undelivered_stop_under(&root, body));
+    eprintln!("{}", spool_undelivered_stop_under(&root, body)?);
+    Ok(())
 }
 
 /// Park an undelivered stop under `root` and say what happened.
@@ -274,22 +278,27 @@ pub(crate) fn spool_undelivered_stop(body: &serde_json::Value) {
 /// `_under` split `FrameworkPaths::under` exists for (critic MEDIUM on PR
 /// #8052, which found the `Test:` pointer here naming a file that never existed).
 /// What: writes `body` through
-/// [`trusty_mpm::core::stop_spool::record_unposted_stop`] and returns the single
-/// operator line for whichever arm ran. Never fails: a hook must not die on a
-/// bookkeeping write.
+/// [`trusty_mpm::core::stop_spool::record_unposted_stop`]. `Ok` carries the
+/// park line; `Err` carries the line saying the stop is lost (#6556: the lost
+/// arm used to return the same `String` as a park, so the hook exited 0).
 /// Test: `a_parked_stop_lands_where_the_daemon_drains_it`,
-/// `an_unusable_root_reports_the_stop_as_lost`.
-pub(crate) fn spool_undelivered_stop_under(root: &Path, body: &serde_json::Value) -> String {
+/// `an_unusable_root_reports_the_stop_as_lost`,
+/// `a_stop_that_cannot_be_parked_fails_the_hook`.
+pub(crate) fn spool_undelivered_stop_under(
+    root: &Path,
+    body: &serde_json::Value,
+) -> anyhow::Result<String> {
     match trusty_mpm::core::stop_spool::record_unposted_stop(root, body) {
-        Some(path) => format!(
+        Some(path) => Ok(format!(
             "{HOOK_POST_LOG_PREFIX} parked at {} — the daemon replays it on its next reap tick",
             path.display()
-        ),
-        None => format!(
+        )),
+        // #6556: fail closed — a stop that is neither delivered nor parked is lost.
+        None => Err(anyhow::anyhow!(
             "{HOOK_POST_LOG_PREFIX} could not park the stop under {} — this delegation will \
              stay Running until the staleness sweep",
             root.display()
-        ),
+        )),
     }
 }
 

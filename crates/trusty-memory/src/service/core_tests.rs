@@ -1140,3 +1140,42 @@ async fn list_palaces_with_counts_opens_palaces_off_the_executor() {
          (#6836). Handle counts observed: {seen:?}"
     );
 }
+
+/// Why (#9544): the registry refuses to create a palace under a live alias
+/// name, but the service mapped every create failure to `Internal`, so HTTP
+/// answered 500 and UDS `-32603` for a state clash the caller can resolve.
+/// What: creates a palace, registers an alias to it, then creates a palace
+/// named after the alias. Asserts `Conflict` and that no `palace.json` was
+/// written for the alias.
+/// Test: itself.
+#[tokio::test]
+async fn create_palace_for_a_live_alias_is_a_conflict() {
+    let (svc, state) = service();
+    let canonical = svc
+        .create_palace(palace_body("alias-target"), ActivitySource::Http)
+        .await
+        .expect("create");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        "alias-name",
+        &canonical,
+    )
+    .expect("register_alias");
+
+    let err = svc
+        .create_palace(palace_body("alias-name"), ActivitySource::Http)
+        .await
+        .expect_err("a live alias name must be refused");
+    match err {
+        ServiceError::Conflict(msg) => assert!(msg.contains("alias"), "{msg}"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    assert!(
+        !state
+            .data_root
+            .join("alias-name")
+            .join("palace.json")
+            .exists(),
+        "no palace.json may be written for the alias"
+    );
+}

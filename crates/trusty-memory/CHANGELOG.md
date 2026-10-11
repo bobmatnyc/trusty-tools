@@ -6,6 +6,62 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.33.0] — 2026-10-10
+
+### Added
+
+- `memory_remember` accepts an optional `type` (`Ruling`, `Decision`, `Status`, `Turn` or `Reference`, any case). The drawer is stored with that type and `memory_list` reports it as `drawer_type`; without `type` the heuristic classifier runs as before. Any other value, including `UserFact` or a non-string, is an error and nothing is written. `memory_note`, `memory.remember_async` and HTTP create-drawer are unchanged (#9144).
+- `trusty-memory doctor` reports a palace the daemon has yet to migrate to this binary's format as "needs migration by the daemon" (a warning), apart from a palace it refuses (#9274).
+- `doctor` warns that a palace's format could not be verified when its `kg.redb` is held by a running daemon or needs crash repair, instead of reporting it current (#9274).
+- The daemon now warns once per alias when a chat store written before the alias redirect (#9544) still sits in the alias's own directory (`<root>/<alias>/chat_sessions.redb`). The warning names the file, its size and the target palace, and tells the operator to back the file up, then merge it by hand or delete it. The file is never opened or changed. Refs [#9612](https://github.com/bobmatnyc/trusty-tools/issues/9612)
+
+### Fixed
+
+- Recall now treats an unkeyed drawer tagged `checkpoint` as a session snapshot: a stale one loses score by age like a `status` drawer, composing with the Status/Turn type factor, and a live fact key still exempts it. Tag matching stays exact (#9391).
+
+### Changed
+
+- Recall ranking reads the drawer type. A `Ruling` or `Decision` drawer counts as a ruling, like a ruling tag, for snapshot demotion and the cross-palace rulings leg. A `Status` drawer's score is multiplied by 0.8 and a `Turn` drawer's by 0.7, on top of any snapshot decay; a drawer holding a live `fact_key` slot is exempt (#9144).
+
+## [0.32.1] — 2026-10-10
+
+### Breaking
+
+- `DaemonEvent` is now `#[non_exhaustive]` and gains the `PalaceRenamed` variant. An exhaustive `match` on it outside trusty-memory no longer compiles; add a `_` arm. Shipped as a patch release by owner ruling (VERSIONING 2026-09-26) (#9544).
+
+### Added
+
+- `palace_rename` (MCP tool and raw RPC method): move a palace to a new id. Drawers, vectors, triples, rooms, wings and chat sessions move with it and their counts are verified unchanged; the old id becomes an alias of the new one. Refuses an alias source, a target that is an alias of another palace, and an existing target unless it is empty and `replace_empty` is set (the empty target moves to `<data root>/.trash`). Refusals answer `-32006`, a missing source `-32004`, a path-shaped id `-32602` (#9544).
+- A `palace_renamed` daemon event announces each rename (#9544).
+
+### Changed
+
+- `palace_update` now takes the palace write lock. It waits for an in-flight `palace_rename` instead of recreating the old palace directory, and an old id relabels the renamed palace. A lock still busy at its bound is an error; the update is never saved unlocked (#9544).
+
+## [0.32.0] — 2026-10-10
+
+### Added
+
+- `memory_list` reports a read-only `fact_key` on every drawer: the ADR-0028
+  Tier C slot the drawer holds, or `null` when it holds none. A drawer that a
+  later write to the same slot displaced reads `null`, so a client can resolve
+  a slot to its one current drawer id from the listing (#9340).
+
+### Fixed
+
+- Under redb 4.3, a table iterator keeps returning an error after its first one. Five trusty-memory readers discarded that error and now report it (#8254).
+- `ActivityLog::list` no longer spins forever or returns a truncated feed as success when a row cannot be read.
+- `ActivityLog::prune` no longer collects an empty eviction batch on a read error, which left its loop spinning on an unchanged row count.
+- `backfill-report` records a palace whose room registry cannot be read as failed, instead of listing every drawer under a short id.
+- The no-palace index marks a palace `unreadable` when its wing or room registry cannot be read, instead of reporting zero wings or no rooms.
+- A palace alias and the palace it points at now share one write lock and one chat-session store, so concurrent identical writes through both no longer slip past the duplicate gate, and a chat call through an alias no longer creates a second session database under the alias name (#9544).
+- Creating a palace whose name is a live alias now answers JSON-RPC code `-32006` (refused) instead of `-32603` (internal error); the service layer reports it as a conflict (#9544).
+- Dream status for a palace alias reads the target palace's dream stats instead of answering not-found (#9544).
+
+### Changed
+
+- Opening a palace by id over MCP now reports a palace-format refusal (for example a palace written by a newer release) as a refused error whose message names the variant, such as `FormatTooNew`, instead of an internal error (#9274).
+
 ## [0.31.0] — 2026-10-09
 
 ### Breaking

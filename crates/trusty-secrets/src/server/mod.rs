@@ -10,12 +10,23 @@
 //! - [`settings`] — socket, index and config paths, and the idle window.
 //! - `router` — bind, uid-checked serve loop, unlink on exit.
 //! - [`project`] — a request's project directory to scopes and a backend.
-//! - `methods` and `doctor` — the six method bodies. None returns a secret
-//!   value.
+//! - `methods` and `doctor` — the six S2 method bodies. None returns a
+//!   secret value.
+//! - `exec` — `secrets.grant`, `secrets.resolve` and `secrets.revoke`
+//!   (S8 slice 2, #9070). `secrets.resolve` is the one method that returns
+//!   a value, and only to a caller inside a live exec grant.
 //! - [`audit`] and `gate` — the credential access audit trail (#4567):
-//!   one record per `set`/`delete` call, per `copy` key, per denied `list`.
+//!   one record per `set`/`delete` call, per `copy` key, per denied `list`,
+//!   per granted key, per `resolve` and per `revoke`, each naming the
+//!   caller's pid.
 //! - [`errors`] — the fixed error text every failure is reported with.
 //! - [`client`] — the minimal spawn-on-first-call helper.
+//! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
+//!   process-ancestry checks `secrets.grant` and `secrets.resolve` use (S8,
+//!   #9070).
+//! - `bridge` — `secrets.bridge.*`, the console bridge's entries: the
+//!   console's verdict on its HTTP client, taken only from the verified
+//!   `trusty-console` peer (S3a, #9066).
 //!
 //! `router` and `methods` are private (#9073): S8 changes the method table
 //! and the body signature, so only the re-exports below are public.
@@ -27,25 +38,49 @@
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
+// #9070: S8 slice 3, the flag-set method body.
+mod agents_flag;
+// #9070: S8 — exec grants and process ancestry.
+pub mod ancestry;
 pub mod audit;
+// #9066: S3a, the console bridge's verdict.
+mod bridge;
 pub mod client;
+// #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
+mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
 mod deadline;
 mod doctor;
 pub mod errors;
+// #9070: S8 slice 2, the exec-grant method bodies.
+mod exec;
 mod gate;
+pub mod grant;
+#[cfg(test)]
+mod grant_fakes;
 mod methods;
 pub mod project;
 mod router;
 pub mod settings;
 mod tools;
 
-pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
+pub use ancestry::{
+    OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
+    is_self_or_descendant,
+};
+pub use audit::{
+    AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
+};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use core_dump::disable_core_dumps;
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
 };
 pub use errors::ErrorKind;
+pub use grant::{
+    Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
+    GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
+};
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{
@@ -53,8 +88,9 @@ pub use router::{
     default_backends, run_to_exit, serve, serve_with,
 };
 pub use settings::{
-    AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,
-    INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError, template_root_beside,
+    AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
+    DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
+    ServerSettings, SettingsError, template_root_beside,
 };
 pub use tools::DetectedTool;
 

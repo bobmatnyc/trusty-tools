@@ -6,6 +6,492 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.7.0] — 2026-10-10
+
+### Added
+
+- **The embedded agent roster is materialized to `<project>/.trusty-code/agents/`
+  with a manifest and recorded provenance (#2074).** A run against a project
+  whose agents directory resolves to Trusty Code's own root now writes one `.md`
+  per shipped role plus a `.trusty-mpm-manifest.json` ledger recording each
+  file's resolved inheritance chain, checksum, deploy time, and origin — so an
+  operator can read, diff, and edit the prompt an agent actually runs instead of
+  inferring it from a compiled-in table. The write goes through
+  `trusty_agents_common::agents::deployer::deploy_agents_filtered` unchanged,
+  which brings atomic write-temp-then-rename, strict-YAML validation of every
+  composed agent, per-agent compose-failure isolation, and a refusal to proceed
+  on a corrupt ledger rather than silently resetting it to empty. The five
+  `BASE-*` composition templates are staged so `extends:` chains resolve, but are
+  never deployed as dispatchable agents. Two policies sit on top of the shared
+  deployer: a project whose `.claude/agents/` or `.open-mpm/agents/` currently
+  wins discovery is skipped, so materializing never silently demotes an existing
+  catalog; and a deployed file the user has hand-edited is deselected before the
+  deploy runs, so the edit survives byte-identical while pristine files still
+  refresh. A projectless session writes nothing and keeps the in-memory embedded
+  roster, and any deploy failure degrades to that same in-memory roster with a
+  loud error rather than aborting the run. `tcode paths show` reports the
+  ledger's state — absent, present with a tracked-file count, or corrupt with the
+  underlying detail — in both its human and `--json` renderings.
+- **`agents.describe` reports one agent's effective configuration, source
+  provenance, and warnings (#2074).** `agents.list` answers "what could I
+  dispatch"; the new method answers the question after it — which file on disk
+  this name resolves from, whether Trusty Code wrote that file, when, from which
+  compose chain, and whether anyone has edited it since. It resolves through
+  `agents::resolve_agent`, the same disk-wins/embedded-fallback/plugin chain
+  dispatch uses, so inspection and dispatch cannot disagree about which
+  definition wins, and it reads the provenance back out of the deployed-agent
+  ledger slice 1 writes. The payload carries the tier (`embedded`, `project`,
+  `user`, `plugin`, or `broken`), the source path, model, role, description,
+  the `tools.allowed` allowlist, the declared skills, the resolved instruction
+  text's length — and the text itself only when `include_instructions: true`,
+  because a composed roster prompt runs to tens of kilobytes. Provenance reports
+  the manifest state, the recorded origin and whether it is framework-owned, the
+  deploy timestamp, the resolved compose chain, and whether the file still
+  matches its recorded checksum. Warnings name what an operator would otherwise
+  have to diff for: a disk copy that diverges from the bundled roster, a file
+  the manifest does not track, a missing ledger in Trusty Code's own agents
+  directory, and an unreadable one. An agent whose file exists but fails to
+  parse is reported with `tier: "broken"` and the parse error in `warnings`
+  rather than raised as an RPC error, so the reason a name fell back to the
+  embedded roster is visible; a name that resolves nowhere is a typed
+  `not_found`. Capability grants are deliberately absent from the payload:
+  Trusty Code has no grant model yet, so the flat allowlist that exists is
+  reported and no `grants` key is invented.
+- **`agents.list` rows carry `has_warnings` (#2074).** An additive boolean
+  computed by the same module `agents.describe` uses, so a client can badge the
+  rows worth opening without describing every one. The ledger is read once per
+  listing rather than once per row. The four original keys are unchanged, so a
+  client written against the previous shape deserializes an entry as before.
+- The TUI client now renders permission prompts (#3422): `permission_requested` and `permission_resolved` map to real TUI events instead of being dropped, and `CodeEngine::respond_permission` answers a suspended tool call over the daemon's own `session.permission.respond` RPC.
+- `task.run` and `session.status` carry an additive `result` object — `status`, `diff_ref`, `branch`, `pr_ref`, `summary` — so a caller learns where a run's change landed and whether it passed instead of only its session id (#4351).
+- Every result field is nullable and the object is omitted entirely for a session that has never run, so an existing consumer sees an unchanged payload.
+- A run that exhausted its turn budget reports `partial`, not `failed`.
+- `agents.describe`'s provenance object gained a `declared_provenance` key
+  carrying what the agent FILE says about its own author (#4698), beside the
+  `origin` and `framework_owned` the deployed-agent ledger records. The two are
+  independent records: a hand-edit that strips the field shows a null
+  declaration against a still-framework-owned ledger row, which the checksum
+  alone does not explain. The ledger stays authoritative. The key is always
+  present and goes null when absent, matching the other keys' contract.
+- **`tcode paths show` and `tcode paths import` (#5426).** `show` reports which
+  configuration root won for each entry, the write root, and whether the private
+  state directory's permissions are owner-only — `--json` for scripts. `import`
+  copies `.claude/agents/**`, `.claude/skills/**`, and `.claude/settings.json`
+  into `.trusty-code/`. The plan is deterministic and printed before anything is
+  written (`--dry-run` stops there), and the applied report lists exactly the
+  files created, so the import is reversible by deleting them. It refuses four
+  classes of source rather than copying them: a target that already exists (an
+  import never overwrites a user-authored file), a source that reaches through a
+  symlink out of `.claude/`, a source carrying the executable bit, and a
+  `settings.json` that holds a secret-bearing key or will not parse. The
+  secret check splits a key into words on separators and camelCase boundaries,
+  de-pluralises each word, and matches word-exactly, so `api_key`, `API-KEY`,
+  `x-api-key`, `xApiKey` and `apiKeys` are all caught while `tokenizer` and
+  `secretary` are not; a short whole-key exemption list keeps count-shaped
+  parameters like `max_tokens` and `token_count` importable. It reads key names
+  only, never values. Plugins are not copied — their
+  provenance cannot be vouched for, so `.claude/plugins/` stays discoverable in
+  place through the compatibility root.
+- `crate::mcp` loads the MCP servers configured in the shared
+  `~/.trusty-tools/mcp/servers.toml` (the file trusty-agents already reads) plus
+  a `<project>/.trusty-code/mcp.toml` override tier, spawns each enabled stdio
+  server in isolation, and registers its tools as `mcp__<server>__<tool>` in the
+  engineer's registry. A project entry is honoured only when it is
+  content-equivalent to a global one, or only disables/re-enables it; anything
+  that introduces or alters a command is refused with a reported reason. A
+  broken config file yields zero servers AND a visible finding, never a silent
+  empty catalog. Remote (`http`/`sse`) transports are reported as unsupported
+  rather than dropped (#5428).
+- **`tcode bakeoff-gate` — the L1-L3 bake-off milestone exit gate (#5441).** A
+  Trusty Code milestone is supposed to close only after a real coding-harness
+  bake-off completes levels 1-3 with no unexplained regression against the
+  previous accepted baseline. The first independent qualification attempt ran
+  all three levels and passed 24/24 verifier checks, and was still disqualified:
+  the retained metadata named no candidate commit, no binary hash, no
+  runner/challenge revision and no instruction/agent/skill digests, the runner
+  checkout was dirty, and L3's +27% wall clock / +50% turns had no recorded
+  disposition — and nothing mechanically rejected any of it. The new
+  `trusty_code::bakeoff` module declares the retained-evidence schema in the
+  crate under test and judges a bundle offline: it rejects incomplete L1-L3
+  coverage, missing or empty artifacts, missing provenance (the literal
+  `"unknown"` included), mock-only evidence, a dirty runner or candidate
+  checkout, and results produced by a different `tcode` build — cross-checking
+  each level's `metadata.json` against its own `tcode_report.json` so the
+  metadata is evidence rather than an assertion. Against a baseline it blocks
+  verifier pass-rate and terminal-status regressions outright, and requires a
+  written `dispositions.json` entry for any cost/token/turn/duration change
+  beyond the tolerance (20% by default). Exits 0 to close, 1 when the gate
+  refuses, 2 when it could not reach a verdict at all. Bundle layout, metadata
+  schema and a worked invocation: `docs/reference/bakeoff-exit-gate.md`.
+- **`tcode serve` now writes a durable file log and drains it periodically
+  (#6537).** `init_tracing_with_file_log` adds a daily-rotating file layer
+  under `~/.trusty-code/logs/tcode.log.*` alongside the existing stderr
+  layer. When `~/.trusty-code/log_drain.yaml` sets `enabled: true` and a
+  `destination` (same field names as trusty-mpm's `log_drain:` config
+  section), the daemon periodically uploads that log via
+  `trusty_common::log_drain::run_once`, scoped to the project `tcode serve`
+  is bound to (or an explicit `owner`/`project` override). Disabled by
+  default; a malformed section is a hard error rather than a silent skip.
+- The daemon now emits `Event::AgentSpawned`/`AgentDone`/`AgentFailed` around every delegated sub-agent loop, bracketing that sub-agent's tool and message events inside the delegating agent's `delegate_to_agent` call (#7940). `AgentSpawned` gained a `task_preview` field, and `ToolEventSink` gained matching `agent_spawned`/`agent_done`/`agent_failed` hooks with no-op defaults.
+- `tcode tui` renders delegation: `forward_session_event` maps `PmDelegating`/`AgentSpawned` to `ReplEvent::DelegationStarted` and `AgentDone`/`AgentFailed` to `DelegationFinished`, instead of dropping all four into its catch-all. `AgentMessageDelta` now maps to `ReplEvent::AgentOutput`, carrying the `(agent_id, turn_id)` key the delta contract requires consumers to group by; `ToolStarted`/`ToolFinished`/`ToolError` carry their `agent_id` through. A new test asserts every agent-attributed `Event` variant either maps or is named on an explicit ignore list, and its exhaustive `match` fails to compile if a new variant is left unclassified.
+- Agents can declare a `permissions:` frontmatter map of tool globs (and per-argument globs for `bash`, file, and search tools) resolving to `allow`, `ask`, or `deny`. A `deny` never reaches the tool; an `ask` emits a `permission_requested` event and waits for `session.permission.respond` (timeout or no client resolves to deny, unless `--permission-mode allow-asks` / `TCODE_PERMISSION_MODE=allow-asks`, which logs each approval and emits `permission_resolved` with source `allow_asks`). Path arguments are matched in both their raw and lexically normalised forms, so `./secrets/x`, `secrets/./x`, `a/../secrets/x`, and `secrets//x` meet the same rule as `secrets/x`. The block is enforced on disk, bundled, and plugin agents alike, and a malformed block fails the agent load. Agents without the block, and existing `tcode_tools` allowlists, behave as before.
+- Reusing an `allow_for_session` grant emits `permission_resolved` with decision `allow_for_session` and source `remembered`, so an audit sees every call the grant covered rather than only the one that was prompted for.
+- A path rule written relative to the working root — `secrets/**` — also decides the absolute in-root spelling of the same file, since the file tools accept an absolute path that resolves inside the root. `/<root>/secrets/x` now meets the `secrets/**` deny that `secrets/x` meets. A path outside the root is unaffected, and matching stays lexical: a root reached through a symlink is not recognised in its other spelling.
+- Tools the harness registers on an agent's behalf — `delegate_to_agent`, `finish_task`, `set_goal`, `clear_goal`, `recall_session`, `use_skill` — are exempt from the legacy `tcode_tools` allowlist, which names only the capabilities an agent's author asks for. Without the exemption the gate refused the PM's own delegation, since stock `pm.md` lists none of them. A `deny` written in a `permissions:` block still refuses them.
+- `tcode run-task --pm-model <SLUG>` (env fallback `TCODE_PM_MODEL`) overrides
+  the TOP-LEVEL agent's own model, the half `--engineer-model` never covered.
+  Precedence is flag > env > the agent's front-matter `model:` > the built-in
+  default; short aliases are accepted and normalised. It reaches both the
+  daemon `task.run` path (as a new `pm_model` request field) and
+  `--legacy-in-process`.
+- `tcode run-task --no-delegate` and the matching `task.run` `no_delegate` request field run the named agent alone — `delegate_to_agent` is not registered, so it cannot hand the task to `python-engineer` ([#8031](https://github.com/bobmatnyc/trusty-tools/issues/8031))
+  - the named agent gets its OWN tcode tools instead (`read_file`, `write_file`, `edit`, `bash`, `glob`, `grep`, …) — previously those existed only on a delegated agent's per-delegation registry, so a non-delegating run had nothing to do the work with
+  - the tool set is built by the same `ProjectToolFactory` and narrowed by the same `tools.allowed` gate a delegated run of that agent goes through, and the run's `permissions:` map decides each call as before
+  - tool events for those calls are attributed to the named agent
+  - applies to both execution paths: the default thin-client/daemon path and `--legacy-in-process`
+  - omitting the flag or the field leaves delegation registered exactly as before
+- Four tcode-native delivery-workflow agents in the embedded roster —
+  `ticketing` (GitHub issues via `gh`), `version-control` (branch, commit,
+  push, PR via `git`+`gh`), `local-ops` (build, test, version bump, changelog)
+  and `documentation` — each with an explicit `tcode_tools:` allowlist that
+  grants `bash`. `version-control` is new to the roster; the other three
+  replace shared trusty-mpm bodies that projected to no allowlist at all.
+- `pm.md` delegation guidance names the four and when to route to each, and
+  tells the PM to parse the `ISSUE:` / `PR:` result lines they emit.
+- Claude Code `tools:` frontmatter on a DISK agent is now translated into a
+  trusty-code tool allowlist instead of being dropped, so an agent imported
+  with `tcode paths import` carries the grant its author wrote rather than
+  silently gaining every tool. `tcode_tools:` still wins when both are
+  present, and the embedded roster is unaffected.
+- `tcode tui` shows a startup splash on connect: robot header, the binary's version and git SHA, the daemon's version and build SHA, the project binding (or "projectless"), the active workstream, and the session's delegation shape. A client/daemon build mismatch prints one plain warning naming both shas and the remedy; a daemon that reports no build at all is called out as older than the client. The splash replaces the banner's old `tcode v0.2.0` sub-crate header. The session id is NOT displayed — it stays internal, kept in the daemon log and the session record for recovery. (#8164)
+- The one-line connect message now names the home directory the session got (the bound root path, or "projectless") and the active workstream, alongside the agent shape. A long path is middle-elided so its deepest components survive. (#8164)
+- The `health` RPC and `GET /health` now report the daemon's build SHA in a `build` field, so a client can tell a stale daemon from a fresh one. (#8164)
+- A `todo_write` tool gives the daemon-session agent a checklist for the task in hand: it takes the whole list each call (`content` plus a `pending` / `in_progress` / `completed` status), replaces the stored one, and fills the per-agent `todos` the `session.get_agents` roster reserved and had always returned empty. A new `todos_changed` session event streams the same list, so an attached client learns of a change without polling. The list is keyed by the writing agent's `agent_id`, so a delegated sub-agent's plan never overwrites the PM's, and it lives and dies with the session rather than accumulating in a shared memory palace. Empty content, an unknown status, more than one `in_progress` step, and a list longer than 20 items are each refused with a message the model can act on, leaving the stored list untouched (#8235).
+- **The delegate-mode PM now has a routing table naming `research`, `engineer`
+  and `qa-agent` as delegation targets, so a simple coding task is routed
+  without the user naming an agent (#8287).** `pm.md` previously documented only
+  the four delivery-workflow specialists (`ticketing`, `version-control`,
+  `local-ops`, `documentation`), so a `tcode tui --delegate` run had no basis to
+  dispatch context-gathering or verification at all. The card now carries one
+  contiguous, marked routing block covering all seven targets, with the coding
+  path fixed at `research` then `engineer` then `qa-agent`. Verification goes to
+  `qa-agent` and explicitly not to `qa`: DOC-75 §6 requires real test output in
+  the transcript and tcode's `qa` fork carries no `bash`, so it can recommend
+  commands it cannot run. The block is delimited by
+  `crate::assets::PM_ROUTING_BLOCK_BEGIN`/`_END` and readable via
+  `crate::assets::pm_routing_block`, which is the span #8293 lifts to a shared
+  source. Three tests hold the line: every agent the block names must resolve
+  and be delegable, the three coding-path targets must appear in order in the
+  ASSEMBLED delegate-mode prompt, and the card must name no tool a delegating PM
+  registry lacks while staying under DOC-75 §4b's 2x size cap (3673 of 5726
+  bytes).
+
+### Fixed
+
+- A `local/*` or `ollama/*` model slug reached OpenRouter. `provider_for_slug` had no Local branch and `build_adapter` matched only Fireworks, Together and AtlasCloud, so every other provider — Local included — fell through to the OpenRouter builder; a local turn was billed to the cloud, or failed asking for `OPENROUTER_API_KEY`. Both slugs now select `ProviderId::Local`, the routing marker is stripped before the id reaches the server, and the adapter is `trusty_common::inference::providers::local`'s, which probes the server inside a one-second budget before each request
+- `tcode tui` in a second project now runs beside the first instead of refusing. When the shared daemon socket serves another project, the TUI starts its own project's daemon on a per-project socket beside the shared one (`tcode serve --project-socket`) and never attaches to the other project's daemon; a second TUI in the same project reuses that daemon. A daemon the TUI starts now binds an OS-assigned HTTP port instead of the fixed 7882, so a port held by another daemon no longer kills it on startup. An explicit `tcode serve --port` still wins. (#4600)
+- `tcode tui` now checks the project of a daemon it just started before attaching. When two TUIs start at once and another project's daemon takes the shared socket first, the TUI starts its own project's daemon on the per-project socket instead of attaching to the other one; when this project's daemon wins, the TUI attaches to it. A shared daemon that does not report its project, or fails its `health` call, is still refused and no daemon is started beside it; the error names that daemon's socket and how to proceed. (#4600)
+- The interactive PM is no longer told to call `glob`, `grep`, `list_dir` or `search_code`, nor to batch its writes into `write_files` — none of which its registry carried. The file-discovery, code-discovery and batch-write guidance is now gated on the run's tool registry, so `tcode tui` stops emitting calls the daemon rejects with "no schema registered for tool". `BASE_PREAMBLE_VERSION` moves 1.8.0 → 1.10.0 because both blocks left the shared preamble (#4602).
+- **The socket transport no longer drops a JSON-RPC error's `data` (#6285).**
+  Converting Trusty Code's `RpcError` onto `trusty_common::uds::server::RpcError`
+  now carries `data` through when present, so a caller over the unix socket reads
+  the same structured error detail it gets over STDIO or HTTP.
+- **`~/.trusty-code/logs` and its rolled log files are now private (#6537).**
+  `init_tracing_with_file_log` routes the directory through the crate's
+  private-state hardening (`0700`) instead of a raw `create_dir_all`, and
+  each rolled log file is chmod'd `0600` on creation.
+- **The log-drain scheduler's local idempotency-cache directory is no longer
+  hardcoded inside the tick (#6537).** It is now a parameter supplied once by
+  the daemon's production entry point (`~/.trusty-code/log-drain`); the
+  resolver, plan, and scheduler tick themselves moved into
+  `trusty_common::log_drain` so trusty-code and trusty-agents share one
+  implementation instead of two near-identical copies.
+- **Every `tcode` run now tightens a permissive `~/.trusty-code` (#6999).** The
+  `0700` create-and-tighten was reachable only from `tcode paths import`, so the
+  README's "tightened on the next run" was false for every other subcommand.
+  `workstreams::default_data_dir` — the one resolver the workstream store,
+  `serve`'s router, and `agent_loop::telemetry` all reach the private-state root
+  through — now applies it, so no writer creates the directory at the process
+  umask first.
+- **`tcode run-task --help` describes the `.trusty-code` layout (#6999).** It
+  still said the project root "must contain a `.claude/` directory" and that
+  agents live in `.claude/agents/<name>.md`; both stopped being true in #5426.
+  `tcode serve --help` carried the same sentence and is corrected too.
+- **`tcode paths import` exits 1 when any entry was refused (#6999).** A symlink
+  escape, an executable, a secret-bearing `settings.json`, or an
+  already-existing target was printed as a `skip` line while the process still
+  exited 0. `--dry-run` reports the same code the real run would, so the preview
+  and the run cannot disagree.
+- **`log_drain` module docs resolve their own links again (#7164).** The four
+  intra-doc links in the module header (`config::LogDrainConfig`,
+  `resolve::resolve_log_drain`, `resolve::LogDrainSetting`, `scheduler::spawn`)
+  are now backed by `crate::log_drain::…` reference definitions, so rustdoc
+  resolves them instead of failing the intra-doc link gate.
+- `run_uds_socket_bind_failure_is_fatal` now bounds the daemon future it awaits
+  at ten seconds. Its shutdown signal is `std::future::pending()`, so a daemon
+  that manages to bind serves forever — which is what happened on Linux, where
+  `bind_singleton_hardened` read the test's occupying regular file as a dead
+  socket and bound over it. The test consumed the whole `Rust tests
+  (pre-publish gate)` shard 6 until the job's 45-minute cancel, on every push to
+  main, and the shard's other targets never reported. A regression now fails in
+  seconds naming the cause ([#7312](https://github.com/bobmatnyc/trusty-tools/issues/7312),
+  [#7219](https://github.com/bobmatnyc/trusty-tools/pull/7219))
+- Roster agents composed by tcode no longer carry the raw `{{TM_SKILLS}}` placeholder, and every skill pointer they carry opens with the agent's own `read_file`. tcode embeds the three skill files `BASE-AGENT.md` points at. The project roster deploy writes them to `<project>/.trusty-code/skill-refs` and points the deployed agents there. If that directory, a skill folder in it, or one of its files is a symlink out of the project, the deploy is refused before anything is written. An in-process compose (the embedded fallback, or a disk agent carrying the placeholder) points at `~/.trusty-code/skill-refs` without writing anything, and the engineer's `read_file` serves exactly those paths from the embedded copies, in bound and projectless runs. A home directory that is read-only or missing never removes an agent from the roster; with no home the pointer stays unresolved and a warning names the path. Neither directory is a skill-discovery path, so the copies never shadow the embedded skill catalog (#7727).
+- A roster deploy that could not read one of its own staged files no longer reports success ([#7779](https://github.com/bobmatnyc/trusty-tools/issues/7779))
+  - the publish step skipped an unreadable scratch file while still writing the ledger that recorded its checksum, so `tcode` logged an agent as deployed that was not on disk; it now reads every file before writing any and fails with `RosterDeployError::Publish`
+  - a deploy refused for a corrupt ledger no longer leaves an empty `.trusty-code/skill-refs/` behind, which path resolution would have read as a usable native configuration root
+- The embedded `condition-based-waiting` and `verification-before-completion` skill references are byte copies of trusty-mpm's bundled skills again, so a composed agent reads the current text instead of the pre-#8323 one (#7862).
+- `DEFAULT_MODEL` now resolves to `anthropic/claude-sonnet-4.5` instead of
+  `openai/gpt-4o-mini`, which OpenRouter accounts with the zero-data-retention
+  (ZDR) guardrail reject with a `404 zdr-violation-by-guardrail`.
+- A 404 from OpenRouter (or any OpenAI-compatible provider) on an inference
+  call now surfaces an actionable error naming the requested model and
+  pointing at the `--model`/`model_override` and `tcode config keys list`
+  remedies, instead of a bare HTTP status.
+- Embed the `git-workflow` skill in the tcode skill-refs set, so the `BASE-AGENT.md` pointer added in #7628 resolves to a readable file instead of a dead path.
+- A delegated run whose retries were exhausted by an LLM/HTTP provider failure now names that error — its type and message — in the terminal error and in the `warn` log at both the per-delegation and run-wide exhaustion sites. `turn_cap_exceeded` is reported only when the turn cap was the actual reason (refs [#8018](https://github.com/bobmatnyc/trusty-tools/issues/8018))
+- A headless `task.run` with an `ask` permission rule now denies immediately instead of waiting out the 300 s ask timeout (#8100). The gate asks the event sink whether anything is consuming the session's events; a run nobody is watching is headless even though the daemon always mints permission-broker state for it. An attached client still gets the full prompt round trip.
+- Permission-prompter attachment is now tracked per session rather than read off the daemon-global event bus (#8100). One console attached to a PM session no longer marks every headless `task.run` sub-agent as watched, which had put each of them back on the 300 s ask timeout. A claim is released by its guard's `Drop`, so a client that dies mid-ask stops counting without calling `session.detach`.
+- `tcode tui`'s "never home on a home directory" guard no longer fails open when the home path cannot be canonicalized. A home that exists but does not resolve used to collapse to the same "no home" as a platform reporting none, which skipped the guard and let a repository enclosing `$HOME` bind anyway; the raw path is now kept and compared. Only a platform with no home path at all disables the guard, which the rule now states. (#8205)
+- Verify-before-finish gate no longer refuses `finish_task` when nothing could
+  satisfy it: it now requires a detectable test command for the bound project
+  (a root `Cargo.toml`, a `package.json` with a `test` script, a pytest config,
+  or `go.mod` — or a non-empty root plus a prompt-named command) AND a `bash`
+  tool in the agent's registry. Otherwise the finish is accepted and the
+  completion report records that no test command ran and why. A refusal now
+  names the manifest or command it detected. (#8206)
+- `CodeEngine` now reports a cancel to the TUI as a typed `CancelReply`, so `-32010 cancel_unconfirmed` reaches the pane as a "still cancelling" state rather than a failure, and any other refusal reaches it as the daemon's own sentence with the JSON-RPC code stripped (#8207).
+- The two embedded-roster tests that compose `rust-engineer` no longer pin a
+  skill name from the shared agent asset (#8215). Both asserted the composed
+  body contained `toolchains-rust-core`, which #8192 replaced with
+  `rust-delivery-workflow` in `rust-engineer.md`, so `cargo test -p trusty-code`
+  was red on main. The leaf-tier marker is now rust-engineer's own
+  `# Rust Engineer` heading, which tracks the agent's identity instead of its
+  skill wiring.
+- **The four supporting agents a delegate-mode PM routes to are now pinned as
+  resolvable with the tool grant their own card declares (#8227).** `research`,
+  `documentation`, `ticketing` and `version-control` each resolve through the
+  same `resolve_agent` call `delegate_to_agent` makes, arrive with a non-empty
+  prompt and the `role:` their card declares, and project exactly the
+  `tcode_tools:` allowlist the card wrote — compared against the card's own
+  frontmatter rather than a transcribed list, so an edit to either side fails.
+  #8129 had verified roster presence only, which left the #8199 class of defect
+  (a frontmatter key silently dropped in projection, leaving an agent with a
+  grant nobody chose) undetected for exactly the four agents the PM's routing
+  table now depends on.
+- **`verify_gate` module docs resolve their own link again (#8234).** The
+  `detect::detect_test_command` intra-doc link in the module header is now
+  backed by a `crate::verify_gate::…` reference definition, so rustdoc resolves
+  it from the crate root instead of failing the intra-doc link gate.
+- a turn that ends with no tool calls and no text now gets one chance to produce its closing message ([#8238](https://github.com/bobmatnyc/trusty-tools/issues/8238))
+  - WHY the model produces such a turn is not diagnosed. This is a mitigation for the one shape #8238's transcripts show: the loop read "no tool calls" as "the model is done" and accepted the empty turn, so the user saw nothing after the last tool result. A turn that ends silent for any other reason is not covered
+  - that shape now costs one extra round-trip in which the model is asked for the closing message; the ask is one-shot, so a second silent turn still ends the run
+  - a turn carrying neither text nor tool calls is no longer recorded in the transcript at all. It contributed no content block on Bedrock Converse, which merged the turns around it into two consecutive user messages and rejected the request — so on a `bedrock/*` model the ask itself failed and the run ended `Failed`
+  - the ask is skipped on the last budgeted turn, where it could not be answered and only changed a run that returned `Ok` into one reporting `TurnCapExceeded`
+- The embedded `code-critic` agent runs a consumer suite in the foreground with an explicit timeout and never backgrounds it to wait (#8320).
+- The embedded `git-workflow` skill reference treats any failed check, or a running check the brief does not waive, as a merge block, and reads required checks from the branch endpoint's `.protection` field (#8614).
+- The same reference says a passing `tm pr queue-check` clears the queue checks only; `tm pr merge` still applies the checks gate (#8614).
+- The daemon `tcode tui` auto-starts (`tcode serve --http`) now starts in its own session (`setsid`, Unix), so closing the terminal no longer SIGHUPs it along with the TUI's foreground group. The daemon was already meant to outlive the TUI (#8783).
+- The daemon-credential tests and the missing-OpenRouter-key test run
+  `#[serial]` inside the shared credential sandbox, so the token-file fallback
+  reads an empty temp data dir rather than the real daemon's token, and no
+  assertion prints a resolved credential (#9123).
+- A test process no longer records turns into the operator's live memory
+  palace. Under the test harness, the turn recorder and the PM catch-up read
+  dial only an explicit `TRUSTY_MEMORY_SOCKET` that resolves, after `..` and
+  symlinks, under a system temp root; any other socket falls back to an
+  unreachable placeholder, and the first use logs why (#9139).
+- The e2e helpers spawn `tcode` with a cleared environment plus an allowlist,
+  and give each child its own `HOME`, data root and memory socket, so an
+  inherited `TRUSTY_MEMORY_PALACE` or live socket never reaches it (#9139).
+- Tests that read repository content outside this crate resolve the checkout at runtime through `trusty_common::test_harness::test_repo_root()`, so a test binary built in one worktree under a shared `CARGO_TARGET_DIR` no longer reads another worktree's files (#9298).
+
+### Changed
+
+- The bundled `code-analyzer` agent no longer marks SOLID violations or language idioms as blocking. Security is its own blocking priority; Best Practices is important, not blocking.
+- **An agent's frontmatter `skills:` list is no longer dropped when a `.md`
+  agent is projected onto `AgentConfig` (#2074).** It now populates
+  `SystemPrompt::append_skills`, which `agents.describe` reports as the agent's
+  declared skills. The field was previously left empty because nothing consumed
+  it; `agents.describe` is that consumer. Nothing injects those skills into a
+  prompt yet — this is a reporting surface, not a runtime one.
+- The TUI event producer reports a failed tool call as data: `ReplEvent::ToolInvocation` now carries `failed`, set from `ToolFinished`'s `success` and always true for a `ToolError`. The `FAILED: ` / `ERROR: ` prefixes in the result text stay, but only as text the operator reads — rewording them no longer decides whether the TUI renders the card as an error (#4596).
+- `prompt::assemble_system_prompt_for_mode` takes a new required sixth parameter, `tools: Option<&ToolRegistry>` — the registry the assembled prompt is scoped to; `None` emits no tool-instructing section (#4602).
+- **Trusty Code owns `<project>/.trusty-code/` and `~/.trusty-code/` (#5426,
+  epic #2892).** Every discovery site used to join the literal `.claude/`
+  itself — agents, skills, plugins, `settings.json`, `CLAUDE.md` — which made
+  another product's directory the source of truth for this one, left a clean
+  project unable to install or run without a `.claude/` tree, and put nothing
+  between the harness and a write INTO that directory. The new
+  `trusty_code::paths` module is now the single resolver those call sites route
+  through: `.trusty-code/` first, then `.claude/`, then `.open-mpm/`, and when
+  none exists the resolved path names `.trusty-code/` anyway, so a project with
+  no `.claude/` directory works end to end. `agent_loop::cadence` reads the same
+  resolved `settings.json` as `mode` does, so `cadence_turns` and
+  `max_overhead_fraction_pct` survive the move rather than silently reverting to
+  their defaults on a `.trusty-code`-only project. A candidate that exists but
+  cannot be read is skipped rather than fatal, and says so — a `warn` naming the
+  path tried, and a line in `tcode paths show`. Writes are the other half and
+  are deliberately a different function: `check_native_write_target` anchors
+  `<project>/.trusty-code/` to the project before comparing anything against it,
+  so neither a symlinked subdirectory nor a symlinked config ROOT can redirect a
+  write outside the project. Private mutable state (transcripts, logs,
+  telemetry, the workstream store) resolves through one place too and is created
+  at mode `0700`, with an existing permissive `~/.trusty-code` tightened on the
+  next run.
+- `agent_loop`'s inference-error log label handles `InferenceError::UnsupportedCapability` as its own class, `unsupported_capability`, rather than folding it into `unsupported` — the two describe different problems, and an operator grouping by this label is looking at a request routed to a provider whose capabilities cannot serve it. Every `ChatRequest` literal in the crate names the new `response_schema` field explicitly as `None`; behavior is unchanged. Refs #5588
+- Removed the `trusty-embedderd` 7890 row from the `known_siblings` port-collision guard; that listener is retired under ADR-0032 and the port is free ([#6289](https://github.com/bobmatnyc/trusty-tools/issues/6289))
+- **`tcode serve` binds a hardened Unix socket, and `tcode tui` dials it directly.** The daemon binds `~/.trusty-code/trusty-code.sock` (`0600`, inside a `0700` directory, peer-uid checked on every accept) FIRST and fatally — a bind failure stops the daemon rather than degrading to HTTP only, which would leave every socket client reporting "no daemon" against a live process. The whole JSON-RPC method surface is mounted behind one `RpcFallback` rather than re-registered, and `session.attach`'s live half becomes the `session.events` stream method, with `workstream.events` bridging the workstream fan-out. `session.events` takes an `after_seq` cursor the SSE route had no equivalent of, so a reconnect resumes above the last confirmed event instead of replaying the whole ring buffer. The HTTP listener stays bound for `trusty-code-gui`'s webview alone and retires with it in PR 2 ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- **`TCODE_DAEMON_URL` and the TUI's daemon discovery are gone.** `tui_client::discovery`, `tui_client::rpc` and `tui_client::sse` are deleted: the socket path is derived from the data directory, so there is nothing to discover, and a `0600` socket needs no bearer token. `tcode tui`'s auto-spawn now waits on the socket answering rather than on `GET /health`, and the "refuse to spawn for an unreachable explicit URL" branch went with the env var it protected. `TCODE_DAEMON_TOKEN` and its loopback gate move to `trusty_code::http_credential`, where `TcodeConnector` still reads them for as long as the HTTP listener exists ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- **A truncated event stream reconnects instead of reading as a finished turn.** `trusty_common::uds`'s contract ends a stream on a terminal frame and never on EOF, so any read failure — including a mid-tail hang-up — now reconnects with the last confirmed `seq`. #3494's property (a wedged daemon must not hang the client forever) is kept by a per-frame budget on the stream reader; its HTTP-specific regression test is replaced by `session_stream_silence_is_bounded_not_infinite`, which asserts the same thing against a socket that accepts and never writes ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- `code-review-standards` skill and the trusty-code `code-critic` fork add
+  the enclosing function or method name as a required field beside every
+  finding's file + line citation, anchoring a fix-round agent's `grep -n -A`
+  instead of a whole-file read
+  (refs [#7239](https://github.com/bobmatnyc/trusty-tools/issues/7239))
+- `systematic-debugging` skill's Phase 1 adds a bypass-the-harness probe for
+  client/server split debugging, and Phase 4 adds an exact-output assertion
+  against the captured bad input before deploying a parsing/trimming fix
+  (refs [#7119](https://github.com/bobmatnyc/trusty-tools/issues/7119))
+- `skill-refs/git-workflow/SKILL.md` is resynced byte-identical to
+  trusty-mpm's `git-workflow.md`, which gains multi-commit rebase guidance
+  (refs [#7231](https://github.com/bobmatnyc/trusty-tools/issues/7231))
+- Preserve text-only transcript construction with the shared inference image-content contract.
+- The four forked agents and the four tcode-only defaults declare their tool
+  allowlist under `tcode_tools:`, and the `.md` loader reads that key instead of
+  `tools:`. The shared roster's `tools:` now carries Claude Code's vocabulary
+  (`Read`, `Bash`, `mcp__trusty-search`), which intersects this runtime's
+  registry at zero tools — honouring it here would have left every embedded
+  roster agent unable to call anything, `finish_task` included (#7683).
+- A symlinked file or directory anywhere beneath `<project>/.trusty-code/` now refuses the roster deploy instead of being followed ([#7779](https://github.com/bobmatnyc/trusty-tools/issues/7779))
+  - this narrows "a hand-edited deployed file is authoritative" to real files: a symlinked `agents/<role>.md`, skill folder or ledger reports `WriteTargetError::Unpinned` and nothing is written, where earlier releases read through the link and preserved it
+  - publishing replaces a link with `renameat` rather than writing where it points, so following it on read and replacing it on write would have disagreed about what the deploy did; keep the real file under `.trusty-code/` and link to it from elsewhere
+- The project ledger lock is a blocking `LOCK_EX` held across the whole mirror/stage/compose/publish sequence, wider than the shared deployer's compose-only lock, so the snapshot that decides "hand-edited" and the publish that acts on it see the same directory
+- The `opus` / `sonnet` / `haiku` model aliases now resolve to the current
+  Claude tiers — `anthropic/claude-opus-5`, `anthropic/claude-sonnet-5` and
+  `anthropic/claude-haiku-4.5` — and `DEFAULT_MODEL` follows `sonnet`.
+- `tcode run-task` gains `--max-turns <N>` (env fallback `TCODE_MAX_TURNS`),
+  overriding the top-level loop's built-in cap of 8 on both the daemon and
+  `--legacy-in-process` paths. A value of 0 is rejected.
+- Cost reporting carries explicit rows for the opus-5, sonnet-5 and haiku-4.5
+  families, matched ahead of the older 4.x substring fallbacks, so
+  `RunReport.cost_usd` prices those models at their published rates.
+- **`tcode tui` runs the no-delegate solo agent by default (#8184).** An
+  interactive session created with no explicit choice now runs #8031's
+  single-agent shape: the top-level agent carries its own tcode tools
+  (`read_file`, `write_file`, `edit`, `bash`, …) and `delegate_to_agent` is
+  never registered, so "add a doc comment to fn X" results in the agent reading
+  and editing the file itself instead of briefing a sub-agent that the previous
+  PM registry — which had no filesystem tools at all — could not reach. The
+  default lives on the daemon, in `session.create`, so every interactive client
+  inherits it; `task.run`'s own mint path is unchanged and still delegates
+  unless asked not to.
+- **The stock `pm` agent now asks before it writes or runs shell (#8184,
+  #3422).** `assets/agents/pm.md` gained a `permissions:` block marking `bash`,
+  `write_file`, `write_files` and `edit` as `ask`; reads stay unprompted. This
+  is what gates the new default: before it, the shipped card declared no
+  `permissions:` at all and an agent with no map is allowed everything, so a
+  solo session would have written and run shell in the user's project root with
+  no prompt. An `ask` needs a client watching that session to answer it — a
+  headless run (no attached client) resolves it to deny per #8100, so a
+  non-interactive `tcode run-task pm --no-delegate` now needs
+  `TCODE_PERMISSION_MODE=allow-asks`. Only the four tools above gate; the
+  agent's own `tcode_tools` allowlist still decides what exists at all.
+- **A deployed roster card keeps the `permissions:` block its source declared
+  (#8184).** The roster deployer re-emits frontmatter from a fixed key list
+  that does not include `permissions:`, so the materialized
+  `<project>/.trusty-code/agents/<name>.md` — which wins agent resolution over
+  the embedded copy — silently lost the block, and an agent with no block is
+  allowed everything. `md_loader` now restores the embedded source's block when
+  a file the deployer wrote (`provenance: framework-owned`) carries none of its
+  own; a hand-authored card, or a deployed one a user has since given rules, is
+  left alone. The shared emitter still drops the key — that is worth fixing at
+  the source, in `trusty_agents_common::agents::builder`.
+- **PM/delegation mode is reachable by an explicit opt-in (#8184).**
+  `session.create`'s new `delegate: true` param mints the pre-#8184 delegating
+  PM, `POST /sessions` forwards it, and `tcode tui --delegate` is the CLI
+  surface that sends it. `TcodeConnector::create_session` — which provisions
+  fleet/automation sessions with no client to answer a prompt — sends
+  `delegate: true` itself, so programmatic provisioning keeps its pre-#8184
+  semantics rather than inheriting a default aimed at a human at a terminal.
+- **A session's agent shape is immutable, like its project binding (#8184).**
+  `task.run` with `no_delegate: true` against a session minted delegating is
+  rejected with `-32003 invalid_argument` instead of running a shape
+  `session.status`/`session.list` would keep reporting as the other one — the
+  same record-vs-run divergence the sibling `project` and `workstream_id`
+  guards prevent. The shape is reported as `no_delegate` on both methods.
+- **The TUI holds a prompter claim from `setup`, before any run (#8184).** The
+  daemon suspends a tool call on an `ask` rule only while someone is watching
+  that session (#8100), and on this transport the only thing that claims a
+  prompter is an open `session.events` stream. `run_chat_turn` issued
+  `task.run` first and opened its stream afterwards, so the interactive
+  default's first gated `write_file`/`bash` raced the stream open and a call
+  that lost was refused with no prompt to answer — and every reconnect gap
+  reopened the same hole. `setup` now opens a dedicated claim stream and
+  confirms it before returning, held for the TUI's life alongside the per-turn
+  stream, so a gap needs both down at once. The claim is confirmed, not
+  assumed: a daemon that refuses or closes the stream fails `setup` rather than
+  starting a session nothing is watching, the wait is bounded by the ordinary
+  15-second call budget, and the background reconnect gives up after the same
+  five attempts the per-turn tail uses instead of re-dialling a dead daemon for
+  the life of the process.
+- **The TUI's connect line states which agent runs (#8184).** It names the
+  session's shape — `solo agent (no delegation)` or `delegating PM` — so the
+  interactive default is visible at launch. #8164 then settled the line's
+  wording, `… — home <root>, workstream <ws>, <shape>`; a session with no
+  `--project` reads `home projectless`, and its run works in an ephemeral
+  scratch root rather than the directory the TUI was launched from.
+- `tcode tui` with no `--project` now binds the git repository enclosing the current directory (its toplevel) instead of running projectless against a throwaway scratch root. With no enclosing repository the session stays projectless — an implicit bind indexes what it binds, so only a repository homes implicitly; `--project <dir>` still binds any directory. `--projectless` opts out; `$HOME`, any directory containing it, and the filesystem root are never homed on. (#8205)
+- `session.cancel` now answers only once the cancelled task has actually stopped ([#8207](https://github.com/bobmatnyc/trusty-tools/issues/8207))
+  - it used to return the still-`running` snapshot the instant the cooperative-cancel flag was set, so a client was told a task had stopped while it kept running and the next prompt was rejected with `-32003 invalid_argument` ("already has a task running")
+  - the wait is fail-closed: a run that does not stop within 10s answers with a `-32010 cancel_unconfirmed` error, never a cancelled snapshot — a domain code a client can tell apart from a `-32603` daemon fault, and one that survives the socket transport, which carries no `data` field
+  - `-32010` now has consumers: `POST /sessions/{id}/cancel` answers HTTP 503 ("not yet, retry") instead of 500, and the TUI client returns a typed `CancelOutcome::StillCancelling` carrying the daemon's own sentence. Rendering that as a "still cancelling…" line in the TUI is a separate change in `trusty-code-tui`
+  - the 10s grace fits inside BOTH in-repo clients' 15s per-call budget — the TUI's and the CLI's; a compile-time assertion per client blocks any of them from being changed out of order, and the grace also bounds how long a cancel can stall a STDIO connection
+  - a run that PANICKED now releases its execution slot and lands `Failed` with a `Failed` task result naming the crash, instead of leaving every later prompt rejected with `-32003` or resuming as if the user had cancelled it cleanly. A newer run that already holds the slot is never failed for its predecessor's crash
+  - known limitation: the permission gate does not watch the cancel flag while a prompt is open, so Esc at an open permission prompt cannot stop the run until the prompt resolves — that cancel spends the full 10s grace and answers `-32010`
+  - a cancel that times out no longer overwrites a newer run's live join handle with the old run's finished one
+  - a second concurrent cancel on one session now waits for the first to confirm, instead of answering "tracked but not yet joinable"
+  - a cancelled session is resumable: the next prompt runs on the SAME session, which is the one the TUI keeps for the whole conversation. `Failed` and `DeadlineExceeded` still require a fresh session
+- Embedded `verification-before-completion` skill-ref copy refreshed against its trusty-mpm source, which gained the background-wait, gate-chain-pipe and stack-trap sections moved out of the resident BASE-AGENT body (#8274).
+- `documentation-style` skill states that prose documents carry no line or word cap (owner ruling 2026-09-20) (Refs #8309).
+- The tcode `ticketing` agent now carries the epic/phase mechanics — title forms, the two-step tracker create, native sub-issue linking, the three tracker marker blocks, and the never-hand-patch rule for the `phases` block — mirrored from the shared asset in that file's own terse style ([#8376](https://github.com/bobmatnyc/trusty-tools/issues/8376)).
+- `code-critic` agent fork: same read-only-gates and `PR: <n>|none` rule as the shared prompt; with `none` it hands off no review-post command (Refs #8584).
+- Embedded `git-workflow` skill-ref copy refreshed against its trusty-mpm source, which gained the "GitHub Actions Spend" section ([#8630](https://github.com/bobmatnyc/trusty-tools/issues/8630)).
+- The 27 shared agent texts tcode composes from (5 `BASE-*` templates and 22 roster agents) are read at runtime from instructional content (#9011, ADR-0064): a trusty-tools checkout above the cwd, else the bundle `tm content install` pinned. The 4 read-only forks and the 8 `Direct` agents stay embedded. With nothing installed, tcode starts with the 8 `Direct` agents and logs one error per process naming `tm content install`, however many `agents.list` requests and roster deploys hit it; dispatching a composed agent fails with the same message, and the project roster deploy loads content before it creates anything, so it writes nothing: no `.trusty-code/agents/` directory and no ledger lock. `assets::EMBEDDED_TM_AGENT_SOURCES` is replaced by `SHARED_TM_AGENT_FILES`, `LOCAL_TM_AGENT_FORKS`, `tm_agent_sources` and `load_tm_agent_sources`; `RosterDeployError` gains a `Content` variant.
+- The four skill-reference copies tcode deploys (`condition-based-waiting`, `git-workflow`, `self-improvement-loop`, `verification-before-completion`) declare their version as `metadata: {version}`, matching trusty-mpm's skills now in `content/skills/` (#9012); the text is otherwise unchanged.
+- The `tcode serve --http` port-collision guard no longer reserves 7878: trusty-search binds no TCP port (#9214).
+
+### Security
+
+- Project writes under `.trusty-code/` now go through a pinned directory handle, closing the check-then-write race a swapped symlink could win ([#7779](https://github.com/bobmatnyc/trusty-tools/issues/7779))
+  - `check_native_write_target` decided membership and every caller then wrote through the same path string, so a `skill-refs -> victim` swap between the two was followed — reproduced in 6 of 40 real deploys
+  - the agents directory, the skill-refs tree and the legacy `.claude/` import each open their target once with `O_NOFOLLOW` and write `openat`-relative to that descriptor; a component swapped afterwards fails with the new `WriteTargetError::Unpinned` and writes nothing at the symlink's destination
+  - `.trusty-code` itself is resolved exactly ONCE, by `anchor_native_root`, and the path it returns is the path pinned; the first cut resolved it a second time inside the pin, so a swap landing between the two pinned a directory the membership rule had never approved (1419 of 20138 completed writes reached a victim in a code-critic race model, 152 of them with the handle's own health check reporting healthy)
+  - a file name carrying a path separator is refused by every `NativeWriteDir` entry point — `O_NOFOLLOW` guards only an `openat` name's last component, so a leading component would still have been resolved through symlinks
+
+### Documentation
+
+- Embedded agent asset refreshed for the gate-output, wait, and budget rules.
+- Embedded `self-improvement-loop` skill-ref copy refreshed against its
+  trusty-mpm source: recommendations go to the `bobmatnyc/trusty-tools` rollup
+  issue #8021, or as a comment on the parent issue, and never as a new issue
+  (owner ruling 2026-09-27).
+- **`paths` module docs link to their own items again (#7001).** The five
+  intra-doc links in the module header (`resolve_project_entry`, `SEARCH_ROOTS`,
+  `ConfigSource`, `native_config_dir`, `check_native_write_target`) are now
+  written as `crate::paths::…` reference definitions, so rustdoc resolves them
+  instead of failing the intra-doc link gate.
+- code-critic.md's forked copy requires quoting the project's own line-cap script output for a file-size finding, never a hand-rolled `grep`/`wc` count, matching the shared trusty-agents-common source (Refs #7819).
+- `fs_browse::mpm_registry` docs no longer point at the retired `trusty-mpm-gui` crate (Refs [#7964](https://github.com/bobmatnyc/trusty-tools/issues/7964))
+- **Three broken intra-doc links resolve again.** `assets`'s module header
+  gained the `crate::assets::EmbeddedAgent::Direct` reference definition its
+  sibling links already had; `paths::write_dir`'s header spells
+  `check_native_write_target` as `super::check_native_write_target`; and
+  `provider::routing`'s `PM_MODEL_ENV_VAR` doc names `TCODE_ENGINEER_MODEL` in
+  prose instead of linking a constant that does not exist. Each one failed the
+  pre-publish rustdoc-links gate, which also left the `tcode` bin doc unit
+  unexamined because the lib doc build aborted before reaching it.
+
 ## [0.5.1] — 2026-09-02
 
 ### Changed

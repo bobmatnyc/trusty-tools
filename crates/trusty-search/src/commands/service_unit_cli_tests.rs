@@ -81,30 +81,33 @@ fn value_form_rejects_garbage() {
     assert!(parse_flag(&["trusty-search", "start", "--no-auto-discover=ture"]).is_err());
 }
 
-/// Why (#9214): `TRUSTY_SEARCH_NO_HTTP=1` is how a launchd unit or the sandbox
-/// script turns the HTTP listener off, and it flows through the same
-/// `value_parser` as the value form below. A bare `bool` would reject `1`.
-/// What: the bare flag, the documented spellings, absence, and a typo.
+/// Why (#9536): `--port` and `--no-http` did nothing since #9214 and were
+/// accepted for one release only. Now a unit or script that still passes one
+/// must fail at parse time, not start a daemon that silently ignores it.
+/// What: every spelling of either flag is a clap `UnknownArgument` error that
+/// names the flag; a bare `start` still parses.
 /// Test: this function.
 #[test]
-fn no_http_flag_spellings_parse() {
-    let parse = |args: &[&str]| -> Result<bool, String> {
-        match Cli::try_parse_from(args)
-            .map_err(|e| e.to_string())?
-            .command
-        {
-            Commands::Start { args } => Ok(args.no_http),
-            _ => panic!("expected Commands::Start"),
-        }
-    };
-    assert_eq!(parse(&["trusty-search", "start"]), Ok(false));
-    assert_eq!(parse(&["trusty-search", "start", "--no-http"]), Ok(true));
-    for spelling in ["1", "true", "yes", "on"] {
-        let arg = format!("--no-http={spelling}");
-        assert_eq!(parse(&["trusty-search", "start", &arg]), Ok(true), "{arg}");
+fn removed_start_flags_are_unknown_arguments() {
+    assert!(Cli::try_parse_from(["trusty-search", "start"]).is_ok());
+    for (args, flag) in [
+        (&["--port", "7878"][..], "--port"),
+        (&["--port=7878"][..], "--port"),
+        (&["--no-http"][..], "--no-http"),
+        (&["--no-http=1"][..], "--no-http"),
+    ] {
+        let argv = ["trusty-search", "start"].iter().chain(args).copied();
+        let err = match Cli::try_parse_from(argv) {
+            Ok(_) => panic!("#9536: `start {args:?}` must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{args:?}: {err}"
+        );
+        assert!(err.to_string().contains(flag), "{args:?}: {err}");
     }
-    assert_eq!(parse(&["trusty-search", "start", "--no-http=0"]), Ok(false));
-    assert!(parse(&["trusty-search", "start", "--no-http=ture"]).is_err());
 }
 
 /// Why: #9214 — `start --socket` names the socket the daemon binds; a relative

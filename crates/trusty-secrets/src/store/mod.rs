@@ -10,6 +10,13 @@
 //! Test: the `*_tests.rs` files beside this module.
 
 mod backend;
+// #7520: the server's per-session cache of CLI-backed values; only the
+// server builds one, so without `server` it is never constructed.
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "only the server's `State` builds a cache")
+)]
+mod cache;
 // #7524 P2-M1: the per-request deadline the server sets and the runner reads.
 #[cfg(any(feature = "server", feature = "cli-backends"))]
 pub(crate) mod deadline;
@@ -28,7 +35,6 @@ mod index;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod keeper;
 mod keychain;
-mod mask;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
 // #7519: the 1Password backend; spawns `op` through `cli`.
@@ -55,12 +61,14 @@ pub use backend::{
     Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
     open_backend_at, swept_backends,
 };
+pub(crate) use cache::{OpenedUnder, SecretCache};
 pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::{KEYCHAIN_CALL_TIMEOUT, KeychainBackend};
-pub use mask::{MASK_HEAD_CHARS, mask_secret};
+// #9066: `mask_secret` moved to `api` for the console bridge; same path here.
+pub use crate::api::{MASK_HEAD_CHARS, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};

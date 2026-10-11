@@ -23,8 +23,8 @@
 // #8176: `handle_start` forwards the parent's auto-discover DECISION through
 // `spawn_auto_discover_arg`, not the raw flag; that helper carries its own unit
 // test. The `--no-auto-discover` arg shape this mirror asserts on is unchanged.
+// #9214: the child gets no `--port`; the daemon binds no TCP port.
 fn build_spawn_args(
-    port: u16,
     device: &str,
     data_dir: Option<&std::path::Path>,
     refuse_auto_discover: bool,
@@ -32,8 +32,6 @@ fn build_spawn_args(
     let mut args: Vec<std::ffi::OsString> = vec![
         "start".into(),
         "--foreground".into(),
-        "--port".into(),
-        port.to_string().into(),
         "--device".into(),
         device.into(),
     ];
@@ -58,7 +56,7 @@ fn build_spawn_args(
 /// Test: this test.
 #[test]
 fn spawn_args_omit_data_dir_when_none() {
-    let args = build_spawn_args(7878, "auto", None, false);
+    let args = build_spawn_args("auto", None, false);
     let has_data_dir = args.iter().any(|a| a == std::ffi::OsStr::new("--data-dir"));
     assert!(
         !has_data_dir,
@@ -84,7 +82,7 @@ fn spawn_args_include_data_dir_when_preset_env() {
 
     // Simulate the regression scenario: TRUSTY_DATA_DIR already set to an
     // old path in the environment. The arg list is what matters for the child.
-    let args = build_spawn_args(7878, "auto", Some(new_path), false);
+    let args = build_spawn_args("auto", Some(new_path), false);
 
     let flag_pos = args
         .iter()
@@ -115,7 +113,7 @@ fn spawn_args_include_data_dir_when_preset_env() {
 #[test]
 fn spawn_args_include_both_data_dir_and_no_auto_discover() {
     let path = std::path::Path::new("/some/data/dir");
-    let args = build_spawn_args(7878, "auto", Some(path), true);
+    let args = build_spawn_args("auto", Some(path), true);
 
     let has_no_auto = args
         .iter()

@@ -57,8 +57,9 @@ pub const CONFIG_FILE: &str = "config.yaml";
 /// parse failure they must surface. A typed enum lets binaries map each to the
 /// right log level or exit behaviour.
 /// What: an I/O variant (carrying the offending path) and a parse/serialise
-/// variant (carrying the path + the `serde_yaml` message).
-/// Test: `load_malformed_is_err` exercises the `Yaml` variant.
+/// variant (carrying the path + a value-free [`YamlErrorDetail`]).
+/// Test: `load_malformed_is_err` exercises the `Yaml` variant;
+/// `no_parse_failure_shape_echoes_the_offending_value_9603` pins its redaction.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// Reading or writing the config file failed (other than a benign not-found).
@@ -71,13 +72,176 @@ pub enum ConfigError {
     },
 
     /// The YAML could not be parsed (load) or produced (save).
-    #[error("config YAML error at {path}: {message}")]
+    #[error("config YAML error at {path}: {detail}")]
     Yaml {
         /// The path being parsed/serialised when the error occurred.
         path: PathBuf,
-        /// The `serde_yaml` error message.
-        message: String,
+        /// What failed and where — never the offending value (#9603).
+        detail: YamlErrorDetail,
     },
+}
+
+/// The class of a YAML parse or serialise failure.
+///
+/// Why: serde's error text quotes the input it rejected, so the class is
+/// carried as a closed enum rather than as that text (#9603).
+/// What: one variant per serde error constructor that can carry input, plus
+/// `Malformed` (a YAML syntax error or a custom deserializer message) and
+/// `Serialize` (the save path).
+/// Test: `no_parse_failure_shape_echoes_the_offending_value_9603`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum YamlErrorKind {
+    /// A value of the wrong type (`secrets: tok` where a list is expected).
+    InvalidType,
+    /// A value of the right type but out of range or rejected.
+    InvalidValue,
+    /// A sequence or map of the wrong length.
+    InvalidLength,
+    /// An enum value that names no variant.
+    UnknownVariant,
+    /// A key the schema rejects.
+    UnknownField,
+    /// A required key is absent.
+    MissingField,
+    /// A key appears twice.
+    DuplicateField,
+    /// A YAML syntax error, or a deserializer's own message.
+    Malformed,
+    /// The value could not be serialised.
+    Serialize,
+}
+
+impl YamlErrorKind {
+    /// serde's fixed message prefixes, in the form `serde::de::Error` emits them.
+    const MARKERS: [(&'static str, Self); 7] = [
+        ("invalid type: ", Self::InvalidType),
+        ("invalid value: ", Self::InvalidValue),
+        ("invalid length ", Self::InvalidLength),
+        ("unknown variant `", Self::UnknownVariant),
+        ("unknown field `", Self::UnknownField),
+        ("missing field `", Self::MissingField),
+        ("duplicate field `", Self::DuplicateField),
+    ];
+
+    /// Classify a serde message by its earliest known prefix; the text is not kept.
+    ///
+    /// `unknown field` wins wherever it appears: that kind truncates the key
+    /// path, so a misclassification errs toward hiding a key, never showing one.
+    fn classify(message: &str) -> Self {
+        if message.contains("unknown field `") {
+            return Self::UnknownField;
+        }
+        Self::MARKERS
+            .iter()
+            .filter_map(|(marker, kind)| message.find(marker).map(|at| (at, *kind)))
+            .min_by_key(|(at, _)| *at)
+            .map_or(Self::Malformed, |(_, kind)| kind)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::InvalidType => "invalid type",
+            Self::InvalidValue => "invalid value",
+            Self::InvalidLength => "invalid length",
+            Self::UnknownVariant => "unknown variant",
+            Self::UnknownField => "unknown field",
+            Self::MissingField => "missing field",
+            Self::DuplicateField => "duplicate field",
+            Self::Malformed => "malformed YAML",
+            Self::Serialize => "serialisation failed",
+        }
+    }
+}
+
+/// A value-free description of a YAML failure: kind, key path, position.
+///
+/// Why: #9603 — `ConfigError::Yaml` used to carry `serde_yaml`'s message, which
+/// quotes the rejected scalar; for `log_drain.secrets` that scalar is a token,
+/// and `load_or_default` logged it at warn on every load. An operator still
+/// needs to find the bad field, so the kind, the key path and the line survive.
+/// What: built from the `serde_yaml` error without storing its text. The key
+/// path comes from `serde_path_to_error`: the accepted keys leading to the
+/// failing node, never a rejected scalar. For `UnknownField` the rejected key
+/// is itself input, so the path stops at its parent map. Map keys that were
+/// accepted (a `HashMap<String, _>` entry) do appear. `None` at the document
+/// root. Line and column are 1-based.
+/// Test: `a_type_error_on_a_secret_field_never_reaches_the_log_9603`,
+/// `an_unknown_key_never_reaches_the_key_path_9603`,
+/// `no_parse_failure_shape_echoes_the_offending_value_9603`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YamlErrorDetail {
+    /// The failure class.
+    pub kind: YamlErrorKind,
+    /// Dotted key path to the failing node (`log_drain.secrets`), if below the root.
+    pub key_path: Option<String>,
+    /// 1-based line of the failing node, when `serde_yaml` reports one.
+    pub line: Option<usize>,
+    /// 1-based column of the failing node, when `serde_yaml` reports one.
+    pub column: Option<usize>,
+}
+
+impl YamlErrorDetail {
+    /// Describe a load failure. `serde_yaml`'s text is read to classify, then dropped.
+    fn from_parse(err: serde_path_to_error::Error<serde_yaml::Error>) -> Self {
+        let kind = YamlErrorKind::classify(&err.inner().to_string());
+        // #9603: an unknown key is the last segment, recorded before the
+        // field visitor rejected it — drop it so the path ends at the parent.
+        let keep = match kind {
+            YamlErrorKind::UnknownField => err.path().iter().len().saturating_sub(1),
+            _ => usize::MAX,
+        };
+        let key_path = render_key_path(err.path().iter().take(keep));
+        let inner = err.into_inner();
+        Self {
+            key_path,
+            ..Self::new(kind, &inner)
+        }
+    }
+
+    /// Describe a save failure; a serialiser's message can quote a value too.
+    fn from_serialize(err: &serde_yaml::Error) -> Self {
+        Self::new(YamlErrorKind::Serialize, err)
+    }
+
+    fn new(kind: YamlErrorKind, err: &serde_yaml::Error) -> Self {
+        let location = err.location();
+        Self {
+            kind,
+            key_path: None,
+            line: location.as_ref().map(serde_yaml::Location::line),
+            column: location.as_ref().map(serde_yaml::Location::column),
+        }
+    }
+}
+
+/// Join path segments as `serde_path_to_error::Path` displays them
+/// (`a.b[0].c`); `None` for the document root.
+fn render_key_path<'a>(
+    segments: impl Iterator<Item = &'a serde_path_to_error::Segment>,
+) -> Option<String> {
+    let mut out = String::new();
+    for segment in segments {
+        let is_index = matches!(segment, serde_path_to_error::Segment::Seq { .. });
+        if !out.is_empty() && !is_index {
+            out.push('.');
+        }
+        out.push_str(&segment.to_string());
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+impl std::fmt::Display for YamlErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind.label())?;
+        if let Some(key_path) = &self.key_path {
+            write!(f, " at key `{key_path}`")?;
+        }
+        if let (Some(line), Some(column)) = (self.line, self.column) {
+            write!(f, " at line {line} column {column}")?;
+        }
+        f.write_str(" (value withheld)")
+    }
 }
 
 /// Resolve the config directory for `crate_name` under an explicit base.
@@ -139,10 +303,13 @@ pub fn load_at<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, ConfigErro
             });
         }
     };
-    let value = serde_yaml::from_str::<T>(&raw).map_err(|e| ConfigError::Yaml {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    // #9603: route through serde_path_to_error for the key path, and keep no
+    // serde_yaml text — it quotes the rejected value.
+    let value = serde_path_to_error::deserialize::<_, T>(serde_yaml::Deserializer::from_str(&raw))
+        .map_err(|e| ConfigError::Yaml {
+            path: path.to_path_buf(),
+            detail: YamlErrorDetail::from_parse(e),
+        })?;
     Ok(Some(value))
 }
 
@@ -171,10 +338,28 @@ pub fn load<T: DeserializeOwned>(crate_name: &str) -> Result<Option<T>, ConfigEr
 /// framing) and downgraded to defaults so the process still starts.
 /// Test: `load_or_default_on_missing` (absent → default).
 pub fn load_or_default<T: DeserializeOwned + Default>(crate_name: &str) -> T {
-    match load::<T>(crate_name) {
+    match crate_config_path(crate_name) {
+        Some(path) => load_or_default_at(path.as_path(), crate_name),
+        None => T::default(),
+    }
+}
+
+/// Load the config at an explicit path, falling back to `Default`.
+///
+/// Why: the hermetic core for [`load_or_default`], so the warn-and-default
+/// failure branch is testable against a temp dir instead of the real home.
+/// What: [`load_at`], with absent → `T::default()` and any error logged at
+/// `warn` (naming `crate_name`) then downgraded to `T::default()`. The logged
+/// error names the file, kind, key path and line, never the rejected value.
+/// Test: `a_parse_failure_falls_back_to_default_and_warns_once_9603`,
+/// `a_type_error_on_a_secret_field_never_reaches_the_log_9603`.
+pub fn load_or_default_at<T: DeserializeOwned + Default>(path: &Path, crate_name: &str) -> T {
+    match load_at::<T>(path) {
         Ok(Some(value)) => value,
         Ok(None) => T::default(),
         Err(e) => {
+            // #9603: `e` is value-free (see `YamlErrorDetail`); the downgrade to
+            // defaults is unchanged.
             tracing::warn!("{e}; falling back to default {crate_name} config");
             T::default()
         }
@@ -199,7 +384,7 @@ pub fn save_at<T: Serialize>(path: &Path, value: &T) -> Result<PathBuf, ConfigEr
     }
     let yaml = serde_yaml::to_string(value).map_err(|e| ConfigError::Yaml {
         path: path.to_path_buf(),
-        message: e.to_string(),
+        detail: YamlErrorDetail::from_serialize(&e), // #9603: no serde text
     })?;
     let header = "# .trusty-tools/<crate>/config.yaml\n\
                   # Managed by the trusty-tools config convention (#1220).\n\
@@ -256,6 +441,10 @@ pub fn save<T: Serialize>(crate_name: &str, value: &T) -> Result<PathBuf, Config
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "crate_config_redaction_tests.rs"]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {

@@ -29,6 +29,8 @@ const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 /// `profile_show_then_set_round_trips`.
 fn tagent() -> Command {
     let mut cmd = Command::new(BIN);
+    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+    trusty_common::parent_death::exit_with_parent(&mut cmd);
     cmd.env_remove("TAGENT_PROJECT_DIR")
         .env_remove("OPEN_MPM_PROJECT_DIR");
     cmd

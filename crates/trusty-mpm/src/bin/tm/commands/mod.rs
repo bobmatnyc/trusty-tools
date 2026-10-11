@@ -35,6 +35,9 @@ pub(crate) mod delete;
 pub(crate) mod divert;
 pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
+// #8454: `tm hook --egress-guard`, the outbound-channel family deny.
+pub(crate) mod egress_guard;
+pub(crate) mod egress_guard_families;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
@@ -85,6 +88,8 @@ pub(crate) mod guided_outside_git;
 pub(crate) mod guided_protected;
 pub(crate) mod guided_resolver;
 pub(crate) mod guided_resume;
+// #8454: the `tm hook` mode dispatch, out of `main.rs`.
+pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
 pub(crate) mod hook_payload;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.

@@ -1,20 +1,20 @@
 //! The arguments of `trusty-search start`.
 //!
-//! Why (#9214): `main.rs` sits at its frozen `check_line_cap` budget, and
-//! `--no-http` adds a field. The fields moved here verbatim; `main.rs` keeps
-//! the subcommand's help text and flattens this struct into it.
-//! What: one `clap::Args` struct, read by [`super::handle_start`].
-//! Test: `bare_flag_still_means_true`, `no_http_flag_spellings_parse` and
-//! `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`
-//! parse `start` through the real `Cli`.
+//! Why (#9214): `main.rs` sits at its frozen `check_line_cap` budget, so the
+//! fields live here; `main.rs` keeps the subcommand's help text and flattens
+//! this struct into it.
+//! What: one `clap::Args` struct, read by [`super::handle_start`]. #9536
+//! removed `--port` and `--no-http`, so clap rejects both as unknown
+//! arguments.
+//! Test: `bare_flag_still_means_true`, `removed_start_flags_are_unknown_arguments`
+//! and `start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one`
+//! parse `start` through the real `Cli`; `removed_start_inputs_are_refused_or_unread`
+//! drives the binary.
 
 /// Every flag `trusty-search start` accepts.
 #[derive(clap::Args, Debug, Clone)]
 pub struct StartArgs {
-    /// Port to listen on (default: 7878, auto-selects next if busy)
-    #[arg(long, default_value_t = crate::service::DEFAULT_PORT)]
-    pub(crate) port: u16,
-
+    // #9536: `--port` is gone — the daemon binds no TCP port (#9214).
     /// Run in the foreground instead of forking a background daemon.
     ///
     /// Default (`trusty-search start`): self-spawns a detached child with
@@ -41,7 +41,7 @@ pub struct StartArgs {
     #[arg(long, value_parser = ["auto", "cpu", "gpu"], default_value = "auto")]
     pub(crate) device: String,
 
-    /// Override the data directory used by the daemon (lockfile, port file,
+    /// Override the data directory used by the daemon (lockfile, socket,
     /// indexes.toml, per-index data).
     ///
     /// Equivalent to setting `TRUSTY_DATA_DIR` in the environment.
@@ -53,7 +53,7 @@ pub struct StartArgs {
     ///
     /// Use this to run an isolated daemon (e.g. for cert/benchmark work)
     /// alongside the production daemon without lockfile conflicts:
-    ///   trusty-search start --data-dir /tmp/ts-cert --port 7879
+    ///   trusty-search start --data-dir /tmp/ts-cert
     #[arg(long, env = "TRUSTY_DATA_DIR")]
     pub(crate) data_dir: Option<std::path::PathBuf>,
 
@@ -123,23 +123,8 @@ pub struct StartArgs {
     #[arg(long, default_value_t = false)]
     pub(crate) serial: bool,
 
-    /// Serve the RPC socket only: bind no HTTP listener (#9214, ADR-0032).
-    ///
-    /// The daemon binds no TCP port, writes no `daemon.port` or `http_addr`
-    /// file (and removes any an earlier run left), registers no HTTP address
-    /// for discovery, and reports `transport.http_addr: null` in
-    /// `search.health`. Every route is reached over the socket instead; the
-    /// HTTP-only routes (the `/ui` admin panel, `/upgrade`, `/metrics`) are
-    /// unavailable. Auto-discovery is skipped, because it registers projects
-    /// over HTTP. `--port` is ignored. Off by default: HTTP still binds.
-    ///
-    /// Also read from `TRUSTY_SEARCH_NO_HTTP` (`1`/`true`/`yes`/`on`;
-    /// `0`/`false`/`no`/`off` leave HTTP on), which is how a launchd unit or
-    /// a sandbox sets it. Any other value is rejected and the daemon does not
-    /// start.
-    #[arg(long, env = "TRUSTY_SEARCH_NO_HTTP", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = crate::commands::service_unit::parse_truthy_bool)]
-    pub(crate) no_http: bool,
-
+    // #9536: `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are gone — the daemon
+    // serves its RPC socket only (#9214).
     /// Bind the RPC socket at exactly this path (#9214).
     ///
     /// Without it the daemon binds `<TRUSTY_DATA_DIR>/trusty-search.sock`, or
@@ -148,7 +133,7 @@ pub struct StartArgs {
     /// auto-starts the daemon, so both sides use one socket. Must be an
     /// absolute path. A missing parent is created at `0700`; an existing one
     /// other than the data directory is never chmodded, and is refused unless `0700`.
-    /// The lockfile and the port file stay under the data directory.
+    /// The lockfile stays under the data directory.
     #[arg(long, value_name = "PATH", value_parser = parse_socket_path)]
     pub(crate) socket: Option<std::path::PathBuf>,
 }

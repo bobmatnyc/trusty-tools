@@ -6,6 +6,74 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.60.0] — 2026-10-10
+
+### Breaking
+
+- A format-0 palace is refused with `FormatNeedsMigration` on every read-only open — `PalaceHandle::open_with_intent(.., OpenIntent::ReadOnlyClient)` and a `PalaceRegistry` left at its default intent — until a writer-intent open migrates it (ADR-0067 D3 rule 2). A registry that is the sole owner of its root must call `with_writer_intent()`.
+- `KgStoreRedb::open` and `KgStoreRedb::open_with_intent` refuse a format-0 `kg.redb` under every intent; open the palace through a writer-intent `PalaceHandle` first.
+- A `kg.redb` in an incompatible redb format is refused under writer intent, its bytes untouched, instead of being renamed to `*.v2-incompatible` and recreated empty (ADR-0067 D5).
+- A palace at format 1 cannot be downgraded: a binary that reads only format 0 refuses it, and no 1 → 0 migration exists. Restore the format-migration backup under `<data_root>/backups/format-migration/<palace>/` to go back.
+
+### Added
+
+- Palace format 1 and the 0 → 1 migration (ADR-0067, #9274). The first writer-intent `PalaceHandle` open of a format-0 palace migrates it, including the daemon's startup hydration, which opens each palace that way (ADR-0067 Consequences): free-space check, verified backup with its manifest written last, `kg.redb` held exclusively, a `format_migration.json` record naming that backup, the `palace.json` mirror, then the triple-key rewrite and both `kg_schema` markers in one redb transaction. A crash or error at any step is completed by the next writer open; a resume trusts only a backup that still verifies.
+- One migration of a palace runs at a time: a second writer open in the same process waits and then sees the migrated palace, and a second process fails at once with `FormatMigrationFailed`, writing nothing, while another holds the palace directory's migration lock.
+- `palace_format::palace_format_status` and `PalaceFormatStatus`, a no-write read of a palace's format state for `doctor`, with `Unverified` for a `kg.redb` that cannot be read without writing (held by a running daemon, or in need of crash repair); and `format_backup::backup_data_root`.
+- `PalaceStoreError::FormatMigrationFailed`, a format refusal naming the palace, both formats and the failed step.
+- The `memory-core-test-support` feature and `memory_core::store::format_v0_fixture`, a format-0 palace written from the old on-disk shapes, for a downstream test that its registry migrates existing palaces.
+
+### Changed
+
+- `PALACE_FORMAT_SUPPORTED` is now 1. A new KG is stamped at format 1 when it is created.
+- The #4810 triple-key rewrite no longer runs at every KG open and no longer fails open: it is the KG step of the format migration, behind the format backup, and an undecodable legacy row or a triple-key marker above 1 fails the migration instead of being skipped. The `kg.redb.pre-4810.bak` sidecar is no longer written.
+- Derived stores keep the #702 recovery of an incompatible redb file.
+- The KG open re-reads the format marker on the database it opened on every fresh open, not only when the pre-open read was deferred.
+- A format-migration backup is reused only when its manifest matches the palace's current files.
+
+## [0.59.2] — 2026-10-10
+
+### Breaking
+
+- `bind_with_auto_port` and the `port` module are removed. No workspace crate called them after #9214; trusty-console is the one TCP listener (a REST proxy, no MCP endpoint) (ADR-0032, #9542).
+
+### Added
+
+- `PalaceRegistry::rename_palace` moves a palace to a new id: it writes `old -> new` into the alias map, moves the directory, and rewrites `palace.json`. It refuses a missing or aliased source, an invalid target, a target that is another palace's alias, a non-empty target, and a source in a newer on-disk format (before anything changes); with `replace_empty` an empty target goes to `<root>/.trash/<new>-replaced-<UTC>/`. A referenced handle makes it answer `Busy` with nothing changed, a failed move rolls the alias keys back, and a re-run finishes a rename a crash left partway (#9544).
+- `PalaceAliasStore::rename_target_with_undo` does the `rename_target` write and returns an `AliasUndo` naming every alias key it changed; `PalaceAliasStore::undo` restores exactly those keys (#9544).
+- `memory_core::palace_emptiness::check_palace_empty` is the shared "this palace is empty" check: no drawers, no unabsorbed legacy data, and no chat sessions (#9544).
+- `json_rmw::update_blank_as_absent` reads a whitespace-only document as absent (#9544).
+
+### Fixed
+
+- Palace alias writes (`register_alias`, `remove_alias`, `rename_target`) now run under the alias file's cross-process lock, so concurrent writers no longer lose updates or share one temp file (#9544).
+- `register_alias` and `remove_alias` now refuse a corrupt `palace_aliases.json` and leave its bytes unchanged, instead of overwriting it or answering "no such alias" (#9544).
+- The first alias write stamps schema `version: 1`, and a whitespace-only alias file still accepts a write (#9544).
+
+## [0.59.1] — 2026-10-10
+
+### Breaking
+
+- `memory_core::palace::DrawerType` is now `#[non_exhaustive]`. A crate outside trusty-common that matches on it needs a wildcard arm; no crate in this workspace does (#9144).
+- `crate_config::ConfigError::Yaml { path, message: String }` is now `ConfigError::Yaml { path, detail: YamlErrorDetail }`, and `YamlErrorKind` is `#[non_exhaustive]`. A crate outside trusty-common that reads or builds the `message` field must use `detail` (kind, key path, line, column) instead; no crate in this workspace does (#9603).
+
+### Added
+
+- `memory_core::palace::DrawerType` has five new variants: `Ruling`, `Decision`, `Status`, `Turn` and `Reference`. They follow `Task`, so every existing postcard index and stored `drawer_type` tag decodes as before. None of them gets a default TTL or dream-cycle protection (#9144).
+- `DrawerType::parse_write_type` parses a type a caller names. It accepts exactly `Ruling`, `Decision`, `Status`, `Turn` and `Reference`, in any ASCII case, and returns the new `ParseDrawerTypeError` for anything else. The lenient `DrawerType::from_tag` still decodes an unrecognised stored tag to `Unknown` (#9144).
+- `palace_alias::PalaceAliasStore::rename_target` points a renamed palace's old id, and every alias of that old id, at the new id in one write. It fails, and leaves the file unchanged, when the alias file is corrupt. `PalaceAliasStore::remove_alias` removes one alias. `palace_alias::canonical_palace_id` names the palace id a request reaches through a live alias (#9544).
+
+### Fixed
+
+- The two `search_index` hung-up-create tests no longer fail under full-suite load. Their mock daemon now drops the connection without running the process-global panic hook, which could stall the mock's only thread past the registry-confirm deadline (#9125). Test-only; no runtime behavior changes.
+- The local model server probe (`local_probe::probe_local`, `list_models`, `chat::auto_detect_local_provider`) now holds to its one-second budget even when building the HTTP client stalls, as the macOS system-proxy lookup can. The client is built off the async worker threads, and one deadline covers the build and the request; a missed deadline reports the server as unreachable (#9213).
+- Requests to Claude Opus 5.5 and Sonnet 5.5 (`claude-opus-5-5`, `claude-sonnet-5-5`, in Anthropic, Bedrock profile and Bedrock ARN forms) no longer send `temperature`, which those models reject. This covers the Bedrock inference adapter, the Anthropic adapter, the `config keys test` auth probe and the chat Bedrock provider. Every other model still receives `temperature` when it is set (#9318).
+- A config file that fails to parse no longer writes the offending value to the log or to the error text. `crate_config::ConfigError::Yaml` now carries a `YamlErrorDetail` (error kind, key path, line and column) in place of `serde_yaml`'s message, which quoted the rejected scalar; a type error under trusty-mpm's `log_drain.secrets` had logged the token at warn on every config load (#9603). The warn-and-default fallback of `load_or_default` is unchanged, and the new `load_or_default_at` is its path-taking core.
+
+### Changed
+
+- `PalaceRegistry::create_palace` refuses an id that is a live palace alias with `palace_alias::LiveAliasError`, instead of creating a palace that shadows the alias. It also fails when the alias file exists but cannot be read; a missing alias file still means no aliases. Ids that already own a palace, and aliases whose target is gone, create as before (#9544).
+
 ## [0.58.0] — 2026-10-10
 
 ### Added

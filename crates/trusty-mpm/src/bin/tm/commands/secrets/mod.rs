@@ -24,6 +24,19 @@ use crate::cli::SecretsAction;
 
 #[cfg(unix)]
 mod doctor;
+// #9621: `tm secrets exec` and its hidden stub.
+#[cfg(unix)]
+mod exec;
+#[cfg(unix)]
+mod exec_proc;
+#[cfg(unix)]
+mod exec_scrub;
+#[cfg(unix)]
+mod exec_stub;
+#[cfg(unix)]
+mod exec_wire;
+#[cfg(unix)]
+mod paste;
 #[cfg(unix)]
 mod session;
 #[cfg(unix)]
@@ -42,16 +55,53 @@ pub(crate) use value::{StdinSource, SystemClipboard, ValueSource};
 /// What: the socket is `~/.trusty-tools/trusty-secrets/secrets.sock`; the
 /// project is the working directory. Exit status 0 on success, 1 on any
 /// error (anyhow from `main`).
+/// `exec` and its stub end the process with the command's exit status.
 /// Test: `tests.rs` covers [`dispatch`]; this wrapper only builds the context.
 #[cfg(unix)]
 pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
+    // #9621: the stub needs no clipboard, project or default socket.
+    if let SecretsAction::ExecStub {
+        socket,
+        token_fd,
+        report_fd,
+        env,
+        stdin,
+        command,
+    } = action
+    {
+        let code = match exec_spec(&env, stdin.as_ref(), command) {
+            Ok(spec) => {
+                let args = exec_stub::StubArgs {
+                    socket,
+                    token_fd,
+                    report_fd,
+                    spec,
+                };
+                exec_stub::run(args).await
+            }
+            Err(_) => 1,
+        };
+        std::process::exit(code);
+    }
     let client = trusty_secrets::server::OnDemandSecrets::new()
         .map_err(|e| anyhow::anyhow!("tm secrets: {e}"))?;
     let project = std::env::current_dir()?;
+    if let SecretsAction::Exec {
+        env,
+        stdin,
+        command,
+    } = action
+    {
+        let spec = exec_spec(&env, stdin.as_ref(), command)?;
+        let code = exec::run(&client, &project, spec).await?;
+        std::io::stdout().flush()?;
+        std::process::exit(code);
+    }
+    let clipboard = SystemClipboard::system();
     let ctx = Ctx {
         client: &client,
         project: &project,
-        clipboard: &SystemClipboard,
+        clipboard: &clipboard,
         stdin: &StdinSource,
         ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
@@ -101,8 +151,27 @@ pub(crate) async fn dispatch(
             verbs::copy(ctx, &from, &to, &keys, out).await
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
+        // #9621: both end the process, so only [`run`] dispatches them.
+        SecretsAction::Exec { .. } | SecretsAction::ExecStub { .. } => {
+            anyhow::bail!("tm secrets exec: runs only from the command line")
+        }
     }
 }
 
+/// The validated [`exec_wire::ExecSpec`] of `exec`'s or the stub's arguments.
+#[cfg(unix)]
+fn exec_spec(
+    env: &[crate::cli::ArgText],
+    stdin: Option<&crate::cli::ArgText>,
+    command: Vec<String>,
+) -> anyhow::Result<exec_wire::ExecSpec> {
+    let env: Vec<&str> = env.iter().map(|e| e.text()).collect();
+    exec_wire::ExecSpec::parse(&env, stdin.map(|s| s.text()), command)
+}
+
+#[cfg(all(test, unix))]
+mod exec_tests;
+#[cfg(all(test, unix))]
+mod paste_tests;
 #[cfg(all(test, unix))]
 mod tests;

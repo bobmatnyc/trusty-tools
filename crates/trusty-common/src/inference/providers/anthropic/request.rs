@@ -21,6 +21,7 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::claude_temperature::accepts_temperature;
 use crate::inference::registry::ProviderId;
 use crate::inference::types::{ChatRequest, ToolChoice, ToolDefinition};
 
@@ -36,14 +37,16 @@ use crate::inference::types::{ChatRequest, ToolChoice, ToolDefinition};
 /// `system` param; `tool` messages remapped to `user` `tool_result` blocks;
 /// consecutive same-role turns coalesced), and the optional `system`,
 /// `temperature`, `stop_sequences`, `tools`, `tool_choice`, and `output_config`
-/// fields. Any `cache_control` breakpoint on a message/tool is rendered as
+/// fields (`temperature` omitted for a model `accepts_temperature`
+/// rejects, #9318). Any `cache_control` breakpoint on a message/tool is rendered as
 /// `{"type":"ephemeral"}` on the corresponding block. #5588: a set
 /// `response_schema` becomes `output_config.format` — Anthropic's own
 /// schema-constrained-output parameter, not the OpenAI `response_format` key.
 /// Test: `hoists_system_and_defaults_max_tokens`,
 /// `builds_alternating_user_assistant_turns`, `tool_result_becomes_user_turn`,
 /// `response_schema_becomes_output_config`,
-/// `output_config_absent_without_a_schema`.
+/// `output_config_absent_without_a_schema`,
+/// `build_body_omits_temperature_only_for_claude_5_5`.
 pub fn build_body(request: &ChatRequest, default_max_tokens: u32) -> Value {
     let mut system_blocks: Vec<Value> = Vec::new();
     let mut system_has_cache = false;
@@ -134,7 +137,11 @@ pub fn build_body(request: &ChatRequest, default_max_tokens: u32) -> Value {
             body.insert("system".into(), json!(joined));
         }
     }
-    if let Some(t) = request.temperature {
+    // #9318: Opus 5.5 and Sonnet 5.5 reject `temperature`; omit it for them.
+    if let Some(t) = request
+        .temperature
+        .filter(|_| accepts_temperature(&request.model))
+    {
         body.insert("temperature".into(), json!(t));
     }
     if let Some(stop) = &request.stop {
@@ -481,5 +488,28 @@ mod tests {
             anthropic_tool_choice(ToolChoice::Function("get_weather".into())),
             json!({"type": "tool", "name": "get_weather"})
         );
+    }
+
+    /// Why (#9318): Opus 5.5 and Sonnet 5.5 reject a body that carries
+    /// `temperature`; every other model must still receive it.
+    /// What: serializes the body for each id in the shared 5.5 and
+    /// older-model lists with `temperature = 0.3`; asserts the key is absent
+    /// for a 5.5 id and `0.3` otherwise.
+    /// Test: itself.
+    #[test]
+    fn build_body_omits_temperature_only_for_claude_5_5() {
+        use crate::claude_temperature::tests::{CLAUDE_5_5_IDS, TEMPERATURE_IDS};
+        for model in CLAUDE_5_5_IDS {
+            let mut req = ChatRequest::new(*model, vec![ChatMessage::user("hi")]);
+            req.temperature = Some(0.3);
+            let body = build_body(&req, 1024);
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+        }
+        for model in TEMPERATURE_IDS {
+            let mut req = ChatRequest::new(*model, vec![ChatMessage::user("hi")]);
+            req.temperature = Some(0.3);
+            let body = build_body(&req, 1024);
+            assert_eq!(body["temperature"], json!(0.3_f32), "{model}: {body}");
+        }
     }
 }

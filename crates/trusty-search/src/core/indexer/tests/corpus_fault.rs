@@ -36,6 +36,8 @@ fn search_for(text: &str) -> SearchQuery {
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     }
 }
 

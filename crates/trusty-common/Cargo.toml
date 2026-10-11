@@ -155,7 +155,9 @@ name = "trusty-common"
 # 0.57.0 (Refs #9214): minor — breaking: the socket-only search clients remove public API (resolve_search_url, SearchClient::base_url and others); subsumes the unpublished 0.56.1 (#9523); 0.56.0 is live on crates.io.
 # 0.58.0 (Refs #9274): minor — palace format gate; PalaceStoreError becomes #[non_exhaustive] with 8 new variants (accepted break, minor per 2026-09-26 ruling); 0.57.0 is live on crates.io.
 # 0.58.1 (Refs #9544): patch — #9544 palace alias rename_target/remove_alias/canonical_palace_id; create refuses a live alias.
-version = "0.59.0"
+# 0.59.2 (Refs #9544): patch — additive palace rename primitive (rename_palace); nothing removed or changed; 0.59.1 is live on crates.io.
+# 0.60.0 (Refs #9274): minor — palace format migration; 0.59.x is not yet published past 0.59.1.
+version = "0.60.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -193,6 +195,9 @@ lanes = [
         "knowledge-document",
         "memory-core",
         "embedder-test-support",
+        # #9274: the format-0 palace fixture; the memory-core tests already
+        # compile it under `cfg(test)`, this lane compiles its feature form.
+        "memory-core-test-support",
         "embedder-client",
         "catchup",
         "monitor-tui",
@@ -479,6 +484,9 @@ rpassword = { workspace = true, optional = true }
 # chat / mcp / symgraph surfaces don't pay the parse cost.
 serde_yaml = { workspace = true, optional = true }
 strsim = { workspace = true, optional = true }
+# Optional: enabled by `crate-config`. Gives a config parse failure its key
+# path without keeping serde's value-quoting message (#9603).
+serde_path_to_error = { workspace = true, optional = true }
 
 # Optional: enabled by the `bedrock` feature (streaming `ChatProvider`) and the
 # `bedrock-client` feature (the `inference::bedrock` Converse adapter, #2407).
@@ -734,6 +742,13 @@ embedder-coreml = ["embedder"]
 # the mock only when one of its own features turns `embedder` or `memory-core`
 # on — trusty-mpm's `sm-memory` does (owner ruling 2026-09-27).
 embedder-test-support = []
+# #9274: exposes `memory_core::store::format_v0_fixture`, a format-0 palace
+# written from the old on-disk shapes, so a `PalaceRegistry` consumer can test
+# that its existing palaces migrate. Like `embedder-test-support` it implies
+# nothing: the module sits inside `memory_core`, so it compiles only when the
+# consumer's own feature turns `memory-core` on. List it in
+# `[dev-dependencies]` only.
+memory-core-test-support = []
 # Issue #54: opt-in Candle BERT backend (all-MiniLM-L6-v2 on Metal/CPU). Does
 # NOT replace the fastembed/ORT default — operators select it at runtime via
 # `TRUSTY_EMBEDDER=candle` on builds that compiled this feature in. The
@@ -910,7 +925,7 @@ cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
 # loader/saver so every trusty-* crate resolves its config from one canonical,
 # per-crate location. Pulls in `serde_yaml` (pinned 0.9 — see the workspace
 # manifest's pin note and #1250) and `dirs` (already an unconditional dep).
-crate-config = ["dep:serde_yaml", "dep:thiserror"]
+crate-config = ["dep:serde_yaml", "dep:serde_path_to_error", "dep:thiserror"]
 # Enables the `palace_resolve` module: the single entry point every crate routes
 # through to answer "which trusty-memory palace does this project use?" (#5811).
 # Owns all four precedence levels — env override, committed

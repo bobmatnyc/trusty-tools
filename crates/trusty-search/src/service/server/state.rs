@@ -74,9 +74,9 @@ pub enum DaemonEvent {
 /// bound, never a guessed default. Both keys always serialise, as `null` when
 /// unset — the `{socket_path: string|null, http_addr: string|null}` shape
 /// trusty-console's `ui-search/src/lib/transport.js` reads. #9214:
-/// `http_addr` is `None` on a daemon started with `--no-http`.
+/// `http_addr` is `None`: the daemon binds no HTTP listener.
 /// Test: `run_daemon_health_reports_the_transport_it_bound`,
-/// `run_daemon_without_http_serves_only_the_socket`,
+/// `run_daemon_serves_only_the_socket`,
 /// `health_reports_a_null_transport_when_no_listener_was_bound`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DaemonTransport {
@@ -251,6 +251,9 @@ pub struct SearchAppState {
     /// OpenRouter API key resolved at startup. May be empty when the user
     /// only configured a local model; the chat handler returns 503 in that case.
     pub openrouter_api_key: String,
+    /// `[search]` lexical-lane defaults from `config.toml` (#9258); a
+    /// per-query value wins. Default: ripgrep lane on, no lexical limit.
+    pub lexical_defaults: crate::core::indexer::LexicalLaneDefaults,
     /// Lazily-initialised active chat provider. Auto-detection happens on the
     /// first chat call and the result is cached for the daemon's lifetime.
     pub chat_provider: Arc<OnceCell<Option<Arc<dyn ChatProvider>>>>,

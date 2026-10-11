@@ -156,7 +156,8 @@ impl CodexSession {
 /// Why (#5265): this is the acceptance for the registration contract — the
 /// vector Codex is registered with must complete a whole clean MCP session.
 /// What: `initialize`, `notifications/initialized` (which must produce NO
-/// response line), `tools/list` (which must advertise `get_prompt_context`), and
+/// response line), `tools/list` (which must advertise `get_prompt_context`, the
+/// library's full roster and, #9144, `memory_remember`'s `type`), and
 /// one `get_prompt_context` tool call. Every line read is parsed as JSON, so
 /// any banner or log byte on stdout fails the test rather than corrupting the
 /// framing silently.
@@ -203,6 +204,25 @@ async fn bare_serve_completes_a_clean_mcp_session() {
         tools.iter().any(|t| t["name"] == "get_prompt_context"),
         "tools/list must advertise get_prompt_context; got {} tools",
         tools.len()
+    );
+    // #9144: the served binary advertises the library's whole roster, and
+    // `memory_remember` carries the spliced `type` enum.
+    let library = trusty_memory::tools::tool_definitions();
+    let expected = library["tools"].as_array().map_or(0, Vec::len);
+    eprintln!("#9144 binary tools/list: {} tools", tools.len());
+    assert_eq!(
+        tools.len(),
+        expected,
+        "served roster must match the library"
+    );
+    let remember = tools
+        .iter()
+        .find(|t| t["name"] == "memory_remember")
+        .unwrap_or_else(|| panic!("tools/list must advertise memory_remember"));
+    assert_eq!(
+        remember["inputSchema"]["properties"]["type"]["enum"],
+        json!(["Ruling", "Decision", "Status", "Turn", "Reference"]),
+        "memory_remember must advertise `type`: {remember}"
     );
 
     session

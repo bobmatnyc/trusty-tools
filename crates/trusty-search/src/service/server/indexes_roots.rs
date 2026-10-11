@@ -15,9 +15,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path as UrlPath, State},
-    http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use serde::Deserialize;
@@ -54,6 +56,7 @@ pub struct AddRootsRequest {
 }
 
 /// `POST /indexes/:id/roots` — axum wrapper over [`add_index_roots_report`].
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn add_index_roots_handler(
     State(state): State<Arc<SearchAppState>>,
     UrlPath(id): UrlPath<String>,

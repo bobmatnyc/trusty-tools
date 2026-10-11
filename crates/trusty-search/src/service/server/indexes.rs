@@ -10,6 +10,8 @@
 //! id (409), and refuses to register a handle whose corpus open failed.
 //! Test: `create_index_rejects_relative_root_path`, `tests_2336.rs`, and
 //! related tests.
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Query, State},
     response::{IntoResponse, Json, Response},
@@ -28,6 +30,7 @@ use super::router::{CreateIndexRequest, IndexDetailEntry};
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_disk_and_mtime;
 
+#[cfg(test)]
 pub(super) use super::indexes_relocate::relocate_index_handler;
 
 /// Query parameters accepted by `GET /indexes`.
@@ -182,6 +185,7 @@ fn normalize_identity_filter(raw: &str) -> Option<String> {
 /// With `?details=true`, returns `{ "indexes": [{"id": …, "size_bytes": …}] }`.
 /// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`,
 /// `list_indexes_details_includes_size_bytes`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn list_indexes_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<ListIndexesParams>,
@@ -305,6 +309,7 @@ pub(crate) async fn list_indexes_report(
     }
 }
 
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn create_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<CreateIndexRequest>,

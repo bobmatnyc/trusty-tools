@@ -6,7 +6,10 @@
 //! What: `GlobalSearchRequest` and `global_search_handler`. Per-index search
 //! lives in `search.rs`; routing helpers live in `routing.rs`.
 //! Test: `test_global_search_fans_out_and_merges` in `server.rs#tests`.
-use axum::{extract::State, http::StatusCode, Json};
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -96,6 +99,13 @@ pub struct GlobalSearchRequest {
     /// `deadline_indexes_skipped`. Clamped to `>= 1`.
     #[serde(default)]
     pub per_index_deadline_ms: Option<u64>,
+
+    /// Forwarded to every per-index search (#9258); see
+    /// `SearchQuery::ripgrep_fallback` / `SearchQuery::lexical_limit`.
+    #[serde(default)]
+    pub ripgrep_fallback: Option<bool>,
+    #[serde(default)]
+    pub lexical_limit: Option<usize>,
 }
 
 fn default_global_top_k() -> usize {
@@ -142,6 +152,7 @@ fn default_global_top_k() -> usize {
 /// indexes a file into each, and asserts both contribute results tagged with
 /// the right `index_id`. `test_global_search_surfaces_cold_indexes_skipped`
 /// asserts the count is > 0 when cold indexes exist.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn global_search_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<GlobalSearchRequest>,
@@ -196,7 +207,8 @@ pub(crate) async fn global_search_report(
         state.cold_store.len()
     };
 
-    let all_ids = state.registry.list();
+    // #9169: a parked index is never part of the fan-out.
+    let all_ids = super::project_park::without_parked(state, state.registry.list());
     // Issue #110: when caller supplies `indexes`, restrict fan-out to that
     // set. Unknown ids are dropped here (the per-index branch below would
     // emit a 404; we'd rather silently skip so a stale caller doesn't
@@ -314,7 +326,7 @@ pub(crate) async fn global_search_report(
     // oversample per-index by passing the user's top_k unchanged: each lane
     // contributes up to top_k candidates, then RRF picks the best top_k
     // overall.
-    let per_index_query = SearchQuery {
+    let mut per_index_query = SearchQuery {
         text: req.query.clone(),
         top_k: req.top_k,
         expand_graph: true,
@@ -338,7 +350,11 @@ pub(crate) async fn global_search_report(
         // Issue #3401: forward path/repo scoping to every per-index search.
         path_prefix: req.path_prefix.clone(),
         repos: req.repos.clone(),
+        ripgrep_fallback: req.ripgrep_fallback,
+        lexical_limit: req.lexical_limit,
     };
+    // #9258: same config defaults and refusal as the per-index route.
+    super::lexical_lane::resolve(state, &mut per_index_query)?;
 
     // Run the per-index searches with *bounded* concurrency (issue #2845).
     // An unbounded `join_all` over ~150+ indexes issued every per-index search

@@ -92,7 +92,7 @@ concurrency:
   # `edited` is excluded on pull requests (#4179 shape): that run is not
   # cancelled, so it must be a real one rather than a cheaper answer racing the
   # run it coexists with.
-  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || (github.event.action != 'edited' && github.event.action != 'ready_for_review') }}
 
 jobs:
   semver-checks:

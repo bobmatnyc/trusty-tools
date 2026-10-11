@@ -24,6 +24,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::core::project_map::MapView;
 use crate::service::persistence::PersistedIndex;
 
 #[path = "project_resolve_disk.rs"]
@@ -150,10 +151,11 @@ impl Candidate {
         format!("root:{}", self.root_path.display())
     }
 
-    /// The key a resolve groups on. #9169: a root with no `.git` of its own is
-    /// a subdirectory index, so sibling subdirectories of one repo are never
-    /// each other's duplicates.
-    fn group_key(&self) -> String {
+    /// The key a resolve groups on, and the key `project-map.toml` pins.
+    /// #9169: a root with no `.git` of its own is a subdirectory index, so
+    /// sibling subdirectories of one repo are never each other's duplicates.
+    /// Read `kind` from a probed candidate; an unprobed one groups by identity.
+    pub fn group_key(&self) -> String {
         if self.kind == RootKind::Checkout {
             self.root_key()
         } else {
@@ -281,11 +283,32 @@ pub fn resolve(
     candidates: &[Candidate],
     disk: &impl Disk,
 ) -> Result<Resolution, ResolveMiss> {
+    resolve_pinned(query, candidates, disk, &MapView::default())
+}
+
+/// [`resolve`], answering from `project-map.toml` (#9169 PR-B1).
+///
+/// Why: once the map exists its pins, not ruling f7, name each group's index,
+/// and a parked index never answers for its project.
+/// What: [`resolve`]'s walk, with two changes inside the pick: a parked id is
+/// never a winner (an exact parked id yields to its group like a worktree),
+/// and a group's pin wins whenever the pinned index is in the group and can
+/// win. A group with no pin keeps the f7 pick. `duplicates` is unchanged.
+/// Test: `a_pin_overrides_the_f7_winner_of_its_group`,
+/// `a_parked_index_never_wins_and_an_exact_parked_id_yields_to_its_group`.
+pub fn resolve_pinned(
+    query: &ProjectQuery,
+    candidates: &[Candidate],
+    disk: &impl Disk,
+    view: &MapView,
+) -> Result<Resolution, ResolveMiss> {
     match query {
-        ProjectQuery::Identity(id) => resolve_key(id, query, candidates, disk, "repo_identity"),
+        ProjectQuery::Identity(id) => {
+            resolve_key(id, query, candidates, disk, "repo_identity", view)
+        }
         ProjectQuery::Name(name) => {
             if let Some(exact) = candidates.iter().find(|c| c.index_id == *name) {
-                return resolve_anchored(exact, candidates, disk, "index_id");
+                return resolve_anchored(exact, candidates, disk, "index_id", view);
             }
             let lower = name.to_lowercase();
             let matches = probed(
@@ -296,7 +319,7 @@ pub fn resolve(
                 [] => Err(ResolveMiss::NotFound {
                     nearest: nearest(query, candidates, disk),
                 }),
-                [only] => resolve_key(only, query, candidates, disk, "name"),
+                [only] => resolve_key(only, query, candidates, disk, "name", view),
                 _ => Err(ResolveMiss::Ambiguous {
                     matches: sorted(matches),
                 }),
@@ -308,10 +331,10 @@ pub fn resolve(
                 .canonicalize(path)
                 .unwrap_or_else(|| lexical_normalize(path));
             if let Some(owner) = owning_candidate(&query_path, candidates) {
-                return resolve_anchored(owner, candidates, disk, "path");
+                return resolve_anchored(owner, candidates, disk, "path", view);
             }
             match disk.derive_identity(path) {
-                Some(id) => resolve_key(&id, query, candidates, disk, "path"),
+                Some(id) => resolve_key(&id, query, candidates, disk, "path", view),
                 None => Err(ResolveMiss::NotFound {
                     nearest: nearest(query, candidates, disk),
                 }),
@@ -337,6 +360,7 @@ fn resolve_key(
     candidates: &[Candidate],
     disk: &impl Disk,
     matched_by: &'static str,
+    view: &MapView,
 ) -> Result<Resolution, ResolveMiss> {
     let members = probed(
         candidates
@@ -346,7 +370,7 @@ fn resolve_key(
     );
     let mut group = group_of(&members, key);
     if group.iter().any(|c| c.kind == RootKind::MainCheckout) {
-        return pick(with_recency(group, disk), matched_by);
+        return pick(with_recency(group, disk), matched_by, key, view);
     }
     // #9169: no main checkout under `key`, so a subdirectory index of the repo
     // is its live index — before a worktree, an orphan or a `/Volumes` row.
@@ -359,10 +383,10 @@ fn resolve_key(
         [] if group.is_empty() => Err(ResolveMiss::NotFound {
             nearest: nearest(query, candidates, disk),
         }),
-        [] => pick(with_recency(group, disk), matched_by),
+        [] => pick(with_recency(group, disk), matched_by, key, view),
         [only] => {
             group.extend(group_of(&subdirs, only));
-            pick(with_recency(group, disk), matched_by)
+            pick(with_recency(group, disk), matched_by, key, view)
         }
         _ => Err(ResolveMiss::Ambiguous {
             matches: sorted(members),
@@ -380,6 +404,7 @@ fn resolve_anchored(
     candidates: &[Candidate],
     disk: &impl Disk,
     matched_by: &'static str,
+    view: &MapView,
 ) -> Result<Resolution, ResolveMiss> {
     let (identity, root) = (anchor.identity_key(), anchor.root_key());
     let members = probed(
@@ -397,9 +422,11 @@ fn resolve_anchored(
             kind: disk.kind(anchor),
             ..anchor.clone()
         });
-    let group = with_recency(group_of(&members, &anchor.group_key()), disk);
-    if !anchor.kind.can_win() {
-        return pick(group, matched_by);
+    let key = anchor.group_key();
+    let group = with_recency(group_of(&members, &key), disk);
+    // #9169: a parked anchor yields to its group, as a worktree does.
+    if !anchor.kind.can_win() || view.is_parked(&anchor.index_id) {
+        return pick(group, matched_by, &key, view);
     }
     let (index, rest): (Vec<Candidate>, Vec<Candidate>) = group
         .into_iter()
@@ -424,17 +451,31 @@ fn resolve_anchored(
 /// `a_repo_with_only_worktree_indexes_has_no_live_index`,
 /// `a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime`,
 /// `a_reload_of_the_older_corpus_does_not_make_it_the_newest`.
-fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, ResolveMiss> {
-    let winner = group
-        .iter()
-        .filter(|c| c.kind.can_win())
-        .min_by(|a, b| {
-            a.kind
-                .cmp(&b.kind)
-                .then(recency(b).cmp(&recency(a)))
-                .then(a.index_id.cmp(&b.index_id))
-        })
+fn pick(
+    group: Vec<Candidate>,
+    matched_by: &'static str,
+    key: &str,
+    view: &MapView,
+) -> Result<Resolution, ResolveMiss> {
+    let eligible = |c: &&Candidate| c.kind.can_win() && !view.is_parked(&c.index_id);
+    // #9169: the group's pin wins over f7 when it is in the group and can win.
+    let pinned = view
+        .pin(key)
+        .and_then(|id| group.iter().find(|c| c.index_id == id))
+        .filter(eligible)
         .cloned();
+    let winner = pinned.or_else(|| {
+        group
+            .iter()
+            .filter(eligible)
+            .min_by(|a, b| {
+                a.kind
+                    .cmp(&b.kind)
+                    .then(recency(b).cmp(&recency(a)))
+                    .then(a.index_id.cmp(&b.index_id))
+            })
+            .cloned()
+    });
     let Some(index) = winner else {
         return Err(ResolveMiss::NoLiveIndex {
             group: sorted(group),
@@ -451,6 +492,28 @@ fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, R
         matched_by,
         duplicates,
     })
+}
+
+/// Every group's PR-A answer, for the first-boot map migration (#9169).
+///
+/// Why: migration pins each group to the index PR-A would return for it, so
+/// the first answers from the map equal the derived ones.
+/// What: probes every candidate's kind, then resolves each distinct group key
+/// exactly as an identity query for that key would, with no map. A group
+/// whose resolve misses (only worktrees or orphans, or an ambiguous key) gets
+/// no entry. Sorted by key.
+/// Test: `migration_pins_every_groups_f7_winner_and_parks_nothing`.
+pub fn group_winners(candidates: &[Candidate], disk: &impl Disk) -> Vec<(String, Candidate)> {
+    let no_map = MapView::default();
+    distinct_keys(&probed(candidates.iter(), disk))
+        .into_iter()
+        .filter_map(|key| {
+            let query = ProjectQuery::Identity(key.clone());
+            resolve_key(&key, &query, candidates, disk, "migration", &no_map)
+                .ok()
+                .map(|r| (key, r.index))
+        })
+        .collect()
 }
 
 /// Ruling f7's recency key, compared newest first (#9169).

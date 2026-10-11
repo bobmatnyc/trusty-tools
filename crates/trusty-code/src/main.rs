@@ -120,6 +120,15 @@ enum Command {
         /// the port discarded.
         #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
         port: Option<u16>,
+
+        /// Bind this project's own socket instead of the shared one (#4600).
+        ///
+        /// The path is derived from `--project` (a sibling of the shared
+        /// socket, keyed by the project root), so a second project can run a
+        /// daemon while another project's daemon holds the shared socket.
+        /// `tcode tui` passes this itself; there is no path to supply.
+        #[arg(long, requires = "http", conflicts_with = "stdio")]
+        project_socket: bool,
     },
 
     /// Launch the interactive TUI REPL, starting a `tcode serve` daemon if
@@ -565,7 +574,8 @@ async fn main() -> Result<()> {
             stdio,
             http,
             port,
-        } => run_serve(project, stdio, http, port).await,
+            project_socket,
+        } => run_serve(project, stdio, http, port, project_socket).await,
 
         // #4424: the launch point for the TUI REPL — reuses `run_thin_client`
         // so a daemon-resolution failure prints `tcode tui: <actionable
@@ -833,7 +843,8 @@ async fn run_thin_client(
 /// reject `--stdio --http` together and `--port` without `--http` before this
 /// function ever runs.
 /// What: `--http` delegates to `trusty_code::serve::run_http` (port defaults
-/// to `serve::DEFAULT_HTTP_PORT` when `--port` is omitted); `--stdio`
+/// to `serve::DEFAULT_HTTP_PORT` when `--port` is omitted), or to
+/// `serve::uds::run_project_daemon` under `--project-socket` (#4600); `--stdio`
 /// delegates to `trusty_code::serve::run_stdio`. Both run until shutdown
 /// (SIGTERM/SIGINT, or stdin EOF for `--stdio`), logging to stderr only.
 /// Neither flag given prints actionable usage and exits 1 rather than
@@ -851,6 +862,7 @@ async fn run_serve(
     stdio: bool,
     http: bool,
     port: Option<u16>,
+    project_socket: bool,
 ) -> Result<()> {
     let binding = match trusty_code::binding::ProjectBinding::resolve(project) {
         Ok(b) => b,
@@ -865,7 +877,14 @@ async fn run_serve(
     };
     if http {
         let port = port.unwrap_or(trusty_code::serve::DEFAULT_HTTP_PORT);
-        if let Err(e) = trusty_code::serve::run_http(binding, port).await {
+        // #4600: `--project-socket` moves only the socket; an explicit
+        // `--port` is honoured either way.
+        let served = if project_socket {
+            trusty_code::serve::uds::run_project_daemon(binding, Some(port)).await
+        } else {
+            trusty_code::serve::run_http(binding, port).await
+        };
+        if let Err(e) = served {
             eprintln!("tcode serve --http: fatal error: {e:#}");
             process::exit(1);
         }

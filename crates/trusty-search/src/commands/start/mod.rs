@@ -21,7 +21,7 @@
 //! Test: `start/tests.rs` — all 14 unit tests pass.
 
 // #9214: the `start` flags, moved out of `main.rs` (frozen line-cap budget).
-mod args;
+pub(crate) mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;
@@ -51,6 +51,10 @@ mod tests_4846;
 // #3929 came in through, which the #2305 / #2336 call-site guards do not sit on.
 #[cfg(test)]
 mod tests_4045;
+
+// #9169: the boot salvage never writes a parked row, nor any row without the map.
+#[cfg(test)]
+mod tests_9169;
 
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A

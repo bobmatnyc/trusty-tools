@@ -1,5 +1,5 @@
-//! `audit.jsonl`: one line per refused send, dropped inbound message, or
-//! quarantined ledger line.
+//! `audit.jsonl`: one line per refused send, dropped or rate-limited inbound
+//! message, or quarantined ledger line.
 //!
 //! Why: a refused send and a dropped reply are the events an operator needs
 //! to see, but the audit log must never become a copy of the conversation
@@ -31,6 +31,9 @@ pub enum AuditEvent {
     InboundUnparseable,
     /// A torn final `questions.jsonl` line was moved aside at open.
     LedgerLineQuarantined,
+    /// An inbound message was dropped over its rate limit (#8454); one line
+    /// per bucket per window.
+    RateLimited,
 }
 
 /// One audit line. It has no field that can hold message text.

@@ -66,12 +66,11 @@ Group=trusty
 #               indexes every git repo it finds.  On EC2, auto-discovery should
 #               be off by default; register indexes explicitly with
 #               `trusty-search index <path>`.
-# --port 7878: explicit port; change to match your deployment or omit to use
-#               the compiled-in default (7878).
+# No --port: the daemon serves its Unix socket only and binds no TCP port
+# (#9214); `start` rejects --port and --no-http (#9536).
 ExecStart=/usr/local/bin/trusty-search start \
     --foreground \
-    --no-auto-discover \
-    --port 7878
+    --no-auto-discover
 
 # ── Graceful shutdown (#694 mitigation) ──────────────────────────────────────
 # KillSignal=SIGTERM: instruct systemd to send SIGTERM first (graceful).  This

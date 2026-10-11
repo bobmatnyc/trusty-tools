@@ -46,7 +46,8 @@
 //! `models_url_does_not_double_an_existing_v1_suffix`,
 //! `probe_reports_unreachable_naming_the_endpoint`,
 //! `probe_reports_non_success_status`, `probe_accepts_a_live_endpoint`,
-//! `probe_timeout_is_one_second`, `list_models_returns_the_served_ids`,
+//! `probe_timeout_is_one_second`, `probe_deadline_bounds_a_stalled_client_build`,
+//! `list_models_returns_the_served_ids`,
 //! `list_models_reports_an_unreadable_body`,
 //! `list_models_is_empty_when_the_server_serves_none`,
 //! `local_host_reads_the_env_override`, `local_host_defaults_when_unset`.
@@ -60,7 +61,8 @@ use std::time::Duration;
 /// is not up has to be ruled out in about the time a human would wait. One
 /// second is what `chat::auto_detect_local_provider` has used since it shipped;
 /// naming it once here is what keeps the two callers from drifting apart.
-/// What: one second, passed to both `connect_timeout` and `timeout`.
+/// What: one second, passed to both `connect_timeout` and `timeout`, and the
+/// deadline over the whole probe, client build included (#9213).
 /// Test: `probe_timeout_is_one_second`.
 pub const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -230,33 +232,69 @@ pub async fn probe_models_endpoint(url: &str) -> Result<(), LocalProbeError> {
 /// Why: [`probe_models_endpoint`] and [`list_models`] issue the IDENTICAL
 /// request and differ only in whether they read the body, so the client, the
 /// timeout, and the success criterion live here once.
-/// What: builds a client bounded by [`LOCAL_PROBE_TIMEOUT`] on connect and on
-/// the whole request, GETs `url`, and returns the response for any 2xx. Sends no
-/// credential.
+/// What: [`get_success_with`] using the real [`build_probe_client`].
 /// Test: `probe_reports_unreachable_naming_the_endpoint`,
 /// `probe_reports_non_success_status`, `probe_accepts_a_live_endpoint`.
 async fn get_success(url: &str) -> Result<reqwest::Response, LocalProbeError> {
+    get_success_with(url, build_probe_client).await
+}
+
+/// Build the probe's HTTP client, bounded by [`LOCAL_PROBE_TIMEOUT`] on connect
+/// and on the whole request.
+fn build_probe_client() -> reqwest::Result<reqwest::Client> {
     // #4490: proxies are deliberately left enabled — see the module's Scope note.
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .connect_timeout(LOCAL_PROBE_TIMEOUT)
         .timeout(LOCAL_PROBE_TIMEOUT)
         .build()
-        .map_err(|e| LocalProbeError::ClientBuild {
-            endpoint: url.to_string(),
-            cause: e.to_string(),
-        })?;
+}
 
-    match client.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => Ok(resp),
-        Ok(resp) => Err(LocalProbeError::Status {
-            endpoint: url.to_string(),
-            status: resp.status().as_u16(),
-        }),
-        Err(e) => Err(LocalProbeError::Unreachable {
-            endpoint: url.to_string(),
-            cause: e.to_string(),
-        }),
-    }
+/// [`get_success`] with the client factory injected.
+///
+/// Why (#9213): building a `reqwest::Client` can block — on macOS the
+/// system-proxy lookup is a synchronous SCDynamicStore call — and it ran before
+/// the client's own timeout started, so a stalled build made a probe outlast
+/// its one-second budget. The factory parameter is the seam a test uses to
+/// inject a build that stalls.
+/// What: runs `build` on the blocking pool so it never parks a tokio worker,
+/// then sends the GET; both steps sit under one [`LOCAL_PROBE_TIMEOUT`]
+/// deadline. A missed deadline is [`LocalProbeError::Unreachable`], the same
+/// outcome a slow send reports. Any 2xx returns the response.
+/// Test: `probe_deadline_bounds_a_stalled_client_build`.
+async fn get_success_with<F>(url: &str, build: F) -> Result<reqwest::Response, LocalProbeError>
+where
+    F: FnOnce() -> reqwest::Result<reqwest::Client> + Send + 'static,
+{
+    let attempt = async {
+        let client = tokio::task::spawn_blocking(build)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|built| built.map_err(|e| e.to_string()))
+            .map_err(|cause| LocalProbeError::ClientBuild {
+                endpoint: url.to_string(),
+                cause,
+            })?;
+        match client.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => Ok(resp),
+            Ok(resp) => Err(LocalProbeError::Status {
+                endpoint: url.to_string(),
+                status: resp.status().as_u16(),
+            }),
+            Err(e) => Err(LocalProbeError::Unreachable {
+                endpoint: url.to_string(),
+                cause: e.to_string(),
+            }),
+        }
+    };
+    // #9213: one deadline over the client build AND the send.
+    tokio::time::timeout(LOCAL_PROBE_TIMEOUT, attempt)
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(LocalProbeError::Unreachable {
+                endpoint: url.to_string(),
+                cause: "probe deadline elapsed".to_string(),
+            })
+        })
 }
 
 /// Probe a local model server given its base URL.
@@ -427,6 +465,42 @@ mod tests {
         probe_local(&format!("http://{addr}"))
             .await
             .expect("live endpoint must probe clean");
+    }
+
+    /// Why (#9213): a client build that stalls (macOS system-proxy lookup) must
+    /// not stretch a probe past its budget; it reports Unreachable like a slow
+    /// send. The outer timeout keeps a regression from hanging the suite.
+    /// Test: this test.
+    #[tokio::test]
+    async fn probe_deadline_bounds_a_stalled_client_build() {
+        let (release, stalled) = std::sync::mpsc::channel::<()>();
+        let stalled_build = move || {
+            // Stall until the test releases us; bounded so a lost sender cannot
+            // pin a blocking-pool thread forever.
+            let _ = stalled.recv_timeout(Duration::from_secs(10));
+            build_probe_client()
+        };
+        let url = models_url(&format!("http://{}", dead_addr()));
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            LOCAL_PROBE_TIMEOUT * 3,
+            get_success_with(&url, stalled_build),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let _ = release.send(());
+        let err = outcome
+            .unwrap_or_else(|_| panic!("probe exceeded its deadline: {elapsed:?}"))
+            .expect_err("a stalled build must fail the probe");
+        assert!(
+            matches!(err, LocalProbeError::Unreachable { .. }),
+            "expected Unreachable, got {err:?}"
+        );
+        assert_eq!(err.endpoint(), url);
+        assert!(
+            elapsed < LOCAL_PROBE_TIMEOUT * 2,
+            "probe took {elapsed:?}, budget {LOCAL_PROBE_TIMEOUT:?}"
+        );
     }
 
     /// Why (#4490): the budget is a contract, not an implementation detail —

@@ -109,7 +109,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         "tools": [
             {
                 "name": "memory_remember",
-                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass content-QUALITY gates (blocklist, short-content, dedup, noise); this does NOT bypass secret detection — see allow_secret_like. Or use memory_note for short curated facts.",
+                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass content-QUALITY gates (blocklist, short-content, dedup, noise); this does NOT bypass secret detection — see allow_secret_like. Or use memory_note for short curated facts. Pass `type` (Ruling, Decision, Status, Turn or Reference) to label the drawer; recall ranks Ruling and Decision as rulings and weights Status and Turn below other drawers.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -281,7 +281,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null. #9390: each drawer also carries `verify`, always present: the command that re-reads its slot's fact, or null when it has none. A drawer displaced from its slot reads null.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -486,6 +486,14 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // production cap on this file.
     let tools = result["tools"].as_array_mut().expect("tools is array");
     let metrics = tools.pop().expect("console_metrics sentinel");
+    // #9544: after `palace_update`, from its own `json!` for the recursion limit.
+    let at = tools
+        .iter()
+        .position(|t| t["name"] == "palace_update")
+        .map_or(tools.len(), |i| i + 1);
+    tools.insert(at, palace_rename_definition());
+    // #9144 `type`, #9390 `verify`: own `json!` calls for the recursion limit.
+    super::write_property_definitions::splice(tools);
     tools.extend(task_tool_definitions(has_default));
     tools.extend(chat_tool_definitions(has_default));
     tools.extend(super::chat_assets::definitions());
@@ -503,4 +511,25 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // advertised. Applied after the splices so a spliced group is covered too.
     super::byte_cap::annotate_capped_tools(&mut result["tools"]);
     result
+}
+
+/// The `palace_rename` schema (#9544).
+///
+/// Why: its own `json!` call, because one more tool in the main literal trips
+/// the macro recursion limit (the same reason `embed_audit_definitions` splits).
+/// Test: `tool_definitions_lists_all_tools`.
+fn palace_rename_definition() -> Value {
+    json!({
+        "name": "palace_rename",
+        "description": "Move a palace to a new id. Drawers, vectors, the knowledge graph, rooms, wings and chat sessions move with it, and their counts are verified unchanged. The old id becomes an alias of the new one, so reads and writes through it keep working, and every alias of the old id follows. Refuses a source that is an alias, a target that is an alias of another palace, and an existing target unless it is empty and `replace_empty=true`. Not rewritten: knowledge-graph subjects written by kg_bootstrap, backups under backups/format-migration/<old>, and project pin files on disk, which still name the old id (it resolves through the alias).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "palace_id":     {"type": "string", "description": "Current id of the palace to rename. Must be the palace itself, not an alias."},
+                "new_id":        {"type": "string", "description": "New palace id ([a-z0-9][a-z0-9-]{0,62})."},
+                "replace_empty": {"type": "boolean", "description": "Replace an existing, empty palace at new_id; it is moved to <data root>/.trash, not deleted. Defaults to false.", "default": false}
+            },
+            "required": ["palace_id", "new_id"]
+        }
+    })
 }

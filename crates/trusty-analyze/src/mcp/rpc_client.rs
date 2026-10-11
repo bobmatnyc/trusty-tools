@@ -100,8 +100,29 @@ impl AnalyzerMcpServer {
     /// daemon, so it arrives here as `Transport` rather than decoding to
     /// `null`.
     ///
-    /// Test: `a_dead_daemon_answers_the_request_that_caused_it`.
+    /// A failed auto-start guard does not block the call (#8279): the call
+    /// still dials, so a daemon that came up late is used, and a transport
+    /// failure carries the guard's message.
+    ///
+    /// Test: `a_dead_daemon_answers_the_request_that_caused_it`,
+    /// `a_failed_daemon_guard_is_an_in_band_error_and_the_bridge_keeps_serving`.
     pub(super) async fn call(&self, method: &str, params: Value) -> Result<Value, DispatchError> {
+        // #8279: the guard runs here, on the first call that needs the daemon,
+        // instead of before the stdio loop reads `initialize`.
+        let guard_failure = match &self.gate {
+            Some(gate) => gate.ensure().await.err(),
+            None => None,
+        };
+        match (self.call_daemon(method, params).await, guard_failure) {
+            (Err(DispatchError::Transport(msg)), Some(guard)) => Err(DispatchError::Transport(
+                format!("{msg} (daemon auto-start failed: {guard})"),
+            )),
+            (outcome, _) => outcome,
+        }
+    }
+
+    /// One bridged exchange with the daemon, with no auto-start guard.
+    async fn call_daemon(&self, method: &str, params: Value) -> Result<Value, DispatchError> {
         // #6316: the framed exchange now lives in trusty-mcp; this maps the
         // bridge's JSON-RPC answer onto the dispatcher's own error type.
         let response = self

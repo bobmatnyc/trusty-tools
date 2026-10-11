@@ -38,6 +38,7 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `embedder-cuda` | GPU-accelerated embedding via CUDA execution provider |
 | `embedder-load-dynamic` | Dynamic ORT loading for AL2023 / glibc < 2.38 builds |
 | `embedder-test-support` | Expose `MockEmbedder` outside `cfg(test)` for downstream tests |
+| `memory-core-test-support` | Expose `memory_core::store::format_v0_fixture`, a format-0 palace for downstream migration tests |
 | `embedder-coreml` | CoreML execution provider on Apple Silicon (no-op alias on other platforms) |
 | `embedder-candle` | Candle Metal embedding backend |
 | `embedder-client` | UDS JSON-RPC client for the `trusty-embedderd` sidecar (formerly `trusty-embedder-client`) |
@@ -55,19 +56,6 @@ By default the crate is dependency-light: `tokio`, `serde`, `reqwest`, and
 `tracing`. Pull in only the features you need.
 
 ## What's Included
-
-### Port Binding
-
-`bind_with_auto_port` walks forward through ports when the requested one is
-busy, so daemon restarts don't fail noisily.
-
-```rust
-use trusty_common::bind_with_auto_port;
-
-let addr = "127.0.0.1:7878".parse()?;
-let listener = bind_with_auto_port(addr, 10).await?;
-println!("listening on {}", listener.local_addr()?);
-```
 
 ### Data Directory
 
@@ -215,7 +203,7 @@ library slot. Enable it in at most one crate per build graph (typically
 
 ### Palace format guard (`memory-core`)
 
-`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch` and `FormatMarkerUnreadable` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm. The `memory_core::store::format_backup` module copies a palace's primary files into a verified backup before a migration; trusty-common 0.58.0 stamps no marker yet.
+`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 1. A writer-intent `PalaceHandle` open migrates a format-0 palace at its first open, behind a verified backup under `<data_root>/backups/format-migration/<palace>/`; a read-only open of a format-0 palace is refused until the daemon has migrated it. One migration of a palace runs at a time: a second writer open in the process waits for it, and another process fails while it holds the palace directory's lock. `palace_format::palace_format_status` reads a palace's state without writing, and reports `Unverified` when `kg.redb` cannot be read without writing (held by a running daemon, or in need of crash repair). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
 
 ## Migrations (`migrations` feature)
 

@@ -1,0 +1,6 @@
+crate   trusty-analyze
+version 0.12.7
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  auto_trait_impl_removed type AnalyzerMcpServer is no longer RefUnwindSafe
+accept  auto_trait_impl_removed type AnalyzerMcpServer is no longer UnwindSafe
+accept  inherent_method_missing TrustySearchClient::base_url

@@ -27,6 +27,8 @@ fn make_branch_query(text: &str, files: Vec<String>, boost: f32) -> SearchQuery 
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     }
 }
 
@@ -195,6 +197,8 @@ async fn test_no_boost_when_branch_files_absent() {
         refine_query: None,
         path_prefix: None,
         repos: Vec::new(),
+        ripgrep_fallback: None,
+        lexical_limit: None,
     };
     let results = idx.search(&q).await.unwrap();
     assert!(!results.is_empty());

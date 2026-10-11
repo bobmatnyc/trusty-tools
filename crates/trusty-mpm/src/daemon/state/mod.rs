@@ -34,3 +34,5 @@ pub use core::{
     DaemonState, EVENT_CHANNEL_CAPACITY, HOOK_HISTORY_LIMIT, PAIR_CODE_TTL, ReapResult,
 };
 pub use sessions::DelegationSweep;
+// #9274: which open intent a process takes on the SM and portfolio palaces.
+pub use sm::PalaceAccess;

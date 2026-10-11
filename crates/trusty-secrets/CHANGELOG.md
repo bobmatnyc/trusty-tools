@@ -6,6 +6,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.1.5] — 2026-10-10
+
+### Added
+
+- `GrantRegistry::check_scoped`, which runs `authorize_scoped`'s checks without spending a one-shot grant, and `GrantRegistry::spend`, which spends one use after the caller's own checks passed (#9621).
+
+### Fixed
+
+- A one-shot exec grant is spent only after every `secrets.resolve` check passed and the allow record was written. An unreadable caller ancestry, an audit failure or a backend failure no longer uses it up (#9621).
+- Grants whose child process has exited are dropped at the next mint or idle check. They no longer keep the server from its idle exit or hold one of the 1024 grant slots, and their tokens are refused (#9621).
+- An npm-installed Claude Code (`node .../@anthropic-ai/claude-code/cli.js`) counts as an agent ancestor. A `node` process is judged on argv[0] and its script operand only, read from `/proc/<pid>/cmdline` on Linux and `KERN_PROCARGS2` on macOS: a `claude-code` path segment, or a basename exactly `claude`, matches. The argument after a node option the matcher does not know is judged as a possible script, and the search for the script goes on past it, so `node --env-file .env /usr/local/bin/claude` counts. A plain `node` does not count, even when a later argument mentions Claude (`node lint.js CLAUDE.md`). A `node` whose argv cannot be read refuses (#9621).
+- `secrets.set_agents_may_use` writes its allow record under the key's index lock, after the row check. Records and flag changes for one key land in the same order, and an unindexed key leaves one `not_found` deny with no allow record (#9621).
+- The `audit_unavailable` text no longer says the requested change "may already have been applied"; it says a change was made only if the record failed after the backend call (#9621).
+- `secrets.resolve` writes its allow audit record before it opens or reads the backend. When the audit log cannot be opened or written, the call answers `audit_unavailable` and reads nothing, so no value is read without a record. A failure after the record (the agents flag, the backend, a spent grant) adds a deny record with its kind (#9621).
+
+## [0.1.4] — 2026-10-10
+
+### Added
+
+- `secrets.set_agents_may_use` on the trusty-secrets socket (DOC-74 §15.8, S8 slice 3, #9070). It takes `project`, `vault`, `key` and `allowed`, and answers the vault, the key and the flag as set. A caller whose own ancestry, read from its socket peer pid, has a Claude Code process may turn the flag off but not on (`agent_use_refused`, -32065); an unreadable ancestry or a missing peer pid refuses with `grant_refused`. The allow audit record is written before the backend call: if the log cannot be opened or the record appended, the flag is not changed (`audit_unavailable`), and a backend failure after it adds a second, deny record with its kind.
+- The `api` types `SetAgentsMayUseRequest` and `SetAgentsMayUseResponse` and the method name `method::SET_AGENTS_MAY_USE`.
+- Audit: `AuditMethod::SetAgentsMayUse`, and two optional record fields: `agents_allowed`, the flag value a flag-set call asked for, and `agent_parent`, whether the caller had a Claude Code ancestor, on `grant`, `resolve` and flag-set records once judged. Older records decode with both absent.
+- `server::grant`: an in-memory exec-grant registry for `secrets.resolve` (DOC-74 §15.8, S8 slice 1, #9070). `GrantRegistry` mints a 256-bit token from the OS CSPRNG and keeps only its SHA-256, compared in constant time. A grant holds its allowed keys, the child pid and that process's start time, an expiry checked on every use and capped at a max TTL, and an optional one-shot flag. A wrong, unknown or expired token, a key outside the grant, a caller outside the child's process tree and a reused child pid all return the one `GrantError::Refused`. A poisoned lock, an unreadable process table or start time, and a clock error each deny with their own variant. `has_unexpired` reports whether any grant is still live.
+- `server::ancestry`: `ProcessTable` (Linux `/proc`, macOS `proc_pidinfo`; any other target refuses every read) and `is_self_or_descendant`, which compares the root's recorded start time so a reused pid is refused.
+- `secrets.grant`, `secrets.resolve` and `secrets.revoke` on the trusty-secrets socket (DOC-74 §15.8, S8 slice 2, #9070). `secrets.grant` takes `project`, `child_pid`, `keys`, `ttl_secs` and an optional `one_shot`, mints the grant server-side and returns its token. `secrets.resolve` takes a token and one key and is the only method that returns a value: it answers only when the token is live, the key is in the grant, and the socket peer's pid (from the kernel, never the request) is the child or a descendant. Every such refusal is the one new error kind `grant_refused` (-32082) and carries no value. A full registry is `grant_limit_reached` (-32083). `secrets.revoke` removes a grant even when the audit log is unwritable. None of the three has a console route or an MCP tool.
+- A registrar with a Claude Code ancestor, judged server-side from its own peer pid's ancestry (`has_agent_ancestor`, `ProcessTable::is_agent`), may grant only keys flagged "agents may use"; any other key is refused with `agent_use_refused` before anything is minted. `secrets.resolve` checks the flag again before each read of such a grant.
+- Audit: `AuditMethod::{Grant, Resolve, Revoke}`. `grant` writes one record per granted key or one deny, `resolve` one record per call, allow or deny, `revoke` one per call. An allowed grant or resolve whose record cannot be written returns no token or value. Every audit record, for every method, now carries the caller's pid.
+- The `api` types `ExecGrantRequest`, `ExecGrantResponse`, `ResolveRequest`, `ResolveResponse`, `RevokeRequest` and `RevokeResponse`, whose `Debug` redacts tokens and values, and the method names `method::GRANT`, `method::RESOLVE` and `method::REVOKE`.
+- The server's 60 s idle exit waits while any exec grant is unexpired, and exits at most one idle window after the last one expires or is revoked.
+- On macOS, the ancestry walk reads each parent pid and process name with `PROC_PIDT_SHORTBSDINFO`, which answers across uids, so a grant from a shell under the root-owned `login` (Terminal, iTerm2) or `sshd` reads its whole parent chain. Only the granted child's start time still uses `PROC_PIDTBSDINFO`.
+
+### Changed
+
+- `secrets.resolve` also judges the resolving caller's own ancestry: a caller with a Claude Code ancestor reads only keys flagged "agents may use", even from a grant a non-agent registered for it (#9070). An unreadable ancestry refuses with `grant_refused`.
+- `ProcessTable::is_agent` has a default body that answers `ProcessError::Unreadable`, so a process table that does not implement it fails closed in `has_agent_ancestor` instead of failing to compile (#9070).
+
+## [0.1.3] — 2026-10-10
+
+### Fixed
+
+- Every Keychain call (read, write, delete, and the "agents may use" flag item read by `list`) now has a time limit, `KEYCHAIN_CALL_TIMEOUT` (60 s), cut to a server request's deadline when that is sooner ([#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)). A call blocked on an unanswered access prompt no longer holds its caller: past the limit it fails with the new `SecretsError::Timeout`, which names the backend, the operation, the vault and the key, and on the wire with the new kind `backend_timeout` (-32081). A timeout is never a miss, an empty value or a success, and no call starts once the request deadline has passed.
+- The timed-out call is abandoned, not stopped: its thread stays blocked until the OS prompt ends, and a write it started may still land then. Until that thread ends, every later call on the same Keychain item (a key's value, or its flag item) fails at once with `Timeout` and is never started, so the late write cannot land after a newer one; calls on other items are unaffected. Both error texts say so.
+- A 1Password or Keeper CLI call still running when the server exits (idle, `SIGTERM` after its drain, or a panic) no longer outlives the server process ([#9572](https://github.com/bobmatnyc/trusty-tools/issues/9572)). The server now raises a cancel flag when its serve loop ends; the call kills and reaps the CLI's whole process group within one 10 ms poll, and no new CLI call starts after that. Before, the call's thread was abandoned at exit and the CLI, with any child it started, kept running under pid 1 until its own timeout (60 s by default). A write the CLI had started may or may not land.
+- A server request whose backend call never returns (for example the file backend on a hung mount) now answers `deadline_exceeded` (-32079) 2 s after its deadline instead of never answering ([#9572](https://github.com/bobmatnyc/trusty-tools/issues/9572)). The stuck call cannot be cancelled: its thread keeps running until the call returns, and a write it started may still land then.
+- Each server process runs at most 64 method calls at once. A call holds its slot until its thread finishes, so calls that never return hold at most 64 threads per server process; a request that waits for a slot past its deadline, or gets one only after its deadline, answers `deadline_exceeded` and runs nothing, never a success or an empty result.
+- The server process exits within 2 s (`EXIT_GRACE`) of an idle exit or a signal, however many backend calls are stuck. Calls still running then are abandoned, so a write such a call started may or may not land. Before, the exit waited with no limit for every stuck call, leaving one hung server process per idle cycle.
+
+### Security
+
+- The "agents may use" flag is held by the backend as its own item per key, no longer by the 0600 names-only index file, which any same-uid process could edit to make `resolve_reference(.., agent_parent = true)` return a value ([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)). On the Keychain the flag is the item service `trusty-secrets.agents`, account `<vault>/<key>`, present when on; `MemoryBackend` keeps it in memory. A missing item reads off, and a failed lookup is an error, never on.
+- `SecretBackend` gains `agents_may_use` and `set_agents_may_use`, with defaults that read every key off and refuse to turn one on; the file, 1Password and Keeper backends use the defaults, so no key on them can be flagged.
+- `SecretStore::list`, `SecretStore::set_agents_may_use` and the agent gate take the flag from the backend, and `secrets.list` reads it from the project's backend; when that backend does not open, `secrets.list` still answers from the index with every flag off. A delete removes the flag item from every swept backend, and a new key's stale flag item is removed before its value is written; a removal that fails fails the delete (the index row stays) or the set (no value is stored).
+- The index field `agents_may_use` still loads from an existing file but is ignored and no longer written, so every flag set before this release reads off; nothing shipped set one. `NamesIndex::set_agents_may_use` is deprecated: it refuses `true` and never changes the file.
+
 ## [0.1.2] — 2026-10-08
 
 ### Added

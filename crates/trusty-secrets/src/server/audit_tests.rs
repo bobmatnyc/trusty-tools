@@ -88,7 +88,8 @@ async fn audit_value_never_reaches_the_audit_file() {
     assert_eq!(record.key, Some(key("API_KEY")));
     assert_eq!(record.backend, Some(BackendId::keychain()));
     assert!(record.project_root.as_ref().unwrap().ends_with("repo"));
-    assert_eq!(record.caller_pid, None);
+    // #9070: the socket peer, this test process, as the kernel reported it.
+    assert_eq!(record.caller_pid, Some(std::process::id()));
     assert!(record.ts > 0);
     assert!(text.contains(&format!("\"stream\":\"{AUDIT_STREAM}\"")));
 }
@@ -605,6 +606,30 @@ fn audit_record_round_trips_a_pid_and_an_unknown_reason() {
     ] {
         assert_eq!(serde_json::to_value(audited).unwrap(), method_name);
     }
+}
+
+/// Why: #9070 slice 3 — a flag-set record says which value was asked for
+/// and whether the caller had an agent ancestor; a record written before
+/// those fields existed still decodes, with both `None`.
+/// Test: itself.
+#[test]
+fn audit_flag_record_round_trips_and_an_older_record_decodes() {
+    let mut record = AuditRecord::new(7, AuditMethod::SetAgentsMayUse, None);
+    record.agents_allowed = Some(true);
+    record.agent_parent = Some(false);
+    let text = serde_json::to_string(&record).unwrap();
+    let back: AuditRecord = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, record);
+    let wire: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(wire["method"], method::SET_AGENTS_MAY_USE);
+    assert_eq!(wire["agents_allowed"], true);
+    assert_eq!(wire["agent_parent"], false);
+
+    let older = r#"{"ts":9,"stream":"credential_access","method":"secrets.grant",
+        "decision":"allow","caller_pid":17}"#;
+    let read: AuditRecord = serde_json::from_str(older).unwrap();
+    assert_eq!(read.method, AuditMethod::Grant);
+    assert_eq!((read.agents_allowed, read.agent_parent), (None, None));
 }
 
 /// Why: AC5 — the default audit log is

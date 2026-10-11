@@ -171,10 +171,12 @@ pub fn routes_path(project_dir: &Path) -> PathBuf {
 /// Why: the one entry point that turns reviewed config into routes; any
 /// failure must refuse every send rather than fall back (rulings 2–3).
 /// What: a missing file returns an empty table. Otherwise refuses a symlink,
-/// reads the bytes once, runs the git load gate on those exact bytes (they
-/// must equal the blob committed at `HEAD`), then parses the same bytes with
-/// unknown keys denied and applies the load rules.
-/// Test: `load_gate_refuses_untracked_modified_and_staged`,
+/// reads the bytes once, runs the git load gate on those exact bytes (#8454
+/// Db1: `HEAD` on the default branch, and the bytes equal that branch's
+/// blob), then parses the same bytes with unknown keys denied and applies
+/// the load rules.
+/// Test: `feature_branch_refuses_load_and_every_send`,
+/// `load_gate_refuses_untracked_modified_and_staged`,
 /// `load_gate_checks_the_bytes_read_not_the_file_after`,
 /// `missing_file_is_zero_routes`, `load_rules_refuse_each_invalid_file`,
 /// `duplicates_name_both_entries`, `valid_file_loads_routes_in_order`.
@@ -193,7 +195,7 @@ pub fn load_routes(project_dir: &Path) -> Result<RouteTable, RouteError> {
     }
     let bytes = std::fs::read(&path).map_err(|e| read_error(&path, &e))?;
     // #9448 review: gate and parse see the same bytes.
-    load_gate::check_committed(&path, &bytes)?;
+    load_gate::check_committed(project_dir, &bytes)?;
     let text = String::from_utf8(bytes).map_err(|_| RouteError::Read {
         path: path.clone(),
         reason: "not valid UTF-8".into(),

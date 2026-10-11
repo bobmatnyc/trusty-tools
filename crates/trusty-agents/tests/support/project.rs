@@ -90,7 +90,10 @@ impl Project {
     pub async fn run_task(&self, task: &str, workflow: &str) -> Result<TaskResult> {
         let out_dir = self.root.path().join("out");
         std::fs::create_dir_all(&out_dir).ok();
-        let mut child = Command::new(&self.binary)
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        let mut child = cmd
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
             // #4826: an inherited `TAGENT_PROJECT_DIR` now outranks exe-path
@@ -130,6 +133,41 @@ impl Project {
         })
     }
 
+    /// Run the binary with `args` and `path_dir` prepended to `$PATH`,
+    /// returning the raw `Output`.
+    ///
+    /// Why: #9617 — a test must be able to put a stub `trusty-search` ahead of
+    /// any real one, so the plugin spawn path runs without starting a daemon.
+    /// What: same isolation as `run_inspect` (cwd = tempdir, pinned `$HOME`,
+    /// project-dir hints cleared), plus the `$PATH` prefix. Does not check the
+    /// exit status; the caller asserts on what it came for.
+    /// Test: `plugins_status_stamps_the_trusty_search_child_for_parent_death`.
+    pub async fn run_args_with_path_prefix(
+        &self,
+        args: &[&str],
+        path_dir: &Path,
+    ) -> Result<std::process::Output> {
+        let mut dirs = vec![path_dir.to_path_buf()];
+        if let Some(inherited) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&inherited));
+        }
+        let path = std::env::join_paths(dirs).context("join PATH")?;
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        cmd.current_dir(self.root.path())
+            .env("HOME", self.home.path())
+            .env("PATH", path)
+            .env_remove("TAGENT_PROJECT_DIR")
+            .env_remove("OPEN_MPM_PROJECT_DIR")
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("spawn trusty-agents")
+    }
+
     /// Run the binary in dry-run inspection mode and return the parsed JSON
     /// report.
     ///
@@ -142,7 +180,10 @@ impl Project {
     /// Test: Exercised by `project_inspect_returns_matched_skills` and
     /// `project_inspect_returns_agent_match`.
     pub async fn run_inspect(&self, task: &str) -> Result<Value> {
-        let output = Command::new(&self.binary)
+        let mut cmd = Command::new(&self.binary);
+        // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
+        trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
+        let output = cmd
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
             // #4826: see `run_task` — clear the inherited project-dir hint so

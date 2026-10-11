@@ -1,0 +1,5 @@
+crate   trusty-memory
+version 0.32.1
+reason  Approved by the Architect 2026-10-10 10:35Z under Bob's 2026-09-26 versioning ruling: DaemonEvent gains #[non_exhaustive] (enum_marked_non_exhaustive), and its HookFired discriminant moves 5 -> 6; it ships as patch 0.32.1, not minor, because a public-API break never forces a major or minor bump. Refs #9544. See docs/reference/semver-gate.md.
+accept  enum_marked_non_exhaustive enum DaemonEvent
+accept  enum_no_repr_variant_discriminant_changed variant DaemonEvent::HookFired 5 -> 6

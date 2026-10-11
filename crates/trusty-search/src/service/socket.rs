@@ -45,7 +45,7 @@
 //!
 //! **Two doors, one daemon.** The socket serves the same `Arc<SearchAppState>`
 //! the axum router was built on — see
-//! [`crate::service::server::build_router_on`]. A second `Arc::new` would give
+//! `crate::service::server::build_router_on`. A second `Arc::new` would give
 //! the socket its own registry and its own tickers, and the two transports
 //! would disagree about which indexes exist.
 //!
@@ -66,7 +66,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{admin, chat, file, project, queries, reads, streams, warm, writes};
+use crate::service::rpc::{
+    admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -152,6 +154,11 @@ pub const METHODS: &[&str] = &[
     warm::METHOD_WARM_STATUS,
     // #9169 — project-to-index resolution. Socket-only and in the free lane.
     project::METHOD_PROJECT_RESOLVE,
+    // #9169 PR-B1 — the project map. Socket-only and in the free lane.
+    project_map::METHOD_PROJECT_MAP,
+    project_map::METHOD_PROJECT_PARK,
+    project_map::METHOD_PROJECT_UNPARK,
+    project_map::METHOD_PROJECT_PIN,
     // #9029 — one indexed file and its diff. Socket-only and in the free lane.
     file::METHOD_FILE_GET,
 ];
@@ -270,6 +277,7 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = chat::register(router, state);
     let router = warm::register(router, state);
     let router = project::register(router, state);
+    let router = project_map::register(router, state);
     let router = file::register(router, state);
     streams::register(router, state)
 }

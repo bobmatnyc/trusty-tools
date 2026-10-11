@@ -201,6 +201,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_create",
         "palace_delete",
         "palace_update",
+        "palace_rename",
         "palace_list",
         "palace_info",
         "palace_compact",
@@ -560,6 +561,8 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples[0]["predicate"], "works_at");
 }
 
+// #9544: palace_create refuses a live alias name with a typed error.
+mod alias_canon_tests;
 mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
@@ -572,6 +575,10 @@ mod lease_refusal_tests;
 mod palace_index_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
+// #9144: `memory_remember`'s optional drawer `type`.
+mod remember_type_tests;
+// #9390: a Tier C slot's `verify` command, end to end through the dispatcher.
+mod verify_with_tests;
 mod write_budget_tests;
 // #4001: a write stalled on the palace lock must reach `memory.health`.
 mod write_liveness_tests;

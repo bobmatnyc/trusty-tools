@@ -59,7 +59,7 @@ fn run_start(value: Option<&str>) -> (i32, String) {
     // #8900: stamped and bounded, so a probe that boots a daemon instead of
     // aborting can neither outlive the run nor hang it.
     let mut cmd = test_daemon::command();
-    cmd.args(["start", "--foreground", "--port", "17999"])
+    cmd.args(["start", "--foreground"])
         .arg("--data-dir")
         .arg(&unusable)
         .env_remove("TRUSTY_DATA_DIR")

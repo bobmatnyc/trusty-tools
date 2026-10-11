@@ -25,9 +25,9 @@ RUST_LOG=info cargo run -p trusty-memory
 # Clients (`tm`, `tctl`, and the `trusty-search` commands `query`, `doctor` and
 # `monitor`) reach trusty-search over its Unix socket: `TRUSTY_SEARCH_SOCKET`,
 # else the socket in the daemon's data directory. `trusty-search start --socket
-# <absolute path>` binds a chosen path. The HTTP listener is optional, and
-# `tm services init` starts the daemon with `--no-http`, so the `port` commands
-# below apply only when the HTTP listener is enabled.
+# <absolute path>` binds a chosen path. The daemon binds no TCP port (#9214),
+# so `trusty-search port` exits 1 naming its socket; `start` rejects `--port`
+# and `--no-http` (#9536). The `port` commands below apply to the other daemons.
 
 # Report the daemon's listening port (stdout is clean — safe for shell substitution):
 trusty-search port                                   # bare port: 7878

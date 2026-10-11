@@ -90,6 +90,7 @@ pub(crate) async fn run_daemon(
         let _ = std::env::set_current_dir("/");
     }
 
+    // #9274: the daemon owns the SM and portfolio palaces; it opens them as writer.
     let state = trusty_mpm::daemon::DaemonState::shared();
 
     // #2486: compute the launchd-supervision signal once, up front, so both

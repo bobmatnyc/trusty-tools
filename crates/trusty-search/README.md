@@ -230,14 +230,13 @@ Add trusty-search as an MCP server in your Claude Code config (`~/.claude/claude
 }
 ```
 
-### Optional HTTP/SSE transport
+### No HTTP/SSE transport
 
-```bash
-trusty-search serve --with-http --port 7879
-```
-
-Then add `http://127.0.0.1:7879/mcp/sse` as an SSE MCP endpoint. The HTTP
-listener is opt-in; stdio remains active for the process.
+`serve` speaks MCP over stdio only. #9542 retired `--with-http`, `--http` and
+`--port`: each exits 1 naming the issue and binds nothing. MCP clients that
+need HTTP have no trusty-search endpoint: trusty-console has no MCP route, only a REST proxy
+at `/api/{service}/{*path}`. Use stdio (`trusty-search serve`) or the daemon's Unix
+socket (`<TRUSTY_DATA_DIR>/trusty-search.sock`, or `TRUSTY_SEARCH_SOCKET`).
 
 Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and the rest of the surface directly — see [MCP tools](#mcp-tools) for the generated roster. The daemon must be running independently (`trusty-search start`) before Claude Code connects.
 
@@ -271,7 +270,7 @@ Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and
   LRU embedding cache (256+ entries) skips re-embedding on repeat queries
 - **Native multi-request** — `Arc<SearchAppState>`, reader-priority `RwLock`,
   axum HTTP/2 — many concurrent searches against the same index never block
-- **MCP server** — stdio + HTTP/SSE transports, drop-in for Claude Code ([tool roster](#mcp-tools))
+- **MCP server** — stdio transport, drop-in for Claude Code ([tool roster](#mcp-tools))
 - **Embedded Svelte 5 admin UI** — Collections, Search, Chat, Admin panels
   compiled into the binary via `include_dir!`; open with `trusty-search ui`
 - **Migration path** — `trusty-search convert` reads `mcp-vector-search`
@@ -571,7 +570,7 @@ trusty-search status                                 # daemon + index overview (
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search
-trusty-search serve [--http <addr>]                  # MCP stdio (default) or HTTP/SSE
+trusty-search serve                                  # MCP stdio (#9542: no HTTP/SSE)
 trusty-search port                                   # print daemon port to stdout (bare: 7878)
 trusty-search port --addr                            # print host:port (127.0.0.1:7878)
 trusty-search port --json                            # print {"addr":"127.0.0.1","port":7878}
@@ -609,12 +608,12 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
-| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
-| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
-| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
 | `typeahead` | `query`, `index_id?`, `limit?`, `mode?`, `project?` | Fast per-keystroke autocomplete suggestions for an index. |
 <!-- END GENERATED: mcp-tools -->

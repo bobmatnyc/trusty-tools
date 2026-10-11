@@ -8,8 +8,9 @@
 //! What: `dashboard` ensures the daemon answers on its socket (spawning it in
 //! the background when no daemon runs), then asks it over `search.health`
 //! which HTTP address it bound (#9214) and opens `http://<addr>/ui`. A
-//! socket-only daemon (`--no-http`) has no dashboard to serve until phase C,
-//! so both commands fail naming the socket; they never guess a port. On
+//! current daemon is socket-only and serves no dashboard — trusty-console
+//! serves it — so both commands fail naming the socket and the console; they
+//! never guess a port. On
 //! browser-open failure (headless env) degrades gracefully by printing the
 //! URL to stderr rather than returning an error.
 //!
@@ -58,9 +59,9 @@ pub async fn handle_monitor_web() -> Result<()> {
 
 /// The `http://host:port` base of the dashboard the daemon on `client` serves.
 ///
-/// Why (#9214): only the daemon knows whether it bound HTTP. The dashboard
-/// needs that listener until phase C moves it, so a socket-only daemon is an
-/// error naming the socket — never a guessed `:7878`.
+/// Why (#9214): only the daemon knows whether it bound HTTP. A current daemon
+/// binds none, so it is an error naming the socket and trusty-console, which
+/// serves the dashboard — never a guessed `:7878`.
 /// What: [`probe_http_listener`]; a bound address becomes `http://<addr>`.
 ///
 /// # Errors
@@ -73,9 +74,10 @@ pub(crate) async fn dashboard_base(client: &DaemonClient) -> Result<String> {
     let socket = client.socket().display();
     match probe_http_listener(client).await? {
         HttpListener::Bound(addr) => Ok(format!("http://{addr}")),
+        // #9214: the daemon serves no dashboard; trusty-console does.
         HttpListener::SocketOnly => Err(anyhow!(
-            "{}: the dashboard needs the daemon's HTTP listener; \
-             restart the daemon without --no-http",
+            "{}: the daemon serves no dashboard; open the search dashboard in \
+             trusty-console instead",
             socket_only_message(client.socket())
         )),
         HttpListener::Unreported => Err(anyhow!(
@@ -244,7 +246,7 @@ mod tests {
     /// Why (#9214): a socket-only daemon has no dashboard to serve, so the
     /// command must fail naming the socket and open nothing.
     /// What: a mock daemon reporting `http_addr: null`; asserts an error that
-    /// names the socket and `--no-http`, and that the opener never ran.
+    /// names the socket and trusty-console, and that the opener never ran.
     /// Test: this function — the opener is a recording closure.
     #[tokio::test]
     async fn dashboard_under_no_http_errors_and_opens_nothing() {
@@ -268,8 +270,8 @@ mod tests {
             "the error must name the socket: {message}"
         );
         assert!(
-            message.contains("--no-http"),
-            "the error must name the flag: {message}"
+            message.contains("trusty-console"),
+            "the error must name where the dashboard lives: {message}"
         );
         assert!(opened.is_empty(), "no browser may open: {opened:?}");
     }

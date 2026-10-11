@@ -209,3 +209,96 @@ async fn the_warming_path_demotes_stale_snapshots() {
         );
     }
 }
+
+/// Why (#9390): an expired Tier C slot is a stale fact, and no recall may
+/// return it. The warming path hydrates BM25 hits straight from the drawer
+/// table, which the L0/L1 and L2/L3 expiry filters never see.
+/// What: a cold, `Warming` state with the in-process BM25 lane and two slots
+/// matching the query, one expired an hour ago and one expiring in a day. On
+/// all three recall tools the expired id is absent and the live id present;
+/// `memory_list` still lists the expired drawer (excluded, not deleted).
+#[tokio::test]
+async fn an_expired_slot_is_not_returned_by_the_warming_path() {
+    use trusty_common::memory_core::palace::{Drawer, PalaceId};
+    use trusty_memory::bm25_lane::Bm25Lane;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = Bm25Lane::new(tmp.path().join("bm25"));
+    let state = cold_warming_state(&tmp).with_bm25_lane(lane.clone());
+    let palace = "warmtest-expiry";
+    let cwd = tmp.path().to_string_lossy().to_string();
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": palace, "force": true, "cwd": cwd}),
+    )
+    .await
+    .expect("palace_create");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+
+    let now = chrono::Utc::now();
+    let slot = |key: &str, text: &str, expires_at: chrono::DateTime<chrono::Utc>| {
+        let mut d = Drawer::new(uuid::Uuid::new_v4(), text);
+        d.fact_key = Some(key.to_string());
+        d.expires_at = Some(expires_at);
+        let id = d.id;
+        handle.add_drawer(d);
+        (id, text.to_string())
+    };
+    let expired = slot(
+        "pr:1/state",
+        "release head sha for pr one is abc123",
+        now - chrono::Duration::hours(1),
+    );
+    let live = slot(
+        "pr:2/state",
+        "release head sha for pr two is def456",
+        now + chrono::Duration::days(1),
+    );
+    for (id, text) in [&expired, &live] {
+        lane.index(palace, &id.to_string(), text)
+            .await
+            .expect("index");
+    }
+
+    for tool in ["memory_recall", "memory_recall_deep", "memory_recall_all"] {
+        let args = if tool == "memory_recall_all" {
+            json!({"q": "release head sha", "top_k": 10})
+        } else {
+            json!({"palace": palace, "query": "release head sha", "top_k": 10})
+        };
+        let result = dispatch_tool(&state, tool, args)
+            .await
+            .expect("recall while warming");
+        assert_no_vector_lane(&result, tool);
+        let ids: Vec<&str> = result["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|r| r["drawer_id"].as_str())
+            .collect();
+        assert!(
+            !ids.contains(&expired.0.to_string().as_str()),
+            "{tool}: an expired slot must not be recalled: {result:#}"
+        );
+        assert!(
+            ids.contains(&live.0.to_string().as_str()),
+            "{tool}: an unexpired slot must still be recalled: {result:#}"
+        );
+    }
+
+    // Excluded, not deleted: the listing still carries the expired slot.
+    let listed = dispatch_tool(&state, "memory_list", json!({"palace": palace}))
+        .await
+        .expect("memory_list");
+    let row = listed["drawers"]
+        .as_array()
+        .expect("drawers")
+        .iter()
+        .find(|d| d["drawer_id"].as_str() == Some(expired.0.to_string().as_str()))
+        .unwrap_or_else(|| panic!("expired slot still listed: {listed:#}"));
+    assert_eq!(row["fact_key"], json!("pr:1/state"), "{listed:#}");
+}

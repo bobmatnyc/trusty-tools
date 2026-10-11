@@ -274,7 +274,7 @@ fn a_parked_stop_lands_where_the_daemon_drains_it() {
     let home = tempfile::tempdir().expect("temp dir");
     let root = trusty_mpm::core::paths::FrameworkPaths::under(home.path()).root;
 
-    let line = spool_undelivered_stop_under(&root, &stop_body());
+    let line = spool_undelivered_stop_under(&root, &stop_body()).expect("parked");
 
     let parked = trusty_mpm::core::stop_spool::read_unposted_stops(&root);
     assert_eq!(
@@ -304,11 +304,30 @@ fn an_unusable_root_reports_the_stop_as_lost() {
     let root = home.path().join("root-is-a-file");
     std::fs::write(&root, "not a directory").expect("write");
 
-    let line = spool_undelivered_stop_under(&root, &stop_body());
+    let line = match spool_undelivered_stop_under(&root, &stop_body()) {
+        Ok(line) => line,
+        Err(e) => e.to_string(),
+    };
 
     assert!(line.contains("could not park"), "{line}");
     assert!(
         trusty_mpm::core::stop_spool::read_unposted_stops(&root).is_empty(),
         "nothing was written, and the line must not claim otherwise"
     );
+}
+
+/// 🔴 REGRESSION (#6556): a stop that is neither delivered nor parked is lost,
+/// and the hook must say so with its exit status. Before the fix the lost arm
+/// returned the same `String` as a park, so `tm hook` exited 0 and Claude Code
+/// showed nothing.
+#[test]
+fn a_stop_that_cannot_be_parked_fails_the_hook() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let root = home.path().join("root-is-a-file");
+    std::fs::write(&root, "not a directory").expect("write");
+
+    let verdict = spool_undelivered_stop_under(&root, &stop_body());
+
+    let err = verdict.expect_err("a lost stop must fail the hook, not exit 0");
+    assert!(err.to_string().contains("could not park"), "{err}");
 }

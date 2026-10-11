@@ -17,8 +17,10 @@ use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
-use trusty_common::memory_core::palace::{PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{admit_tier_c, RememberOptions, TierCAdmission};
+use trusty_common::memory_core::palace::{DrawerType, PalaceId, RoomType};
+use trusty_common::memory_core::retrieval::{
+    admit_tier_c, RememberOptions, TierCAdmission, VerifyNotStored,
+};
 use trusty_common::memory_core::timeouts::{self, OpBudget};
 use uuid::Uuid;
 
@@ -276,17 +278,73 @@ pub(crate) fn resolve_tier_c(args: &Value, tool: &str) -> Result<TierCAdmission>
     ))
 }
 
+/// Resolve `memory_remember`'s optional drawer `type` argument (#9144).
+///
+/// Why: a write that names a type must store that type or fail. An unknown
+/// name that fell back to `Unknown` or to the heuristic classifier would store
+/// a drawer the caller believes is typed, and ranking would treat it wrongly
+/// with no error anywhere.
+/// What: absent or JSON `null` gives `Ok(None)`, which leaves `classify_as`
+/// unset — exactly the untyped write path. A string goes through
+/// [`DrawerType::parse_write_type`] (the five writable names, any ASCII case);
+/// its error becomes `Err("{tool}: <message>")`. Any other JSON value is an
+/// `Err` too. There is no lenient branch.
+/// Test: `dispatch_remember_stores_requested_type_and_list_round_trips_it`,
+/// `dispatch_remember_rejects_unknown_type_and_writes_nothing`,
+/// `dispatch_remember_bad_type_beats_content_gate`.
+pub(crate) fn resolve_type_arg(args: &Value, tool: &str) -> Result<Option<DrawerType>> {
+    match args.get("type") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(name)) => DrawerType::parse_write_type(name)
+            .map(Some)
+            .map_err(|e| anyhow!("{tool}: {e}")),
+        Some(other) => Err(anyhow!(
+            "{tool}: 'type' must be a string naming a drawer type, got {other}"
+        )),
+    }
+}
+
+/// Resolve the optional `verify` argument of the write tools (#9390).
+///
+/// Why: a re-verify command on a write with no slot has nothing to re-check,
+/// and a blank one checks nothing. Both are caller mistakes, so they fail
+/// before any content gate can answer with a "skipped" success.
+/// What: absent or JSON `null` gives `Ok(None)`. A string that is non-blank on
+/// a call that also names `fact_key` gives `Ok(Some(trimmed))`. A missing
+/// `fact_key`, a blank string, or a non-string is an `Err`; nothing is written.
+/// Test: `verify_without_fact_key_is_refused`,
+/// `a_verify_command_round_trips_through_memory_list`.
+pub(crate) fn resolve_verify_arg(args: &Value, tool: &str) -> Result<Option<String>> {
+    let command = match args.get("verify") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.trim(),
+        Some(other) => return Err(anyhow!("{tool}: 'verify' must be a string, got {other}")),
+    };
+    if command.is_empty() {
+        return Err(anyhow!("{tool}: 'verify' must not be empty or whitespace"));
+    }
+    if args.get("fact_key").and_then(|v| v.as_str()).is_none() {
+        return Err(anyhow!(
+            "{tool}: 'verify' needs 'fact_key': only a Tier C slot can be re-verified, and nothing was stored"
+        ));
+    }
+    Ok(Some(command.to_string()))
+}
+
 /// Fold an admission decision into the write options and the response envelope.
 ///
 /// Why: both `memory_remember` and `memory_note` need the identical
 /// "carry the resolved slot down, report the tier back up" step; duplicating it
 /// is how the two tools would drift on what a refusal looks like.
 /// What: on admission, sets `opts.fact_key` / `opts.expires_at` to the resolved
-/// values. Otherwise leaves them unset so the library writes an ordinary
-/// drawer. Returns `(tier_label, refusal_reason)` for the JSON envelope.
-/// Test: same tests as [`resolve_tier_c`].
+/// values and `opts.verify_with` to `verify` (#9390). Otherwise leaves all
+/// three unset so the library writes an ordinary drawer with no command.
+/// Returns `(tier_label, refusal_reason)` for the JSON envelope.
+/// Test: same tests as [`resolve_tier_c`], plus
+/// `a_verify_command_round_trips_through_memory_list`.
 pub(crate) fn apply_tier_c(
     admission: &TierCAdmission,
+    verify: Option<String>,
     opts: &mut RememberOptions,
 ) -> (&'static str, Option<String>) {
     match admission {
@@ -296,6 +354,7 @@ pub(crate) fn apply_tier_c(
         } => {
             opts.fact_key = Some(fact_key.clone());
             opts.expires_at = Some(*expires_at);
+            opts.verify_with = verify;
             ("C", None)
         }
         TierCAdmission::Refused(refusal) => ("E", Some(refusal.to_string())),
@@ -405,11 +464,16 @@ pub(crate) fn open_palace_handle_within(
 /// [`open_palace_handle_within`]. The registration lives inside the returned
 /// [`WriteGuard`], so the write counts from the start of its wait until the
 /// lock is released. `tool` prefixes the error so the caller sees which
-/// handler gave up.
-/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`.
+/// handler gave up. Once the mutex is held it re-reads the palace's mutex
+/// ([`AppState::palace_write_lock`]); when that is a different mutex — a
+/// rename moved the id to another palace while this writer waited (#9544,
+/// ruling QD) — it releases and waits on the current one, within the same
+/// budget.
+/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`,
+/// `rename_stale_writer_waits_on_the_renamed_palace_lock`.
 pub(crate) async fn begin_budgeted_write<'a>(
     state: &'a AppState,
-    write_lock: &'a std::sync::Arc<tokio::sync::Mutex<()>>,
+    write_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
     palace_id: &str,
     tool: &str,
 ) -> Result<(WriteGuard<'a>, OpBudget)> {
@@ -417,21 +481,43 @@ pub(crate) async fn begin_budgeted_write<'a>(
     // #4001: register before the wait so a queued writer is visible, and hold
     // the registration until the lock is released so a stalled holder is too.
     let tracked = state.worker_liveness.track();
-    let lock = timeouts::lock_with_timeout(
-        write_lock,
-        budget.leg(timeouts::write_lock_timeout()),
-        palace_id,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
-    Ok((
-        WriteGuard {
-            _lock: lock,
-            _tracked: tracked,
-        },
-        budget,
+    let mut mutex = std::sync::Arc::clone(write_lock);
+    for _ in 0..MAX_WRITE_LOCK_REKEYS {
+        let waited = budget.leg(timeouts::write_lock_timeout());
+        let lock = tokio::time::timeout(waited, std::sync::Arc::clone(&mutex).lock_owned())
+            .await
+            .map_err(|_| {
+                anyhow::Error::new(timeouts::WriteTimeout::LockWait {
+                    palace: palace_id.to_string(),
+                    waited,
+                })
+            })
+            .map_err(|e| anyhow::anyhow!("{tool}: {e:#}"))?;
+        // #9544 (QD): a writer that took the mutex Arc before a rename must not
+        // write under it while post-rename writers hold the new palace's mutex.
+        let current = state.palace_write_lock(palace_id);
+        if std::sync::Arc::ptr_eq(&current, &mutex) {
+            return Ok((
+                WriteGuard {
+                    _lock: lock,
+                    _tracked: tracked,
+                },
+                budget,
+            ));
+        }
+        drop(lock);
+        mutex = current;
+    }
+    Err(anyhow::anyhow!(
+        "{tool}: palace '{palace_id}' changed identity {MAX_WRITE_LOCK_REKEYS} times while \
+         this write waited (a rename is in progress); retry when it is idle"
     ))
 }
+
+/// How many times [`begin_budgeted_write`] follows a palace's mutex to a new
+/// one before giving up (#9544). One rename moves it once; this only bounds a
+/// pathological rename loop.
+const MAX_WRITE_LOCK_REKEYS: usize = 4;
 
 /// A held palace write lock plus the write's liveness registration (#4001).
 ///
@@ -442,11 +528,11 @@ pub(crate) async fn begin_budgeted_write<'a>(
 /// holder visible, and it means neither can be dropped without the other.
 /// A write that holds the lock past the threshold reads as wedged even if it
 /// later finishes: every writer queued behind it has already failed.
-/// What: the `tokio` lock guard and a [`crate::worker_liveness::WorkGuard`];
-/// both release on drop.
+/// What: the owned `tokio` lock guard (owned so a re-key can swap mutexes,
+/// #9544) and a [`crate::worker_liveness::WorkGuard`]; both release on drop.
 /// Test: `tools::tests::write_liveness_tests`.
 pub(crate) struct WriteGuard<'a> {
-    _lock: tokio::sync::MutexGuard<'a, ()>,
+    _lock: tokio::sync::OwnedMutexGuard<()>,
     _tracked: crate::worker_liveness::WorkGuard<'a>,
 }
 
@@ -563,7 +649,9 @@ pub(crate) struct WriteDrawerParams<'a> {
 /// What: opens the palace handle, calls `remember_with_options`, fires the
 /// BM25 index task, emits `DrawerAdded` + the aggregate status event, and
 /// runs the auto-KG-extraction pass (best-effort). Returns the new drawer
-/// id on success; any underlying error propagates via `anyhow::Result`.
+/// id on success; any underlying error propagates via `anyhow::Result`. A
+/// `VerifyNotStored` error still runs every step for its committed drawer and
+/// is returned after them (#9390).
 ///
 /// **A write-pipeline timeout error does not mean the write did not land**
 /// (#6366): the durable commit, once dispatched, completes regardless of the
@@ -599,7 +687,7 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
     // #6366: the write mutex is held for this whole call. Pass the daemon's
     // configured ceiling so a slow commit fails with a named reason and
     // releases the mutex, instead of stalling every other writer on this palace.
-    let drawer_id = handle
+    let written = handle
         .remember_with_options_within(
             content,
             room,
@@ -608,8 +696,16 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
             opts,
             state.write_pipeline_budget,
         )
-        .await
-        .context("PalaceHandle::remember_with_options")?;
+        .await;
+    // #9390: a slot whose verify command was not stored is still committed, so
+    // it is indexed and announced like any drawer before the error returns.
+    let (drawer_id, verify_missed) = match written {
+        Ok(id) => (id, None),
+        Err(e) => match e.downcast_ref::<VerifyNotStored>() {
+            Some(missed) => (missed.drawer, Some(e)),
+            None => return Err(e.context("PalaceHandle::remember_with_options")),
+        },
+    };
     // Issue #156 + #231: opt-in BM25 lexical lane. Enqueue onto the
     // bounded indexer channel so the redb write returns immediately;
     // a full queue is dropped + logged rather than allowed to grow
@@ -646,7 +742,10 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
         room_label_for_kg.as_deref(),
     )
     .await;
-    Ok(drawer_id)
+    match verify_missed {
+        Some(e) => Err(e),
+        None => Ok(drawer_id),
+    }
 }
 
 /// Build a JSON "skipped" envelope used by both write handlers when a gate

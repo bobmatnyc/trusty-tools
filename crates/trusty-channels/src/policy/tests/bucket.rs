@@ -142,3 +142,37 @@ fn route_lower_limit_is_enforced_by_its_bucket() {
     assert_eq!(limiter.take_route(bob), Admit);
     assert_eq!(p.default_rate_limit(), RateLimit::DEFAULT);
 }
+
+#[test]
+fn take_binding_matches_take_route() {
+    let p = policy(three_routes());
+    let bob = &p.routes()[1];
+    let clock = TestClock::default();
+    let mut limiter = RateLimiter::new(p.default_rate_limit(), clock.clone());
+    // #8454 S3b: a binding take and a route take with the same (channel,
+    // name) share one window.
+    for _ in 0..50 {
+        assert_eq!(limiter.take_route(bob), Admit);
+        assert_eq!(
+            limiter.take_binding(bob.channel(), bob.name(), bob.rate_limit()),
+            Admit
+        );
+    }
+    assert_eq!(limiter.take_route(bob), Exhausted, "101st via take_route");
+    assert_eq!(
+        limiter.take_binding(bob.channel(), bob.name(), bob.rate_limit()),
+        Exhausted,
+        "101st via take_binding"
+    );
+    // A different name on the same channel has its own window.
+    assert_eq!(
+        limiter.take_binding(bob.channel(), "other", RateLimit::DEFAULT),
+        Admit
+    );
+    clock.set_ms(60_000);
+    assert_eq!(
+        limiter.take_binding(bob.channel(), bob.name(), bob.rate_limit()),
+        Admit,
+        "window slid"
+    );
+}

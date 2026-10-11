@@ -175,7 +175,8 @@ const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 /// (`push_guard`), the session-scope re-apply (`session_scope`, #7678 — the
 /// project-tier `enabledPlugins` map and the composed session-MCP file, skipped
 /// entirely for a directory with no `.trusty-mpm/` marker), the two-way
-/// auto-memory key (`auto_memory`, #7685),
+/// auto-memory key (`auto_memory`, #7685), the trusty-search duplicate parks
+/// (`search_project_duplicate_index`, #9664 — through the daemon, never the map),
 /// the output-style redeploy at BOTH style tiers
 /// (`output_style_staleness`, #5866, #7423),
 /// the `legacy_sources` refusals, the stray-`.mcp.json`
@@ -261,6 +262,11 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
             project,
             mode,
             trusty_mpm::core::memory_reachable::probe_memory_reachable_blocking(),
+        ));
+        // #9664: park what `search_project_duplicate_index` flags, through the
+        // daemon's `search.project.park`; never this project's own index.
+        steps.extend(trusty_mpm::daemon::doctor::repair_duplicate_indexes(
+            project, mode,
         ));
     } else {
         eprintln!("  could not resolve the current directory — skipped the project-scoped repairs");

@@ -79,7 +79,7 @@ pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
 };
 pub(crate) use repair::RepairAction;
-pub(crate) use secrets::SecretsAction;
+pub(crate) use secrets::{ArgText, SecretsAction};
 pub(crate) use services::ServicesAction;
 pub(crate) use sessctl::SessctlAction;
 pub(crate) use session::SessionAction;

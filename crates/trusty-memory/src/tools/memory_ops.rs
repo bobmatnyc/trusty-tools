@@ -23,7 +23,8 @@ use super::bm25::bm25_delete_document;
 use super::helpers::{
     apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate, content_gate,
     dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
-    resolve_palace, resolve_tier_c, room_label, skipped_envelope, write_drawer, WriteDrawerParams,
+    resolve_palace, resolve_tier_c, resolve_type_arg, resolve_verify_arg, room_label,
+    skipped_envelope, write_drawer, WriteDrawerParams,
 };
 // #6318: the read tools below fall back to a palace index; the write tools in
 // this file keep `resolve_palace`'s error.
@@ -48,6 +49,11 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
         .to_string();
+    // #9144: parse the optional drawer `type` before every content gate, so a
+    // gate's "skipped" success envelope can never mask a bad type.
+    let classify_as = resolve_type_arg(&args, "memory_remember")?;
+    // #9390: same rule for `verify` — a refusal must not hide behind a gate.
+    let verify = resolve_verify_arg(&args, "memory_remember")?;
 
     // Issue #2442: `force` must be parsed BEFORE any content-quality gate
     // runs so it can bypass every one of them uniformly — it is an explicit
@@ -165,9 +171,11 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     let admission = resolve_tier_c(&args, "memory_remember")?;
     let mut opts = RememberOptions {
         wing_id,
+        // #9144: an explicit type beats the heuristic classifier; `None` keeps it.
+        classify_as,
         ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
     };
-    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
+    let (tier, refusal) = apply_tier_c(&admission, verify, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -210,6 +218,8 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
         .to_string();
+    // #9390: refuse a bad `verify` before any content gate can skip the write.
+    let verify = resolve_verify_arg(&args, "memory_note")?;
     // Issue #220: blocklist gate — silently drop content matching
     // known low-value auto-capture patterns. Same filter as
     // `memory_remember` so the gate is uniform across the write
@@ -296,7 +306,7 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
         defer_embedding,
         ..RememberOptions::note()
     };
-    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
+    let (tier, refusal) = apply_tier_c(&admission, verify, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -332,7 +342,12 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// What: one JSON object per drawer. `fact_key` is always present: the slot
 /// key, or `null` for an unslotted drawer and for one a later write to its
 /// slot displaced (retirement clears the displaced drawer's own key).
+/// `verify` is always present too (#9390): the drawer's re-verify command from
+/// one batched KG read, or `null`. A drawer with no `fact_key` always reports
+/// `null`, whatever triples the KG holds.
 /// Test: `memory_list_reports_a_slotted_drawers_fact_key`,
+/// `a_verify_command_round_trips_through_memory_list`,
+/// `a_displaced_drawer_never_lists_a_verify_command`,
 /// `memory_list_reports_null_fact_key_for_an_unslotted_drawer`,
 /// `memory_list_reports_the_key_only_on_the_slots_current_occupant`.
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
@@ -355,6 +370,13 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
         RecallScope::Room(room) => handle.list_drawers(Some(room), tag, limit),
         RecallScope::All => handle.list_drawers(None, tag, limit),
     };
+    // #9390: one batched KG read for the page, keyed by drawer id.
+    let ids = drawers.iter().map(|d| d.id).collect();
+    let verify = handle
+        .kg
+        .verify_with_many(ids)
+        .await
+        .context("memory_list: read verify commands")?;
     let payload: Vec<Value> = drawers
         .iter()
         .map(|d| {
@@ -368,6 +390,9 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
                 "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
                 // #9340: read-only slot report; `null` when the drawer holds no slot.
                 "fact_key": d.fact_key,
+                // #9390: only a slot holder reports a command, so a displaced
+                // drawer shows `null` even when closing its triple failed.
+                "verify": verify.get(&d.id).filter(|_| d.fact_key.is_some()),
             })
         })
         .collect();

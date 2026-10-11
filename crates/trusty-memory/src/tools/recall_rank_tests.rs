@@ -241,3 +241,181 @@ fn fusion_ranks_tied_drawers_by_id_whatever_the_input_order() {
         "ties must rank by drawer id: {results:#?}"
     );
 }
+
+/// A fresh, untagged drawer of type `t`, as a recall hit scoring `score`.
+fn typed_hit(content: &str, t: DrawerType, score: f32, now: DateTime<Utc>) -> RecallResult {
+    let mut d = drawer(content, &[], Duration::zero(), now);
+    d.drawer_type = t;
+    hit(d, score)
+}
+
+/// Why (#9144): with equal similarity and age, a typed ruling must outrank a
+/// typed status report — the status line is the one a newer write replaces.
+/// What: both fresh at 0.70; after demotion the Status hit scores 0.70 * 0.8
+/// and the Ruling keeps 0.70, so the Ruling ranks first whatever its id.
+#[test]
+fn a_ruling_typed_drawer_outranks_an_equal_status_typed_drawer() {
+    let now = Utc::now();
+    let status = typed_hit("status", DrawerType::Status, 0.70, now);
+    let ruling = typed_hit("ruling", DrawerType::Ruling, 0.70, now);
+    let mut results = vec![status, ruling];
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
+    let score = |c: &str| {
+        results
+            .iter()
+            .find(|r| r.drawer.content() == c)
+            .map(|r| r.score)
+    };
+    assert_eq!(score("ruling"), Some(0.70));
+    let s = score("status").expect("status hit kept");
+    assert!((s - 0.70 * 0.8).abs() < 1e-6, "status score {s}");
+    assert_eq!(results[0].drawer.content(), "ruling", "{results:#?}");
+}
+
+/// Why (#9144): a recorded conversational turn is weaker still than a status.
+/// What: as above with Turn, whose factor is 0.7.
+#[test]
+fn a_ruling_typed_drawer_outranks_an_equal_turn_typed_drawer() {
+    let now = Utc::now();
+    let turn = typed_hit("turn", DrawerType::Turn, 0.70, now);
+    let ruling = typed_hit("ruling", DrawerType::Ruling, 0.70, now);
+    let mut results = vec![turn, ruling];
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
+    let t = results
+        .iter()
+        .find(|r| r.drawer.content() == "turn")
+        .map(|r| r.score)
+        .expect("turn hit kept");
+    assert!((t - 0.70 * 0.7).abs() < 1e-6, "turn score {t}");
+    assert_eq!(results[0].drawer.content(), "ruling", "{results:#?}");
+}
+
+/// Why (#9144): a live Tier C slot is current by construction (ADR-0028 D5),
+/// so its type must not demote it; once the slot is retired it is an ordinary
+/// Status drawer and takes the 0.8 factor.
+#[test]
+fn a_live_keyed_status_typed_drawer_is_exempt_from_the_type_factor() {
+    let now = Utc::now();
+    let mut keyed = drawer("s", &[], Duration::zero(), now);
+    keyed.drawer_type = DrawerType::Status;
+    keyed.fact_key = Some("ws:s1/resume".to_string());
+    keyed.expires_at = Some(now + Duration::hours(1));
+    assert_eq!(temporal_weight(&keyed, now), 1.0);
+    keyed.fact_key = None;
+    keyed.expires_at = None;
+    assert!((temporal_weight(&keyed, now) - 0.8).abs() < 1e-6);
+}
+
+/// Why (#9144): a typed Ruling or Decision is a ruling for the rank pass and
+/// the rulings leg alike; the other typed variants are not, and only Status
+/// and Turn carry a factor below 1.
+/// What: fresh untagged drawers of each writable type.
+#[test]
+fn ruling_and_decision_types_are_rulings_and_the_rest_keep_their_factor() {
+    let now = Utc::now();
+    for (t, ruling, weight) in [
+        (DrawerType::Ruling, true, 1.0),
+        (DrawerType::Decision, true, 1.0),
+        (DrawerType::Reference, false, 1.0),
+        (DrawerType::Status, false, 0.8),
+        (DrawerType::Turn, false, 0.7),
+    ] {
+        let mut d = drawer("x", &[], Duration::zero(), now);
+        d.drawer_type = t;
+        assert_eq!(is_ruling(&d), ruling, "{t:?}");
+        assert!((temporal_weight(&d, now) - weight).abs() < 1e-6, "{t:?}");
+    }
+    // The factor multiplies the snapshot decay: floor 0.5 times 0.8.
+    let mut old_status = drawer("x", &["status"], Duration::days(365), now);
+    old_status.drawer_type = DrawerType::Status;
+    assert!((temporal_weight(&old_status, now) - SNAPSHOT_FLOOR * 0.8).abs() < 1e-6);
+}
+
+/// Why (#9391): a `checkpoint`-tagged unkeyed drawer is a point-in-time
+/// record like a `status` one; it must decay with age and stay whole when fresh.
+/// What: 365 days reaches the floor, one half-life lands midway, fresh is 1.0.
+#[test]
+fn a_checkpoint_tagged_drawer_is_a_snapshot() {
+    let now = Utc::now();
+    let ancient = drawer("c", &["checkpoint"], Duration::days(365), now);
+    let w = temporal_weight(&ancient, now);
+    assert!((w - SNAPSHOT_FLOOR).abs() < 1e-6, "ancient weight {w}");
+    let day = drawer("c", &["checkpoint"], Duration::hours(24), now);
+    let mid = SNAPSHOT_FLOOR + (1.0 - SNAPSHOT_FLOOR) * 0.5;
+    let w = temporal_weight(&day, now);
+    assert!((w - mid).abs() < 1e-3, "one half-life weight {w}");
+    let fresh = drawer("c", &["checkpoint"], Duration::zero(), now);
+    assert_eq!(temporal_weight(&fresh, now), 1.0);
+}
+
+/// Why (#9391): exact tag match only — near-miss spellings are not snapshots.
+#[test]
+fn checkpoint_near_miss_tags_are_not_snapshots() {
+    let now = Utc::now();
+    for tag in [
+        "checkpointed",
+        "pre-checkpoint",
+        "Checkpoint",
+        "checkpoints",
+    ] {
+        let d = drawer("x", &[tag], Duration::days(30), now);
+        assert_eq!(temporal_weight(&d, now), 1.0, "tag {tag} is not a snapshot");
+    }
+}
+
+/// Why (#9391): the type factor (#9144) and the snapshot decay compose; a
+/// Status or Turn drawer tagged `checkpoint` takes both.
+/// What: at the floor (365 days), weight is 0.5 * 0.8 for Status, 0.5 * 0.7
+/// for Turn; at one half-life it is mid * factor.
+#[test]
+fn a_typed_checkpoint_takes_both_the_type_factor_and_the_decay() {
+    let now = Utc::now();
+    let mid = SNAPSHOT_FLOOR + (1.0 - SNAPSHOT_FLOOR) * 0.5;
+    for (t, factor) in [(DrawerType::Status, 0.8), (DrawerType::Turn, 0.7)] {
+        let mut old = drawer("c", &["checkpoint"], Duration::days(365), now);
+        old.drawer_type = t;
+        let w = temporal_weight(&old, now);
+        assert!(
+            (w - SNAPSHOT_FLOOR * factor).abs() < 1e-6,
+            "{t:?} floor {w}"
+        );
+        let mut day = drawer("c", &["checkpoint"], Duration::hours(24), now);
+        day.drawer_type = t;
+        let w = temporal_weight(&day, now);
+        assert!((w - mid * factor).abs() < 1e-3, "{t:?} half-life {w}");
+        let mut fresh = drawer("c", &["checkpoint"], Duration::zero(), now);
+        fresh.drawer_type = t;
+        let w = temporal_weight(&fresh, now);
+        assert!((w - factor).abs() < 1e-6, "{t:?} fresh {w}");
+    }
+}
+
+/// Why (#9391): a live Tier C slot stays exempt, checkpoint tag or not; once
+/// retired it is an unkeyed snapshot and decays.
+#[test]
+fn a_live_keyed_checkpoint_is_exempt() {
+    let now = Utc::now();
+    let mut keyed = drawer("c", &["checkpoint"], Duration::days(3), now);
+    keyed.fact_key = Some("ws:s1/checkpoint".to_string());
+    keyed.expires_at = Some(now + Duration::hours(1));
+    assert_eq!(temporal_weight(&keyed, now), 1.0);
+    keyed.fact_key = None;
+    keyed.expires_at = None;
+    assert!(temporal_weight(&keyed, now) < 0.9);
+}
+
+/// Why (#9391): the defect itself — a weeks-old checkpoint above fresher
+/// material that scores slightly lower.
+#[test]
+fn a_stale_checkpoint_ranks_below_a_fresher_lower_scoring_drawer() {
+    let now = Utc::now();
+    let checkpoint = hit(
+        drawer("ckpt", &["checkpoint"], Duration::days(20), now),
+        0.80,
+    );
+    let fresh = hit(drawer("fresh", &["kg"], Duration::days(1), now), 0.60);
+    let mut results = vec![checkpoint, fresh];
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
+    let order: Vec<&str> = results.iter().map(|r| r.drawer.content()).collect();
+    assert_eq!(order, ["fresh", "ckpt"], "{results:#?}");
+}

@@ -85,6 +85,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_create"
         | "palace_delete"
         | "palace_update"
+        // #9544: moves a palace's directory and rewrites the alias map.
+        | "palace_rename"
         | "palace_compact"
         // #4906: dry-run is read-only but the repair writes vectors.
         | "palace_reembed"
@@ -185,6 +187,7 @@ mod tests {
         assert_eq!(scopes_for_tool("kg_assert"), vec!["memory.write"]);
         assert_eq!(scopes_for_tool("palace_compact"), vec!["memory.write"]);
         assert_eq!(scopes_for_tool("palace_info"), vec!["memory.read"]);
+        assert_eq!(scopes_for_tool("palace_rename"), vec!["memory.write"]);
         // #7654: pin the chat-asset split — only the put is a write.
         assert_eq!(
             scopes_for_tool("chat_asset_capabilities"),

@@ -30,7 +30,7 @@ use std::sync::{Mutex, PoisonError};
 use serde::{Deserialize, Serialize};
 
 use super::errors::ErrorKind;
-use crate::api::{BackendId, SecretKey, SecretsError, VaultName};
+use crate::api::{BackendId, BridgeSource, SecretKey, SecretsError, VaultName};
 use crate::store::file::{self, Kind};
 
 /// The one audit stream's discriminator (owner Q2).
@@ -64,6 +64,19 @@ pub enum AuditMethod {
     /// `secrets.list`, denials only.
     #[serde(rename = "secrets.list")]
     List,
+    /// `secrets.grant`, one record per granted key, or one deny (#9070).
+    #[serde(rename = "secrets.grant")]
+    Grant,
+    /// `secrets.resolve`, one record per key resolved or refused (#9070).
+    #[serde(rename = "secrets.resolve")]
+    Resolve,
+    /// `secrets.revoke`, one record per call (#9070).
+    #[serde(rename = "secrets.revoke")]
+    Revoke,
+    /// `secrets.set_agents_may_use`: one allow record before the backend
+    /// call, then a deny if that call fails; one deny for a refusal (#9070).
+    #[serde(rename = "secrets.set_agents_may_use")]
+    SetAgentsMayUse,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -108,15 +121,60 @@ impl From<ErrorKind> for AuditReason {
     }
 }
 
+/// Where a console bridge call's `agent_parent` came from (#9066).
+///
+/// What: the console's [`BridgeSource`], or `malformed` when the bridge
+/// assertion did not decode or contradicted its source. A direct call
+/// carries none. A source this build does not know decodes as
+/// [`AuditSource::Other`].
+/// Test: `bridge_call_is_audited_allow_and_deny`,
+/// `bridge_malformed_assertion_is_refused_and_audited`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuditSource {
+    /// The client's pid was found and its ancestry read.
+    Mapped,
+    /// No pid could be found for the client.
+    Unmappable,
+    /// The client's pid was found but its ancestry could not be read.
+    Unreadable,
+    /// The bridge assertion was missing, did not decode, or contradicted
+    /// its source.
+    Malformed,
+    /// A source a newer server records. Never written by this build.
+    #[serde(other)]
+    Other,
+}
+
+impl From<BridgeSource> for AuditSource {
+    fn from(source: BridgeSource) -> Self {
+        match source {
+            BridgeSource::Mapped => Self::Mapped,
+            BridgeSource::Unmappable => Self::Unmappable,
+            // Exhaustive: `BridgeSource` is this crate's, so a new variant
+            // fails the build here until it has its own audit source.
+            BridgeSource::Unreadable => Self::Unreadable,
+        }
+    }
+}
+
 /// One line of the audit log.
 ///
 /// Why: see the module docs. Every field is typed; none can carry a value.
 /// What: `vault`, `key`, `backend` and `project_root` are `None` when the
 /// call was refused before the server knew them (an undecodable request has
-/// none). `caller_pid` is `None` until S8 passes the peer pid in. Unknown
-/// fields are ignored and missing optional fields default, so old and new
-/// readers and writers interoperate.
-/// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`.
+/// none). `caller_pid` is the socket peer's pid as the kernel reported it
+/// (#9070), `None` when the kernel reported none. #9070 slice 3:
+/// `agents_allowed` is the flag value a `secrets.set_agents_may_use` call
+/// asked for, and `agent_parent` whether the caller's ancestry has a Claude
+/// Code process, on `grant`, `resolve` and flag-set records once judged.
+/// #9066: on a console bridge call, every record also carries `source`, and
+/// `agent_parent` is the console's assertion; a direct call's record omits
+/// `source`, so its line is unchanged. Unknown fields are ignored and missing optional fields default, so old
+/// and new readers and writers interoperate.
+/// Test: `audit_record_round_trips_a_pid_and_an_unknown_reason`,
+/// `audit_flag_record_round_trips_and_an_older_record_decodes`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AuditRecord {
@@ -143,9 +201,19 @@ pub struct AuditRecord {
     /// The project's checkout root, once resolved.
     #[serde(default)]
     pub project_root: Option<PathBuf>,
-    /// The calling process, once S8 reports it.
+    /// The calling process: the socket peer's pid (#9070).
     #[serde(default)]
     pub caller_pid: Option<u32>,
+    /// The "agents may use" value a flag-set call asked for (#9070).
+    #[serde(default)]
+    pub agents_allowed: Option<bool>,
+    /// Whether the caller had a Claude Code ancestor, once judged (#9070).
+    #[serde(default)]
+    pub agent_parent: Option<bool>,
+    /// Where a bridge call's `agent_parent` came from; `None` for a direct
+    /// call, and then not written (#9066).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AuditSource>,
 }
 
 impl AuditRecord {
@@ -166,6 +234,9 @@ impl AuditRecord {
             backend: None,
             project_root: None,
             caller_pid: None,
+            agents_allowed: None,
+            agent_parent: None,
+            source: None,
         }
     }
 

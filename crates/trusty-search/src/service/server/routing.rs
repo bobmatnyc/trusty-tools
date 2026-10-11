@@ -6,9 +6,11 @@
 //! What: `RoutingMode` enum + `compute_context_weights` helper +
 //! `SearchSimilarRequest` + `search_similar_handler`.
 //! Test: `routing_mode_all_preserves_every_index_with_weights` and siblings.
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
@@ -179,6 +181,7 @@ fn default_similar_top_k() -> usize {
 /// chunk).
 /// Test: `search_similar_fallback_reembeds_when_cache_misses` in the server
 /// integration tests.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn search_similar_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

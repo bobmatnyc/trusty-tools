@@ -150,12 +150,8 @@ commands:
     examples:
       - cmd: trusty-search health
   start:
-    description: Start the HTTP daemon
+    description: Start the socket-only daemon
     flags:
-      - name: port
-        type_hint: PORT
-        default: "7878"
-        description: Port to listen on (auto-walks if busy)
       - name: foreground
         description: Run in the foreground instead of forking a background daemon
       - name: device
@@ -164,7 +160,6 @@ commands:
         description: Embedding device (auto|cpu|gpu)
     examples:
       - cmd: trusty-search start
-      - cmd: trusty-search start --port 7878
       - cmd: trusty-search start --foreground
         note: launchd / systemd / Docker
   stop:
@@ -172,21 +167,10 @@ commands:
     examples:
       - cmd: trusty-search stop
   serve:
-    description: Start MCP server (stdio by default; add --with-http for HTTP)
-    flags:
-      - name: with-http
-        description: Enable the HTTP/SSE listener in addition to MCP stdio
-      - name: port
-        type_hint: PORT
-        default: "0"
-        description: HTTP port (only used when --with-http is set; 0 = OS picks)
-      - name: http
-        type_hint: ADDR
-        description: 'Legacy: explicit "host:port" bind address'
+    description: Start the MCP server over stdio (#9542 retired --with-http)
     examples:
       - cmd: trusty-search serve
-        note: MCP stdio only (Claude hook)
-      - cmd: trusty-search serve --with-http --port 7878
+        note: MCP stdio (Claude hook)
   service:
     description: Manage the macOS launchd service
     subcommands:

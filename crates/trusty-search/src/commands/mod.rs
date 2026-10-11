@@ -3,7 +3,7 @@
 //! Why: `main()` was a 2.7k-line file mixing clap argument definitions with
 //! subcommand implementations and ~50 helper functions. This module splits
 //! each `Commands::*` variant into its own handler plus a set of shared
-//! support modules (`daemon_utils`, `format`, `index_resolve`,
+//! support modules (`format`, `index_resolve`,
 //! `reindex_engine`, `doctor_checks`, `doctor_pipeline`) so `main.rs` becomes
 //! a thin clap-to-handler dispatcher.
 //!
@@ -20,7 +20,6 @@
 // Shared support modules
 // #9214: shared socket-call error mapping for the subcommands moved off HTTP.
 pub(crate) mod daemon_rpc;
-pub mod daemon_utils;
 pub mod doctor_checks;
 pub(crate) mod doctor_pipeline;
 pub mod format;
@@ -67,6 +66,8 @@ pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;
 // #6822: the scalar-precision backfill command.
+// #9169 PR-B1: `trusty-search project map|park|unpark|pin|rebuild-map`.
+pub mod project;
 pub mod prune;
 pub mod prune_orphans;
 pub mod quantize;

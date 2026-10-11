@@ -126,6 +126,7 @@ pub async fn remember_async(
             Value::Array(tags.into_iter().map(Value::String).collect()),
         );
     }
+    // The RPC carries no drawer `type`, so the heuristic classifier runs. See #9144
     let tool_args = Value::Object(args);
 
     let state_for_task = state.clone();

@@ -762,7 +762,6 @@ crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
 crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_edges
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_mcp_tool_returns_hits
 crates/trusty-search/src/service/colocated_storage.rs	colocated_dir_exists_after_create
-crates/trusty-search/src/service/config.rs	load_user_config_returns_defaults_when_missing
 crates/trusty-search/src/service/embed_pool.rs	embed_pool_reply_rx_timeout_returns_error
 crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_defers_spawn
 crates/trusty-search/src/service/embedder_supervisor/mod.rs	lazy_handle_idle_shutdown

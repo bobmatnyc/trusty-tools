@@ -7,9 +7,11 @@
 //! (`RoutingMode`, `compute_context_weights`) and `search_similar_handler`
 //! live in `routing.rs`. Global fan-out lives in `search_global.rs`.
 //! Test: `search_handler_meta_includes_stale_index_root_field` and related.
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
@@ -24,6 +26,7 @@ use super::status::index_last_indexed;
 
 // Re-export global fan-out handler so the router in `mod.rs` can reach it
 // through the `search` path without knowing about `search_global`.
+#[cfg(test)]
 pub(super) use super::search_global::global_search_handler;
 
 /// Query parameters for `DELETE /indexes/{id}` (issue #4123).
@@ -82,6 +85,7 @@ pub(crate) struct DeleteIndexParams {
 /// `delete_of_an_allowlist_excluded_registration_removes_the_row`,
 /// `delete_of_an_id_in_no_store_and_no_registry_is_404`,
 /// `a_failed_indexes_toml_rewrite_is_reported_not_swallowed`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -122,7 +126,8 @@ pub(crate) async fn delete_index_report(
     if let Some(expected) = params.expected_root_path.as_deref() {
         super::delete_guard::refuse_unless_root_matches(state, id, expected)?;
     }
-    let outcome = unregister_index(
+    // #9169: through the project map, so no park row or pin outlives the id.
+    let outcome = super::project_park::unregister_with_map(
         state,
         id,
         params.delete_data,
@@ -663,6 +668,7 @@ pub(super) async fn unregister_index(
     }
 }
 
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn search_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -703,6 +709,8 @@ pub(crate) async fn search_report(
             serde_json::json!({ "error": "query must not be empty" }),
         ));
     }
+    // #9258: config fills an unset lexical-lane field; a bad limit is a 400.
+    super::lexical_lane::resolve(state, &mut query)?;
     let index_id = IndexId::new(id.to_string());
     // Issue #993: hot registry first, then the cold-store lazy load. #5349 moved
     // that flow into `index_resolve` so the write endpoints drive the identical

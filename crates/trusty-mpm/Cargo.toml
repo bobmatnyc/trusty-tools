@@ -149,7 +149,9 @@ name = "trusty-mpm"
 # 1.8.1 (Refs #9566): patch — 1.8.0 is published on crates.io and this PR
 # edits `src/**`, so the "PR version bump vs crates.io" check (#4421)
 # requires the bump. Bug fix, no signature break.
-version = "1.8.1"
+# 1.9.0 (Refs #9621): minor — 1.8.2 is published on crates.io and this PR adds
+# the `tm secrets exec` subcommand (a feature) under `src/**`.
+version = "1.9.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -534,6 +536,9 @@ trusty-common = { workspace = true, features = [
     # #9123: the shared credential test sandbox; mutates the process
     # environment, so dev-only.
     "credential-test-sandbox",
+    # #9274: the format-0 palace fixture the SM and portfolio migration tests
+    # build; compiles nothing until `sm-memory` / `manager-memory` add memory-core.
+    "memory-core-test-support",
 ] }
 # #8341: the `trusty-review` dev-dependency was REMOVED. It existed for the
 # cross-gate AC-18 golden test (DOC-15 C5 / #1362), which now lives in

@@ -248,7 +248,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **52 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **53 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -277,11 +277,11 @@ this table is generated from it, not maintained by hand.
 | `list_prompt_facts` | `full?`, `max_bytes?` | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
 | `memory_list` | `full?`, `limit?`, `max_bytes?`, `palace?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
-| `memory_note` | `palace`, `content`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
+| `memory_note` | `palace`, `content`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `verify?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
 | `memory_recall` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
 | `memory_recall_all` | `q`, `deep?`, `full?`, `include_creator_tags?`, `max_bytes?`, `scope?`, `top_k?` | Semantic search across palaces: by default (`scope: "resident"`) only the palaces already loaded in memory, opening none; with `scope:… |
 | `memory_recall_deep` | `query`, `full?`, `include_creator_tags?`, `max_bytes?`, `min_score?`, `palace?`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
-| `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
+| `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `type?`, `verify?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
 | `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
 | `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
 | `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
@@ -291,6 +291,7 @@ this table is generated from it, not maintained by hand.
 | `palace_info` | `palace?` | Get metadata and stats for a single palace. |
 | `palace_list` | — | List all palaces on this machine. |
 | `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
+| `palace_rename` | `palace_id`, `new_id`, `replace_empty?` | Move a palace to a new id. |
 | `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
 | `palace_update` | `palace_id`, `name` | Update the display name of an existing palace. |
 | `palace_verify_embedded` | `drawer_ids`, `palace?` | #5000: answer whether YOUR OWN drawer ids are vector-findable. |
@@ -312,6 +313,21 @@ over the socket as `memory.status` (`StatusPayload` in
 `src/service/types.rs`, bound in `src/transport/uds.rs`); there is no
 corresponding MCP tool, which is why the generated roster above does not
 list one.
+
+### Typed writes (`memory_remember` `type`)
+
+`memory_remember` takes an optional `type`: `Ruling`, `Decision`, `Status`,
+`Turn` or `Reference`, matched in any case (#9144). The drawer is stored with
+that type, and `memory_list` reports it as `drawer_type`. Without `type`, the
+heuristic classifier picks the type, as before. Any other value, `UserFact`
+included, fails the call and writes nothing. `memory_note`, the
+`memory.remember_async` RPC and the HTTP create-drawer route take no type.
+
+Recall uses the type. A `Ruling` or `Decision` drawer counts as a ruling, the
+same as a ruling tag, so it is exempt from snapshot decay and eligible for the
+cross-palace rulings leg. A `Status` drawer's score is multiplied by 0.8 and a
+`Turn` drawer's by 0.7, on top of any snapshot decay. A drawer that holds a
+live `fact_key` slot is exempt from that factor.
 
 ### Task drawers (protected memory)
 

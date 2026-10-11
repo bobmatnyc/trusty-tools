@@ -1,6 +1,6 @@
 [package]
 name = "trusty-secrets"
-version = "0.1.3"
+version = "0.1.6"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -24,8 +24,8 @@ readme = "README.md"
 [features]
 default = ["api", "store", "server"]
 api = ["dep:serde", "dep:thiserror"]
-store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc"]
-server = ["store", "dep:tokio", "dep:trusty-common"]
+store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
+server = ["store", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
 # #7519: the blocking runner and template-file guard the CLI-backed backends
 # (1Password, Keeper) share. std plus `store`'s libc only — owner ruling
 # 2026-10-07, "no common dependencies"; pinned by
@@ -43,6 +43,11 @@ serde_yaml = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 trusty-common = { workspace = true, optional = true, features = ["uds-supervisor"] }
+# #9070: exec-grant tokens — 256 bits from the OS CSPRNG, kept only as SHA-256.
+sha2 = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
+# #7520 S2: the session cache zeroes each value it drops (ruling Dd8).
+zeroize = { workspace = true, optional = true }
 
 [[bin]]
 name = "trusty-secrets"
@@ -59,6 +64,18 @@ required-features = ["server"]
 [[test]]
 name = "audit_post_success"
 path = "tests/audit_post_success.rs"
+required-features = ["server"]
+
+# #7520 S2: sets RLIMIT_CORE for its whole process, so it is its own binary.
+[[test]]
+name = "core_dump_limit"
+path = "tests/core_dump_limit.rs"
+required-features = ["server"]
+
+# #9070: S8 live checks; spawns the real binary, so it needs `server`.
+[[test]]
+name = "live_flag_peer"
+path = "tests/live_flag_peer.rs"
 required-features = ["server"]
 
 # #9328: imports `store`, so an `api`-only test run must skip it.
@@ -85,3 +102,7 @@ libc = { workspace = true, optional = true }
 tempfile = { workspace = true }
 # The api tests decode wire JSON even when only `api` is enabled.
 serde_json = { workspace = true }
+# #9070: the resolve sentinel test captures every tracing event. Both are
+# already in the graph through trusty-common, with the same features.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

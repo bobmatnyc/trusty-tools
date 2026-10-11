@@ -88,6 +88,8 @@ pub mod task_ops;
 pub mod wing_definitions;
 #[cfg(feature = "server")]
 pub mod wing_ops;
+// #9144 / #9390: write-tool properties spliced in for the recursion limit.
+mod write_property_definitions;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
@@ -126,7 +128,8 @@ use {
     },
     palace_ops::{
         handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-        handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
+        handle_palace_list, handle_palace_reembed, handle_palace_rename, handle_palace_unalias,
+        handle_palace_update,
     },
     recall_ops::{handle_memory_recall, handle_memory_recall_all, handle_memory_recall_deep},
     room_ops::{handle_room_create, handle_room_list, handle_room_rename},
@@ -220,8 +223,8 @@ fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
     };
     // The same rule `PalaceRegistry::resolve_palace_alias` applies, from the
     // one place that owns it — a second spelling here is how the two drift.
-    let palace = trusty_common::palace_alias::alias_target_if_absent(&state.data_root, &palace)
-        .unwrap_or(palace);
+    // #9544: the named helper for this rule, not an open-coded copy of it.
+    let palace = trusty_common::palace_alias::canonical_palace_id(&state.data_root, &palace);
     let id = trusty_common::memory_core::PalaceId::new(&palace);
     let Some(data_dir) = state.registry.peek(&id).and_then(|h| h.data_dir.clone()) else {
         return;
@@ -246,6 +249,8 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
         "palace_list" => handle_palace_list(state, args).await,
         "palace_delete" => handle_palace_delete(state, args).await,
         "palace_update" => handle_palace_update(state, args).await,
+        // #9544: move a palace to a new id; the old id keeps answering.
+        "palace_rename" => handle_palace_rename(state, args).await,
         "kg_assert" => handle_kg_assert(state, args).await,
         // The inverse of `kg_assert`: closes one (subject, predicate, object)
         // and leaves the pair's other objects live.

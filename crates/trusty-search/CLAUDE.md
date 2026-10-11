@@ -15,7 +15,7 @@ serves multiple named indexes (one per project) via HTTP daemon and MCP server.
   expansion, fused via Reciprocal Rank Fusion (RRF, k=60, parameter-free)
 - **Query-type routing**: classify intent (Definition / Usage / Conceptual / BugDebt /
   Keyword / Unknown) and route to optimal weighting before searching
-- **MCP server**: stdio + HTTP/SSE for Claude Code integration
+- **MCP server**: stdio for Claude Code integration (#9542 retired HTTP/SSE)
 - **Zero cold-start**: HNSW stays hot (Duration::MAX cool-after), LRU embedding cache
   (256 entries) skips re-embedding on repeated queries
 - **Native multi-request**: `Arc<SearchAppState>`, concurrent reads via `RwLock`,
@@ -192,6 +192,15 @@ daemon.
     retries it, because a partial walk may have committed chunks and the cause
     that killed the first walk would likely kill the retry. Clear it with
     `POST /indexes/:id/reindex`.
+  - `chat_available` (#9030): `true` only when a chat provider exists - a
+    reachable local Ollama / LM Studio server or an OpenRouter key - the same
+    detection (`SearchAppState::chat_provider_available`) that makes
+    `search.chat` answer "no chat provider available". It means
+    "`search.chat` would not refuse with 503"; it never fills the
+    provider cell, so an early poll cannot lock the choice in. A per-request
+    `api_key` can still get chat when it is `false`. Fails closed: `false` with
+    no provider, and `false` when resolution takes over 2 s. Additive, always
+    present; the console passes the `search.health` body through unchanged.
   - `indexes_stage_failed_ids` (#6688): the ids behind
     `warmboot_summary.indexes_stage_failed`, so a consumer can act on the
     specific index instead of polling `GET /indexes/:id/status` for every
@@ -236,6 +245,61 @@ List every registered index.
     `indeterminate`). Also on `?details=true`; a `?repo_identity=` filter
     narrows it to that repo's rows. Omitted when nothing is
     parked, so a consumer must treat it as optional.
+  - A row with `parked: true` (#9169) is an index parked in
+    `project-map.toml` (below). It also carries `reason`, `key` and
+    `canonical_index_id`.
+
+##### Project map — `project-map.toml` (#9169)
+
+Socket-only, free lane. The map sits next to `indexes.toml` (with a
+`project-map.toml.lock` sidecar) and names one index per project.
+
+- **Schema 1.** `[[projects]] {key, index_id, root_path, pinned_by =
+  migration|create|operator, pinned_unix}` and `[[parked]] {index_id, key,
+  root_path, reason = worktree|orphaned|operator, parked_unix}`. `key` is the
+  resolver's group key: the repo identity, or `root:<path>` for a
+  subdirectory index.
+- **Migration.** The first boot with no map pins every group to the index
+  `search.project.resolve` returned before the map existed, parks nothing,
+  and writes once. `indexes.toml` and `projects.json` are not changed. An
+  unreadable `indexes.toml` writes no map.
+- **Fail closed.** A map that cannot be parsed, names a schema other than 1,
+  or cannot be read is never rewritten. `search.project.resolve` and
+  `search.project.map` answer `CODE_INTERNAL_ERROR` naming the file and the
+  remedy; a resolve by an exact index id still answers. Requests that name
+  an index id do not read parks from an unreadable map, prune deletes
+  nothing, the boot orphan heal and relocation salvage are skipped, the
+  runtime orphan reaper reaps nothing, and `search.index.delete` is refused
+  with `500 project_map_unreadable`.
+  `trusty-search project rebuild-map --yes` moves the file to
+  `project-map.toml.corrupt-<unix>` and migrates again.
+- `search.project.resolve` answers from the map: a group's pin wins, a parked
+  index never wins, and the answer carries `pinned_by` (`null` when derived).
+  Each duplicate carries `parked`.
+- `search.project.map` → `{path, schema, projects, parked}`.
+- `search.project.park {index_id}` → `{index_id, parked, key, reason,
+  canonical_index_id, unpinned, unloaded}`. A pin naming the parked index is
+  dropped; `unpinned` lists the group keys it held. Only a worktree, an orphaned root, or an
+  index sharing its root with another registration (not the group's live
+  index) parks. A main checkout is refused with `-32009`
+  `data.error = "park_refused"`. A parked index keeps its corpus and its
+  `indexes.toml` row; it is unloaded and is not warm-loaded, watched,
+  reindexed, or searched by `search.query.all`.
+- `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
+  reindex | reindex_error}`: clears the row, reloads the index, queues a
+  reindex.
+- `search.project.pin {index_id}` → `{index_id, key, pinned_by, previous}`.
+  A worktree, orphaned or parked index is refused.
+- A request naming a parked index (`search.query`, reindex, file reads and
+  writes) answers `409 index_parked` — socket `-32009` with `data`
+  `{parked: true, canonical_index_id, key, reason}`. It never redirects and
+  never returns empty hits. `canonical_index_id` is the group's live answer
+  under the map (`null` when it has none), never a parked or unregistered id.
+- Deleting an index drops its park row and pins from the map, so an index
+  registered again at the same root is not parked.
+- `search.index.create` pins a new index's group when it has no pin
+  (`pinned_by = create`); a pin that cannot be written is reported as
+  `project_map_error` and the index stays registered.
 
 ##### `POST /indexes`
 
@@ -621,6 +685,17 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `git diff --name-only <base>..HEAD` inside the index `root_path` to
     derive the file list. Failure is non-fatal: a `tracing::warn!` is logged
     and search proceeds with no boost. Issue #122.
+  - `ripgrep_fallback` (optional bool, #9258): `false` stops the
+    content-scan lanes (grep fallback, exact-match injection) from adding
+    rows, so no result carries `fallback:ripgrep`. Omitted: the daemon's
+    `[search].ripgrep_fallback` from `~/.trusty-search/config.toml`, else on.
+  - `lexical_limit` (optional, `1..=10000`, #9258): candidate depth of each
+    lexical lane (BM25, grep, exact-match). Omitted: `[search].lexical_limit`,
+    else `top_k × 4`. Out of range answers `400 invalid_lexical_limit`, never a
+    clamp. A bad `[search]` value in `config.toml` (wrong type, negative, `0`,
+    above `10000`, or a file that declares `[search]` but is not valid TOML)
+    stops `trusty-search start`; the error names the key, never the value.
+    `POST /search` carries both fields too.
 - **Response 200**:
   ```json
   {
@@ -1130,12 +1205,12 @@ this table is generated from it, not maintained by hand.
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
-| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
-| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
-| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `lexical_limit?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `ripgrep_fallback?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
 | `typeahead` | `query`, `index_id?`, `limit?`, `mode?`, `project?` | Fast per-keystroke autocomplete suggestions for an index. |
 <!-- END GENERATED: mcp-tools -->
@@ -1445,8 +1520,7 @@ Additional internal caps (not env-tunable):
 ## CLI
 
 ```bash
-trusty-search start                                  # start HTTP daemon (background)
-trusty-search start --no-http                        # socket-only daemon (see below)
+trusty-search start                                  # start the socket-only daemon (background)
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]  # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml for multi-index repos
@@ -1456,50 +1530,43 @@ trusty-search status                                 # daemon + index overview (
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search
-trusty-search serve [--http <addr>]                  # MCP stdio (default) or HTTP/SSE
+trusty-search serve                                  # MCP stdio (#9542: no HTTP/SSE)
+trusty-search project map|park <id>|unpark <id>|pin <id>|rebuild-map --yes   # #9169 project map
 # Aliases preserved for backward compatibility:
 trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
 
-### Socket-only daemon (`--no-http`, #9214)
+### Socket-only daemon (#9214)
 
-`trusty-search start --no-http`, or `TRUSTY_SEARCH_NO_HTTP=1` in the daemon's
-environment, serves every socket method and binds no TCP port. It is off by
-default; ADR-0032 flips it once the in-tree clients use the socket. With it set
-the daemon:
+The daemon serves every method on its Unix socket and binds no TCP port
+(ADR-0032, #9214 PR-A). It:
 
-- writes no `daemon.port` or `http_addr` file, and removes any an earlier run
+- writes no `daemon.port` or `http_addr` file, and removes any an older build
   of the same data dir left;
-- registers no address in the shared discovery registry;
+- clears the default instance's shared discovery registry entry, and
+  registers none. A stale file or entry it cannot remove is logged as a
+  warning naming its path, and the daemon keeps serving;
 - reports `transport.http_addr: null` from `search.health`;
-- still runs every background ticker, and `trusty-search stop` still finds it
-  through the lockfile pid;
-- skips auto-discovery and logs why, because auto-discovery registers
-  projects over HTTP.
+- runs every background ticker, and `trusty-search stop` finds it through the
+  lockfile pid;
+- runs auto-discovery over the socket.
 
-The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
-`/upgrade`, `/metrics`, `/api/chat/providers`. `status`, `list`, `add`'s
-guard, `remove` and `watch` use the socket (#9214 B2(a)), and so do
-`config get|set`, `cleanup`, `convert` and `migrate`'s index phase (#9214
-B2(b1)); `config` and `cleanup` never start the daemon. `index`, `reindex`
-(with its progress stream), `index-status`, `index remove`, `index relocate`,
-`add`'s per-file write and `init`/`discover` registration use it too (#9214
-B2(b2)); with no daemon answering they exit 1 naming the socket. `port`,
-`dashboard` and `monitor web` ask the daemon over the socket which HTTP
-address it bound (#9214 B2(d1)). Against a `--no-http` daemon, `port` exits 1
-with `no HTTP listener (socket-only daemon at <socket>)`; `dashboard` and
-`monitor web` exit non-zero, name the socket, and open no browser, because the
-dashboard needs the HTTP listener until phase C. `port` reports "no daemon
-running" only when nothing answers on the socket, and never starts a daemon.
-`query`, `doctor`, `monitor status`/`indexes` and the daemon's
-auto-discovery use the socket too (#9214 slice 1), so no CLI path dials TCP;
-`doctor` reports the HTTP listener the daemon says it bound instead of
-probing a port. `monitor tui` reads through trusty-common's socket-only
-`SearchClient` (#9214 trusty-common slice). Auto-discovery is still withheld
-under `--no-http`.
-`--no-http` on `trusty-search serve` is a different, older flag and is still a
-no-op there.
+#9536 removed `--port` and `--no-http` from `start`: clap rejects either as
+an unknown argument (exit 2), and `TRUSTY_SEARCH_NO_HTTP` is not read. A unit
+that still passes a flag fails to start; `service install` regenerates it
+without them. The axum router compiles
+only under `cfg(test)` until PR-B deletes it (ruling D1), so `/ui`,
+`/upgrade`, `/metrics` and `/api/chat/providers` are unavailable; the search
+dashboard is served by trusty-console.
+
+Every CLI path uses the socket. `port` exits 1 with `no HTTP listener
+(socket-only daemon at <socket>)`; `dashboard` and `monitor web` exit
+non-zero, name the socket and trusty-console, and open no browser. `port`
+reports "no daemon running" only when nothing answers on the socket, and
+never starts a daemon. `doctor` reports the HTTP listener the daemon says it
+bound, and warns when an older daemon still binds one. `--no-http` on
+`trusty-search serve` is a different, older flag and is still a no-op there.
 
 ## Crate Layout
 
@@ -1526,7 +1593,7 @@ trusty-search/
 │   ├── doctor.rs                    diagnostic checks
 │   ├── core/                        CodeIndexer, BM25, HNSW, chunking, classifier
 │   ├── service/                     axum daemon, FileWatcher, socket client, Svelte UI
-│   └── mcp/                         MCP server (stdio + HTTP/SSE)
+│   └── mcp/                         MCP server (stdio)
 └── tests/
     ├── integration_tests.rs         imports `trusty_search::core::*`
     └── benchmark_harness.rs         MRR@5 / Recall@10 quality bench
@@ -1544,7 +1611,7 @@ them via the crate's `Cargo.toml` features. Key surfaces consumed here:
 |------------------|----------|
 | the `trusty-mcp` crate (`trusty_mcp`) | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, OpenRPC discovery — extracted out of `trusty_common::mcp` by ADR-0040 (#5803) |
 | `embedder` (`trusty_common::embedder`) | `Embedder` trait, `FastEmbedder` (LRU + persistent model cache), `MockEmbedder` (formerly `trusty-embedder`) |
-| core (always available) | `bind_with_auto_port`, `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
+| core (always available) | `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
 
 ## Development
 
@@ -1768,7 +1835,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport (see [MCP Tools](#mcp-tools))
+- MCP server: full JSON-RPC 2.0 stdio transport (see [MCP Tools](#mcp-tools))
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection

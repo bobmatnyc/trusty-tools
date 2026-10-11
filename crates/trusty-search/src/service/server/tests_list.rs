@@ -307,6 +307,8 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await
@@ -390,6 +392,8 @@ async fn global_search_sub_index_boost_applied() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await
@@ -476,6 +480,8 @@ async fn global_search_serial_returns_all_results() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await
@@ -540,6 +546,8 @@ async fn global_search_request_override_echoed() {
             path_prefix: None,
             repos: Vec::new(),
             per_index_deadline_ms: None,
+            ripgrep_fallback: None,
+            lexical_limit: None,
         }),
     )
     .await

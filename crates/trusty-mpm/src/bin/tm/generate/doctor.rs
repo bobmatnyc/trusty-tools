@@ -148,6 +148,22 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "Resolves the index id the project's `.mcp.json` actually PINS (`trusty-search serve --index <id>`) against `GET /indexes/{id}/status`, and FAILS on a 404 — the pin names an index the daemon does not have, so every `search`/`grep` call in the session returns \"unknown index\". Index registration is fail-open at every step, so the pin advances even when creation failed and the `search` check above still reports healthy; 4 of 75 live worktrees had an index when this was measured. Read-only; never creates or reindexes (issue #5045).",
     ),
     (
+        "search_project_no_index",
+        "Resolves this project's root with trusty-search's `search.project.resolve` (issue #9169). Ok when an index answers for it; Warn when no index covers it (remedy `trusty-search index <path>`), when only worktree or orphaned indexes do, or when it matches more than one repo. Warn \"not checked\" with no project directory, a daemon that does not answer, or any other refusal. Read-only.",
+    ),
+    (
+        "search_project_duplicate_index",
+        "Reads trusty-search's project map (`search.project.map`), then resolves each pinned index (at most 64 groups, 3 s per call, 15 s in all). Warn names each group that still holds a live worktree, orphaned or same-root duplicate, with the remedy `trusty-search project park <id>`; parked duplicates are fine. Warn \"not checked\" for a map that was not read and for each group whose resolve was refused, timed out or fell past the cap — never Ok. The check is read-only (issue #9169); `tm doctor --fix --yes` parks each flagged duplicate through the daemon's `search.project.park`, never this project's own index and nothing when the map was not read (issue #9664).",
+    ),
+    (
+        "search_project_two_checkouts",
+        "From the same per-group resolves: Warn when a group holds a second live main checkout (the #9230 case, where the f7 recency rule picks between them) and its answer was not pinned by an operator, with the remedy `trusty-search project pin <id>`; an operator pin clears it. Warn \"not checked\" under the same conditions as `search_project_duplicate_index`. Read-only (issue #9169).",
+    ),
+    (
+        "search_project_map_unreadable",
+        "Whether the trusty-search daemon can read its `project-map.toml` (issue #9169). Fail when `search.project.map` answers the fail-closed internal error — every resolve by project name, owner/repo or path fails until `trusty-search project rebuild-map --yes` moves the file aside and migrates again. Ok when the map is readable. Warn \"not checked\" when the daemon does not answer, predates the map (older than trusty-search 0.60.0), or answers without a map. Read-only; tm never writes the map.",
+    ),
+    (
         "worktrees",
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
     ),
@@ -307,7 +323,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "tcp_listeners",
-        "Which trusty-* processes hold a TCP socket in LISTEN state, graded against the ADR-0032 allowlist `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv` — the file the CI lint `scripts/check_no_tcp_listeners.sh` reads too (issue #8926). Only trusty-console may listen on TCP. Probed through libproc on macOS and `/proc` on Linux, never `lsof`. `Ok` when only the console listens, or nothing does; WARNS naming the issue for a `temporary` row's daemon still on TCP (tm #6288, trusty-search #6285); FAILS on any other trusty-* listener, including an opt-in `--http`/`--api` server. UNKNOWN — never `Ok` — when the probe cannot run or a trusty-* process's sockets cannot be read. Read-only.",
+        "Which trusty-* processes hold a TCP socket in LISTEN state, graded against the ADR-0032 allowlist `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv` — the file the CI lint `scripts/check_no_tcp_listeners.sh` reads too (issue #8926). Only trusty-console may listen on TCP. Probed through libproc on macOS and `/proc` on Linux, never `lsof`. `Ok` when only the console listens, or nothing does; WARNS naming the issue for a `temporary` row's daemon still on TCP (tm #6288); FAILS on any other trusty-* listener, a trusty-search one included (no trusty-search process binds TCP since #9214 and #9542), including an opt-in `--http`/`--api` server. UNKNOWN — never `Ok` — when the probe cannot run or a trusty-* process's sockets cannot be read. Read-only.",
     ),
     (
         "pty_headroom",

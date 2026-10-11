@@ -112,4 +112,54 @@ pub(crate) enum SecretsAction {
     },
     /// Report socket and backend reachability, never a value.
     Doctor,
+    // #9621: tier 1 of DOC-74 §15.8 — `--env` and `--stdin`; no `--dotenv`.
+    /// Run a command with project keys in its environment or on its stdin.
+    ///
+    /// Each `--env NAME=KEY` sets `NAME` to the value of `KEY`; `--stdin KEY`
+    /// writes the value of `KEY` to the command's stdin and closes it. A value
+    /// never goes on any command line. Any key that does not resolve runs
+    /// nothing and exits 1. Exit status is the command's, or 128 + signal.
+    ///
+    /// When stdout is not a terminal, stdout and stderr are scrubbed of every
+    /// injected value of 8 characters or more. On a terminal nothing is
+    /// scrubbed. Known limits: any process of the same user can read the
+    /// command's environment (`ps eww`, `/proc/<pid>/environ`); the grant
+    /// lasts at most 3600 s and is not renewed; when tm is killed with
+    /// SIGKILL the grant lives until the server prunes it or it expires.
+    Exec {
+        /// `NAME=KEY`: set variable `NAME` to the value of `KEY`. Repeatable.
+        #[arg(long = "env", value_name = "NAME=KEY")]
+        env: Vec<ArgText>,
+        /// Write the value of `KEY` to the command's stdin.
+        #[arg(long, value_name = "KEY")]
+        stdin: Option<ArgText>,
+        /// The command and its arguments, after `--`.
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// The helper `exec` runs as its child; never run by hand.
+    ///
+    /// It reads the grant token from `--token-fd`, resolves each key, reports
+    /// the values to tm on `--report-fd`, and execs the command in place.
+    #[command(name = "__exec-stub", hide = true)]
+    ExecStub {
+        /// The trusty-secrets socket tm granted on.
+        #[arg(long)]
+        socket: PathBuf,
+        /// The inherited pipe that carries the token.
+        #[arg(long)]
+        token_fd: i32,
+        /// The inherited pipe the values go back to tm on.
+        #[arg(long)]
+        report_fd: i32,
+        /// `NAME=KEY`, as given to `exec`.
+        #[arg(long = "env", value_name = "NAME=KEY")]
+        env: Vec<ArgText>,
+        /// The `--stdin` key, as given to `exec`.
+        #[arg(long, value_name = "KEY")]
+        stdin: Option<ArgText>,
+        /// The command and its arguments.
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }

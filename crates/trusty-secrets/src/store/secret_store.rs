@@ -9,26 +9,37 @@
 //! A `set` writes the backend inside the index lock, after the index read, so
 //! a corrupt or locked index fails before any value is stored and an index
 //! row never claims a value the backend refused. #9070: the "agents may use"
-//! flag is read from and written to the backend, never the index.
+//! flag is read from and written to the backend, never the index. #7520: a
+//! store given a [`SecretCache`] keeps the CLI-backed values it reads, after
+//! every gate on the read path has run.
 //! Test: `store_tests.rs` beside this file.
 
 use std::fmt;
 use std::sync::Arc;
 
-use super::{Capabilities, NamesIndex, ScopeSet, SecretBackend, mask_secret, platform};
+use super::{
+    Capabilities, NamesIndex, OpenedUnder, ScopeSet, SecretBackend, SecretCache, mask_secret,
+    platform,
+};
 use crate::api::methods::{DeleteResponse, KeyMeta, SetOutcome, SetResponse};
 use crate::api::{SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
 
 /// A backend and its names-only index.
 ///
 /// Why: see the module docs.
-/// What: cheap to clone the `Arc` it holds; holds no value itself. `Debug`
-/// shows the backend id and the index root.
-/// Test: `store_debug_never_contains_a_value`.
+/// What: cheap to clone the `Arc`s it holds; holds no value itself, only
+/// the optional session cache does (#7520). `Debug` shows the backend id,
+/// the index root and the cache's entry count.
+/// Test: `store_debug_never_contains_a_value`, `cache_debug_never_prints_value`.
 #[derive(Clone)]
 pub struct SecretStore {
     backend: Arc<dyn SecretBackend>,
     index: NamesIndex,
+    // #7520: the server's session cache; `None` reads the backend every time.
+    cache: Option<Arc<SecretCache>>,
+    // #7520 M1: the settings `backend` was opened under; `None` is unknown,
+    // and the cache is then bypassed. Kept out of `Debug`.
+    opened_under: Option<OpenedUnder>,
 }
 
 impl fmt::Debug for SecretStore {
@@ -36,6 +47,7 @@ impl fmt::Debug for SecretStore {
         f.debug_struct("SecretStore")
             .field("backend", &self.backend.id())
             .field("index_root", &self.index.root())
+            .field("cache", &self.cache)
             .finish()
     }
 }
@@ -43,7 +55,33 @@ impl fmt::Debug for SecretStore {
 impl SecretStore {
     /// Pair a backend with an index.
     pub fn new(backend: Arc<dyn SecretBackend>, index: NamesIndex) -> Self {
-        Self { backend, index }
+        Self {
+            backend,
+            index,
+            cache: None,
+            opened_under: None,
+        }
+    }
+
+    /// This store, reading CLI-backed values through `cache` (#7520), as
+    /// filled under `opened_under`, the settings the backend was opened under.
+    ///
+    /// What: only the read path consults it, after its gates; writes never
+    /// touch it (the server evicts). `opened_under: None` bypasses it.
+    /// Test: `resolve_second_call_does_not_reread_cli_backend`,
+    /// `cache_cleared_when_cli_account_settings_change`.
+    #[cfg_attr(
+        not(feature = "server"),
+        allow(dead_code, reason = "only the server's resolve gives a cache")
+    )]
+    pub(crate) fn with_cache(
+        mut self,
+        cache: Arc<SecretCache>,
+        opened_under: Option<OpenedUnder>,
+    ) -> Self {
+        self.cache = Some(cache);
+        self.opened_under = opened_under;
+        self
     }
 
     /// The backend.
@@ -259,6 +297,33 @@ impl SecretStore {
         })
     }
 
+    /// [`Self::set_agents_may_use`], running `before` under the same index
+    /// lock, after the row check and before the backend call.
+    ///
+    /// Why: #9621 — the server's write-ahead audit record goes in `before`,
+    /// so records and flag changes for one key land in the same order, and
+    /// a key with no row is refused before any allow record is written.
+    /// What: `Ok(Err(e))` when `before` refused (the backend is never
+    /// called); `Ok(Ok(()))` when the flag was written; `Err` for a missing
+    /// row, a lock or index failure, or a backend failure.
+    /// Test: `store_flag_before_hook_runs_under_the_row_check`.
+    #[cfg_attr(
+        not(feature = "server"),
+        allow(dead_code, reason = "only the server's flag method calls it")
+    )]
+    pub(crate) fn set_agents_may_use_after<E>(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+        before: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Result<(), E>, SecretsError> {
+        self.index.with_row(vault, key, || match before() {
+            Ok(()) => self.backend.set_agents_may_use(vault, key, allowed).map(Ok),
+            Err(refused) => Ok(Err(refused)),
+        })
+    }
+
     /// The vault a reference resolves to, by the names-only index.
     ///
     /// Why: DOC-74 §15.3 — `secret://KEY` checks the project vault, then the
@@ -317,7 +382,7 @@ impl SecretStore {
     /// Read the value a reference names.
     ///
     /// What: refuses a backend without `READ` (a sync target), locates the
-    /// vault, and reads the backend directly — no cache (DOC-74 §15.5). An
+    /// vault, and reads it through [`Self::read_located`] (DOC-74 §15.5). An
     /// indexed key the backend no longer holds is `NotFound`; a backend
     /// failure stays a backend error.
     /// Test: `store_resolution_prefers_project_over_owner`,
@@ -339,8 +404,8 @@ impl SecretStore {
     /// Why: #7525 — a refused key must never reach the Keychain, so the gate
     /// runs between the index lookup and the value read.
     /// What: `require(READ)`, [`Self::locate_row`], the row's agents flag
-    /// from the backend (#9070), `admit(vault, row)`, then the uncached
-    /// backend read. A failed flag lookup and an `admit` error are returned
+    /// from the backend (#9070), `admit(vault, row)`, then
+    /// [`Self::read_located`]. A failed flag lookup and an `admit` error are returned
     /// as-is, before the value is read.
     /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`,
     /// `resolve_agent_gate_ignores_a_hand_edited_index_flag`,
@@ -352,24 +417,58 @@ impl SecretStore {
         admit: impl FnOnce(&VaultName, &KeyMeta) -> Result<(), SecretsError>,
     ) -> Result<SecretValue, SecretsError> {
         self.require(Capabilities::READ, "read")?;
-        let (vault, mut row) = self.locate_row(reference, scopes)?;
-        // #9070: the gate judges the backend's flag item, never the index row.
-        row.agents_may_use = self.backend.agents_may_use(&vault, &row.name)?;
+        let (vault, row) = self.locate_flagged(reference, scopes)?;
         admit(&vault, &row)?;
         self.read_located(&vault, reference.key())
     }
 
-    /// The uncached backend read of a located key; a miss is `NotFound`.
+    /// [`Self::locate_row`], with the row's agents flag from the backend.
+    ///
+    /// Why: #9070 — `secrets.grant` judges the flag of every key it grants
+    /// to an agent-parented registrar without reading a value, through the
+    /// same lookup the read path's gate uses.
+    /// What: the located vault and row; `agents_may_use` is the backend's
+    /// flag item, never the index row's field. A failed flag lookup is an
+    /// error, never ON. No value is read.
+    /// Test: `grant_by_agent_ancestor_cannot_name_unflagged_key`,
+    /// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
+    pub(crate) fn locate_flagged(
+        &self,
+        reference: &SecretRef,
+        scopes: &ScopeSet,
+    ) -> Result<(VaultName, KeyMeta), SecretsError> {
+        let (vault, mut row) = self.locate_row(reference, scopes)?;
+        // #9070: the gate judges the backend's flag item, never the index row.
+        row.agents_may_use = self.backend.agents_may_use(&vault, &row.name)?;
+        Ok((vault, row))
+    }
+
+    /// The backend read of a located key; a miss is `NotFound`.
+    ///
+    /// What: with a session cache, through [`SecretCache::read_through`], so
+    /// a CLI-backed value already read in this session is not read again;
+    /// otherwise straight from the backend. Callers run every gate first.
+    /// Test: `resolve_second_call_does_not_reread_cli_backend`,
+    /// `warm_cache_still_refuses_unflagged_key_for_agent`.
     fn read_located(
         &self,
         vault: &VaultName,
         key: &SecretKey,
     ) -> Result<SecretValue, SecretsError> {
-        self.backend
-            .get(vault, key)?
-            .ok_or_else(|| SecretsError::NotFound {
-                key: key.to_string(),
-                searched: vault.to_string(),
-            })
+        // #7520: after `admit` and the flag gate; a hit skips only this read.
+        let value = match &self.cache {
+            Some(cache) => cache.read_through(
+                &self.backend.id(),
+                self.opened_under.as_ref(),
+                vault,
+                key,
+                || self.backend.get(vault, key),
+            )?,
+            None => self.backend.get(vault, key)?,
+        };
+        value.ok_or_else(|| SecretsError::NotFound {
+            key: key.to_string(),
+            searched: vault.to_string(),
+        })
     }
 }

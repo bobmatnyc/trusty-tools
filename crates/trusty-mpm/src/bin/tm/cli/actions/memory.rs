@@ -84,6 +84,10 @@ pub(crate) enum MemoryAction {
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
+        /// #9390: command that re-reads this slot's fact, e.g.
+        /// `gh pr view 123 --json headRefOid`. Needs `--fact-key`.
+        #[arg(long, requires = "fact_key")]
+        verify: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -118,6 +122,10 @@ pub(crate) enum MemoryAction {
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
+        /// #9390: command that re-reads this slot's fact, e.g.
+        /// `gh pr view 123 --json headRefOid`. Needs `--fact-key`.
+        #[arg(long, requires = "fact_key")]
+        verify: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -146,6 +154,30 @@ pub(crate) enum MemoryAction {
         #[arg(long)]
         palace: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
+    /// Move a palace to a new id — trusty-memory's `palace_rename` (#9544).
+    ///
+    /// Drawers, vectors, the knowledge graph and chat sessions move with it.
+    /// The old id becomes an alias of the new one, so it keeps working.
+    /// Refuses an alias source, and an existing target unless it is empty and
+    /// `--replace-empty` is passed (the empty target moves to
+    /// `<data root>/.trash`). Exits non-zero on any refusal, with the daemon's
+    /// reason.
+    Rename {
+        /// Current palace id.
+        old: String,
+        /// New palace id.
+        new: String,
+        /// Replace an existing, empty palace at `<NEW>`.
+        #[arg(long)]
+        replace_empty: bool,
+        /// Print the daemon's JSON answer instead of the human summary.
         #[arg(long)]
         json: bool,
         /// trusty-memory socket path. Defaults to the derived one.

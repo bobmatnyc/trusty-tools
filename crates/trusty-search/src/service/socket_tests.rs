@@ -241,6 +241,7 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
         ("streams", crate::service::rpc::streams::METHODS),
         ("warm", crate::service::rpc::warm::METHODS),
         ("project", crate::service::rpc::project::METHODS),
+        ("project_map", crate::service::rpc::project_map::METHODS),
         ("file", crate::service::rpc::file::METHODS),
     ] {
         for method in names {
@@ -373,6 +374,10 @@ async fn rpc_health_answers_with_a_stray_params_object() {
 /// carries exactly that body rather than a re-derived one.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+// #9631: `rss_limit_mb` reads the process-global memory limit, which every
+// `#[serial]` writer (e.g. `memory_pressure_tests`' 1 MB) may change between
+// the two reads; `serial` keeps the field compared instead of excluded.
+#[serial_test::serial]
 async fn health_over_the_socket_matches_the_http_body() {
     let tmp = TempDir::new().expect("tempdir");
     let socket = tmp.path().join("sockets").join("trusty-search.sock");

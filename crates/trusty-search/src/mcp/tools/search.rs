@@ -116,6 +116,10 @@ pub(super) async fn dispatch_search_tool(
             if let Some(repos) = args.get("repos") {
                 body["repos"] = repos.clone();
             }
+            // #9258: the lexical-lane pair reaches every per-index search.
+            if let Err(e) = super::lexical_args::forward(args, &mut body) {
+                return Some(Err(e));
+            }
             // #9168: `POST /search`'s socket twin.
             let mut resp = match server.call(METHOD_QUERY_ALL, body).await {
                 Ok(v) => v,
@@ -207,6 +211,10 @@ pub(super) async fn dispatch_search_tool(
             };
             if want_compact {
                 body["compact"] = Value::Bool(true);
+            }
+            // #9258: forwarded for both `query` shapes.
+            if let Err(e) = super::lexical_args::forward(args, &mut body) {
+                return Some(Err(e));
             }
             // Issue #4715: scoped call so a not-found on the session's
             // advertised index surfaces as INDEX_NOT_READY, not "unknown index".
@@ -423,6 +431,8 @@ impl McpServer {
         if want_compact {
             body["compact"] = Value::Bool(true);
         }
+        // #9258: the lexical-lane pair, type-checked.
+        super::lexical_args::forward(args, &mut body)?;
 
         let params = serde_json::json!({ "index_id": index_id, "body": body });
         let mut resp = self

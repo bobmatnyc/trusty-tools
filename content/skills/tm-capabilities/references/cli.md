@@ -92,6 +92,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `note` — Store a short curated fact — the no-MCP `memory_note` (#8352)
   - `recall` — Recall memories from the palace — the no-MCP `memory_recall` (#8352)
   - `remember` — Store a memory in the palace — the no-MCP `memory_remember` (#8352)
+  - `rename` — Move a palace to a new id — trusty-memory's `palace_rename` (#9544)
 - `meta` — Standalone metaharness — PM + sub-agent delegation without the daemon (#1045)
   - `run` — Boot the metaharness for a single run
 - `optimizer` — Inspect or configure the token-use optimizer
@@ -141,8 +142,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
 - `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
+  - `__exec-stub` — The helper `exec` runs as its child; never run by hand
   - `copy` — Copy this project's keys from one backend to another
   - `doctor` — Report socket and backend reachability, never a value
+  - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
   - `remove` — Remove one key of the project scope
