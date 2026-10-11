@@ -26,8 +26,10 @@ use super::tests::{
 const LISTED: &str = "/work/acme-web";
 
 /// Every route that forwards a bridged call.
-const ROUTES: [&str; 6] = [
+const ROUTES: [&str; 7] = [
     "/api/secrets/scopes",
+    // #9067 P1: the copy dialog's backend list.
+    "/api/secrets/backends",
     "/api/secrets/list",
     "/api/secrets/set",
     "/api/secrets/delete",
@@ -39,7 +41,7 @@ const ROUTES: [&str; 6] = [
 fn body_for(route: &str, project: &str) -> String {
     let vault = "trusty/acme/web";
     let body = match route {
-        "/api/secrets/scopes" => json!({ "project": project }),
+        "/api/secrets/scopes" | "/api/secrets/backends" => json!({ "project": project }),
         "/api/secrets/list" => json!({ "project": project, "vault": vault }),
         "/api/secrets/set" => {
             json!({ "project": project, "vault": vault, "key": "API_KEY", "value": "v" })
@@ -58,6 +60,10 @@ fn answering_stub(dir: &Path) -> (PathBuf, Seen) {
     stub(dir, |request| {
         if request["method"] == "secrets.bridge.scopes" {
             ok_frame(json!({ "scopes": [{ "kind": "project", "vault": "trusty/acme/web" }] }))
+        } else if request["method"] == "secrets.bridge.backends" {
+            ok_frame(
+                json!({ "selected": "file", "backends": [{ "id": "file", "available": true }] }),
+            )
         } else {
             ok_frame(json!({ "ok": true }))
         }

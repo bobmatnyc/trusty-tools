@@ -17,7 +17,7 @@ mod names;
 mod reference;
 mod value;
 
-pub use bridge::{BRIDGE_FIELD, BridgeAssertion, BridgeSource};
+pub use bridge::{BRIDGE_FIELD, BackendChoice, BackendsResponse, BridgeAssertion, BridgeSource};
 pub use error::SecretsError;
 pub use mask::{MASK_HEAD_CHARS, mask_secret};
 pub use names::{

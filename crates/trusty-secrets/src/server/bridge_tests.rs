@@ -769,7 +769,16 @@ async fn bridge_methods_answer_as_their_direct_method() {
     let fx = fixture();
     let server = fx.start().await;
     for (name, _) in crate::server::bridge::METHODS {
-        let direct = crate::api::bridge::direct_method(name).expect("a direct method");
+        // #9067 P1: `backends` has no direct method; it answers under its own
+        // name with a read's deadline.
+        let direct = match name {
+            BRIDGE_BACKENDS => {
+                assert_eq!(crate::api::bridge::direct_method(name), None);
+                assert_eq!(request_deadline(name), request_deadline(method::LIST));
+                name
+            }
+            _ => crate::api::bridge::direct_method(name).expect("a direct method"),
+        };
         assert_eq!(request_deadline(name), request_deadline(direct), "{name}");
         assert_eq!(client_wait(name), client_wait(direct), "{name}");
         let response = call(&fx.settings.socket, name, json!(SENTINEL_VALUE)).await;
@@ -975,4 +984,144 @@ async fn bridge_scopes_refuses_when_audit_unwritable() {
         wire(&bridge)
     );
     assert_eq!(ok(direct)["scopes"][0]["vault"], PROJECT_VAULT);
+}
+
+/// The bridged backend list (#9067 P1).
+const BRIDGE_BACKENDS: &str = "secrets.bridge.backends";
+
+/// The audit wire name of a bridged backend list (#9067 P1).
+const BACKENDS_RECORD: &str = "secrets.backends";
+
+/// Why: #9067 P1 — the copy dialog offers the backends the server reports,
+/// never a fixed list. The bridged list is the doctor's own judgement for
+/// the project, reduced to id and availability: no path, detail or reason
+/// reaches the page. It is read-only and audited like a bridged scopes:
+/// one allow record. Red until `secrets.bridge.backends` exists.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_backends_match_doctor_and_are_audited_once() {
+    let fx = fixture();
+    let server = serve(&fx, console_procs(), "API_KEY").await;
+    let socket = &fx.settings.socket;
+    let doctor = ok(call(socket, "secrets.doctor", json!({"project": fx.project()})).await);
+    let via_bridge = call(
+        socket,
+        BRIDGE_BACKENDS,
+        bridged(
+            json!({"project": fx.project()}),
+            assertion(true, "unmappable"),
+        ),
+    )
+    .await;
+    server.stop().await;
+
+    let via_bridge = ok(via_bridge);
+    let expected: Vec<Value> = doctor["backends"]
+        .as_array()
+        .expect("doctor rows")
+        .iter()
+        .map(|row| json!({"id": row["id"], "available": row["available"]}))
+        .collect();
+    assert_eq!(
+        via_bridge,
+        json!({"selected": doctor["selected_backend"], "backends": expected})
+    );
+    let wire = via_bridge.to_string();
+    for leak in ["detail", "reason", "socket", "/"] {
+        assert!(!wire.contains(leak), "{leak} in {wire}");
+    }
+    assert!(holds(&fx, "API_KEY"), "the list changed nothing");
+    let all = raw_records(&fx);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["method"], BACKENDS_RECORD);
+    assert_eq!(all[0]["decision"], "allow");
+    assert_eq!(all[0]["source"], "unmappable");
+    assert_eq!(all[0]["agent_parent"], true);
+}
+
+/// Why: #9067 P1 — like every bridged method, the backend list is refused
+/// with `bridge_refused` (-32084) and one deny record when the socket peer
+/// is not the verified console. Red until `secrets.bridge.backends` exists.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_backends_from_non_console_peer_is_refused() {
+    let impostor = procs_with_me();
+    impostor.set_executable(me(), "/usr/bin/python3");
+    for (case, procs) in [("impostor", impostor), ("unreadable", procs_with_me())] {
+        let fx = fixture();
+        let server = serve(&fx, procs, "API_KEY").await;
+        let refused = call(
+            &fx.settings.socket,
+            BRIDGE_BACKENDS,
+            bridged(json!({"project": fx.project()}), assertion(false, "mapped")),
+        )
+        .await;
+        server.stop().await;
+
+        assert_eq!(kind(&refused).as_deref(), Some("bridge_refused"), "{case}");
+        assert_eq!(refused.error.as_ref().map(|e| e.code), Some(-32084));
+        assert!(refused.result.is_none(), "{case}");
+        let all = raw_records(&fx);
+        assert_eq!(all.len(), 1, "{case}: {all:?}");
+        assert_eq!(all[0]["method"], BACKENDS_RECORD, "{case}");
+        assert_eq!(all[0]["decision"], "deny", "{case}");
+    }
+}
+
+/// Why: #9067 P1 — a bridged backend list is admitted fail-closed, like a
+/// bridged scopes: with the audit log unwritable it is `audit_unavailable`
+/// and lists nothing; and a project the server cannot resolve fails with the
+/// kind a bridged scopes gets, each with one deny record.
+/// Red until `secrets.bridge.backends` exists.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_backends_errors_map_as_bridged_scopes_does() {
+    let fx = fixture();
+    let (state, _grants) = state_with(&fx, console_procs());
+    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&dir).unwrap();
+    set_mode(&dir, 0o755);
+    let restore = RestoreMode(dir);
+    let server = fx.start_state(state).await;
+    let blocked = call(
+        &fx.settings.socket,
+        BRIDGE_BACKENDS,
+        bridged(json!({"project": fx.project()}), assertion(false, "mapped")),
+    )
+    .await;
+    server.stop().await;
+    drop(restore);
+    assert_eq!(kind(&blocked).as_deref(), Some("audit_unavailable"));
+    assert!(blocked.result.is_none(), "{:?}", blocked.result);
+
+    let fx = fixture();
+    let server = serve(&fx, console_procs(), "API_KEY").await;
+    let missing = fx.settings.socket.with_file_name("no-such-checkout-9067");
+    let mut kinds = Vec::new();
+    for name in [BRIDGE_SCOPES, BRIDGE_BACKENDS] {
+        let refused = call(
+            &fx.settings.socket,
+            name,
+            bridged(json!({"project": missing}), assertion(false, "mapped")),
+        )
+        .await;
+        assert!(refused.result.is_none(), "{name}");
+        kinds.push(kind(&refused));
+    }
+    server.stop().await;
+    assert!(kinds[0].is_some(), "{kinds:?}");
+    assert_eq!(kinds[0], kinds[1], "backends maps its error as scopes does");
+    let all = raw_records(&fx);
+    let decisions = |name: &str| -> Vec<Value> {
+        all.iter()
+            .filter(|r| r["method"] == name)
+            .map(|r| r["decision"].clone())
+            .collect()
+    };
+    assert_eq!(
+        decisions(BACKENDS_RECORD),
+        decisions(method::SCOPES),
+        "{all:?}"
+    );
+    assert!(all.iter().all(|r| r["decision"] == "deny"), "{all:?}");
 }

@@ -152,6 +152,9 @@ crates/trusty-console/ui-memory/node_modules/
 # trusty-analyze runtime artifacts
 crates/trusty-console/ui-analyze/node_modules/
 
+# trusty-console Secrets page (#9067)
+crates/trusty-console/ui-secrets/node_modules/
+
 # trusty-console runtime artifacts
 crates/trusty-console/ui/node_modules/
 
@@ -162,6 +165,7 @@ crates/trusty-console/ui/node_modules/
 # platform's optional-dependency set and dirties the tree — the #5078 shape.
 # Anchored per crate for the #4789 reason spelled out above.
 crates/trusty-console/ui-analyze/package-lock.json
+crates/trusty-console/ui-secrets/package-lock.json
 crates/trusty-console/ui/package-lock.json
 crates/trusty-console/ui-memory/package-lock.json
 crates/trusty-search/ui/package-lock.json

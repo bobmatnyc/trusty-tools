@@ -8,8 +8,9 @@
 //! chain, and asserts the verdict; this module decides whether to believe
 //! it, then runs the direct method body under it.
 //! What: [`METHODS`], one bridged entry per method the console forwards
-//! (`scopes`, `list`, `set`, `delete`, `copy`, `set_agents_may_use`). Each
-//! entry:
+//! (`backends`, `scopes`, `list`, `set`, `delete`, `copy`,
+//! `set_agents_may_use`); `backends` (#9067 P1) runs a bridge-only body,
+//! the rest their direct method. Each entry:
 //! 1. takes the [`BRIDGE_FIELD`] assertion out of the params; one that is
 //!    missing, does not decode, carries an unknown field or contradicts its
 //!    source is `malformed`;
@@ -56,7 +57,9 @@ use crate::api::{BRIDGE_FIELD, BridgeAssertion, SecretKey, VaultName};
 pub(crate) const CONSOLE_EXECUTABLE: &str = "trusty-console";
 
 /// Every bridged method, with its entry.
-pub(crate) const METHODS: [(&str, MethodFn); 6] = [
+pub(crate) const METHODS: [(&str, MethodFn); 7] = [
+    // #9067 P1: the page's copy dialog; bridge-only.
+    (bridged::BACKENDS, backends),
     // #9067: the page's scope picker.
     (bridged::SCOPES, scopes),
     (bridged::LIST, list),
@@ -128,6 +131,16 @@ impl BridgeVerdict {
 
 fn scopes(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     bridged(state, caller, params, AuditMethod::Scopes, methods::scopes)
+}
+
+fn backends(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    bridged(
+        state,
+        caller,
+        params,
+        AuditMethod::Backends,
+        super::doctor::backends,
+    )
 }
 
 fn list(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {

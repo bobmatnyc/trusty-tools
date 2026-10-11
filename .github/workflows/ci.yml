@@ -2283,6 +2283,12 @@ jobs:
             # five list envelopes the daemon answers with. Not a required
             # context, so no open PR is wedged by the addition.
             command: pnpm run build && pnpm run test
+          # #9067: the Secrets page, the console's fifth UI project. Its tests
+          # pin the CSRF header, value clearing and the error texts. Not a
+          # required context, so no open PR is wedged by the addition.
+          - name: trusty-console-secrets
+            dir: crates/trusty-console/ui-secrets
+            command: pnpm run build && pnpm run test
     steps:
       - uses: actions/checkout@v5
 

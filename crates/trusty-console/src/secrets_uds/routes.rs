@@ -10,7 +10,8 @@
 //! result is relayed as the server sent it — for `set`, the server's mask
 //! text; an error passes only through the closed kind table. #9067: the
 //! `scopes` result must decode as project and owner scopes before it is
-//! relayed; `projects` reads the tm registry and dials nothing; every
+//! relayed, and the `backends` result (#9067 P1) must decode as ids and
+//! availability only; `projects` reads the tm registry and dials nothing; every
 //! bridged call's project must be one the registry lists (PR B1).
 //! Test: `each_route_dials_its_bridged_method_with_an_assertion`,
 //! `malformed_bodies_never_echo_the_value`,
@@ -26,7 +27,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use trusty_secrets::api::bridge::method;
 use trusty_secrets::api::methods::ScopesResponse;
-use trusty_secrets::api::{BRIDGE_FIELD, BackendId, SecretKey, SecretValue, VaultName};
+use trusty_secrets::api::{
+    BRIDGE_FIELD, BackendId, BackendsResponse, SecretKey, SecretValue, VaultName,
+};
 
 use super::dial::DialError;
 use super::errors::{Refusal, upstream_response};
@@ -38,6 +41,13 @@ use super::{MAX_BODY_BYTES, SecretsBridge};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScopesBody {
+    project: String,
+}
+
+/// `POST /api/secrets/backends` (#9067 P1).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackendsBody {
     project: String,
 }
 
@@ -134,6 +144,27 @@ pub async fn scopes(State(bridge): State<Arc<SecretsBridge>>, request: Request) 
     };
     match serde_json::from_value::<ScopesResponse>(result) {
         Ok(scopes) => Json(scopes).into_response(),
+        Err(_) => Refusal::UnknownUpstream.into_response(),
+    }
+}
+
+/// `POST /api/secrets/backends` -> `secrets.bridge.backends` (#9067 P1).
+///
+/// Why: the copy dialog offers the backends the server reports, never a
+/// list built here.
+/// What: the result is relayed only when it decodes as
+/// [`BackendsResponse`], ids and availability with no other field;
+/// anything else is [`Refusal::UnknownUpstream`].
+/// Test: `backends_route_dials_secrets_bridge_backends_with_an_assertion`,
+/// `backends_route_relays_only_ids_and_availability`,
+/// `backends_route_relays_only_the_upstream_kind`.
+pub async fn backends(State(bridge): State<Arc<SecretsBridge>>, request: Request) -> Response {
+    let result = match call::<BackendsBody>(&bridge, request, method::BACKENDS).await {
+        Ok(result) => result,
+        Err(refused) => return refused,
+    };
+    match serde_json::from_value::<BackendsResponse>(result) {
+        Ok(backends) => Json(backends).into_response(),
         Err(_) => Refusal::UnknownUpstream.into_response(),
     }
 }

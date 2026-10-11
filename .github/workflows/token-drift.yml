@@ -25,7 +25,7 @@
 name: Token drift
 
 # Optional and dependency-free: trigger only for the canonical tokens, the
-# six enforced consumer stylesheets, or the checker/workflow itself.
+# seven enforced consumer stylesheets, or the checker/workflow itself.
 on:
   push:
     branches: [main]
@@ -35,6 +35,7 @@ on:
       - "crates/trusty-code-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"
+      - "crates/trusty-console/ui-secrets/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-search/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-memory/src/lib/styles/tokens.css"
       - "scripts/check_token_drift.mjs"
@@ -54,6 +55,7 @@ on:
       - "crates/trusty-code-gui/ui/src/app.css"
       - "crates/trusty-console/ui/src/theme.css"
       - "crates/trusty-console/ui-analyze/src/lib/styles/tokens.css"
+      - "crates/trusty-console/ui-secrets/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-search/src/lib/styles/tokens.css"
       - "crates/trusty-console/ui-memory/src/lib/styles/tokens.css"
       - "scripts/check_token_drift.mjs"

@@ -323,3 +323,83 @@ fn registry_file_follows_the_tm_root() {
     );
     assert_eq!(registry_file_for(None, None), None);
 }
+
+/// What a real `secrets.bridge.backends` answers on a Linux host.
+fn backends_result() -> Value {
+    json!({ "selected": "file", "backends": [
+        { "id": "keychain", "available": false },
+        { "id": "file", "available": true },
+        { "id": "onepassword", "available": false },
+        { "id": "keeper", "available": false },
+    ]})
+}
+
+/// Why: #9067 P1 — the copy dialog's backends come from one bridged call,
+/// `secrets.bridge.backends`, carrying the console's verdict, and the answer
+/// is relayed as the server sent it. No list is built in the console.
+/// Red until the route exists.
+/// Test: itself.
+#[tokio::test]
+async fn backends_route_dials_secrets_bridge_backends_with_an_assertion() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = stub(tmp.path(), |_| ok_frame(backends_result()));
+    let bridge = bridge_at(&socket, Arc::new(family()));
+    let mut request = own_request(&bridge, "/api/secrets/backends", SCOPES_BODY);
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(PeerLookup::ready(AcceptedPeer::Unfound)));
+    let (status, body) = send(&bridge, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(answer, backends_result());
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.len(), 1, "exactly one call");
+    assert_eq!(seen[0]["method"], "secrets.bridge.backends");
+    assert_eq!(seen[0]["params"]["project"], "/p");
+    assert_eq!(
+        seen[0]["params"]["bridge"],
+        json!({ "agent_parent": true, "source": "unmappable" })
+    );
+}
+
+/// Why: #9067 P1 — the page gets ids and availability only. A result that
+/// carries anything else (a doctor detail naming a path) is refused, not
+/// relayed. Red until the route exists and checks the shape.
+/// Test: itself.
+#[tokio::test]
+async fn backends_route_relays_only_ids_and_availability() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, seen) = stub(tmp.path(), |_| {
+        ok_frame(json!({ "selected": "file", "backends": [
+            { "id": "file", "available": false, "detail": "/home/someone/.trusty" },
+        ]}))
+    });
+    let bridge = bridge_at(&socket, Arc::new(family()));
+    let (status, body) = send(
+        &bridge,
+        own_request(&bridge, "/api/secrets/backends", SCOPES_BODY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains(text(Refusal::UnknownUpstream)), "{body}");
+    assert!(!body.contains("/home/someone"), "{body}");
+    assert_eq!(seen.lock().expect("lock").len(), 1);
+}
+
+/// Why: #9067 P1 — a server refusal of the backend list passes only through
+/// the closed kind table, as the scope picker's does.
+/// Test: itself.
+#[tokio::test]
+async fn backends_route_relays_only_the_upstream_kind() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (socket, _seen) = stub(tmp.path(), |_| error_frame(Some("audit_unavailable")));
+    let bridge = bridge_at(&socket, Arc::new(family()));
+    let (status, body) = send(
+        &bridge,
+        own_request(&bridge, "/api/secrets/backends", SCOPES_BODY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.contains("audit_unavailable"), "{body}");
+    assert!(!body.contains("UPSTREAM-MESSAGE-TEXT"), "{body}");
+}
