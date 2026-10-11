@@ -239,9 +239,10 @@ fn stored_outcome(result: &Value, has_verify: bool) -> String {
         return skipped("not_stored", &result.to_string());
     }
     if result.get("tier").and_then(Value::as_str) != Some("C") {
+        let refused = result.get("tier_c_refused").and_then(Value::as_str);
         tracing::warn!(
             "session_context_pause: the resume slot was stored as an ordinary drawer: {}",
-            result.get("tier_c_refused").unwrap_or(&Value::Null)
+            refused.unwrap_or("no reason given")
         );
         return "stored_unslotted:slot_refused".to_string();
     }
