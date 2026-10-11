@@ -119,6 +119,10 @@ fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'s
 /// single boolean to gate on: every requested id embedded AND the alias audit
 /// clean, so an id-collision victim (which HAS a vector key and is still
 /// unreachable) cannot pass, and a chunk-count check that ran (#9275).
+/// `chunk_check`/`chunk_check_error` say whether that check ran and why not.
+/// `embedder_state` (`ready` | `warming` | `failed`, with `embedder_error`
+/// naming a failed warm-up) lets a caller wait on a warm-up in progress and
+/// fail at once on one that failed.
 ///
 /// #6318: this reads, so a call with no `palace` argument and no `--palace`
 /// default succeeds with the palace index instead of erroring. The index is
@@ -136,7 +140,8 @@ fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'s
 /// Test: `verify_embedded_names_the_unembedded_id`,
 /// `verify_embedded_separates_an_unknown_id_from_an_unembedded_one`,
 /// `verify_embedded_refuses_a_malformed_id`,
-/// `every_read_tool_returns_an_index_with_no_palace`.
+/// `every_read_tool_returns_an_index_with_no_palace`,
+/// `verify_embedded_names_the_unrun_chunk_check_while_warming`.
 pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value) -> Result<Value> {
     // #6318: no palace and no default is answered with an index, not an error.
     let palace = match resolve_palace_or_index(state, &args, "palace_verify_embedded").await? {
@@ -189,6 +194,14 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
     }
 
     let audit = audit_state(&health.alias_audit);
+    // #9275: a failed startup warm-up is not "warming"; a later lazy init that
+    // succeeded still reads `ready`.
+    let warm_failure = state.embedder_warm_failure.get().map(String::as_str);
+    let (embedder_state, embedder_error) = match (health.embedder_ready, warm_failure) {
+        (true, _) => ("ready", None),
+        (false, Some(e)) => ("failed", Some(e)),
+        (false, None) => ("warming", None),
+    };
     Ok(json!({
         "palace": health.palace_id,
         "embedded": embedded,
@@ -196,6 +209,12 @@ pub(crate) async fn handle_palace_verify_embedded(state: &AppState, args: Value)
         "unknown": unknown,
         "alias_audit": audit,
         "alias_audit_error": health.alias_audit.unavailable_reason(),
+        // #9275: why `verified` is false when no id is missing or unknown.
+        "chunk_check": chunk_state(&health.chunk_check),
+        "chunk_check_error": health.chunk_check.unavailable_reason(),
+        "embedder_ready": health.embedder_ready,
+        "embedder_state": embedder_state,
+        "embedder_error": embedder_error,
         // The one field to gate a deletion on. An aliased or unreadable audit
         // fails it even when every requested id has a vector key (#5005); so
         // does a chunk check that did not run (#9275).

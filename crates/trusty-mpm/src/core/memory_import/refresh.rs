@@ -133,9 +133,11 @@ pub async fn refresh_drawer(
 /// What: the first warming answer starts one run-wide deadline; the gate asks
 /// again every `poll` until the check runs or the deadline passes, then fails
 /// closed. Later rows share the deadline, so a daemon that never warms costs
-/// one wait per run, not one per file.
+/// one wait per run, not one per file. Only a warm-up in progress is waited
+/// on; a daemon reporting a failed warm-up fails the row at once.
 /// Test: `verify_gate_waits_for_a_warming_daemon`,
-/// `verify_gate_fails_closed_naming_the_cause_when_warm_up_outlasts_the_wait`.
+/// `verify_gate_fails_closed_naming_the_cause_when_warm_up_outlasts_the_wait`,
+/// `verify_gate_fails_closed_at_once_naming_a_failed_warm_up`.
 #[derive(Debug, Clone)]
 pub struct WarmupWait {
     budget: Duration,
@@ -191,6 +193,7 @@ impl Default for WarmupWait {
 /// Test: `verify_gate_fails_a_drawer_no_vector_search_returns`,
 /// `verify_gate_fails_closed_when_it_cannot_run`,
 /// `verify_gate_waits_for_a_warming_daemon`,
+/// `verify_gate_fails_closed_at_once_naming_a_failed_warm_up`,
 /// `refresh_replaces_a_drifted_drawer`.
 pub async fn verify_findable(
     socket: &Path,
@@ -234,7 +237,7 @@ fn stored_phrase(status: ImportStatus) -> &'static str {
 /// `Ok(None)` when the drawer is findable, `Ok(Some(reason))` when it is not.
 ///
 /// #9275: a warming answer is asked again until `wait` runs out, then fails
-/// closed with the daemon's own cause.
+/// closed with the daemon's own cause. A failed warm-up fails at once.
 async fn verdict(
     socket: &Path,
     palace: &str,
@@ -251,8 +254,17 @@ async fn verdict(
         if answer.get("verified").and_then(Value::as_bool) == Some(true) {
             return Ok(None);
         }
-        if !is_warming(&answer) {
-            return Ok(Some(unverified_reason(&answer)));
+        match warm_up(&answer) {
+            WarmUp::NotTheCause => return Ok(Some(unverified_reason(&answer))),
+            // Architect 17:19Z: a failed warm-up will not clear by waiting.
+            WarmUp::Failed(cause) => {
+                return Ok(Some(format!(
+                    "{}; the daemon's embedder warm-up failed: {cause} — fix it and \
+                     restart the daemon",
+                    unverified_reason(&answer)
+                )));
+            }
+            WarmUp::InProgress => {}
         }
         if wait.expired() {
             return Ok(Some(format!(
@@ -265,12 +277,39 @@ async fn verdict(
     }
 }
 
-/// Whether the answer is "not yet": the chunk-count check could not run
-/// because the daemon's embedder has not initialised (#9275). Any other
-/// unrun check (tokenizer, index scan) will not clear by waiting.
-fn is_warming(answer: &Value) -> bool {
-    answer.get("chunk_check").and_then(Value::as_str) == Some("unavailable")
-        && answer.get("embedder_ready").and_then(Value::as_bool) == Some(false)
+/// What a `verified: false` answer says about the daemon's embedder warm-up.
+enum WarmUp {
+    /// Still warming: asking again within the wait can clear it.
+    InProgress,
+    /// The startup warm-up failed, with the daemon's error: waiting cannot.
+    Failed(String),
+    /// The unrun chunk check (if any) is not down to the warm-up.
+    NotTheCause,
+}
+
+/// Classify a `verified: false` answer by the daemon's `embedder_state` (#9275).
+///
+/// Test: `verify_gate_fails_closed_at_once_naming_a_failed_warm_up`,
+/// `verify_gate_waits_for_a_warming_daemon`.
+///
+/// Only an unrun chunk-count check with a `warming` embedder is worth waiting
+/// on. A `failed` embedder fails the row at once, naming `embedder_error`; any
+/// other unrun check (tokenizer, index scan) will not clear by waiting either.
+fn warm_up(answer: &Value) -> WarmUp {
+    if answer.get("chunk_check").and_then(Value::as_str) != Some("unavailable") {
+        return WarmUp::NotTheCause;
+    }
+    match answer.get("embedder_state").and_then(Value::as_str) {
+        Some("warming") => WarmUp::InProgress,
+        Some("failed") => WarmUp::Failed(
+            answer
+                .get("embedder_error")
+                .and_then(Value::as_str)
+                .unwrap_or("the daemon gave no reason")
+                .to_string(),
+        ),
+        _ => WarmUp::NotTheCause,
+    }
 }
 
 /// Turn a `verified: false` answer into the phrase an operator can act on.
