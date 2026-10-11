@@ -917,4 +917,36 @@ mod tests {
         assert_refused_without_spawn(&registry, dir.path().to_path_buf()).await;
         assert_eq!(std::fs::read(&settings).expect("read"), garbage);
     }
+
+    // #9704: `[]` parses but is not an object, so the writer returns Ok
+    // without writing and only the read-back's guard-state arm can refuse.
+    #[tokio::test]
+    async fn run_session_refuses_and_spawns_nothing_when_settings_not_an_object() {
+        let dir = hermetic_temp_dir();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).expect("create .claude");
+        let settings = claude.join("settings.json");
+        std::fs::write(&settings, b"[]").expect("seed");
+        let registry = pinned_registry(5, 0);
+        let err = registry
+            .run_session(run_params(
+                dir.path().to_path_buf(),
+                BackendKind::StreamJson,
+            ))
+            .await
+            .expect_err("a worker whose settings carry no egress guard must not spawn");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("egress guard Missing"),
+            "the refusal must come from the guard read-back: {chain}"
+        );
+        assert!(
+            !chain.contains("is not valid JSON"),
+            "the refusal must not come from the parse arm: {chain}"
+        );
+        assert_eq!(err.chain().count(), 1, "no I/O or parse cause: {chain}");
+        assert!(registry.list_ids().await.is_empty());
+        assert_eq!(next_session_number(&registry).await, "p-0");
+        assert_eq!(std::fs::read(&settings).expect("read"), b"[]");
+    }
 }
