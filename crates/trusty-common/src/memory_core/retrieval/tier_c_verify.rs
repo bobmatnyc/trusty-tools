@@ -20,7 +20,7 @@ use uuid::Uuid;
 use super::tier_c::CommitCtx;
 use super::types::RememberOptions;
 use crate::memory_core::filter::check_secret;
-use crate::memory_core::store::kg::{KnowledgeGraph, Triple};
+use crate::memory_core::store::kg::Triple;
 use crate::memory_core::store::kg_store::VERIFY_WITH;
 
 /// Provenance stamped on a `verify_with` triple.
@@ -62,10 +62,19 @@ pub(super) fn check_verify_command(opts: &RememberOptions) -> Result<Option<Stri
 /// so the assert closes any earlier active command on the same drawer.
 /// Test: `a_refused_slot_stores_no_verify_command`, `slot_retirement_closes_the_retirees_verify_command`.
 pub(super) async fn record_verify_command(
-    kg: &KnowledgeGraph,
+    ctx: &CommitCtx,
     drawer: Uuid,
     command: &str,
 ) -> Result<()> {
+    let missed = || format!("drawer {drawer} is stored, but its verify command was not");
+    // #9390: the test seam stands in for a failed KG write; see `PalaceHandle`.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    if ctx
+        .fail_next_verify_record
+        .swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(anyhow!("injected verify_with failure")).with_context(missed);
+    }
     let triple = Triple {
         subject: format!("drawer:{drawer}"),
         predicate: VERIFY_WITH.to_string(),
@@ -75,9 +84,7 @@ pub(super) async fn record_verify_command(
         confidence: 1.0,
         provenance: Some(VERIFY_PROVENANCE.to_string()),
     };
-    kg.assert(triple)
-        .await
-        .with_context(|| format!("drawer {drawer} is stored, but its verify command was not"))
+    ctx.kg.assert(triple).await.with_context(missed)
 }
 
 /// Close the `verify_with` command of a drawer its slot just retired (#9390).

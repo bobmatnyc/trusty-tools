@@ -465,6 +465,9 @@ pub(super) struct CommitCtx {
     /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
     #[cfg(test)]
     pub commit_delay: Option<std::time::Duration>,
+    /// #9390 test seam: when set, the next verify record fails once.
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fail_next_verify_record: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Commit `drawer` durably and mirror the outcome into the in-memory table, as
@@ -556,7 +559,7 @@ pub(super) async fn commit_and_mirror(
     }
     // #9390: under the guard, so the next writer's retirement sees this command.
     if let Some(command) = verify.as_deref() {
-        record_verify_command(&ctx.kg, newcomer, command).await?;
+        record_verify_command(&ctx, newcomer, command).await?;
     }
     // #6366: explicit so the release is visibly ordered AFTER the mirror — the
     // next writer's incumbent read must not start before this point.

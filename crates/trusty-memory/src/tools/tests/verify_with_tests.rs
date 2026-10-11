@@ -229,3 +229,122 @@ async fn verify_without_fact_key_is_refused() {
     let drawers = list(&state, "vw4").await;
     assert!(drawers.is_empty(), "nothing may be stored: {drawers:?}");
 }
+
+/// A drawer a later write displaced holds no slot, so it never lists a command,
+/// even when its `verify_with` triple is still active in the KG (the close that
+/// retirement runs fails open). PR C's resume pass acts on this listing.
+#[tokio::test]
+async fn a_displaced_drawer_never_lists_a_verify_command() {
+    use trusty_common::memory_core::store::kg::Triple;
+
+    let (state, _tmp) = test_state();
+    create(&state, "vw5").await;
+    let displaced = remember(&state, "vw5", "PR 9390 is open at head a38e511d", None).await;
+    let current = remember(&state, "vw5", "PR 9390 merged to main as a squash", None).await;
+
+    // Stands in for a failed close: an active command on a drawer with no slot.
+    let handle = open_palace_handle(&state, "vw5").expect("open palace");
+    handle
+        .kg
+        .assert(Triple {
+            subject: format!("drawer:{displaced}"),
+            predicate: "verify_with".to_string(),
+            object: CMD_A.to_string(),
+            valid_from: chrono::Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .expect("assert a verify_with triple");
+
+    let drawers = list(&state, "vw5").await;
+    let displaced_row = drawers
+        .iter()
+        .find(|d| d["drawer_id"] == displaced)
+        .expect("displaced drawer listed");
+    assert_eq!(displaced_row["fact_key"], Value::Null, "{drawers:?}");
+    assert_eq!(
+        verify_of(&drawers, &displaced),
+        Some(Value::Null),
+        "a drawer with no fact_key must never list a verify command: {drawers:?}"
+    );
+    assert_eq!(
+        verify_of(&drawers, &current),
+        Some(Value::Null),
+        "{drawers:?}"
+    );
+}
+
+/// A verify record that fails after the drawer commit still leaves a
+/// recallable drawer: the BM25 enqueue runs, the deferred embed backfills its
+/// vector, and the caller gets the error after both.
+#[tokio::test]
+async fn a_failed_verify_record_still_indexes_the_drawer() {
+    use trusty_common::memory_core::store::VectorStore;
+
+    // Warming defers the embed to a post-commit task, so the vector lane
+    // depends on the post-commit steps too.
+    let (mut state, _tmp) = test_state_warming();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    state.bm25_index_tx = tx;
+    create(&state, "vw6").await;
+    let handle = open_palace_handle(&state, "vw6").expect("open palace");
+    handle.fail_next_verify_record_for_test();
+
+    let text = "PR 9390 is open on the stacked branch at head 636d4161";
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({ "palace": "vw6", "text": text, "force": true, "fact_key": KEY, "verify": CMD_A }),
+    )
+    .await
+    .expect_err("a verify command that was not stored must be reported");
+    assert!(
+        format!("{err:#}").contains("verify command was not"),
+        "{err:#}"
+    );
+
+    let drawers = list(&state, "vw6").await;
+    assert_eq!(drawers.len(), 1, "{drawers:?}");
+    let id = drawers[0]["drawer_id"].as_str().expect("drawer_id").to_string();
+    assert_eq!(drawers[0]["fact_key"], json!(KEY), "{drawers:?}");
+    assert_eq!(drawers[0]["verify"], Value::Null, "{drawers:?}");
+
+    let mut enqueued = Vec::new();
+    while let Ok(req) = rx.try_recv() {
+        enqueued.push(req.drawer_id);
+    }
+    assert!(
+        enqueued.contains(&id),
+        "the committed drawer must reach the BM25 lane: {enqueued:?}"
+    );
+
+    let embedder = trusty_common::memory_core::retrieval::shared_embedder()
+        .await
+        .expect("shared embedder");
+    let query = embedder
+        .embed_batch(&[text.to_string()])
+        .await
+        .expect("embed query");
+    let drawer_id = Uuid::parse_str(&id).expect("uuid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut backfilled = false;
+    while std::time::Instant::now() < deadline {
+        let hits = handle
+            .vector_store
+            .search(&query[0], 5)
+            .await
+            .expect("vector search");
+        // Same 8-byte key match as `remember_succeeds_and_defers_embedding_while_state_is_warming`.
+        if hits
+            .iter()
+            .any(|h| h.drawer_id.as_bytes()[..8] == drawer_id.as_bytes()[..8])
+        {
+            backfilled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(backfilled, "the deferred embed must backfill the drawer's vector");
+}
