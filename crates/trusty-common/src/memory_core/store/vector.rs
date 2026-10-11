@@ -477,21 +477,19 @@ impl UsearchStore {
         }
     }
 
-    /// Number of distinct drawers holding at least one vector row.
+    /// [`Self::index_size`] with each drawer's chunk rows counted once.
     ///
-    /// Why (#9275): `index_size` counts rows, and a chunked drawer has one
-    /// per chunk. The dream rebuild trigger and the open-time orphan warning
-    /// compare against the drawer table, so they need drawers.
-    /// What: the length of [`Self::all_ids`]' set, but a scan failure is an
-    /// error rather than zero.
-    /// Test: `drawer_count_ignores_chunk_rows_and_dream_does_not_rebuild_a_chunked_palace`,
+    /// Why (#9275): the dream rebuild trigger and the open-time orphan warning
+    /// compare the index with the drawer table. A chunked drawer has one row
+    /// per chunk, so a row count flags a healthy chunked palace. Rows that
+    /// name no drawer (malformed or non-uuid keys, keyless vectors) are what
+    /// those checks exist to catch, so they still count, as on main.
+    /// What: `HnswStore::entry_count`; a read failure is an error, not zero.
+    /// Test: `unparseable_and_keyless_rows_still_trip_the_orphan_warning_and_rebuild`,
+    /// `drawer_count_ignores_chunk_rows_and_dream_does_not_rebuild_a_chunked_palace`,
     /// `upsert_chunks_replaces_the_group_and_shrinks`.
-    pub fn drawer_count(&self) -> Result<usize> {
-        let keys = self
-            .inner
-            .all_keys()
-            .context("drawer_count: read vector keys")?;
-        Ok(drawer_ids(&keys).len())
+    pub(crate) fn entry_count(&self) -> Result<usize> {
+        Ok(self.inner.entry_count()?)
     }
 
     /// Store `chunks` as the whole of drawer `id`: chunk `n` under

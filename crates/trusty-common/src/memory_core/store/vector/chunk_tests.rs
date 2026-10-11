@@ -377,7 +377,7 @@ async fn upsert_chunks_replaces_the_group_and_shrinks() {
         ]
     );
     assert_eq!(store.index_size(), 4, "one row per chunk");
-    assert_eq!(store.drawer_count().unwrap(), 1, "one drawer");
+    assert_eq!(store.entry_count().unwrap(), 1, "one drawer");
     let hits = store.search(&planar(0.0), 5).await.unwrap();
     assert_eq!(hits.len(), 1);
     assert!(
@@ -459,7 +459,7 @@ async fn upsert_chunks_rejects_empty_and_over_cap() {
         .await
         .unwrap();
     assert_eq!(store.index_size(), MAX_CHUNKS_PER_DRAWER);
-    assert_eq!(store.drawer_count().unwrap(), 1);
+    assert_eq!(store.entry_count().unwrap(), 1);
 }
 
 /// Fail-open check 4 (#9275): freeing the rest of a drawer runs in the SAME

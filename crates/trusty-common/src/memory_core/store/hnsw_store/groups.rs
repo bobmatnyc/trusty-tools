@@ -8,12 +8,12 @@
 //! one redb write transaction; [`HnswStore::search_grouped`], which folds the
 //! ranked rows into one hit per drawer and widens the graph arm until `k`
 //! drawers or the index is exhausted; [`remove_drawer_rows`], shared with
-//! `unalias`.
+//! `unalias`; [`HnswStore::entry_count`] for the size heuristics.
 //! Test: `chunk_tests.rs` (this module's siblings) and `vector/chunk_tests.rs`.
 
 use std::collections::HashSet;
 
-use redb::{ReadableTable, Table};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, Table};
 
 use super::exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS;
 use super::key_cache::KeyMap;
@@ -66,11 +66,27 @@ pub(super) fn remove_drawer_rows(
     Ok(())
 }
 
+/// Reject a drawer key that is empty or holds `#`.
+///
+/// Why (#9275): `split` cuts at the first `#`, so a drawer key `x#2` makes
+/// its own chunk rows read as malformed and `delete_group("{d}#2")` reads as
+/// drawer `d`. Either silently deletes rows behind an `Ok`.
+/// Test: `replace_group_rejects_an_empty_or_hash_drawer_key`,
+/// `delete_group_rejects_an_empty_or_hash_drawer_key`.
+fn check_drawer_key(drawer: &str) -> Result<()> {
+    if drawer.is_empty() || drawer.contains('#') {
+        return Err(HnswStoreError::DrawerKey(drawer.to_string()));
+    }
+    Ok(())
+}
+
 /// One hit per drawer from `raw`, best row first, at most `k` of them.
 ///
-/// What: skips tombstoned and repeated vector ids and ids with no key, then
-/// keeps the first (nearest) row of each drawer and emits the drawer key.
-/// Returns whether `k` drawers were found.
+/// What: skips tombstoned and repeated vector ids, ids with no key, and keys
+/// with a malformed suffix (#9275: such a row names no drawer, so it must not
+/// take one of the `k` slots). Keeps the first (nearest) row of each drawer
+/// and emits the drawer key. Returns whether `k` drawers were found.
+/// Test: `malformed_key_takes_no_top_k_slot`.
 fn group_rows(raw: Vec<(u64, f32)>, keys: &KeyMap, k: usize) -> (Vec<(String, f32)>, bool) {
     let mut out: Vec<(String, f32)> = Vec::with_capacity(k);
     let mut ids: HashSet<u64> = HashSet::new();
@@ -82,7 +98,9 @@ fn group_rows(raw: Vec<(u64, f32)>, keys: &KeyMap, k: usize) -> (Vec<(String, f3
         let Some(key) = keys.reverse.get(&id) else {
             continue;
         };
-        let drawer = vector_key::group_key(key);
+        let Some((drawer, _)) = vector_key::split(key) else {
+            continue;
+        };
         if drawers.insert(drawer) {
             out.push((drawer.to_string(), distance));
             if out.len() >= k {
@@ -108,11 +126,13 @@ impl HnswStore {
     /// Test: `upsert_chunks_replaces_the_group_and_shrinks`,
     /// `upsert_chunks_with_one_bad_dimension_changes_nothing`,
     /// `upsert_chunks_rejects_empty_and_over_cap`,
-    /// `single_upsert_drops_stale_chunk_rows`.
+    /// `single_upsert_drops_stale_chunk_rows`,
+    /// `replace_group_rejects_an_empty_or_hash_drawer_key`.
     pub fn replace_group(&self, drawer: &str, vectors: &[Vec<f32>]) -> Result<Vec<u64>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
+        check_drawer_key(drawer)?;
         if vectors.is_empty() || vectors.len() > MAX_CHUNKS_PER_DRAWER {
             return Err(HnswStoreError::ChunkCount {
                 got: vectors.len(),
@@ -190,13 +210,16 @@ impl HnswStore {
     ///
     /// Why (#9275): `forget` must leave no chunk row of the drawer behind.
     /// What: [`remove_drawer_rows`] under one write transaction; tombstones
-    /// each row's vector id as [`HnswStore::delete`] does.
+    /// each row's vector id as [`HnswStore::delete`] does. An empty key or one
+    /// holding `#` is [`HnswStoreError::DrawerKey`] and deletes nothing.
     /// Test: `remove_deletes_every_chunk_row_of_the_drawer`,
-    /// `forget_removes_all_vector_rows_for_a_drawer`.
+    /// `forget_removes_all_vector_rows_for_a_drawer`,
+    /// `delete_group_rejects_an_empty_or_hash_drawer_key`.
     pub fn delete_group(&self, drawer: &str) -> Result<usize> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
+        check_drawer_key(drawer)?;
         let wtx = self.db.begin_write()?;
         let mut freed = Vec::new();
         {
@@ -241,6 +264,33 @@ impl HnswStore {
             }
             want = want.saturating_mul(2).min(live);
         }
+    }
+
+    /// Live vector rows, with each drawer's chunk rows counted once.
+    ///
+    /// Why (#9275): the dream rebuild trigger and the open-time orphan warning
+    /// compare the index with the drawer table. Counting rows makes a healthy
+    /// chunked palace look orphan-ridden; counting parseable drawers hides
+    /// the rows those checks exist for — keyless rows and keys naming no
+    /// drawer. This is [`Self::len`] minus the surplus chunk rows, so a
+    /// palace of bare keys reads exactly as `len` did on main.
+    /// What: one read transaction; `len` minus (key rows minus distinct
+    /// `vector_key::group_key` groups). A malformed key is a group of its own.
+    /// Test: `unparseable_and_keyless_rows_still_trip_the_orphan_warning_and_rebuild`,
+    /// `drawer_count_ignores_chunk_rows_and_dream_does_not_rebuild_a_chunked_palace`.
+    pub(crate) fn entry_count(&self) -> Result<usize> {
+        let rtx = self.db.begin_read()?;
+        let live = (rtx.open_table(VECTORS)?.len()? as usize)
+            .saturating_sub(rtx.open_table(DELETED_VECTORS)?.len()? as usize);
+        let keys = rtx.open_table(VECTOR_KEYS)?;
+        let mut rows = 0usize;
+        let mut groups: HashSet<String> = HashSet::new();
+        for entry in keys.iter()? {
+            let key = entry?.0.value().to_string();
+            rows += 1;
+            groups.insert(vector_key::group_key(&key).to_string());
+        }
+        Ok(live.saturating_sub(rows - groups.len()))
     }
 
     /// #9275 test seam: make every [`remove_drawer_rows`] on this thread fail.

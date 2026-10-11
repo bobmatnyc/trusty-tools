@@ -180,6 +180,7 @@ async fn legacy_bare_key_recalls_and_forgets_unchanged() {
         .await
         .unwrap();
     // The vector layers (2, 3) only: this test pins the vector store.
+    // #9706: the L1 snapshot serves a forgotten drawer until reopen.
     assert!(
         after
             .iter()

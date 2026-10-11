@@ -128,6 +128,9 @@ pub enum HnswStoreError {
     /// #9275: a drawer write named no chunk, or more than the cap allows.
     #[error("a drawer holds 1..={max} chunk vectors, got {got}")]
     ChunkCount { got: usize, max: usize },
+    /// #9275: a drawer-level call named a row key (`#`) or an empty key.
+    #[error("drawer key {0:?} is empty or contains '#'")]
+    DrawerKey(String),
     /// A maintenance write outran its deadline and was rolled back (#8749).
     #[error(transparent)]
     WriteDeadline(#[from] WriteTxnError),

@@ -138,7 +138,7 @@ pub(super) async fn compact_pass(
     // below, which re-takes it independently (no reentrancy — tokio::Mutex is
     // not reentrant). `remember` never holds this across `compact_pass`, and the
     // idle dreamer holds only the `is_compacting` flag, so this cannot deadlock.
-    let (drawer_count, vector_drawers) = {
+    let (drawer_count, index_entries) = {
         let _write_guard = timeouts::lock_with_timeout(
             &handle.write_mutex,
             timeouts::write_lock_timeout(),
@@ -162,25 +162,25 @@ pub(super) async fn compact_pass(
                 Err(e) => tracing::warn!(?vid, "dream compact: vector remove failed: {e:#}"),
             }
         }
-        // #9275: drawers with a vector, not rows — a chunked drawer has one
-        // row per chunk, and a rebuild would drop every chunk but the first.
-        let vector_drawers = handle
+        // #9275: a chunked drawer's rows count once (a rebuild would drop
+        // every chunk but the first); rows naming no drawer still count.
+        let index_entries = handle
             .vector_store
-            .drawer_count()
-            .context("dream compact: count vector drawers")?;
-        (drawer_ids.len(), vector_drawers)
+            .entry_count()
+            .context("dream compact: count vector entries")?;
+        (drawer_ids.len(), index_entries)
     };
 
     // Fallback rebuild: if the index still reports significantly more
-    // vectors than the drawer table holds (e.g. pre-fix orphans we can't
-    // enumerate via key_map), reset the index and re-upsert every drawer
-    // from scratch. Costly but bounded — only runs when the divergence is
+    // vectors than the drawer table holds (e.g. keyless rows, or keys that
+    // name no drawer, which the addressable pass cannot enumerate), reset the
+    // index and re-upsert every drawer from scratch. Costly but bounded — only runs when the divergence is
     // material, and re-embedding 100s of drawers takes <1s on the local
     // ONNX model.
     // Only rebuild when we have drawers to re-embed AND the index has at
     // least 1 + 2*drawer_count entries (well past noise). Avoids tight
     // rebuild loops on a healthy small palace.
-    if drawer_count > 0 && vector_drawers > drawer_count.saturating_mul(2) + 1 {
+    if drawer_count > 0 && index_entries > drawer_count.saturating_mul(2) + 1 {
         let rebuilt = rebuild_index_from_drawers(handle, started, budget)
             .await
             .map_err(|e| e.context("dream compact rebuild"))?;
@@ -188,7 +188,7 @@ pub(super) async fn compact_pass(
         // orphans removed via rebuild is `index_size_before - drawer_count`.
         // Surface a conservative `removed` increment by counting the
         // delta as orphans dropped from the index.
-        let delta = vector_drawers.saturating_sub(rebuilt);
+        let delta = index_entries.saturating_sub(rebuilt);
         removed = removed.saturating_add(delta);
     }
 
