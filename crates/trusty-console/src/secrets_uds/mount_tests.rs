@@ -2,12 +2,13 @@
 //!
 //! `tests.rs` drives the secrets sub-router alone; these drive the real
 //! router (`build_router`), the tailnet serve path (`serve_tailnet`) and the
-//! loopback serve path (`serve_listeners`), where the pid is read at accept.
+//! loopback serve path (`serve_listeners`), where the pid lookup starts at
+//! accept.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -370,5 +371,50 @@ async fn a_loopback_request_is_judged_from_the_pid_found_at_accept() {
         assert_eq!(sent, expected, "mode {mode}");
     }
     assert!(lookups::count(addr) >= 4, "looked up at accept");
+    let _ = stop.send(true);
+}
+
+// ─── #9066 F1: the lookup never runs in the accept loop ──────────────────────
+
+/// How long each lookup on the listener under test sleeps.
+const SLOW_LOOKUP: Duration = Duration::from_millis(600);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_lookup_delays_no_accept_and_no_other_route() {
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let listeners = serve_listeners(
+        &["127.0.0.1:0".parse().expect("addr")],
+        &build_router(AppState::new(Vec::new())),
+        Arc::new(AnyOwner),
+        move || {
+            let mut stopped = stopped.clone();
+            async move {
+                let _ = stopped.wait_for(|s| *s).await;
+            }
+        },
+    )
+    .await
+    .expect("serve");
+    let addr = listeners.bound[0];
+    lookups::slow_down(addr, SLOW_LOOKUP);
+    let health = format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let started = Instant::now();
+    let (first, second) = tokio::join!(exchange(addr, &health), exchange(addr, &health));
+    let took = started.elapsed();
+    assert_eq!((first.0, second.0), (200, 200), "{first:?} {second:?}");
+    assert!(
+        took < SLOW_LOOKUP / 2,
+        "two fresh connections took {took:?} against a {SLOW_LOOKUP:?} lookup"
+    );
+    // A9: the lookups still started at accept, though nothing awaited them.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while lookups::count(addr) < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        lookups::count(addr),
+        2,
+        "one lookup per accepted connection"
+    );
     let _ = stop.send(true);
 }

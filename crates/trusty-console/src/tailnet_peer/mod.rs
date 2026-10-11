@@ -363,11 +363,11 @@ where
         let serve: BoxFuture<'static, std::io::Result<()>> = if local.ip().is_loopback() {
             let (app, stop) = (router.clone(), shutdown());
             Box::pin(async move {
-                // #9066 A9: the client's pid and start time are read at accept.
+                // #9066 A9, F1: the pid lookup starts at accept, off the loop.
                 #[cfg(unix)]
-                let app = app.into_make_service_with_connect_info::<
-                    crate::secrets_uds::verdict::AcceptedPeer,
-                >();
+                let app = app
+                    .into_make_service_with_connect_info::<crate::secrets_uds::verdict::PeerLookup>(
+                    );
                 #[cfg(not(unix))]
                 let app = app.into_make_service();
                 axum::serve(listener, app)

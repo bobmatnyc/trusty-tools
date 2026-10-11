@@ -189,8 +189,8 @@ impl SecretsBridge {
         self.enabled.as_ref().map(|(dial, _)| dial)
     }
 
-    pub(crate) fn table(&self) -> &dyn ProcessTable {
-        self.table.as_ref()
+    pub(crate) fn table(&self) -> Arc<dyn ProcessTable> {
+        Arc::clone(&self.table)
     }
 
     /// The socket the bridge dials, when enabled.

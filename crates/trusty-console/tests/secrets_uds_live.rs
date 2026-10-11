@@ -210,7 +210,7 @@ fn role(exe: &Path, role: &str) -> Command {
 fn run_console() {
     use trusty_console::secrets_uds::SecretsBridge;
     use trusty_console::secrets_uds::dial::SecretsDial;
-    use trusty_console::secrets_uds::verdict::AcceptedPeer;
+    use trusty_console::secrets_uds::verdict::PeerLookup;
     let socket = PathBuf::from(std::env::var_os(SOCKET).expect("socket"));
     let out = PathBuf::from(std::env::var_os(OUT).expect("out"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -231,7 +231,7 @@ fn run_console() {
         std::fs::write(&out, addr.to_string()).expect("write addr");
         axum::serve(
             listener,
-            app.into_make_service_with_connect_info::<AcceptedPeer>(),
+            app.into_make_service_with_connect_info::<PeerLookup>(),
         )
         .await
         .expect("serve");

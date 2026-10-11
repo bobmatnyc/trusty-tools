@@ -5,7 +5,7 @@
 //! relay the answer without echoing anything it was not meant to.
 //! What: every forwarding handler reads the body under [`MAX_BODY_BYTES`],
 //! decodes it with `deny_unknown_fields` (the serde error is dropped unread,
-//! A7), judges the client from the [`AcceptedPeer`] the listener recorded at
+//! A7), judges the client from the [`PeerLookup`] the listener started at
 //! accept, adds the `bridge` assertion, and makes exactly one call (A4). A
 //! result is relayed as the server sent it — for `set`, the server's mask
 //! text; an error passes only through the closed kind table.
@@ -25,7 +25,7 @@ use trusty_secrets::api::{BRIDGE_FIELD, BackendId, SecretKey, SecretValue, Vault
 
 use super::dial::DialError;
 use super::errors::{Refusal, upstream_response};
-use super::verdict::{AcceptedPeer, judge};
+use super::verdict::{PeerLookup, judge_in_time};
 use super::{MAX_BODY_BYTES, SecretsBridge};
 
 /// `POST /api/secrets/list`.
@@ -136,10 +136,11 @@ where
     let Some(dial) = bridge.dial() else {
         return Refusal::Unavailable.into_response();
     };
-    let peer = request
+    // #9066 F2: a missing lookup is judged `unreadable` by `judge_in_time`.
+    let lookup = request
         .extensions()
-        .get::<ConnectInfo<AcceptedPeer>>()
-        .map_or(AcceptedPeer::Unfound, |info| info.0);
+        .get::<ConnectInfo<PeerLookup>>()
+        .map(|info| info.0.clone());
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
         return Refusal::TooLarge.into_response();
     };
@@ -151,7 +152,8 @@ where
         return Refusal::BadBody.into_response();
     };
     drop(body);
-    let assertion = judge(bridge.table(), peer);
+    // #9066 F1: the lookup and the ancestry walk run off the async threads.
+    let assertion = judge_in_time(bridge.table(), lookup).await;
     let Ok(assertion) = serde_json::to_value(assertion) else {
         return Refusal::BadBody.into_response();
     };

@@ -113,8 +113,8 @@ fn proc_net_rows_parse_both_families() {
     assert_eq!((row.uid, row.inode), (501, 77));
 }
 
-/// The accept loop runs this lookup once per loopback connection, so its
-/// cost bounds how fast the console accepts. Prints the measurement
+/// The blocking pool runs this lookup once per loopback connection, and a
+/// secrets request waits for it under `VERDICT_BOUND`. Prints the measurement
 /// (`--nocapture`); fails only on a pathological stall.
 #[test]
 fn accept_time_lookup_stays_bounded() {

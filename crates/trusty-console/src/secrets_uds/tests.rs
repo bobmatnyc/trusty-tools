@@ -24,7 +24,7 @@ use trusty_secrets::api::BridgeAssertion;
 
 use super::dial::{self, SecretsDial};
 use super::errors::{Refusal, UPSTREAM_KINDS};
-use super::verdict::{AcceptedPeer, PidResolver, judge};
+use super::verdict::{AcceptedPeer, PeerLookup, PidResolver, VERDICT_BOUND, judge};
 use super::{CSRF_HEADER, MAX_BODY_BYTES, SecretsBridge, TailnetRequest, router};
 
 pub(super) const OWN: &str = "127.0.0.1:7788";
@@ -203,7 +203,11 @@ async fn each_route_dials_its_bridged_method_with_an_assertion() {
         ),
     ];
     for (path, body, _) in cases {
-        let (status, answer) = send(&bridge, own_request(&bridge, path, body)).await;
+        let mut request = own_request(&bridge, path, body);
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(PeerLookup::ready(AcceptedPeer::Unfound)));
+        let (status, answer) = send(&bridge, request).await;
         assert_eq!(status, StatusCode::OK, "{path}: {answer}");
         assert_eq!(answer, r#"{"ok":true}"#, "{path}");
     }
@@ -629,10 +633,20 @@ fn accepted_peer_records_the_start_time_at_accept() {
 
 /// Send a list as the client `peer`; return the assertion the socket saw.
 async fn wire_assertion(table: FakeTable, peer: AcceptedPeer) -> (StatusCode, Value) {
+    wire_assertion_for(Arc::new(table), Some(PeerLookup::ready(peer))).await
+}
+
+/// Send a list on a connection whose connect info is `lookup`, if any.
+async fn wire_assertion_for(
+    table: Arc<dyn ProcessTable>,
+    lookup: Option<PeerLookup>,
+) -> (StatusCode, Value) {
     let (_tmp, socket, seen) = ok_stub();
-    let bridge = bridge_at(&socket, Arc::new(table));
+    let bridge = bridge_at(&socket, table);
     let mut request = own_request(&bridge, "/api/secrets/list", LIST_BODY);
-    request.extensions_mut().insert(ConnectInfo(peer));
+    if let Some(lookup) = lookup {
+        request.extensions_mut().insert(ConnectInfo(lookup));
+    }
     let (status, _) = send(&bridge, request).await;
     let seen = seen.lock().expect("lock");
     assert_eq!(seen.len(), 1, "forwarded exactly once");
@@ -680,11 +694,60 @@ async fn unreadable_verdict_is_forwarded_identically_every_time() {
     let bridge = bridge_at(&socket, Arc::new(family()));
     for _ in 0..2 {
         let mut request = own_request(&bridge, "/api/secrets/list", LIST_BODY);
-        request.extensions_mut().insert(ConnectInfo(found(600, 99)));
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(PeerLookup::ready(found(600, 99))));
         assert_eq!(send(&bridge, request).await.0, StatusCode::OK);
     }
     let seen = seen.lock().expect("lock");
     assert_eq!(seen[0], seen[1], "the console reads no audit setting");
+}
+
+// ─── #9066 F1, F2: the wait for the accept-time lookup ───────────────────────
+
+/// Finds the agent pid 500, but only after the verdict bound has passed.
+struct Stalled;
+
+impl PidResolver for Stalled {
+    fn pid_of(&self, _local: SocketAddr, _peer: SocketAddr) -> Option<u32> {
+        std::thread::sleep(VERDICT_BOUND + std::time::Duration::from_secs(1));
+        Some(500)
+    }
+}
+
+#[tokio::test]
+async fn a_lookup_slower_than_the_bound_is_unreadable() {
+    let table: Arc<dyn ProcessTable> = Arc::new(family());
+    let lookup = PeerLookup::start(
+        Stalled,
+        Arc::clone(&table),
+        OWN.parse().expect("addr"),
+        "127.0.0.1:50000".parse().expect("addr"),
+    );
+    let started = std::time::Instant::now();
+    let (status, sent) = wire_assertion_for(table, Some(lookup)).await;
+    let took = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sent,
+        json!({ "agent_parent": true, "source": "unreadable" }),
+        "a timed-out lookup never yields the late `mapped` answer"
+    );
+    assert!(
+        took < VERDICT_BOUND + std::time::Duration::from_millis(500),
+        "the request waited {took:?}, past the {VERDICT_BOUND:?} bound"
+    );
+}
+
+#[tokio::test]
+async fn a_request_without_a_lookup_is_unreadable() {
+    let (status, sent) = wire_assertion_for(Arc::new(family()), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sent,
+        json!({ "agent_parent": true, "source": "unreadable" }),
+        "missing connect info is a wiring fault, never `unmappable`"
+    );
 }
 
 // ─── T15, T16, A11: reachability ─────────────────────────────────────────────
@@ -782,7 +845,9 @@ async fn tailnet_requests_are_refused_before_any_lookup() {
     ] {
         let mut request = own_request(&bridge, path, LIST_BODY);
         request.extensions_mut().insert(TailnetRequest);
-        request.extensions_mut().insert(ConnectInfo(found(500, 50)));
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(PeerLookup::ready(found(500, 50))));
         let (status, body) = send(&bridge, request).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
         assert!(body.contains(text(Refusal::Tailnet)), "{path}");

@@ -16,13 +16,21 @@
 //!   `unmappable`;
 //! - otherwise `mapped` with `has_agent_ancestor`'s answer.
 //!
+//! [`PeerLookup`] runs the accept-time lookup on tokio's blocking pool, and
+//! [`judge_in_time`] waits for it and the judgement under [`VERDICT_BOUND`].
+//!
 //! Test: `verdict_without_a_pid_is_unmappable_and_not_an_agent`,
 //! `verdict_with_an_unreadable_chain_is_unreadable`,
 //! `verdict_for_a_pid_reused_after_accept_is_unreadable`,
 //! `verdict_reads_the_agent_ancestor`.
 
+use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
+use futures_util::FutureExt as _;
+use futures_util::future::{self, BoxFuture, Shared};
 use trusty_secrets::ancestry::{ProcessTable, StartTime, has_agent_ancestor};
 use trusty_secrets::api::BridgeAssertion;
 
@@ -91,5 +99,88 @@ pub fn judge(table: &dyn ProcessTable, peer: AcceptedPeer) -> BridgeAssertion {
     match has_agent_ancestor(table, pid) {
         Ok(agent_parent) => BridgeAssertion::mapped(agent_parent),
         Err(_) => BridgeAssertion::unreadable(),
+    }
+}
+
+/// How long a secrets request waits for its connection's lookup and the
+/// ancestry walk, together.
+///
+/// Why: the lookup measured a median of about 10 ms on EVO and 2.7 ms on the
+/// Mac (`accept_time_lookup_stays_bounded`). Two seconds leaves two orders of
+/// magnitude for a loaded host or a queued blocking pool, yet a stalled
+/// `/proc` or libproc read cannot hold a request open without limit. Expiry
+/// is fail-closed: the request is forwarded as `unreadable`.
+pub const VERDICT_BOUND: Duration = Duration::from_secs(2);
+
+/// The client lookup for one accepted connection, axum's connect info on the
+/// loopback listener (#9066 F1).
+///
+/// Why: the lookup reads `/proc` or libproc, which costs milliseconds. Run in
+/// axum's accept loop, it serialized every connection to the console.
+/// What: [`PeerLookup::start`] hands [`AcceptedPeer::resolve`] to tokio's
+/// blocking pool at accept (A9) and returns at once; every clone shares the
+/// one result. A lookup that panicked, was cancelled or found no runtime
+/// yields `None`. Only a secrets request awaits it.
+/// Test: `a_slow_lookup_delays_no_accept_and_no_other_route`,
+/// `a_lookup_slower_than_the_bound_is_unreadable`.
+#[derive(Clone)]
+pub struct PeerLookup(Shared<BoxFuture<'static, Option<AcceptedPeer>>>);
+
+impl PeerLookup {
+    /// Start resolving the connection `peer` -> `local` now, off the async
+    /// threads.
+    pub fn start(
+        resolver: impl PidResolver + 'static,
+        table: Arc<dyn ProcessTable>,
+        local: SocketAddr,
+        peer: SocketAddr,
+    ) -> Self {
+        // #9066 F1: never resolve inline; no runtime is a failed lookup.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return Self(future::ready(None).boxed().shared());
+        };
+        let task = runtime
+            .spawn_blocking(move || AcceptedPeer::resolve(&resolver, table.as_ref(), local, peer));
+        Self(task.map(Result::ok).boxed().shared())
+    }
+
+    /// A lookup that already found `peer`.
+    pub fn ready(peer: AcceptedPeer) -> Self {
+        Self(future::ready(Some(peer)).boxed().shared())
+    }
+}
+
+impl fmt::Debug for PeerLookup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PeerLookup").field(&self.0.peek()).finish()
+    }
+}
+
+/// The assertion for a request on the connection `lookup` describes.
+///
+/// Why: a secrets request must not wait on the lookup without limit, and an
+/// absent lookup is a wiring fault, not Dd7 B's "no pid found" (#9066 F2).
+/// What: awaits the lookup, then runs [`judge`] on the blocking pool, both
+/// under [`VERDICT_BOUND`]. No lookup, a failed one, a panicked judgement
+/// or the bound expiring each give `unreadable`, never `unmappable`.
+/// Test: `a_lookup_slower_than_the_bound_is_unreadable`,
+/// `a_request_without_a_lookup_is_unreadable`,
+/// `verdicts_reach_the_wire_and_are_forwarded`.
+pub async fn judge_in_time(
+    table: Arc<dyn ProcessTable>,
+    lookup: Option<PeerLookup>,
+) -> BridgeAssertion {
+    let Some(lookup) = lookup else {
+        return BridgeAssertion::unreadable();
+    };
+    let judged = async move {
+        let peer = lookup.0.await?;
+        tokio::task::spawn_blocking(move || judge(table.as_ref(), peer))
+            .await
+            .ok()
+    };
+    match tokio::time::timeout(VERDICT_BOUND, judged).await {
+        Ok(Some(assertion)) => assertion,
+        _ => BridgeAssertion::unreadable(),
     }
 }
