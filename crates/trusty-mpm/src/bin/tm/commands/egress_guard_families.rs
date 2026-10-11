@@ -10,10 +10,11 @@
 //! Code names an MCP tool `mcp__<server>__<tool>`. The server segment is
 //! normalized — lowercased, every character but ASCII letters and digits
 //! dropped — and denied when it contains a family name, so `Slack-MCP`,
-//! `claude_ai_Slack` and `S.l.a.c.k` all match `slack`. A `gworkspace` or
-//! `google_workspace` server is denied only for its mail, chat and message
-//! tools. [`FamilyTable::classify_resource_server`] judges the server an MCP
-//! resource tool names.
+//! `claude_ai_Slack` and `S.l.a.c.k` all match `slack`. Any tool whose
+//! normalized tool segment contains `gmail` is denied, whatever its server. A
+//! `gworkspace`, `google_workspace` or `gsuite` server is denied only for its
+//! mail, chat and message tools. [`FamilyTable::classify_resource_server`]
+//! judges the server an MCP resource tool names.
 //!
 //! Limits, by design of a name match: Unicode confusables (a Cyrillic `а` in
 //! `slаck`) are dropped by the normalization, not mapped, so they evade it; a
@@ -37,8 +38,14 @@ const SERVER_FAMILIES: &[&str] = &[
 const GWORKSPACE: &str = "gworkspace";
 
 /// Normalized server spellings of [`GWORKSPACE`]. #8454 fix round:
-/// `google_workspace` normalizes to `googleworkspace`, which lacks `gworkspace`.
-const GWORKSPACE_SERVERS: &[&str] = &[GWORKSPACE, "googleworkspace"];
+/// `google_workspace` normalizes to `googleworkspace`, which lacks `gworkspace`;
+/// final round: `gsuite`, as in `mcp-gsuite`.
+const GWORKSPACE_SERVERS: &[&str] = &[GWORKSPACE, "googleworkspace", "gsuite"];
+
+/// The normalized tool-segment fragment denied on every server (#8454 final
+/// round): an unlisted server name such as `workspace-mcp` still carries
+/// `send_gmail_message`.
+const GMAIL_TOOL: &str = "gmail";
 
 /// Normalized tool-segment fragments that make a `gworkspace` tool a messaging
 /// tool: `mail` covers `gmail` and `email`, `draft` the send-a-draft path.
@@ -158,6 +165,7 @@ impl FamilyTable {
     /// The family of a normalized `server`, given its normalized `tool`.
     ///
     /// What: a server containing a pattern is that [`Classification::Family`].
+    /// A `tool` containing [`GMAIL_TOOL`] is the `gmail` family on any server.
     /// A server containing a [`GWORKSPACE_SERVERS`] spelling is the
     /// `gworkspace` family when `tool` is `None` or contains a
     /// [`GWORKSPACE_MESSAGING`] fragment. Anything else is unrelated.
@@ -169,6 +177,10 @@ impl FamilyTable {
             .find(|p| server.contains(p.as_str()))
         {
             return Classification::Family(family.clone());
+        }
+        // #8454 final round: a gmail tool is mail whatever its server is named.
+        if tool.is_some_and(|t| t.contains(GMAIL_TOOL)) {
+            return Classification::Family(GMAIL_TOOL.to_owned());
         }
         let messaging = tool.is_none_or(|t| GWORKSPACE_MESSAGING.iter().any(|m| t.contains(m)));
         if messaging && GWORKSPACE_SERVERS.iter().any(|g| server.contains(g)) {
