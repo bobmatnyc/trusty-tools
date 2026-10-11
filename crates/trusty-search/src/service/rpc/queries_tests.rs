@@ -327,6 +327,7 @@ async fn search_over_the_socket_matches_the_http_body() {
 /// tell a caller its sweep was complete when it was not.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn global_search_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
     let req = serde_json::json!({ "query": TERM, "top_k": 5 });
@@ -349,6 +350,7 @@ async fn global_search_over_the_socket_matches_the_http_body() {
 /// caller most commonly sends together.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn grep_over_the_socket_matches_the_http_body() {
     let (_tmp, http, rpc) = grep_fixture().await;
     let req = serde_json::json!({
@@ -375,6 +377,7 @@ async fn grep_over_the_socket_matches_the_http_body() {
 /// stale id into a hard failure.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn global_grep_over_the_socket_matches_the_http_body() {
     let (_tmp, http, rpc) = grep_fixture().await;
 
@@ -399,6 +402,7 @@ async fn global_grep_over_the_socket_matches_the_http_body() {
 /// different seed embedding and return different neighbours.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn search_similar_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
     let req = serde_json::json!({ "file": "src/auth.rs", "function": TERM, "top_k": 3 });
@@ -426,6 +430,7 @@ async fn search_similar_over_the_socket_matches_the_http_body() {
 /// transport that decoded either differently shows up here.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn typeahead_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -468,6 +473,7 @@ async fn typeahead_over_the_socket_matches_the_http_body() {
 /// registry lookup.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unknown_index_reports_not_found_on_every_query_method() {
     let (_state, _http, rpc) = fixture().await;
 
@@ -508,6 +514,7 @@ async fn an_unknown_index_reports_not_found_on_every_query_method() {
 /// which would tell a client to file a bug instead of fixing its request.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_empty_query_reports_invalid_params_on_both_transports() {
     let (_state, http, rpc) = fixture().await;
 
@@ -533,6 +540,7 @@ async fn an_empty_query_reports_invalid_params_on_both_transports() {
 /// be `invalid_params` even though nothing about the index was wrong.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_bad_regex_reports_invalid_params_on_both_transports() {
     let (_state, http, rpc) = fixture().await;
 
@@ -560,6 +568,7 @@ async fn a_bad_regex_reports_invalid_params_on_both_transports() {
 /// `invalid_params`); what must not differ is that BOTH refuse.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unknown_search_field_reports_invalid_params_on_both_transports() {
     let (_state, http, rpc) = fixture().await;
 
@@ -592,6 +601,7 @@ async fn an_unknown_search_field_reports_invalid_params_on_both_transports() {
 /// has and asserting both doors then refuse.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn queries_are_refused_when_the_shared_limiter_is_saturated() {
     let (state, http, rpc) = guarded_fixture().await;
 
@@ -630,6 +640,7 @@ async fn queries_are_refused_when_the_shared_limiter_is_saturated() {
 /// rather than an injected one — every query path takes that read lock.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports() {
     let (state, http, rpc) = guarded_fixture().await;
     let handle = state

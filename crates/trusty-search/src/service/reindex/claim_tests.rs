@@ -20,6 +20,7 @@ use crate::service::server::SearchAppState;
 /// on another index is unaffected.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn a_second_claim_is_refused_and_names_the_running_job() {
     let id = IndexId::new("claim-8889-second");
     let first = try_claim_reindex(&id, "http", true).expect("first claim");
@@ -39,6 +40,7 @@ fn a_second_claim_is_refused_and_names_the_running_job() {
 /// What: poisons the index's slot by panicking while holding it, then claims.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn a_poisoned_slot_refuses_the_claim() {
     let id = IndexId::new("claim-8889-poisoned");
     poison(&id);
@@ -67,6 +69,7 @@ fn poison(id: &IndexId) {
 /// task is aborted mid-await (the daemon-shutdown path), and on a normal drop.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn the_claim_is_released_on_panic_and_on_cancellation() {
     let id = IndexId::new("claim-8889-release");
 
@@ -101,6 +104,7 @@ async fn the_claim_is_released_on_panic_and_on_cancellation() {
 /// indexes, all get distinct staging names that the leftover sweep recognises.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::parallel]
 fn two_claims_get_distinct_staging_names() {
     let id = IndexId::new("claim-8889-staging");
     let first = try_claim_reindex(&id, "test", false).expect("claim");
@@ -142,6 +146,7 @@ fn bare_handle(id: &str, root: &std::path::Path) -> IndexHandle {
 /// both return `AlreadyRunning` and leave the progress untouched.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn spawn_reindex_refuses_while_the_index_is_claimed() {
     let dir = tempfile::tempdir().expect("tempdir");
     let handle = Arc::new(bare_handle("claim-8889-spawn", dir.path()));
@@ -177,6 +182,7 @@ async fn spawn_reindex_refuses_while_the_index_is_claimed() {
 /// reindex_guard_unavailable` and no progress entry.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let id = "claim-8889-http-poisoned";

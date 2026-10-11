@@ -24,6 +24,7 @@ const SOURCE: &str = "pub fn alpha() -> u32 {\n    1\n}\n\npub fn beta() -> u32 
 /// is a gap; a stage with a pass in flight or a terminal verdict is not.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn gap_is_reported_for_a_ready_or_pending_stage_short_of_vectors() {
     use StageStatus::*;
     for owed in [Ready, Pending] {
@@ -129,6 +130,7 @@ async fn a_gap_demotes_the_stage_and_queues_a_backfill() {
 /// without the gate the reconcile queues the backfill and returns `true`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_gap_on_a_serve_only_index_queues_no_backfill() {
     let (handle, total) = handle_with_vectors("vector-gap-8883-serve-only", 1).await;
     let handle = Arc::new(IndexHandle {
@@ -161,6 +163,7 @@ async fn a_gap_on_a_serve_only_index_queues_no_backfill() {
 /// demote it or spend the background permit on it.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn no_gap_leaves_a_ready_stage_alone() {
     let (handle, total) = handle_with_vectors("vector-gap-8726-full", usize::MAX).await;
     assert_eq!(
@@ -267,6 +270,7 @@ impl VectorStore for UnreadableStore {
 /// not stay `pending` with nothing scheduled.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unreadable_store_fails_a_pending_stage_closed() {
     let (handle, total) = handle_over_unreadable_store("vector-gap-8863-unreadable").await;
     *handle.stages.write().await = stages_after_a_discarded_snapshot(total);
@@ -279,6 +283,7 @@ async fn an_unreadable_store_fails_a_pending_stage_closed() {
 /// fail closed with the same reason the `pending` case gives.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unreadable_store_fails_a_ready_stage_closed() {
     let (handle, _) = handle_over_unreadable_store("vector-gap-8863-unreadable-ready").await;
     handle.stages.write().await.semantic.status = StageStatus::Ready;
@@ -342,6 +347,7 @@ async fn assert_fails_closed_on_unreadable_store(handle: &Arc<IndexHandle>) {
 /// never-started state #8863 reports; it must be a named, terminal `failed`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(DIM).expect("usearch"));
     let mut indexer = CodeIndexer::new("vector-gap-8863-no-embedder", "/tmp/vector-gap-8863");

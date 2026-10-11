@@ -67,6 +67,7 @@ fn now_unix() -> u64 {
 /// corpus, read-write and read-only, reads the same stamp back.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_committed_reindex_stamps_the_corpus_and_a_reload_does_not() {
     let (root, handle) = colocated_index("stamp-9169");
     assert_eq!(stamp_of(&handle).await, None, "a fresh corpus is unstamped");
@@ -104,6 +105,7 @@ async fn a_committed_reindex_stamps_the_corpus_and_a_reload_does_not() {
 /// corpus, and that commit must stamp it too.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn the_direct_write_path_stamps_the_live_corpus() {
     let (_root, handle) = colocated_index("direct-9169");
     resolve_corpus_swap(
@@ -146,6 +148,7 @@ async fn direct_write_stamp(
 /// memory guard aborted, committed nothing the resolver may call fresh.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_failed_or_memory_aborted_reindex_does_not_stamp() {
     let failed = ReindexOutcome::Failed {
         reason: "every batch failed to embed".into(),
@@ -161,6 +164,7 @@ async fn a_failed_or_memory_aborted_reindex_does_not_stamp() {
 /// and reattaches the live corpus, whose stamp must be the one it had.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_rolled_back_reindex_keeps_the_previous_stamp() {
     let (root, handle) = colocated_index("rollback-9230");
     let live = handle

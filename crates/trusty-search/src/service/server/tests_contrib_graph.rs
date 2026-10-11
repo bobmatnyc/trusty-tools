@@ -100,6 +100,7 @@ fn neighbors_params(
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_then_neighbors_round_trip() {
     let (_dir, state) = state_with_corpus("contrib-rt");
 
@@ -156,6 +157,7 @@ async fn ingest_then_neighbors_round_trip() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_twice_replaces_per_producer() {
     let (_dir, state) = state_with_corpus("contrib-replace");
 
@@ -187,6 +189,7 @@ async fn ingest_twice_replaces_per_producer() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_survives_derived_rebuild() {
     let (_dir, state) = state_with_corpus("contrib-rebuild");
     let _ = ingest_graph_handler(
@@ -219,6 +222,7 @@ async fn ingest_survives_derived_rebuild() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_unknown_index_404() {
     let (_dir, state) = state_with_corpus("contrib-404");
     let err = ingest_graph_handler(
@@ -232,6 +236,7 @@ async fn ingest_unknown_index_404() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_empty_producer_400() {
     let (_dir, state) = state_with_corpus("contrib-400");
     let err = ingest_graph_handler(
@@ -245,6 +250,7 @@ async fn ingest_empty_producer_400() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn ingest_without_corpus_503() {
     // Bare indexer with no durable corpus store attached.
     let registry = IndexRegistry::new();
@@ -271,6 +277,7 @@ async fn ingest_without_corpus_503() {
 /// Test: this test. Fails on the pre-fix commit with the `Ok` arm's panic
 /// (`200`, `graph_nodes = 0`).
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
     let (_dir, corpus, state) = state_and_corpus("contrib-merge-fail");
     let state = Arc::new(state);
@@ -328,6 +335,7 @@ async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
 /// else's row the retry fails identically forever.
 /// Test: this test — same fault, planted under the INGESTING producer's key.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn ingest_503_is_retryable_when_the_blocking_row_is_this_producers_own() {
     let (_dir, corpus, state) = state_and_corpus("contrib-self-blocked");
     crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "navigatsql")
@@ -364,6 +372,7 @@ async fn ingest_503_is_retryable_when_the_blocking_row_is_this_producers_own() {
 /// was wrong is that the caller never heard about it.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn ingest_succeeds_but_flags_a_derived_kg_persist_failure() {
     let (_dir, corpus, state) = state_and_corpus("contrib-persist-degraded");
     crate::core::corpus::test_support::break_kg_nodes_table(&corpus).expect("break kg_nodes");
@@ -394,6 +403,7 @@ async fn ingest_succeeds_but_flags_a_derived_kg_persist_failure() {
 /// healthy, one whose contributed overlay cannot be loaded.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn ingest_route_answers_503_over_http_when_the_merge_fails() {
     let registry = IndexRegistry::new();
     let (_ok_dir, _ok_corpus) = register_index_with_corpus(&registry, "live-ok");
@@ -454,6 +464,7 @@ async fn ingest_route_answers_503_over_http_when_the_merge_fails() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn neighbors_rejects_unknown_edge_kind() {
     let (_dir, state) = state_with_corpus("contrib-badkind");
     let err = graph_neighbors_handler(
@@ -467,6 +478,7 @@ async fn neighbors_rejects_unknown_edge_kind() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn neighbors_unknown_node_is_empty() {
     let (_dir, state) = state_with_corpus("contrib-empty");
     let Json(body) = graph_neighbors_handler(

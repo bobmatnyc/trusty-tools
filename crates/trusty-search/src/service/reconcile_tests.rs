@@ -18,6 +18,7 @@ use tokio::sync::RwLock;
 /// avoid flaky behaviour in parallel test binaries.
 /// Test: only `Some("1")` disables; other values leave reconciliation on.
 #[test]
+#[serial_test::parallel]
 fn reconcile_disabled_for_value_only_matches_one() {
     assert!(
         reconcile_disabled_for_value(Some("1")),
@@ -45,6 +46,7 @@ fn reconcile_disabled_for_value_only_matches_one() {
 /// not panic — callers fall back to a full reindex on `None`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn changed_files_between_returns_none_outside_git_repo() {
     let tmp = tempfile::tempdir().expect("tempdir");
     assert!(
@@ -58,6 +60,7 @@ async fn changed_files_between_returns_none_outside_git_repo() {
 /// Why: skip predicates must exclude build artefacts and pass normal source.
 /// Test: `node_modules` path excluded; plain Rust file not excluded.
 #[test]
+#[serial_test::parallel]
 fn reconcile_skip_excluded_path() {
     assert!(
         should_skip_for_reconcile(std::path::Path::new("node_modules/lodash/index.js")),
@@ -247,6 +250,7 @@ fn add_commit(root: &std::path::Path, filename: &str, content: &str) -> String {
 /// two real commits in a git repo.
 /// Test: two commits; assert the diff includes the modified file.
 #[tokio::test]
+#[serial_test::parallel]
 async fn changed_files_between_finds_modified_file() {
     let (_dir, first_sha, root) = init_git_repo_with_file("src.rs", "fn a() {}");
     add_commit(&root, "src.rs", "fn a() {}\nfn b() {}\n");
@@ -264,6 +268,7 @@ async fn changed_files_between_finds_modified_file() {
 /// caller can fall back to a full reindex.
 /// Test: pass a zeroed SHA to a valid git repo.
 #[tokio::test]
+#[serial_test::parallel]
 async fn changed_files_between_returns_none_for_unknown_sha() {
     let (_dir, _sha, root) = init_git_repo_with_file("foo.rs", "fn x() {}");
     assert!(
@@ -364,6 +369,7 @@ async fn reconcile_stamps_head_sha_after_delta() {
 /// the gate is wired correctly when the env var is absent (returns false).
 /// Test: this test — use the pure function to confirm all opt-out paths.
 #[test]
+#[serial_test::parallel]
 fn reconcile_disabled_gate() {
     // Absent env var → reconciliation enabled.
     assert!(
@@ -391,6 +397,7 @@ fn reconcile_disabled_gate() {
 /// Test: real git repo; stamp handle with current HEAD; call
 /// `reconcile_one_index`; assert SHA is unchanged.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_up_to_date_index_is_noop() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -551,6 +558,7 @@ async fn reconcile_stale_index_stamps_new_sha() {
 /// code without the gate the SHA advances and `delta_reindexed` is 1.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_skips_a_serve_only_index() {
     use crate::core::registry::{IndexHandle, IndexId};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -696,6 +704,7 @@ async fn apply_delta_total_failure_does_not_stamp() {
 /// Assert only `src/real.rs` appears (sentinel excluded), proving the dir was
 /// pruned (a non-pruning walk would include the sentinel).
 #[test]
+#[serial_test::parallel]
 fn mtime_walk_prunes_excluded_dir_not_just_skips() {
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -738,6 +747,7 @@ fn mtime_walk_prunes_excluded_dir_not_just_skips() {
 /// Test: write two files into a tempdir (one fresh, one old), call the
 /// function, and assert only the fresh file is returned.
 #[test]
+#[serial_test::parallel]
 fn mtime_walk_finds_newer_file_and_skips_older() {
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -778,6 +788,7 @@ fn mtime_walk_finds_newer_file_and_skips_older() {
 /// Test: create `node_modules/pkg/index.js` with a fresh mtime; assert it
 /// is excluded by `collect_stale_files_by_mtime`.
 #[test]
+#[serial_test::parallel]
 fn mtime_walk_skips_excluded_dir() {
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -804,6 +815,7 @@ fn mtime_walk_skips_excluded_dir() {
 /// the caller can detect the threshold breach.
 /// Test: create `FULL_REINDEX_THRESHOLD + 5` fresh files; verify the cap.
 #[test]
+#[serial_test::parallel]
 fn mtime_walk_caps_at_threshold_plus_one() {
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -923,6 +935,7 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
 /// directly (simulating what the joiner does), then manually drop the guard;
 /// assert `in_progress` is false and `up_to_date = 1`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_in_progress_clears_after_tasks_complete() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::server::ReconcileSummary;
@@ -1015,6 +1028,7 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
 /// Test: set `indexed_head_sha = current HEAD` on a real git repo; call
 /// `reconcile_one_index`; assert `up_to_date = 1`, others = 0.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_summary_counts_up_to_date() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::server::ReconcileSummary;
@@ -1156,6 +1170,7 @@ fn stuck_unwalked_handle(
 /// corpus, and no walk ever run. Asserts reconcile classified it as stuck and
 /// re-drove it rather than declaring it current.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stuck_unwalked_git_index_is_retried_not_marked_up_to_date() {
     use crate::service::server::ReconcileSummary;
 
@@ -1199,6 +1214,7 @@ async fn stuck_unwalked_git_index_is_retried_not_marked_up_to_date() {
 /// What: a non-git tempdir holding a source file, `indexed_head_sha = None`,
 /// empty corpus, no walk ever run. Asserts the index is re-driven, not skipped.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stuck_unwalked_non_git_index_is_retried_not_skipped() {
     use crate::service::server::ReconcileSummary;
 
@@ -1235,6 +1251,7 @@ async fn stuck_unwalked_non_git_index_is_retried_not_skipped() {
 /// zero-file walk. Asserts the git marker path runs normally and nothing is
 /// re-driven.
 #[tokio::test]
+#[serial_test::parallel]
 async fn already_walked_empty_index_is_not_re_driven() {
     use crate::service::server::ReconcileSummary;
 
@@ -1274,6 +1291,7 @@ async fn already_walked_empty_index_is_not_re_driven() {
 /// What: a `.env` that `.gitignore` excludes is nonetheless collected.
 /// Test: this test itself.
 #[test]
+#[serial_test::parallel]
 fn mtime_walk_does_not_honour_gitignore() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join(".gitignore"), ".env\n").expect("gitignore");
@@ -1303,6 +1321,7 @@ fn mtime_walk_does_not_honour_gitignore() {
 /// stamp — does not queue a reindex that could never converge.
 /// Test: this test itself.
 #[tokio::test]
+#[serial_test::parallel]
 async fn broken_git_repo_refuses_rather_than_mtime_walking() {
     use crate::service::server::ReconcileSummary;
 
@@ -1359,6 +1378,7 @@ async fn broken_git_repo_refuses_rather_than_mtime_walking() {
 /// reindex.
 /// Test: this test itself.
 #[tokio::test]
+#[serial_test::parallel]
 async fn unborn_head_repo_is_refused_once_not_reindexed_every_boot() {
     use crate::service::server::ReconcileSummary;
 
@@ -1406,6 +1426,7 @@ async fn unborn_head_repo_is_refused_once_not_reindexed_every_boot() {
 /// reindex is queued rather than refused.
 /// Test: this test itself.
 #[tokio::test]
+#[serial_test::parallel]
 async fn never_stamped_git_repo_with_commits_full_reindexes_and_converges() {
     use crate::service::server::ReconcileSummary;
 

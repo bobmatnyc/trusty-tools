@@ -161,6 +161,7 @@ async fn create_with_a_corrupt_registry_still_refuses_a_store_in_the_work_tree()
 /// repository rather than climb to the main repository's top.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn a_git_file_marks_the_top_of_a_linked_worktree() {
     let (_dir, repo) = clean_repo("wt-8499-", None);
     let linked = repo.join("linked");
@@ -341,6 +342,7 @@ async fn relocate_races_into_one_root_register_exactly_once() {
 /// format-incompatible corpus from an unclassified failure.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn corpus_open_refusal_names_the_failure_kind_on_both_arms() {
     use crate::core::corpus::CorpusOpenFailure;
     let root = Path::new("/nonexistent-8499");

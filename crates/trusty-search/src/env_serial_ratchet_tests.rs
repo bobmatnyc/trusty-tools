@@ -16,6 +16,12 @@
 //! only: a test that READS the data dir (`persistence::data_dir`, the daemon
 //! dir) without writing it takes `#[serial_test::parallel]`, which excludes
 //! the writers but not other readers (#9233).
+//!
+//! A second ratchet (#9684) covers the registry. A test that reaches
+//! `with_registry_write_lock` resolves `indexes.toml` from `TRUSTY_DATA_DIR`
+//! at write time, so an untagged one can drop `indexes.toml.lock` into the
+//! data dir a `#[serial]` test has just pointed somewhere else. Every test in
+//! a file that names a [`REGISTRY_REACHING`] function carries a group tag.
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};
@@ -137,6 +143,208 @@ fn the_ratchet_detects_a_writer_outside_the_unnamed_group() {
         !check("src/daemon.rs", production),
         "a production write above `#[cfg(test)]` is not a test's"
     );
+}
+
+/// Functions whose call reaches `with_registry_write_lock` on a path resolved
+/// from `TRUSTY_DATA_DIR` at write time (#9684).
+///
+/// Why: the reindex finish (`persist_indexed_head_sha`), the reconcile stamp,
+/// the first-query stamp (`update_last_queried_unix`), the registration and
+/// delete handlers and the boot restore paths all patch `indexes.toml` through
+/// `data_dir()`. The router entry points reach every handler.
+/// What: matched as whole identifiers in test code, so a call, a `use` and a
+/// path all count; `upsert_index_registry_entry_at` does not count as
+/// `upsert_index_registry_entry`, because an explicit path never reads env.
+const REGISTRY_REACHING: &[&str] = &[
+    "spawn_reindex_awaitable",
+    "spawn_reindex",
+    "spawn_claimed_reindex",
+    "spawn_reindex_with_cleanup",
+    "run_reindex",
+    "finish_reindex",
+    "reindex_report",
+    "reconcile_one_index",
+    "stamp_handle",
+    "persist_indexed_head_sha",
+    "persist_deferred_embed_pending",
+    "rearm_deferred_embed_if_pending",
+    "resolve_indexed_head_sha",
+    "run_embed_catch_up",
+    "spawn_deferred_embed_pass",
+    "update_last_queried_unix",
+    "update_last_indexed_unix",
+    "search_handler",
+    "search_report",
+    "create_index_handler",
+    "create_index_report",
+    "delete_index_handler",
+    "delete_index_report",
+    "unregister_index",
+    "unregister_with_map",
+    "relocate_index_handler",
+    "relocate_index_report",
+    "add_index_roots_handler",
+    "add_index_roots_report",
+    "patch_index_config_handler",
+    "patch_index_config_report",
+    "restore_index_on_demand",
+    "resolve_or_load_index",
+    "restore_one_index",
+    "restore_indexes",
+    "heal_boot_orphans",
+    "handle_ambiguous_root",
+    "clear_ambiguous_root_stamp",
+    "reap_orphans_once",
+    "handle_migrate_storage",
+    "upsert_index_registry_entry",
+    "save_index_registry",
+    "remove_index_registry_entry",
+    "remove_index_registry_entries",
+    "build_router",
+    "build_router_on",
+];
+
+/// Attributes that put a test in the unnamed `serial_test` group.
+const GROUP_TAGS: &[&str] = &[
+    "#[serial]",
+    "#[serial_test::serial]",
+    "#[parallel]",
+    "#[serial_test::parallel]",
+];
+
+/// Attribute prefixes that open a test function.
+const TEST_ATTRS: &[&str] = &["#[test]", "#[tokio::test]", "#[tokio::test("];
+
+/// The ratchet — no test that can reach the registry runs outside the group.
+///
+/// Test: this function IS the test;
+/// `the_registry_ratchet_detects_an_untagged_test` proves the detection.
+#[test]
+fn registry_reaching_tests_join_the_unnamed_group() {
+    let mut offenders = Vec::new();
+    for path in lib_sources() {
+        let rel = relative(&path);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let untagged = untagged_registry_tests(&rel, &strip_noncode(&text));
+        if !untagged.is_empty() {
+            offenders.push(format!("{rel}: {}", untagged.join(", ")));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tests sit in a file that reaches the index registry, and carry no \
+         `#[serial_test::parallel]` / `#[serial_test::serial]` tag (#9684). An untagged test \
+         runs beside a `#[serial]` test that repoints `TRUSTY_DATA_DIR`, and its registry write \
+         lands `indexes.toml.lock` in that test's data dir. Tag each one `parallel`, or \
+         `serial` when it writes the environment.\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The detection fires on an untagged or named-key test in a file that names
+/// a registry-reaching function, and on nothing else.
+///
+/// Test: this function IS the test.
+#[test]
+fn the_registry_ratchet_detects_an_untagged_test() {
+    let check = |rel: &str, s: &str| untagged_registry_tests(rel, &strip_noncode(s));
+
+    let untagged = "use super::spawn_reindex_awaitable;\n#[tokio::test]\nasync fn t() {}\n";
+    assert_eq!(check("src/a_tests.rs", untagged), ["t"]);
+
+    let mixed = concat!(
+        "fn h() { search_report(); }\n",
+        "#[test]\n#[serial_test::parallel]\nfn ok_parallel() {}\n",
+        "#[tokio::test(flavor = \"multi_thread\")]\n#[serial]\nasync fn ok_serial() {}\n",
+        "#[test]\n#[serial_test::serial(watcher_start)]\nfn named_key() {}\n",
+        "#[test]\nfn bare() {}\n",
+    );
+    assert_eq!(check("src/a_tests.rs", mixed), ["bare", "named_key"]);
+
+    let explicit_path = "fn h() { upsert_index_registry_entry_at(p, e); }\n#[test]\nfn t() {}\n";
+    assert!(
+        check("src/a_tests.rs", explicit_path).is_empty(),
+        "an explicit registry path never reads the environment"
+    );
+
+    let prose = "// calls search_report\n#[test]\nfn t() {}\n";
+    assert!(
+        check("src/a_tests.rs", prose).is_empty(),
+        "a comment is not a reach"
+    );
+
+    let production = concat!(
+        "fn serve() { search_report(); }\n",
+        "#[cfg(test)]\nmod tests { #[test] fn t() {} }\n",
+    );
+    assert!(
+        check("src/search.rs", production).is_empty(),
+        "a production call above `#[cfg(test)]` is not a test's"
+    );
+}
+
+/// Names of the tests in a stripped file that can reach the registry and
+/// carry no unnamed-group tag; empty when the file names no reaching function.
+///
+/// What: a test's attribute block runs from the item boundary (`{`, `}`, `;`)
+/// before its test attribute to its `fn`; the block must hold a
+/// [`GROUP_TAGS`] entry. A named key is a separate lock and does not count.
+/// Test: `the_registry_ratchet_detects_an_untagged_test`.
+fn untagged_registry_tests(rel: &str, code: &str) -> Vec<String> {
+    let tests = test_code(rel, code);
+    if !REGISTRY_REACHING
+        .iter()
+        .any(|name| names_identifier(tests, name))
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for attr in TEST_ATTRS {
+        for (at, _) in tests.match_indices(attr) {
+            let Some((fn_at, name)) = next_fn(tests, at) else {
+                continue;
+            };
+            let start = tests[..at].rfind(['{', '}', ';']).map_or(0, |i| i + 1);
+            let block: String = tests[start..fn_at].split_whitespace().collect();
+            if !GROUP_TAGS.iter().any(|tag| block.contains(tag)) {
+                out.push(name.to_owned());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Does `code` hold `name` as a whole identifier?
+fn names_identifier(code: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices(name).any(|(at, _)| {
+        let before = code[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after = code[at + name.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident(c));
+        before && after
+    })
+}
+
+/// The byte offset and name of the first `fn <name>` at or after `from`.
+fn next_fn(code: &str, from: usize) -> Option<(usize, &str)> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    code[from..].match_indices("fn").find_map(|(rel, _)| {
+        let at = from + rel;
+        let before_ok = code[..at].chars().next_back().is_none_or(|c| !is_ident(c));
+        let rest = &code[at + 2..];
+        let name_start = rest.len() - rest.trim_start().len();
+        if !before_ok || name_start == 0 {
+            return None;
+        }
+        let name = &rest[name_start..];
+        let len = name.find(|c: char| !is_ident(c)).unwrap_or(name.len());
+        (len > 0).then(|| (at, &name[..len]))
+    })
 }
 
 /// Every `.rs` file under `src/`, this file excluded.

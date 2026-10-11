@@ -594,6 +594,7 @@ async fn patch_component_toggle_persists_to_toml() {
 /// exactly the handles that match.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_surfaces_component_disabled_counts() {
     use crate::core::registry::{IndexRegistry, StageState, StageStatus};
 
@@ -665,9 +666,9 @@ async fn health_surfaces_component_disabled_counts() {
 /// one).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn health_surfaces_indexes_without_embed_pool() {
-    use crate::core::embed::MockEmbedder;
-    use crate::service::embed_pool::EmbedPool;
+    use crate::{core::embed::MockEmbedder, service::embed_pool::EmbedPool};
 
     let registry = IndexRegistry::new();
     let tmp = std::env::temp_dir();
@@ -713,6 +714,7 @@ async fn health_surfaces_indexes_without_embed_pool() {
 /// turn-off assertion.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn patch_vector_off_stops_index_file_from_embedding() {
     use super::components::{apply_component_transition, resolve_component_toggle};
 

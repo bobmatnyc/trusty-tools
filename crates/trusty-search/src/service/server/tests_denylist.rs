@@ -130,6 +130,7 @@ async fn validate_root_path_denylist_rejects_home() {
 /// Test: this test; see also `allowlist::tests::denylist_blocks_tmp` which
 /// tests `is_denied` directly for `/tmp/my-project`.
 #[test]
+#[serial_test::parallel]
 fn validate_root_path_denylist_rejects_tmp_literal_paths() {
     use crate::allowlist::{is_denied, SENSITIVE_PATH_PREFIXES};
 
@@ -174,6 +175,7 @@ fn validate_root_path_denylist_rejects_tmp_literal_paths() {
 /// machine and asserts `validate_root_path` returns `Ok`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn validate_root_path_accepts_safe_project_dir() {
     // Strategy: find a directory that (a) exists, (b) is not sensitive.
     // On both macOS and Linux, /usr or /opt tend to be present and non-sensitive.
@@ -233,6 +235,7 @@ async fn validate_root_path_accepts_safe_project_dir() {
 /// and asserts 400 with "indexing refused".
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_still_rejects_sensitive_path_by_default() {
     use crate::core::registry::IndexRegistry;
 

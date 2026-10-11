@@ -170,6 +170,7 @@ async fn relocate_index_updates_root_path() {
 /// the lookup hits.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn hash_cache_relative_key_matches_after_load() {
     let map: dashmap::DashMap<std::path::PathBuf, String> = dashmap::DashMap::new();
 
@@ -217,6 +218,7 @@ fn hash_cache_relative_key_matches_after_load() {
 ///
 /// Test: this test (issue #1097 / #1088 guard).
 #[test]
+#[serial_test::parallel]
 fn colocated_fallback_is_false_when_disk_entry_absent() {
     use crate::service::persistence::load_index_registry_at;
     use std::path::PathBuf;
@@ -277,6 +279,7 @@ fn colocated_fallback_is_false_when_disk_entry_absent() {
 /// recovers the correct values.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn relocate_preserves_lru_timestamps() {
     use crate::service::persistence::{
         load_index_registry_at, upsert_index_registry_entry_at, PersistedIndex,
@@ -355,6 +358,7 @@ fn relocate_preserves_lru_timestamps() {
 ///
 /// Test: this test (issue #1089 completeness, issue #1097).
 #[test]
+#[serial_test::parallel]
 fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
     use crate::service::persistence::load_index_registry_at;
     use crate::service::persistence::{upsert_index_registry_entry_at, PersistedIndex};

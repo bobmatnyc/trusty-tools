@@ -113,6 +113,7 @@ async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::V
 /// What: empty allowlist, real existing non-sensitive directory, no project
 /// registration → `403`, nothing in the registry.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_refuses_unlisted_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("unlisted");
@@ -224,6 +225,7 @@ async fn create_index_accepts_provisioned_worktree() {
 /// not approve `~/Projects/foo-scratch` — that is the unrelated-directory case
 /// the 74-index incident was made of.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_refuses_sibling_of_approved_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("sibling-parent");
@@ -291,6 +293,7 @@ async fn denylist_still_wins_over_an_allowlist_entry() {
 /// of. The root here is an ordinary temp dir: not a credential directory, not a
 /// home top-level, so ONLY the allowlist stands between it and indexing.
 #[tokio::test]
+#[serial_test::parallel]
 async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
