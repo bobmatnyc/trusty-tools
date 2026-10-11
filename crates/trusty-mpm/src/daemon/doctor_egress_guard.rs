@@ -342,4 +342,41 @@ mod tests {
         std::fs::write(managed.join("settings.json"), provisioned(Some(10))).expect("rewrite");
         assert_eq!(check(&fx).status, CheckStatus::Ok);
     }
+
+    /// 🔴 #8454 S2 fix round (critic LOW): a `claude-config/` directory whose
+    /// `settings.json` is gone, or a dangling link, fails rather than reading
+    /// as no managed tier at all.
+    #[test]
+    fn egress_doctor_fails_a_managed_tier_whose_settings_file_is_missing() {
+        let fx = fixture(&[]);
+        let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(&fx.home);
+        std::fs::create_dir_all(&managed).expect("mkdir managed");
+        let row = check(&fx);
+        assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+        assert!(row.message.contains("settings.json"), "{}", row.message);
+        std::os::unix::fs::symlink(managed.join("gone.json"), managed.join("settings.json"))
+            .expect("dangling link");
+        let row = check(&fx);
+        assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    }
+
+    /// 🔴 #8454 S2 fix round (critic LOW): a managed tier the probe cannot
+    /// stat or read is `Unknown`, never `Ok`.
+    #[test]
+    fn egress_doctor_reports_unknown_when_the_managed_tier_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = fixture(&[]);
+        let managed = crate::core::trusty_tools_config::managed_claude_config_dir_at(&fx.home);
+        std::fs::create_dir_all(&managed).expect("mkdir managed");
+        std::fs::write(managed.join("settings.json"), provisioned(Some(10))).expect("write");
+        let parent = managed.parent().expect("parent").to_path_buf();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // Root stats any path; the arm is only reachable for another user.
+        let blocked = std::fs::symlink_metadata(&managed).is_err();
+        let row = check(&fx);
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        if blocked {
+            assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+        }
+    }
 }

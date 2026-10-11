@@ -335,3 +335,107 @@ fn egress_project_settings_symlink_is_followed() {
     assert!(pm_verdict(&fx, "Write", write_input(&link, "{}")).is_some());
     assert!(pm_bash(&fx, "echo '{}' > alias.json").is_some());
 }
+
+/// `command` as a Bash call, judged for a PM, a subagent payload and a
+/// session with the subagent marker set.
+fn verdicts_for_every_caller(fx: &Fixture, command: &str) -> [Option<String>; 3] {
+    let call = payload(fx, "Bash", json!({ "command": command }));
+    let mut dispatched = call.clone();
+    dispatched["agent_id"] = json!("agent-9");
+    let marked = HookEnv {
+        sub_agent: true,
+        ..pm_env(fx)
+    };
+    [
+        evaluate(&call, &pm_env(fx), MpmConfig::default),
+        evaluate(&dispatched, &pm_env(fx), MpmConfig::default),
+        evaluate(&call, &marked, MpmConfig::default),
+    ]
+}
+
+/// 🔴 #8454 S2 fix round (critic HIGH): an expansion after a literal parent
+/// is judged by that parent, and one in the first segment by a literal last
+/// component. Only an operand with no placeable parent stays allowed.
+#[test]
+fn egress_anchor_delete_with_an_expansion_is_judged_by_its_parent() {
+    let fx = egress_fixture();
+    for command in [
+        "rm ~/.trusty-tools/trusty-mpm/$F",
+        "rm ~/.trusty-mpm/$X",
+        "rm \"$D/config.yaml\"",
+        "rm \"$HOME/.trusty-mpm/twin/armed/$R\"",
+        "rm -f ~/.trusty-tools/trusty-mpm/`cat f`",
+    ] {
+        for (caller, verdict) in verdicts_for_every_caller(&fx, command)
+            .into_iter()
+            .enumerate()
+        {
+            assert!(verdict.is_some(), "caller {caller} allowed: {command}");
+        }
+    }
+    for command in [
+        "rm $F",
+        "rm \"$D/$X\"",
+        "rm build/$F",
+        "rm -f \"$TMPDIR/x.log\"",
+    ] {
+        assert_eq!(pm_bash(&fx, command), None, "denied: {command}");
+    }
+}
+
+/// 🔴 #8454 S2 fix round (Fail-Open Check): a glob whose literal parent does
+/// not resolve could delete an anchor, so it is denied.
+#[test]
+fn egress_anchor_delete_through_a_looped_glob_parent_is_denied() {
+    let fx = egress_fixture();
+    let looped = fx.cwd.join("loop");
+    std::os::unix::fs::symlink(&looped, &looped).expect("self symlink");
+    let reason = pm_bash(&fx, "rm -rf loop/*").expect("denied");
+    assert!(reason.contains("does not resolve"), "{reason}");
+}
+
+/// 🔴 #8454 S2 fix round (critic MEDIUM): deleting, moving or copying over a
+/// guarded project's `.claude` directory is a write to both settings files;
+/// edits inside it that leave them alone stay allowed.
+#[test]
+fn egress_project_settings_claude_dir_operations_are_denied() {
+    let fx = egress_fixture();
+    project_settings(&fx, &pretty(&guarded_settings(json!({}))));
+    std::fs::write(fx.cwd.join(".claude/notes.md"), "n").expect("write note");
+    for command in [
+        "rm -rf .claude",
+        "rm -f .claude/*",
+        "rm .claude/settings*.json",
+        "mv .claude old-claude",
+        "cp -r /tmp/x/.claude .",
+        "cp -rT /tmp/x .claude",
+    ] {
+        let reason = pm_bash(&fx, command).unwrap_or_else(|| panic!("allowed: {command}"));
+        assert!(reason.contains("#8454"), "{command}: {reason}");
+    }
+    for command in [
+        "rm .claude/notes.md",
+        "rm -rf .claude/worktrees/x",
+        "cp a.txt .claude/notes.md",
+        "cp a.txt .claude/",
+    ] {
+        assert_eq!(pm_bash(&fx, command), None, "denied: {command}");
+    }
+}
+
+/// 🔴 #8454 S2 fix round: a `.claude` tree moved in that sets
+/// `disableAllHooks` is denied even where the project carries no entry yet.
+#[test]
+fn egress_project_settings_incoming_claude_tree_disabling_hooks_is_denied() {
+    let fx = egress_fixture();
+    let evil = fx.cwd.join("evil/.claude");
+    std::fs::create_dir_all(&evil).expect("mkdir evil");
+    std::fs::write(
+        evil.join("settings.local.json"),
+        "{\"disableAllHooks\": true}",
+    )
+    .expect("write evil");
+    assert!(pm_bash(&fx, "mv evil/.claude .").is_some());
+    std::fs::write(evil.join("settings.local.json"), "{}").expect("rewrite evil");
+    assert_eq!(pm_bash(&fx, "mv evil/.claude ."), None);
+}

@@ -223,3 +223,27 @@ fn egress_anchor_guards_the_project_settings_entry() {
     let unrelated = payload(&fx, "Write", write(&fx.project.join("notes.md"), "x"));
     assert_allowed(&run(&fx, &unrelated, &[]), "unrelated write");
 }
+
+/// 🔴 #8454 S2 fix round (critic HIGH): a delete whose operand carries an
+/// expansion is judged by its literal parent, or by a literal last component,
+/// under both bypass variables and for subagents.
+#[test]
+fn egress_anchor_denies_deletes_through_an_expansion() {
+    let fx = Fixture::new();
+    for command in [
+        "rm ~/.trusty-tools/trusty-mpm/$F",
+        "rm ~/.trusty-mpm/$X",
+        "rm \"$D/config.yaml\"",
+    ] {
+        for env in ENVS {
+            let main = payload(&fx, "Bash", serde_json::json!({ "command": command }));
+            assert_denied(&run(&fx, &main, env), &format!("{command} {env:?}"));
+            let mut dispatched = main.clone();
+            dispatched["agent_id"] = serde_json::json!("agent-2");
+            assert_denied(
+                &run(&fx, &dispatched, env),
+                &format!("{command} agent_id {env:?}"),
+            );
+        }
+    }
+}
