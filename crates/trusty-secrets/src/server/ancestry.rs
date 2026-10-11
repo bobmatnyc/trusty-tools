@@ -23,6 +23,8 @@
 //! the agent check no longer sees Claude Code above it.
 //! Test: `ancestry_tests.rs` beside this module.
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// The longest parent chain [`is_self_or_descendant`] walks before it gives up.
@@ -93,6 +95,16 @@ pub trait ProcessTable: Send + Sync {
     /// [`has_agent_ancestor`] fails closed for a table that does not judge.
     /// Test: `agent_check_fails_closed_on_a_table_without_is_agent`.
     fn is_agent(&self, pid: u32) -> Result<bool, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    /// The executable `pid` runs (#9066).
+    ///
+    /// Why: the console bridge's verdict is taken only from the
+    /// `trusty-console` executable. The default refuses, like `is_agent`.
+    /// Test: `bridge_assertion_from_non_console_peer_is_refused`,
+    /// `os_table_reads_this_process`.
+    fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 }
@@ -377,6 +389,10 @@ impl ProcessTable for OsProcessTable {
     fn is_agent(&self, pid: u32) -> Result<bool, ProcessError> {
         os::is_agent(pid)
     }
+
+    fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        os::executable(pid)
+    }
 }
 
 /// The fields of a `/proc/<pid>/stat` line after the `comm` field.
@@ -462,6 +478,11 @@ mod os {
         labels.extend(exe.as_deref());
         // #9621: npm Claude Code is `node .../claude-code/cli.js`.
         agent_verdict(&labels, || argv(pid))
+    }
+
+    /// `/proc/<pid>/exe` (#9066).
+    pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
+        std::fs::read_link(format!("/proc/{pid}/exe")).map_err(|_| ProcessError::Unreadable { pid })
     }
 
     /// `/proc/<pid>/cmdline`; unreadable or empty is an error.
@@ -668,6 +689,13 @@ mod os {
         super::parse_procargs2(&buf).ok_or(unreadable)
     }
 
+    /// `proc_pidpath` for `pid` (#9066).
+    pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
+        executable_path(pid)
+            .map(std::path::PathBuf::from)
+            .ok_or(ProcessError::Unreadable { pid })
+    }
+
     /// `proc_pidpath` for `pid`, or `None` when it fails.
     fn executable_path(pid: u32) -> Option<String> {
         let raw = libc::c_int::try_from(pid).ok()?;
@@ -704,6 +732,10 @@ mod os {
     }
 
     pub(super) fn is_agent(pid: u32) -> Result<bool, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 }

@@ -212,7 +212,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 36] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 37] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1220,7 +1220,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 36;
+    const ARMS: usize = 37;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1266,6 +1266,8 @@ fn error_kind_all_lists_every_variant_once() {
             // #9070: after `BackendTimeout`.
             ErrorKind::GrantRefused => 34,
             ErrorKind::GrantLimitReached => 35,
+            // #9066: after `GrantLimitReached`.
+            ErrorKind::BridgeRefused => 36,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1279,12 +1281,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 36 variants, and the
+/// What: `kind as i32` equals its pinned value for all 37 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 36] = [
+    const PINNED: [(ErrorKind, i32); 37] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1321,6 +1323,7 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::BackendTimeout, 33),
         (ErrorKind::GrantRefused, 34),
         (ErrorKind::GrantLimitReached, 35),
+        (ErrorKind::BridgeRefused, 36),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");

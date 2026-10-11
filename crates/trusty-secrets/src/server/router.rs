@@ -31,6 +31,7 @@ use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::agents_flag;
 use super::audit::AuditSink;
+use super::bridge;
 use super::deadline::{BODY_GRACE, request_deadline};
 use super::doctor;
 use super::errors::ErrorKind;
@@ -353,6 +354,8 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
     let admission = Arc::new(Semaphore::new(state.admission_cap()));
     METHODS
         .into_iter()
+        // #9066: the console bridge's entries share the admission cap.
+        .chain(bridge::METHODS)
         .fold(RpcRouter::new(), |router, (name, body)| {
             let state = Arc::clone(&state);
             let admission = Arc::clone(&admission);
@@ -365,9 +368,11 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
                     let caller = Caller::new(request_peer_pid());
                     // #7524 P2-M1: one deadline for the whole request.
                     let deadline = Instant::now() + state.deadline_for(name);
+                    // #9066: a bridged call answers as its direct method.
+                    let reply_as = crate::api::bridge::direct_method(name).unwrap_or(name);
                     run_blocking(state, admission, deadline, body, caller, params)
                         .await
-                        .map_err(|kind| kind.to_rpc(name))
+                        .map_err(|kind| kind.to_rpc(reply_as))
                 }
             })
         })

@@ -24,6 +24,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use super::audit::AuditMethod;
+use super::bridge::BridgeVerdict;
 use super::errors::ErrorKind;
 use super::gate::{Recording, audited};
 use super::project::ProjectContext;
@@ -47,18 +48,33 @@ pub const PROJECT_FIELD: &str = "project";
 /// the router reads it before it spawns the body and passes it in here.
 /// What: the peer pid, or `None` when the kernel reported none (a direct
 /// dispatch in a test, or a target without a peer-pid option). A method that
-/// grants on it treats `None` as a refusal.
+/// grants on it treats `None` as a refusal. #9066: on a console bridge call,
+/// also the console's verdict on the client it serves.
 /// Test: `resolve_without_grant_returns_no_value_and_one_deny_record`,
-/// `audit_value_never_reaches_the_audit_file`.
+/// `audit_value_never_reaches_the_audit_file`,
+/// `bridge_call_is_audited_allow_and_deny`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Caller {
     pid: Option<u32>,
+    // #9066: set only by the bridge, after it read the assertion.
+    bridge: Option<BridgeVerdict>,
 }
 
 impl Caller {
     /// A caller with the peer pid `pid`.
     pub(crate) fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+        Self { pid, bridge: None }
+    }
+
+    /// This caller, acting through the console bridge under `verdict`.
+    pub(crate) fn with_bridge(mut self, verdict: BridgeVerdict) -> Self {
+        self.bridge = Some(verdict);
+        self
+    }
+
+    /// The console's verdict, on a bridge call only (#9066).
+    pub(crate) fn bridge(self) -> Option<BridgeVerdict> {
+        self.bridge
     }
 
     /// The peer pid, when the kernel reported one.
@@ -118,38 +134,42 @@ pub(crate) fn scopes(state: &State, _caller: Caller, params: Value) -> Result<Va
 /// unknown — the index listing is returned with every flag OFF. A failed
 /// flag lookup on an opened backend is an error. Never reads a value. A
 /// denied call leaves one audit record; an allowed one leaves none (#4567).
+/// #9066: a console bridge call is audited like `set` instead — admitted
+/// fail-closed before the listing, one record per call.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_list_lists_flags_off_when_the_backend_does_not_open`,
 /// `server_corrupt_index_is_a_fixed_error`,
-/// `audit_list_records_only_denials_and_scopes_doctor_none`.
+/// `audit_list_records_only_denials_and_scopes_doctor_none`,
+/// `bridge_list_allow_is_audited`,
+/// `bridge_list_refuses_when_audit_unwritable`.
 pub(crate) fn list(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
-    audited(
-        state,
-        caller,
-        AuditMethod::List,
-        Recording::DenyOnly,
-        |gate| {
-            let (dir, rest) = split_project(params)?;
-            let request: ListRequest = decode(rest)?;
-            gate.name(&request.vault, None);
-            let project = ProjectContext::resolve(state, &dir)?;
-            gate.project(&project);
-            project.require_in_scope(&request.vault)?;
-            // #9070: the flag is the backend's. A backend that does not open
-            // vouches for no flag, so the index listing stands with every flag
-            // OFF; a list that worked before the flag moved keeps working.
-            let keys = match project.backend(state) {
-                Ok(backend) => {
-                    SecretStore::new(backend, state.index.clone()).list(&request.vault)?
-                }
-                Err(_) => state.index.list(&request.vault)?,
-            };
-            to_json(&ListResponse {
-                vault: request.vault,
-                keys,
-            })
-        },
-    )
+    // #9066: every bridge call is audited; the direct list stays deny-only.
+    let recording = match caller.bridge() {
+        Some(_) => Recording::Once,
+        None => Recording::DenyOnly,
+    };
+    audited(state, caller, AuditMethod::List, recording, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: ListRequest = decode(rest)?;
+        gate.name(&request.vault, None);
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        project.require_in_scope(&request.vault)?;
+        if recording == Recording::Once {
+            gate.admit()?;
+        }
+        // #9070: the flag is the backend's. A backend that does not open
+        // vouches for no flag, so the index listing stands with every flag
+        // OFF; a list that worked before the flag moved keeps working.
+        let keys = match project.backend(state) {
+            Ok(backend) => SecretStore::new(backend, state.index.clone()).list(&request.vault)?,
+            Err(_) => state.index.list(&request.vault)?,
+        };
+        to_json(&ListResponse {
+            vault: request.vault,
+            keys,
+        })
+    })
 }
 
 /// `secrets.set`: upsert one key; answer S1's masked confirmation once.
