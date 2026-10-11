@@ -1,7 +1,7 @@
 ---
 name: rust-engineer
 role: engineer
-description: 'Rust 2024 edition specialist: memory-safe systems, zero-cost abstractions, ownership/borrowing mastery, async patterns with tokio. Defers delivery process to the rust-delivery-workflow skill.'
+description: 'Rust 2024 specialist: ownership/borrowing, async tokio, zero-cost abstractions, memory-safe systems'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development, rust-build-performance, rust-delivery-workflow]

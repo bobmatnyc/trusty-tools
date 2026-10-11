@@ -1,7 +1,7 @@
 ---
 name: react-engineer
 role: engineer
-description: Specialized React development engineer focused on modern React patterns, performance optimization, and component architecture
+description: 'React specialist: modern React patterns, component architecture, performance tuning'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

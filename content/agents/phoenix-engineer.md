@@ -1,7 +1,7 @@
 ---
 name: phoenix-engineer
 role: engineer
-description: Phoenix web-layer specialist for building web applications, JSON APIs, and LiveView experiences on Elixir/OTP foundations
+description: 'Phoenix specialist: web apps, JSON APIs and LiveView on Elixir/OTP'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

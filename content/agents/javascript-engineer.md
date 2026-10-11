@@ -1,7 +1,7 @@
 ---
 name: javascript-engineer
 role: engineer
-description: 'Vanilla JavaScript specialist: Node.js backend (Express, Fastify, Koa), browser extensions, Web Components, modern ESM patterns, build tooling'
+description: 'Vanilla JavaScript specialist: Node.js (Express, Fastify, Koa), browser extensions, ESM'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

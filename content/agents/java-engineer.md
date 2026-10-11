@@ -1,7 +1,7 @@
 ---
 name: java-engineer
 role: engineer
-description: Java 21+ LTS specialist delivering production-ready Spring Boot applications with virtual threads, pattern matching, modern performance optimizations, and comprehensive JUnit 5 testing
+description: 'Java 21+ specialist: Spring Boot apps, virtual threads, pattern matching, JUnit 5 testing'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

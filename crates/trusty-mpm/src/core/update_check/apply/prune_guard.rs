@@ -37,6 +37,8 @@ use std::path::{Path, PathBuf};
 
 use super::ApplyError;
 use crate::core::agent_manifest::AgentManifest;
+// #8992: the agent deletion gate is shared with the orphan sweep.
+use crate::core::agent_orphans::{AgentRemoval, agent_removal_verdict};
 use crate::core::skill_manifest::SkillManifest;
 use crate::core::skill_retire::{SkillRemoval, skill_removal_verdict};
 
@@ -71,61 +73,21 @@ pub(super) fn prune_backup_root(fw_root: &Path, now: chrono::DateTime<chrono::Ut
 
 /// May prune delete this managed agent file?
 ///
-/// Why (#391): the same rule `agents::deployer` already applies before an
-/// overwrite. Deleting a file whose bytes the user changed destroys work no
-/// backup was asked for.
-/// A checksum gate alone is not the whole rule, for the same reason it was not
-/// on the skill side: it protects an EDITED file, never a pristine one the user
-/// owns. Skills had to derive that from the live user source because their
-/// ledger records no tier. The agent ledger already carries it —
-/// `ManifestEntry::origin`, which `agents::deployer` consults through
-/// `Origin::is_framework_owned` to decide refresh-vs-preserve — so this guard
-/// reads the same field rather than inventing a second answer.
-///
-/// Nothing writes a non-`Bundled` origin today, so no live prune reaches that
-/// branch. It is closed now because the day something does, it becomes a data
-/// -loss path with no test and no record of why it mattered.
-/// What: `Prunable` when the file is absent (prune is idempotent — there is
-/// nothing to lose), or when the ledger records it framework-owned AND its
-/// content still checksums to that entry. `Kept` when the ledger has no entry
-/// for it, when the entry is user-owned (`User`/`Registry` — the seed-once
-/// tier), when the content differs, or when it cannot be read as text.
+/// Why (#391): deleting a file whose bytes the user changed destroys work no
+/// backup was asked for, and a checksum gate alone never protects a pristine
+/// file the user owns — the ledger's `origin` does. #8992's orphan sweep asks
+/// the IDENTICAL question, so the rule moved to
+/// [`crate::core::agent_orphans::agent_removal_verdict`] and this is the thin
+/// adapter onto prune's own [`Verdict`], as [`skill_verdict`] is for skills.
+/// What: `Prunable` when the file is absent, or when the ledger records it
+/// framework-owned AND its content still checksums to that entry. `Kept` when
+/// the entry is missing, user-owned, edited, or unreadable.
 /// Test: `apply_prune_skips_hand_edited_agent`,
 /// `apply_prune_spares_a_user_origin_agent`, `apply_prune_removes_deselected`.
 pub(super) fn agent_verdict(manifest: &AgentManifest, target: &Path, filename: &str) -> Verdict {
-    let path = target.join(filename);
-    if !path.exists() {
-        return Verdict::Prunable;
-    }
-    // #391: an agent the ledger attributes to the user is theirs whether or not
-    // they have edited it — the same case a matching checksum waved through on
-    // the skill side. Callers only pass managed filenames, so a missing entry is
-    // unreachable; treated as user-owned rather than unwrapped.
-    match manifest.managed.get(filename) {
-        Some(entry) if entry.origin.is_framework_owned() => {}
-        Some(entry) => {
-            return Verdict::Kept(format!(
-                "the ledger records it as {:?}-owned, not framework-owned",
-                entry.origin
-            ));
-        }
-        None => {
-            return Verdict::Kept(format!(
-                "{} has no ledger entry, so trusty-mpm does not own it",
-                path.display()
-            ));
-        }
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) if manifest.checksum_matches(filename, &content) => Verdict::Prunable,
-        Ok(_) => Verdict::Kept(format!(
-            "{} was edited after it was deployed",
-            path.display()
-        )),
-        Err(e) => Verdict::Kept(format!(
-            "{} could not be read, so it cannot be verified: {e}",
-            path.display()
-        )),
+    match agent_removal_verdict(manifest, target, filename) {
+        AgentRemoval::Removable => Verdict::Prunable,
+        AgentRemoval::Kept(why) => Verdict::Kept(why),
     }
 }
 

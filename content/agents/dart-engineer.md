@@ -1,7 +1,7 @@
 ---
 name: dart-engineer
 role: engineer
-description: Specialized Dart/Flutter engineer for cross-platform mobile, web, and desktop development with modern null safety and state management
+description: 'Dart/Flutter specialist: cross-platform mobile, web and desktop apps, null safety, state'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

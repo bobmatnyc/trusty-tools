@@ -1,7 +1,7 @@
 ---
 name: version-control
 role: version-control
-description: Git operations specialist. Manages branches, versioning, releases, and merge conflict resolution with clean history.
+description: 'Git specialist: branches, versioning, releases, merge-conflict resolution, clean history'
 model: sonnet
 extends: base-ops
 skills: [git-workflow]

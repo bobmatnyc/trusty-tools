@@ -1,7 +1,7 @@
 ---
 name: elixir-engineer
 role: engineer
-description: 'Elixir 1.17-1.18 + OTP specialist: supervision trees, GenServer/Task/Agent processes, fault-tolerant concurrency, Ecto persistence, idiomatic functional design'
+description: 'Elixir/OTP specialist: supervision trees, GenServer/Task processes, fault tolerance, Ecto'
 model: sonnet
 extends: base-engineer
 skills: [systematic-debugging, test-driven-development]

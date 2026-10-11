@@ -421,7 +421,12 @@ fn verdict_for(
     if mode == RepairMode::DryRun {
         return StepStatus::Planned;
     }
-    match back_up_and_remove(&candidate.path, &candidate.file_name, backup_root) {
+    match back_up_and_remove(
+        &candidate.path,
+        &candidate.file_name,
+        backup_root,
+        "project-agents",
+    ) {
         Ok(backup) => {
             *dirty = true;
             StepStatus::Applied {
@@ -436,13 +441,19 @@ fn verdict_for(
 ///
 /// Why: a deletion that reports success from `remove_file`'s return value has
 /// verified nothing.
-/// What: copies `path` to `<backup_root>/project-agents/<file_name>`, removes
-/// it, then re-checks that the path is gone. A failure AFTER the copy names the
+/// What: copies `path` to `<backup_root>/<subdir>/<file_name>`, removes it,
+/// then re-checks that the path is gone. A failure AFTER the copy names the
 /// backup, because at that point the operator's copy exists in two places and
-/// the message is the only thing that says where.
-/// Test: `a_removed_stray_is_backed_up`.
-fn back_up_and_remove(path: &Path, file_name: &str, backup_root: &Path) -> Result<PathBuf, String> {
-    let dest_dir = backup_root.join("project-agents");
+/// the message is the only thing that says where. #8992: shared with the
+/// canonical-dir orphan sweep, which passes its own `subdir`.
+/// Test: `a_removed_stray_is_backed_up`, `a_pristine_orphan_is_removed`.
+pub(crate) fn back_up_and_remove(
+    path: &Path,
+    file_name: &str,
+    backup_root: &Path,
+    subdir: &str,
+) -> Result<PathBuf, String> {
+    let dest_dir = backup_root.join(subdir);
     std::fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("could not create {}: {e}", dest_dir.display()))?;
     let dest = dest_dir.join(file_name);
