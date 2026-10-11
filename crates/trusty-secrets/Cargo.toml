@@ -28,7 +28,7 @@ readme = "README.md"
 default = ["api", "store", "server"]
 api = ["dep:serde", "dep:thiserror"]
 store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
-ancestry = ["dep:thiserror", "dep:libc"]
+ancestry = ["dep:thiserror", "dep:libc", "server"]
 server = ["store", "ancestry", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
 # #7519: the blocking runner and template-file guard the CLI-backed backends
 # (1Password, Keeper) share. std plus `store`'s libc only — owner ruling

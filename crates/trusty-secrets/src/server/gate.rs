@@ -337,9 +337,6 @@ impl Gate<'_> {
 
     /// Append a deny record if the log opens; ignore every failure.
     fn deny_best_effort(&self, kind: ErrorKind) {
-        if self.suppressed {
-            return;
-        }
         if let Ok(mut file) = self.state.audit.open() {
             let _ = file.append(&self.record(Some(kind)));
         }
