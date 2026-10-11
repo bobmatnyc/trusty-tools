@@ -31,7 +31,7 @@
 
 use std::ffi::OsStr;
 
-use serde::de::{Deserialize, DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use super::agents_flag;
