@@ -1282,11 +1282,16 @@ console makes the ancestry judgment and the server checks who made it.
   reads as `trusty-console (deleted)` and is refused until it restarts.
 - A missing, undecodable or contradictory assertion, or one with an
   unknown field, is `invalid_params`.
-- A refused call leaves one deny record. An accepted call runs the direct
-  method body, so it leaves the direct call's records, plus `source`
+- Every bridge call is audited, and every bridge record carries `source`
   (`mapped`, `unmappable`, `unreadable`, or `malformed` for a refused
-  assertion) and the asserted `agent_parent`. An allowed change keeps the
-  direct method's fail-closed audit: no record, no backend call. Errors
+  assertion) and the asserted `agent_parent`. A refused call leaves one
+  deny record, naming the vault and key its params carried when they
+  decode. An accepted `set`, `delete`, `copy` or `set_agents_may_use` runs
+  the direct method body and leaves the direct call's records. An accepted
+  `list` leaves one record, allow or deny; a direct `list` leaves a record
+  only when denied. Every allowed bridge call, `list` included, is admitted
+  fail-closed: when the audit log cannot be written it is refused with
+  `audit_unavailable` and no backend call runs. Errors
   answer under the direct method's name, with its deadline, so a bridged
   error is the same wire error a direct caller gets.
 - There is no human-presence or confirm step. Tailnet requests are
