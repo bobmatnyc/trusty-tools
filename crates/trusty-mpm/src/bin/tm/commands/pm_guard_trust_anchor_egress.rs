@@ -12,17 +12,20 @@
 //! under the parent's resolve, symlink, hard-link, case and fail-closed rules —
 //! so the directories above them are protected too, and `rm -rf` or `mv` of
 //! `~/.trusty-tools/trusty-mpm` is denied. [`Anchors::judge_delete`] judges an
-//! `rm`/`rmdir`/`unlink` operand, a glob by its literal parent.
+//! `rm`/`rmdir`/`unlink` operand, a glob or expansion by its literal parent.
 //! [`project_settings_verdict`] is the D2 content rule for a project's
 //! `.claude/settings.json` and `settings.local.json`, and binds every session,
 //! the Architect included: an Edit or Write whose result drops or weakens the
 //! egress entry, or sets `disableAllHooks`, is denied; a Bash write is denied
 //! while either file of that `.claude/` directory carries the entry; an
-//! unreadable or malformed file denies every write to it.
+//! unreadable or malformed file denies every write to it. Deleting, moving or
+//! copying over the `.claude/` directory itself is a write to both files.
 //! Residual: a Bash write that creates `disableAllHooks` in a project whose
 //! settings never carried the entry; a hard link to a project settings file
 //! made before this rule (a new `ln` of one is judged as its source);
-//! `xargs rm`, `find -delete` and a glob after a `cd`.
+//! `xargs rm`, `find -delete`, a glob after a `cd`, an operand whose
+//! parent is an expansion (`rm $F`), and a `cp -r` of a `.claude` tree that
+//! sets `disableAllHooks` into a project with no entry (its source is unseen).
 //! Test: `pm_guard_trust_anchor_egress_tests.rs`; end to end in
 //! `tests/tm_hook_egress_anchor_8454.rs`.
 
@@ -93,12 +96,17 @@ impl Anchors {
     /// The deny for one delete-verb operand, or `None`.
     ///
     /// What: an operand with no glob or expansion is judged as a write to it.
-    /// One with a glob deletes entries of its literal parent (the text before
-    /// the segment holding the first pattern character), so it is denied when
-    /// that parent is an anchor, a directory above one, inside a fenced tree,
-    /// or does not resolve. A parent that cannot be placed (after a `cd`, or
-    /// an unknown expansion) is allowed — the documented residual.
-    /// Test: `egress_anchor_rm_and_mv_of_the_config_dir_are_denied`.
+    /// One with a glob or an expansion can delete any entry of its literal
+    /// parent ([`literal_parent`]), so it is denied when that parent is an
+    /// anchor, a directory above one, inside a fenced tree, or does not
+    /// resolve. A glob in the first segment judges the working directory. An
+    /// expansion in the first segment has no parent to place; a literal last
+    /// component is then judged by the parent's name rule (`rm "$D/config.yaml"`).
+    /// Only an operand whose parent cannot be placed at all — `rm $F`, a
+    /// relative path after a `cd` — is allowed, the documented residual.
+    /// Test: `egress_anchor_rm_and_mv_of_the_config_dir_are_denied`,
+    /// `egress_anchor_delete_with_an_expansion_is_judged_by_its_parent`,
+    /// `egress_anchor_delete_through_a_looped_glob_parent_is_denied`.
     pub(super) fn judge_delete(
         &self,
         word: &str,
@@ -106,25 +114,20 @@ impl Anchors {
         home: &Path,
     ) -> Option<String> {
         let word = dequote(word);
-        // A leading `$HOME` is placed, not an unknown expansion.
-        let skip = ["${HOME}", "$HOME"]
-            .iter()
-            .find(|p| {
-                word.strip_prefix(**p)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-            })
-            .map_or(0, |p| p.len());
-        let Some(at) = word[skip..].find(PATTERN_CHARS).map(|at| at + skip) else {
+        let Some(at) = pattern_at(&word) else {
             return self.judge_placed(&word, place(&word, base, home, true));
         };
-        // An unknown expansion names no parent the guard can place.
-        if word[at..].starts_with(['$', '`']) {
-            return None;
-        }
-        let parent = match word[..at].rfind('/') {
-            Some(0) => "/",
-            Some(slash) => &word[..slash],
-            None => ".",
+        let parent = match literal_parent(&word, at) {
+            Some(parent) => parent,
+            // A glob in the first segment deletes entries of the cwd.
+            None if !word[at..].starts_with(['$', '`']) => ".",
+            // #8454 fix round: an expansion in the first segment — only a
+            // literal last component names anything the guard can judge.
+            None => {
+                let last = word.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                let judged = word.contains('/') && !last.contains(PATTERN_CHARS);
+                return (judged && self.could_be(last)).then(|| super::unknown_reason(&word));
+            }
         };
         let Placed::At(path) = place(parent, base, home, true) else {
             return None;
@@ -140,14 +143,40 @@ impl Anchors {
     }
 }
 
+/// Where a shell word's first glob or expansion starts, a leading `$HOME`
+/// (which `place` resolves) skipped.
+fn pattern_at(word: &str) -> Option<usize> {
+    let skip = ["${HOME}", "$HOME"]
+        .iter()
+        .find(|p| {
+            word.strip_prefix(**p)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .map_or(0, |p| p.len());
+    word[skip..].find(PATTERN_CHARS).map(|at| at + skip)
+}
+
+/// The literal directory before the segment holding byte `at`; `None` when
+/// the pattern is in the first segment.
+fn literal_parent(word: &str, at: usize) -> Option<&str> {
+    match word[..at].rfind('/') {
+        Some(0) => Some("/"),
+        Some(slash) => Some(&word[..slash]),
+        None => None,
+    }
+}
+
 /// The D2 project-settings verdict for one call: `Some(reason)` denies.
 ///
 /// What: places every write the call makes (an edit tool's target literally,
 /// a Bash word as the shell would) and judges each one that names a project
 /// settings file — by its spelling or after symlinks — with
 /// [`judge_settings_write`]. A Bash target the guard cannot place whose file
-/// name is a settings name denies. An unknown home, and a Bash command the
-/// parent cannot place at all, are left to the parent's own rules.
+/// name is a settings name denies. #8454 fix round: a delete, rename source or
+/// copy destination that is a `.claude` directory — or a glob whose literal
+/// parent is one — is judged by [`judge_claude_dir`] as a write to both
+/// settings files. An unknown home, and a Bash command the parent cannot place
+/// at all, are left to the parent's own rules.
 /// Test: the `egress_project_settings_*` tests.
 pub(super) fn project_settings_verdict(
     tool_name: &str,
@@ -166,16 +195,45 @@ pub(super) fn project_settings_verdict(
         cwd
     };
     let mut targets: Vec<(String, bool)> = Vec::new();
+    // #8454 fix round: `(spelling, incoming)` operands that may be a `.claude`
+    // directory; `incoming` marks a tree moved into place.
+    let mut dirs: Vec<(String, bool)> = Vec::new();
     for write in writes {
         match write {
             AnchorWrite::Literal(path) => targets.push((path.clone(), false)),
-            AnchorWrite::File(word) | AnchorWrite::Source(word) | AnchorWrite::Delete(word) => {
+            AnchorWrite::File(word) => targets.push((dequote(word), true)),
+            AnchorWrite::Source(word) => {
                 targets.push((dequote(word), true));
+                dirs.push((dequote(word), true));
             }
-            AnchorWrite::Into { dest, names, .. } => {
+            AnchorWrite::Delete(word) => {
+                let word = dequote(word);
+                match pattern_at(&word) {
+                    None => dirs.push((word.clone(), false)),
+                    Some(at) => match literal_parent(&word, at) {
+                        Some(parent) => dirs.push((parent.to_owned(), false)),
+                        None if !word[at..].starts_with(['$', '`']) => {
+                            dirs.push((".".to_owned(), false));
+                        }
+                        None => {}
+                    },
+                }
+                targets.push((word, true));
+            }
+            AnchorWrite::Into {
+                dest,
+                names,
+                dest_too,
+            } => {
                 targets.push((dest.clone(), true));
                 let dir = dest.trim_end_matches('/');
-                targets.extend(names.iter().map(|n| (format!("{dir}/{n}"), true)));
+                for name in names {
+                    targets.push((format!("{dir}/{name}"), true));
+                    dirs.push((format!("{dir}/{name}"), false));
+                }
+                if *dest_too {
+                    dirs.push((dest.clone(), false));
+                }
             }
             AnchorWrite::IntoUnnamed(dir) => {
                 let dir = dir.trim_end_matches('/');
@@ -183,6 +241,19 @@ pub(super) fn project_settings_verdict(
             }
             AnchorWrite::DirChange => {}
         }
+    }
+    let dir_reason = dirs.iter().find_map(|(spelling, incoming)| {
+        let Placed::At(lexical) = place(spelling, base, home, true) else {
+            let name = spelling.trim_end_matches('/').rsplit('/').next()?;
+            return name
+                .eq_ignore_ascii_case(CLAUDE_DIR)
+                .then(|| unplaceable_reason(spelling));
+        };
+        let dir = claude_dir(&lexical)?;
+        judge_claude_dir(&dir, *incoming).map(|why| project_reason(spelling, &why))
+    });
+    if dir_reason.is_some() {
+        return dir_reason;
     }
     targets.iter().find_map(|(spelling, shell)| {
         let Placed::At(lexical) = place(spelling, base, home, *shell) else {
@@ -192,6 +263,45 @@ pub(super) fn project_settings_verdict(
         let dir = settings_dir(&lexical)?;
         judge_settings_write(edit, &lexical, &dir).map(|why| project_reason(spelling, &why))
     })
+}
+
+/// `path` when it, as spelled or after symlinks, is a `.claude` directory.
+fn claude_dir(lexical: &Path) -> Option<PathBuf> {
+    let named = |path: &Path| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(CLAUDE_DIR))
+    };
+    match resolve(lexical) {
+        Resolved::Path(resolved) if named(&resolved) => Some(resolved),
+        _ if named(lexical) => Some(lexical.to_path_buf()),
+        _ => None,
+    }
+}
+
+/// Judge a delete, rename or copy that replaces the `.claude` directory `dir`
+/// as a write to both its settings files (#8454 fix round).
+///
+/// What: either file unreadable or malformed denies; either carrying an
+/// egress entry denies; for an `incoming` tree, either setting
+/// `disableAllHooks` denies. A directory holding neither file is allowed.
+/// Test: `egress_project_settings_claude_dir_operations_are_denied`,
+/// `egress_project_settings_incoming_claude_tree_disabling_hooks_is_denied`.
+fn judge_claude_dir(dir: &Path, incoming: bool) -> Option<String> {
+    for name in SETTINGS_NAMES {
+        let path = dir.join(name);
+        let current = match read_settings(&path) {
+            Ok(current) => current,
+            Err(why) => return Some(format!("`{}` {why}", path.display())),
+        };
+        if state_of(&current) != EgressGuardState::Missing {
+            return Some("the `.claude` directory's settings carry the egress entry".to_owned());
+        }
+        if incoming && matches!(&current, Current::Object(value, _) if disables_all_hooks(value)) {
+            return Some(format!("`{}` sets `disableAllHooks`", path.display()));
+        }
+    }
+    None
 }
 
 /// Whether a file name is a guarded settings name, in any case.

@@ -12,8 +12,10 @@
 //! guard); the managed tier always is. `Fail` when a provisioned group carries
 //! no egress group, a weakened one (a timeout under 10 or a narrowed matcher),
 //! or sets `disableAllHooks`. `Unknown` when a file is unreadable or
-//! malformed. `Ok` otherwise — a foreign project owes tm nothing. It never
-//! reads `[pm_guard]`: the entry has no off switch (Architect D3). Read-only.
+//! malformed, or when `claude-config/` cannot be stat'ed; a `claude-config/`
+//! whose `settings.json` is missing fails. `Ok` otherwise — a foreign
+//! project owes tm nothing. It never reads `[pm_guard]`: the entry has no off
+//! switch (Architect D3). Read-only.
 //! Test: the `egress_doctor_*` tests below.
 
 use std::collections::BTreeMap;
@@ -62,22 +64,31 @@ pub(super) fn check_egress_guard(
             .files
             .push(file);
     }
-    let managed = managed_claude_config_dir_at(home);
-    if managed.join("settings.json").is_file() {
-        let files = ["settings.json", "settings.local.json"]
-            .into_iter()
-            .map(|name| managed.join(name))
-            .filter(|path| path.is_file())
-            .collect();
-        tiers.insert(
-            managed,
-            Tier {
-                files,
-                managed: true,
-            },
-        );
-    }
     let (mut fails, mut unknowns, mut guarded) = (Vec::new(), Vec::new(), 0usize);
+    // #8454 fix round: the managed tier is judged whenever `claude-config/`
+    // exists, so a deleted or dangling `settings.json` fails rather than
+    // hiding the tier; a directory that cannot be stat'ed is Unknown.
+    let managed = managed_claude_config_dir_at(home);
+    match std::fs::symlink_metadata(&managed) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => unknowns.push(format!("{} cannot be read ({e})", managed.display())),
+        Ok(_) => {
+            let local = managed.join("settings.local.json");
+            let mut files = vec![managed.join("settings.json")];
+            if std::fs::symlink_metadata(&local)
+                .map_or_else(|e| e.kind() != std::io::ErrorKind::NotFound, |_| true)
+            {
+                files.push(local);
+            }
+            tiers.insert(
+                managed,
+                Tier {
+                    files,
+                    managed: true,
+                },
+            );
+        }
+    }
     for (dir, tier) in &tiers {
         match judge_tier(dir, tier) {
             Verdict::Fine(true) => guarded += 1,
@@ -129,8 +140,19 @@ enum Verdict {
 fn judge_tier(dir: &Path, tier: &Tier) -> Verdict {
     let mut values = Vec::new();
     let mut unknown = Vec::new();
+    let mut missing = Vec::new();
     for file in &tier.files {
         match std::fs::read_to_string(file) {
+            // #8454 fix round: the managed tier's own file is owed; a missing
+            // one (or a dangling link) is a finding, not an unknown.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && tier.managed
+                    && file.file_name().is_some_and(|n| n == "settings.json") =>
+            {
+                missing.push(format!("{} is missing", file.display()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => unknown.push(format!("{} is unreadable ({e})", file.display())),
             Ok(text) if text.trim().is_empty() => {
                 values.push((file, Value::Object(Default::default())))
@@ -145,7 +167,7 @@ fn judge_tier(dir: &Path, tier: &Tier) -> Verdict {
         || values
             .iter()
             .any(|(_, value)| !event_names_matching(value, is_tm_hook_command).is_empty());
-    let mut fails = Vec::new();
+    let mut fails = missing;
     let (mut present, mut weakened) = (false, false);
     for (file, value) in &values {
         if disables_all_hooks(value) {
