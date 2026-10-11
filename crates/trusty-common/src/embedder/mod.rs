@@ -37,6 +37,8 @@ pub use candle_embedder::{CandleEmbedder, CandleEmbedderError};
 /// basic sanity invariants.
 pub mod rss;
 
+// #9275: token-exact chunking for embedders with a bounded input window.
+mod chunk;
 mod fast_embedder;
 mod types;
 
@@ -67,8 +69,12 @@ mod batching_tests;
 // #9391: the per-call byte budget changes no vector beyond main's rounding.
 #[cfg(test)]
 mod budget_identity_tests;
+// #9275: `input_window` and the chunker.
+#[cfg(test)]
+mod chunk_tests;
 
-pub use fast_embedder::FastEmbedder;
+pub use chunk::{CHUNK_OVERLAP_PERCENT, ChunkError, ChunkTokenizer, TextChunk, chunk_text};
+pub use fast_embedder::{FASTEMBED_MAX_LENGTH, FastEmbedder};
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
     DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
