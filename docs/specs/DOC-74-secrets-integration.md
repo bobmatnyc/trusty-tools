@@ -1280,7 +1280,11 @@ console makes the ancestry judgment and the server checks who made it.
   malformed one is a fixed 503. The route takes the same guard and CSRF
   header as every secrets route and never dials the socket. The console
   reads the file itself, so trusty-secrets gains no trusty-common edge
-  (owner ruling Df0).
+  (owner ruling Df0). Known limit: the registry keys each checkout by its
+  directory basename and keeps the first one registered, so of two
+  checkouts that share a basename (`acme/web`, `bob/web`) only the first
+  is listed, and the page cannot reach the second (Architect ruling
+  2026-10-11 D1).
 - Each bridged call carries a `bridge` field beside the method's own
   params: `agent_parent` (a boolean) and `source`. `mapped` means the
   console found the client's pid and read its chain. `unmappable` means it
