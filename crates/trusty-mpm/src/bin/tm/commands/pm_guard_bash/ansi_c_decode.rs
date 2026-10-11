@@ -197,7 +197,7 @@ fn ansi_c_body(body: &[char], lenient: bool) -> Option<(String, usize)> {
     let (mut out, mut i) = (String::new(), 0);
     loop {
         let Some(c) = body.get(i) else {
-            return lenient.then(|| (out, body.len()));
+            return lenient.then_some((out, body.len()));
         };
         match c {
             '\'' => return Some((out, i + 1)),
