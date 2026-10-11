@@ -246,14 +246,16 @@ fn universal_floor(
     if let Some(reason) = command.and_then(unclassifiable_reason) {
         return deny("unclassifiable-command", reason);
     }
-    if let Some(reason) = pm_guard_trust_anchor::evaluate(payload, &gate.env, &*gate.config) {
-        return deny(TRUST_ANCHOR_RULE, reason);
-    }
     // A delete of `$HOME` or `/`, or one whose target cannot be resolved.
+    // #8454: ahead of the trust anchor, as on the guarded path, now that the
+    // anchor also reads delete verbs — a root delete keeps its own reason.
     if let Some(class) = command.and_then(|c| evaluate_destructive_delete_command(c, hook_cwd))
         && class.is_floor()
     {
         return deny("destructive-delete", class.reason().to_string());
+    }
+    if let Some(reason) = pm_guard_trust_anchor::evaluate(payload, &gate.env, &*gate.config) {
+        return deny(TRUST_ANCHOR_RULE, reason);
     }
     // No secret value reaches the transcript; #8939: the same gated decision
     // as the guarded path, so the Architect's `tm env` exemption holds here.

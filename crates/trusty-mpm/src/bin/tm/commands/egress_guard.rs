@@ -6,13 +6,15 @@
 //! the only outbound path. `tm hook --pm-guard` cannot carry this rule: both
 //! of its bypass variables lift it, it exempts subagents, and its settings
 //! entry can be removed by the pm-guard opt-out. So this is a separate mode
-//! that reads none of `TRUSTY_MPM_PM_UNRESTRICTED`, `TRUSTY_MPM_DISABLE_HOOKS`,
-//! `CLAUDE_MPM_SUB_AGENT` or the payload's `agent_id` — it binds every
-//! tm-launched session, subagents included (Bob ruling 3). It never calls
+//! that never reads `TRUSTY_MPM_PM_UNRESTRICTED` or `TRUSTY_MPM_DISABLE_HOOKS`.
+//! `CLAUDE_MPM_SUB_AGENT` and the payload's `agent_id` are never read to allow:
+//! only the trust-anchor floor reads them, to narrow its Architect exemption
+//! (#8454 S2, Architect D1). It binds every tm-launched session, subagents
+//! included (Bob ruling 3). It never calls
 //! `ChannelPolicy::check_egress`: an `Allow` from a channel policy must not
 //! read as permission to run a family tool.
-//! What: [`egress_guard`] reads the `PreToolUse` payload, [`decide`]s, and on a
-//! deny records it through `pm_guard_deny_log`, prints the deny from
+//! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
+//! trust-anchor floor ([`verdict`]), [`decide`]s, and on a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
 //! output, which Claude Code reads as "no decision".
@@ -29,6 +31,8 @@ use crate::commands::hook_stdin::{
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, post_deny_audit, record_deny};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use crate::commands::pm_guard_trust_anchor::{HookEnv, TRUST_ANCHOR_RULE, evaluate};
+use trusty_mpm::core::config::MpmConfig;
 
 /// The deny reason printed when the guard panics.
 const PANIC_REASON: &str = "tm hook --egress-guard failed while deciding this tool call, so \
@@ -145,6 +149,27 @@ pub(crate) fn decide(
     }
 }
 
+/// The guard's verdict: the trust-anchor floor first, then [`decide`].
+///
+/// Why (#8454 S2, Architect D1): `[pm_guard] enabled = false` leaves the
+/// pm-guard hook out, and with it the #8878 trust-anchor floor; this hook has
+/// no off switch, so it runs that floor itself.
+/// What: when the read is a payload and `anchor` denies it, a
+/// `trust-anchor-write` deny; otherwise [`decide`]'s verdict.
+/// Test: `egress_trust_anchor_verdict_precedes_the_family_check`.
+pub(crate) fn verdict(
+    read: &Result<serde_json::Value, HookStdinError>,
+    table: &FamilyTable,
+    anchor: impl FnOnce(&serde_json::Value) -> Option<String>,
+) -> Verdict {
+    if let Ok(payload) = read
+        && let Some(reason) = anchor(payload)
+    {
+        return deny(TRUST_ANCHOR_RULE, reason);
+    }
+    decide(read, table)
+}
+
 /// Run one guard pass, answering a deny if it panics.
 ///
 /// Why (§4, Architect Q5): Claude Code treats a non-zero hook exit as
@@ -165,14 +190,18 @@ where
 
 /// Read, decide and audit one call; `Some(deny)` to print, `None` to allow.
 ///
-/// What: the stdin read under `PM_GUARD_STDIN_TIMEOUT`, then [`decide`]. A
+/// What: the stdin read under `PM_GUARD_STDIN_TIMEOUT`, then [`verdict`]. A
 /// deny is recorded and POSTed through `pm_guard_deny_log` first; neither can
 /// change the verdict — a failed record is reported on stderr, a failed POST
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
 /// Test: `egress_deny_is_audited_without_changing_verdict_when_log_unwritable`.
 async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let read = read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await;
-    let Verdict::Deny { check, reason } = decide(&read, &FamilyTable::builtin()) else {
+    // #8454 D1: the floor reads the ambient home and user config, as pm-guard's.
+    let anchor = |payload: &serde_json::Value| {
+        evaluate(payload, &HookEnv::ambient(), MpmConfig::load_default)
+    };
+    let Verdict::Deny { check, reason } = verdict(&read, &FamilyTable::builtin(), anchor) else {
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.

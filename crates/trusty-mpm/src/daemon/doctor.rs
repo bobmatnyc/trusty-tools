@@ -262,6 +262,10 @@ use doctor_session_profile::check_session_profile;
 #[path = "doctor_pm_guard.rs"]
 mod doctor_pm_guard;
 use doctor_pm_guard::check_pm_guard;
+// #8454: whether every tm-provisioned settings file registers the egress guard.
+#[path = "doctor_egress_guard.rs"]
+mod doctor_egress_guard;
+use doctor_egress_guard::check_egress_guard;
 // #9091: whether the `[accounts]` org → gh account table reads.
 #[path = "doctor_org_accounts.rs"]
 mod doctor_org_accounts;
@@ -457,7 +461,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_two_checks`,
+/// Test: `run_doctor_produces_seventy_three_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -672,6 +676,12 @@ pub(crate) async fn run_doctor_with_claims(
         build_tree_binary,
         missing_tm_group,
     ]);
+    // #8454: and whether those files still register the egress guard.
+    checks.push(check_egress_guard(
+        project_dir,
+        active_workspace_paths,
+        &home,
+    ));
     // Issue #2997: surface whether managed panes disclaim TCC responsibility so
     // the "trusty-mpm/tmux would like to access data…" prompt class is
     // diagnosable rather than silent. Synchronous + instantaneous (no log scan).
@@ -864,7 +874,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_two_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_three_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

@@ -1400,6 +1400,8 @@ async fn doctor_endpoint_returns_report() {
         "hooks_build_tree_binary",
         // #7490: the lifecycle event a tm-provisioned file has no group for.
         "hooks_missing_tm_group",
+        // #8454: the egress-guard entry in every tm-provisioned file.
+        "egress_guard",
         "tcc_taint",
         "scaffold_tracking",
         "push_guard",
