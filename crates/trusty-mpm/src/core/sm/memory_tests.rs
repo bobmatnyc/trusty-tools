@@ -648,7 +648,9 @@ fn open_the_sm_palace_as_the_daemon_child() {
         Ok(mem) => mem,
         Err(e) => panic!("the daemon's writer open of the SM palace failed: {e}"),
     };
-    let handle = daemon.ensure_palace().expect("the daemon's SM palace handle");
+    let handle = daemon
+        .ensure_palace()
+        .expect("the daemon's SM palace handle");
     assert!(
         !handle.kg.is_read_only(),
         "the daemon holds a read-only snapshot of the SM palace, not the live file"
