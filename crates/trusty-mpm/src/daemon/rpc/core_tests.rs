@@ -570,17 +570,24 @@ async fn parity_doctor_agrees_across_transports() {
 /// message or status — is derived from a quantity it re-reads from the host on
 /// every call, rather than from config on disk or the daemon's own state.
 ///
-/// Why exactly these six: `worktree_disk` measures the worktree tree against a
+/// Why exactly these seven: `worktree_disk` measures the worktree tree against a
 /// 3-second deadline, `worktrees` reports the reconciled inventory's counts,
 /// `session_store` reports `sessions.json`'s record count and byte length
 /// (#6490), `pty_headroom` takes a live census of allocated pseudo-terminals
 /// (#6577), `skill_staleness` re-walks the deployed skill FILES at every
 /// tier — including `~/.claude/skills` — and derives both its message and its
 /// verdict from what it finds there (#6622), and `disk_usage` reads the live
-/// used-percentage of the MOUNT holding the worktree store (#7973). Each answer
-/// moves whenever another process on the machine adds a worktree, writes a
-/// session, opens a pty, deploys a skill, or writes a byte to that volume
-/// between this test's two calls.
+/// used-percentage of the MOUNT holding the worktree store (#7973), and
+/// `tcp_listeners` walks the live process table and each process's sockets
+/// (#9583). Each answer moves whenever another process on the machine adds a
+/// worktree, writes a session, opens a pty, deploys a skill, writes a byte to
+/// that volume, or starts, stops or locks down a listening process between
+/// this test's two calls.
+///
+/// Why `tcp_listeners` is normalized whole (#9583): a process whose fds the
+/// caller cannot read (`Permission denied (os error 13)`) turns the verdict from
+/// `warn` to `unknown` and appends a clause to the message, so on a host running
+/// several trusty-search daemons the two reads disagree in status and message.
 ///
 /// Why the `$HOME` pin does not already cover `disk_usage` (#7973): the pin
 /// buys a path no other process knows, which is what makes every OTHER
@@ -622,7 +629,8 @@ async fn parity_doctor_agrees_across_transports() {
 /// Test: [`parity_doctor_agrees_across_transports`],
 /// [`host_sampled_status_is_excused_from_parity_and_no_other_check_is`],
 /// [`skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is`],
-/// [`disk_usage_divergence_is_excused_from_parity_and_no_other_check_is`].
+/// [`disk_usage_divergence_is_excused_from_parity_and_no_other_check_is`],
+/// [`tcp_listeners_divergence_is_excused_from_parity_and_no_other_check_is`].
 const HOST_SAMPLED_CHECKS: &[&str] = &[
     "worktree_disk",
     "worktrees",
@@ -636,6 +644,9 @@ const HOST_SAMPLED_CHECKS: &[&str] = &[
     // #7973: disk_usage reads the live used-percentage of the mount, which any
     // write anywhere on that volume moves between the two transport calls.
     "disk_usage",
+    // #9583: tcp_listeners walks the live process table and per-process sockets,
+    // whose readability and membership change between the two transport calls.
+    "tcp_listeners",
 ];
 
 /// Reduce each [`HOST_SAMPLED_CHECKS`] row to what cannot churn: its name, and
@@ -711,6 +722,8 @@ fn host_sampled_status_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
                 // #7973: present so only the exclusion under test varies.
                 {"name": "disk_usage", "status": "ok", "message": "/ is at 79.6% disk usage"},
+                // #9583: present so only the exclusion under test varies.
+                {"name": "tcp_listeners", "status": "ok", "message": "2 loopback listener(s)"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -761,6 +774,8 @@ fn skill_staleness_divergence_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "skill_staleness", "status": skills_status, "message": skills_message},
                 // #7973: present so only the exclusion under test varies.
                 {"name": "disk_usage", "status": "ok", "message": "/ is at 79.6% disk usage"},
+                // #9583: present so only the exclusion under test varies.
+                {"name": "tcp_listeners", "status": "ok", "message": "2 loopback listener(s)"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -821,6 +836,8 @@ fn disk_usage_divergence_is_excused_from_parity_and_no_other_check_is() {
                 {"name": "pty_headroom", "status": "ok", "message": "82 of 511 allocated"},
                 {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
                 {"name": "disk_usage", "status": disk_status, "message": disk_message},
+                // #9583: present so only the exclusion under test varies.
+                {"name": "tcp_listeners", "status": "ok", "message": "2 loopback listener(s)"},
                 {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
             ]
         })
@@ -856,6 +873,61 @@ fn disk_usage_divergence_is_excused_from_parity_and_no_other_check_is() {
     // still has its verdict compared whole.
     let http = normalize_host_sampled_checks(report("ok", "at 79.6%", "ok"));
     let socket = normalize_host_sampled_checks(report("ok", "at 79.6%", "fail"));
+    assert_ne!(
+        http, socket,
+        "a NON-host-sampled check's STATUS divergence must still fail parity"
+    );
+}
+
+/// #9583: a `tcp_listeners` row that differs in STATUS and MESSAGE between the
+/// two samples passes parity, and a row that is not host-sampled and differs in
+/// status still fails it.
+///
+/// Why a hand-built pair: `check_tcp_listeners` reads the live process table and
+/// each process's sockets on every call, so the answer depends on which
+/// trusty-search pids exist and whether their fds are readable at that instant.
+/// On a busy host one read answers `unknown` ("could not read the sockets of ...
+/// Permission denied") and the next `warn`; that cannot be forced
+/// deterministically, so the pair is fed to the normaliser directly.
+/// Test: this function IS the test.
+#[test]
+fn tcp_listeners_divergence_is_excused_from_parity_and_no_other_check_is() {
+    let report = |tcp_status: &str, tcp_message: &str, instructions_status: &str| {
+        json!({
+            "checks": [
+                {"name": "worktree_disk", "status": "warn", "message": "6.2 GiB measured"},
+                {"name": "worktrees", "status": "ok", "message": "14 live, 265 not reclaimable"},
+                {"name": "session_store", "status": "ok", "message": "43 session record(s)"},
+                {"name": "pty_headroom", "status": "ok", "message": "82 of 511 allocated"},
+                {"name": "skill_staleness", "status": "ok", "message": "every deployed skill matches"},
+                {"name": "disk_usage", "status": "ok", "message": "/ is at 79.6% disk usage"},
+                // #9583: the row under test.
+                {"name": "tcp_listeners", "status": tcp_status, "message": tcp_message},
+                {"name": "instructions", "status": instructions_status, "message": "last-instructions.md not found"},
+            ]
+        })
+    };
+
+    // The observed break: one read could not open a trusty-search pid's fds.
+    let http = normalize_host_sampled_checks(report(
+        "unknown",
+        "trusty-search (pid 4024982) 127.0.0.1:7927 TEMPORARY until #6285 (trusty-search); \
+         could not read the sockets of trusty-search (pid 1829688): Permission denied (os error 13)",
+        "warn",
+    ));
+    let socket = normalize_host_sampled_checks(report(
+        "warn",
+        "trusty-search (pid 4024982) 127.0.0.1:7927 TEMPORARY until #6285 (trusty-search)",
+        "warn",
+    ));
+    assert_eq!(
+        http, socket,
+        "a `tcp_listeners` row that churned between the reads must not fail parity"
+    );
+
+    // Non-vacuous: `instructions` is NOT host-sampled and is still compared whole.
+    let http = normalize_host_sampled_checks(report("warn", "same", "ok"));
+    let socket = normalize_host_sampled_checks(report("warn", "same", "fail"));
     assert_ne!(
         http, socket,
         "a NON-host-sampled check's STATUS divergence must still fail parity"
