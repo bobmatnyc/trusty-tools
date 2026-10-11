@@ -338,3 +338,167 @@ async fn rebuild_stopping_at_the_budget_leaves_only_complete_groups() {
     let whole = Some((k, (k - 1) as u32));
     assert_eq!(shapes, vec![whole, whole, None, None]);
 }
+
+// ── #9275 fix round: dedup merge and rebuild keep full chunk groups ──────────
+
+/// Drawer `text`, `age_days` old, in redb and the table with its full chunk
+/// group under `e`.
+async fn put_embedded(
+    handle: &Arc<PalaceHandle>,
+    text: &str,
+    age_days: i64,
+    e: &crate::embedder::MockEmbedder,
+) -> Uuid {
+    let mut d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), text);
+    d.created_at = chrono::Utc::now() - chrono::Duration::days(age_days);
+    let id = d.id;
+    handle.kg.upsert_drawer(&d).await.unwrap();
+    let vecs = crate::memory_core::retrieval::embed_chunks(e, text)
+        .await
+        .unwrap();
+    handle.vector_store.upsert_chunks(id, vecs).await.unwrap();
+    handle.add_drawer(d);
+    id
+}
+
+/// Drawer `text` in redb and the table, with no vector.
+async fn put_bare(handle: &Arc<PalaceHandle>, text: &str) -> Uuid {
+    let d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), text);
+    let id = d.id;
+    handle.kg.upsert_drawer(&d).await.unwrap();
+    handle.add_drawer(d);
+    id
+}
+
+/// #9275 fix round (Fix 1): the merge appended the loser's text but kept the
+/// survivor's old vectors, so the survivor read short and its tail was not
+/// findable by vector search.
+#[tokio::test]
+async fn a_dedup_merge_reembeds_the_survivor_as_a_full_chunk_group() {
+    use crate::memory_core::embed::Embedder;
+    use crate::memory_core::store::vector::VectorStore;
+    let dir = tempfile::tempdir().unwrap();
+    let handle = open_handle(dir.path(), "merge-chunks");
+    let e = chunking_mock(&handle);
+    let tail = words(8, "t");
+    let survivor = put_embedded(&handle, &words(8, "s"), 0, &e).await;
+    let loser = put_embedded(&handle, &tail, 1, &e).await;
+
+    // Threshold -1: the only two drawers always merge; the newer survives.
+    let outcome = super::cycle::dedup_pass_with_embedder(
+        &handle,
+        Instant::now(),
+        Duration::from_secs(60),
+        -1.0,
+        &e,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert_eq!((outcome.merged, outcome.failed), (1, 0));
+    let merged = handle.drawers.read()[0].content().to_string();
+    assert_eq!(handle.drawers.read().len(), 1);
+    assert!(handle.drawers.read().iter().all(|d| d.id != loser));
+    let k = chunks_at(&handle, &merged);
+    assert!(k >= 2, "fixture: the merged text needs {k} chunks");
+
+    let health = handle.embed_health_with(Some(&e as &dyn Embedder));
+    assert!(
+        health.short_chunk_ids.is_empty(),
+        "short after merge: {:?}",
+        health.short_chunk_ids
+    );
+    assert_eq!(shape(&handle, survivor), Some((k, (k - 1) as u32)));
+    // A query naming only the loser's text finds the survivor's tail chunk.
+    let q = e.embed_batch(std::slice::from_ref(&tail)).await.unwrap();
+    let hits = handle.vector_store.search(&q[0], 1).await.unwrap();
+    assert_eq!(hits[0].drawer_id, survivor);
+    assert!(hits[0].score > 0.5, "tail not recallable: {:?}", hits[0]);
+}
+
+/// A chunking window with a tokenizer that will not load.
+struct BrokenTokenizer(crate::embedder::MockEmbedder);
+
+#[async_trait::async_trait]
+impl crate::memory_core::embed::Embedder for BrokenTokenizer {
+    async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.0.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        self.0.dimension()
+    }
+    fn input_window(&self) -> Option<usize> {
+        Some(WINDOW)
+    }
+    fn chunking_tokenizer(
+        &self,
+    ) -> Result<Option<Arc<crate::embedder::ChunkTokenizer>>, crate::embedder::ChunkError> {
+        Err(crate::embedder::ChunkError::TokenizerMissing {
+            path: "/nonexistent/tokenizer.json".into(),
+        })
+    }
+}
+
+/// #9275 fix round (Fix 2): a drawer whose text will not split stopped the
+/// rebuild after `reset()`, so every later drawer lost its vectors.
+#[tokio::test]
+async fn a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest() {
+    use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    let dir = tempfile::tempdir().unwrap();
+    let handle = open_handle(dir.path(), "rebuild-skip");
+    // Ten words per chunk: one chunk past the per-drawer cap.
+    let bad = put_bare(
+        &handle,
+        &words((WINDOW - 2) * (MAX_CHUNKS_PER_DRAWER + 1), "x"),
+    )
+    .await;
+    let mut good = Vec::new();
+    for tag in ["a", "b"] {
+        good.push(remember_forced(&handle, &words(30, tag)).await);
+    }
+    assert_ne!(handle.drawers.read().last().map(|d| d.id), Some(bad));
+
+    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+        Arc::new(chunking_mock(&handle));
+    let result = super::helpers::rebuild_index_with(
+        &handle,
+        Some(&e),
+        Instant::now(),
+        Duration::from_secs(60),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let k = chunks_at(&handle, &words(30, "a"));
+    for id in good {
+        assert_eq!(shape(&handle, id), Some((k, (k - 1) as u32)));
+    }
+    let health = handle.embed_health_with(Some(e.as_ref()));
+    assert_eq!(health.missing_vector_ids, vec![bad]);
+}
+
+/// #9275 fix round (Fix 2): no planner means no rebuild, and the index stays.
+#[tokio::test]
+async fn a_rebuild_whose_planner_cannot_be_built_leaves_the_index_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = open_handle(dir.path(), "rebuild-no-planner");
+    let mut ids = Vec::new();
+    for tag in ["a", "b"] {
+        ids.push(remember_forced(&handle, &words(5, tag)).await);
+    }
+    let before: Vec<_> = ids.iter().map(|id| shape(&handle, *id)).collect();
+    assert!(before.iter().all(Option::is_some));
+
+    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+        Arc::new(BrokenTokenizer(chunking_mock(&handle)));
+    let err = super::helpers::rebuild_index_with(
+        &handle,
+        Some(&e),
+        Instant::now(),
+        Duration::from_secs(60),
+    )
+    .await
+    .expect_err("no planner, no rebuild");
+    assert!(format!("{err:#}").contains("tokenizer"), "{err:#}");
+    let after: Vec<_> = ids.iter().map(|id| shape(&handle, *id)).collect();
+    assert_eq!(after, before, "the index is untouched");
+}

@@ -7,7 +7,7 @@
 //! Test: this file IS the tests.
 
 use super::deferred_embed::{EmbedLoss, RetryPolicy, embed_and_store};
-use super::embed_store::{embed_chunks, expected_chunk_count, plan_chunks};
+use super::embed_store::{embed_chunks, embed_chunks_within, expected_chunk_count, plan_chunks};
 use super::handle::PalaceHandle;
 use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
 use crate::memory_core::embed::Embedder;
@@ -256,4 +256,70 @@ async fn expected_chunk_count_equals_rows_the_pipeline_writes() {
         assert_eq!(expected, chunks_at(12, &text).max(1), "{n} words");
         assert_eq!(shape(&h, id).map(|s| s.0), Some(expected), "{n} words");
     }
+}
+
+/// Embedder that spends `per_input` on every text of each `embed_batch` call.
+struct PerInputLatency {
+    inner: MockEmbedder,
+    per_input: std::time::Duration,
+}
+
+#[async_trait]
+impl Embedder for PerInputLatency {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let n = u32::try_from(texts.len()).unwrap_or(u32::MAX);
+        tokio::time::sleep(self.per_input.saturating_mul(n)).await;
+        self.inner.embed_batch(texts).await
+    }
+    fn dimension(&self) -> usize {
+        DIM
+    }
+    fn input_window(&self) -> Option<usize> {
+        self.inner.input_window()
+    }
+    fn chunking_tokenizer(&self) -> Result<Option<Arc<ChunkTokenizer>>, ChunkError> {
+        self.inner.chunking_tokenizer()
+    }
+}
+
+fn latency(per_input: std::time::Duration) -> PerInputLatency {
+    PerInputLatency {
+        inner: MockEmbedder::new(DIM).with_chunking(12),
+        per_input,
+    }
+}
+
+/// #9275 fix round (Fix 3): a ceiling sized for one input timed out a drawer
+/// whose chunks together outlast it, so the drawer got no vector at all.
+#[tokio::test]
+async fn a_multi_chunk_drawer_inside_the_scaled_embed_timeout_gets_every_vector() {
+    let per_chunk = std::time::Duration::from_millis(300);
+    let e = latency(per_chunk / 2);
+    let text = words(40);
+    let n = plan_chunks(&e, &text).unwrap().len();
+    assert!(n >= 4, "fixture: {n} chunks");
+    // n x 150 ms outlasts one 300 ms ceiling and fits n x 300 ms.
+    let vecs = embed_chunks_within(&e, &text, per_chunk)
+        .await
+        .expect("the ceiling covers every chunk");
+    assert_eq!(vecs.len(), n);
+}
+
+/// #9275 fix round (Fix 3): the scaled ceiling is still a bound.
+#[tokio::test]
+async fn a_wedged_chunked_embed_ends_at_the_scaled_bound() {
+    let per_chunk = std::time::Duration::from_millis(50);
+    let e = latency(std::time::Duration::from_secs(3600));
+    let text = words(40);
+    let n = u32::try_from(plan_chunks(&e, &text).unwrap().len()).unwrap();
+    let started = std::time::Instant::now();
+    let err = embed_chunks_within(&e, &text, per_chunk)
+        .await
+        .expect_err("a wedged embedder must time out");
+    let took = started.elapsed();
+    assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+    assert!(
+        took >= per_chunk * n && took < std::time::Duration::from_secs(30),
+        "{took:?} for {n} chunks"
+    );
 }

@@ -319,23 +319,15 @@ async fn run_pipeline(
         let embedder = super::embedder::shared_embedder()
             .await
             .context("acquire shared embedder for remember")?;
-        let embed_timeout = timeouts::embed_batch_timeout();
-        let vecs = tokio::time::timeout(
-            embed_timeout,
-            // #9275: one vector per window-sized chunk, so a fact late in a
-            // long drawer is findable.
-            super::embed_store::embed_chunks(embedder.as_ref(), &content),
+        // #9275: one vector per window-sized chunk, so a fact late in a long
+        // drawer is findable.
+        let vecs = super::embed_store::embed_chunks_within(
+            embedder.as_ref(),
+            &content,
+            timeouts::embed_batch_timeout(),
         )
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "embed_batch timed out after {:?} on remember path (issue #906); \
-                     increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
-                     take longer on this host",
-                embed_timeout
-            )
-        })?
-        .context("embed drawer content")?;
+        .context("embed drawer content on remember path (issue #906)")?;
         handle
             .vector_store
             .upsert_chunks(id, vecs)

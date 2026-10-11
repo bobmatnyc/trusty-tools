@@ -109,6 +109,17 @@ pub async fn embed_chunks(embedder: &dyn Embedder, text: &str) -> Result<Vec<Vec
     embed_planned(embedder, &chunks).await
 }
 
+/// [`embed_chunks`] under an embed ceiling of `per_chunk`.
+pub(crate) async fn embed_chunks_within(
+    embedder: &dyn Embedder,
+    text: &str,
+    per_chunk: std::time::Duration,
+) -> Result<Vec<Vec<f32>>> {
+    tokio::time::timeout(per_chunk, embed_chunks(embedder, text))
+        .await
+        .map_err(|_| anyhow::anyhow!("embed timed out after {per_chunk:?}"))?
+}
+
 /// One `embed_batch` over `chunks`; a vector count other than the chunk count
 /// is an error, never a partial group.
 /// Test: `embed_batch_returning_the_wrong_count_is_an_error_and_writes_nothing`.
