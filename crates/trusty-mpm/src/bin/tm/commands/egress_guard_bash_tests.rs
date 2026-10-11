@@ -605,3 +605,152 @@ fn bash_other_residuals_are_not_detected() {
         assert_eq!(bash(&command), Verdict::Allow, "{residual}: `{command}`");
     }
 }
+
+/// The bound on a large-input verdict (#9699): generous for a debug build on a
+/// loaded host, and below the seconds a quadratic or unbounded walk takes.
+const LARGE_INPUT_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The verdict on `command`, which must arrive within `bound`: Claude Code
+/// kills a hook at its timeout, and a killed hook is an allow (#9699).
+fn bash_within(command: String, bound: std::time::Duration) -> Verdict {
+    let shown: String = command.chars().take(48).collect();
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(bash(&command));
+    });
+    recv.recv_timeout(bound)
+        .unwrap_or_else(|err| panic!("`{shown}…` was not judged within {bound:?}: {err}"))
+}
+
+/// Assert `verdict`, on the command shown as `what`, is an `egress-bash` deny
+/// whose reason contains `needle`.
+fn assert_deny_with(verdict: Verdict, what: &str, needle: &str) {
+    match verdict {
+        Verdict::Deny { check, reason } => {
+            assert_eq!(check, BASH_CHECK, "{what}: {reason}");
+            assert!(
+                reason.contains(needle),
+                "{what} must name `{needle}`: {reason}"
+            );
+        }
+        Verdict::Allow => panic!("{what} must be denied (`{needle}`)"),
+    }
+}
+
+/// `echo` and `filler` repeated to exactly `len` bytes; it names no channel.
+fn padded(len: usize, filler: &str) -> String {
+    let mut command = "echo ".to_owned();
+    while command.len() + filler.len() <= len {
+        command.push_str(filler);
+    }
+    command.push_str(&"a".repeat(len - command.len()));
+    command
+}
+
+/// 🔴 #9699 (b): a command over the 64 KiB cap is denied whole and the reason
+/// names the cap, though it names no channel. A family token past the cap
+/// denies the same way: the command is never scanned in part.
+#[test]
+fn bash_egress_denies_a_command_over_the_byte_cap_9699() {
+    for command in [
+        padded(65_537, "a"),
+        padded(256 * 1024, "ab "),
+        format!("{} sendmail bob", padded(70_000, "ab ")),
+    ] {
+        let what = format!("a {}-byte command", command.len());
+        assert_deny_with(bash_within(command, LARGE_INPUT_BOUND), &what, "64 KiB");
+    }
+}
+
+/// 🔴 #9699: the cap is inclusive. 65 536 bytes is read as any command is;
+/// 65 537 bytes is denied.
+#[test]
+fn bash_egress_byte_cap_boundary_is_65536_bytes_9699() {
+    assert_eq!(bash(&padded(65_536, "a")), Verdict::Allow, "65 536 bytes");
+    assert_deny_with(bash(&padded(65_537, "a")), "65 537 bytes", "64 KiB");
+}
+
+/// #9699 control: a ~60 KiB here-document of plain prose, under the cap and
+/// naming no channel, is allowed within the bound.
+#[test]
+fn bash_allows_a_60_kib_heredoc_9699() {
+    let mut body = String::new();
+    for n in 0.. {
+        if body.len() >= 60 * 1024 {
+            break;
+        }
+        body.push_str(&format!(
+            "line {n}: the cache (target dir) keeps it's state; see notes\n"
+        ));
+    }
+    let command = format!("cat > notes.md <<'EOF'\n{body}EOF");
+    assert!(
+        (60 * 1024..=65_536).contains(&command.len()),
+        "{}",
+        command.len()
+    );
+    assert_eq!(bash_within(command, LARGE_INPUT_BOUND), Verdict::Allow);
+}
+
+/// 🔴 #9699 (a): once the walk gives up — budget spent, nesting too deep, a
+/// segment that will not lex, an undecodable `$"…"` — the raw scan also reads
+/// the text with its quotes removed, so a name spliced from quoted pieces
+/// still denies. The `$'…'` row was already denied; it pins the decode path.
+#[test]
+fn bash_egress_denies_quote_split_names_in_the_raw_scan_9699() {
+    let nest = |inner: &str| format!("{}{inner}{}", "$(".repeat(33), ")".repeat(33));
+    for (command, service) in [
+        (
+            format!("{}se''ndmail bob", "time eval ".repeat(11)),
+            "SMTP mail",
+        ),
+        (nest("se''ndmail bob"), "SMTP mail"),
+        (format!("$\"x\"; {}", nest("se''ndmail bob")), "SMTP mail"),
+        (r#"cu""rl hooks.sl''ack.com 'unclosed"#.to_owned(), "Slack"),
+        ("curl 's'lack.com/api 'unclosed".to_owned(), "Slack"),
+        (r"se\ndmail bob 'unclosed".to_owned(), "SMTP mail"),
+        (r"curl $'\x73'lack.com/x 'unclosed".to_owned(), "Slack"),
+    ] {
+        let what = format!("`{}`", command.chars().take(48).collect::<String>());
+        let needle = format!("it reaches {service} (");
+        assert_deny_with(bash_within(command, LARGE_INPUT_BOUND), &what, &needle);
+    }
+}
+
+/// #9699 control: removing quotes joins only the pieces a quote joins; words
+/// the shell keeps apart stay apart in the raw scan. The S3 argument rulings
+/// hold on the walk.
+#[test]
+fn bash_allows_quote_separated_words_in_the_raw_scan_9699() {
+    for command in [
+        r#"echo "se" "ndmail" 'unclosed"#,
+        "echo 'mai' 'lx' \"unclosed",
+        "grep mail file",
+        "git log --grep mail",
+        "echo gws http mail",
+    ] {
+        assert_allows(command);
+    }
+}
+
+/// 🔴 #9699 (c): an open quote and tens of thousands of `(` sent the shared
+/// `lift` pass quadratic. Near the cap the command is judged within the
+/// bound, and the program behind the parens still denies.
+#[test]
+fn bash_egress_judges_an_open_quote_and_many_parens_within_bound_9699() {
+    let command = format!("echo 'x {} sendmail bob", "(".repeat(65_000));
+    assert!(command.len() <= 65_536, "{}", command.len());
+    let verdict = bash_within(command, LARGE_INPUT_BOUND);
+    assert_deny_with(verdict, "`echo 'x ((…`", "it reaches SMTP mail (");
+}
+
+/// #9699 (b): the walk's budget counts calls, not bytes. Under the cap its
+/// worst case — `time eval` doubling the reads of a near-cap payload — is
+/// still judged within the bound.
+#[test]
+fn bash_egress_judges_a_near_cap_time_eval_payload_within_bound_9699() {
+    let prefix = "time eval ".repeat(12);
+    let command = format!("{prefix}{}", padded(65_536 - prefix.len(), "ab "));
+    assert_eq!(command.len(), 65_536);
+    assert_eq!(bash_within(command, LARGE_INPUT_BOUND), Verdict::Allow);
+}

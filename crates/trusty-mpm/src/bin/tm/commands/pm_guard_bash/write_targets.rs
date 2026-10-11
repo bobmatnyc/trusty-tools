@@ -748,4 +748,21 @@ mod tests {
             );
         }
     }
+
+    // #9699 (c): an open quote sends `lift` to its quote-blind pass, which
+    // once scanned to the end of input for every unclosed `(` — quadratic.
+    // At the egress cap's size it now finishes far inside the bound.
+    #[test]
+    fn lift_bodies_is_linear_on_an_open_quote_and_many_parens_9699() {
+        let command = format!("echo 'x {}", "(".repeat(65_000));
+        let (send, recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let lifted = lift_bodies(&command).map(|(outer, bodies)| (outer.len(), bodies.len()));
+            let _ = send.send(lifted);
+        });
+        let lifted = recv
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("65 000 unclosed `(` behind an open quote must lift within 2 s");
+        assert_eq!(lifted, Ok((65_008, 0)));
+    }
 }
