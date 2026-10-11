@@ -504,8 +504,8 @@ mod tests {
     /// still reach `Refused`, or the fix would trade a false `down` for a stack
     /// that is never repaired. This is the ONLY outcome (with `Timeout`) allowed
     /// to authorise a kickstart.
-    /// What: plants an `http_addr` pointing at a released ephemeral port and
-    /// asserts `Refused` + `is_confirmed_down`.
+    /// What: plants an `http_addr` at `dead_addr` (#9613), whose connect fails
+    /// at once, and asserts `Refused` + `is_confirmed_down`.
     /// Test: This is the test.
     #[test]
     fn probe_member_health_refused_when_nothing_listens() {

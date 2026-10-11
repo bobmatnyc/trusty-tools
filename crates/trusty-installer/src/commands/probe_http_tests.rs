@@ -449,6 +449,40 @@ async fn probe_distinguishes_failure_causes() {
 
 // ── Proxy immunity ──────────────────────────────────────────────────────────
 
+/// Child-mode marker for [`probe_ignores_http_proxy_env`] (#9613).
+const PROXY_CHILD_ENV: &str = "TCTL_PROBE_PROXY_CHILD";
+
+/// Re-runs [`probe_ignores_http_proxy_env`] alone in a child test process with
+/// `HTTP_PROXY` set to [`dead_addr`], and panics unless exactly one test ran
+/// and passed (#9613).
+///
+/// Why: `HTTP_PROXY` is process-global. Exported in the shared test process, it
+/// diverts every concurrent proxy-honouring client to the dead proxy.
+/// What: runs `current_exe()` with `[<name>, --exact, --test-threads=1]`. A
+/// filter that matches no test also exits 0, so the child's `1 passed` result
+/// line is asserted as well.
+/// Test: `probe_ignores_http_proxy_env`.
+fn run_proxy_child() {
+    let name = concat!(module_path!(), "::probe_ignores_http_proxy_env");
+    // libtest test names omit the crate segment.
+    let name = name.split_once("::").map_or(name, |(_, rest)| rest);
+    let exe = std::env::current_exe().expect("resolve the current test binary");
+    let output = std::process::Command::new(&exe)
+        .args([name, "--exact", "--test-threads=1"])
+        .env(PROXY_CHILD_ENV, "1")
+        .env("HTTP_PROXY", format!("http://{}", dead_addr()))
+        .output()
+        .expect("re-run the test binary for the proxy child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "proxy child `{name}` failed or ran no test ({}):\n--- stdout ---\n{stdout}\n\
+         --- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 /// Why: proxy immunity is the single most load-bearing property of this module.
 /// Since #4392 the `.no_proxy()` call lives in
 /// `trusty_common::http_client::loopback_client_builder`, so this test now also
@@ -462,27 +496,26 @@ async fn probe_distinguishes_failure_causes() {
 /// This asserts BOTH halves, so it fails loudly if someone deletes the flag as
 /// "hygiene": a client built WITHOUT it does not reach the stub under an exported
 /// proxy, and the production client does.
-/// What: exports `HTTP_PROXY` pointing at a dead address, probes a live stub
-/// twice — once with a proxy-honouring client, once with
-/// [`build_probe_client`] — and restores the environment. Holds
-/// [`ENV_TEST_LOCK`] because `HTTP_PROXY` is process-global.
+/// What: re-runs this test binary filtered to this one test, with `HTTP_PROXY`
+/// pointing at [`dead_addr`] in the child's environment only. The child probes a
+/// live stub twice — once with a proxy-honouring client, once with
+/// [`build_probe_client`]. The parent asserts the child ran exactly one test and
+/// passed. #9613: an in-process `set_var` leaked the dead proxy into concurrent
+/// tests whose clients honour it (`download::pinned::tests::a_set_installs_*`);
+/// [`ENV_TEST_LOCK`] cannot help, since those tests never take it.
 /// Test: This is the test.
 ///
 /// If a future reqwest DOES exempt loopback from proxies, the first assertion
 /// below becomes obsolete and should be deleted — but `.no_proxy()` itself must
 /// stay, because the crate cannot pin every consumer's reqwest patch level.
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn probe_ignores_http_proxy_env() {
-    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if std::env::var_os(PROXY_CHILD_ENV).is_none() {
+        run_proxy_child();
+        return;
+    }
     let addr = stub_once(OK_LINE, r#"{"status":"ok","version":"0.39.0"}"#).await;
     let base = format!("http://{addr}");
-    let dead_proxy = dead_addr();
-    let previous = std::env::var("HTTP_PROXY").ok();
-    unsafe {
-        // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-        std::env::set_var("HTTP_PROXY", format!("http://{dead_proxy}"));
-    }
 
     // A proxy-honouring client reproduces the bug: loopback goes to the dead proxy.
     let leaky = reqwest::Client::builder()
@@ -495,14 +528,6 @@ async fn probe_ignores_http_proxy_env() {
     // The production client must reach the stub regardless of the environment.
     let guarded = build_probe_client().expect("probe client builds");
     let guarded_outcome = probe_bases(&guarded, Some(base), None).await;
-
-    unsafe {
-        // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
-        match previous {
-            Some(v) => std::env::set_var("HTTP_PROXY", v),
-            None => std::env::remove_var("HTTP_PROXY"),
-        }
-    }
 
     assert!(
         !matches!(leaked, ProbeOutcome::Serving { .. }),
