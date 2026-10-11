@@ -699,22 +699,47 @@ fn bash_allows_a_60_kib_heredoc_9699() {
 #[test]
 fn bash_egress_denies_quote_split_names_in_the_raw_scan_9699() {
     let nest = |inner: &str| format!("{}{inner}{}", "$(".repeat(33), ")".repeat(33));
-    for (command, service) in [
+    let mut missed = Vec::new();
+    for (row, command, service) in [
         (
+            "budget spent",
             format!("{}se''ndmail bob", "time eval ".repeat(11)),
             "SMTP mail",
         ),
-        (nest("se''ndmail bob"), "SMTP mail"),
-        (format!("$\"x\"; {}", nest("se''ndmail bob")), "SMTP mail"),
-        (r#"cu""rl hooks.sl''ack.com 'unclosed"#.to_owned(), "Slack"),
-        ("curl 's'lack.com/api 'unclosed".to_owned(), "Slack"),
-        (r"se\ndmail bob 'unclosed".to_owned(), "SMTP mail"),
-        (r"curl $'\x73'lack.com/x 'unclosed".to_owned(), "Slack"),
+        ("too deep", nest("se''ndmail bob"), "SMTP mail"),
+        (
+            "undecodable",
+            format!("$\"x\"; {}", nest("se''ndmail bob")),
+            "SMTP mail",
+        ),
+        (
+            "unlexable, spliced host",
+            r#"cu""rl hooks.sl''ack.com 'unclosed"#.to_owned(),
+            "Slack",
+        ),
+        (
+            "unlexable, quoted label",
+            "curl 's'lack.com/api 'unclosed".to_owned(),
+            "Slack",
+        ),
+        (
+            "unlexable, backslash",
+            r"se\ndmail bob 'unclosed".to_owned(),
+            "SMTP mail",
+        ),
+        (
+            "unlexable, ANSI-C",
+            r"curl $'\x73'lack.com/x 'unclosed".to_owned(),
+            "Slack",
+        ),
     ] {
-        let what = format!("`{}`", command.chars().take(48).collect::<String>());
         let needle = format!("it reaches {service} (");
-        assert_deny_with(bash_within(command, LARGE_INPUT_BOUND), &what, &needle);
+        match bash_within(command, LARGE_INPUT_BOUND) {
+            Verdict::Deny { check, reason } if check == BASH_CHECK && reason.contains(&needle) => {}
+            other => missed.push(format!("{row}: {other:?}")),
+        }
     }
+    assert!(missed.is_empty(), "rows not denied: {missed:#?}");
 }
 
 /// #9699 control: removing quotes joins only the pieces a quote joins; words
