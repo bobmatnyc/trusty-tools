@@ -85,7 +85,13 @@ fn egress_gworkspace_denies_only_mail_chat_message_tools() {
 /// server and tool is malformed, never unrelated.
 #[test]
 fn egress_short_or_hollow_mcp_names_are_malformed() {
-    for tool in ["mcp__slack", "mcp__", "MCP__x", "mcp____send", "mcp__github__"] {
+    for tool in [
+        "mcp__slack",
+        "mcp__",
+        "MCP__x",
+        "mcp____send",
+        "mcp__github__",
+    ] {
         assert!(
             matches!(
                 FamilyTable::builtin().classify(tool),

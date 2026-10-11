@@ -97,8 +97,9 @@ fn assert_denied(out: &Output, case: &str) {
         !line.contains('\n'),
         "{case}: stdout must be one object: {stdout}"
     );
-    let value: serde_json::Value = serde_json::from_str(line)
-        .unwrap_or_else(|e| panic!("{case}: stdout is not JSON ({e}): {stdout:?}; stderr={stderr}"));
+    let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| {
+        panic!("{case}: stdout is not JSON ({e}): {stdout:?}; stderr={stderr}")
+    });
     assert_eq!(
         value["hookSpecificOutput"]["permissionDecision"], "deny",
         "{case}: {value}"
@@ -106,7 +107,10 @@ fn assert_denied(out: &Output, case: &str) {
     let reason = value["hookSpecificOutput"]["permissionDecisionReason"]
         .as_str()
         .unwrap_or_default();
-    assert!(reason.contains("#8454"), "{case}: reason names the issue: {reason}");
+    assert!(
+        reason.contains("#8454"),
+        "{case}: reason names the issue: {reason}"
+    );
 }
 
 /// Assert `out` is exit 0 with nothing on stdout — Claude Code's ALLOW.
@@ -180,7 +184,10 @@ fn egress_denies_under_unrestricted_and_disable_hooks() {
         ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
         ("CLAUDE_MPM_SUB_AGENT", "1"),
     ];
-    for tool in ["mcp__claude_ai_Slack__slack_send_message", "mcp__notion__notion-search"] {
+    for tool in [
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__notion__notion-search",
+    ] {
         assert_denied(&run(&payload(tool), &bypassed), tool);
     }
     assert_denied(&run(b"", &bypassed), "empty stdin under both bypasses");
@@ -205,11 +212,23 @@ fn egress_denies_malformed_payloads() {
         ("tool_name empty", br#"{"tool_name":"","tool_input":{}}"#),
         ("tool_name number", br#"{"tool_name":7,"tool_input":{}}"#),
         ("tool_name null", br#"{"tool_name":null,"tool_input":{}}"#),
-        ("tool_name array", br#"{"tool_name":["Bash"],"tool_input":{}}"#),
+        (
+            "tool_name array",
+            br#"{"tool_name":["Bash"],"tool_input":{}}"#,
+        ),
         ("tool_input missing", br#"{"tool_name":"Bash"}"#),
-        ("tool_input string", br#"{"tool_name":"Bash","tool_input":"ls"}"#),
-        ("tool_input array", br#"{"tool_name":"Read","tool_input":[]}"#),
-        ("tool_input null", br#"{"tool_name":"Read","tool_input":null}"#),
+        (
+            "tool_input string",
+            br#"{"tool_name":"Bash","tool_input":"ls"}"#,
+        ),
+        (
+            "tool_input array",
+            br#"{"tool_name":"Read","tool_input":[]}"#,
+        ),
+        (
+            "tool_input null",
+            br#"{"tool_name":"Read","tool_input":null}"#,
+        ),
     ];
     for (case, stdin) in raw {
         assert_denied(&run(stdin, &[]), case);

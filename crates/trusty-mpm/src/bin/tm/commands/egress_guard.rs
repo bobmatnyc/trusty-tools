@@ -40,10 +40,7 @@ pub(crate) enum Verdict {
     /// No decision: the call goes through the normal permission flow.
     Allow,
     /// Refuse the call; `check` is the audit slug, `reason` the agent's text.
-    Deny {
-        check: &'static str,
-        reason: String,
-    },
+    Deny { check: &'static str, reason: String },
 }
 
 /// A [`Verdict::Deny`] for `check`.
