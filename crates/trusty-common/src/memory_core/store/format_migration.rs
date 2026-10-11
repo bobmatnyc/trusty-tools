@@ -120,6 +120,10 @@ pub(crate) fn open_gate_with(
     seams: Seams,
 ) -> anyhow::Result<()> {
     let to = PALACE_FORMAT_SUPPORTED;
+    // #9659: an observer reads no marker on the live kg.redb, not even shared.
+    if intent == OpenIntent::Observer {
+        return super::observer_open::observer_gate(data_dir, palace);
+    }
     if intent != OpenIntent::Writer {
         return match classify_with(data_dir, palace, to)? {
             FormatState::Behind { found } => Err(PalaceStoreError::FormatNeedsMigration {

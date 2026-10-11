@@ -535,7 +535,8 @@ impl PalaceHandle {
         // #8733: only the data root's elected maintainer deletes the rows; a
         // non-maintainer still hides them from this handle, as reads do, and
         // writes no #8732 journal record because it deletes nothing.
-        let pruned = if purge_expired {
+        // #9659: an observer's copy takes no write.
+        let pruned = if purge_expired && intent != OpenIntent::Observer {
             super::open_sweep::reclaim_expired_rows(
                 kg.store(),
                 expired_ids,
@@ -578,9 +579,13 @@ impl PalaceHandle {
         // of `PalaceRegistry::open_palace` gets logging for free.
         // #9140 batch: shared, so a second open of a live palace in this
         // process reuses the first handle's log instead of failing on redb's lock.
-        let recall_log = match RecallLog::open_shared(&data_dir.join(RECALL_LOG_FILENAME)) {
-            Ok(log) => Some(log),
-            Err(e) => {
+        // #9659: an observer never opens, so never locks, the live recall.db.
+        let recall_log = match (intent != OpenIntent::Observer)
+            .then(|| RecallLog::open_shared(&data_dir.join(RECALL_LOG_FILENAME)))
+        {
+            None => None,
+            Some(Ok(log)) => Some(log),
+            Some(Err(e)) => {
                 tracing::warn!(palace = %palace.id, "open recall log failed, analytics disabled: {e:#}");
                 None
             }

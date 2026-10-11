@@ -228,3 +228,142 @@ fn an_existing_format_0_portfolio_palace_migrates_at_open() {
         "migration left its record"
     );
 }
+
+/// The env var naming the framework root the #9659 portfolio daemon child
+/// provisions as writer.
+#[cfg(feature = "manager-memory")]
+const PORTFOLIO_DAEMON_ROOT_ENV: &str = "TM_9659_DAEMON_PORTFOLIO_ROOT";
+
+/// The portfolio palace's data root under a framework root.
+#[cfg(feature = "manager-memory")]
+fn portfolio_palace_dir(framework_root: &std::path::Path) -> std::path::PathBuf {
+    framework_root
+        .join(MANAGER_DATA_SUBDIR)
+        .join("palace")
+        .join(PORTFOLIO_PALACE_ID)
+}
+
+/// Child half of `sm_serve_first_then_daemon_gets_the_portfolio_writer_lock`.
+///
+/// What: returns at once unless `PORTFOLIO_DAEMON_ROOT_ENV` names a framework
+/// root. Otherwise provisions the portfolio palace there as the daemon does
+/// (writer) and asserts it is available, holds the live palace (not a
+/// read-only snapshot), is at the supported format, and takes a `remember`.
+/// Test: run by `sm_serve_first_then_daemon_gets_the_portfolio_writer_lock`.
+#[cfg(feature = "manager-memory")]
+#[test]
+#[ignore = "child process of the #9659 portfolio sm-serve-first test"]
+fn open_the_portfolio_palace_as_the_daemon_child() {
+    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_common::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+
+    let Some(root) = std::env::var_os(PORTFOLIO_DAEMON_ROOT_ENV).map(std::path::PathBuf::from)
+    else {
+        return;
+    };
+    seed_shared_embedder_with_mock();
+    let daemon = PortfolioPalace::provision(&root, PalaceAccess::Writer);
+    assert!(
+        daemon.is_available(),
+        "the daemon's writer provision of the portfolio palace is unavailable: {:?}",
+        daemon.unavailable_reason()
+    );
+    let mem = daemon.memory().expect("live portfolio memory");
+    let handle = mem
+        .registry
+        .get(&mem.palace_id)
+        .expect("the daemon's portfolio palace handle");
+    assert!(
+        !handle.is_read_only(),
+        "the daemon holds a read-only snapshot of the portfolio palace, not the live file"
+    );
+    let json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(portfolio_palace_dir(&root).join("palace.json")).expect("read palace.json"),
+    )
+    .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime
+        .block_on(mem.remember(
+            "DAEMON_9659_PORTFOLIO_MARKER written by the daemon",
+            vec!["9659".to_string()],
+        ))
+        .expect("remember as the daemon");
+}
+
+/// #9659: the portfolio analogue of `sm_serve_first_then_daemon_gets_the_writer_lock`.
+/// With a format-0 portfolio palace and `tm sm serve`'s read-only provision
+/// held for the whole test, the daemon's writer provision (a separate process,
+/// as in production) migrates the palace and `remember` lands.
+/// Test: this is the test.
+#[cfg(feature = "manager-memory")]
+#[test]
+fn sm_serve_first_then_daemon_gets_the_portfolio_writer_lock() {
+    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_format_0_palace(&portfolio_palace_dir(dir.path()), PORTFOLIO_PALACE_ID)
+        .expect("format-0 palace");
+
+    let _serve = PortfolioPalace::provision(dir.path(), PalaceAccess::ReadOnly);
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "daemon::manager::memory::tests::open_the_portfolio_palace_as_the_daemon_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(PORTFOLIO_DAEMON_ROOT_ENV, dir.path())
+        .output()
+        .expect("run the daemon child");
+    assert!(
+        out.status.success(),
+        "the daemon's writer provision failed beside tm sm serve ({}):\n{}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// #9659 Fail-Open Check: a writer provision that cannot take `kg.redb` must
+/// say so in the unavailable reason, never come up on a read-only snapshot.
+///
+/// What: provisions a current-format portfolio palace and drops it, holds its
+/// `kg.redb` with a raw `create_palace_db`, then provisions as the daemon does
+/// (writer). Asserts the palace is unavailable AND carries a reason; a log
+/// line alone does not reach `/manager/version`.
+/// Test: this is the test.
+#[cfg(feature = "manager-memory")]
+#[test]
+fn a_writer_provision_beside_a_kg_holder_is_unavailable_with_a_reason() {
+    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    {
+        let first = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
+        assert!(first.is_available(), "an uncontended writer provision");
+    }
+    let kg_path = portfolio_palace_dir(dir.path()).join("kg.redb");
+    let _holder = trusty_common::redb_cache::create_palace_db(&kg_path)
+        .expect("another holder takes kg.redb");
+
+    let daemon = PortfolioPalace::provision(dir.path(), PalaceAccess::Writer);
+    let read_only = daemon
+        .memory()
+        .and_then(|m| m.registry.get(&m.palace_id))
+        .map(|h| h.is_read_only());
+    assert!(
+        !daemon.is_available(),
+        "a writer provision beside a kg.redb holder came up available (read_only={read_only:?})"
+    );
+    assert!(
+        daemon.unavailable_reason().is_some_and(|r| !r.is_empty()),
+        "an unavailable portfolio palace must carry a reason, not only a log line"
+    );
+}

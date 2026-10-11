@@ -136,9 +136,11 @@ impl SmMemory {
     /// (#9274). The daemon holds it as writer, so a format-0 palace migrates;
     /// `tm sm serve` must read beside it, and a writer open there fails while
     /// the daemon holds `kg.redb`.
-    /// What: opens the registry with `intent`, derives `palace_id` from
-    /// `cfg.palace`, then: if `<data_root>/<id>/palace.json` already exists,
-    /// opens it from disk; otherwise creates and persists a fresh palace. Both
+    /// What: opens the registry with `intent` (#9659: from hydration on),
+    /// derives `palace_id` from `cfg.palace`, then: if
+    /// `<data_root>/<id>/palace.json` already exists, opens it from disk;
+    /// otherwise creates and persists a fresh palace, except under
+    /// `OpenIntent::Observer`, which never creates one. Both
     /// paths register the handle in the registry. Any failure is wrapped in
     /// [`SmMemoryError::Palace`].
     /// Test: `an_existing_format_0_sm_palace_migrates_at_open` (writer),
@@ -152,15 +154,14 @@ impl SmMemory {
         let palace_id = PalaceId::new(cfg.palace.clone());
         let recall_top_k = cfg.recall_top_k as usize;
 
-        // #9274: the caller picks the intent; the registry defaults to read-only.
-        let mut registry =
-            PalaceRegistry::open(&data_root).map_err(|source| SmMemoryError::Palace {
+        // #9659: the intent applies from hydration, so a writer never holds a
+        // snapshot and an observer never locks the live files.
+        let registry = PalaceRegistry::open_with_intent(&data_root, intent).map_err(|source| {
+            SmMemoryError::Palace {
                 palace: palace_id.to_string(),
                 source,
-            })?;
-        if intent == OpenIntent::Writer {
-            registry = registry.with_writer_intent();
-        }
+            }
+        })?;
 
         let me = Self {
             registry,
@@ -232,7 +233,10 @@ impl SmMemory {
         // Fail closed: anything other than a definite `Ok(false)` — present, or
         // a probe we could not complete — propagates the open error instead.
         let palace_dir = self.data_root.join(self.palace_id.as_str());
-        if !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false)) {
+        // #9659: an observer (`tm sm serve`) never creates the palace.
+        if self.registry.open_intent() == OpenIntent::Observer
+            || !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false))
+        {
             return Err(SmMemoryError::Palace {
                 palace: self.palace_id.to_string(),
                 source: open_err,

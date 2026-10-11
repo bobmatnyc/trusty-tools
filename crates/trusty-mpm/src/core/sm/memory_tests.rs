@@ -589,3 +589,157 @@ fn hold_the_sm_palace_as_writer_child() {
     }
     drop(writer);
 }
+
+/// The env var naming the data root the #9659 daemon child opens as writer.
+const DAEMON_ROOT_ENV: &str = "TM_9659_DAEMON_SM_PALACE_ROOT";
+
+/// The fact the #9659 daemon child remembers.
+const DAEMON_MARKER: &str = "DAEMON_9659_MARKER written by the daemon";
+
+/// The open intent `tm sm serve --stdio` takes on the SM palace (#9659).
+fn sm_serve_intent() -> OpenIntent {
+    crate::daemon::state::PalaceAccess::ReadOnly.open_intent()
+}
+
+/// Run `open_the_sm_palace_as_the_daemon_child` against `root` to completion.
+///
+/// What: the daemon is a separate process, as in production, so this
+/// process's store cache cannot serve its open. Fails with the child's output
+/// when any of its assertions fails.
+fn run_the_daemon_child(root: &std::path::Path) {
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::sm::memory::tests::open_the_sm_palace_as_the_daemon_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(DAEMON_ROOT_ENV, root)
+        .output()
+        .expect("run the daemon child");
+    assert!(
+        out.status.success(),
+        "the daemon's writer open failed beside tm sm serve ({}):\n{}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Child half of the #9659 tests: the daemon's writer open of the SM palace.
+///
+/// What: returns at once unless `DAEMON_ROOT_ENV` names a data root. Otherwise
+/// opens the SM palace there with writer intent and asserts the open is Ok,
+/// the handle holds the live palace (not a read-only snapshot), the palace is
+/// at the supported format, and a `remember` lands.
+/// Test: run by `sm_serve_first_then_daemon_gets_the_writer_lock` and its
+/// siblings.
+#[test]
+#[ignore = "child process of the #9659 sm-serve-first tests"]
+fn open_the_sm_palace_as_the_daemon_child() {
+    use trusty_common::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+
+    let Some(root) = std::env::var_os(DAEMON_ROOT_ENV).map(std::path::PathBuf::from) else {
+        return;
+    };
+    seed_shared_embedder_with_mock();
+    let cfg = SmMemoryConfig::default();
+    let daemon = match SmMemory::open_with_intent(&root, &cfg, OpenIntent::Writer) {
+        Ok(mem) => mem,
+        Err(e) => panic!("the daemon's writer open of the SM palace failed: {e}"),
+    };
+    let handle = daemon
+        .ensure_palace()
+        .expect("the daemon's SM palace handle");
+    assert!(
+        !handle.kg.is_read_only(),
+        "the daemon holds a read-only snapshot of the SM palace, not the live file"
+    );
+    let json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join(&cfg.palace).join("palace.json")).expect("read palace.json"),
+    )
+    .expect("palace.json");
+    assert_eq!(json["format_version"], PALACE_FORMAT_SUPPORTED, "{json}");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime
+        .block_on(daemon.remember(DAEMON_MARKER))
+        .expect("remember as the daemon");
+}
+
+/// #9659: `tm sm serve` started before the daemon must leave the daemon the
+/// writer. With a format-0 SM palace and `tm sm serve`'s open held for the
+/// whole test, the daemon's writer open migrates the palace and `remember`
+/// lands. `tm sm serve` cannot read a format-0 palace; its open may refuse.
+/// Test: this is the test.
+#[test]
+fn sm_serve_first_then_daemon_gets_the_writer_lock() {
+    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    write_format_0_palace(&dir.path().join(&cfg.palace), &cfg.palace).expect("format-0 palace");
+
+    let _serve = SmMemory::open_with_intent(dir.path(), &cfg, sm_serve_intent());
+    run_the_daemon_child(dir.path());
+}
+
+/// #9659: the same order with a current-format SM palace. `tm sm serve` opens
+/// it and holds it; the daemon's writer open must still hold the live file,
+/// never a read-only snapshot.
+/// Test: this is the test.
+#[test]
+fn sm_serve_first_then_daemon_gets_the_writer_lock_on_a_current_palace() {
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    // A daemon run creates the current-format palace, then exits.
+    run_the_daemon_child(dir.path());
+
+    let serve = SmMemory::open_with_intent(dir.path(), &cfg, sm_serve_intent());
+    assert!(serve.is_ok(), "tm sm serve opens a current-format palace");
+    run_the_daemon_child(dir.path());
+}
+
+/// #9659: with no daemon running, `tm sm serve` still recalls a fact the
+/// daemon wrote earlier, and it reads a snapshot copy: the live `kg.redb` and
+/// vector store stay unlocked while its open is held.
+/// Test: this is the test.
+#[test]
+fn daemon_not_running_sm_serve_still_recalls() {
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+    run_the_daemon_child(dir.path());
+
+    let serve = match SmMemory::open_with_intent(dir.path(), &cfg, sm_serve_intent()) {
+        Ok(mem) => mem,
+        Err(e) => panic!("tm sm serve could not open the SM palace: {e}"),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let hits = runtime
+        .block_on(serve.recall("which marker did the daemon write"))
+        .expect("recall with no daemon running");
+    assert!(
+        hits.iter()
+            .any(|h| h.drawer.content().contains("DAEMON_9659_MARKER")),
+        "tm sm serve must recall the daemon's fact with no daemon running"
+    );
+
+    let palace_dir = dir.path().join(&cfg.palace);
+    for file in ["kg.redb", "index.usearch.redb"] {
+        let live = trusty_common::redb_cache::create_palace_db(&palace_dir.join(file));
+        assert!(
+            live.is_ok(),
+            "tm sm serve holds the redb lock on the live {file}: {:?}",
+            live.err()
+        );
+    }
+    drop(serve);
+}

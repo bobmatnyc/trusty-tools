@@ -107,11 +107,13 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
     // Writer → 0 extra attempts (handoff retry lives in `try_open_or_snapshot`).
     // ReadOnlyClient → RETRIES in-process TOCTOU retries (issue #1152). The
     // `u8::from(bool)` keeps this a single non-`if` expression (fmt-stable).
-    let max_attempts = RETRIES * u8::from(intent != OpenIntent::Writer);
+    let max_attempts = RETRIES * u8::from(intent == OpenIntent::ReadOnlyClient);
+    // #9659: an observer opens its own copy and shares no cached handle.
+    let observer = intent == OpenIntent::Observer;
 
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..=max_attempts {
-        {
+        if !observer {
             let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
             let key = canonical_key(path);
             if let Some(weak) = cache.get(&key)
@@ -137,7 +139,7 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
                     mode,
                     _snapshot_guard: snapshot_guard,
                 });
-                {
+                if !observer {
                     let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
                     cache.insert(canonical_key(path), Arc::downgrade(&state));
                 }
@@ -331,7 +333,9 @@ impl UsearchStore {
     /// Test: `persist_and_reload` (ReadOnlyClient default) and
     /// `writer_intent_open_fails_loud_on_locked_vector_file` (Writer path).
     pub fn new_with_intent(path: PathBuf, dim: usize, intent: OpenIntent) -> Result<Self> {
-        if let Some(parent) = path.parent()
+        // #9659: an observer never creates the palace directory.
+        if intent != OpenIntent::Observer
+            && let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).with_context(|| {

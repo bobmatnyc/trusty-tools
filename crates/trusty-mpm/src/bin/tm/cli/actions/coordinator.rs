@@ -28,6 +28,12 @@ use clap::Subcommand;
 #[derive(Debug, Subcommand)]
 pub(crate) enum CoordinatorAction {
     /// Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface).
+    ///
+    /// Reads the SM and portfolio palaces read-only, through a snapshot copy
+    /// taken at startup, whether or not the daemon runs; it never locks the
+    /// live files, so `tm daemon run` stays their writer. It cannot create a
+    /// palace, or read a format-0 one, until the daemon has run once.
+    // #9659: the Observer open intent; see `PalaceAccess::ReadOnly`.
     Serve {
         /// Speak newline-delimited JSON-RPC 2.0 on stdin/stdout (logs to stderr).
         ///

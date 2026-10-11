@@ -1,0 +1,3 @@
+Added
+- `OpenIntent::Observer`: a read-only open that always copies the live redb file and opens the copy, so the caller never takes the live file's lock, never creates a store, palace directory or `recall.db`, and reads no format marker on the live `kg.redb`. `tm sm serve` uses it; with no daemon running it reads a snapshot copy and cannot create a palace or read a format-0 one until the daemon has run (#9659).
+- `PalaceRegistry::open_with_intent(data_root, intent)` hydrates every palace with the given intent from the first open. Under `Writer` a palace that fails to open logs an ERROR and is recorded unopenable, never handed back as a read-only snapshot (#9659).

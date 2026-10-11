@@ -89,7 +89,11 @@ impl KgStoreRedb {
     /// `a_direct_kg_open_of_an_n_plus_one_file_is_refused`,
     /// `the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker`.
     pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
-        if let Some(parent) = path.parent()
+        // #9659: an observer reads a copy of the live file and shares no handle
+        // through the cache, so it never creates, gates or locks the live file.
+        let observer = intent == OpenIntent::Observer;
+        if !observer
+            && let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)
@@ -127,11 +131,11 @@ impl KgStoreRedb {
         // Writer → 0 extra attempts (handoff retry lives in `try_open_or_snapshot`).
         // ReadOnlyClient → RETRIES in-process TOCTOU retries (issue #1152). The
         // `u8::from(bool)` keeps this a single non-`if` expression (fmt-stable).
-        let max_attempts = RETRIES * u8::from(intent != OpenIntent::Writer);
+        let max_attempts = RETRIES * u8::from(intent == OpenIntent::ReadOnlyClient);
 
         // #9274: refuse a newer palace format before `Database::create` writes
         // the header. A file this process already holds was gated when opened.
-        if !Self::is_cached(path) {
+        if !observer && !Self::is_cached(path) {
             gate_kg_pre_open(path)?;
         }
         #[cfg(test)]
@@ -143,7 +147,7 @@ impl KgStoreRedb {
         for attempt in 0..=max_attempts {
             // Check in-process cache first — avoids re-opening the same
             // redb file from two code paths within one process.
-            {
+            if !observer {
                 let mut cache = db_cache().lock().expect("db_cache poisoned");
                 let key = canonical_key(path);
                 if let Some(weak) = cache.get(&key)
@@ -229,7 +233,7 @@ impl KgStoreRedb {
                         mode,
                         _snapshot_guard: snapshot_guard,
                     });
-                    {
+                    if !observer {
                         let mut cache = db_cache().lock().expect("db_cache poisoned");
                         // Use the post-create canonical path so symlinks
                         // resolve correctly on macOS (/var → /private/var).

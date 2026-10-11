@@ -24,6 +24,8 @@ pub mod kg_redb;
 pub mod kg_store;
 pub mod kg_writer;
 pub mod l1_cache;
+// #9659: the observer open — a palace read through a copy, never the live file.
+mod observer_open;
 pub mod palace_format;
 pub mod palace_store;
 pub mod payload_store;

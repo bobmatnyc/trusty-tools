@@ -198,8 +198,9 @@ async fn build_goal_store(
 ) -> Arc<Mutex<SmGoalStore>> {
     use crate::core::sm::memory::SmMemory;
 
-    // #9274: `open` is read-only, so the goal store loads beside a running daemon.
-    let store = match SmMemory::open(data_root.join("palace"), &config.memory) {
+    // #9659: `tm sm serve`'s intent, so the goal store never locks the live palace.
+    let intent = crate::daemon::state::PalaceAccess::ReadOnly.open_intent();
+    let store = match SmMemory::open_with_intent(data_root.join("palace"), &config.memory, intent) {
         Ok(mem) => {
             let mem: Arc<dyn crate::core::sm::GoalMemory> = Arc::new(mem);
             match SmGoalStore::load(mem, data_root.to_path_buf()).await {

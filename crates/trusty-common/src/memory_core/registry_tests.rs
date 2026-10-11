@@ -1823,3 +1823,60 @@ async fn a_blocked_hnsw_op_stays_reported_on_every_eviction_path() {
         assert_eq!(op.kind, HnswOpKind::Search, "{path}");
     }
 }
+
+/// #9659: a writer registry's hydration must never hand back a read-only
+/// snapshot of a palace whose `kg.redb` another holder has.
+///
+/// Why: the daemon builds its SM and portfolio registries the way this test
+/// does, `PalaceRegistry::open(..)` then `.with_writer_intent()`. Hydration ran
+/// under the default `ReadOnlyClient` intent, so with `tm sm serve` holding
+/// `kg.redb` it fell back to a snapshot, and every daemon write then failed
+/// "read-only" with only an INFO log.
+/// What: creates a current-format palace and drops it, holds `kg.redb` with a
+/// raw `create_palace_db`, then opens a registry the daemon's way. Passes when
+/// the open fails, or when the palace has no handle and is recorded unopenable.
+/// Test: this is the test.
+#[test]
+fn a_writer_registry_never_hydrates_read_only() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace_id = PalaceId::new("held-by-sm-serve");
+    {
+        let registry = PalaceRegistry::new().with_writer_intent();
+        let palace = Palace {
+            id: palace_id.clone(),
+            name: "held-by-sm-serve".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join(palace_id.as_str()),
+        };
+        registry
+            .create_palace(data_root, palace)
+            .expect("create a current-format palace");
+    }
+
+    let kg_path = data_root.join(palace_id.as_str()).join("kg.redb");
+    let _holder =
+        crate::redb_cache::create_palace_db(&kg_path).expect("another holder takes kg.redb");
+
+    // The daemon's construction today (trusty-mpm core/sm/memory.rs).
+    let Ok(registry) = PalaceRegistry::open(data_root) else {
+        return;
+    };
+    let registry = registry.with_writer_intent();
+    if let Some(handle) = registry.get(&palace_id) {
+        panic!(
+            "a writer registry hydrated {palace_id} as a handle (read_only={}) while \
+             another holder has kg.redb",
+            handle.is_read_only()
+        );
+    }
+    assert!(
+        registry.unopenable_reason(&palace_id).is_some(),
+        "a palace a writer registry could not open must be recorded unopenable"
+    );
+}
