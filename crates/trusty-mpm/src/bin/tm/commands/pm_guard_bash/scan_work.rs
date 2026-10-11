@@ -6,7 +6,8 @@
 //! inner-loop steps does not.
 //! What: [`charge`] adds `units` to one [`Site`]'s counter. Outside tests it
 //! does nothing. Under `cfg(test)` the counters are thread-local, so tests
-//! running in parallel do not share them, and [`take`] reads and resets one.
+//! running in parallel do not share them, and the test-only `take` reads and
+//! resets one.
 //! Test: `heredoc_operators_track_pending_lows_in_linear_work_9720`,
 //! `heredoc_bodies_look_up_operators_in_log_work_9720`,
 //! `heredoc_operators_find_each_line_end_once_9720`,
