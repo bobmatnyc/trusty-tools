@@ -133,8 +133,11 @@ fn schema_rows(db: &redb::Database) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// One `kg_schema` row: key and raw value bytes.
+type SchemaRow = (&'static str, Vec<u8>);
+
 /// A bare KG whose `kg_schema` holds `rows` (absent rows are not written).
-fn kg_with(dir: &Path, rows: &[(&str, Vec<u8>)]) -> redb::Database {
+fn kg_with(dir: &Path, rows: &[SchemaRow]) -> redb::Database {
     let db = crate::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg");
     let wtx = db.begin_write().expect("txn");
     {
@@ -157,7 +160,7 @@ fn version(v: u32) -> Vec<u8> {
 #[test]
 fn the_1_to_2_step_commits_nothing_when_the_stored_format_is_not_1() {
     let tk = (KG_SCHEMA_TRIPLE_KEY, version(1));
-    let cases: [(&str, Vec<(&str, Vec<u8>)>); 5] = [
+    let cases: [(&str, Vec<SchemaRow>); 5] = [
         ("format absent", vec![tk.clone()]),
         (
             "format 0",
