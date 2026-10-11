@@ -332,6 +332,10 @@ fn egress_denies_resource_tools_naming_no_server() {
         ("ReadMcpResourceTool", serde_json::json!({"uri": "x://y"})),
         (
             "ReadMcpResourceTool",
+            serde_json::json!({"server": "--", "uri": "x://y"}),
+        ),
+        (
+            "ReadMcpResourceTool",
             serde_json::json!({"server": null, "uri": "x://y"}),
         ),
         (

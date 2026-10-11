@@ -34,6 +34,10 @@ use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 const PANIC_REASON: &str = "tm hook --egress-guard failed while deciding this tool call, so \
      it denies it (#8454). A repeat is a bug in the guard; report it.";
 
+/// Claude Code's built-in MCP resource tools, which name their server in
+/// `tool_input.server` rather than in `tool_name` (#8454 fix round).
+const RESOURCE_TOOLS: &[&str] = &["ReadMcpResourceTool", "ListMcpResourcesTool"];
+
 /// The guard's decision for one tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -62,11 +66,13 @@ fn unclassifiable(detail: &str) -> String {
 /// Why (§4 of the G3 plan): fail closed. Each fault a payload can carry is a
 /// deny, never a default — no `unwrap_or_default` on a missing field.
 /// What: an `Err` read, a `tool_name` that is missing, empty or not a string,
-/// and a `tool_input` that is not an object each deny. Otherwise the
-/// [`FamilyTable`] classifies the tool: a family or a malformed `mcp__` name
-/// denies, anything else allows.
+/// and a `tool_input` that is not an object each deny. A [`RESOURCE_TOOLS`]
+/// call is judged by its `tool_input.server`, and denies when that is missing,
+/// empty or not a string. Otherwise the [`FamilyTable`] classifies the tool:
+/// a family or a malformed `mcp__` name denies, anything else allows.
 /// Test: `egress_denies_malformed_payloads`, `egress_denies_each_family_tool_name`,
-/// `egress_allows_unrelated_tools`.
+/// `egress_allows_unrelated_tools`, `egress_denies_family_mcp_resource_tools`,
+/// `egress_denies_resource_tools_naming_no_server`.
 pub(crate) fn decide(
     read: &Result<serde_json::Value, HookStdinError>,
     table: &FamilyTable,
@@ -93,16 +99,32 @@ pub(crate) fn decide(
             );
         }
     };
-    if !payload
-        .get("tool_input")
-        .is_some_and(serde_json::Value::is_object)
-    {
+    let Some(input) = payload.get("tool_input").filter(|v| v.is_object()) else {
         return deny(
             "egress-unclassifiable-payload",
             unclassifiable("`tool_input` is missing or is not an object"),
         );
-    }
-    match table.classify(tool_name) {
+    };
+    let classification = if RESOURCE_TOOLS.contains(&tool_name) {
+        // #8454 fix round: these name their server in `tool_input.server`.
+        match input.get("server").and_then(serde_json::Value::as_str) {
+            Some(server) if !server.trim().is_empty() => table.classify_resource_server(server),
+            _ => {
+                return deny(
+                    "egress-unnamed-resource-server",
+                    format!(
+                        "tm hook --egress-guard denies `{tool_name}`: its `tool_input.server` \
+                         is missing or not a non-empty string, so the call may reach an \
+                         outbound-channel server — a listing with no server covers every \
+                         server (#8454). Name the server."
+                    ),
+                );
+            }
+        }
+    } else {
+        table.classify(tool_name)
+    };
+    match classification {
         Classification::Unrelated => Verdict::Allow,
         Classification::Family(family) => deny(
             "egress-family",

@@ -10,8 +10,10 @@
 //! Code names an MCP tool `mcp__<server>__<tool>`. The server segment is
 //! normalized — lowercased, every character but ASCII letters and digits
 //! dropped — and denied when it contains a family name, so `Slack-MCP`,
-//! `claude_ai_Slack` and `S.l.a.c.k` all match `slack`. A `gworkspace` server
-//! is denied only for its mail, chat and message tools.
+//! `claude_ai_Slack` and `S.l.a.c.k` all match `slack`. A `gworkspace` or
+//! `google_workspace` server is denied only for its mail, chat and message
+//! tools. [`FamilyTable::classify_resource_server`] judges the server an MCP
+//! resource tool names.
 //!
 //! Limits, by design of a name match: Unicode confusables (a Cyrillic `а` in
 //! `slаck`) are dropped by the normalization, not mapped, so they evade it; a
@@ -20,11 +22,23 @@
 //! Test: `egress_guard_tests.rs`; end to end in
 //! `tests/tm_hook_egress_guard_8454.rs`.
 
-/// Server-segment families whose every tool is denied.
-const SERVER_FAMILIES: &[&str] = &["slack", "gmail", "notion", "googlechat", "gchat"];
+/// Server-segment families whose every tool is denied. #8454 fix round:
+/// `googlemail` because `google-mail` normalizes to it, which lacks `gmail`.
+const SERVER_FAMILIES: &[&str] = &[
+    "slack",
+    "gmail",
+    "googlemail",
+    "notion",
+    "googlechat",
+    "gchat",
+];
 
 /// The Google Workspace server family, denied for its messaging tools only.
 const GWORKSPACE: &str = "gworkspace";
+
+/// Normalized server spellings of [`GWORKSPACE`]. #8454 fix round:
+/// `google_workspace` normalizes to `googleworkspace`, which lacks `gworkspace`.
+const GWORKSPACE_SERVERS: &[&str] = &[GWORKSPACE, "googleworkspace"];
 
 /// Normalized tool-segment fragments that make a `gworkspace` tool a messaging
 /// tool: `mail` covers `gmail` and `email`, `draft` the send-a-draft path.
@@ -99,9 +113,7 @@ impl FamilyTable {
     /// [`Classification::Unrelated`]. Otherwise it splits on `__`; fewer than
     /// three segments, or an empty one, is [`Classification::Malformed`]. The
     /// segments between `mcp` and the last are the server; the last is the
-    /// tool. A normalized server containing a pattern is that
-    /// [`Classification::Family`]; a `gworkspace` server is one only when its
-    /// normalized tool contains a [`GWORKSPACE_MESSAGING`] fragment.
+    /// tool, both judged by [`FamilyTable::server_family`].
     /// Test: `egress_family_match_normalizes_case_and_separators`,
     /// `egress_gworkspace_denies_only_mail_chat_message_tools`,
     /// `egress_short_or_hollow_mcp_names_are_malformed`.
@@ -121,6 +133,36 @@ impl FamilyTable {
             Some((tool, server)) => (normalize(tool), normalize(&server.join("_"))),
             None => return Classification::Malformed("no server segment"),
         };
+        self.server_family(&server, Some(&tool))
+    }
+
+    /// Classify the `server` an MCP resource tool names in its `tool_input`.
+    ///
+    /// Why (#8454 fix round, Bob ruling 4): `ReadMcpResourceTool` and
+    /// `ListMcpResourcesTool` carry the server outside `tool_name`, so a family
+    /// read through them would otherwise be unrelated.
+    /// What: [`FamilyTable::server_family`] over the normalized `server`, with
+    /// no tool — a resource is not a tool, so a Google Workspace server is
+    /// denied whole. A name with no ASCII letter or digit is
+    /// [`Classification::Malformed`].
+    /// Test: `egress_denies_family_mcp_resource_tools`,
+    /// `egress_allows_resource_tools_naming_unrelated_servers`.
+    pub(crate) fn classify_resource_server(&self, server: &str) -> Classification {
+        let server = normalize(server);
+        if server.is_empty() {
+            return Classification::Malformed("a server name with no letter or digit");
+        }
+        self.server_family(&server, None)
+    }
+
+    /// The family of a normalized `server`, given its normalized `tool`.
+    ///
+    /// What: a server containing a pattern is that [`Classification::Family`].
+    /// A server containing a [`GWORKSPACE_SERVERS`] spelling is the
+    /// `gworkspace` family when `tool` is `None` or contains a
+    /// [`GWORKSPACE_MESSAGING`] fragment. Anything else is unrelated.
+    /// Test: `egress_gworkspace_denies_only_mail_chat_message_tools`.
+    fn server_family(&self, server: &str, tool: Option<&str>) -> Classification {
         if let Some(family) = self
             .server_patterns
             .iter()
@@ -128,7 +170,8 @@ impl FamilyTable {
         {
             return Classification::Family(family.clone());
         }
-        if server.contains(GWORKSPACE) && GWORKSPACE_MESSAGING.iter().any(|m| tool.contains(m)) {
+        let messaging = tool.is_none_or(|t| GWORKSPACE_MESSAGING.iter().any(|m| t.contains(m)));
+        if messaging && GWORKSPACE_SERVERS.iter().any(|g| server.contains(g)) {
             return Classification::Family(GWORKSPACE.to_owned());
         }
         Classification::Unrelated
