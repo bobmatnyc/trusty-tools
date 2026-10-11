@@ -1291,7 +1291,10 @@ console makes the ancestry judgment and the server checks who made it.
   `list` leaves one record, allow or deny; a direct `list` leaves a record
   only when denied. Every allowed bridge call, `list` included, is admitted
   fail-closed: when the audit log cannot be written it is refused with
-  `audit_unavailable` and no backend call runs. Errors
+  `audit_unavailable` and no backend call runs. Bridge auditing follows the
+  machine config's `secrets.audit`, as the direct socket's does (owner
+  ruling Ddf, 2026-10-11): with `audit: false` no bridge call writes a
+  record, allow or deny, and an unwritable log refuses nothing. Errors
   answer under the direct method's name, with its deadline, so a bridged
   error is the same wire error a direct caller gets.
 - There is no human-presence or confirm step. Tailnet requests are
