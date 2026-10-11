@@ -14,6 +14,8 @@
 pub mod agent_worktree_reap;
 // #8257: the record view the dispatch deny and `--list` share, and the OS
 // probe the repair asks before it writes.
+// #6556: stale a quiet Running record the OS shows is gone.
+pub(crate) mod delegation_quiet_stale;
 pub mod delegation_records;
 pub mod delegation_repair;
 // #8531: the repair caller, established from the socket's kernel peer pid.

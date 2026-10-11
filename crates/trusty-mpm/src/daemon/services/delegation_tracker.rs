@@ -576,28 +576,31 @@ fn register_agent_worktree(state: &DaemonState, session: SessionId, payload: &Va
     let Some(agent_id) = field(payload, "agent_id") else {
         return;
     };
-    let Some(cwd) = field(payload, "cwd").map(std::path::PathBuf::from) else {
-        return;
-    };
     let Some(id) = state.find_delegation(session, |d| d.agent_id.as_deref() == Some(agent_id))
     else {
         return;
     };
+    let cwd = field(payload, "cwd").map(std::path::PathBuf::from);
     // #6556 critic round: track where this agent is NOW, in the same pass that
     // decides whether to claim. `worktree_path` is a latch and must stay one —
     // the reap needs it — so the current directory is its own field. Written
     // only when it changed, which keeps the steady state off the hot path.
     let mut claim_needed = false;
     state.mutate_delegation(id, |d| {
+        // #6556: the quiet bound measures from the agent's last hook event.
+        d.last_event_at = Some(Utc::now());
+        let Some(cwd) = cwd.as_ref() else {
+            return;
+        };
         if d.last_agent_cwd.as_deref() != Some(cwd.as_path()) {
             d.last_agent_cwd = Some(cwd.clone());
         }
         claim_needed = d.worktree_path.as_deref() != Some(cwd.as_path())
             && d.cwd.as_deref() != Some(cwd.as_path());
     });
-    if !claim_needed {
+    let (true, Some(cwd)) = (claim_needed, cwd) else {
         return;
-    }
+    };
     if let Some(refusal) = claim_refused(state, session, agent_id, &cwd) {
         tracing::warn!(
             agent_id,

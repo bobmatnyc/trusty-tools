@@ -563,11 +563,15 @@ pub(crate) const REAP_INTERVAL_SECS: u64 = 60;
 /// precisely because it is an O(N) pass. #6556: and
 /// [`services::stop_spool_drain::drain_unposted_stops`] first, so a stop a hook
 /// parked while this daemon was down resolves its delegation instead of the
-/// sweep aging the record out six hours later.
+/// sweep aging the record out six hours later. #6556: then
+/// [`services::delegation_quiet_stale::stale_quiet_delegations`], which stales
+/// a quiet isolated record the OS shows is gone.
 /// Test: the reaping rule is unit-tested via `DaemonState::reap_against`;
 /// `cancel_token_stops_reap_loop_cleanly` asserts the loop exits on cancel.
 async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::CancellationToken) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(REAP_INTERVAL_SECS));
+    // #6556: read once, so a bad override warns once rather than every tick.
+    let quiet_bound = services::delegation_quiet_stale::quiet_stale_bound();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -581,6 +585,9 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                 // it first means the sweep sees the recovered record, not the
                 // stale one it would have had to age out.
                 crate::daemon::services::stop_spool_drain::drain_unposted_stops(&state).await;
+                // #6556: a quiet Running record the OS shows is gone goes Stale
+                // at the quiet bound, not at the six-hour sweep below.
+                services::delegation_quiet_stale::stale_quiet_delegations(&state, quiet_bound).await;
                 let sweep = state.sweep_delegations();
                 if sweep.staled > 0 || sweep.evicted > 0 {
                     info!(
