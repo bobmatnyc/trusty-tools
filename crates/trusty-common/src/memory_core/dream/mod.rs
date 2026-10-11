@@ -24,6 +24,9 @@ mod semantic;
 // #9391: the settled-corpus marker that lets an unchanged palace skip embedding.
 mod settled;
 
+// #9275: the compact pass over `{uuid}#n` chunk rows.
+#[cfg(test)]
+mod chunk_key_tests;
 #[cfg(test)]
 mod concurrency_tests;
 // #9172: merge persistence, survivor choice, survivor-forget journal.

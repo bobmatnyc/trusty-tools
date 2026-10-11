@@ -445,3 +445,7 @@ async fn a_reopen_behind_a_stuck_vector_write_still_reads() {
 }
 
 use crate::memory_core::store::kg_store::VECTOR_KEYS as VECTOR_KEYS_FOR_TEST;
+
+// #9275: `{uuid}#n` chunk rows read as one drawer.
+#[path = "chunk_tests.rs"]
+mod chunk_tests;

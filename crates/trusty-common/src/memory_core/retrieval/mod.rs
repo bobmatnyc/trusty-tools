@@ -44,6 +44,9 @@ mod write_pipeline;
 #[cfg(test)]
 pub(crate) mod embed_repair_tests;
 // #9433: `pub(crate)` so `tier_c_tests` can reuse its log `Capture`.
+// #9275: `{uuid}#n` chunk rows through `PalaceHandle`.
+#[cfg(test)]
+mod chunk_key_tests;
 #[cfg(test)]
 mod op_budget_remember_tests;
 #[cfg(test)]

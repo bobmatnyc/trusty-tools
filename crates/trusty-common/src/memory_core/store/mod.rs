@@ -37,6 +37,8 @@ pub mod room_plan;
 // ADR-0027 T1/T4/T6: room record shape, resolve-or-create, and the room surface.
 pub mod rooms;
 pub mod vector;
+// #9275: `{uuid}#n` chunk-row keys — one drawer, several vectors.
+mod vector_key;
 // ADR-0027 T9: wing record shape, default-wing seeding, create/rename/list.
 pub mod wings;
 pub mod write_deadline;

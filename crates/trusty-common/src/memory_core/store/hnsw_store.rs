@@ -36,6 +36,9 @@ use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowe
 mod graph_arm;
 use graph_arm::graph_nearest;
 
+// #9275: drawer-level replace / delete / search over `{drawer}#n` chunk rows.
+mod groups;
+
 mod key_cache;
 use key_cache::KeyCache;
 
@@ -122,6 +125,12 @@ pub enum HnswStoreError {
          refusing to overwrite a live vector — the palace index needs a rebuild"
     )]
     IdAllocationFailed { probes: u8, last_candidate: u64 },
+    /// #9275: a drawer write named no chunk, or more than the cap allows.
+    #[error("a drawer holds 1..={max} chunk vectors, got {got}")]
+    ChunkCount { got: usize, max: usize },
+    /// #9275: a drawer-level call named a row key (`#`) or an empty key.
+    #[error("drawer key {0:?} is empty or contains '#'")]
+    DrawerKey(String),
     /// A maintenance write outran its deadline and was rolled back (#8749).
     #[error(transparent)]
     WriteDeadline(#[from] WriteTxnError),
@@ -507,35 +516,8 @@ impl HnswStore {
         // #9487: the redb half lives in `row_write.rs`.
         let (vector_id, shadows_previous) = self.commit_vector_row(uuid, vector)?;
 
-        // #5171: mark BEFORE the graph can serve the shadow point. The two
-        // steps cannot be atomic, and the asymmetry runs one way: a search
-        // that sees the shadow without the flag scores the drawer by whichever
-        // copy is nearer, which is the defect. A search that sees the flag
-        // without the shadow re-reads the already-committed `VECTORS` row and
-        // gets the right answer, so over-marking costs one point read.
-        //
-        // #5171: safe only because `exhaustive_nearest` (exhaustive.rs) never
-        // truncates before `resolve_shadowed` corrects every candidate — a
-        // pre-correction cap there would reopen this race.
-        if shadows_previous {
-            self.shadowed.write().insert(vector_id);
-        }
-        // #9187: the redb row is committed either way; on Err the next open
-        // replays it.
-        // #9487: both waits are bounded; a timeout trips the breaker.
-        let _gate = self.bounded_gate("upsert")?;
-        let index = self.bounded_graph("upsert")?;
-        // #9174: the lists this insert can evict from, read before it runs.
-        let before = stranded::neighbourhoods_before_insert(&index, vector);
-        quiet_insert::insert_quietly(&index, vector, vector_id as usize)
-            .map_err(HnswStoreError::StdoutGuard)?;
-        // #9174: a point its own search misses is scanned exactly instead —
-        // the new one, and every one this insert evicted from a list.
-        if !stranded::reachable(&index, vector, vector_id) {
-            stranded::add_stranded(&mut self.stranded.write(), vector, vector_id);
-        }
-        stranded::restrand_evicted(&index, before, vector_id, &self.stranded);
-
+        // #9275: the graph half lives in `row_write.rs`, shared with `replace_group`.
+        self.index_point(vector, vector_id, shadows_previous)?;
         Ok(vector_id)
     }
 
@@ -548,12 +530,16 @@ impl HnswStore {
     /// hit. Tombstoned ids are filtered out before the lookup so callers
     /// never see deleted points.
     /// What: Ranks candidates — exactly, by scanning every point, when the
-    /// palace holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`] live drawers;
+    /// palace holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`] live rows;
     /// otherwise via `Hnsw::search(query, k, ef_search)`. Re-scores any drawer
     /// that has a shadow copy in the graph against its `VECTORS` row, filters
     /// the result against `DELETED_VECTORS`, then maps each surviving
     /// `vector_id` back to its UUID via the `VECTOR_KEYS` reverse map. Returns
     /// hits sorted by ascending distance (best first), each UUID at most once.
+    ///
+    /// #9275: the rows of one drawer — `{drawer}` and `{drawer}#n`, grammar in
+    /// `store::vector_key` — fold into one hit under the drawer key, scored by
+    /// its nearest row, and `k` counts drawers; see `groups.rs`.
     ///
     /// #5171: below the threshold the graph traversal returns only the points
     /// reachable from its descent pivot along pruned layer-0 neighbour lists,
@@ -578,7 +564,8 @@ impl HnswStore {
     /// `search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours`,
     /// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
     /// `search_finds_drawers_the_graph_cannot_reach`,
-    /// `search_reads_vector_keys_once_until_a_store_write`.
+    /// `search_reads_vector_keys_once_until_a_store_write`,
+    /// `top_k_counts_drawers_not_chunks`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
@@ -592,16 +579,29 @@ impl HnswStore {
         // #9141: the (id → uuid) reverse map and tombstone set, re-read from
         // redb only when a write has landed since the last search.
         let keys = self.keys.get(&self.db)?;
+        // #9275: `k` counts drawers, not chunk rows; see `groups.rs`.
+        self.search_grouped(query, k, &keys)
+    }
+
+    /// Candidate `(vector_id, distance)` rows for `query`, best first, with
+    /// shadowed drawers re-scored against `VECTORS` (#5171).
+    ///
+    /// What: the exhaustive arm returns every live row; the graph arm returns
+    /// a pool sized for `k` rows (#5179, #9174). Tombstones and the id → key
+    /// mapping are applied by the caller, `groups::group_rows`.
+    /// Test: `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_widens_until_k_drawers_in_the_graph_arm`.
+    fn ranked(&self, query: &[f32], k: usize, keys: &key_cache::KeyMap) -> Result<Vec<(u64, f32)>> {
         let (reverse, tombstones) = (&keys.reverse, &keys.tombstones);
 
-        // #5171: `reverse.len()` is the LIVE drawer count — `get_nb_point()`
+        // #5171: `reverse.len()` is the LIVE row count — `get_nb_point()`
         // also counts tombstones and shadows, so a small palace could churn
         // past the threshold mid-session and silently revert to the approximate
         // path. The scan returns every live candidate rather than a
         // `want`-sized prefix: a shadowed drawer's provisional distance is
         // `min(stale, current)`, so cutting before `resolve_shadowed` lets a
-        // superseded vector evict a true neighbour. The `out.len() >= k` break
-        // below does the bounding instead, on the corrected ranking.
+        // superseded vector evict a true neighbour. `group_rows` does the
+        // bounding instead, on the corrected ranking.
         let mut raw: Vec<(u64, f32)> = {
             let index = self.bounded_graph("search")?; // #9487
             if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
@@ -626,22 +626,7 @@ impl HnswStore {
             let vectors = rtx.open_table(VECTORS)?;
             resolve_shadowed(&mut raw, &shadowed, query, &vectors)?;
         }
-        drop(shadowed);
-
-        let mut out: Vec<(String, f32)> = Vec::with_capacity(k);
-        let mut emitted: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for (id, distance) in raw {
-            if tombstones.contains(&id) || !emitted.insert(id) {
-                continue;
-            }
-            if let Some(uuid) = reverse.get(&id) {
-                out.push((uuid.clone(), distance));
-                if out.len() >= k {
-                    break;
-                }
-            }
-        }
-        Ok(out)
+        Ok(raw)
     }
 
     /// Mark a UUID's vector as deleted (tombstone).
@@ -786,13 +771,15 @@ impl HnswStore {
     /// content is not reliably its own either — every member of the group is
     /// suspect, not just the unreachable ones. The only sound repair is to drop
     /// the whole group's mapping and re-embed all of them.
-    /// What: for each aliased group, removes every `VECTOR_KEYS` row in it and
-    /// tombstones the shared id, in one write transaction. Returns the freed
-    /// uuids, which then read as ordinary "missing" drawers to
+    /// What: for each aliased group, removes every `VECTOR_KEYS` row in it —
+    /// and, #9275, every other chunk row of each drawer it touches — and
+    /// tombstones the ids, in one write transaction. Returns the freed keys,
+    /// which then read as ordinary "missing" drawers to
     /// `PalaceHandle::embed_health` and are repaired by the normal backfill.
     /// Idempotent: a second run finds no groups and frees nothing. #8749: runs
     /// under the write-transaction deadline, like `compact_orphans`.
-    /// Test: `unalias_frees_every_uuid_in_a_collision_group`.
+    /// Test: `unalias_frees_every_uuid_in_a_collision_group`,
+    /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`.
     pub fn unalias(&self) -> Result<Vec<String>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
@@ -809,8 +796,8 @@ impl HnswStore {
             for (id, uuids) in &audit.aliased {
                 wtx.check("between unalias groups")?; // #8749
                 for uuid in uuids {
-                    let _ = keys.remove(uuid.as_str())?;
-                    freed.push(uuid.clone());
+                    // #9275: free the whole drawer, every chunk row of it.
+                    groups::remove_drawer_rows(&mut keys, &mut tombstones, uuid, &mut freed)?;
                 }
                 tombstones.insert(*id, [].as_slice())?;
             }
