@@ -144,7 +144,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/rust-engineer.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/secrets-manager.md"
@@ -256,10 +256,14 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/rust-build-performance.md"
-version = "1.1.0"
+version = "1.2.0"
 
 [[member]]
 path = "skills/rust-delivery-workflow.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/rust-runtime-performance.md"
 version = "1.0.0"
 
 [[member]]

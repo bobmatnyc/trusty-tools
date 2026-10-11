@@ -1,0 +1,2 @@
+Changed
+- `rust-build-performance` 1.2.0 (smaller than 1.1.0): objective and comparison discipline, thin generic wrapper with `cargo llvm-lines`, generated-code measurement instead of a proc-macro rule, conditional sccache, `cargo check` default-members, crate splits versus file-size caps, feature resolution, macOS first-launch scan; host-specific figures removed. `rust-engineer` 0.1.1 gains a trigger for `rust-runtime-performance` (#9296).
