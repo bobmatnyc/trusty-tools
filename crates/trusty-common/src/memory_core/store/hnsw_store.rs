@@ -588,7 +588,7 @@ impl HnswStore {
     /// mapping are applied by the caller, `groups::group_rows`.
     /// Test: `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
     /// `search_widens_until_k_drawers_in_the_graph_arm`.
-    pub(super) fn ranked(
+    fn ranked(
         &self,
         query: &[f32],
         k: usize,
