@@ -107,7 +107,8 @@ pub async fn session(State(bridge): State<Arc<SecretsBridge>>) -> Response {
 /// is `{"projects": []}`, one that cannot be read is
 /// [`Refusal::RegistryUnavailable`]. Never dials the secrets socket.
 /// Test: `projects_route_lists_the_registry_and_never_dials`,
-/// `projects_route_answers_an_empty_list_for_an_absent_or_empty_registry`.
+/// `projects_route_answers_an_empty_list_for_an_absent_or_empty_registry`,
+/// `projects_route_refuses_a_malformed_or_unknown_registry`.
 pub async fn projects(State(bridge): State<Arc<SecretsBridge>>) -> Response {
     let Some(file) = bridge.registry().map(ToOwned::to_owned) else {
         return Refusal::RegistryUnavailable.into_response();

@@ -11,6 +11,7 @@
 //! dependency edge for it (owner ruling Df0).
 //! Test: `projects_route_lists_the_registry_and_never_dials`,
 //! `projects_route_answers_an_empty_list_for_an_absent_or_empty_registry`,
+//! `projects_route_refuses_a_malformed_or_unknown_registry`,
 //! `registry_file_follows_the_tm_root`.
 
 use std::ffi::OsString;

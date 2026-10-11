@@ -7,6 +7,7 @@
 //! in a tempdir; both through the real router.
 //! Test: this file IS the test.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -245,8 +246,7 @@ async fn projects_route_lists_the_registry_and_never_dials() {
 }
 
 /// Why: #9067 — a registry that is absent or empty is a picker with no
-/// projects, not an error; one that does not parse is refused with fixed
-/// text that quotes nothing from the file.
+/// projects, not an error.
 /// Red until the route exists.
 /// Test: itself.
 #[tokio::test]
@@ -264,9 +264,27 @@ async fn projects_route_answers_an_empty_list_for_an_absent_or_empty_registry() 
         assert_eq!(status, StatusCode::OK, "{}: {body}", registry.display());
         assert_eq!(body, r#"{"projects":[]}"#, "{}", registry.display());
     }
+}
+
+/// Why: #9067 — a registry that does not parse, cannot be read, or has no
+/// known location is refused 503 with fixed text that quotes nothing from
+/// the file, never answered as an empty picker.
+/// What: a malformed file, a mode-000 file (skipped when this process can
+/// still read it, as root can), and no registry path at all.
+/// Test: itself.
+#[tokio::test]
+async fn projects_route_refuses_a_malformed_or_unknown_registry() {
+    let (tmp, socket, _seen) = ok_stub();
     let malformed = tmp.path().join("malformed.json");
     std::fs::write(&malformed, "SECRET-LOOKING-TEXT {").expect("write");
-    for registry in [Some(malformed), None] {
+    let unreadable = tmp.path().join("unreadable.json");
+    std::fs::write(&unreadable, "SECRET-LOOKING-TEXT []").expect("write");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let mut registries = vec![Some(malformed), None];
+    if std::fs::read(&unreadable).is_err() {
+        registries.push(Some(unreadable));
+    }
+    for registry in registries {
         let bridge = Arc::new(
             Arc::try_unwrap(bridge_at(&socket, Arc::new(family())))
                 .expect("sole owner")
