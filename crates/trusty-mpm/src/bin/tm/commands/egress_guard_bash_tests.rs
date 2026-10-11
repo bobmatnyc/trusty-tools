@@ -334,6 +334,29 @@ fn bash_egress_denies_keyword_nesting_past_the_depth_bound() {
     assert_denies(&product, "SMTP mail");
 }
 
+/// 🔴 #8454 S3 critic round 3 (HIGH): `time eval S` reads `S` twice — once
+/// past the keyword, once as the `eval` wrapper's inner command — so the work
+/// doubles per level. A run past the hook timeout is an allow, so the guard
+/// must reach its deny within a bounded budget. The keyword cases this must
+/// not disturb stay in `bash_egress_denies_program_behind_a_shell_keyword`
+/// and `bash_egress_denies_keyword_nesting_past_the_depth_bound`.
+#[test]
+fn bash_egress_bounds_work_for_time_eval_nesting() {
+    let command = format!("{}sendmail bob", "time eval ".repeat(32));
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(bash(&command));
+    });
+    match recv.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Verdict::Deny { check, reason }) => {
+            assert_eq!(check, BASH_CHECK, "{reason}");
+            assert!(reason.contains("it reaches SMTP mail ("), "{reason}");
+        }
+        Ok(Verdict::Allow) => panic!("`time eval`×32 + `sendmail bob` must be denied"),
+        Err(err) => panic!("`time eval`×32 was not judged within 2 s: {err}"),
+    }
+}
+
 /// 🔴 #8454 S3 (plan §5, fail closed): a command the guard cannot lex or nest
 /// through is denied when its text holds a family token. An allow here is the
 /// error arm failing open.
