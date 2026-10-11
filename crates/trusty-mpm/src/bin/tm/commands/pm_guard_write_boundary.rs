@@ -560,6 +560,11 @@ fn unplaceable_write_reason(what: UnplaceableWrite) -> String {
     )
 }
 
+// #7228: the copy-verb and `sed -i` rows, beside the module they pin.
+#[cfg(test)]
+#[path = "pm_guard_write_boundary_verb_tests.rs"]
+mod verb_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
