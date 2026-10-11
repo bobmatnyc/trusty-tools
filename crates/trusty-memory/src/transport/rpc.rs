@@ -181,10 +181,14 @@ impl JsonRpcResponse {
     /// `LiveAliasError` (#9544: a create refused because the id is a live
     /// alias), the error's own code when it carries a `RenameError` (#9544:
     /// `palace_rename`'s table, including `NOT_FOUND` for a missing source),
+    /// `REFUSED` when it carries a palace-format refusal (#9665, the
+    /// `is_format_refusal` test `api_error::open_handle` uses),
     /// `INTERNAL_ERROR` otherwise; message = `format!("{e:#}")` always.
     /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`,
     /// `from_anyhow_maps_live_alias_to_refused`,
-    /// `from_anyhow_maps_palace_rename_errors`.
+    /// `from_anyhow_maps_palace_rename_errors`,
+    /// `format_too_new_tool_error_is_refused_on_the_wire`,
+    /// `from_anyhow_maps_every_format_refusal_to_refused`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
         let code = if let Some(rename) = e.downcast_ref::<crate::service::rename::RenameError>() {
             rename.rpc_code()
@@ -196,6 +200,9 @@ impl JsonRpcResponse {
             error_codes::REFUSED
         } else if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
             error_codes::NOT_FOUND
+        } else if trusty_common::memory_core::store::palace_format::is_format_refusal(&e) {
+            // #9665: a format refusal no retry can clear answered -32603.
+            error_codes::REFUSED
         } else {
             error_codes::INTERNAL_ERROR
         };
@@ -890,6 +897,65 @@ mod tests {
         let err = dispatch(&state, req).await.error.expect("error");
         assert_eq!(err.code, error_codes::REFUSED, "{}", err.message);
         assert!(!state.data_root.join("personal/palace.json").exists());
+    }
+
+    /// Why (#9665): a palace written by a newer release answered `-32603`, so
+    /// an MCP client read "upgrade this binary" as a daemon fault and retried.
+    /// What: sends `memory_list` (direct) and `memory_remember` (`tools/call`)
+    /// at a too-new palace and asserts `-32006` naming `FormatTooNew`, with
+    /// `palace.json` byte-for-byte unchanged.
+    /// Test: itself.
+    #[tokio::test]
+    async fn format_too_new_tool_error_is_refused_on_the_wire() {
+        let state = test_state();
+        let path = crate::service::core_tests::seed_too_new_palace(&state.data_root, "too-new");
+        let before = std::fs::read(&path).expect("read");
+        let requests = [
+            ("memory_list", json!({"palace": "too-new", "limit": 5})),
+            (
+                "tools/call",
+                json!({"name": "memory_remember", "arguments": {
+                    "palace": "too-new", "text": "a fact worth keeping", "force": true}}),
+            ),
+        ];
+        for (method, params) in requests {
+            let req = JsonRpcRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(11)),
+                method: method.to_string(),
+                params: Some(params),
+            };
+            let err = dispatch(&state, req).await.error.expect("error");
+            assert_eq!(err.code, error_codes::REFUSED, "{method}: {}", err.message);
+            assert_eq!(i64::from(err.code), crate::transport::CODE_REFUSED);
+            assert!(err.message.contains("FormatTooNew"), "{}", err.message);
+        }
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            before,
+            "palace.json changed"
+        );
+    }
+
+    /// Why (#9665): `from_anyhow` must classify a format refusal by type, and
+    /// must not widen to the operational failures that share its error enum.
+    /// What: every `Format*` refusal in `open_errors` maps to `REFUSED`; every
+    /// other entry (backup, space, io, json, a plain error) stays `INTERNAL_ERROR`.
+    /// Test: itself.
+    #[test]
+    fn from_anyhow_maps_every_format_refusal_to_refused() {
+        for (name, e, refusal) in crate::service::core_tests::open_errors() {
+            let err = JsonRpcResponse::from_anyhow(json!(1), e)
+                .error
+                .expect("error");
+            let want = if refusal {
+                error_codes::REFUSED
+            } else {
+                error_codes::INTERNAL_ERROR
+            };
+            assert_eq!(err.code, want, "{name}: {}", err.message);
+            assert!(!refusal || err.message.contains(name), "{}", err.message);
+        }
     }
 
     /// Why: `initialize` is the first method Claude Code sends over the UDS/
