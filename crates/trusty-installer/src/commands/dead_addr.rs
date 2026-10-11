@@ -80,8 +80,10 @@ mod tests {
     /// Test: this function.
     #[tokio::test]
     async fn dead_addr_fails_inside_connect_before_any_packet_is_sent() {
-        let socket = tokio::net::TcpSocket::new_v4().expect("create a TCP socket");
-        let mut connect = std::pin::pin!(socket.connect(DEAD));
+        // #9613: `TcpStream::connect`, not `TcpSocket`, so the ADR-0032 guard
+        // sees a client connect. A `SocketAddr` resolves without awaiting, so the
+        // first poll still reaches `connect(2)`.
+        let mut connect = std::pin::pin!(tokio::net::TcpStream::connect(DEAD));
         let mut cx = Context::from_waker(Waker::noop());
         match connect.as_mut().poll(&mut cx) {
             Poll::Ready(Err(e)) => assert_ne!(
