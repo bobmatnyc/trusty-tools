@@ -7,7 +7,11 @@
    * list shows name, length and time, never a value. A set clears its value
    * input before the call and shows only the server's masked text, dropped
    * on the next action. Copy stays in the chosen project and names backends
-   * from `backends`, never a fixed list. A refused toggle reverts.
+   * from `backends`, never a fixed list. A refused toggle reverts. Delete and
+   * copy each run only from a separate confirm step that Cancel or Escape
+   * closes; the confirm sits away from the button that opened it and ignores
+   * the second click of a double-click. The copy confirm names both backends
+   * and the project vault's key count, and sends the backends it named.
    * Test: `src/App.test.js`.
    */
   import { onMount } from 'svelte';
@@ -31,6 +35,7 @@
   let pendingDelete = $state(null);
   let fromBackend = $state('');
   let toBackend = $state('');
+  let pendingCopy = $state(null);
   let copied = $state(null);
 
   const available = $derived(backends.filter((b) => b.available === true));
@@ -49,6 +54,27 @@
     masked = null;
     copied = null;
     pendingDelete = null;
+    pendingCopy = null;
+  }
+
+  /**
+   * #9067: a click is deliberate unless it is a later click of a multi-click
+   * (`detail` > 1). Keyboard activation has `detail` 0.
+   */
+  function deliberate(event) {
+    return (event?.detail ?? 0) <= 1;
+  }
+
+  /** Escape closes any open confirm step. */
+  function onKey(event) {
+    if (event.key !== 'Escape') return;
+    pendingDelete = null;
+    pendingCopy = null;
+  }
+
+  /** Focus the safe choice when a confirm step opens. */
+  function focusOnMount(node) {
+    node.focus();
   }
 
   onMount(async () => {
@@ -80,7 +106,8 @@
       const answer = await api.backends(path);
       backends = answer.backends ?? [];
       selectedBackend = answer.selected ?? '';
-      fromBackend = available[0]?.id ?? '';
+      // #9067: copy reads from the selected backend when it is available.
+      fromBackend = available.find((b) => b.id === selectedBackend)?.id ?? available[0]?.id ?? '';
       toBackend = available.find((b) => b.id !== fromBackend)?.id ?? '';
     } catch (err) {
       fail(err);
@@ -123,7 +150,8 @@
     }
   }
 
-  async function confirmDelete(name) {
+  async function confirmDelete(event, name) {
+    if (!deliberate(event)) return;
     clearResults();
     try {
       const answer = await api.remove(project, vault, name);
@@ -148,17 +176,42 @@
     }
   }
 
+  /**
+   * #9067: Copy only opens the confirm step. Copy writes every key of the
+   * project vault, so the count comes from that vault, not the shown scope.
+   */
   async function submitCopy(event) {
     event.preventDefault();
     clearResults();
+    const from = fromBackend;
+    const to = toBackend;
+    const projectVault = scopes.find((s) => s.kind === 'project')?.vault;
+    if (!projectVault) {
+      notice = { tone: 'error', lines: ['This project has no project scope to copy.'] };
+      return;
+    }
     try {
-      copied = await api.copy(project, fromBackend, toBackend);
+      const count = ((await api.list(project, projectVault)).keys ?? []).length;
+      pendingCopy = { from, to, count };
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function confirmCopy(event) {
+    if (!deliberate(event) || !pendingCopy) return;
+    const { from, to } = pendingCopy;
+    clearResults();
+    try {
+      copied = await api.copy(project, from, to);
       await refresh();
     } catch (err) {
       fail(err);
     }
   }
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <main>
   <header>
@@ -230,14 +283,22 @@
                   />
                 </td>
                 <td>
-                  {#if pendingDelete === row.name}
-                    <button data-testid="confirm-delete" onclick={() => confirmDelete(row.name)}>Confirm delete</button>
-                    <button onclick={() => (pendingDelete = null)}>Cancel</button>
-                  {:else}
-                    <button data-testid="delete" onclick={() => (pendingDelete = row.name)}>Delete</button>
-                  {/if}
+                  <!-- #9067: the confirm opens in the next row, never under this button. -->
+                  <button
+                    data-testid="delete"
+                    aria-expanded={pendingDelete === row.name}
+                    onclick={() => (pendingDelete = row.name)}>Delete</button>
                 </td>
               </tr>
+              {#if pendingDelete === row.name}
+                <tr class="confirm">
+                  <td colspan="5" role="alertdialog" aria-label={`Delete ${row.name}`} data-testid="delete-confirm">
+                    <p>Delete <span class="mono">{row.name}</span> from <span class="mono">{vault}</span>? This page cannot undo it.</p>
+                    <button use:focusOnMount onclick={() => (pendingDelete = null)}>Cancel</button>
+                    <button data-testid="confirm-delete" onclick={(e) => confirmDelete(e, row.name)}>Delete {row.name}</button>
+                  </td>
+                </tr>
+              {/if}
             {/each}
           </tbody>
         </table>
@@ -274,18 +335,31 @@
         <form data-testid="copy-form" onsubmit={submitCopy}>
           <label>
             From
-            <select data-testid="copy-from" bind:value={fromBackend}>
+            <select data-testid="copy-from" bind:value={fromBackend} disabled={pendingCopy !== null}>
               {#each available as b (b.id)}<option value={b.id}>{b.id}</option>{/each}
             </select>
           </label>
           <label>
             To
-            <select data-testid="copy-to" bind:value={toBackend}>
+            <select data-testid="copy-to" bind:value={toBackend} disabled={pendingCopy !== null}>
               {#each available as b (b.id)}<option value={b.id}>{b.id}</option>{/each}
             </select>
           </label>
-          <button type="submit">Copy</button>
+          <button type="submit" disabled={pendingCopy !== null}>Copy…</button>
         </form>
+      {/if}
+      {#if pendingCopy}
+        <div class="confirm" role="alertdialog" aria-label="Confirm copy" data-testid="copy-confirm">
+          <p>
+            Copy {pendingCopy.count} {pendingCopy.count === 1 ? 'key' : 'keys'} of this project from
+            <span class="mono">{pendingCopy.from}</span> to <span class="mono">{pendingCopy.to}</span>?
+            This overwrites the {pendingCopy.count === 1 ? 'value' : 'values'} of
+            {pendingCopy.count === 1 ? 'that key' : `those ${pendingCopy.count} keys`} in
+            <span class="mono">{pendingCopy.to}</span>.
+          </p>
+          <button data-testid="cancel-copy" use:focusOnMount onclick={() => (pendingCopy = null)}>Cancel</button>
+          <button data-testid="confirm-copy" onclick={confirmCopy}>Copy {pendingCopy.count} to {pendingCopy.to}</button>
+        </div>
       {/if}
       {#if copied}
         <p data-testid="copied">Copied {copied.copied?.length ?? 0}; failed {copied.failed?.length ?? 0}.</p>
@@ -342,5 +416,13 @@
   }
   .notice p {
     margin: 0;
+  }
+  .confirm {
+    padding: var(--trusty-space-3);
+    border: 1px solid var(--red);
+    border-radius: var(--trusty-radius);
+  }
+  .confirm p {
+    margin: 0 0 var(--trusty-space-2);
   }
 </style>
