@@ -194,8 +194,12 @@ pub(super) fn uuid_prefix_eq(a: Uuid, b: Uuid) -> bool {
 /// filled from the L1 cache snapshot at open and the open-time sweep only
 /// retains over the full drawer table, so an expired drawer in that snapshot
 /// survived even a reopen. The L0 identity row is synthetic and never expires.
+///
+/// #9706: L1 entries whose id is no longer in the drawer table (a forgotten
+/// drawer on a live handle) are dropped too.
 /// Test: `l0_l1_always_present` asserts both layers appear;
-/// `expired_l1_drawer_is_excluded_without_reopen` covers the filter.
+/// `expired_l1_drawer_is_excluded_without_reopen` covers the filter;
+/// `forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle` covers forget.
 pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
     let mut out: Vec<RecallResult> = Vec::with_capacity(1 + handle.l1_drawers.len());
     let now = chrono::Utc::now();
@@ -216,7 +220,17 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
         });
     }
 
+    // #9706: `l1_drawers` is a snapshot taken at open and `forget` does not
+    // edit it, so a forgotten drawer would still be served here. The drawer
+    // table is the source of truth: an L1 entry whose id is absent from it is
+    // dropped. Fails closed, and does not depend on `l1_saved` succeeding.
+    let live_ids: std::collections::HashSet<Uuid> =
+        handle.drawers.read().iter().map(|d| d.id).collect();
+
     for d in &handle.l1_drawers {
+        if !live_ids.contains(&d.id) {
+            continue;
+        }
         // #4885: an expired drawer is a false fact, not a low-ranked one —
         // skip it rather than let `rescore_l1_by_similarity` demote it, which
         // would still leave it eligible for the injection budget.

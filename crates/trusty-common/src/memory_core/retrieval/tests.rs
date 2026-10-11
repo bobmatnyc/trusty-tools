@@ -342,6 +342,88 @@ async fn forget_reports_deleted_and_the_drawer_stays_gone_after_reopen() {
     );
 }
 
+/// Issue #9706: a forgotten drawer must not be served by L0/L1 on the same
+/// live handle.
+///
+/// Why: production holds one `Arc<PalaceHandle>` for the process life, and
+/// `forget_removing` does not touch `l1_drawers`, so `retrieve_l0_l1` kept
+/// serving the forgotten drawer until a restart.
+/// What: remembers two drawers, loads them into L1 via `refresh_l1`, forgets
+/// one, and asserts `retrieve_l0_l1` drops it while still serving the other.
+/// Test: this test.
+#[tokio::test]
+async fn forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let (_palace, mut handle) = open_disk_palace(dir.path(), "forget-l1-live");
+
+    let gone = handle
+        .remember(
+            "Axolotls regenerate whole limbs without scarring".into(),
+            RoomType::General,
+            vec![],
+            0.9,
+        )
+        .await
+        .unwrap();
+    let kept = handle
+        .remember(
+            "Narwhal tusks are elongated left canine teeth".into(),
+            RoomType::General,
+            vec![],
+            0.8,
+        )
+        .await
+        .unwrap();
+    Arc::get_mut(&mut handle)
+        .expect("sole owner of the handle")
+        .refresh_l1();
+    assert!(
+        handle.l1_drawers.iter().any(|d| d.id == gone),
+        "precondition: the drawer is cached in L1"
+    );
+
+    assert_eq!(handle.forget(gone).await.unwrap(), ForgetOutcome::Deleted);
+
+    let ids: Vec<Uuid> = retrieve_l0_l1(&handle)
+        .iter()
+        .map(|r| r.drawer.id)
+        .collect();
+    assert!(!ids.contains(&gone), "forgotten drawer served by L0/L1");
+    assert!(ids.contains(&kept), "a kept drawer must still be served");
+}
+
+/// Issue #9706 guard: forget, reopen, and L0/L1 must not return the drawer.
+///
+/// Why: `forget_removing` rewrites `l1_cache.json` from the drawer table, so
+/// the reopen path is expected to be correct already; this pins it.
+/// What: remembers, forgets, flushes, reopens, and asserts neither
+/// `l1_drawers` nor `retrieve_l0_l1` carries the id.
+/// Test: this test.
+#[tokio::test]
+async fn forgotten_drawer_is_not_served_by_l0_l1_after_reopen() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let (palace, handle) = open_disk_palace(dir.path(), "forget-l1-reopen");
+
+    let id = handle
+        .remember(
+            "Okapis are the only living relatives of giraffes".into(),
+            RoomType::General,
+            vec![],
+            0.9,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
+    handle.flush().unwrap();
+    drop(handle);
+
+    let reopened = PalaceHandle::open(&palace).unwrap();
+    assert!(!reopened.l1_drawers.iter().any(|d| d.id == id));
+    assert!(!retrieve_l0_l1(&reopened).iter().any(|r| r.drawer.id == id));
+}
+
 /// Regression test for issue #6201: a corrupt drawer table must surface as a
 /// degraded signal on the handle, not silently masquerade as an empty palace.
 ///
