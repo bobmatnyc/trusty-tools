@@ -280,3 +280,130 @@ fn a_project_with_only_worktree_indexes_is_warn() {
     assert_eq!(r.status, CheckStatus::Warn);
     assert!(r.message.contains("main checkout"), "{}", r.message);
 }
+
+/// Fail-Open (#9169 critic HIGH): a resolve that answers but lacks a field the
+/// verdict reads is not checked, never a clean group.
+#[tokio::test]
+async fn a_malformed_resolve_answer_is_not_checked_not_clean() {
+    let cases = [
+        (
+            "duplicates",
+            serde_json::json!({ "index_id": "a", "root_path": "/src/a" }),
+        ),
+        (
+            "duplicates",
+            serde_json::json!({ "index_id": "a", "root_path": "/src/a", "duplicates": {} }),
+        ),
+        (
+            "index_id",
+            serde_json::json!({ "root_path": "/src/a", "duplicates": [] }),
+        ),
+        (
+            "root_path",
+            serde_json::json!({ "index_id": "a", "duplicates": [] }),
+        ),
+        (
+            "kind",
+            serde_json::json!({ "index_id": "a", "root_path": "/src/a",
+                "duplicates": [{ "index_id": "b", "root_path": "/src/b", "parked": false }] }),
+        ),
+    ];
+    for (field, body) in cases {
+        let d = daemon(Ok(map_body(&["a"], "migration")), Ok(body.clone())).await;
+        let rows = check_search_project_at(d.socket(), None, FAST).await;
+        for name in [DUPLICATE, TWO_CHECKOUTS] {
+            let r = row(&rows, name);
+            assert_eq!(
+                r.status,
+                CheckStatus::Warn,
+                "{name} over {body}: {}",
+                r.message
+            );
+            assert!(
+                r.message
+                    .contains(&format!("resolve answered without `{field}`")),
+                "{name} over {body}: {}",
+                r.message
+            );
+        }
+    }
+}
+
+/// Hang guard: the total budget, not the per-call bound, stops a fan-out of
+/// slow answers, and the groups it cut off say so.
+#[tokio::test]
+async fn the_fanout_budget_cuts_off_slow_groups_as_not_checked() {
+    let map = map_body(&["a", "b", "c", "d"], "migration");
+    let d = uds_mock::spawn(move |method: &str, _params: Value| -> MockFuture {
+        let map = map.clone();
+        let method = method.to_string();
+        Box::pin(async move {
+            if method == METHOD_MAP {
+                return Ok(map);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok(resolved("a", serde_json::json!([])))
+        })
+    })
+    .await;
+    let limits = FanoutLimits {
+        max_groups: 8,
+        per_call: Duration::from_millis(300),
+        budget: Duration::from_millis(50),
+    };
+    let started = Instant::now();
+    let rows = check_search_project_at(d.socket(), None, limits).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let r = row(&rows, DUPLICATE);
+    assert_eq!(r.status, CheckStatus::Warn, "{}", r.message);
+    assert!(r.message.contains("past the 50ms budget"), "{}", r.message);
+    assert!(
+        r.message.contains("`o/d` (past the 50ms budget)"),
+        "{}",
+        r.message
+    );
+}
+
+/// Fail-Open error arms of `read_map`: a map answer tm cannot use leaves every
+/// map row not-ok.
+#[tokio::test]
+async fn a_map_answer_that_cannot_be_read_is_never_ok() {
+    let pin_row = |key: Option<&str>, id: Option<&str>| {
+        let mut row = serde_json::json!({ "root_path": "/src/a", "pinned_by": "migration" });
+        if let Some(k) = key {
+            row["key"] = serde_json::json!(k);
+        }
+        if let Some(i) = id {
+            row["index_id"] = serde_json::json!(i);
+        }
+        serde_json::json!({ "path": "/d/m.toml", "schema": 1, "projects": [row], "parked": [] })
+    };
+    let cases: [(Result<Value, RpcError>, &str); 4] = [
+        (
+            Ok(serde_json::json!({ "path": "/d/m.toml", "schema": 1 })),
+            "without a `projects` list",
+        ),
+        (Ok(pin_row(None, Some("a"))), "a pin without a key or id"),
+        (Ok(pin_row(Some("o/a"), None)), "a pin without a key or id"),
+        (
+            Err(RpcError::new(CODE_NOT_FOUND, "nope")),
+            "refused (-32004): nope",
+        ),
+    ];
+    for (answer, why) in cases {
+        let d = daemon(answer, Ok(resolved("a", serde_json::json!([])))).await;
+        let rows = check_search_project_at(d.socket(), None, FAST).await;
+        let map = row(&rows, MAP_UNREADABLE);
+        assert_eq!(map.status, CheckStatus::Warn, "{}", map.message);
+        assert!(map.message.contains(why), "{why}: {}", map.message);
+        for name in [DUPLICATE, TWO_CHECKOUTS] {
+            let r = row(&rows, name);
+            assert_eq!(r.status, CheckStatus::Warn, "{name} ({why}): {}", r.message);
+            assert!(r.message.starts_with("not checked"), "{}", r.message);
+        }
+    }
+}
