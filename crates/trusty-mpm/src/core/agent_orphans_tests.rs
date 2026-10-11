@@ -326,3 +326,19 @@ fn live_names_cover_every_repo_roster_file() {
     assert!(live.contains("base-agent") && live.contains("rust-engineer"));
     assert!(!live.contains("ops"), "ops left the bundle in #4765");
 }
+
+#[test]
+fn live_names_match_a_source_file_by_stem_not_only_declared_name() {
+    // A source file deploys under its FILE name, so `foo.md` declaring
+    // `name: bar` must keep a deployed `foo.md` live.
+    let base = TempDir::new().unwrap();
+    let mut paths = FrameworkPaths::under(base.path());
+    paths.trusty_mpm_root = None;
+    place(&paths.agent_source_dir(), "Foo.md", &doc("bar", false));
+    let roster = crate::core::content_source::test_support::repo_roster();
+
+    let live = live_agent_names(&paths, &roster);
+
+    assert!(live.contains("foo"), "matched by file stem: {live:?}");
+    assert!(live.contains("bar"), "and by declared name: {live:?}");
+}
