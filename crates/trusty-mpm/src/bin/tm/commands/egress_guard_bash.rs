@@ -13,7 +13,8 @@
 //! [`WALK_BYTE_BUDGET`] (#9699). It reuses the pm-guard shell
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
 //! `tokenize`, `resolve_program_word`, `split_heredoc_bodies` and
-//! `decode_ansi_c` — and adds no tokenizer.
+//! `decode_ansi_c` — and adds no tokenizer to the walk; the raw scan's
+//! [`shell_words`] reads a `tm` word's flags as bash splits them (#9710).
 //! Accepted residuals (plan §4): (1) hosts or programs the shell constructs —
 //! from variables, substitutions, brace expansion, curl URL globs or path
 //! globs; (2) encoded payloads; (3) scripts run by path; (4) aliases,
@@ -99,6 +100,10 @@ const SMTPLIB: &str = "smtplib";
 const RAW_SEPARATORS: &[char] = &[
     ';', '|', '&', '(', ')', '{', '}', '<', '>', '\'', '"', '`', '$', '=', ',', '\\',
 ];
+
+/// The bytes besides whitespace that end an unquoted word in [`shell_words`]:
+/// bash's control operators. `$ { } = ,` stay inside a word (#9710).
+const SHELL_BREAKS: &[char] = &[';', '|', '&', '(', ')', '<', '>', '`'];
 
 /// The per-segment error for a segment that will not tokenize.
 const UNLEXABLE_SEGMENT: UnplaceableWrite = "a segment whose words do not lex";
@@ -271,9 +276,11 @@ pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
 ///
 /// What: a walk that spends [`WALK_BYTE_BUDGET`] denies, naming the first hit
 /// it found if any (#9699); a text the walk cannot parse, or one that spends
-/// [`CALL_BUDGET`], falls back to [`raw_hit`].
+/// [`CALL_BUDGET`], denies on the first hit it found, else falls back to
+/// [`raw_hit`] (#9710).
 /// Test: `bash_egress_denies_a_spliced_program_after_byte_exhaustion_9699`,
-/// `bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699`.
+/// `bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699`,
+/// `bash_egress_keeps_a_walk_hit_when_the_call_budget_runs_out_9710`.
 fn text_hit(text: &str) -> Option<BashDeny> {
     if let Some(found) = host_hit(text) {
         return Some(BashDeny::Channel(found));
@@ -290,7 +297,13 @@ fn text_hit(text: &str) -> Option<BashDeny> {
                 .map_or(BashDeny::WalkBudget, BashDeny::Channel),
         ),
         // #8454 plan §5: unlexable or too deep denies only on a family token.
-        Err(_) => raw_hit(text).map(BashDeny::Channel),
+        // #9710: a hit the walk already found denies; the raw scan only adds.
+        Err(_) => walk
+            .first
+            .get()
+            .cloned()
+            .or_else(|| raw_hit(text))
+            .map(BashDeny::Channel),
     }
 }
 
@@ -406,9 +419,8 @@ fn smtp_port_hit(piece: &str, after: &str) -> Option<Hit> {
 /// It reads every word, not only command position, because the command
 /// position is unknown.
 /// What: a `tm` word's subcommand is found past its flags by
-/// [`tm_subcommand_at`], as the walk finds it (#9699 critic). A `tm` inside a
-/// run an earlier `tm` already read is a flag value, and reading from it
-/// gives the same answer, so it is skipped: the scan stays linear.
+/// [`tm_subcommand_at`], as the walk finds it (#9699 critic), in the raw words
+/// and in the [`shell_words`] (#9710).
 /// Test: `bash_egress_denies_unlexable_with_family_token`,
 /// `raw_word_hit_skips_tm_flags_9699`.
 fn raw_word_hit(text: &str) -> Option<Hit> {
@@ -420,20 +432,86 @@ fn raw_word_hit(text: &str) -> Option<Hit> {
         .split(|c: char| c.is_whitespace() || RAW_SEPARATORS.contains(&c))
         .filter(|word| !word.is_empty())
         .collect();
+    words
+        .iter()
+        .find_map(|word| program_hit(&basename(word)))
+        .or_else(|| tm_words_hit(&words))
+        // #9710 (a): the raw words split a flag value at `$ { } = , "` and at a
+        // quoted space, so the leftover piece read as the subcommand.
+        .or_else(|| tm_words_hit(&shell_words(&lower)))
+}
+
+/// The first [`TM_SUBCOMMANDS`] hit of a `tm` word among `words`.
+///
+/// What: a `tm` inside a run an earlier `tm` already read is a flag value, and
+/// reading from it gives the same answer, so it is skipped: the scan stays
+/// linear.
+fn tm_words_hit<S: AsRef<str>>(words: &[S]) -> Option<Hit> {
     let mut tm_read_to = 0;
     words.iter().enumerate().find_map(|(i, word)| {
-        let name = basename(word);
-        if name != "tm" {
-            return program_hit(&name);
-        }
-        if i < tm_read_to {
+        if i < tm_read_to || basename(word.as_ref()) != "tm" {
             return None;
         }
         let rest = &words[i + 1..];
         let at = tm_subcommand_at(rest);
         tm_read_to = i + 1 + at.unwrap_or(rest.len());
-        at.and_then(|at| tm_subcommand_hit(rest[at]))
+        at.and_then(|at| tm_subcommand_hit(rest[at].as_ref()))
     })
+}
+
+/// `text`'s words as bash splits them (#9710): at whitespace and
+/// [`SHELL_BREAKS`] outside quotes, with the quoting removed, a `\`+newline
+/// dropped and a `#` comment skipped.
+///
+/// Why: a `tm` flag value such as `"http://h:${PORT}"` or `"ops team"` is one
+/// word to bash. An open quote reads to the end of `text`; the raw words, read
+/// beside these, still judge what it swallows.
+/// Test: `raw_word_hit_skips_tm_flags_9699`,
+/// `bash_egress_reads_tm_flags_past_a_commented_quote_9710`.
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    // A quoted empty string is still a word: `--account "" slack`.
+    let mut started = false;
+    let mut quote = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(open), _) if c == open => quote = None,
+            (Some('"'), '\\') => match chars.next() {
+                Some('\n') | None => {}
+                Some(next @ ('"' | '\\' | '$' | '`')) => word.push(next),
+                Some(next) => word.extend(['\\', next]),
+            },
+            (Some(_), _) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, '\\') => {
+                if let Some(next) = chars.next().filter(|&next| next != '\n') {
+                    word.push(next);
+                    started = true;
+                }
+            }
+            (None, '#') if !started => {
+                chars.by_ref().find(|&c| c == '\n');
+            }
+            (None, _) if c.is_whitespace() || SHELL_BREAKS.contains(&c) => {
+                if std::mem::take(&mut started) {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (None, _) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 /// The hits of ONE command segment, for `shell_segments_map`.
