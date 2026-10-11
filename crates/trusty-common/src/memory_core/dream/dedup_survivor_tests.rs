@@ -333,6 +333,186 @@ async fn a_failed_merge_persist_keeps_the_duplicate() {
     );
 }
 
+/// Basis vector `i`.
+fn basis(i: usize) -> Vec<f32> {
+    let mut v = vec![0.0_f32; EMBED_DIM];
+    v[i] = 1.0;
+    v
+}
+
+/// Survivor text embeds to `basis(0)`, loser text to `basis(2)`, and the
+/// merged text to `merged`, or fails when `merged` is `None`. Only the
+/// survivor's query reaches the pair, so a pass tries the merge once.
+struct MergeEmbedder {
+    survivor: &'static str,
+    loser: &'static str,
+    merged: Option<Vec<f32>>,
+}
+
+#[async_trait]
+impl Embedder for MergeEmbedder {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts
+            .iter()
+            .map(|t| {
+                if t.contains(self.survivor) && t.contains(self.loser) {
+                    self.merged
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("injected merged-text embed failure"))
+                } else if t == self.loser {
+                    Ok(basis(2))
+                } else {
+                    Ok(basis(0))
+                }
+            })
+            .collect()
+    }
+
+    fn dimension(&self) -> usize {
+        EMBED_DIM
+    }
+}
+
+/// A newer survivor stored at `basis(0)` and an older loser stored at cosine
+/// ~0.98 to it, so the survivor's query finds the loser above 0.95.
+async fn merge_pair(
+    handle: &Arc<PalaceHandle>,
+    survivor: &'static str,
+    loser: &'static str,
+) -> (Uuid, Uuid, Vec<f32>) {
+    let spec = |content, age_days| Spec {
+        content,
+        importance: 0.5,
+        age_days,
+        tags: &[],
+        fact_key: None,
+    };
+    let mut loser_vec = basis(0);
+    loser_vec[1] = 0.2;
+    let norm = loser_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    loser_vec.iter_mut().for_each(|x| *x /= norm);
+    let s = put_with_vector(handle, &spec(survivor, 0), basis(0)).await;
+    let l = put_with_vector(handle, &spec(loser, 1), loser_vec.clone()).await;
+    (s, l, loser_vec)
+}
+
+/// The top hit for `query`, as `(drawer, score)`.
+async fn top_hit(handle: &PalaceHandle, query: &[f32]) -> (Uuid, f32) {
+    let hits = handle.vector_store.search(query, 1).await.unwrap();
+    let hit = hits.first().expect("a vector hit");
+    (hit.drawer_id, hit.score)
+}
+
+/// Why (#9275, Fail-Open Check): the merged survivor is re-embedded before
+/// anything commits. A failed re-embed must leave both drawers and both
+/// vector groups as they were, and count as one failed merge.
+/// What: the merged-text embed fails; redb, the drawer table and each
+/// drawer's single-row vector group are unchanged and the pass reports
+/// `(merged, failed) == (0, 1)`.
+#[tokio::test]
+async fn a_failed_merge_reembed_commits_nothing() {
+    let (survivor, loser) = (
+        "Gate runs pin the toolchain on every cargo command",
+        "Every cargo gate pins its toolchain version explicitly",
+    );
+    let dir = tempdir().unwrap();
+    let handle = open(&palace_in(&dir, "reembed-fails"));
+    let (s, l, loser_vec) = merge_pair(&handle, survivor, loser).await;
+    let embedder = MergeEmbedder {
+        survivor,
+        loser,
+        merged: None,
+    };
+
+    let out = dedup_pass_with_embedder(
+        &handle,
+        Instant::now(),
+        Duration::from_secs(60),
+        0.95,
+        &embedder,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert_eq!((out.merged, out.failed), (0, 1), "one failed merge");
+
+    for (id, text) in [(s, survivor), (l, loser)] {
+        let row = handle.kg.load_drawer(id).unwrap().expect("redb row kept");
+        assert_eq!(row.content(), text, "redb row of {id} must be unchanged");
+        assert_eq!(content_of(&handle, id), text, "table row of {id}");
+    }
+    let shapes = handle.vector_store.chunk_shapes().unwrap();
+    for id in [s, l] {
+        assert_eq!(shapes[&id].rows, 1, "vector group of {id}: {shapes:?}");
+    }
+    for (id, vec) in [(s, basis(0)), (l, loser_vec)] {
+        let (top, score) = top_hit(&handle, &vec).await;
+        assert_eq!(top, id, "{id}'s own vector must still find it");
+        assert!((score - 1.0).abs() < 1e-4, "{id} scored {score}");
+    }
+}
+
+/// Why (#9275, Fail-Open Check): the vector swap happens before the redb
+/// write. When that write fails, the survivor's own group must be put back,
+/// or its text stays findable only through the unpersisted merged vector.
+/// What: the merged text embeds to `basis(5)`; the survivor's redb upsert is
+/// stalled past a 100 ms transaction budget. Afterwards the survivor's own
+/// text (`basis(0)`) finds the survivor first at score 1.0 within 1e-4. The
+/// stored and query vectors are the same unit vector, so the only error is
+/// f32 rounding (~1e-7); the loser sits at ~0.98 and the unrestored merged
+/// vector at 0.0, both far outside the bound.
+#[tokio::test]
+async fn a_failed_merge_persist_restores_the_survivor_vectors() {
+    use crate::memory_core::store::kg_redb::BatchWriteOp;
+    let (survivor, loser) = (
+        "Dream dedup keeps the survivor's vectors on a failed write",
+        "A failed dedup write keeps the survivor vector group",
+    );
+    let dir = tempdir().unwrap();
+    let handle = open(&palace_in(&dir, "persist-fails-restore"));
+    let (s, _l, _) = merge_pair(&handle, survivor, loser).await;
+    let embedder = MergeEmbedder {
+        survivor,
+        loser,
+        merged: Some(basis(5)),
+    };
+
+    let store = handle.kg.redb_store();
+    *store.test_hooks().txn_budget.lock().unwrap() = Some(Duration::from_millis(100));
+    *store.test_hooks().after_batch_op.lock().unwrap() =
+        Some(Arc::new(move |op: &BatchWriteOp| {
+            if let BatchWriteOp::UpsertDrawer(d) = op
+                && d.id == s
+            {
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }));
+    let out = dedup_pass_with_embedder(
+        &handle,
+        Instant::now(),
+        Duration::from_secs(60),
+        0.95,
+        &embedder,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    *store.test_hooks().after_batch_op.lock().unwrap() = None;
+    assert_eq!(
+        (out.merged, out.failed),
+        (0, 1),
+        "precondition: the redb write failed"
+    );
+
+    let (top, score) = top_hit(&handle, &basis(0)).await;
+    assert_eq!(top, s, "the survivor's own text must find it first");
+    assert!(
+        (score - 1.0).abs() < 1e-4,
+        "the survivor's own group must be restored, scored {score}"
+    );
+    assert_eq!(handle.vector_store.chunk_shapes().unwrap()[&s].rows, 1);
+}
+
 /// Why (#9172 closure 3): two dedup survivors were later removed by a path
 /// that left no journal record, so the text merged into them was untraceable.
 /// What: merges a pair, then forgets the survivor through the user path; the
