@@ -33,6 +33,9 @@ const MAX_COMMITS_LISTED: usize = 20;
 /// The prefix `catchup::pause` writes for the snapshot's recorded commit.
 const LAST_COMMIT_PREFIX: &str = "Last commit:";
 
+/// The prefix `catchup::pause` writes for the branch the snapshot was paused on.
+const BRANCH_PREFIX: &str = "Branch:";
+
 /// The section that prefix lives under.
 const GIT_CONTEXT_HEADING: &str = "## Git Context";
 
@@ -97,21 +100,32 @@ pub(crate) fn assess_snapshot(project_dir: &Path, snapshot: &Path) -> SnapshotFr
 /// token when it looks like an abbreviated object id (at least four hex digits).
 /// Test: `a_snapshot_without_a_git_context_is_not_superseded`,
 /// `a_non_hex_commit_token_is_rejected`.
-fn recorded_commit(markdown: &str) -> Option<String> {
+pub(crate) fn recorded_commit(markdown: &str) -> Option<String> {
+    let token = git_context_token(markdown, LAST_COMMIT_PREFIX)?;
+    let looks_like_a_commit = token.len() >= 4 && token.chars().all(|c| c.is_ascii_hexdigit());
+    looks_like_a_commit.then(|| token.to_string())
+}
+
+/// The branch a pause snapshot recorded in its `## Git Context`, if any.
+///
+/// Why (#9390): the resume verify pass compares a `git rev-parse <branch>`
+/// result with [`recorded_commit`] only when the snapshot was paused on that
+/// branch; this is the same section reader, so the two cannot disagree.
+/// Test: `the_recorded_branch_comes_from_the_git_context_only`.
+pub(crate) fn recorded_branch(markdown: &str) -> Option<String> {
+    git_context_token(markdown, BRANCH_PREFIX).map(str::to_string)
+}
+
+/// The first token after `prefix` on a line inside `## Git Context`.
+fn git_context_token<'a>(markdown: &'a str, prefix: &str) -> Option<&'a str> {
     let mut in_git_context = false;
     for line in markdown.lines() {
         if line.starts_with("## ") {
             in_git_context = line.trim_end() == GIT_CONTEXT_HEADING;
             continue;
         }
-        if !in_git_context {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(LAST_COMMIT_PREFIX) {
-            let token = rest.split_whitespace().next()?;
-            let looks_like_a_commit =
-                token.len() >= 4 && token.chars().all(|c| c.is_ascii_hexdigit());
-            return looks_like_a_commit.then(|| token.to_string());
+        if in_git_context && let Some(rest) = line.strip_prefix(prefix) {
+            return rest.split_whitespace().next();
         }
     }
     None
@@ -366,5 +380,14 @@ mod tests {
             recorded_commit("## Git Context\nLast commit: abc1234 subject\n").as_deref(),
             Some("abc1234")
         );
+    }
+
+    /// #9390: a `Branch:` line quoted in the PM's summary is not the recorded one.
+    #[test]
+    fn the_recorded_branch_comes_from_the_git_context_only() {
+        let markdown = "## Summary\nBranch: quoted\n\n## Git Context\nBranch: feat/x\n\
+                        Last commit: abc1234 s\n\n## Tmux Window\nBranch: later\n";
+        assert_eq!(recorded_branch(markdown).as_deref(), Some("feat/x"));
+        assert_eq!(recorded_branch("## Summary\nBranch: quoted\n"), None);
     }
 }
