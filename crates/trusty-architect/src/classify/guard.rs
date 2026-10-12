@@ -2,7 +2,7 @@
 
 use super::matchers::{ansi_len, is_rule};
 use super::{find_box, find_dialog, screen_lines};
-use crate::input::{InputState, classify_input};
+use crate::input::{InputState, SendReading, classify_input};
 use crate::pystr::{is_space, splitlines, strip};
 
 const ESC: char = '\u{1b}';
@@ -25,7 +25,12 @@ const ESC: char = '\u{1b}';
 /// `Typed` (the box holds text it cannot prove is a suggestion).
 /// Test: `unrecognised_captures_never_accept_input`,
 /// `test_wake_detects_its_own_stale_pointer_and_does_not_send`.
-pub fn input_state_for_send(capture: &str) -> InputState {
+pub fn input_state_for_send(capture: &str) -> SendReading {
+    // #9171 A3a: the only constructor of a SendReading outside tests.
+    SendReading::new(read_for_send(capture))
+}
+
+fn read_for_send(capture: &str) -> InputState {
     let lines = screen_lines(capture);
     let Some((top, bottom)) = find_box(&lines) else {
         return InputState::NoPrompt;
@@ -67,9 +72,11 @@ pub fn input_state_for_send(capture: &str) -> InputState {
 /// What: walks the raw row with dim off at its start. SGR `2` sets dim; `0`,
 /// an empty parameter (or an empty `ESC[m`) and `22` clear it; the colour
 /// arguments of `38`/`48`/`58` are skipped so `38;5;2` is not read as dim.
-/// Other escape sequences are skipped. An escape it cannot parse, or an
-/// `m`-final sequence with non-numeric parameters, fails closed (`false`).
-/// Test: `unrecognised_captures_never_accept_input`.
+/// OSC and charset escapes are skipped. An escape it cannot parse, a CSI whose
+/// final byte is not `m`, a C1 control (U+0080-U+009F), or an `m`-final
+/// sequence with non-numeric parameters, fails closed (`false`).
+/// Test: `unrecognised_captures_never_accept_input`,
+/// `all_visible_dim_fails_closed_on_non_sgr_csi_and_c1`.
 fn all_visible_dim(row: &str) -> bool {
     let s: Vec<char> = row.chars().collect();
     let mut dim = false;
@@ -80,7 +87,12 @@ fn all_visible_dim(row: &str) -> bool {
                 return false;
             };
             let seq = &s[i..i + n];
-            if seq.get(1) == Some(&'[') && seq.last() == Some(&'m') {
+            // #9171 A3a: a CSI that is not SGR (CSI u restore, DECSTR `ESC[!p`)
+            // can reset attributes, so dim cannot be carried across it.
+            if seq.get(1) == Some(&'[') && seq.last() != Some(&'m') {
+                return false;
+            }
+            if seq.get(1) == Some(&'[') {
                 let params: String = seq[2..n - 1].iter().collect();
                 if !params.chars().all(|c| c.is_ascii_digit() || c == ';') {
                     return false;
@@ -90,7 +102,9 @@ fn all_visible_dim(row: &str) -> bool {
             i += n;
             continue;
         }
-        if !dim && !is_space(s[i]) {
+        // #9171 A3a: a C1 control (U+0080-U+009F, e.g. the one-byte CSI
+        // U+009B) is an escape this walk cannot parse: fail closed.
+        if ('\u{80}'..='\u{9f}').contains(&s[i]) || (!dim && !is_space(s[i])) {
             return false;
         }
         i += 1;
@@ -120,5 +134,27 @@ fn apply_sgr(params: &str, dim: &mut bool) {
             _ => {}
         }
         k += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_visible_dim;
+
+    // #9171 A3a: the open MEDIUM from the A2 review (PR #9799).
+    #[test]
+    fn all_visible_dim_fails_closed_on_non_sgr_csi_and_c1() {
+        let dim = "\u{1b}[2m";
+        assert!(all_visible_dim(&format!("{dim}hint\u{1b}[0m")));
+        assert!(all_visible_dim(&format!("{dim}a\u{1b}]8;;x\u{7}b")));
+        for row in [
+            format!("{dim}a\u{1b}[ub"),
+            format!("{dim}a\u{1b}[!pb"),
+            format!("{dim}a\u{1b}[1Ab"),
+            format!("{dim}a\u{9b}0mb"),
+            format!("{dim}a\u{85}"),
+        ] {
+            assert!(!all_visible_dim(&row), "{row:?} must fail closed");
+        }
     }
 }
