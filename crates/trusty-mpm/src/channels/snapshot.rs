@@ -314,14 +314,6 @@ where
         }
     }
 
-    /// Wait until no refresh is in flight; a poisoned lock returns at once.
-    #[cfg(test)]
-    pub(crate) fn wait_idle(&self) {
-        if let Ok(published) = self.inner.published.lock() {
-            drop(self.inner.idle.wait_while(published, |p| p.in_flight));
-        }
-    }
-
     /// May a `kind` message go to `recipient` on `channel`?
     ///
     /// Why: every daemon send passes this before any network call.
@@ -370,12 +362,16 @@ impl<S: PolicySource, C> Inner<S, C> {
     /// One source refresh, outside every lock a check takes: the report and
     /// whether it is fresh, or `None` when the refresh panicked.
     fn load(&self) -> Option<(Arc<LoadReport>, bool)> {
-        // The catch below keeps this lock unpoisoned; a poisoned one fails.
-        let Ok(mut source) = self.source.lock() else {
-            tracing::error!("channel policy source lock is poisoned; refresh failed");
-            return None;
+        // #9777: the guard lives only inside the catch, so a refresh panic
+        // never poisons the lock; a poisoned one fails the refresh.
+        let caught = {
+            let Ok(mut source) = self.source.lock() else {
+                tracing::error!("channel policy source lock is poisoned; refresh failed");
+                return None;
+            };
+            catch_unwind(AssertUnwindSafe(|| source.refresh()))
         };
-        let report = match catch_unwind(AssertUnwindSafe(|| source.refresh())) {
+        let report = match caught {
             Ok(report) => report,
             Err(_) => {
                 // #8454: a panic counts toward max age; the last report stays.
@@ -398,7 +394,7 @@ impl<S: PolicySource, C> Inner<S, C> {
 /// ever starts again and the snapshot ages to deny for good.
 /// What: on drop, publishes `outcome` (only a fresh one moves `fresh_at`,
 /// to the start time), stamps `attempted` with the finish time (#9777 Q2),
-/// clears the flag and wakes `wait_idle`.
+/// clears the flag and notifies `idle`.
 /// Test: `refresh_panic_clears_in_flight_and_keeps_report`,
 /// `slow_refresh_does_not_start_a_second_refresh`,
 /// `hung_refresh_past_max_age_denies_without_blocking`.

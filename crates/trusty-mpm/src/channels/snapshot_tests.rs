@@ -765,7 +765,27 @@ fn settle<S: PolicySource + 'static, C: Clock + Send + Sync + 'static>(
     snap: &PolicySnapshot<S, C>,
 ) {
     let _ = snap.current();
-    snap.wait_idle();
+    wait_idle(snap);
+}
+
+/// Wait until no refresh is in flight; a poisoned lock returns at once.
+/// Panics after [`HANG_GUARD`], so a wedged in-flight flag fails the test
+/// instead of hanging the suite.
+fn wait_idle<S, C>(snap: &PolicySnapshot<S, C>) {
+    let Ok(published) = snap.inner.published.lock() else {
+        return;
+    };
+    let waited = snap
+        .inner
+        .idle
+        .wait_timeout_while(published, HANG_GUARD, |p| p.in_flight);
+    if let Ok((published, wait)) = waited {
+        drop(published);
+        assert!(
+            !wait.timed_out(),
+            "a refresh stayed in flight past the guard"
+        );
+    }
 }
 
 /// The test's end of a gate that holds one refresh inside the source.
@@ -849,7 +869,7 @@ fn reader_not_blocked_by_slow_refresh() {
     assert_eq!(reader, Ok(Ok(1)), "a reader waited on the refresh");
     let first = first.recv_timeout(HANG_GUARD).map(|r| r.is_ok());
     assert_eq!(first, Ok(true), "the check that found the refresh due");
-    snap.wait_idle();
+    wait_idle(&snap);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -877,7 +897,11 @@ fn slow_refresh_does_not_start_a_second_refresh() {
         let checked = rx.recv_timeout(HANG_GUARD);
         assert!(matches!(checked, Ok(Ok(_))), "{checked:?}");
     }
-    snap.wait_idle();
+    wait_idle(&snap);
+    // #9777 Q2: still at 12 s. The next refresh is due 5 s after this one
+    // finished (12 s), not 5 s after it started (5 s).
+    let _ = snap.current();
+    wait_idle(&snap);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
@@ -910,7 +934,7 @@ fn hung_refresh_past_max_age_denies_without_blocking() {
         other => panic!("a check during a hung refresh at 66 s: {other:?}"),
     }
     let _ = first.recv_timeout(HANG_GUARD);
-    snap.wait_idle();
+    wait_idle(&snap);
     // The refresh started at 5 s, so its report is 61 s old at 66 s.
     match snap.current() {
         Err(SnapshotDeny::Stale { age, .. }) => assert_eq!(age, secs(61.0)),
@@ -939,7 +963,7 @@ fn never_loaded_denies_while_first_refresh_in_flight() {
     let never = Ok(Some(SnapshotDeny::NeverLoaded));
     assert_eq!(first, never, "the cold check waited on the first load");
     assert_eq!(second, never, "a check during the first load");
-    snap.wait_idle();
+    wait_idle(&snap);
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -949,9 +973,10 @@ fn never_loaded_denies_while_first_refresh_in_flight() {
 }
 
 #[test]
-fn unverified_refresh_keeps_previous_report_and_ages() {
-    // #9777: unverified reports from the refresh thread never move the fresh
-    // time, so checks that never wait see the snapshot age to deny.
+fn unverified_refresh_publishes_without_moving_fresh_time() {
+    // #9777: unverified reports from the refresh thread are published but
+    // never move the fresh time, so checks that never wait see the snapshot
+    // age to deny.
     let (snap, clock, calls) = scripted(|n| match n {
         0 => bob_report(),
         _ => stale_bob_report(ProjectFileError::Gate {
@@ -969,13 +994,31 @@ fn unverified_refresh_keeps_previous_report_and_ages() {
         |d| matches!(d, SnapshotDeny::Stale { .. }),
         "past max age, no wait",
     );
-    snap.wait_idle();
+    wait_idle(&snap);
     assert!(calls.load(Ordering::SeqCst) >= 2, "no failed refresh ran");
     assert_snapshot_denies(
         &snap,
         |d| matches!(d, SnapshotDeny::Stale { .. }),
         "past max age, every refresh returned",
     );
+
+    // The unverified report is the one served: a denied one denies at once,
+    // inside max age, instead of the clean report before it.
+    let (snap, clock, _) = scripted(|n| match n {
+        0 => bob_report(),
+        _ => {
+            let mut report = stale_bob_report(ProjectFileError::Gate {
+                error: GateError::GitTimedOut { step: "show" },
+            });
+            report.denied = true;
+            report
+        }
+    });
+    settle(&snap);
+    assert_eq!(bob_verdicts(&snap), Ok(()), "clean first load");
+    clock.set(secs(5.0));
+    settle(&snap);
+    assert_eq!(snap.current().err(), Some(SnapshotDeny::Denied));
 }
 
 #[test]
@@ -1046,7 +1089,7 @@ fn concurrent_due_checks_start_one_refresh() {
         assert!(matches!(checked, Ok(Ok(_))), "{checked:?}");
     }
     gate.open();
-    snap.wait_idle();
+    wait_idle(&snap);
     assert_eq!(calls.load(Ordering::SeqCst), 2, "more than one refresh ran");
     assert_eq!(most.load(Ordering::SeqCst), 1, "two refreshes overlapped");
 }
