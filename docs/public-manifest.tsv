@@ -108,6 +108,7 @@ PAGE	tools	docs/trusty-mpm/statusline-savings.md	/tools/trusty-mpm/statusline-sa
 PAGE	tools	docs/trusty-agents/README.md	/tools/trusty-agents	trusty-agents
 PAGE	tools	docs/trusty-search/README.md	/tools/trusty-search	trusty-search
 PAGE	tools	docs/trusty-memory/README.md	/tools/trusty-memory	trusty-memory
+PAGE	tools	docs/trusty-memory/backup-restore-upgrade.md	/tools/trusty-memory/backup-restore-upgrade	trusty-memory backup, restore and upgrade
 PAGE	tools	docs/trusty-analyze/README.md	/tools/trusty-analyze	trusty-analyze
 PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
 PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
