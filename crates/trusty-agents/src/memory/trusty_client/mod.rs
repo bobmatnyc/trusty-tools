@@ -283,7 +283,7 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 }
 
 /// Minimal shape we read back from `memory.drawers_list` — trusty-memory's
-/// `Drawer` struct (`trusty_common::memory_core::palace::Drawer`) has many
+/// `Drawer` struct (`trusty_memory::engine::palace::Drawer`) has many
 /// more fields; we only need `id` and `content` to resolve/round-trip a
 /// record, plus `tags` for defensive filtering client-side.
 #[derive(Deserialize)]
@@ -395,7 +395,7 @@ impl MemoryStore for TrustyMemoryClient {
     /// trusty-memory's only recall surface is text — `memory_recall` and
     /// `memory_recall_all` take a `q` string and the daemon computes the query
     /// embedding itself, server-side
-    /// (`trusty_common::memory_core::retrieval::recall_with_default_embedder`).
+    /// (`trusty_memory::engine::retrieval::recall_with_default_embedder`).
     /// No method accepts a raw vector, and embeddings are not invertible, so a
     /// caller-supplied vector cannot be turned into the `q` text those methods
     /// require. Adding a vector-accepting recall method to trusty-memory was

@@ -4,8 +4,8 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use trusty_common::chat_attachments::{Attachment, ImageContent, ImageRef, InputAttachment};
-use trusty_common::memory_core::store::chat_sessions::ChatMessage;
 use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
+use trusty_memory::engine::store::chat_sessions::ChatMessage;
 
 pub(crate) const HISTORY_UNAVAILABLE_NOTICE: &str = "Saved image history and chat persistence are unavailable for this turn. The response may lack earlier image context.";
 

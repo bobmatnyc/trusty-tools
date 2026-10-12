@@ -31,7 +31,7 @@
 //!     Unix socket; bounding the daemon read needs a trusty-memory change and
 //!     is deliberately out of scope here.
 //!   - `ChatMessage` is `{role, content}` with NO per-message timestamp
-//!     (`trusty_common::memory_core::store::chat_sessions::types`), so the
+//!     (`trusty_memory::engine::store::chat_sessions::types`), so the
 //!     response carries only the session's `updated_at`. The client must not
 //!     invent per-turn times it was never given.
 //!   - Only turns that reached [`spawn_persist_turn`] are here. That call sits
