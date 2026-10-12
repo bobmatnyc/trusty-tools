@@ -703,3 +703,114 @@ async fn backfill_stale_drawer_is_not_failing_and_writes_no_ledger_row() {
     );
     assert!(ledger_ids(dir.path()).is_empty());
 }
+
+/// Fails the first multi-chunk batch, then blocks the next on `release`.
+struct FlakyGate {
+    inner: MockEmbedder,
+    calls: std::sync::atomic::AtomicU32,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Embedder for FlakyGate {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.len() > 1 {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                anyhow::bail!("transient embed failure");
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.embed_batch(texts).await
+    }
+    delegate!();
+}
+
+/// Sample `try_lock` every 10 ms until `stop` fires; `(samples, held)`.
+async fn sample_lock(m: Arc<tokio::sync::Mutex<()>>, stop: &Notify) -> (u32, u32) {
+    let (mut samples, mut held) = (0, 0);
+    loop {
+        tokio::select! {
+            () = stop.notified() => break,
+            () = tokio::time::sleep(Duration::from_millis(10)) => {
+                samples += 1;
+                held += u32::from(m.try_lock().is_err());
+            }
+        }
+    }
+    (samples, held)
+}
+
+#[tokio::test]
+async fn backfill_embed_and_retry_sleeps_run_outside_write_mutex() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let e: Emb = Arc::new(FlakyGate {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        calls: Default::default(),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let m = h.write_mutex_for_test();
+    let opts = backfill_opts(2, Duration::from_millis(200));
+    let (report, (samples, held)) = tokio::join!(h.backfill_with(opts, &e), async {
+        let (mut samples, mut held) = sample_lock(m.clone(), &entered).await;
+        samples += 1;
+        held += u32::from(m.try_lock().is_err());
+        release.notify_one();
+        (samples, held)
+    });
+    assert!(samples >= 5, "the retry sleep was sampled: {samples}");
+    assert_eq!(held, 0, "write_mutex held during embed or sleep");
+    assert_eq!(report.unwrap().repaired, 1);
+    assert!(full(&h, id));
+}
+
+#[tokio::test]
+async fn backfill_lock_timeout_returns_an_error_naming_the_palace() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let m = h.write_mutex_for_test();
+    let held = m.lock().await;
+    // Precedent: `timeout_tests` sets this name the same way.
+    unsafe { std::env::set_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", "0") };
+    let result = h
+        .backfill_with(backfill_opts(1, Duration::ZERO), &chunking())
+        .await;
+    unsafe { std::env::remove_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS") };
+    drop(held);
+    let err = result.expect_err("a lock timeout must not be skipped silently");
+    assert!(format!("{err:#}").contains("chunk-store"), "{err:#}");
+    assert_eq!(shape(&h, id), Some((1, 0)));
+}
+
+#[tokio::test]
+async fn backfill_upsert_failure_is_retried_without_holding_the_lock_between_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let m = h.write_mutex_for_test();
+    let done = Notify::new();
+    let opts = backfill_opts(3, Duration::from_millis(200));
+    let (report, (samples, held)) = tokio::join!(
+        async {
+            let r = h.backfill_with(opts, &picky(true)).await;
+            done.notify_one();
+            r
+        },
+        sample_lock(m, &done)
+    );
+    let report = report.unwrap();
+    assert_eq!(report.still_failing, 1);
+    assert!(samples >= 20, "{samples}");
+    assert!(
+        held * 10 < samples,
+        "lock held between attempts: {held}/{samples}"
+    );
+    let ledger = embed_ledger::load(dir.path());
+    assert_eq!((ledger[0].drawer_id, ledger[0].attempts), (id, 3));
+}

@@ -9,7 +9,7 @@
 //! takes the mutex only to recheck the drawer text and run one upsert.
 //! Test: `chunk_backfill_tests`.
 
-use super::deferred_embed::EmbedLoss;
+use super::deferred_embed::{EmbedLoss, RetryPolicy, with_retry};
 use super::embed_repair::EmbedHealth;
 use super::embed_store::{embed_planned_within, plan_chunks};
 use super::handle::PalaceHandle;
@@ -484,4 +484,96 @@ async fn embed_bounded(
         Ok(Err(e)) => Err(format!("{e:#}")),
         Err(_) => Err(format!("slice embed timed out after {slice_timeout:?}")),
     }
+}
+
+/// Outcome of [`PalaceHandle::repair_one`] on the operator path.
+#[derive(Debug)]
+pub(crate) enum Repair {
+    /// The new group committed after this many attempts.
+    Repaired(u32),
+    /// The drawer was forgotten or rewritten during the embed; nothing written.
+    Stale,
+    /// The split, embed or upsert failed after its retries.
+    Failed(EmbedLoss),
+    /// `write_mutex` was not granted in time; the run must stop.
+    Locked(ChunkCommitError),
+}
+
+impl PalaceHandle {
+    /// Re-embed one drawer for `backfill_with`.
+    ///
+    /// Why (#9735 Q5): `embed_and_store` upserts with no recheck, so a forget
+    /// during its embed left an orphan row; wrapping it in the lock would hold
+    /// writers across the embed and its retry sleeps.
+    /// What: [`embed_outside`] with retries and no lock, then
+    /// [`Self::commit_if_current`] per upsert attempt, sleeping between
+    /// attempts with the guard already dropped. A stale drawer is not retried.
+    /// Test: `backfill_forget_between_read_and_upsert_leaves_no_orphan_row`,
+    /// `backfill_upsert_failure_is_retried_without_holding_the_lock_between_attempts`.
+    pub(crate) async fn repair_one(
+        &self,
+        embedder: &Arc<dyn Embedder + Send + Sync>,
+        id: Uuid,
+        text: &str,
+        policy: &RetryPolicy,
+        lock_wait: Duration,
+    ) -> Repair {
+        let (vectors, embed_attempts) = match embed_outside(embedder, text, policy).await {
+            Ok(v) => v,
+            Err(loss) => return Repair::Failed(loss),
+        };
+        let total = policy.attempts.max(1);
+        let mut attempt = 1;
+        loop {
+            match self
+                .commit_if_current(id, text, vectors.clone(), lock_wait)
+                .await
+            {
+                Ok(Commit::Committed) => return Repair::Repaired(embed_attempts.max(attempt)),
+                Ok(Commit::Stale) => return Repair::Stale,
+                Err(e @ ChunkCommitError::LockWait { .. }) => return Repair::Locked(e),
+                Err(ChunkCommitError::Upsert { reason, .. }) if attempt >= total => {
+                    return Repair::Failed(EmbedLoss::Upsert {
+                        reason,
+                        attempts: total,
+                    });
+                }
+                // #9735 Q5: the guard dropped with `commit_if_current`.
+                Err(ChunkCommitError::Upsert { .. }) => {
+                    tokio::time::sleep(policy.delay_for(attempt)).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Split `text` once and embed it with retries, holding no lock.
+///
+/// Why (#9735 Q5): the embed and its retry sleeps must stay outside
+/// `write_mutex`.
+/// What: a split error is an `Embed` loss after one attempt (as in
+/// `embed_and_store`); each embed attempt runs under the scaled, clamped bound.
+/// Test: `backfill_embed_and_retry_sleeps_run_outside_write_mutex`.
+pub(crate) async fn embed_outside(
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+    text: &str,
+    policy: &RetryPolicy,
+) -> Result<(Vec<Vec<f32>>, u32), EmbedLoss> {
+    let chunks: Vec<String> = plan_chunks(embedder.as_ref(), text)
+        .map_err(|e| embed_loss(format!("{e:#}")))?
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let per_chunk = timeouts::embed_batch_timeout();
+    with_retry(policy, |_| {
+        let chunks = &chunks;
+        async move {
+            embed_planned_within(embedder.as_ref(), chunks, per_chunk)
+                .await
+                .map_err(|e| format!("{e:#}"))
+        }
+    })
+    .await
+    .map_err(|(reason, attempts)| EmbedLoss::Embed { reason, attempts })
 }
