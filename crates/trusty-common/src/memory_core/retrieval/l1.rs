@@ -13,7 +13,8 @@
 
 use super::handle::PalaceHandle;
 use super::open_sweep::{OPEN_WRITE_BUDGET, run_open_write};
-use super::types::L1_CAP;
+use super::scope::RecallScope;
+use super::types::{L1_CAP, RecallResult};
 use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
@@ -33,6 +34,25 @@ pub(super) fn select_l1(drawers: &[Drawer]) -> Vec<Drawer> {
     sorted.sort_by(super::types::drawer_listing_order);
     sorted.truncate(L1_CAP);
     sorted
+}
+
+/// L0 + L1 for a recall under `scope`.
+///
+/// Why: #9719 — the live L1 holds the newest drawers of every wing, so an
+/// unscoped L1 put another wing's drawer into a wing-scoped recall. A room is a
+/// topic, not an ownership boundary (ADR-0027 T7), so a room scope leaves L1 as
+/// the palace's baseline, as before.
+/// What: a `Wing` scope limits L1 to the rooms that wing owns, resolved
+/// fail-closed by [`RecallScope::allowed_room_ids`]; `All` and `Room` admit
+/// every room. L0 is never scoped.
+/// Test: `a_wing_scoped_recall_drops_another_wings_l1_drawer`,
+/// `wing_mcp::wing_scoped_write_then_recall_over_mcp`.
+pub fn retrieve_l0_l1_scoped(handle: &PalaceHandle, scope: &RecallScope) -> Vec<RecallResult> {
+    let allowed = match scope {
+        RecallScope::Wing(_) => scope.allowed_room_ids(&handle.kg),
+        RecallScope::All | RecallScope::Room(_) => None,
+    };
+    super::layers::l0_l1_admitted(handle, &allowed)
 }
 
 /// Whether open must gap-fill the drawer table from the L1 snapshot.

@@ -619,8 +619,13 @@ fn palace_without_legacy_kg_reports_none() {
 }
 
 /// Why (#8434): the L1 snapshot is a capped cache that the next flush
-/// rewrites; a legacy drawer present only there is not persisted, so both the
-/// dry run and the apply must treat it as missing and write it to `kg.redb`.
+/// rewrites; a legacy drawer present only there is not persisted, so the dry
+/// run must treat it as missing and the apply must leave it in `kg.redb`.
+/// #9722: the apply's Writer open may adopt that drawer from the snapshot
+/// before the importer runs, which moves it from `imported` to
+/// `already_live`. Either way no legacy drawer may be lost.
+/// What: every readable legacy drawer, and every drawer `kg.redb` held before,
+/// is in `kg.redb` after the apply, and the count matches.
 /// Test: itself.
 #[tokio::test]
 async fn l1_only_legacy_drawer_is_imported_to_redb() {
@@ -633,6 +638,24 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     l1.id = a;
     trusty_common::memory_core::store::L1Cache::save_l1_cache(&[l1], &palace.data_dir)
         .expect("seed L1 snapshot");
+    let kg_path = palace.data_dir.join("kg.redb");
+    let redb_ids = |p: &Path| -> HashSet<Uuid> {
+        KgStoreRedb::open(p)
+            .expect("open kg.redb")
+            .load_drawer_ids()
+            .expect("ids")
+            .into_iter()
+            .collect()
+    };
+    let legacy: HashSet<Uuid> = read_legacy_kg(&palace.data_dir)
+        .expect("read")
+        .expect("legacy kg.db present")
+        .drawers
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    let before: HashSet<Uuid> = legacy.union(&redb_ids(&kg_path)).copied().collect();
+    assert_eq!(before.len(), 3, "fixture: one live and two missing drawers");
 
     let scan = scan_report(&palace, false).expect("scan");
     assert_eq!((scan.already_live, scan.missing), (1, 2), "L1 is not live");
@@ -640,15 +663,18 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     let r = apply_report(&palace, data_root(&palace), false, false, false)
         .await
         .expect("apply");
-    assert_eq!((r.already_live, r.missing, r.imported), (1, 2, 2));
-    let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
-        .expect("reopen kg.redb")
-        .load_drawer_ids()
-        .expect("ids");
-    assert!(
-        ids.contains(&a),
-        "the L1-only legacy drawer must reach kg.redb"
+    assert_eq!(r.imported, r.missing, "every missing drawer was imported");
+    assert_eq!(
+        r.already_live + r.imported,
+        legacy.len(),
+        "every legacy drawer is accounted for: {r:?}"
     );
+    let after = redb_ids(&kg_path);
+    assert_eq!(after.len(), before.len(), "no drawer lost or invented");
+    for id in &before {
+        assert!(after.contains(id), "drawer {id} did not survive the import");
+    }
+    assert!(after.contains(&a), "the L1-only legacy drawer must reach kg.redb");
 }
 
 /// Why (#8434): a `Writer` open renames an unreadable `kg.redb` or vector

@@ -1,3 +1,4 @@
 Fixed
-- memory_core: L1 now follows the drawer table on a live palace handle; a drawer remembered, forgotten or imported after open reaches `retrieve_l0_l1` without a reopen (#9719). `PalaceHandle::l1_drawers` is now `Arc<RwLock<Vec<Drawer>>>` and `refresh_l1` takes `&self`.
+- memory_core: L1 now follows the drawer table on a live palace handle; a drawer remembered, forgotten or imported after open reaches `retrieve_l0_l1` without a reopen (#9719).
+- memory_core: L1 serves each drawer from its live drawer-table row, so an expiry, backdate or retired `fact_key` reaches L1 as it reaches L2; a wing-scoped recall (`recall_scoped`, `recall_deep_scoped`) no longer returns another wing's drawer from L1; and a drawer found by the L2/L3 lane is reported at that layer instead of as its L1 copy (#9719). New: `retrieval::retrieve_l0_l1_scoped`.
 - memory_core: a stale second palace handle can no longer revive a forgotten drawer at the next open. The first maintainer open persists any snapshot-only drawers and stamps a `drawers_authoritative` marker in `kg_schema`; a stamped palace no longer gap-fills its drawer table from `l1_cache.json` (#9722).

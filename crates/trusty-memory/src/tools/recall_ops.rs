@@ -85,8 +85,9 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// present, re-sorts by score descending, and truncates to `top_k`.
 /// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
-/// another room's drawer just because the daemon happened to be warming. L0/L1
-/// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
+/// another room's drawer just because the daemon happened to be warming. L1
+/// takes a wing scope but not a room scope, matching `retrieval::recall_scoped`
+/// (#9719).
 /// #5036: the palace is read off `handle`, never passed in. This is the one
 /// path where the lexical lane is the ONLY lane, so keying it on a caller's
 /// slug — which `open_palace` may have redirected through an alias — searched a
@@ -103,7 +104,8 @@ async fn recall_without_embedder(
     scope: &RecallScope,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
-    let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
+    // #9719: the live L1 follows the wing scope, as on the ready path.
+    let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1_scoped(handle, scope);
     // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
     // scope so a WING-scoped recall issued while the embedder is warming is
     // filtered too. Without that, the warming path would return unscoped

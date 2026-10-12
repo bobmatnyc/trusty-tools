@@ -117,6 +117,8 @@ pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_wi
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+// #9719: L0 + L1 under a recall scope; trusty-memory's warming lane uses it.
+pub use l1::retrieve_l0_l1_scoped;
 
 // #9390: the expired-slot refill bound. Public because trusty-memory's BM25
 // warming lane applies the same stop rule.

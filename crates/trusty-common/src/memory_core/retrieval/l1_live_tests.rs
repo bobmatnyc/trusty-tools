@@ -193,3 +193,98 @@ async fn a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped()
         "the snapshot-only drawer is durable once the marker is stamped"
     );
 }
+
+/// #9719: L1 serves each entry from its live drawer-table row.
+///
+/// Why: `l1_drawers` holds copies taken at the last write. A change made in
+/// place to the drawer table (an expiry, a backdate) reached L2 but not L1, so
+/// L1 served an expired slot and ranked a stale snapshot as fresh.
+/// What: remembers a drawer, then edits its row in place: a new `created_at`
+/// must reach the L1 result, and a past `expires_at` must drop it.
+/// Test: this test.
+#[tokio::test]
+async fn l1_serves_the_live_row_not_its_cached_copy() {
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().expect("tempdir");
+    let palace = disk_palace(dir.path(), "l1-live-row");
+    let handle = PalaceHandle::open(&palace).expect("open");
+    let id = remember(&handle, "Axolotls regrow their limbs").await;
+    let backdated = chrono::Utc::now() - chrono::Duration::days(30);
+    edit_row(&handle, id, |d| d.created_at = backdated);
+
+    let served = retrieve_l0_l1(&handle);
+    let row = served.iter().find(|r| r.drawer.id == id).expect("in L1");
+    assert_eq!(row.drawer.created_at, backdated, "L1 served a stale copy");
+
+    edit_row(&handle, id, |d| {
+        d.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+    });
+    assert!(
+        !l0_l1_ids(&handle).contains(&id),
+        "#9719: L1 served a drawer whose live row has expired"
+    );
+}
+
+fn edit_row(handle: &PalaceHandle, id: Uuid, edit: impl FnOnce(&mut Drawer)) {
+    let mut drawers = handle.drawers.write();
+    edit(drawers.iter_mut().find(|d| d.id == id).expect("row present"));
+}
+
+/// #9719: a wing scope bounds L1; a room scope and no scope do not.
+///
+/// Why: the live L1 holds the newest drawers of every wing, so an unscoped L1
+/// handed a wing-scoped recall another wing's drawer.
+/// What: one drawer per wing in L1; `retrieve_l0_l1_scoped` under the
+/// engineer wing serves only the engineer drawer, while `All` and a `Room`
+/// scope serve both.
+/// Test: this test.
+#[test]
+fn a_wing_scoped_recall_drops_another_wings_l1_drawer() {
+    let dir = tempdir().expect("tempdir");
+    let handle = super::tests::make_handle(dir.path());
+    let (engineer, eng_room) = super::tests::wing_with_room(&handle, "engineer", "Planning");
+    let (_pm, pm_room) = super::tests::wing_with_room(&handle, "pm", "Planning");
+    let eng = Drawer::new(eng_room, "the ingest retry budget is three");
+    let pm = Drawer::new(pm_room, "the launch review is on Thursday");
+    let (eng_id, pm_id) = (eng.id, pm.id);
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+    handle.refresh_l1();
+
+    let ids = |scope: &RecallScope| -> Vec<Uuid> {
+        retrieve_l0_l1_scoped(&handle, scope)
+            .iter()
+            .map(|r| r.drawer.id)
+            .collect()
+    };
+    let wing = ids(&RecallScope::Wing(engineer));
+    assert!(wing.contains(&eng_id), "the wing's own drawer is served");
+    assert!(!wing.contains(&pm_id), "#9719: another wing's L1 drawer leaked");
+    for scope in [RecallScope::All, RecallScope::Room(RoomType::Planning)] {
+        let all = ids(&scope);
+        assert!(all.contains(&eng_id) && all.contains(&pm_id), "{scope:?}");
+    }
+}
+
+/// #9719: a query-lane hit replaces its L1 copy in the merged recall.
+///
+/// Why: with a live L1 most lane hits are also L1 entries; kept as layer 1
+/// they escape the `min_score` floor and stop reading as query matches.
+/// What: `dedup_extend` over an L1 entry and a lane hit on the same drawer
+/// keeps the lane row; an L1 entry with no hit stays; a new hit is appended.
+/// Test: this test.
+#[test]
+fn a_lane_hit_replaces_its_l1_copy() {
+    let hit = Drawer::new(Uuid::new_v4(), "hit");
+    let kept = Drawer::new(Uuid::new_v4(), "kept");
+    let new = Drawer::new(Uuid::new_v4(), "new");
+    let row = |d: &Drawer, score: f32, layer: u8| RecallResult {
+        drawer: d.clone(),
+        score,
+        layer,
+    };
+    let mut base = vec![row(&hit, 0.9, 1), row(&kept, 0.1, 1)];
+    super::layers::dedup_extend(&mut base, vec![row(&hit, 0.7, 2), row(&new, 0.6, 2)]);
+    let got: Vec<(Uuid, u8)> = base.iter().map(|r| (r.drawer.id, r.layer)).collect();
+    assert_eq!(got, vec![(hit.id, 2), (kept.id, 1), (new.id, 2)]);
+}

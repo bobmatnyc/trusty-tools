@@ -25,7 +25,7 @@ fn init_embedder() {
     seed_shared_embedder_with_mock();
 }
 
-fn make_handle(dir: &std::path::Path) -> PalaceHandle {
+pub(super) fn make_handle(dir: &std::path::Path) -> PalaceHandle {
     let vs = UsearchStore::new(dir.join("idx.usearch"), 384).unwrap();
     let kg = KnowledgeGraph::open(&dir.join("kg.db")).unwrap();
     PalaceHandle::new(PalaceId::new("test"), "Test palace".to_string(), vs, kg)
@@ -2079,7 +2079,7 @@ use crate::memory_core::store::wings::{ensure_default_wing, resolve_or_create_wi
 
 /// Seed the default wing plus a named one, and return `(wing_id, room_id)`
 /// for a room called `label` inside it.
-fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
+pub(super) fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
     ensure_default_wing(&handle.kg).expect("seed default wing");
     let store = handle.kg.store();
     let (wing_id, _) = resolve_or_create_wing_sync(&store, wing).expect("create wing");
