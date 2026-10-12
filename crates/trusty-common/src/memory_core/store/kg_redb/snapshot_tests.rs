@@ -36,21 +36,30 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const PALACE: &str = "snap-p1";
+pub(super) const PALACE: &str = "snap-p1";
 const SEED_DRAWERS: usize = 600;
 
 /// An on-disk palace under `<tmp>/palaces/<PALACE>` with every primary file.
-struct Fixture {
+pub(super) struct Fixture {
     _tmp: TempDir,
-    root: PathBuf,
-    handle: Arc<PalaceHandle>,
-    chat: ChatSessionStore,
+    pub(super) root: PathBuf,
+    pub(super) handle: Arc<PalaceHandle>,
+    pub(super) chat: ChatSessionStore,
     rooms: Vec<Uuid>,
 }
 
 impl Fixture {
     fn palace_dir(&self) -> PathBuf {
         self.root.join("palaces").join(PALACE)
+    }
+
+    /// The legacy-layout backup root, `<canonical data root>/backups/manual`.
+    pub(super) fn manual_root(&self) -> PathBuf {
+        self.root
+            .canonicalize()
+            .expect("canonical root")
+            .join("backups")
+            .join("manual")
     }
 }
 
@@ -79,7 +88,7 @@ fn write_pair(store: &KgStoreRedb, room: Uuid, n: u64) {
         .expect("write pair");
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -157,9 +166,18 @@ fn snapshot_under_writer(fx: &Fixture) -> (PalaceSnapshot, u64, u64) {
         std::thread::sleep(Duration::from_millis(1));
     }
     let before = written.load(Ordering::SeqCst);
-    let dest = fx.root.join("snap");
-    let snap =
-        snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), slow_copy).expect("snapshot");
+    let snap = snapshot_palace(
+        &fx.handle,
+        Some(&fx.chat),
+        Some(Path::new("snap")),
+        slow_copy,
+    )
+    .expect("snapshot");
+    assert_eq!(
+        snap.dir,
+        fx.manual_root().join("snap"),
+        "#9282: a name under the root"
+    );
     let after = written.load(Ordering::SeqCst);
     stop.store(true, Ordering::SeqCst);
     writer.join().expect("writer thread");
@@ -249,10 +267,7 @@ fn a_journal_torn_final_line_is_not_copied() {
     let snap = fx.handle.snapshot(Some(&fx.chat), None).expect("snapshot");
     let copied = std::fs::read(snap.dir.join(MAINTENANCE_LOG_FILENAME)).expect("copy");
     assert_eq!(copied, b"{\"a\":1}\n{\"b\":2}\n");
-    assert!(
-        snap.dir
-            .starts_with(fx.root.join("backups").join("manual").join(PALACE))
-    );
+    assert!(snap.dir.starts_with(fx.manual_root().join(PALACE)));
     assert_eq!(complete_lines(b"no newline at all"), b"");
 }
 
@@ -270,7 +285,7 @@ fn drawer_count_lines_are_filtered_to_the_palace() {
     );
 }
 
-fn listing(dir: &Path) -> Vec<String> {
+pub(super) fn listing(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .expect("list")
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
@@ -379,14 +394,11 @@ fn alter_after_fsync(step: SnapshotStep, path: &Path) -> io::Result<()> {
 /// Run a snapshot with `hook`; it must fail and leave no snapshot directory.
 fn assert_fails_closed(hook: super::SnapshotHook) -> SnapshotError {
     let fx = fixture();
-    let dest = fx.root.join("snap");
-    let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), hook)
+    let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(Path::new("snap")), hook)
         .expect_err("fault must surface as Err");
-    assert!(!dest.exists(), "no partial snapshot may exist");
-    assert!(
-        !fx.root.join("snap.tmp").exists(),
-        "staging must be removed"
-    );
+    let root = fx.manual_root();
+    assert!(!root.join("snap").exists(), "no partial snapshot may exist");
+    assert!(!root.join("snap.tmp").exists(), "staging must be removed");
     err
 }
 
@@ -443,11 +455,16 @@ fn an_unreadable_journal_fails_the_snapshot() {
     let journal = fx.palace_dir().join(MAINTENANCE_LOG_FILENAME);
     std::fs::remove_file(&journal).expect("rm");
     std::fs::create_dir(&journal).expect("a directory cannot be read as a file");
-    let dest = fx.root.join("snap");
-    let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), no_fault)
-        .expect_err("journal read must fail");
+    let err = snapshot_palace(
+        &fx.handle,
+        Some(&fx.chat),
+        Some(Path::new("snap")),
+        no_fault,
+    )
+    .expect_err("journal read must fail");
     assert!(matches!(err, SnapshotError::Io { op: "read", .. }), "{err}");
-    assert!(!dest.exists() && !fx.root.join("snap.tmp").exists());
+    let root = fx.manual_root();
+    assert!(!root.join("snap").exists() && !root.join("snap.tmp").exists());
 }
 
 /// Fail-open check (#9282): a restore write failure leaves no target behind.
@@ -487,203 +504,32 @@ fn a_restored_copy_altered_after_fsync_fails_verification() {
     );
 }
 
-/// Fail-open check (#9282): the snapshot refuses to overwrite a destination.
+/// Fail-open check (#9282): the snapshot refuses to overwrite a destination
+/// under the backup root, a directory and a dangling symlink alike; the
+/// dangling link is never followed (`try_exists` reads it as absent).
+#[cfg(unix)]
 #[test]
 fn an_existing_destination_is_refused() {
     let fx = fixture();
-    let dest = fx.root.join("snap");
+    let root = fx.manual_root();
+    let dest = root.join("snap");
     std::fs::create_dir_all(&dest).expect("dest");
-    let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), no_fault)
-        .expect_err("existing destination");
-    assert!(
-        matches!(err, SnapshotError::DestinationExists { .. }),
-        "{err}"
-    );
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).expect("link");
+    for (name, path) in [("snap", &dest), ("dangling", &root.join("dangling"))] {
+        let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(Path::new(name)), no_fault)
+            .expect_err("existing destination");
+        assert!(
+            matches!(&err, SnapshotError::DestinationExists { path: p } if p == path),
+            "{name}: {err}"
+        );
+    }
     assert!(listing(&dest).is_empty());
-}
-
-/// Every path under `dir`, relative and sorted.
-#[cfg(unix)]
-fn tree(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut todo = vec![dir.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        for e in std::fs::read_dir(&d).expect("list") {
-            let p = e.expect("entry").path();
-            if p.is_dir() && !p.is_symlink() {
-                todo.push(p.clone());
-            }
-            out.push(p.strip_prefix(dir).expect("prefix").to_path_buf());
-        }
-    }
-    out.sort();
-    out
-}
-
-/// Fail-open check (#9282): a destination directly in the palace registry
-/// directory is refused before anything is written. A backup there holds a
-/// `palace.json`, so the palace lister would take it for a palace.
-/// What: the legacy layout (`<root>/palaces/<id>`); the registry dir named
-/// directly, through a symlink, and through a missing dir and `..`. Each is
-/// refused, and the tree under the data root is unchanged: no backup, no
-/// `.tmp` staging dir, no created parent.
-#[cfg(unix)]
-#[test]
-fn a_destination_in_the_registry_is_refused_and_writes_nothing() {
-    let fx = fixture();
-    let registry = fx.root.join("palaces");
-    let link = fx.root.join("registry-link");
-    std::os::unix::fs::symlink(&registry, &link).expect("symlink");
-    let before = tree(&fx.root);
-    for dest in [
-        registry.join("bk"),
-        link.join("bk-via-link"),
-        registry.join("missing").join("..").join("bk-dotdot"),
-    ] {
-        let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), no_fault)
-            .expect_err("a destination in the registry dir must be refused");
-        assert!(
-            err.to_string().contains("palace registry directory"),
-            "{}: {err}",
-            dest.display()
-        );
-        assert_eq!(tree(&fx.root), before, "{} wrote something", dest.display());
-    }
-}
-
-/// A small flat-layout palace: `<root>/flat-p`, so the registry is `<root>`
-/// itself and no `<root>/palaces` exists. Returns the canonical root.
-#[cfg(unix)]
-fn flat_palace() -> (TempDir, PathBuf, Arc<PalaceHandle>) {
-    seed_shared_embedder_with_mock();
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path().canonicalize().expect("canonical root");
-    let palace = Palace {
-        id: PalaceId::new("flat-p"),
-        name: "flat-p".into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir: root.join("flat-p"),
-    };
-    PalaceStore::save_palace(&palace).expect("palace.json");
-    let handle = PalaceHandle::open(&palace).expect("open palace");
-    (tmp, root, handle)
-}
-
-/// Fail-open check (#9282, delta critic BLOCKER): in the flat layout a
-/// destination anywhere under `<root>/palaces` is refused before any write.
-/// Creating `palaces/` there makes the next start take it as the registry
-/// (`palace_registry_dir_from`), and every real palace vanishes.
-/// What: `palaces/bk`, `palaces/sub/bk`, and `Palaces/bk` (the same
-/// directory on a case-insensitive filesystem). Each is refused, and the
-/// tree is unchanged: no `palaces/`.
-#[cfg(unix)]
-#[test]
-fn a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing() {
-    let (_tmp, root, handle) = flat_palace();
-    let before = tree(&root);
-    for dest in [
-        root.join("palaces").join("bk"),
-        root.join("palaces").join("sub").join("bk"),
-        root.join("Palaces").join("bk"),
-    ] {
-        let err = snapshot_palace(&handle, None, Some(&dest), no_fault)
-            .expect_err("a destination under <root>/palaces must be refused");
-        assert!(
-            err.to_string().contains("switch its palace registry"),
-            "{}: {err}",
-            dest.display()
-        );
-        assert_eq!(tree(&root), before, "{} wrote something", dest.display());
-    }
-    assert!(!root.join("palaces").exists() && !root.join("Palaces").exists());
-}
-
-/// Restores a directory's mode on drop, so the tempdir can be removed.
-#[cfg(unix)]
-struct ModeGuard(PathBuf, u32);
-
-#[cfg(unix)]
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
-    }
-}
-
-/// Fail-closed check (#9282, delta critic MEDIUM): a destination whose
-/// prefix cannot be resolved is an `Io { op: "resolve" }` error, never a
-/// pass. `resolve_existing_prefix` returns any error other than not-found.
-/// What: `dest` = `<locked>/bk` with `<locked>` at mode 000, so
-/// canonicalising `<locked>/bk` fails with EACCES. Skipped as root, which
-/// ignores the mode.
-#[cfg(unix)]
-#[test]
-fn an_unresolvable_dest_prefix_is_an_error_and_writes_nothing() {
-    use std::os::unix::fs::PermissionsExt;
-    // SAFETY: `geteuid` has no preconditions.
-    if unsafe { libc::geteuid() } == 0 {
-        eprintln!("skipped: root ignores mode 000");
-        return;
-    }
-    let (_tmp, root, handle) = flat_palace();
-    let elsewhere = tempfile::tempdir().expect("elsewhere");
-    let locked = elsewhere.path().join("locked");
-    std::fs::create_dir(&locked).expect("locked dir");
-    let before = tree(&root);
-    let err = {
-        let _restore = ModeGuard(locked.clone(), 0o755);
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
-            .expect("chmod 000");
-        snapshot_palace(&handle, None, Some(&locked.join("bk")), no_fault)
-            .expect_err("an unresolvable destination must be refused")
-    };
-    assert!(
-        matches!(&err, SnapshotError::Io { op: "resolve", .. }),
-        "{err}"
+    assert_eq!(
+        listing(&root),
+        vec!["dangling".to_string(), "snap".to_string()]
     );
-    assert_eq!(tree(&root), before);
-    assert!(listing(&locked).is_empty(), "nothing under the locked dir");
-}
-
-/// Fail-closed check (#9282): a palace directory with no parent has no
-/// registry to compare against; the guard errors instead of passing.
-#[cfg(unix)]
-#[test]
-fn a_palace_dir_without_a_parent_is_refused() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let err = super::check_snapshot_dest(Path::new("/"), &tmp.path().join("bk"))
-        .expect_err("a palace dir with no parent must be refused");
     assert!(
-        matches!(&err, SnapshotError::Io { op: "resolve", .. }),
-        "{err}"
+        !root.join("nowhere").exists(),
+        "the dangling link was followed"
     );
-}
-
-/// Crash check (#9282, delta critic CRITICAL): a self-referencing dangling
-/// symlink in the destination is an error, never a stack overflow. With
-/// `evil -> missing/../evil`, canonicalising `evil` fails with ENOENT, not
-/// ELOOP, so a resolver that follows dangling links recursed forever and one
-/// `palace_backup` call aborted the daemon.
-/// What: `dest` = `<dir>/evil/bk`. The call returns an error (the process
-/// does not abort), and neither tree changes: no `bk`, no `missing`, no
-/// `palaces/`.
-#[cfg(unix)]
-#[test]
-fn a_self_referencing_dangling_symlink_dest_is_an_error_not_a_crash() {
-    let (_tmp, root, handle) = flat_palace();
-    let elsewhere = tempfile::tempdir().expect("elsewhere");
-    let dir = elsewhere.path();
-    std::os::unix::fs::symlink(
-        Path::new("missing").join("..").join("evil"),
-        dir.join("evil"),
-    )
-    .expect("symlink");
-    let before_root = tree(&root);
-    let before_dir = tree(dir);
-    snapshot_palace(&handle, None, Some(&dir.join("evil").join("bk")), no_fault)
-        .expect_err("a destination through a dangling symlink must fail");
-    assert_eq!(tree(&root), before_root, "the data root changed");
-    assert_eq!(tree(dir), before_dir, "the destination dir changed");
-    assert!(!dir.join("missing").exists() && !root.join("palaces").exists());
 }

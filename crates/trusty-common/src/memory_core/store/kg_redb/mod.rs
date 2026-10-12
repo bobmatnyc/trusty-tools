@@ -46,8 +46,8 @@ pub use copy_swap::{
 };
 pub use drawer_authority::KG_SCHEMA_DRAWERS_AUTHORITATIVE;
 pub use snapshot::{
-    PalaceSnapshot, SnapshotError, SnapshotFile, SnapshotManifest, check_snapshot_dest,
-    restore_palace_snapshot,
+    PalaceSnapshot, SnapshotError, SnapshotFile, SnapshotManifest, check_backup_name,
+    check_snapshot_dest, restore_palace_snapshot,
 };
 pub use stats::{KgRedbStats, KgTableStats};
 #[cfg(test)]

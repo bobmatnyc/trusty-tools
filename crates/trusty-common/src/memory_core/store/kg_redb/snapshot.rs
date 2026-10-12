@@ -38,10 +38,13 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[path = "snapshot_dest.rs"]
+mod dest;
 #[path = "snapshot_io.rs"]
 mod io_util;
 #[path = "snapshot_restore.rs"]
 mod restore;
+pub use dest::check_backup_name;
 use io_util::{
     StagingDir, copy_verified, hash_file, io_err, redb_err, resolve_existing_prefix, sibling,
     sync_file, write_verified,
@@ -96,6 +99,18 @@ pub enum SnapshotError {
         "snapshot destination {path} is under {palaces}; creating that directory would make the daemon switch its palace registry to it on the next start, and every existing palace would disappear from the daemon; choose a directory outside it. Nothing was written"
     )]
     DestinationSwitchesRegistry { path: PathBuf, palaces: PathBuf },
+    /// The backup name is not a relative path of plain segments (#9282).
+    #[error(
+        "backup name {name:?} is refused: {reason}; a backup name is a relative path of plain segments under the palace's backup root. No backup was written"
+    )]
+    InvalidBackupName { name: PathBuf, reason: String },
+    /// A segment of the backup name below the backup root is a symlink or not
+    /// a directory, or a created directory resolved outside the root (#9282).
+    #[error("backup destination component {path} is unsafe: {reason}. No backup was written")]
+    UnsafeBackupComponent { path: PathBuf, reason: String },
+    /// A fixed segment of the backup root is a symlink or not a directory (#9282).
+    #[error("backup root component {path} is unsafe: {reason}. No backup was written")]
+    BackupRootUnsafe { path: PathBuf, reason: String },
     /// A filesystem call failed.
     #[error("{op} {path}: {source}")]
     Io {
@@ -217,6 +232,8 @@ pub(crate) enum SnapshotStep {
     Verify,
     /// Before the manifest is written.
     WriteManifest,
+    /// Before a missing parent segment of the backup name is created (#9282).
+    CreateDest,
 }
 
 /// Test seam; production passes [`no_fault`].
@@ -644,6 +661,9 @@ fn write_manifest(dir: &Path, manifest: &SnapshotManifest, hook: SnapshotHook) -
     std::fs::rename(&tmp, &path).map_err(io_err("rename", &path))
 }
 
+#[cfg(test)]
+#[path = "snapshot_dest_tests.rs"]
+mod dest_tests;
 #[cfg(test)]
 #[path = "snapshot_tests.rs"]
 mod tests;

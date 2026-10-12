@@ -127,8 +127,9 @@ async fn palace_backup_manifest_counts_equal_the_palace_counts() {
     assert_eq!(out["room_count"], info["room_count"], "{out} vs {info}");
     assert_eq!(out["vector_index_included"], false, "{out}");
     let dir = PathBuf::from(out["dir"].as_str().expect("dir"));
-    assert!(
-        dir.starts_with(fx.tmp.path().join(".trusty-memory/backups/manual/bk-round")),
+    assert_eq!(
+        dir.parent(),
+        Some(flat_manual(fx.tmp.path()).join("bk-round").as_path()),
         "default destination: {}",
         dir.display()
     );
@@ -207,9 +208,18 @@ async fn palace_backup_lends_the_cached_chat_store() {
     assert!(dir.join("chat_sessions.redb").is_file());
 }
 
+/// The flat-layout backup root of an `AppState` data root, canonical.
+fn flat_manual(data_root: &Path) -> PathBuf {
+    data_root
+        .canonicalize()
+        .expect("canonical data root")
+        .join(".trusty-memory/backups/manual")
+}
+
 /// Why (#9282): every refusal must be an error, never a partial backup.
-/// What: a relative `dest`, an existing `dest`, a non-string `dest` and a
-/// palace that does not exist each fail, and none leaves a directory behind.
+/// What: an absolute `dest`, a `dest` with a NUL byte, an existing `dest`
+/// under the backup root, a non-string `dest` and a palace that does not
+/// exist each fail, and none leaves a directory behind.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn palace_backup_error_arms_fail_and_write_nothing() {
@@ -217,15 +227,24 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
     fx.palace("bk-err");
     let root = fx.tmp.path();
 
-    let rel = raw(
+    let abs = raw(
         &fx.state,
         "palace_backup",
-        json!({"palace": "bk-err", "dest": "rel/dir"}),
+        json!({"palace": "bk-err", "dest": root.join("abs/dir")}),
     )
     .await;
-    let err = rel.expect_err("a relative dest is refused");
-    assert!(err.contains("absolute"), "{err}");
-    assert!(!root.join("rel").exists());
+    let err = abs.expect_err("an absolute dest is refused");
+    assert!(err.contains("absolute path"), "{err}");
+    assert!(!root.join("abs").exists());
+
+    let nul = raw(
+        &fx.state,
+        "palace_backup",
+        json!({"palace": "bk-err", "dest": format!("a{}b", char::from(0u8))}),
+    )
+    .await;
+    let err = nul.expect_err("a NUL byte is refused");
+    assert!(err.contains("NUL byte"), "{err}");
 
     let typed = raw(
         &fx.state,
@@ -237,14 +256,12 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
         .expect_err("a non-string dest is refused")
         .contains("dest"));
 
-    // Outside the registry dir (`root`), which is refused for its own reason.
-    let elsewhere = tempfile::tempdir().expect("elsewhere");
-    let existing = elsewhere.path().join("already-here");
-    std::fs::create_dir(&existing).expect("mkdir");
+    let existing = flat_manual(root).join("already-here");
+    std::fs::create_dir_all(&existing).expect("mkdir");
     let exists = raw(
         &fx.state,
         "palace_backup",
-        json!({"palace": "bk-err", "dest": existing}),
+        json!({"palace": "bk-err", "dest": "already-here"}),
     )
     .await;
     assert!(
@@ -266,9 +283,7 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
         !root.join("no-such-palace").exists(),
         "a failed backup must not create the palace dir"
     );
-    assert!(!root
-        .join(".trusty-memory/backups/manual/no-such-palace")
-        .exists());
+    assert!(!flat_manual(root).join("no-such-palace").exists());
 }
 
 /// Every path under `dir`, relative and sorted.
@@ -288,13 +303,12 @@ fn tree(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Why (#9282, Opus critic HIGH): in the flat layout the data root IS the
-/// palace registry dir. A backup written there holds a `palace.json`, so the
-/// palace lister takes it for a palace, and after a restart the live handle
-/// can point at the backup.
-/// What: `dest` = `<registry>/bk`, named directly and through a symlink to
-/// the registry. Each call is refused with the registry error, and the tree
-/// under the registry is unchanged: no `bk`, no `bk.tmp` staging dir.
+/// Why (#9282, option C ruling A): a `dest` is a name under the backup root;
+/// any absolute path is refused before a write, so a backup can never land
+/// in the registry dir (listed as a palace) or create `<root>/palaces`.
+/// What: absolute `<registry>/bk`, the same through a symlink, `<root>/palaces/bk`,
+/// `<root>/palaceſ/bk`, and a path inside the backup root. Each is refused
+/// as an absolute name, and the data root and the link's dir are unchanged.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn palace_backup_refuses_a_dest_in_the_registry_dir() {
@@ -304,70 +318,105 @@ async fn palace_backup_refuses_a_dest_in_the_registry_dir() {
     let elsewhere = tempfile::tempdir().expect("elsewhere");
     let link = elsewhere.path().join("registry-link");
     std::os::unix::fs::symlink(&registry, &link).expect("symlink");
-    let before = tree(&registry);
-    for dest in [registry.join("bk"), link.join("bk-via-link")] {
+    let (before, before_else) = (tree(&registry), tree(elsewhere.path()));
+    for dest in [
+        registry.join("bk"),
+        link.join("bk-via-link"),
+        registry.join("palaces").join("bk"),
+        registry.join("palace\u{17f}").join("bk"),
+        flat_manual(&registry).join("inside"),
+    ] {
         let res = raw(
             &fx.state,
             "palace_backup",
             json!({"palace": "bk-reg", "dest": dest}),
         )
         .await;
-        let err = res.expect_err("a dest in the registry dir must be refused");
-        assert!(
-            err.contains("palace registry directory"),
-            "{}: {err}",
-            dest.display()
-        );
+        let err = res.expect_err("an absolute dest must be refused");
+        assert!(err.contains("absolute path"), "{}: {err}", dest.display());
+        assert_eq!(tree(&registry), before, "{} wrote", dest.display());
         assert_eq!(
-            tree(&registry),
-            before,
-            "{} wrote something",
+            tree(elsewhere.path()),
+            before_else,
+            "{} wrote",
             dest.display()
         );
     }
+    assert!(!registry.join("palaces").exists(), "palaces/ was created");
 }
 
-/// Why (#9282, delta critic BLOCKER): in the flat layout a backup under
-/// `<data root>/palaces` creates that directory, and the next start takes it
-/// as the palace registry, so every real palace vanishes from the daemon.
-/// What: `dest` = `<root>/palaces/bk` and `<root>/palaces/sub/bk`. Each call
-/// is refused with the registry-switch error, and the tree under the data
-/// root is unchanged: no `palaces/`.
+/// Why (#9282, option C): a symlinked segment below the backup root would
+/// carry the backup anywhere the link points.
+/// What: `<backup root>/out -> elsewhere`, `dest` = `out/bk`. Refused as an
+/// unsafe component; `elsewhere` stays empty and the data root unchanged.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn palace_backup_refuses_a_flat_layout_dest_under_palaces() {
+async fn palace_backup_refuses_a_symlinked_dest_component() {
     let fx = Fixture::new();
-    fx.palace("bk-switch");
+    fx.palace("bk-link");
     let root = fx.tmp.path().to_path_buf();
+    let manual = flat_manual(&root);
+    std::fs::create_dir_all(&manual).expect("root");
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    std::os::unix::fs::symlink(elsewhere.path(), manual.join("out")).expect("symlink");
     let before = tree(&root);
-    for dest in [
-        root.join("palaces").join("bk"),
-        root.join("palaces").join("sub").join("bk"),
-    ] {
-        let res = raw(
+    let res = raw(
+        &fx.state,
+        "palace_backup",
+        json!({"palace": "bk-link", "dest": "out/bk"}),
+    )
+    .await;
+    let err = res.expect_err("a symlinked component must be refused");
+    assert!(err.contains("is unsafe"), "{err}");
+    assert_eq!(tree(&root), before);
+    assert_eq!(std::fs::read_dir(elsewhere.path()).expect("ls").count(), 0);
+}
+
+/// Why (#9282, `palaceſ` hole): on APFS `palaceſ` case-folds to `palaces`.
+/// Under the backup root that is harmless: no `<root>/palaces` appears, so
+/// the next start keeps the same registry and lists the same palaces.
+/// What: relative `palaceſ/bk` and `team/weekly/bk` through the tool land at
+/// `<backup root>/<name>`; `palace_registry_dir_from` still picks the root.
+/// Prints whether this filesystem folded the name.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_backup_long_s_and_nested_names_land_under_the_backup_root() {
+    let fx = Fixture::new();
+    fx.palace("bk-long-s");
+    let root = fx.tmp.path().to_path_buf();
+    let manual = flat_manual(&root);
+    for name in ["palace\u{17f}/bk", "team/weekly/bk"] {
+        let out = raw(
             &fx.state,
             "palace_backup",
-            json!({"palace": "bk-switch", "dest": dest}),
+            json!({"palace": "bk-long-s", "dest": name}),
         )
-        .await;
-        let err = res.expect_err("a dest under <root>/palaces must be refused");
-        assert!(
-            err.contains("switch its palace registry"),
-            "{}: {err}",
-            dest.display()
-        );
-        assert_eq!(tree(&root), before, "{} wrote something", dest.display());
+        .await
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dir = PathBuf::from(out["dir"].as_str().expect("dir"));
+        assert_eq!(dir, manual.join(name), "{name}");
+        assert!(dir.join("manifest.json").is_file(), "{name}");
     }
-    assert!(!root.join("palaces").exists(), "palaces/ was created");
+    assert!(!root.join("palaces").exists(), "<root>/palaces was created");
+    assert_eq!(
+        trusty_common::palace_alias::palace_registry_dir_from(root.clone()),
+        root,
+        "the next start would switch the registry"
+    );
+    eprintln!(
+        "fold probe: palace\u{17f} aliases palaces on this filesystem: {}",
+        manual.join("palaces").exists()
+    );
 }
 
 /// The missing first components of the `..` rows (#9282, round-3 delta
-/// critic CRITICAL): `<root>/palaces/../l/bk` and its case variant.
+/// critic CRITICAL): `palaces/../l/bk` and its case variant.
 const DOTDOT_ROWS: [&str; 2] = ["palaces", "Palaces"];
 
-/// `<root>/<missing>/../l/bk`.
-fn dotdot_dest(root: &Path, missing: &str) -> PathBuf {
-    root.join(missing).join("..").join("l").join("bk")
+/// The `..` destinations for one row: relative, then absolute under `root`.
+fn dotdot_dests(root: &Path, missing: &str) -> [PathBuf; 2] {
+    let rel = Path::new(missing).join("..").join("l").join("bk");
+    [rel.clone(), root.join(rel)]
 }
 
 /// What one `..` row got wrong, empty when it was refused and wrote nothing.
@@ -379,9 +428,14 @@ fn dotdot_row_problems(
     outcome: Result<String, String>,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    let want = if dest.is_absolute() {
+        "absolute path"
+    } else {
+        "'..' segment"
+    };
     match outcome {
         Ok(ok) => out.push(format!("{}: not refused: {ok}", dest.display())),
-        Err(e) if !e.contains("which does not exist") => {
+        Err(e) if !e.contains(want) => {
             out.push(format!("{}: wrong error: {e}", dest.display()));
         }
         Err(_) => {}
@@ -397,12 +451,11 @@ fn dotdot_row_problems(
     out
 }
 
-/// Why (#9282, round-3 delta critic CRITICAL): the resolver popped `..`
-/// textually after a missing component, so `<root>/palaces/../l/bk` passed
-/// the guard as `<root>/l/bk`, and the create then made `<root>/palaces`:
-/// in the flat layout the next start switches the registry to it.
-/// What: each row in a fresh flat data root, through the tool. Each is an
-/// error naming the missing component, and the data root is unchanged: no
+/// Why (#9282, round-3 delta critic CRITICAL): `palaces/../l/bk` once passed
+/// the guard as `l/bk`, and the create then made `<root>/palaces`: in the
+/// flat layout the next start switches the registry to it.
+/// What: each row, relative and absolute, in a fresh flat data root, through
+/// the tool. Each is refused as a name, and the data root is unchanged: no
 /// `palaces`, `Palaces`, `l`. Every row is checked before the assert.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -413,15 +466,16 @@ async fn palace_backup_refuses_dotdot_after_a_missing_component() {
         fx.palace("bk-dotdot");
         let root = fx.tmp.path().to_path_buf();
         let before = tree(&root);
-        let dest = dotdot_dest(&root, missing);
-        let res = raw(
-            &fx.state,
-            "palace_backup",
-            json!({"palace": "bk-dotdot", "dest": dest}),
-        )
-        .await;
-        let outcome = res.map(|v| v.to_string());
-        problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+        for dest in dotdot_dests(&root, missing) {
+            let res = raw(
+                &fx.state,
+                "palace_backup",
+                json!({"palace": "bk-dotdot", "dest": dest}),
+            )
+            .await;
+            let outcome = res.map(|v| v.to_string());
+            problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+        }
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
@@ -432,10 +486,17 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trusty-memory"))
 }
 
-/// Run the binary with `override_dir` as `TRUSTY_DATA_DIR_OVERRIDE`.
+/// Run the binary with `override_dir` as `TRUSTY_DATA_DIR_OVERRIDE`, from
+/// that dir, so nothing a test passes can land in the crate directory.
 fn run(override_dir: &Path, args: &[&str]) -> Output {
+    run_in(override_dir, override_dir, args)
+}
+
+/// [`run`] from the working directory `cwd`.
+fn run_in(override_dir: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
+        .current_dir(cwd)
         .env("TRUSTY_DATA_DIR_OVERRIDE", override_dir)
         .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
         .env("RUST_LOG", "warn")
@@ -502,20 +563,38 @@ fn counts_under(data_dir: &Path, id: &str) -> (usize, usize) {
     )
 }
 
-/// Write a backup of `id` from `src` into `dest` through the binary.
-fn cli_backup(src: &Path, id: &str, dest: &Path) {
-    let out = run(
-        src,
-        &[
-            "palace",
-            "backup",
-            id,
-            "--dest",
-            dest.to_str().expect("utf8"),
-        ],
-    );
+/// The directory a successful `palace backup` reports ("written to <dir>").
+fn written_dir(out: &Output) -> PathBuf {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().next().unwrap_or_default();
+    let (_, dir) = line
+        .split_once(" written to ")
+        .unwrap_or_else(|| panic!("no backup dir in: {}", text(out)));
+    PathBuf::from(dir)
+}
+
+/// The legacy-layout backup root of a data dir, canonical.
+fn legacy_manual(data_dir: &Path) -> PathBuf {
+    data_dir
+        .canonicalize()
+        .expect("canonical")
+        .join("backups/manual")
+}
+
+/// Back up `id` from `src` through the binary to the default directory,
+/// and return that directory.
+fn cli_backup(src: &Path, id: &str) -> PathBuf {
+    let out = run(src, &["palace", "backup", id]);
     assert!(out.status.success(), "backup: {}", text(&out));
-    assert!(dest.join("manifest.json").is_file(), "{}", text(&out));
+    let dir = written_dir(&out);
+    assert_eq!(
+        dir.parent(),
+        Some(legacy_manual(&data_dir(src)).join(id).as_path()),
+        "default dir: {}",
+        text(&out)
+    );
+    assert!(dir.join("manifest.json").is_file(), "{}", text(&out));
+    dir
 }
 
 /// Why (#9282 AC2): a backup is only proven by restoring it somewhere empty
@@ -528,10 +607,8 @@ fn cli_backup(src: &Path, id: &str, dest: &Path) {
 fn cli_backup_then_restore_into_a_fresh_root_keeps_counts() {
     let src = tempfile::tempdir().expect("src");
     let dst = tempfile::tempdir().expect("dst");
-    let scratch = tempfile::tempdir().expect("scratch");
     let (drawers, rooms) = seed_on_disk(src.path(), "cli-rt");
-    let snap = scratch.path().join("snap");
-    cli_backup(src.path(), "cli-rt", &snap);
+    let snap = cli_backup(src.path(), "cli-rt");
 
     let out = run(
         dst.path(),
@@ -556,10 +633,8 @@ fn cli_backup_then_restore_into_a_fresh_root_keeps_counts() {
 fn cli_restore_refuses_a_palace_id_mismatch_and_writes_nothing() {
     let src = tempfile::tempdir().expect("src");
     let dst = tempfile::tempdir().expect("dst");
-    let scratch = tempfile::tempdir().expect("scratch");
     seed_on_disk(src.path(), "cli-mm");
-    let snap = scratch.path().join("snap");
-    cli_backup(src.path(), "cli-mm", &snap);
+    let snap = cli_backup(src.path(), "cli-mm");
 
     let out = run(
         dst.path(),
@@ -590,10 +665,8 @@ fn cli_restore_refuses_a_palace_id_mismatch_and_writes_nothing() {
 fn cli_restore_refuses_while_a_daemon_serves_the_root() {
     let src = tempfile::tempdir().expect("src");
     let dst = tempfile::tempdir().expect("dst");
-    let scratch = tempfile::tempdir().expect("scratch");
     seed_on_disk(src.path(), "cli-live");
-    let snap = scratch.path().join("snap");
-    cli_backup(src.path(), "cli-live", &snap);
+    let snap = cli_backup(src.path(), "cli-live");
 
     let dd = data_dir(dst.path());
     std::fs::create_dir_all(&dd).expect("mkdir data dir");
@@ -615,7 +688,6 @@ fn cli_restore_refuses_while_a_daemon_serves_the_root() {
 #[test]
 fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
     let src = tempfile::tempdir().expect("src");
-    let scratch = tempfile::tempdir().expect("scratch");
     seed_on_disk(src.path(), "cli-fd");
     let listener =
         UnixListener::bind(data_dir(src.path()).join("trusty-memory.sock")).expect("bind");
@@ -624,16 +696,10 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
             drop(conn);
         }
     });
-    let snap = scratch.path().join("snap");
+    let snap = legacy_manual(&data_dir(src.path())).join("snap");
     let out = run(
         src.path(),
-        &[
-            "palace",
-            "backup",
-            "cli-fd",
-            "--dest",
-            snap.to_str().expect("utf8"),
-        ],
+        &["palace", "backup", "cli-fd", "--dest", "snap"],
     );
     assert!(!out.status.success(), "{}", text(&out));
     assert!(
@@ -642,46 +708,6 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
         text(&out)
     );
     assert!(!snap.exists(), "no direct-open fallback: {}", text(&out));
-}
-
-/// Why (#9282, Opus critic HIGH): the offline path must refuse a backup into
-/// the palace registry dir as the daemon does; here the legacy layout,
-/// where the registry is `<data root>/palaces`.
-/// What: with no daemon, `palace backup --dest <data root>/palaces/bk` exits
-/// non-zero with the registry error, and nothing under the registry dir
-/// changes: no `bk`, no `bk.tmp` staging dir, no other new entry.
-/// Test: itself.
-#[test]
-fn cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing() {
-    let src = tempfile::tempdir().expect("src");
-    seed_on_disk(src.path(), "cli-reg");
-    let dd = data_dir(src.path());
-    let registry = dd.join("palaces");
-    let dest = registry.join("bk");
-    let before = tree(&registry);
-    let out = run(
-        src.path(),
-        &[
-            "palace",
-            "backup",
-            "cli-reg",
-            "--dest",
-            dest.to_str().expect("utf8"),
-        ],
-    );
-    assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("palace registry directory"),
-        "{}",
-        text(&out)
-    );
-    assert_eq!(
-        tree(&registry),
-        before,
-        "nothing may be written: {}",
-        text(&out)
-    );
-    assert!(!dest.exists() && !registry.join("bk.tmp").exists());
 }
 
 /// Seed a flat-layout palace at `<override>/trusty-memory/<id>` (no
@@ -699,11 +725,68 @@ fn seed_flat_on_disk(override_dir: &Path, id: &str) {
     drop(PalaceHandle::open(&palace).expect("open palace"));
 }
 
+/// `palace backup <id> --dest <dest>` with no daemon, from `cwd`.
+fn cli_backup_dest(src: &Path, cwd: &Path, id: &str, dest: &Path) -> Output {
+    let dest = dest.to_str().expect("utf8");
+    run_in(src, cwd, &["palace", "backup", id, "--dest", dest])
+}
+
+/// Why (#9282, option C rulings A and F): the CLI sends the name as given;
+/// an absolute path or a symlinked component is refused with exit 1 before
+/// anything is written, on the direct path as on the daemon's.
+/// What: a flat-layout data dir, no daemon. Rows: absolute `<root>/bk` (the
+/// registry dir), `<root>/palaceſ/bk`, a path inside the backup root, and
+/// relative `out/bk` with `<backup root>/out -> elsewhere`. Each exits 1, and
+/// the data dir and `elsewhere` are unchanged.
+/// Test: itself.
+#[test]
+fn cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing() {
+    let src = tempfile::tempdir().expect("src");
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    seed_flat_on_disk(src.path(), "cli-reg");
+    let root = data_dir(src.path());
+    let manual = flat_manual(&root);
+    std::fs::create_dir_all(&manual).expect("backup root");
+    std::os::unix::fs::symlink(elsewhere.path(), manual.join("out")).expect("symlink");
+    let (before, before_else) = (tree(&root), tree(elsewhere.path()));
+    for (dest, want) in [
+        (root.join("bk"), "absolute path"),
+        (root.join("palace\u{17f}").join("bk"), "absolute path"),
+        (manual.join("inside"), "absolute path"),
+        (PathBuf::from("out/bk"), "is unsafe"),
+    ] {
+        let out = cli_backup_dest(src.path(), src.path(), "cli-reg", &dest);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{}: {}",
+            dest.display(),
+            text(&out)
+        );
+        assert!(
+            text(&out).contains(want),
+            "{}: {}",
+            dest.display(),
+            text(&out)
+        );
+        assert_eq!(
+            tree(&root),
+            before,
+            "{} wrote: {}",
+            dest.display(),
+            text(&out)
+        );
+        assert_eq!(tree(elsewhere.path()), before_else, "{}", dest.display());
+    }
+    assert!(!root.join("palaces").exists());
+}
+
 /// Why (#9282, round-3 delta critic CRITICAL): the CLI's direct path runs
-/// the same guard; `<root>/palaces/../l/bk` must not create `<root>/palaces`.
-/// What: each row in a fresh flat-layout data dir, no daemon. Each exits
-/// non-zero naming the missing component, and the data dir is unchanged: no
-/// `palaces`, `Palaces`, `l`. Every row is checked before the assert.
+/// the same name rules; `palaces/../l/bk` must not create `<root>/palaces`.
+/// What: each row, relative and absolute, in a fresh flat-layout data dir,
+/// no daemon. Each exits 1 naming the refused segment or the absolute path,
+/// and the data dir is unchanged: no `palaces`, `Palaces`, `l`. Every row is
+/// checked before the assert.
 /// Test: itself.
 #[test]
 fn cli_backup_refuses_dotdot_after_a_missing_component_and_writes_nothing() {
@@ -713,23 +796,40 @@ fn cli_backup_refuses_dotdot_after_a_missing_component_and_writes_nothing() {
         seed_flat_on_disk(src.path(), "cli-dotdot");
         let root = data_dir(src.path());
         let before = tree(&root);
-        let dest = dotdot_dest(&root, missing);
-        let out = run(
-            src.path(),
-            &[
-                "palace",
-                "backup",
-                "cli-dotdot",
-                "--dest",
-                dest.to_str().expect("utf8"),
-            ],
-        );
-        let outcome = if out.status.success() {
-            Ok(text(&out))
-        } else {
-            Err(text(&out))
-        };
-        problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+        for dest in dotdot_dests(&root, missing) {
+            let out = cli_backup_dest(src.path(), src.path(), "cli-dotdot", &dest);
+            let outcome = match out.status.code() {
+                Some(0) => Ok(text(&out)),
+                Some(1) => Err(text(&out)),
+                _ => Ok(format!("exit code is not 1: {}", text(&out))),
+            };
+            problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+        }
     }
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// Why (#9282, option C): `--dest` names a directory under the backup root,
+/// not under the caller's cwd; `palaceſ/bk` must not alias `<root>/palaces`.
+/// What: a flat-layout data dir, no daemon, cwd = an unrelated dir. `--dest
+/// bk` and `--dest palaceſ/bk` land at `<backup root>/<name>`; the cwd stays
+/// empty, no `<root>/palaces` appears, and the registry is still the root.
+/// Test: itself.
+#[test]
+fn cli_backup_long_s_and_cwd_names_land_under_the_backup_root() {
+    let src = tempfile::tempdir().expect("src");
+    let cwd = tempfile::tempdir().expect("cwd");
+    seed_flat_on_disk(src.path(), "cli-name");
+    let root = data_dir(src.path());
+    for name in ["bk", "palace\u{17f}/bk"] {
+        let out = cli_backup_dest(src.path(), cwd.path(), "cli-name", Path::new(name));
+        assert!(out.status.success(), "{name}: {}", text(&out));
+        assert_eq!(written_dir(&out), flat_manual(&root).join(name), "{name}");
+    }
+    assert_eq!(std::fs::read_dir(cwd.path()).expect("ls").count(), 0);
+    assert!(!root.join("palaces").exists(), "<root>/palaces was created");
+    assert_eq!(
+        trusty_common::palace_alias::palace_registry_dir_from(root.clone()),
+        root
+    );
 }

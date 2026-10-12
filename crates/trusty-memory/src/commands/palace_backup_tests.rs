@@ -44,8 +44,9 @@ fn fixture() -> Fixture {
                 .expect("drawer");
         }
     }
-    let snap = tmp.path().join("snap");
-    backup_offline(&palace, Some(&snap)).expect("backup");
+    // #9282: the default directory under `<src>/backups/manual`.
+    let report = backup_offline(&palace, None).expect("backup");
+    let snap = PathBuf::from(report["dir"].as_str().expect("dir"));
     let fresh = tmp.path().join("fresh");
     std::fs::create_dir_all(&fresh).expect("fresh");
     Fixture {
