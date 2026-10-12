@@ -536,12 +536,12 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
 /// Test: indirectly via `kg_gaps_endpoint_returns_cached_gaps`.
 pub async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
     let mut gaps = handle.kg.knowledge_gaps();
-    if let Ok(api_key) = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY) {
-        if !api_key.is_empty() {
-            for gap in gaps.iter_mut() {
-                if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
-                    gap.suggested_exploration = enriched;
-                }
+    if let Ok(api_key) = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+        && !api_key.is_empty()
+    {
+        for gap in gaps.iter_mut() {
+            if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
+                gap.suggested_exploration = enriched;
             }
         }
     }

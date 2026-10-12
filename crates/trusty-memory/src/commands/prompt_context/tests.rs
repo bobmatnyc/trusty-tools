@@ -1401,14 +1401,13 @@ impl DaemonHandle {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        if let Some(h) = self.join.take() {
-            if tokio::time::timeout(std::time::Duration::from_secs(10), &mut { h })
+        if let Some(h) = self.join.take()
+            && tokio::time::timeout(std::time::Duration::from_secs(10), &mut { h })
                 .await
                 .is_err()
-            {
-                // The loop did not return inside the budget; the task is
-                // dropped with the handle either way.
-            }
+        {
+            // The loop did not return inside the budget; the task is
+            // dropped with the handle either way.
         }
         // Release the pinned data dir override for sibling tests.
         // SAFETY: protected by env_test_lock in the caller.

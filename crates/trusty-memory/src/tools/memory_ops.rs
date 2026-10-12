@@ -78,14 +78,12 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // `Claude Code session ended: …`). Logged at debug so operators
     // can audit when investigating missing writes. Issue #2442: `force`
     // bypasses this gate, matching the other content-quality gates below.
-    if !force {
-        if let Some(pattern) = blocklist_gate(&raw_text) {
-            // Issue #1481: name the matched pattern so callers can see exactly
-            // what tripped the gate instead of an opaque "blocked pattern".
-            let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
-            tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
-            return Ok(skipped_envelope(palace, &reason));
-        }
+    if !force && let Some(pattern) = blocklist_gate(&raw_text) {
+        // Issue #1481: name the matched pattern so callers can see exactly
+        // what tripped the gate instead of an opaque "blocked pattern".
+        let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
+        tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
+        return Ok(skipped_envelope(palace, &reason));
     }
     // Issue #215: content gate — drop very short standalone content
     // unless the caller supplied a `context` wrapper or `force = true`

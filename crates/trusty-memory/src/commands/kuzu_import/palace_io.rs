@@ -207,10 +207,10 @@ pub struct SystemDaemonProbe;
 #[async_trait]
 impl DaemonProbe for SystemDaemonProbe {
     async fn live_daemon(&self) -> Option<String> {
-        if let Ok(socket) = crate::socket_path() {
-            if crate::commands::daemon_guard::probe(&socket).await {
-                return Some(format!("serving {}", socket.display()));
-            }
+        if let Ok(socket) = crate::socket_path()
+            && crate::commands::daemon_guard::probe(&socket).await
+        {
+            return Some(format!("serving {}", socket.display()));
         }
         let pids = crate::commands::stop::find_daemon_pids();
         (!pids.is_empty()).then(|| format!("pid {pids:?}"))

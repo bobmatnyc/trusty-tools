@@ -274,18 +274,18 @@ fn scan_member(
     if let Some(bins) = parsed.get("bin").and_then(|b| b.as_array()) {
         let pkg_for_bin = package_name.as_deref().unwrap_or(&dir_name).to_string();
         for bin in bins {
-            if let Some(bin_name) = bin.get("name").and_then(|n| n.as_str()) {
-                if bin_name != pkg_for_bin {
-                    push_unique(
-                        discoveries,
-                        seen_pairs,
-                        AliasDiscovery {
-                            short: bin_name.to_string(),
-                            full: pkg_for_bin.clone(),
-                            source: DiscoverySource::CargoBinaryName,
-                        },
-                    );
-                }
+            if let Some(bin_name) = bin.get("name").and_then(|n| n.as_str())
+                && bin_name != pkg_for_bin
+            {
+                push_unique(
+                    discoveries,
+                    seen_pairs,
+                    AliasDiscovery {
+                        short: bin_name.to_string(),
+                        full: pkg_for_bin.clone(),
+                        source: DiscoverySource::CargoBinaryName,
+                    },
+                );
             }
         }
     }
@@ -429,12 +429,11 @@ fn read_origin_url(project_root: &Path) -> Option<String> {
         .arg("--get")
         .arg("remote.origin.url")
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
-                return Some(url);
-            }
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
         }
     }
 
@@ -464,12 +463,10 @@ fn extract_origin_url(config: &str) -> Option<String> {
             in_origin = trimmed == "[remote \"origin\"]";
             continue;
         }
-        if in_origin {
-            if let Some(rest) = trimmed.strip_prefix("url") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    return Some(rest.trim().to_string());
-                }
+        if in_origin && let Some(rest) = trimmed.strip_prefix("url") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                return Some(rest.trim().to_string());
             }
         }
     }

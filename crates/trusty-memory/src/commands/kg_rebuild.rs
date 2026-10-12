@@ -422,10 +422,10 @@ pub async fn purge_palaces(
     let _lease = apply.then(|| require_state_lease(state)).transpose()?;
     for palace in palaces {
         let id = palace.id.0.clone();
-        if let Some(filter) = palace_filter {
-            if filter != id {
-                continue;
-            }
+        if let Some(filter) = palace_filter
+            && filter != id
+        {
+            continue;
         }
         let summary = purge_one(state, &id, apply)
             .await
@@ -598,10 +598,10 @@ pub async fn rebuild_palaces(
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     for palace in palaces {
         let id = palace.id.0.clone();
-        if let Some(filter) = palace_filter {
-            if filter != id {
-                continue;
-            }
+        if let Some(filter) = palace_filter
+            && filter != id
+        {
+            continue;
         }
         let summary = rebuild_one(state, &id)
             .await

@@ -721,15 +721,16 @@ async fn run() -> Result<()> {
     let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
     let is_upgrade = matches!(cli.command, Command::Upgrade { .. });
     let is_config = matches!(cli.command, Command::Config(_));
-    if !is_daemon_path && !is_upgrade && !is_config {
-        if let Some(info) = trusty_common::update::check_throttled(
+    if !is_daemon_path
+        && !is_upgrade
+        && !is_config
+        && let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
         )
         .await
-        {
-            eprintln!("{}", trusty_common::update::notice(&info));
-        }
+    {
+        eprintln!("{}", trusty_common::update::notice(&info));
     }
 
     match cli.command {

@@ -162,53 +162,52 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
     let mut context = String::new();
     let mut palace_display_name = palace_id.clone();
 
-    if !palace_id.is_empty() {
-        if let Ok(handle) = state
+    if !palace_id.is_empty()
+        && let Ok(handle) = state
             .registry
             .open_palace(&state.data_root, &PalaceId::new(&palace_id))
-        {
-            // Live counts from the opened handle.
-            let drawer_count = handle.drawers.read().len();
-            let vector_count = handle.vector_store.index_size();
-            // #5384: the prompt claims to be an honest view of the palace, so a
-            // failed count says so rather than printing a 0 the model repeats.
-            let kg_triple_count = match handle.kg.count_active_triples() {
-                Ok(n) => n.to_string(),
-                Err(e) => {
-                    tracing::warn!(palace = %palace_id, "kg_triple_count unavailable: {e:#}");
-                    "unknown (read failed)".to_string()
-                }
-            };
+    {
+        // Live counts from the opened handle.
+        let drawer_count = handle.drawers.read().len();
+        let vector_count = handle.vector_store.index_size();
+        // #5384: the prompt claims to be an honest view of the palace, so a
+        // failed count says so rather than printing a 0 the model repeats.
+        let kg_triple_count = match handle.kg.count_active_triples() {
+            Ok(n) => n.to_string(),
+            Err(e) => {
+                tracing::warn!(palace = %palace_id, "kg_triple_count unavailable: {e:#}");
+                "unknown (read failed)".to_string()
+            }
+        };
 
-            // Prefer the on-disk palace.json name/description; fall back to id.
-            let (name, description) = match &selected_palace_meta {
-                Some(p) => (p.name.clone(), p.description.clone()),
-                None => (palace_id.clone(), None),
-            };
-            palace_display_name = name.clone();
+        // Prefer the on-disk palace.json name/description; fall back to id.
+        let (name, description) = match &selected_palace_meta {
+            Some(p) => (p.name.clone(), p.description.clone()),
+            None => (palace_id.clone(), None),
+        };
+        palace_display_name = name.clone();
 
-            palace_block.push_str(&format!(
-                "Currently selected palace:\n\
+        palace_block.push_str(&format!(
+            "Currently selected palace:\n\
                  - id: {id}\n\
                  - name: {name}\n",
-                id = palace_id,
-                name = name,
-            ));
-            if let Some(desc) = description.as_deref().filter(|s| !s.is_empty()) {
-                palace_block.push_str(&format!("- description: {desc}\n"));
-            }
-            palace_block.push_str(&format!(
-                "- drawers: {drawer_count}\n\
+            id = palace_id,
+            name = name,
+        ));
+        if let Some(desc) = description.as_deref().filter(|s| !s.is_empty()) {
+            palace_block.push_str(&format!("- description: {desc}\n"));
+        }
+        palace_block.push_str(&format!(
+            "- drawers: {drawer_count}\n\
                  - vectors: {vector_count}\n\
                  - kg_triples: {kg_triple_count}\n",
-            ));
-            let identity_trimmed = handle.identity.trim();
-            if !identity_trimmed.is_empty() {
-                palace_block.push_str(&format!("- identity:\n{identity_trimmed}\n",));
-            }
-
-            context = recall_context(&state, &palace_id, &body.message).await;
+        ));
+        let identity_trimmed = handle.identity.trim();
+        if !identity_trimmed.is_empty() {
+            palace_block.push_str(&format!("- identity:\n{identity_trimmed}\n",));
         }
+
+        context = recall_context(&state, &palace_id, &body.message).await;
     }
 
     // Build the grounded system prompt with identity, palace, RAG, config,
@@ -311,10 +310,10 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
     tokio::spawn(async move {
         // Emit a leading session_id frame so the SPA can correlate this stream
         // with a persisted session row.
-        if let Some(sid) = persist_session_id.as_deref() {
-            if frames.send(Ok(json!({ "session_id": sid }))).await.is_err() {
-                return;
-            }
+        if let Some(sid) = persist_session_id.as_deref()
+            && frames.send(Ok(json!({ "session_id": sid }))).await.is_err()
+        {
+            return;
         }
 
         let mut final_assistant_text = String::new();

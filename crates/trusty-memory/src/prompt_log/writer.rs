@@ -224,13 +224,13 @@ impl PromptLogger {
                 Some(d) => d,
                 None => continue,
             };
-            if date < cutoff {
-                if let Err(e) = std::fs::remove_file(entry.path()) {
-                    tracing::warn!(
-                        "trusty-memory prompt log: prune {}: {e}",
-                        entry.path().display()
-                    );
-                }
+            if date < cutoff
+                && let Err(e) = std::fs::remove_file(entry.path())
+            {
+                tracing::warn!(
+                    "trusty-memory prompt log: prune {}: {e}",
+                    entry.path().display()
+                );
             }
         }
     }

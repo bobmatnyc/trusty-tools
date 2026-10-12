@@ -149,12 +149,12 @@ pub fn scan(root: &Path, now_unix: i64) -> Result<ReclaimReport> {
                 &path,
                 "redb 2.x store quarantined at open; this binary cannot read it".into(),
             ));
-        } else if name == "uds_addr" {
-            if let Some(reason) = stale_uds_addr(&path) {
-                report
-                    .items
-                    .push(item(ReclaimClass::StaleUdsAddr, None, &path, reason));
-            }
+        } else if name == "uds_addr"
+            && let Some(reason) = stale_uds_addr(&path)
+        {
+            report
+                .items
+                .push(item(ReclaimClass::StaleUdsAddr, None, &path, reason));
         }
     }
     Ok(report)

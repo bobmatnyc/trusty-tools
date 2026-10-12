@@ -225,10 +225,10 @@ impl RulingsLeg {
         if oldest.is_some_and(|started| started.elapsed() >= self.timeout) {
             return Err((DegradedReason::InFlight, false));
         }
-        if let Some((at, reason)) = state.failure {
-            if at.elapsed() < RULINGS_RETRY_AFTER {
-                return Err((reason, true));
-            }
+        if let Some((at, reason)) = state.failure
+            && at.elapsed() < RULINGS_RETRY_AFTER
+        {
+            return Err((reason, true));
         }
         state.generation += 1;
         state.running.insert(state.generation, Instant::now());

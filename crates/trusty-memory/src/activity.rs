@@ -539,20 +539,20 @@ fn entry_matches(entry: &ActivityEntry, filter: &ActivityFilter) -> bool {
             _ => return false,
         }
     }
-    if let Some(s) = filter.source {
-        if entry.source != s {
-            return false;
-        }
+    if let Some(s) = filter.source
+        && entry.source != s
+    {
+        return false;
     }
-    if let Some(t) = filter.since {
-        if entry.timestamp < t {
-            return false;
-        }
+    if let Some(t) = filter.since
+        && entry.timestamp < t
+    {
+        return false;
     }
-    if let Some(t) = filter.until {
-        if entry.timestamp > t {
-            return false;
-        }
+    if let Some(t) = filter.until
+        && entry.timestamp > t
+    {
+        return false;
     }
     true
 }

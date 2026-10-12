@@ -1419,15 +1419,14 @@ impl AppState {
                 //      direct to `service` keeps this method usable when
                 //      the `daemon` feature is disabled.
                 let cfg = crate::service::load_user_config().unwrap_or_default();
-                if cfg.local_model.enabled {
-                    if let Some(mut p) =
+                if cfg.local_model.enabled
+                    && let Some(mut p) =
                         trusty_common::auto_detect_local_provider(&cfg.local_model.base_url).await
-                    {
-                        // auto_detect returns an empty model id; callers must
-                        // set the configured model name themselves.
-                        p.model = cfg.local_model.model.clone();
-                        return Some(Arc::new(p) as Arc<dyn ChatProvider>);
-                    }
+                {
+                    // auto_detect returns an empty model id; callers must
+                    // set the configured model name themselves.
+                    p.model = cfg.local_model.model.clone();
+                    return Some(Arc::new(p) as Arc<dyn ChatProvider>);
                 }
                 if !cfg.openrouter_api_key.is_empty() {
                     return Some(Arc::new(trusty_common::OpenRouterProvider::new(

@@ -321,10 +321,10 @@ pub fn scan_palaces(
         }
         out.push(counts);
     }
-    if let Some(name) = palace_filter {
-        if out.is_empty() {
-            anyhow::bail!("no palace named `{name}` under {}", registry_dir.display());
-        }
+    if let Some(name) = palace_filter
+        && out.is_empty()
+    {
+        anyhow::bail!("no palace named `{name}` under {}", registry_dir.display());
     }
     Ok(out)
 }

@@ -65,11 +65,11 @@ pub async fn retract_stale(
             if keep.contains(&(t.subject.clone(), t.predicate.clone(), t.object.clone())) {
                 continue;
             }
-            if let Some(s) = sink {
-                if let Err(e) = s.retract_triple(&t).await {
-                    fail(c, "retract triple", &e);
-                    continue;
-                }
+            if let Some(s) = sink
+                && let Err(e) = s.retract_triple(&t).await
+            {
+                fail(c, "retract triple", &e);
+                continue;
             }
             tracing::info!(%memory_id, family, "kuzu import: retracted an edge the source no longer has");
             c.retracted.push(Retraction {

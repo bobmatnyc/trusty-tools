@@ -165,10 +165,10 @@ async fn rename_concurrent_remember_loses_and_duplicates_nothing() {
                         json!({"palace": "race-src", "text": note(i), "force": true}),
                     )
                     .await;
-                if let Ok(out) = out {
-                    if let Some(id) = out["drawer_id"].as_str() {
-                        acked.push(id.to_string());
-                    }
+                if let Ok(out) = out
+                    && let Some(id) = out["drawer_id"].as_str()
+                {
+                    acked.push(id.to_string());
                 }
             }
             acked

@@ -621,10 +621,10 @@ fn parse_user_prompt(stdin_payload: &str) -> String {
     if stdin_payload.trim().is_empty() {
         return String::new();
     }
-    if let Ok(value) = serde_json::from_str::<Value>(stdin_payload) {
-        if let Some(p) = value.get("prompt").and_then(|v| v.as_str()) {
-            return p.trim().to_string();
-        }
+    if let Ok(value) = serde_json::from_str::<Value>(stdin_payload)
+        && let Some(p) = value.get("prompt").and_then(|v| v.as_str())
+    {
+        return p.trim().to_string();
     }
     stdin_payload.trim().to_string()
 }
