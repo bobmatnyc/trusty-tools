@@ -780,7 +780,7 @@ async fn failure_arms_and_empty_store_write_nothing() {
     for (i, b) in cases.into_iter().enumerate() {
         let runner = FakeRunner::new(b);
         let daemon = FakeDaemon(None);
-        let report = import_one(&env(&runner, &daemon, &data_root), &store, &args).await;
+        let report = import_one(&env(&runner, &daemon, &data_root), &store, &args, None).await;
         let expect_empty = i == 4;
         assert_eq!(
             matches!(report.status, StoreStatus::Empty),
