@@ -244,10 +244,13 @@ fn write_and_rename(
 }
 
 /// Reads `path`. A missing file is an empty state and no error; an unreadable
-/// or corrupt file is an empty state and the error, for the caller to log.
+/// or corrupt file (bytes that are not UTF-8 count as corrupt) is an empty
+/// state and the error, for the caller to log.
 pub fn load_state(path: &Path) -> (PollState, Option<StateError>) {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
+    // #9171: read bytes, not a String. Bytes that are not UTF-8 are a corrupt
+    // file (copied, then reset), not an I/O error that blocks saves for good.
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return (PollState::default(), None),
         Err(source) => {
             let err = StateError::Io {
@@ -257,7 +260,7 @@ pub fn load_state(path: &Path) -> (PollState, Option<StateError>) {
             return (PollState::default(), Some(err));
         }
     };
-    match serde_json::from_str(&text) {
+    match serde_json::from_slice(&bytes) {
         Ok(state) => (state, None),
         Err(source) => {
             let err = StateError::Corrupt {

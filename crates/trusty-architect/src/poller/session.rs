@@ -6,14 +6,16 @@
 //! keys Python owns and any owed wake are lost (#9803 critic carry-over,
 //! #9171 A3b-2).
 //! What: [`PollSession::load`] reads the state. A missing file is an empty
-//! state. A file that cannot be read (I/O, not UTF-8) gives an empty
+//! state. A file that cannot be read (an OS error) gives an empty
 //! in-memory state and blocks every save while the error lasts. A corrupt
-//! file is first copied to `poll-state.json.corrupt.<unix>` (`create_new`);
+//! file, bytes that are not UTF-8 included, is first copied to `poll-state.json.corrupt.<unix>` (`create_new`);
 //! then the loop starts empty and may save. If that copy fails, saves stay
 //! blocked and the partial copy is removed. A blocked session re-reads the file before each cycle; once it
 //! reads, the session adopts it and adds the wakes it owed meanwhile. A dry
 //! run copies nothing.
 //! Test: `load_state_io_skips_save`, `load_state_corrupt_keeps_copy`,
+//! `non_utf8_state_is_copied_then_reset`,
+//! `unreadable_state_path_stays_blocked`,
 //! `corrupt_state_whose_copy_fails_is_never_overwritten`,
 //! `blocked_state_recovers_and_keeps_owed_wake`,
 //! `failed_copies_across_cycles_leave_no_corrupt_files`.

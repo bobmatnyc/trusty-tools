@@ -22,14 +22,14 @@ fn quiet_state() -> PollState {
     }
 }
 
-/// An unreadable state file (here: not UTF-8) is never overwritten: the loop
-/// runs on an empty in-memory state and skips every save while the error
-/// persists. Red against a loop that saves over it.
+/// A state path the OS cannot read (here: a directory) is an `Io` error, not
+/// corruption: the loop runs on an empty in-memory state and skips every save
+/// while the error persists. Red against a loop that saves over it or
+/// reclassifies it as corrupt.
 #[test]
-fn load_state_io_skips_save() -> TestResult {
+fn unreadable_state_path_stays_blocked() -> TestResult {
     let env = Env::new(&[])?;
-    let bytes = [0xff_u8, 0xfe, b'{', b'}'];
-    fs::write(env.state_path(), bytes)?;
+    fs::create_dir(env.state_path())?;
     let (mut session, log) = PollSession::load(&env.config, false, NOW);
     assert!(session.save_blocked());
     assert!(log.iter().any(|l| l.contains("state ERROR")), "{log:?}");
@@ -38,8 +38,13 @@ fn load_state_io_skips_save() -> TestResult {
     let runner = env.runner(&tmux, &clock, &QuietHost);
     runner.run_once(&mut session)?;
     runner.run_once(&mut session)?;
-    assert_eq!(fs::read(env.state_path())?, bytes, "never overwritten");
+    assert!(env.state_path().is_dir(), "never replaced");
     assert!(session.save_blocked());
+    let copies = fs::read_dir(&env.config.inbox)?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+        .count();
+    assert_eq!(copies, 0, "no corrupt copy for an I/O error");
     Ok(())
 }
 
@@ -127,8 +132,14 @@ fn dry_run_load_writes_no_corrupt_copy() -> TestResult {
 #[test]
 fn blocked_state_recovers_and_keeps_owed_wake() -> TestResult {
     let env = Env::new(&[])?;
-    fs::write(env.state_path(), [0xff_u8])?;
+    // Blocked because the copy name is taken, then the file becomes readable.
+    fs::write(env.state_path(), "{not json")?;
+    fs::write(
+        env.config.inbox.join("poll-state.json.corrupt.1000"),
+        "older",
+    )?;
     let (mut session, _) = PollSession::load(&env.config, false, NOW);
+    assert!(session.save_blocked());
     session.state.wake_pending = Some(StoredCount::Count(2));
     let mut stored = quiet_state();
     stored.wake_pending = Some(StoredCount::Count(1));

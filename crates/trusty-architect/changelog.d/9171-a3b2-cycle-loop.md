@@ -6,3 +6,4 @@ Added
 - `architect_busy`, `rename_windows` / `plan_window_renames` and the `Triage` seam with its `WakeAll` default ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
 - `read_events` holds its offset at the last newline, so an event still being written is read whole next cycle; a bad `LOAD_FACTOR` is listed in `Config::problems` and turns off host alerts only, where it used to fail `Config::from_env` ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
 - `Runner::run_once` logs each bad `Config::problems` entry, with the sensor it turned off, on every cycle
+- A `poll-state.json` that is not valid UTF-8 is treated as corrupt (copied to `poll-state.json.corrupt.<unix>`, then reset and saved over) instead of an I/O error that blocked every save; a real OS read error still blocks saves ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
