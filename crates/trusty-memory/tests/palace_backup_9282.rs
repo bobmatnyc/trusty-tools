@@ -419,5 +419,10 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
         &["palace", "backup", "cli-fd", "--dest", snap.to_str().expect("utf8")],
     );
     assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("on the trusty-memory daemon"),
+        "the error must be the daemon call's: {}",
+        text(&out)
+    );
     assert!(!snap.exists(), "no direct-open fallback: {}", text(&out));
 }
