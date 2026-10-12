@@ -115,8 +115,9 @@ lazily, when it opens it. The format 1 to 2 change is on derived data and
 rewrites no row.
 
 Before it migrates, the daemon writes a verified copy of the palace's primary
-files to `<data root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`
-and aborts the migration if that copy fails. The two newest copies per palace
+files to
+`<data root>/.trusty-memory/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`,
+or `<data root>/backups/format-migration/…` in the legacy layout, and aborts the migration if that copy fails. The two newest copies per palace
 are kept. This copy is not a `palace backup`: it has a `MANIFEST` file, not
 `manifest.json`, and `palace restore` does not read it.
 
@@ -126,7 +127,8 @@ To upgrade:
 2. After the palace opens, run `trusty-memory palace backup` for each palace
    you care about.
 
-`palace backup` without a daemon refuses a palace in an older format. It never
+`palace backup` and `palace restore` are not in trusty-memory 0.35.0. They ship
+in the next release after 0.35.0 (0.35.1). `palace backup` without a daemon refuses a palace in an older format. It never
 migrates. A backup of a migrated palace is in the new format.
 
 A palace in a newer format than the binary supports is refused, not opened.
@@ -139,17 +141,38 @@ to format 2, trusty-memory 0.33.0 refuses the migrated palace, and a
 older version you need a backup in the older format. For the format 1 to 2
 upgrade, that is the migration copy described above.
 
-1. Stop the daemon.
-2. Move the upgraded palace directory aside. Restore writes only into an
-   empty or missing palace directory.
-3. Put the older-format backup in its place. A backup written by
-   `trusty-memory palace backup` restores with
-   `trusty-memory palace restore`, run with the newer binary. Restore does not
-   read the migration copy; copy its files back by hand (ADR-0067,
-   Consequences).
-4. Start the daemon of the older version and call `palace_reembed` with
-   `dry_run=false` until it reports `missing: 0`. In 0.33.0 `dry_run` defaults
-   to `true`, which re-embeds nothing.
+1. Install the older version
+   (`cargo install trusty-memory --version 0.33.0 --locked`). Close every MCP
+   client that uses trusty-memory, then run `trusty-memory stop`. A running
+   client restarts the daemon.
+2. In the migration backup directory, pick the newest `1-to-2-<UTC>` directory
+   that holds `MANIFEST`. Never use a `0-to-1-*` directory or one ending in
+   `.tmp`. A `0-to-1-*` copy loses every write made under 0.33.0. Copy from the
+   directory you pick; never move or edit it.
+3. Move the upgraded palace directory out of the palace root, for example to
+   `~/trusty-memory-rollback/<id>`. Any directory in the palace root that holds
+   `palace.json` is read as a palace.
+4. Make a staging directory on the same filesystem, outside the palace root.
+   Copy every file except `MANIFEST` into it, and check each file's SHA-256
+   against `MANIFEST`. Then rename the staging directory to the palace
+   directory.
+5. Start the 0.33.0 daemon and call `palace_reembed` with `dry_run=false` until
+   it reports `missing: 0`. In 0.33.0, `dry_run` defaults to `true`, which
+   re-embeds nothing.
+
+`MANIFEST` is JSON, not a `shasum` list. This command prints each file's
+expected hash and compares it. Run it inside the staging directory, with the
+`MANIFEST` path in place of `<backup>/MANIFEST`. It exits non-zero on any
+mismatch:
+
+```bash
+grep -E '"(name|sha256)"' <backup>/MANIFEST | sed -E 's/.*": "([^"]*)".*/\1/' \
+  | paste - - | while read n h; do echo "$h  $n"; done | shasum -a 256 -c -
+```
+
+A `palace backup` taken before the upgrade, with a trusty-memory release that
+has the command, restores with `trusty-memory palace restore` instead. Restore
+does not read the migration copy (ADR-0067, Consequences).
 
 A restore never writes `index.usearch.redb`, so none exists in a restored
 palace. Writes made after the backup are lost.
@@ -165,4 +188,5 @@ palace. Writes made after the backup are lost.
 - Two first backups that share a parent directory that does not exist yet can
   race, and one can fail. Retry it.
 - Restore does not write `drawer_counts.jsonl` back. That file belongs to the
-  data root, and the backup keeps this palace's lines.
+  data root, and the backup keeps this palace's lines. After a rollback, this
+  palace's lines in `drawer_counts.jsonl` are stale.
