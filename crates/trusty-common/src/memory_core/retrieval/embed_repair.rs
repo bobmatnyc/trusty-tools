@@ -24,8 +24,9 @@
 //! Test: `health_reports_the_drawer_with_no_vector`,
 //! `backfill_reembeds_a_marked_drawer`, `backfill_is_a_noop_on_a_healthy_palace`.
 
+use super::chunk_backfill::Repair;
 use super::chunk_health::{ChunkCheck, short_chunk_ids};
-use super::deferred_embed::{RetryPolicy, embed_and_store};
+use super::deferred_embed::RetryPolicy;
 use super::embedder::{SHARED_EMBEDDER, shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
 use crate::memory_core::embed::Embedder;
@@ -667,9 +668,14 @@ impl PalaceHandle {
     /// delete a source file until they are. #9275: a drawer embedded before
     /// chunking has a vector and is still unfindable by its tail.
     /// What: computes [`EmbedHealth`], then (unless `dry_run`) embeds each
-    /// missing drawer, then each short one, through the same `embed_and_store`
-    /// primitive the write path uses (`limit` caps the union, missing first),
-    /// clearing its ledger row on success and refreshing it on failure.
+    /// missing drawer, then each short one (`limit` caps the union, missing
+    /// first): the embed runs with no lock, then `write_mutex` is held only to
+    /// recheck the text and upsert (#9735). Clears a ledger row on success and
+    /// refreshes it on failure. A drawer forgotten or rewritten during its
+    /// embed is skipped: not attempted, not failing, no ledger row, and it
+    /// stays in `still_missing_ids`/`still_short_ids`. A lock wait past
+    /// `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` ends the run with an error naming the
+    /// palace, after repaired drawers' rows are cleared.
     /// Idempotent and safe to re-run: a repaired drawer is in neither set, so a
     /// second run does nothing. When the chunk check could not run because no
     /// embedder had initialised, it initialises one and checks again.
@@ -717,8 +723,10 @@ impl PalaceHandle {
     /// seed with a non-chunking mock; this is the seam a chunking test drives.
     /// What: recomputes health with `embedder`, then re-embeds the missing
     /// drawers followed by the short ones (`limit` caps the union, missing
-    /// first) through `embed_and_store`.
+    /// first) through `PalaceHandle::repair_one` (#9735 Q5).
     /// Test: `backfill_limit_applies_to_missing_then_short`,
+    /// `backfill_lock_timeout_returns_an_error_naming_the_palace`,
+    /// `backfill_lock_timeout_clears_the_repaired_rows_first`,
     /// `backfill_dry_run_counts_short_drawers_and_writes_nothing`.
     pub(crate) async fn backfill_with(
         &self,
@@ -744,6 +752,7 @@ impl PalaceHandle {
         };
 
         let mut repaired: HashSet<Uuid> = HashSet::new();
+        let mut locked = None;
         for id in targets {
             // Re-read the content under the lock each time: a `forget` may have
             // landed since `embed_health` ran, in which case there is nothing to
@@ -758,16 +767,27 @@ impl PalaceHandle {
             let Some(content) = content else {
                 continue;
             };
-            report.attempted += 1;
-            match embed_and_store(embedder, &self.vector_store, id, &content, &opts.retry).await {
-                Ok(attempts) => {
+            // #9735 Q5: embed with no lock; recheck and upsert under write_mutex.
+            let wait = crate::memory_core::timeouts::write_lock_timeout();
+            match self
+                .repair_one(embedder, id, &content, &opts.retry, wait)
+                .await
+            {
+                Repair::Stale => {} // #9735: skipped, not failed; still listed
+                Repair::Locked(e) => {
+                    locked = Some(e);
+                    break;
+                }
+                Repair::Repaired(attempts) => {
+                    report.attempted += 1;
                     tracing::info!(
                         palace = %self.id, drawer = %id, attempts,
                         "#4906: vector backfill repaired a drawer"
                     );
                     repaired.insert(id);
                 }
-                Err(loss) => {
+                Repair::Failed(loss) => {
+                    report.attempted += 1;
                     report.still_failing += 1;
                     tracing::error!(
                         palace = %self.id, drawer = %id,
@@ -793,7 +813,11 @@ impl PalaceHandle {
                 tracing::warn!(palace = %self.id, "#4906: ledger clear after backfill failed: {e:#}");
             }
         }
-        Ok(report)
+        // #9735 Q5: a busy palace ends the run, after repaired rows are cleared.
+        match locked {
+            Some(e) => Err(anyhow::Error::new(e)),
+            None => Ok(report),
+        }
     }
 
     /// Refuse a vector write on a read-only snapshot handle.

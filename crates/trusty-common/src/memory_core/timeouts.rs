@@ -40,6 +40,8 @@ const DEFAULT_EMBEDDER_INIT_SECS: u64 = 180;
 /// Why: Normal batches take 10-30 ms; even worst-case single-item batches
 /// should complete well under 10 s. 30 s gives a 100x safety margin.
 const DEFAULT_EMBED_BATCH_SECS: u64 = 30;
+/// #9735 Q3: default ceiling on a scaled chunked-embed timeout (10 min).
+pub(crate) const DEFAULT_EMBED_CHUNKED_CAP_SECS: u64 = 600;
 
 /// Default ceiling for an interactive caller's wait on a dream permit (#7106).
 ///
@@ -193,6 +195,20 @@ pub fn embedder_init_timeout() -> Duration {
 /// Test: `embed_batch_timeout_default`.
 pub fn embed_batch_timeout() -> Duration {
     parse_secs_env("TRUSTY_EMBED_BATCH_TIMEOUT_SECS", DEFAULT_EMBED_BATCH_SECS)
+}
+
+/// Return the cap on a chunked embed's scaled timeout.
+///
+/// Why (#9735 Q3): `per_chunk × chunks` reaches about 34 h at the 4096-chunk
+/// cap, and `persist_merge` holds `write_mutex` across that embed.
+/// What: reads `TRUSTY_EMBED_CHUNKED_CAP_SECS`; falls back to
+/// `DEFAULT_EMBED_CHUNKED_CAP_SECS` (600).
+/// Test: `chunked_embed_timeout_honours_the_cap_env`.
+pub fn chunked_embed_cap() -> Duration {
+    parse_secs_env(
+        "TRUSTY_EMBED_CHUNKED_CAP_SECS",
+        DEFAULT_EMBED_CHUNKED_CAP_SECS,
+    )
 }
 
 /// Return how long an interactive dream call waits for a concurrency permit.
