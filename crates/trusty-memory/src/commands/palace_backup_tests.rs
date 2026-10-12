@@ -9,9 +9,9 @@
 //! Test: this file is the test.
 
 use super::*;
-use trusty_common::memory_core::palace::{Drawer, PalaceId, RoomType};
-use trusty_common::memory_core::store::rooms::resolve_or_create_room_sync;
-use trusty_common::memory_core::store::PalaceStore;
+use crate::engine::palace::{Drawer, PalaceId, RoomType};
+use crate::engine::store::rooms::resolve_or_create_room_sync;
+use crate::engine::store::PalaceStore;
 
 const ID: &str = "unit-bk";
 
@@ -23,7 +23,7 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let palace = Palace {
         id: PalaceId::new(ID),
