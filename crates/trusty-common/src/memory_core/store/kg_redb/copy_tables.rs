@@ -159,8 +159,9 @@ fn copy_byte_table(
 
 /// Copy one `&str`-keyed table verbatim.
 ///
+/// #9282: also copies the `chat_sessions.redb` tables for a palace snapshot.
 /// Test: `compaction_preserves_every_live_row`.
-fn copy_str_table(
+pub(super) fn copy_str_table(
     src: &ReadTransaction,
     dest: &Database,
     def: TableDefinition<'static, &'static str, &'static [u8]>,

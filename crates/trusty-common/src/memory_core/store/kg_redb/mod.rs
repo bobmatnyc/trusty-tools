@@ -20,6 +20,8 @@ mod import;
 // #4810: at-open rewrite of the TRIPLES key to include the object.
 pub(crate) mod migrate;
 mod read_ops;
+// #9282: consistent live snapshot of a palace, and its offline restore.
+pub mod snapshot;
 // ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
 mod room_ops;
 // #6652: copy-then-swap compaction of kg.redb, and the table inventory it walks.
@@ -43,6 +45,9 @@ pub use copy_swap::{
     CompactFaultHook, CompactOutcome, CompactPlan, CompactStep, PreparedCompaction,
 };
 pub use drawer_authority::KG_SCHEMA_DRAWERS_AUTHORITATIVE;
+pub use snapshot::{
+    PalaceSnapshot, SnapshotError, SnapshotFile, SnapshotManifest, restore_palace_snapshot,
+};
 pub use stats::{KgRedbStats, KgTableStats};
 #[cfg(test)]
 pub(crate) use store::AFTER_PRE_OPEN;

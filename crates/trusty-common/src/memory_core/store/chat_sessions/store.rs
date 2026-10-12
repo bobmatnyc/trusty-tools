@@ -43,6 +43,12 @@ pub struct ChatSessionStore {
 }
 
 impl ChatSessionStore {
+    /// The shared database handle (#9282: a palace snapshot reads through it,
+    /// since redb allows one handle per file per process).
+    pub(crate) fn redb(&self) -> Arc<redb::Database> {
+        Arc::clone(&self.db)
+    }
+
     /// Open (or create) the redb chat-session store at `path`.
     ///
     /// Why: Each palace gets one chat database; this constructor is idempotent

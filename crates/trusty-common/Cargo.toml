@@ -160,7 +160,8 @@ name = "trusty-common"
 # 0.61.0 (Refs #9275): minor — chunked embed pipeline, palace format 2; 0.60.1 was never published (0.60.0 is live on crates.io).
 # 0.62.0 (Refs #9735): minor — backfill engine (PR 1 of #9735); 0.61.0 is live on crates.io.
 # 0.63.0 (Refs #9722, #9719): minor — accepted 0.x break: PalaceHandle::l1_drawers becomes Arc<RwLock<Vec<Drawer>>> and refresh_l1 takes &self; 0.61.0 is live on crates.io.
-version = "0.63.0"
+# 0.63.1 (Refs #9282): patch — additive PalaceHandle::snapshot / restore_palace_snapshot and snapshot types; three items narrowed to crate-private; 0.63.0 is live on crates.io.
+version = "0.63.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
