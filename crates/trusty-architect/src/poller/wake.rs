@@ -20,12 +20,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::Value;
-
 use super::SUPERVISOR;
 use super::box_text::{box_full_text, own_pointer};
 use super::listing::{Pane, capture};
-use super::state::PollState;
+use super::state::{PollState, StoredCount};
 use crate::classify::{input_state_for_send, parse_pane};
 use crate::clock::Clock;
 use crate::error::WakeError;
@@ -196,21 +194,9 @@ fn pointer_text(now: f64, n: u64, logged: Option<u64>, alerts: &Path) -> String 
     }
 }
 
-/// A count in `state.other`: `absent` when the key is missing, `unreadable`
-/// when the stored value is not a non-negative integer.
-fn counter_or(state: &PollState, key: &str, unreadable: u64) -> u64 {
-    match state.other.get(key) {
-        None => 0,
-        Some(v) => v.as_u64().unwrap_or_else(|| {
-            tracing::warn!(key, value = %v, unreadable, "poll-state counter is not a count");
-            unreadable
-        }),
-    }
-}
-
-/// An integer counter in `state.other`, 0 when absent or unreadable.
-fn counter(state: &PollState, key: &str) -> u64 {
-    counter_or(state, key, 0)
+/// A stored count: 0 when absent, `unreadable` when not a count.
+fn counter_or(stored: Option<&StoredCount>, key: &str, unreadable: u64) -> u64 {
+    stored.map_or(0, |c| c.or_unreadable(key, unreadable))
 }
 
 /// `dispatch_wake(state, panes, new_count, dry_run, logged)`: carries
@@ -226,8 +212,8 @@ fn counter(state: &PollState, key: &str) -> u64 {
 /// `failed: <message>`. A stored `wake_pending` that is not a non-negative
 /// integer counts as 1. Only a result starting `sent` zeroes `wake_pending`
 /// and drops `wake_logged`, and outside a dry run stamps `wake_sent_at` with
-/// `clock.now_unix()`. The keys live in [`PollState::other`] until A3b-2
-/// types them.
+/// `clock.now_unix()`. The keys are [`PollState`]'s typed `wake_*` fields
+/// (#9171 A3b-2).
 /// Test: `dispatch_wake_clears_only_on_sent`,
 /// `dispatch_wake_unreadable_pending_reads_as_owed`,
 /// `test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once`,
@@ -241,32 +227,26 @@ pub fn dispatch_wake<C: Clock + ?Sized>(
     wake: impl FnOnce(u64, Option<u64>) -> Result<String, WakeError>,
 ) -> String {
     // #9171 AC7: an unreadable stored count is a wake still owed, never 0.
-    let pending = counter_or(state, "wake_pending", 1).saturating_add(new_count);
-    state
-        .other
-        .insert("wake_pending".to_owned(), Value::from(pending));
+    let pending =
+        counter_or(state.wake_pending.as_ref(), "wake_pending", 1).saturating_add(new_count);
+    state.wake_pending = Some(StoredCount::Count(pending));
+    let mut logged_total = None;
     if let Some(l) = logged {
-        let total = counter(state, "wake_logged").saturating_add(l);
-        state
-            .other
-            .insert("wake_logged".to_owned(), Value::from(total));
+        let total = counter_or(state.wake_logged.as_ref(), "wake_logged", 0).saturating_add(l);
+        state.wake_logged = Some(StoredCount::Count(total));
+        logged_total = Some(total);
     }
     if pending == 0 {
-        state.other.remove("wake_logged");
+        state.wake_logged = None;
         return "none".to_owned();
     }
-    let logged_total = logged.map(|_| counter(state, "wake_logged"));
     let result = wake(pending, logged_total).unwrap_or_else(|e| format!("failed: {e}"));
     // #9171 AC7: only a confirmed send clears the count.
     if result.starts_with("sent") {
-        state
-            .other
-            .insert("wake_pending".to_owned(), Value::from(0));
-        state.other.remove("wake_logged");
+        state.wake_pending = Some(StoredCount::Count(0));
+        state.wake_logged = None;
         if !dry_run {
-            state
-                .other
-                .insert("wake_sent_at".to_owned(), Value::from(clock.now_unix()));
+            state.wake_sent_at = Some(clock.now_unix());
         }
     }
     result
@@ -316,14 +296,14 @@ mod tests {
             path: String::new(),
             dead: String::new(),
         }];
-        let mut state = PollState::default();
-        state
-            .other
-            .insert("wake_pending".to_owned(), Value::from(2));
+        let mut state = PollState {
+            wake_pending: Some(StoredCount::Count(2)),
+            ..PollState::default()
+        };
         // The box stays empty: the pointer is typed once, never confirmed.
         assert_eq!(waker.dispatch(&mut state, &panes, 3, None), BOX_CHANGED);
         assert_eq!(tmux.sends()[0][5], "[poll 00:00Z] 5 new alerts -> /a");
-        assert_eq!(state.other.get("wake_pending"), Some(&Value::from(5)));
+        assert_eq!(state.wake_pending, Some(StoredCount::Count(5)));
         Ok(())
     }
 }

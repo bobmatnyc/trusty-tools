@@ -21,7 +21,7 @@ use support::{
     ALERTS, DIM, NOW, RESET, TestResult, owned_tmux, pane, pointer, screen, sent, sup_pane, waker,
     wrapped, wrapped_with,
 };
-use trusty_architect::poller::{PollState, dispatch_wake};
+use trusty_architect::poller::{PollState, StoredCount, dispatch_wake};
 use trusty_architect::{FakeClock, ScriptedTmux, WakeError};
 
 const PERMISSION: &str = "⏺ Bash(rm -rf build/)\n\n────────────────────────────────────────────────────────────────────────────────\n Bash command · from the local-ops agent\n\n   rm -rf build/\n   Remove the build dir\n\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for rm commands in this project\n   3. No, and tell Claude what to do differently (esc)\n\n Esc to cancel\n";
@@ -300,8 +300,10 @@ fn dispatch_wake_clears_only_on_sent() {
     ];
     for (outcome, dry_run, clears, stamps) in cases {
         let clock = FakeClock::new(NOW);
-        let mut state = PollState::default();
-        state.other.insert("wake_logged".to_owned(), Value::from(1));
+        let mut state = PollState {
+            wake_logged: Some(StoredCount::Count(1)),
+            ..PollState::default()
+        };
         let result = dispatch_wake(&mut state, 2, Some(1), dry_run, &clock, |_, _| {
             outcome
                 .map(str::to_owned)
@@ -312,12 +314,12 @@ fn dispatch_wake_clears_only_on_sent() {
         });
         let want = if clears { 0 } else { 2 };
         assert_eq!(
-            state.other.get("wake_pending"),
-            Some(&Value::from(want)),
+            state.wake_pending,
+            Some(StoredCount::Count(want)),
             "{result}"
         );
-        assert_eq!(state.other.contains_key("wake_logged"), !clears, "{result}");
-        assert_eq!(state.other.contains_key("wake_sent_at"), stamps, "{result}");
+        assert_eq!(state.wake_logged.is_some(), !clears, "{result}");
+        assert_eq!(state.wake_sent_at.is_some(), stamps, "{result}");
         if outcome.is_err() {
             assert_eq!(result, "failed: refusing to send to %1 (session 'tm-api')");
         }
@@ -328,8 +330,8 @@ fn dispatch_wake_clears_only_on_sent() {
     dispatch_wake(&mut state, 1, None, true, &clock, |_, _| {
         Ok("sent to %1".to_owned())
     });
-    assert_eq!(state.other.get("wake_pending"), Some(&Value::from(0)));
-    assert!(!state.other.contains_key("wake_sent_at"));
+    assert_eq!(state.wake_pending, Some(StoredCount::Count(0)));
+    assert!(state.wake_sent_at.is_none());
 }
 
 /// #9171 AC7: a stored `wake_pending` that is not a non-negative integer is
@@ -345,10 +347,10 @@ fn dispatch_wake_unreadable_pending_reads_as_owed() {
     for (name, stored) in bad {
         // Refused: the wake is attempted and the count stays non-zero.
         let clock = FakeClock::new(NOW);
-        let mut state = PollState::default();
-        state
-            .other
-            .insert("wake_pending".to_owned(), stored.clone());
+        let mut state = PollState {
+            wake_pending: Some(StoredCount::Unreadable(stored.clone())),
+            ..PollState::default()
+        };
         let mut called = false;
         let result = dispatch_wake(&mut state, 0, None, false, &clock, |n, _| {
             called = true;
@@ -356,16 +358,21 @@ fn dispatch_wake_unreadable_pending_reads_as_owed() {
             Ok("skipped: input typed".to_owned())
         });
         assert!(called, "{name}: no wake attempted, result {result}");
-        let left = state.other.get("wake_pending").and_then(Value::as_u64);
-        assert!(left.is_some_and(|c| c >= 1), "{name}: left {left:?}");
+        let left = state.wake_pending.clone();
+        assert!(
+            matches!(left, Some(StoredCount::Count(c)) if c >= 1),
+            "{name}: left {left:?}"
+        );
 
         // Sent: the count clears.
-        let mut state = PollState::default();
-        state.other.insert("wake_pending".to_owned(), stored);
+        let mut state = PollState {
+            wake_pending: Some(StoredCount::Unreadable(stored)),
+            ..PollState::default()
+        };
         dispatch_wake(&mut state, 0, None, false, &clock, |_, _| {
             Ok("sent to %1".to_owned())
         });
-        assert_eq!(state.other.get("wake_pending"), Some(&Value::from(0)));
+        assert_eq!(state.wake_pending, Some(StoredCount::Count(0)));
     }
 }
 
@@ -403,16 +410,16 @@ fn dispatch_wake_failure_after_typing_stays_owed() -> TestResult {
     ];
     for (name, tmux) in rows {
         let clock = FakeClock::new(NOW);
-        let mut state = PollState::default();
-        state
-            .other
-            .insert("wake_pending".to_owned(), Value::from(2));
+        let mut state = PollState {
+            wake_pending: Some(StoredCount::Count(2)),
+            ..PollState::default()
+        };
         let result = waker(&tmux, &clock, ALERTS).dispatch(&mut state, &sup_pane()?, 1, None);
         assert!(!result.starts_with("sent"), "{name}: {result}");
         assert!(!tmux.sends().is_empty(), "{name}: nothing was typed");
         assert_eq!(
-            state.other.get("wake_pending"),
-            Some(&Value::from(3)),
+            state.wake_pending,
+            Some(StoredCount::Count(3)),
             "{name}: {result}"
         );
     }

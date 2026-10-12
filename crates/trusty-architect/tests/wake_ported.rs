@@ -19,11 +19,13 @@ use support::{
     ALERTS, NOW, TestResult, owned_tmux, pointer, screen, sent, sup_pane, waker, wrapped,
 };
 use trusty_architect::classify::{BoxReading, parse_pane};
-use trusty_architect::poller::{PollState, dispatch_wake};
+use trusty_architect::poller::{PollState, StoredCount, dispatch_wake};
 use trusty_architect::{FakeClock, InputState, ScriptedTmux, WakeError};
 
+/// A key as `poll-state.json` would hold it (#9171 A3b-2: the `wake_*` keys
+/// are typed fields).
 fn key(state: &PollState, key: &str) -> Option<Value> {
-    state.other.get(key).cloned()
+    serde_json::to_value(state).ok()?.get(key).cloned()
 }
 
 // Python: test_wake_reports_no_input_box_found_not_a_misleading_box_state
@@ -195,8 +197,10 @@ fn test_dispatch_wake_carries_pending_on_a_failed_confirm() {
 #[test]
 fn test_dispatch_wake_none_when_nothing_pending() {
     let clock = FakeClock::new(NOW);
-    let mut state = PollState::default();
-    state.other.insert("wake_logged".to_owned(), Value::from(2));
+    let mut state = PollState {
+        wake_logged: Some(StoredCount::Count(2)),
+        ..PollState::default()
+    };
     let mut called = false;
     let result = dispatch_wake(&mut state, 0, None, false, &clock, |_, _| {
         called = true;
