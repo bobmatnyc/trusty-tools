@@ -1,0 +1,75 @@
+# cargo-deny record for moli v1.1.16 (SHA 9616d01ab1faf30fef389d6dbce234e7019d1e18)
+#
+# Why: D31 offers moli as an opt-in skill. This file records which licence
+#   decisions a `cargo deny check licenses` run over moli's graph needs. It is a
+#   dated record, not a gate: trusty-tools CI does not read it, and moli is not a
+#   workspace member. The root /deny.toml is untouched and still carries no
+#   exception rows.
+# What: the root allow-list, plus two per-crate exception rows. Both rows wait on
+#   decision D33 (Bob). Nothing here is accepted until D33 is answered.
+# Test: not run. The step0 run (step0/deny.out, cargo-deny 0.20.2) used the root
+#   deny.toml unchanged. This file has not been parsed or executed.
+#   Reproduce in a moli checkout at the SHA above, on EVO:
+#     cargo deny --locked --config <this file> check licenses
+#   Prediction, unverified: exactly 3 `error[unlicensed]` (the crates listed at
+#   the foot of this file) and no other error.
+# See docs/licence-review/moli/REVIEW.md for the findings and decisions.
+
+[graph]
+# Same four targets as the root file; Windows-only crates fall out of the graph.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+exclude-dev = true
+
+[licenses]
+# Copied from the root /deny.toml. Counts are omitted: they were measured on a
+# different graph. In the step0 run `CDLA-Permissive-2.0` and `Unicode-DFS-2016`
+# matched nothing in moli's graph and produced two `license-not-encountered`
+# warnings (deny.out:232, :238); both are left in so this stays a copy.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "BSL-1.0",
+    "MIT-0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    # File-scoped weak copyleft. 17 crates in moli's graph, including moli's own
+    # moli-site and moli-xpath. See REVIEW.md, "MPL-2.0 set".
+    "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+# IJG is NOT in `allow` and WTFPL is NOT in `allow`. Each is a per-crate
+# exception so that the acceptance covers one crate and nothing else.
+
+# PENDING D33 (Bob): IJG in jpeg-encoder 0.6.1, expression
+# `(MIT OR Apache-2.0) AND IJG` (step0/deny.out:1-31). IJG is an AND term, so it
+# applies in every case. Reached via moli-image.
+[[licenses.exceptions]]
+crate = "jpeg-encoder@0.6.1"
+allow = ["IJG"]
+
+# PENDING D33 (Bob): WTFPL in typed-num 0.3.0 (step0/deny.out:164-231). Reached
+# via moli-cookie-cache, moli-opfs and moli-renderer-v8.
+[[licenses.exceptions]]
+crate = "typed-num@0.3.0"
+allow = ["WTFPL"]
+
+# NO `[[licenses.clarify]]` ROWS. moli-html-input-type 0.1.0, moli-url-policy
+# 0.1.0 and moli-window-features 0.1.0 declare no `license` field
+# (step0/deny.out:83, :135, :161). A clarify row would assert a licence upstream
+# has not stated. They stay `unlicensed` errors until upstream answers (D39) and
+# Bob rules (D33). Not a silent pass.
