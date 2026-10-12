@@ -13,7 +13,9 @@
 // #4906: the deferred-embed lane (retry + durable failure ledger) and the
 // vector-coverage health/repair surface that answers "which drawers have no
 // vector" and re-embeds them.
+mod chunk_backfill;
 mod chunk_health;
+mod chunk_progress;
 mod deferred_embed;
 mod embed_repair;
 mod embed_store;
@@ -47,6 +49,8 @@ mod write_pipeline;
 pub(crate) mod embed_repair_tests;
 // #9433: `pub(crate)` so `tier_c_tests` can reuse its log `Capture`.
 // #9275: `{uuid}#n` chunk rows through `PalaceHandle`.
+#[cfg(test)]
+mod chunk_backfill_tests;
 #[cfg(test)]
 mod chunk_health_tests;
 #[cfg(test)]
@@ -92,7 +96,11 @@ pub use handle::PalaceHandle;
 pub use deferred_embed::RetryPolicy;
 // #9275: the chunk-count verdict on `EmbedHealth`, and the chunked embed
 // primitive trusty-memory's kuzu import writes a drawer's vectors with.
+pub use chunk_backfill::{ChunkCommitError, SliceBounds, SliceReport, SliceStop};
 pub use chunk_health::ChunkCheck;
+pub use chunk_progress::{
+    CHUNK_MARKER_FILE, ChunkMarker, ChunkProgress, ChunkState, MARKER_RESCAN_AFTER,
+};
 pub use embed_repair::{
     AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
     VectorBackfillOptions, VectorBackfillReport,

@@ -1,0 +1,487 @@
+//! #9735: the chunk backfill engine — one bounded re-embed slice per call.
+//!
+//! Why: drawers written before chunking (#9275) hold one truncated vector, so
+//! their tail is unfindable, and nothing repaired them without an operator
+//! command. A background caller needs a unit of work that never holds
+//! `write_mutex` across an embed and never trusts a counter for progress.
+//! What: [`PalaceHandle::reembed_slice`] re-embeds missing and short drawers
+//! with the embed outside `write_mutex`; [`PalaceHandle::commit_if_current`]
+//! takes the mutex only to recheck the drawer text and run one upsert.
+//! Test: `chunk_backfill_tests`.
+
+use super::deferred_embed::EmbedLoss;
+use super::embed_repair::EmbedHealth;
+use super::embed_store::{embed_planned_within, plan_chunks};
+use super::handle::PalaceHandle;
+use crate::memory_core::embed::Embedder;
+use crate::memory_core::palace::Drawer;
+use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
+use crate::memory_core::timeouts;
+use chrono::{DateTime, Utc};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+/// Limits on one [`PalaceHandle::reembed_slice`] call.
+///
+/// Why: a background slice must yield to writers and to shutdown, and the
+/// defaults are starting values to be measured, not proven (ruling 8).
+/// What: every limit except `embed_timeout` and `lock_wait` is checked
+/// between drawers only, so none of them bounds one drawer; `embed_timeout`
+/// bounds one drawer's embed and `lock_wait` one commit's lock wait.
+/// Test: `slice_stops_starting_drawers_past_the_chunk_cap`,
+/// `slice_embed_is_bounded_by_the_slice_timeout`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceBounds {
+    /// Wall-clock budget, checked between drawers. Env
+    /// `TRUSTY_CHUNK_BACKFILL_SLICE_MS`, default 20 000.
+    pub budget: Duration,
+    /// Drawers started per slice. Env `TRUSTY_CHUNK_BACKFILL_MAX_DRAWERS`, default 8.
+    pub max_drawers: usize,
+    /// Chunks embedded per slice. Env `TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS`, default 64.
+    pub max_chunks: usize,
+    /// Ceiling on one drawer's embed. Env `TRUSTY_CHUNK_BACKFILL_EMBED_SECS`, default 120.
+    pub embed_timeout: Duration,
+    /// Ceiling on one commit's `write_mutex` wait. Env
+    /// `TRUSTY_CHUNK_BACKFILL_LOCK_WAIT_SECS`, default 5.
+    pub lock_wait: Duration,
+    /// A missing-vector drawer younger than this is left to the deferred lane.
+    /// Env `TRUSTY_CHUNK_BACKFILL_MIN_AGE_SECS`, default 120.
+    pub min_age: Duration,
+    /// A drawer with a ledger row younger than this is skipped. Env
+    /// `TRUSTY_CHUNK_BACKFILL_BACKOFF_SECS`, default 86 400.
+    pub ledger_backoff: Duration,
+    /// Consecutive embed failures that end the slice as host-level. Env
+    /// `TRUSTY_CHUNK_BACKFILL_HOST_FAILURES`, default 2.
+    pub host_failures: usize,
+}
+
+impl Default for SliceBounds {
+    fn default() -> Self {
+        Self {
+            budget: Duration::from_millis(20_000),
+            max_drawers: 8,
+            max_chunks: 64,
+            embed_timeout: Duration::from_secs(120),
+            lock_wait: Duration::from_secs(5),
+            min_age: Duration::from_secs(120),
+            ledger_backoff: Duration::from_secs(86_400),
+            host_failures: 2,
+        }
+    }
+}
+
+impl SliceBounds {
+    /// The defaults, each overridable by its env var; a malformed value keeps
+    /// the default.
+    /// Test: `slice_bounds_read_their_env_overrides`.
+    pub fn from_env() -> Self {
+        let d = Self::default();
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        Self {
+            budget: Duration::from_millis(env_u64("TRUSTY_CHUNK_BACKFILL_SLICE_MS", ms(d.budget))),
+            max_drawers: env_usize("TRUSTY_CHUNK_BACKFILL_MAX_DRAWERS", d.max_drawers),
+            max_chunks: env_usize("TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS", d.max_chunks),
+            embed_timeout: secs("TRUSTY_CHUNK_BACKFILL_EMBED_SECS", d.embed_timeout),
+            lock_wait: secs("TRUSTY_CHUNK_BACKFILL_LOCK_WAIT_SECS", d.lock_wait),
+            min_age: secs("TRUSTY_CHUNK_BACKFILL_MIN_AGE_SECS", d.min_age),
+            ledger_backoff: secs("TRUSTY_CHUNK_BACKFILL_BACKOFF_SECS", d.ledger_backoff),
+            host_failures: env_usize("TRUSTY_CHUNK_BACKFILL_HOST_FAILURES", d.host_failures),
+        }
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    usize::try_from(env_u64(name, default as u64)).unwrap_or(default)
+}
+
+fn secs(name: &str, default: Duration) -> Duration {
+    Duration::from_secs(env_u64(name, default.as_secs()))
+}
+
+/// Why a slice ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SliceStop {
+    /// Every queued drawer was visited.
+    #[default]
+    QueueEmpty,
+    /// The handle cannot write vectors; nothing ran.
+    ReadOnly,
+    /// The chunk check did not run (no tokenizer, failed scan); nothing ran.
+    ChunkCheckUnavailable(String),
+    /// The wall-clock budget was spent.
+    Budget,
+    /// `max_drawers` drawers were started.
+    DrawerCap,
+    /// `max_chunks` chunks were embedded.
+    ChunkCap,
+    /// `host_failures` consecutive embeds failed.
+    HostFailure,
+    /// `write_mutex` was not granted within `lock_wait`; the palace is busy.
+    LockTimeout(String),
+    /// The vector store refused an upsert.
+    StoreError(String),
+}
+
+/// What one slice did. Progress itself is never read from here: it is
+/// recomputed from the index by [`EmbedHealth::chunk_progress`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SliceReport {
+    /// Drawers embedded or failed (a stale drawer is not counted).
+    pub attempted: usize,
+    /// Drawers whose new group committed.
+    pub repaired: usize,
+    /// Drawers that could not be split, embedded or stored.
+    pub failed: usize,
+    /// Drawers forgotten or rewritten while their embed ran; nothing written.
+    pub stale: usize,
+    /// Chunks embedded successfully in this slice.
+    pub chunks_embedded: usize,
+    /// `host_failures` or more embed failures and no success: the fault is
+    /// the host's, so no ledger row was written for those failures.
+    pub host_failure: bool,
+    /// Why the slice ended.
+    pub stop: SliceStop,
+}
+
+/// Outcome of [`PalaceHandle::commit_if_current`] that wrote or skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Commit {
+    /// The drawer still had the embedded text; its group was replaced.
+    Committed,
+    /// The drawer is gone or its text changed; nothing was written.
+    Stale,
+}
+
+/// A commit that could not complete.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChunkCommitError {
+    /// `write_mutex` was not granted in time.
+    #[error("palace '{palace}': write lock not granted within {waited:?}")]
+    LockWait { palace: String, waited: Duration },
+    /// The vector store refused the upsert; redb rolled it back.
+    #[error("palace '{palace}': vector upsert failed: {reason}")]
+    Upsert { palace: String, reason: String },
+}
+
+/// A buffered ledger row and whether it is drawer-specific by construction.
+struct PendingRow {
+    id: Uuid,
+    loss: EmbedLoss,
+    drawer_specific: bool,
+}
+
+impl PalaceHandle {
+    /// Re-embed up to one slice of missing and short drawers.
+    ///
+    /// Why (#9735): a background caller must repair pre-chunking drawers
+    /// without blocking writers, recall or shutdown, and a failure must never
+    /// advance progress.
+    /// What: recomputes health with `embedder`; returns before any embed on a
+    /// read-only handle or an unrun chunk check. Queues missing-vector drawers
+    /// older than `min_age`, then short drawers by importance, skipping any
+    /// with a ledger row younger than `ledger_backoff`. Per drawer: split, embed
+    /// under `embed_timeout` with no lock, then [`Self::commit_if_current`].
+    /// Stops on the bounds, a lock timeout, a store error, or `host_failures`
+    /// consecutive embed failures. Ledger rows are written at the end, except
+    /// embed failures in a host-level slice; repaired drawers' rows are cleared.
+    /// Test: `chunk_backfill_tests` (e.g. `crash_midway_through_n_drawers_resumes_and_finishes`,
+    /// `host_level_slice_failure_writes_no_ledger_rows`).
+    pub async fn reembed_slice(
+        &self,
+        embedder: &Arc<dyn Embedder + Send + Sync>,
+        bounds: &SliceBounds,
+    ) -> SliceReport {
+        let mut report = SliceReport::default();
+        if self.is_read_only() {
+            report.stop = SliceStop::ReadOnly;
+            return report;
+        }
+        let health = self.embed_health_with(Some(embedder.as_ref()));
+        if let Some(reason) = health.chunk_check.unavailable_reason() {
+            report.stop = SliceStop::ChunkCheckUnavailable(reason.to_string());
+            return report;
+        }
+        let queue = self.backfill_queue(&health, bounds, Utc::now());
+        let started = Instant::now();
+        let mut rows: Vec<PendingRow> = Vec::new();
+        let mut repaired: HashSet<Uuid> = HashSet::new();
+        let (mut consecutive, mut embed_failures, mut started_drawers) = (0usize, 0usize, 0usize);
+        for id in queue {
+            if let Some(stop) = limit_reached(bounds, started, started_drawers, &report) {
+                report.stop = stop;
+                break;
+            }
+            let Some(text) = self.drawer_text(id) else {
+                report.stale += 1;
+                continue;
+            };
+            started_drawers += 1;
+            let chunks: Vec<String> = match plan_chunks(embedder.as_ref(), &text) {
+                Ok(c) => c.into_iter().map(str::to_string).collect(),
+                Err(e) => {
+                    // #9735 gap 12: a split error is the drawer's, never the host's.
+                    report.attempted += 1;
+                    report.failed += 1;
+                    rows.push(PendingRow::new(id, embed_loss(format!("{e:#}")), true));
+                    continue;
+                }
+            };
+            let vectors = match embed_bounded(embedder, &chunks, bounds.embed_timeout).await {
+                Ok(v) => v,
+                Err(reason) => {
+                    report.attempted += 1;
+                    report.failed += 1;
+                    (consecutive, embed_failures) = (consecutive + 1, embed_failures + 1);
+                    rows.push(PendingRow::new(id, embed_loss(reason), false));
+                    if consecutive >= bounds.host_failures.max(1) {
+                        report.stop = SliceStop::HostFailure;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            consecutive = 0;
+            report.chunks_embedded += chunks.len();
+            match self
+                .commit_if_current(id, &text, vectors, bounds.lock_wait)
+                .await
+            {
+                Ok(Commit::Committed) => {
+                    report.attempted += 1;
+                    repaired.insert(id);
+                }
+                Ok(Commit::Stale) => report.stale += 1,
+                Err(e @ ChunkCommitError::LockWait { .. }) => {
+                    report.stop = SliceStop::LockTimeout(e.to_string());
+                    break;
+                }
+                Err(e @ ChunkCommitError::Upsert { .. }) => {
+                    report.attempted += 1;
+                    report.failed += 1;
+                    let loss = EmbedLoss::Upsert {
+                        reason: e.to_string(),
+                        attempts: 1,
+                    };
+                    rows.push(PendingRow::new(id, loss, true));
+                    report.stop = SliceStop::StoreError(e.to_string());
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        report.repaired = repaired.len();
+        report.host_failure = repaired.is_empty() && embed_failures >= bounds.host_failures.max(1);
+        self.settle_slice_ledger(rows, repaired, report.host_failure)
+            .await;
+        report
+    }
+
+    /// Recheck the drawer under `write_mutex`, then upsert its group once.
+    ///
+    /// Why (#9735 Q5): an embed outside the lock can finish after a `forget`
+    /// or a rewrite; committing then leaves an orphan or a stale group.
+    /// What: waits at most `lock_wait` for `write_mutex`, the same mutex
+    /// `forget` and `remember` hold; `Stale` (nothing written) when the drawer
+    /// is gone or its text differs from `text`; otherwise one `upsert_chunks`
+    /// under the guard, never retried inside it.
+    /// Test: `no_orphan_rows_after_a_forget_races_the_slice`,
+    /// `no_stale_vector_after_a_merge_races_the_slice`,
+    /// `a_busy_palace_makes_the_slice_stop_not_queue`.
+    pub(crate) async fn commit_if_current(
+        &self,
+        id: Uuid,
+        text: &str,
+        vectors: Vec<Vec<f32>>,
+        lock_wait: Duration,
+    ) -> Result<Commit, ChunkCommitError> {
+        let palace = || self.id.as_str().to_string();
+        let _guard = timeouts::lock_with_timeout(&self.write_mutex, lock_wait, self.id.as_str())
+            .await
+            .map_err(|_| ChunkCommitError::LockWait {
+                palace: palace(),
+                waited: lock_wait,
+            })?;
+        if self.drawer_text(id).as_deref() != Some(text) {
+            return Ok(Commit::Stale);
+        }
+        self.vector_store
+            .upsert_chunks(id, vectors)
+            .await
+            .map(|()| Commit::Committed)
+            .map_err(|e| ChunkCommitError::Upsert {
+                palace: palace(),
+                reason: format!("{e:#}"),
+            })
+    }
+
+    /// The drawer's current text, or `None` once it is gone.
+    pub(super) fn drawer_text(&self, id: Uuid) -> Option<String> {
+        self.drawers
+            .read()
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.content().to_string())
+    }
+
+    /// Missing-vector drawers first, then short drawers by importance.
+    ///
+    /// Why (rulings 7, 9): a drawer with no vector is invisible to recall, and
+    /// a young one may still have a deferred embed in flight.
+    /// What: drops drawers with a ledger row younger than `ledger_backoff`
+    /// and missing-vector drawers younger than `min_age`; short drawers sort
+    /// by descending importance. The age rule never applies to short drawers.
+    /// Test: `queue_orders_missing_first_then_short_by_importance`,
+    /// `missing_vector_drawer_younger_than_two_minutes_is_skipped`.
+    pub(crate) fn backfill_queue(
+        &self,
+        health: &EmbedHealth,
+        bounds: &SliceBounds,
+        now: DateTime<Utc>,
+    ) -> Vec<Uuid> {
+        let younger = |at: DateTime<Utc>, limit: Duration| {
+            now.signed_duration_since(at)
+                .to_std()
+                .map_or(true, |age| age < limit)
+        };
+        let backed_off: HashSet<Uuid> = health
+            .recorded_failures
+            .iter()
+            .filter(|f| younger(f.failed_at, bounds.ledger_backoff))
+            .map(|f| f.drawer_id)
+            .collect();
+        let drawers = self.drawers.read();
+        let by_id: HashMap<Uuid, &Drawer> = drawers.iter().map(|d| (d.id, d)).collect();
+        let mut queue: Vec<Uuid> = health
+            .missing_vector_ids
+            .iter()
+            .filter(|id| !backed_off.contains(id))
+            .filter(|id| {
+                by_id
+                    .get(id)
+                    .is_some_and(|d| !younger(d.created_at, bounds.min_age))
+            })
+            .copied()
+            .collect();
+        let mut short: Vec<(f32, Uuid)> = health
+            .short_chunk_ids
+            .iter()
+            .filter(|id| !backed_off.contains(id))
+            .map(|id| (by_id.get(id).map_or(0.0, |d| d.importance), *id))
+            .collect();
+        short.sort_by(|a, b| b.0.total_cmp(&a.0));
+        queue.extend(short.into_iter().map(|(_, id)| id));
+        queue
+    }
+
+    /// Write the slice's buffered ledger rows and clear repaired drawers' rows.
+    ///
+    /// Why (#9735 gap 12): an embedder that is down fails every drawer, and a
+    /// row per drawer would back healthy drawers off for a day.
+    /// What: in a host-level slice only drawer-specific rows (split, upsert)
+    /// are written; otherwise every row is. One `spawn_blocking`, because
+    /// `json_rmw` blocks on an flock. A ledger error is logged, not returned.
+    /// Test: `host_level_slice_failure_writes_no_ledger_rows`,
+    /// `one_bad_drawer_among_good_ones_is_ledgered_and_the_rest_repair`.
+    async fn settle_slice_ledger(
+        &self,
+        rows: Vec<PendingRow>,
+        repaired: HashSet<Uuid>,
+        host_failure: bool,
+    ) {
+        let Some(dir) = self.data_dir.clone() else {
+            return;
+        };
+        let now = Utc::now();
+        let entries: Vec<EmbedFailure> = rows
+            .into_iter()
+            .filter(|r| r.drawer_specific || !host_failure)
+            .map(|r| EmbedFailure {
+                drawer_id: r.id,
+                failed_at: now,
+                attempts: r.loss.attempts(),
+                reason: r.loss.reason(),
+            })
+            .collect();
+        if entries.is_empty() && repaired.is_empty() {
+            return;
+        }
+        let written = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            for entry in entries {
+                embed_ledger::record(&dir, entry)?;
+            }
+            embed_ledger::clear(&dir, &repaired)
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(palace = %self.id, "#9735: slice ledger write failed: {e:#}")
+            }
+            Err(e) => tracing::warn!(palace = %self.id, "#9735: slice ledger task failed: {e}"),
+        }
+    }
+}
+
+impl PendingRow {
+    fn new(id: Uuid, loss: EmbedLoss, drawer_specific: bool) -> Self {
+        Self {
+            id,
+            loss,
+            drawer_specific,
+        }
+    }
+}
+
+fn embed_loss(reason: String) -> EmbedLoss {
+    EmbedLoss::Embed {
+        reason,
+        attempts: 1,
+    }
+}
+
+/// The bound a slice hit before starting another drawer, if any.
+fn limit_reached(
+    bounds: &SliceBounds,
+    started: Instant,
+    started_drawers: usize,
+    report: &SliceReport,
+) -> Option<SliceStop> {
+    if started.elapsed() >= bounds.budget {
+        Some(SliceStop::Budget)
+    } else if started_drawers >= bounds.max_drawers {
+        Some(SliceStop::DrawerCap)
+    } else if report.chunks_embedded >= bounds.max_chunks {
+        Some(SliceStop::ChunkCap)
+    } else {
+        None
+    }
+}
+
+/// Embed `chunks` under the scaled per-chunk ceiling and the slice's own.
+///
+/// Why (#9735 gap 11): the scaled ceiling can be minutes; a slice must give
+/// up on one drawer sooner.
+/// What: the lower of `slice_timeout` and the per-chunk scaled bound wins.
+/// Test: `slice_embed_is_bounded_by_the_slice_timeout`.
+async fn embed_bounded(
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+    chunks: &[String],
+    slice_timeout: Duration,
+) -> Result<Vec<Vec<f32>>, String> {
+    let per_chunk = timeouts::embed_batch_timeout();
+    let embed = embed_planned_within(embedder.as_ref(), chunks, per_chunk);
+    match tokio::time::timeout(slice_timeout, embed).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(format!("{e:#}")),
+        Err(_) => Err(format!("slice embed timed out after {slice_timeout:?}")),
+    }
+}
