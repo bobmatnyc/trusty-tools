@@ -56,8 +56,9 @@ pub(crate) const KUZU_STORE_RULE: &str = "kuzu-store-read";
 
 /// Programs that may name a deny item: each reports metadata, none prints
 /// bytes. Narrower than the #7266 `SAFE_HANDLING_VERBS`: `cd`/`pushd` would
-/// put a later `cat *` inside a store, and `rm` destroys one.
-const KUZU_SAFE_VERBS: &[&str] = &["ls", "stat", "file", "test", "["];
+/// put a later `cat *` inside a store, `rm` destroys one, and `file -f` prints
+/// every line of the path it is given (#8625).
+const KUZU_SAFE_VERBS: &[&str] = &["ls", "stat", "test", "["];
 
 /// The kuzu-store decision for one tool call: `Some(reason)` denies.
 ///
@@ -77,7 +78,7 @@ pub(crate) fn evaluate_kuzu_store_access(
     let how = format!("the `{tool_name}` tool");
     match tool_name {
         "Bash" => cwd_verdict(cwd)
-            .or_else(|| evaluate_command(field("command").unwrap_or_default(), cwd, home, 0)),
+            .or_else(|| evaluate_command(field("command").unwrap_or_default(), home, 0)),
         "Read" | "Edit" | "MultiEdit" | "Write" => path_verdict(field("file_path")?, cwd, &how),
         "NotebookEdit" => path_verdict(field("notebook_path")?, cwd, &how),
         "Grep" | "Glob" => {
@@ -168,12 +169,7 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 /// a file, then each command-substitution body, recursively.
 /// Test: `denies_bash_reads_of_a_store`, `denies_running_kuzu_memory`,
 /// `the_exception_cannot_be_widened`.
-fn evaluate_command(
-    command: &str,
-    cwd: &Path,
-    home: Option<&Path>,
-    depth: usize,
-) -> Option<String> {
+fn evaluate_command(command: &str, home: Option<&Path>, depth: usize) -> Option<String> {
     if depth > MAX_SUBSTITUTION_DEPTH {
         let lower = command.to_ascii_lowercase();
         return (lower.contains("kuzu") || lower.contains("memories.db"))
@@ -181,13 +177,16 @@ fn evaluate_command(
     }
     let (argv_text, bodies) = split_heredoc_bodies(command);
     let segments = split_shell_segments(&argv_text);
-    let lone = segments.iter().filter(|s| !s.trim().is_empty()).count() == 1;
-    for segment in &segments {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(reason) = segment_verdict(trimmed, lone, cwd, home) {
+    let live: Vec<&str> = segments
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let lone = live.len() == 1;
+    // #8625: the import exemption needs the whole command, bar a trailing `| tee`.
+    let whole = lone || (live.len() == 2 && runs_tee(live[1]));
+    for (i, segment) in live.iter().enumerate() {
+        if let Some(reason) = segment_verdict(segment, lone, whole && i == 0, home) {
             return Some(reason);
         }
     }
@@ -200,7 +199,15 @@ fn evaluate_command(
     }
     command_substitutions(command)
         .iter()
-        .find_map(|sub| evaluate_command(sub.text(), cwd, home, depth + 1))
+        .find_map(|sub| evaluate_command(sub.text(), home, depth + 1))
+}
+
+/// Whether `segment` is a `tee` call (the only tail the import exemption allows).
+fn runs_tee(segment: &str) -> bool {
+    tokenize(segment)
+        .ok()
+        .and_then(|argv| argv.first().map(|p| command_basename(p) == "tee"))
+        .unwrap_or(false)
 }
 
 /// The kuzu-store decision for one segment.
@@ -211,7 +218,7 @@ fn evaluate_command(
 /// all arguments of a [`KUZU_SAFE_VERBS`] program allows.
 /// Test: `denies_an_unlexable_segment_naming_a_store`,
 /// `keeps_ordinary_commands_allowed`, `the_exception_cannot_be_widened`.
-fn segment_verdict(segment: &str, lone: bool, cwd: &Path, home: Option<&Path>) -> Option<String> {
+fn segment_verdict(segment: &str, lone: bool, whole: bool, home: Option<&Path>) -> Option<String> {
     let Ok(argv) = tokenize(segment) else {
         let word = kuzu_words_in(segment, false)
             .into_iter()
@@ -224,7 +231,7 @@ fn segment_verdict(segment: &str, lone: bool, cwd: &Path, home: Option<&Path>) -
             })?;
         return Some(deny_reason(&word, "a command the guard cannot lex"));
     };
-    if let Some(reason) = trusty_memory_verdict(&argv, cwd, home) {
+    if let Some(reason) = trusty_memory_verdict(&argv, segment, home) {
         return Some(reason);
     }
     if runs_kuzu_memory(&argv) {
@@ -233,7 +240,7 @@ fn segment_verdict(segment: &str, lone: bool, cwd: &Path, home: Option<&Path>) -
              `trusty-memory import kuzu` as the tm-memory-import skill describes."
         ));
     }
-    let mut skip = sanctioned_argument_indices(segment, &argv);
+    let mut skip = sanctioned_argument_indices(segment, &argv, home, whole);
     skip.extend(pattern_argument_index(segment, &argv));
     skip.extend(text_payload_indices(segment, &argv));
     skip.extend(commit_message_indices(segment, &argv));

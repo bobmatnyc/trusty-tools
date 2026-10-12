@@ -126,7 +126,7 @@ fn python_runs_kuzu_module(args: &[String]) -> bool {
 /// `denies_a_non_venv_python_program`, `allows_the_venv_interpreter`.
 pub(crate) fn trusty_memory_verdict(
     argv: &[String],
-    cwd: &Path,
+    segment: &str,
     home: Option<&Path>,
 ) -> Option<String> {
     let calls = argv
@@ -149,8 +149,10 @@ pub(crate) fn trusty_memory_verdict(
             ));
         }
         if argv[sub] == "import" && after.first().is_some_and(|t| t == "kuzu") {
-            for value in python_values(&after[1..]) {
-                if let Err(why) = venv_python_verdict(value, cwd, home) {
+            let quoted_tilde = ["\"~", "'~"].iter().any(|q| segment.contains(q));
+            for (value, tilde_ok) in python_values(&after[1..]) {
+                let tilde_ok = tilde_ok && !quoted_tilde;
+                if let Err(why) = venv_python_verdict(value, tilde_ok, home) {
                     return Some(python_reason(value.unwrap_or_default(), why));
                 }
             }
@@ -165,14 +167,16 @@ fn is_migrate_alias(token: &str) -> bool {
     MIGRATE_ALIASES.contains(&normal.as_str())
 }
 
-/// Every `--python` value in `args`; `None` for a flag with no value.
-fn python_values(args: &[String]) -> Vec<Option<&str>> {
+/// Every `--python` value in `args`; `None` for a flag with no value. The
+/// flag says whether bash would expand a leading `~` in that spelling: it does
+/// for a separate unquoted word, never after `--python=`.
+fn python_values(args: &[String]) -> Vec<(Option<&str>, bool)> {
     let mut out = Vec::new();
     for (i, arg) in args.iter().enumerate() {
         if arg == "--python" {
-            out.push(args.get(i + 1).map(String::as_str));
+            out.push((args.get(i + 1).map(String::as_str), true));
         } else if let Some(value) = arg.strip_prefix("--python=") {
-            out.push(Some(value));
+            out.push((Some(value), false));
         }
     }
     out
@@ -180,33 +184,42 @@ fn python_values(args: &[String]) -> Vec<Option<&str>> {
 
 /// Ruling Q9 for one `--python` value: `Ok` only for the venv interpreter.
 ///
-/// What: the value, `~` and a relative path placed against `home` and `cwd`,
-/// is normalised LEXICALLY (no symlink is followed) and must be
-/// `<home>/.trusty-tools/kuzu-import-venv/bin/` plus `python`, `python3` or
-/// `python3.N`; then its canonical path must equal the canonical
-/// `<venv>/bin/python`. No home, no value, and either canonicalisation error
-/// deny (#8625 Fail-Open Check).
+/// What: the value must be absolute, or an unquoted separate `~/...` word
+/// (`tilde_ok`); a relative value, `--python=~/...` and a quoted `~` deny,
+/// because trusty-memory opens the file the shell hands it, not the one the
+/// guard guesses. The path is normalised LEXICALLY (no symlink is followed)
+/// and must be `<home>/.trusty-tools/kuzu-import-venv/bin/` plus `python`,
+/// `python3` or `python3.N`; then the canonical path of the UN-normalised
+/// value must equal the canonical `<venv>/bin/python`, so a `..` after a
+/// symlink resolves as it will at run time. No home, no value, and either
+/// canonicalisation error deny (#8625 Fail-Open Check).
 /// Test: `allows_the_venv_interpreter`, `denies_a_non_venv_python_program`,
 /// `denies_a_planted_symlink_to_the_same_cpython`,
-/// `denies_when_the_venv_interpreter_cannot_be_resolved`.
+/// `denies_when_the_venv_interpreter_cannot_be_resolved`,
+/// `denies_dot_dot_after_a_symlink_in_the_python_path`,
+/// `denies_a_tilde_bash_does_not_expand_and_a_relative_python`.
 pub(crate) fn venv_python_verdict(
     value: Option<&str>,
-    cwd: &Path,
+    tilde_ok: bool,
     home: Option<&Path>,
 ) -> Result<(), &'static str> {
     let value = value.ok_or("the flag has no value")?;
     let home = home.ok_or("the home directory is unknown")?;
     let venv_bin = lexical(&home.join(VENV_BIN));
-    let path = if value == "~" {
-        home.to_path_buf()
-    } else if let Some(rest) = value.strip_prefix("~/") {
+    // #8625: a path the guard cannot know bash resolves the same way is refused.
+    let path = if let Some(rest) = value.strip_prefix("~/") {
+        if !tilde_ok {
+            return Err("bash does not expand this `~`, so the path is not the venv's");
+        }
         home.join(rest)
+    } else if Path::new(value).is_absolute() {
+        PathBuf::from(value)
     } else {
-        cwd.join(value)
+        return Err("it is not an absolute path");
     };
-    let path = lexical(&path);
-    let named = path.parent() == Some(venv_bin.as_path())
-        && path
+    let normal = lexical(&path);
+    let named = normal.parent() == Some(venv_bin.as_path())
+        && normal
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(is_venv_python_name);
@@ -258,14 +271,26 @@ fn python_reason(value: &str, why: &str) -> String {
 /// The argv indices of a sanctioned `trusty-memory import kuzu` call that
 /// may name a store, a venv path or a temp export (ruling Q8).
 ///
-/// What: empty unless the segment runs no nested command, its program word
-/// resolves (not through `xargs`, not a lookup) to `trusty-memory`, and the
-/// next two words are exactly `import kuzu`. Then every later argument, minus
-/// a redirection operator and its target. A wrapper word or an env
-/// assignment in front of the program is never exempt.
-/// Test: `allows_the_sanctioned_import`, `the_exception_cannot_be_widened`.
-pub(crate) fn sanctioned_argument_indices(segment: &str, argv: &[String]) -> Vec<usize> {
-    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+/// What: empty unless `whole` (the segment is the entire command, bar a
+/// trailing `| tee`), it runs no nested command, its program word resolves
+/// (not through `xargs`, not a lookup) to the bare `trusty-memory` or
+/// `<home>/.cargo/bin/trusty-memory`, nothing precedes it but `env -u NAME`
+/// pairs, and the next two words are exactly `import kuzu`. Then every later
+/// argument, minus a redirection operator and its target. A function body, a
+/// `PATH=`/`PYTHONPATH=` assignment or a path-qualified program is never
+/// exempt: the bridge inherits the environment and imports `kuzu` unisolated.
+/// Test: `allows_the_sanctioned_import`, `the_exception_cannot_be_widened`,
+/// `denies_a_shell_function_shadowing_trusty_memory`,
+/// `denies_an_environment_assignment_before_trusty_memory`,
+/// `denies_a_path_assignment_before_trusty_memory`,
+/// `denies_a_path_qualified_trusty_memory`, `allows_the_cargo_bin_trusty_memory`.
+pub(crate) fn sanctioned_argument_indices(
+    segment: &str,
+    argv: &[String],
+    home: Option<&Path>,
+    whole: bool,
+) -> Vec<usize> {
+    if !whole || NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return Vec::new();
     }
     let Ok(word) = resolve_program_word(argv) else {
@@ -274,9 +299,8 @@ pub(crate) fn sanctioned_argument_indices(segment: &str, argv: &[String]) -> Vec
     let at = word.index;
     let sanctioned = !word.lookup
         && word.xargs_at.is_none()
-        && argv
-            .get(at)
-            .is_some_and(|p| command_basename(p) == TRUSTY_MEMORY)
+        && clean_prefix(&argv[..at])
+        && argv.get(at).is_some_and(|p| is_real_trusty_memory(p, home))
         && argv.get(at + 1).is_some_and(|t| t == "import")
         && argv.get(at + 2).is_some_and(|t| t == "kuzu");
     if !sanctioned {
@@ -285,6 +309,26 @@ pub(crate) fn sanctioned_argument_indices(segment: &str, argv: &[String]) -> Vec
     (at + 3..argv.len())
         .filter(|&i| !redirect_related(argv, i))
         .collect()
+}
+
+/// Whether `prefix` is empty or `env` followed only by `-u NAME` pairs.
+fn clean_prefix(prefix: &[String]) -> bool {
+    match prefix.split_first() {
+        None => true,
+        Some((env, rest)) => {
+            env == "env"
+                && rest.len().is_multiple_of(2)
+                && rest
+                    .chunks(2)
+                    .all(|pair| pair[0] == "-u" && !pair[1].contains('='))
+        }
+    }
+}
+
+/// Whether `program` is the bare name or the home's cargo-bin install.
+fn is_real_trusty_memory(program: &str, home: Option<&Path>) -> bool {
+    program == TRUSTY_MEMORY
+        || home.is_some_and(|h| Path::new(program) == h.join(".cargo/bin").join(TRUSTY_MEMORY))
 }
 
 /// Whether token `i` is a redirection, or the target of one.
