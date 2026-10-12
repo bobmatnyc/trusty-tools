@@ -129,6 +129,36 @@ fn bash_egress_denies_chat_googleapis_host() {
     );
 }
 
+/// 🔴 #8454 P1a (O5): the Google Chat web host is denied as Google Chat.
+#[test]
+fn bash_reaching_chat_google_com_is_denied() {
+    assert_denies("curl https://chat.google.com/", "Google Chat");
+}
+
+/// 🔴 #8454 P1a (O5): a `notion.site` subdomain is denied as Notion.
+#[test]
+fn bash_reaching_notion_site_is_denied() {
+    assert_denies("curl https://x.notion.site/", "Notion");
+}
+
+/// #8454 P1a control: the two new hosts add no deny to `google.com`, its
+/// other subdomains, or a lookalike, and leave the `notion.so` deny as it was.
+#[test]
+fn bash_new_family_hosts_leave_neighbours_unchanged() {
+    for command in [
+        "curl https://google.com/",
+        "curl https://www.google.com/search?q=chat",
+        "curl https://notchat.google.com/",
+        "curl https://notchat.google.com.evil.example/",
+        "curl https://chat.google.com.evil.example/",
+        "curl https://xnotion.site/",
+        "curl https://notion.site.evil.example/",
+    ] {
+        assert_allows(command);
+    }
+    assert_denies("curl https://www.notion.so/x", "Notion");
+}
+
 /// 🔴 #8454 S3: every mail client in command position is denied, and so is an
 /// `smtp://` URL or an `smtp.*` host on a mail port.
 #[test]
