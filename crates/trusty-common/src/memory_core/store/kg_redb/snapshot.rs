@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 //! Consistent snapshot of a live palace, and its offline restore (#9282).
 //!
 //! Why: no path copied a palace while the daemon served it. A raw `cp` of
@@ -39,8 +38,13 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[path = "snapshot_io.rs"]
+mod io_util;
 #[path = "snapshot_restore.rs"]
 mod restore;
+use io_util::{
+    StagingDir, copy_verified, hash_file, io_err, redb_err, sibling, sync_file, write_verified,
+};
 pub use restore::restore_palace_snapshot;
 
 /// Version of the snapshot layout and manifest this build writes and reads.
@@ -232,23 +236,189 @@ impl PalaceHandle {
     }
 }
 
-// #9282 RED STUB: the API without the behaviour, so the tests compile and fail.
+/// Take a consistent snapshot of `handle`'s palace.
+///
+/// Why: see the module doc. `PalaceHandle::snapshot` is the public entry.
+/// What: `chat_sessions` is the process's open chat store for this palace,
+/// when it has one; redb allows one handle per file per process, so the
+/// caller that holds it must lend it. Without it the file is opened
+/// read-only, which fails closed while another process holds it. `dest`
+/// overrides the default directory and must not exist. Blocking I/O: call
+/// from `spawn_blocking` in async code.
+/// Test: `snapshot_under_a_concurrent_writer_matches_its_manifest`,
+/// `a_kg_copy_failure_leaves_no_snapshot`.
 pub(crate) fn snapshot_palace(
     handle: &PalaceHandle,
     chat_sessions: Option<&ChatSessionStore>,
     dest: Option<&Path>,
     hook: SnapshotHook,
 ) -> Result<PalaceSnapshot> {
-    Err(SnapshotError::Redb {
-        op: "snapshot",
-        path: PathBuf::new(),
-        reason: "not implemented".into(),
+    let palace = handle.id.as_str().to_string();
+    let palace_dir = handle
+        .data_dir
+        .clone()
+        .ok_or_else(|| SnapshotError::NoDataDir {
+            palace: palace.clone(),
+        })?;
+    if handle.kg.is_read_only() {
+        return Err(SnapshotError::ReadOnlyHandle { palace });
+    }
+    let taken_at = Utc::now();
+    let final_dir = match dest {
+        Some(d) => d.to_path_buf(),
+        None => default_snapshot_dir(&palace_dir, &palace, taken_at),
+    };
+    if final_dir.try_exists().map_err(io_err("stat", &final_dir))? {
+        return Err(SnapshotError::DestinationExists { path: final_dir });
+    }
+    let tmp = StagingDir::create(sibling(&final_dir, TMP_SUFFIX))?;
+
+    let store = handle.kg.store();
+    let (kg_tables, palace_format) = snapshot_kg(&store, &tmp.path.join(KG_FILE), hook)?;
+    let chat_tables = snapshot_chat(&palace_dir, chat_sessions, &tmp.path.join(CHAT_FILE), hook)?;
+    let mut files = Vec::new();
+    for name in [KG_FILE, CHAT_FILE] {
+        let path = tmp.path.join(name);
+        if path.try_exists().map_err(io_err("stat", &path))? {
+            files.push(finish_db_file(name, &path, hook)?);
+        }
+    }
+    for name in PLAIN_FILES {
+        if let Some(bytes) = read_optional(&palace_dir.join(name))? {
+            files.push(write_verified(&tmp.path, name, &bytes, hook)?);
+        }
+    }
+    for name in JOURNAL_FILES {
+        if let Some(bytes) = read_optional(&palace_dir.join(name))? {
+            files.push(write_verified(&tmp.path, name, complete_lines(&bytes), hook)?);
+        }
+    }
+    if let Some(bytes) = drawer_count_lines(&palace_dir, &palace)? {
+        files.push(write_verified(&tmp.path, DRAWER_COUNTS_FILE, &bytes, hook)?);
+    }
+
+    let manifest = SnapshotManifest {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        kind: SNAPSHOT_KIND.to_string(),
+        palace,
+        taken_at,
+        writer_version: env!("CARGO_PKG_VERSION").to_string(),
+        palace_format,
+        drawer_count: kg_tables.get("drawers").copied().unwrap_or(0),
+        room_count: kg_tables.get("rooms").copied().unwrap_or(0),
+        kg_tables,
+        chat_tables,
+        files,
+    };
+    write_manifest(&tmp.path, &manifest, hook)?;
+    tmp.commit_to(&final_dir)?;
+    Ok(PalaceSnapshot {
+        dir: final_dir,
+        manifest,
     })
 }
 
-/// Red stub: copies every byte, torn final line included.
-pub(crate) fn complete_lines(bytes: &[u8]) -> &[u8] {
-    bytes
+/// `<data root>/backups/manual/<palace>/<UTC>`, beside the migration backups.
+fn default_snapshot_dir(palace_dir: &Path, palace: &str, at: DateTime<Utc>) -> PathBuf {
+    backup_data_root(palace_dir)
+        .join("backups")
+        .join("manual")
+        .join(palace)
+        .join(at.format("%Y%m%dT%H%M%S%.3fZ").to_string())
+}
+
+/// Copy `kg.redb` from one read transaction; return its counts and format.
+///
+/// Why: one read transaction sees exactly one commit, so the copy is a
+/// consistent state however many writes land during it, and redb MVCC means
+/// no writer waits on it (ADR-0067 D2 ruling, #9282).
+/// Test: `snapshot_under_a_concurrent_writer_matches_its_manifest`,
+/// `a_kg_copy_failure_leaves_no_snapshot`.
+fn snapshot_kg(
+    store: &KgStoreRedb,
+    dest: &Path,
+    hook: SnapshotHook,
+) -> Result<(BTreeMap<String, u64>, Option<u32>)> {
+    let src = store.path().to_path_buf();
+    let rtx = store
+        .db()
+        .begin_read()
+        .map_err(redb_err("begin read", &src))?;
+    guard_tables(&rtx, &src, &known_table_names())?;
+    let names: Vec<&str> = BYTE_TABLES
+        .iter()
+        .map(|t| t.name())
+        .chain(STR_TABLES.iter().map(|t| t.name()))
+        .collect();
+    let expected = table_counts(&rtx, &src, &names)?;
+    hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
+    let copy = crate::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    copy_all(&rtx, &copy, None).map_err(redb_err("copy into", dest))?;
+    drop(rtx);
+    let counts = verify_counts(&copy, dest, &names, &expected)?;
+    let format = match read_marker(&copy, dest).map_err(redb_err("read format of", dest))? {
+        KgMarker::Stamped(n) => Some(n),
+        KgMarker::Unstamped => Some(0),
+        KgMarker::Fresh | KgMarker::Deferred => None,
+    };
+    Ok((counts, format))
+}
+
+/// Copy `chat_sessions.redb` from one read transaction, when the palace has one.
+///
+/// Test: `snapshot_under_a_concurrent_writer_matches_its_manifest`.
+fn snapshot_chat(
+    palace_dir: &Path,
+    lent: Option<&ChatSessionStore>,
+    dest: &Path,
+    hook: SnapshotHook,
+) -> Result<BTreeMap<String, u64>> {
+    let src = palace_dir.join(CHAT_FILE);
+    let rtx = match lent {
+        Some(store) => store
+            .redb()
+            .begin_read()
+            .map_err(redb_err("begin read", &src))?,
+        None => {
+            if !src.try_exists().map_err(io_err("stat", &src))? {
+                return Ok(BTreeMap::new());
+            }
+            crate::redb_cache::open_palace_db_read_only(&src)
+                .map_err(redb_err("open read-only", &src))?
+                .begin_read()
+                .map_err(redb_err("begin read", &src))?
+        }
+    };
+    let defs = [SESSIONS, CHAT_ASSETS_TABLE];
+    let names: Vec<&str> = defs.iter().map(|t| t.name()).collect();
+    guard_tables(&rtx, &src, &names)?;
+    let expected = table_counts(&rtx, &src, &names)?;
+    hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
+    let copy = crate::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    let mut counts = Default::default();
+    for def in defs {
+        copy_str_table(&rtx, &copy, def, &mut counts).map_err(redb_err("copy into", dest))?;
+    }
+    drop(rtx);
+    verify_counts(&copy, dest, &names, &expected)
+}
+
+/// Refuse a database holding a table outside `known`; copying would drop it.
+fn guard_tables(rtx: &ReadTransaction, path: &Path, known: &[&str]) -> Result<()> {
+    let unknown: Vec<String> = rtx
+        .list_tables()
+        .map_err(redb_err("list tables of", path))?
+        .map(|h| h.name().to_string())
+        .filter(|n| !known.contains(&n.as_str()))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(SnapshotError::UnknownTables {
+            path: path.to_path_buf(),
+            tables: unknown.join(", "),
+        })
+    }
 }
 
 /// Row count of each named table; an absent table counts zero.
@@ -274,17 +444,113 @@ pub(crate) fn table_counts(
     Ok(out)
 }
 
-/// Map any displayable redb or anyhow error into [`SnapshotError::Redb`].
-pub(crate) fn redb_err<E: std::fmt::Display>(
-    op: &'static str,
+/// Re-count the copy and require it to equal the source's counts.
+fn verify_counts(
+    copy: &Database,
     path: &Path,
-) -> impl FnOnce(E) -> SnapshotError {
-    let path = path.to_path_buf();
-    move |e| SnapshotError::Redb {
-        op,
-        path,
-        reason: format!("{e:#}"),
+    names: &[&str],
+    expected: &BTreeMap<String, u64>,
+) -> Result<BTreeMap<String, u64>> {
+    let rtx = copy.begin_read().map_err(redb_err("begin read", path))?;
+    let actual = table_counts(&rtx, path, names)?;
+    check_counts(path, expected, &actual)?;
+    Ok(actual)
+}
+
+/// Every table in `expected` must have the same count in `actual`.
+pub(crate) fn check_counts(
+    path: &Path,
+    expected: &BTreeMap<String, u64>,
+    actual: &BTreeMap<String, u64>,
+) -> Result<()> {
+    for (table, want) in expected {
+        let got = actual.get(table).copied().unwrap_or(0);
+        if got != *want {
+            return Err(SnapshotError::CountMismatch {
+                path: path.to_path_buf(),
+                table: table.clone(),
+                expected: *want,
+                actual: got,
+            });
+        }
     }
+    Ok(())
+}
+
+/// fsync a copied database and record its length and hash.
+fn finish_db_file(name: &str, path: &Path, hook: SnapshotHook) -> Result<SnapshotFile> {
+    sync_file(path, hook)?;
+    hook(SnapshotStep::Verify, path).map_err(io_err("verify", path))?;
+    let (len, sha256) = hash_file(path)?;
+    Ok(SnapshotFile {
+        name: name.to_string(),
+        len,
+        sha256,
+    })
+}
+
+/// The bytes up to and including the last `\n`; a torn final line is dropped.
+///
+/// Test: `a_journal_torn_final_line_is_not_copied`.
+pub(crate) fn complete_lines(bytes: &[u8]) -> &[u8] {
+    match bytes.iter().rposition(|b| *b == b'\n') {
+        Some(i) => &bytes[..=i],
+        None => &[],
+    }
+}
+
+/// This palace's complete lines of the shared `drawer_counts.jsonl`.
+///
+/// Why: the file sits beside the palace directories and carries one line per
+/// palace per day (#9283); only this palace's lines belong in its snapshot.
+/// What: `None` when the file is absent or holds no line for `palace`. A line
+/// that is not a JSON object naming a palace names no palace, so no snapshot
+/// takes it.
+/// Test: `drawer_count_lines_are_filtered_to_the_palace`.
+fn drawer_count_lines(palace_dir: &Path, palace: &str) -> Result<Option<Vec<u8>>> {
+    let Some(parent) = palace_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(bytes) = read_optional(&parent.join(DRAWER_COUNTS_FILE))? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for line in complete_lines(&bytes).split_inclusive(|b| *b == b'\n') {
+        let owner = serde_json::from_slice::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("palace").and_then(|p| p.as_str().map(str::to_owned)));
+        if owner.as_deref() == Some(palace) {
+            out.extend_from_slice(line);
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// Read a whole file; `None` only when it does not exist.
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    if !path.try_exists().map_err(io_err("stat", path))? {
+        return Ok(None);
+    }
+    std::fs::read(path).map(Some).map_err(io_err("read", path))
+}
+
+/// Write the manifest through a fsynced temp file and a rename.
+///
+/// Test: `a_manifest_write_failure_leaves_no_snapshot`.
+fn write_manifest(dir: &Path, manifest: &SnapshotManifest, hook: SnapshotHook) -> Result<()> {
+    let path = dir.join(SNAPSHOT_MANIFEST);
+    hook(SnapshotStep::WriteManifest, &path).map_err(io_err("write", &path))?;
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| {
+        SnapshotError::ManifestJson {
+            path: path.clone(),
+            source,
+        }
+    })?;
+    let tmp = sibling(&path, TMP_SUFFIX);
+    let mut f = std::fs::File::create(&tmp).map_err(io_err("create", &tmp))?;
+    f.write_all(&bytes).map_err(io_err("write", &tmp))?;
+    f.sync_all().map_err(io_err("fsync", &tmp))?;
+    std::fs::rename(&tmp, &path).map_err(io_err("rename", &path))
 }
 
 #[cfg(test)]
