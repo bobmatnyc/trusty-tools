@@ -1183,3 +1183,41 @@ async fn actor_classifier_failure_is_fail_open() {
         "a classifier failure must be fail-open: session completes cleanly; got: {state}"
     );
 }
+
+/// A backend whose `recv` reports a worker failure ends the session `Failed`,
+/// never `Stopped{Completed}` (#9725).
+///
+/// Why: the stream-json backend now reports a non-zero, signal or lingering
+/// worker exit as `Some(Err)`; this pins the actor side of that contract.
+/// What: feeds `Some(Err)` through the channel backend and asserts the
+/// terminal state, the `Failed` broadcast carrying the reason, and no
+/// `Stopped` event.
+/// Test: this test.
+#[tokio::test]
+async fn actor_backend_exit_error_ends_failed_not_completed() {
+    let id = ControlSessionId::new("exit-err", 0);
+    let (handle, mut bcast, backend_tx) =
+        spawn_chan_actor(&id, BackendKind::StreamJson, SessionActorConfig::default());
+    backend_tx
+        .send(Some(Err(anyhow::anyhow!(
+            "claude worker exited unsuccessfully (exit status: 2)"
+        ))))
+        .await
+        .unwrap();
+
+    let state = await_terminal(&handle, tokio::time::Duration::from_secs(5)).await;
+    assert_eq!(state, SessionState::Failed, "got: {state}");
+
+    let mut failed_reason = None;
+    while let Ok(ev) = bcast.try_recv() {
+        match ev {
+            SessionEvent::Failed { reason, .. } => failed_reason = Some(reason),
+            SessionEvent::Stopped { reason, .. } => {
+                panic!("a failed worker must not broadcast Stopped({reason:?})")
+            }
+            _ => {}
+        }
+    }
+    let reason = failed_reason.expect("a Failed event must be broadcast");
+    assert!(reason.contains("exit status: 2"), "reason: {reason}");
+}

@@ -29,8 +29,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -54,6 +55,12 @@ use super::{SessionBackend, SessionInput};
 /// What: the literal `"ANTHROPIC_API_KEY"`.
 /// Test: `build_command_removes_api_key`, `build_command_removes_key_even_if_set`.
 pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// How long `recv` waits for the worker to exit once its stdout closes (#9725).
+const EXIT_WAIT_BOUND: Duration = Duration::from_secs(5);
+
+/// The least time the post-SIGKILL reap is given, whatever the exit bound (#9725).
+const POST_KILL_REAP_FLOOR: Duration = Duration::from_secs(2);
 
 /// Build the `claude` stream-JSON [`std::process::Command`] for a session.
 ///
@@ -122,7 +129,13 @@ pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::
 /// Test: `stream_json_backend_constructs`.
 pub struct StreamJsonBackend {
     session_id: ControlSessionId,
-    child: ChildHandle,
+    /// `None` once the stdout-EOF reap owns the child (#9725).
+    child: Option<ChildHandle>,
+    /// The bounded stdout-EOF reap task, once started (#9725).
+    exit_reaper: Option<tokio::task::JoinHandle<Result<()>>>,
+    /// Tells the pending reap to SIGKILL now; sent by `stop`, dropped by Drop.
+    reap_kill: Option<tokio::sync::oneshot::Sender<()>>,
+    exit_wait_bound: Duration,
     stdin: DynChildStdin,
     stdout: BufReader<DynChildStdout>,
 }
@@ -152,22 +165,138 @@ impl StreamJsonBackend {
         prompt_file: Option<PathBuf>,
     ) -> Result<Self> {
         let std_cmd = build_claude_command(&workdir, prompt_file.as_deref());
-
-        let spawned = disclaimed_piped_spawn(std_cmd).with_context(|| {
+        let sid = session_id.clone();
+        Self::spawn_command(session_id, std_cmd, EXIT_WAIT_BOUND).with_context(|| {
             format!(
                 "failed to spawn 'claude' for session {} in {}",
-                session_id,
+                sid,
                 workdir.display()
             )
-        })?;
+        })
+    }
 
+    /// Spawn an already-built command as the session's worker.
+    ///
+    /// Why: #9725 — `spawn` hard-codes `claude`, which left the worker-exit
+    /// paths of `recv` with no test seam. This takes any piped command and an
+    /// injectable stdout-EOF exit-wait bound, so tests drive `sh -c` workers
+    /// through the same [`disclaimed_piped_spawn`] path `claude` uses.
+    /// What: spawns `cmd` via [`disclaimed_piped_spawn`] and wraps the handles.
+    /// `exit_wait_bound` caps how long `recv` waits for the child to exit
+    /// after its stdout closes.
+    /// Test: `recv_reports_nonzero_exit_before_any_output_as_error`,
+    /// `recv_times_out_when_stdout_closes_but_child_lives_and_reaps_it`.
+    pub(crate) fn spawn_command(
+        session_id: ControlSessionId,
+        cmd: std::process::Command,
+        exit_wait_bound: Duration,
+    ) -> std::io::Result<Self> {
+        let spawned = disclaimed_piped_spawn(cmd)?;
         Ok(Self {
             session_id,
-            child: spawned.handle,
+            child: Some(spawned.handle),
+            exit_reaper: None,
+            reap_kill: None,
+            exit_wait_bound,
             stdin: spawned.stdin,
             stdout: BufReader::new(spawned.stdout),
         })
     }
+
+    /// Settle the worker's exit once its stdout has closed.
+    ///
+    /// Why: #9725 — `recv` read stdout EOF as a clean exit, so a worker that
+    /// failed or was killed ended `Stopped{Completed}`. The exit status decides.
+    /// What: on the first call hands the child to a spawned [`reap_at_eof`]
+    /// task, then awaits that task. Returns `None` for exit 0 and `Some(Err)`
+    /// otherwise. The reap runs in its own task so a `recv` cancelled by the
+    /// actor's `select!` loses neither the wait nor the kill; the next call
+    /// awaits the same task. A call after the outcome is returned yields `None`.
+    /// Test: `recv_reports_nonzero_exit_before_any_output_as_error`,
+    /// `recv_cancelled_during_exit_wait_resumes_the_same_reap`.
+    async fn exit_outcome(&mut self) -> Option<Result<Vec<SessionEvent>>> {
+        if let Some(child) = self.child.take() {
+            let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+            self.reap_kill = Some(kill_tx);
+            self.exit_reaper = Some(tokio::spawn(reap_at_eof(
+                child,
+                self.exit_wait_bound,
+                kill_rx,
+            )));
+        }
+        let outcome = self.exit_reaper.as_mut()?.await;
+        self.exit_reaper = None;
+        self.reap_kill = None;
+        match outcome {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(Err(e)),
+            Err(join) => Some(Err(anyhow!("claude worker exit reap failed: {join}"))),
+        }
+    }
+}
+
+/// The worker's raw pid while it is unreaped (#9725).
+fn child_pid(child: &ChildHandle) -> Option<i32> {
+    match child {
+        ChildHandle::Native(c) => c.id().and_then(|p| i32::try_from(p).ok()),
+        #[cfg(target_os = "macos")]
+        ChildHandle::Disclaimed { pid, .. } => Some(*pid),
+    }
+}
+
+/// Wait, bounded, for a worker whose stdout closed and classify its exit.
+///
+/// Why: #9725 — a worker that exits non-zero or by signal must fail the
+/// session, and one that closes stdout but keeps running must neither hang
+/// the actor nor be leaked.
+/// What: waits up to `bound` for the exit. Exit 0 is `Ok(())`; any other
+/// status is `Err` naming it (`exit status: N` or `signal: N`). When `bound`
+/// elapses first, or `kill_now` resolves (a `stop` request, or the backend
+/// dropped), SIGKILLs the pid, waits up to `bound.max(POST_KILL_REAP_FLOOR)`
+/// for the reap, and returns `Err`. One `wait()` future is polled throughout,
+/// so the child is reaped exactly once — `ChildHandle::wait` allows one call
+/// on the disclaimed path — and the pid is signalled only while that wait is
+/// pending.
+/// Test: `recv_reports_signal_exit_as_error`,
+/// `recv_times_out_when_stdout_closes_but_child_lives_and_reaps_it`,
+/// `recv_keeps_fast_clean_exit_as_none`,
+/// `stop_during_pending_exit_reap_kills_at_once_and_logs_the_result`.
+async fn reap_at_eof(
+    mut child: ChildHandle,
+    bound: Duration,
+    kill_now: tokio::sync::oneshot::Receiver<()>,
+) -> Result<()> {
+    let pid = child_pid(&child);
+    let wait = child.wait();
+    tokio::pin!(wait);
+    let why = tokio::select! {
+        biased;
+        status = &mut wait => {
+            let status = status.context("waiting for the claude worker to exit failed")?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(anyhow!("claude worker exited unsuccessfully ({status})"))
+            };
+        }
+        _ = kill_now => "was killed by a stop request while its exit was pending".to_owned(),
+        () = tokio::time::sleep(bound) => {
+            format!("closed stdout but was still running after {bound:?}")
+        }
+    };
+    if let Some(pid) = pid {
+        // #9725: the wait above is still pending, so the pid is unreaped.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let reap = match tokio::time::timeout(bound.max(POST_KILL_REAP_FLOOR), &mut wait).await {
+        Ok(Ok(status)) => format!("killed: {status}"),
+        Ok(Err(e)) => format!("killed; reap failed: {e}"),
+        Err(_) => "SIGKILL sent; not reaped within the bound".to_owned(),
+    };
+    Err(anyhow!("claude worker {why} ({reap})"))
 }
 
 #[async_trait]
@@ -197,12 +326,14 @@ impl SessionBackend for StreamJsonBackend {
     /// Read the next line from `claude`'s stdout and parse as a stream-JSON event.
     ///
     /// Why: the actor's `select!` loop needs a single async poll point for all
-    /// backend output. Returning `None` on EOF signals a clean exit.
-    /// What: reads one UTF-8 line from the stdout `BufReader`; on EOF returns
-    /// `None`; on a non-empty line attempts to parse it as JSON and wraps it in
-    /// `SessionEvent::Output`; on a blank line (heartbeat/separator) loops to
-    /// the next call. Returns `Some(Err(…))` only on a hard I/O error.
-    /// Test: recv-path covered by integration test.
+    /// backend output. `None` signals a clean exit (exit code 0).
+    /// What: reads one UTF-8 line from the stdout `BufReader`; on EOF settles
+    /// the worker's exit status (#9725, see `exit_outcome`): `None` for exit 0,
+    /// `Some(Err)` for a non-zero, signal or still-running worker. A non-empty
+    /// line is parsed as JSON and wrapped in `SessionEvent::Output`; a blank
+    /// line (heartbeat/separator) loops. A hard I/O error is `Some(Err(…))`.
+    /// Test: `recv_keeps_fast_clean_exit_as_none`,
+    /// `recv_reports_nonzero_exit_before_any_output_as_error`.
     async fn recv(&mut self) -> Option<Result<Vec<SessionEvent>>> {
         let mut line = String::new();
         loop {
@@ -212,9 +343,9 @@ impl SessionBackend for StreamJsonBackend {
                 Err(e) => return Some(Err(e.into())),
             };
             if n == 0 {
-                // EOF — child exited cleanly.
+                // #9725: EOF is not proof of a clean exit; the exit status decides.
                 debug!(session_id = %self.session_id, "stream-json stdout EOF");
-                return None;
+                return self.exit_outcome().await;
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -259,10 +390,28 @@ impl SessionBackend for StreamJsonBackend {
     /// the child exit. Note: `start_kill()` sends SIGKILL, not SIGTERM; a
     /// graceful SIGTERM → wait → SIGKILL sequence is deferred to a later phase.
     /// Drop provides a final safety net in case `stop()` is never called.
-    /// Test: stop-path covered by integration test.
+    /// #9725: once the stdout-EOF reap owns the child, `stop` tells that reap
+    /// to SIGKILL now and awaits it, so the child is never waited on twice. The
+    /// reap's result is logged at warn; the stop itself stays Ok.
+    /// Test: `stop_after_reported_exit_does_not_wait_twice`,
+    /// `stop_during_pending_exit_reap_kills_at_once_and_logs_the_result`.
     async fn stop(mut self) -> Result<()> {
-        let _ = self.child.start_kill(); // SIGKILL; ignore if already exited
-        let _ = self.child.wait().await; // reap the child
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill(); // SIGKILL; ignore if already exited
+            let _ = child.wait().await; // reap the child
+        } else if let Some(reaper) = self.exit_reaper.take() {
+            if let Some(kill) = self.reap_kill.take() {
+                let _ = kill.send(()); // Err: the reap already finished
+            }
+            match reaper.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(session_id = %self.session_id, "stop: {e:#}"),
+                Err(join) => warn!(
+                    session_id = %self.session_id,
+                    "stop: claude worker exit reap failed: {join}"
+                ),
+            }
+        }
         Ok(())
     }
 }
@@ -277,7 +426,11 @@ impl Drop for StreamJsonBackend {
     /// are already closed by dropping the handles, which signals EOF.
     /// Test: side-effect-only; covered by the integration cleanup suite.
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        // #9725: a child handed to the stdout-EOF reap is that task's to kill;
+        // dropping `reap_kill` tells it to kill now.
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -415,6 +568,246 @@ mod tests {
             .collect();
         assert!(args.contains(&"--append-system-prompt-file".to_string()));
         assert!(args.contains(&"/tmp/prompt.md".to_string()));
+    }
+
+    // ── #9725: worker exit status at stdout EOF ──────────────────────────────
+
+    /// Spawn `sh -c <script>` as a worker through the disclaimed spawn path.
+    fn spawn_sh(script: &str, exit_wait_bound: Duration) -> StreamJsonBackend {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        StreamJsonBackend::spawn_command(ControlSessionId::new("exit", 0), cmd, exit_wait_bound)
+            .expect("sh must spawn")
+    }
+
+    /// The worker's raw pid, read from the live handle.
+    fn worker_pid(backend: &StreamJsonBackend) -> i32 {
+        backend
+            .child
+            .as_ref()
+            .and_then(child_pid)
+            .expect("a freshly spawned worker has a pid")
+    }
+
+    /// Assert the pid is neither alive nor an unreaped zombie: both answer
+    /// signal 0, so ESRCH proves the worker was killed AND reaped.
+    fn assert_reaped(pid: i32) {
+        let probe = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None);
+        assert_eq!(
+            probe,
+            Err(nix::errno::Errno::ESRCH),
+            "worker pid {pid} must be gone (killed and reaped)"
+        );
+    }
+
+    /// Name a `recv` outcome for an assertion message.
+    fn outcome(o: &Option<Result<Vec<SessionEvent>>>) -> String {
+        match o {
+            None => "None".into(),
+            Some(Ok(ev)) => format!("Some(Ok({} events))", ev.len()),
+            Some(Err(e)) => format!("Some(Err({e:#}))"),
+        }
+    }
+
+    /// Await one `recv`, bounded so a hang fails instead of stalling the run.
+    async fn recv_bounded(backend: &mut StreamJsonBackend) -> Option<Result<Vec<SessionEvent>>> {
+        tokio::time::timeout(Duration::from_secs(10), backend.recv())
+            .await
+            .expect("recv must return within 10 s")
+    }
+
+    #[tokio::test]
+    async fn recv_reports_nonzero_exit_before_any_output_as_error() {
+        let mut backend = spawn_sh("exit 2", Duration::from_secs(5));
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("exit status: 2"),
+                "the failure must name exit code 2: {e:#}"
+            ),
+            other => panic!("exit 2 must be Some(Err), got {}", outcome(other)),
+        }
+    }
+
+    #[tokio::test]
+    async fn recv_reports_signal_exit_as_error() {
+        let mut backend = spawn_sh("kill -9 $$", Duration::from_secs(5));
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("signal: 9"),
+                "the failure must name signal 9: {e:#}"
+            ),
+            other => panic!(
+                "a SIGKILLed worker must be Some(Err), got {}",
+                outcome(other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn recv_keeps_fast_clean_exit_as_none() {
+        let mut backend = spawn_sh(
+            r#"echo '{"type":"result"}'; exit 0"#,
+            Duration::from_secs(5),
+        );
+        let first = recv_bounded(&mut backend).await;
+        assert!(
+            matches!(&first, Some(Ok(ev)) if ev.len() == 1),
+            "the result line must arrive first, got {}",
+            outcome(&first)
+        );
+        let second = recv_bounded(&mut backend).await;
+        assert!(
+            second.is_none(),
+            "exit 0 must end in None, got {}",
+            outcome(&second)
+        );
+
+        let mut silent = spawn_sh("exit 0", Duration::from_secs(5));
+        let only = recv_bounded(&mut silent).await;
+        assert!(
+            only.is_none(),
+            "a silent exit 0 must be None, got {}",
+            outcome(&only)
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_times_out_when_stdout_closes_but_child_lives_and_reaps_it() {
+        let bound = Duration::from_millis(200);
+        let mut backend = spawn_sh("exec >&-; exec sleep 30", bound);
+        let pid = worker_pid(&backend);
+        let started = std::time::Instant::now();
+        let got = recv_bounded(&mut backend).await;
+        match &got {
+            Some(Err(e)) => assert!(
+                format!("{e:#}").contains("still running"),
+                "the failure must say the worker outlived the bound: {e:#}"
+            ),
+            other => panic!(
+                "a worker alive after stdout EOF must be Some(Err), got {}",
+                outcome(other)
+            ),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "recv must give up near the {bound:?} bound, took {:?}",
+            started.elapsed()
+        );
+        assert_reaped(pid);
+    }
+
+    /// The actor's `select!` drops a pending `recv` whenever a command
+    /// arrives; the reap must survive that and the next `recv` must finish it.
+    #[tokio::test]
+    async fn recv_cancelled_during_exit_wait_resumes_the_same_reap() {
+        let mut backend = spawn_sh("exec >&-; exec sleep 30", Duration::from_millis(300));
+        let pid = worker_pid(&backend);
+        let cancelled = tokio::time::timeout(Duration::from_millis(150), backend.recv()).await;
+        assert!(cancelled.is_err(), "the first recv must still be waiting");
+        let got = recv_bounded(&mut backend).await;
+        assert!(
+            matches!(&got, Some(Err(_))),
+            "the resumed reap must report the lingering worker, got {}",
+            outcome(&got)
+        );
+        assert_reaped(pid);
+    }
+
+    /// A `stop` after `recv` reported the exit must not wait on the child a
+    /// second time (the disclaimed handle panics on a second `wait`).
+    #[tokio::test]
+    async fn stop_after_reported_exit_does_not_wait_twice() {
+        let mut backend = spawn_sh("exit 3", Duration::from_secs(5));
+        let got = recv_bounded(&mut backend).await;
+        assert!(matches!(&got, Some(Err(_))), "got {}", outcome(&got));
+        backend
+            .stop()
+            .await
+            .expect("stop after a reported exit is Ok");
+    }
+
+    /// A requested stop of a live worker still SIGKILLs and reaps it.
+    #[tokio::test]
+    async fn stop_kills_and_reaps_a_live_worker() {
+        let backend = spawn_sh("sleep 30", Duration::from_secs(5));
+        let pid = worker_pid(&backend);
+        tokio::time::timeout(Duration::from_secs(10), backend.stop())
+            .await
+            .expect("stop must return within 10 s")
+            .expect("stop is Ok");
+        assert_reaped(pid);
+    }
+
+    /// A `tracing` writer that keeps every formatted line for an assertion.
+    #[derive(Clone, Default)]
+    struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The actor drops a pending `recv` on Stop/ForceStop, then calls `stop`.
+    /// `stop` must kill the lingering worker at once, not wait out the reap's
+    /// own bound, return Ok, and log the reap's result instead of dropping it.
+    #[tokio::test]
+    async fn stop_during_pending_exit_reap_kills_at_once_and_logs_the_result() {
+        // #4931: a thread-local capture records nothing unless MAX_LEVEL is raised.
+        crate::test_support::enable_event_capture();
+        let logs = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let bound = Duration::from_secs(5);
+        let mut backend = spawn_sh("exec >&-; exec sleep 30", bound);
+        let pid = worker_pid(&backend);
+        let cancelled = tokio::time::timeout(Duration::from_secs(1), backend.recv()).await;
+        assert!(cancelled.is_err(), "the first recv must still be waiting");
+        assert!(
+            backend.child.is_none() && backend.exit_reaper.is_some(),
+            "recv must have reached stdout EOF and handed the child to the exit reap \
+             before stop() runs, or this test does not exercise the pending-reap branch"
+        );
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(10), backend.stop())
+            .await
+            .expect("stop must return within 10 s")
+            .expect("a requested stop is Ok even though it killed the worker");
+        let took = started.elapsed();
+        assert!(
+            took < bound / 2,
+            "stop must kill at once, not wait out the {bound:?} reap bound; took {took:?}"
+        );
+        assert_reaped(pid);
+        let logged = String::from_utf8(logs.0.lock().expect("capture lock").clone())
+            .expect("the captured log must be utf-8");
+        assert!(
+            logged.contains("WARN") && logged.contains("claude worker"),
+            "stop must log the reap's result at warn: {logged:?}"
+        );
     }
 
     /// Verify that spawning when `claude` is absent returns a descriptive error.
