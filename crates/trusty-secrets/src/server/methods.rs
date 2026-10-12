@@ -303,8 +303,10 @@ fn sweep_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKin
 /// `configured`, each opened through the factory. A factory that answers
 /// [`SecretsError::UnknownBackend`] has no such backend, so it holds
 /// nothing and is skipped. Any other open failure is returned: that backend
-/// may still hold a value.
+/// may still hold a value. #9793: an active sandbox skips every backend but
+/// `file`; the flag without the override does not.
 /// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_is_refused_under_the_flag_with_the_real_home`,
 /// `server_delete_fails_closed_when_an_old_backend_cannot_open`,
 /// `server_delete_sweeps_onepassword_when_the_machine_enables_it`.
 fn other_backends(
@@ -314,9 +316,11 @@ fn other_backends(
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
     for id in swept_backends(machine) {
-        // #9793: a sandboxed server never opened the Keychain or a CLI
+        // #9793: an active sandbox never opened the Keychain or a CLI
         // backend, so they hold nothing it wrote; `State::open` refuses them.
-        if id == *configured || (state.sandboxed && !sandbox::opens_in_sandbox(&id)) {
+        // With the flag but no override (Q3) they are the account's, so the
+        // refusal below fails the delete closed and the index row stays.
+        if id == *configured || (state.sandbox_override && !sandbox::opens_in_sandbox(&id)) {
             continue;
         }
         match state.open(&id) {

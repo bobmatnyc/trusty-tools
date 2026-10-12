@@ -5,7 +5,7 @@
 //! home. Consent to `file` writes is read from the password database's home
 //! (#7524 H1, ruling 74), which a sandbox must not touch, so every `set` into
 //! `file` was refused there, and the default backend was the login Keychain.
-//! What: [`SandboxEnv`] (the three variables read once at start),
+//! What: [`SandboxEnv`] (the three variables, read once by the binary),
 //! [`sandbox_consent_config`] (the sandbox home's machine config, only when
 //! every signal agrees), [`file_consent_config_for`] (that override, else the
 //! account's own file), and [`opens_in_sandbox`] (only `file` opens under the
@@ -15,8 +15,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use trusty_common::DATA_DIR_OVERRIDE_ENV;
-use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
+use trusty_common::credentials::sandbox_flag_set;
 
 use crate::api::BackendId;
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
@@ -25,10 +24,14 @@ use crate::store::config::MACHINE_CONFIG_SUBPATH;
 ///
 /// Why: a decision read per request could change under a running server;
 /// one read at start keeps consent, enablement and doctor in agreement.
-/// What: `TRUSTY_SANDBOX`, `TRUSTY_DATA_DIR_OVERRIDE` and `HOME`, raw.
-/// Test: `sandbox_consent_is_none_without_the_flag`.
+/// What: `TRUSTY_SANDBOX`, `TRUSTY_DATA_DIR_OVERRIDE` and `HOME`, raw. The
+/// binary reads them once in `main` and hands them in through
+/// [`StartEnv`](super::StartEnv); library code never reads the process
+/// environment for them (#9793), so `Default` means not sandboxed.
+/// Test: `sandbox_consent_is_none_without_the_flag`,
+/// `library_code_never_reads_the_sandbox_variables_from_the_process_env`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SandboxEnv {
+pub struct SandboxEnv {
     /// `TRUSTY_SANDBOX`, as set.
     pub(crate) flag: Option<OsString>,
     /// `TRUSTY_DATA_DIR_OVERRIDE`, as set.
@@ -38,12 +41,17 @@ pub(crate) struct SandboxEnv {
 }
 
 impl SandboxEnv {
-    /// This process's sandbox variables.
-    pub(crate) fn read() -> Self {
+    /// The sandbox variables as the binary read them at start.
+    // #9793: the caller reads the environment; this library never does.
+    pub fn new(
+        flag: Option<OsString>,
+        data_dir_override: Option<OsString>,
+        home: Option<OsString>,
+    ) -> Self {
         Self {
-            flag: std::env::var_os(SANDBOX_ENV_VAR),
-            data_dir_override: std::env::var_os(DATA_DIR_OVERRIDE_ENV),
-            home: std::env::var_os("HOME"),
+            flag,
+            data_dir_override,
+            home,
         }
     }
 
@@ -61,8 +69,9 @@ impl SandboxEnv {
 /// What: `Some(<canonical HOME>/.trusty-tools/trusty-common/config.yaml)`
 /// only when all hold: the flag is exactly `1`; `TRUSTY_DATA_DIR_OVERRIDE`
 /// is an absolute, existing directory; `HOME` is absolute and exists; the
-/// account home is known; and the canonical `HOME` differs from the
-/// canonical account home (Q3). Anything else is `None`.
+/// account home is known; and `HOME` is not the same directory as the
+/// account home, by `(dev, ino)` (Q3). Any metadata error on either side is
+/// doubt, so `None`.
 /// Test: `sandbox_consent_is_none_without_the_flag`,
 /// `sandbox_consent_is_none_without_a_data_dir_override`,
 /// `sandbox_consent_is_none_when_home_is_the_account_home`.
@@ -77,13 +86,22 @@ pub(crate) fn sandbox_consent_config(
     if !data_dir.is_dir() {
         return None;
     }
-    let home = absolute(env.home.as_deref())?.canonicalize().ok()?;
-    let account = account_home?.canonicalize().ok()?;
+    let home = absolute(env.home.as_deref())?;
     // #9793 (Q3): the real home is never a sandbox; consent stays ruling 74's.
-    if home == account {
+    // The inode, not the canonical path: `canonicalize` leaves a macOS
+    // firmlink alias of the account home looking like another directory.
+    if same_directory(&home, account_home?)? {
         return None;
     }
-    Some(home.join(MACHINE_CONFIG_SUBPATH))
+    Some(home.canonicalize().ok()?.join(MACHINE_CONFIG_SUBPATH))
+}
+
+/// Whether `a` and `b` are one directory, by `(dev, ino)`; `None` when
+/// either cannot be read, which the caller treats as doubt.
+fn same_directory(a: &Path, b: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (std::fs::metadata(a).ok()?, std::fs::metadata(b).ok()?);
+    Some((a.dev(), a.ino()) == (b.dev(), b.ino()))
 }
 
 /// `value` as a path, when it is set and absolute.

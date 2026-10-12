@@ -7,12 +7,15 @@
 #   launcher that forwarded one inherited credential, or bound the console
 #   off loopback, would look exactly like a working one.
 # What: runs the launcher against two stub binaries that record the variable
-#   NAMES, arguments and working directory they received, from a caller
+#   NAMES (and the values of four non-secret ones), arguments and working
+#   directory they received, from a caller
 #   environment (built with `env -i`) polluted with fake secrets. No real
 #   server starts. Cases:
 #     allowlist   the secrets stub sees exactly HOME PATH TRUSTY_DATA_DIR_OVERRIDE
 #                 TRUSTY_SANDBOX; the console stub those plus TRUSTY_MPM_ROOT
 #                 and TRUSTY_SECRETS_EXTERNAL (plus what /bin/sh adds itself)
+#     values      those four variables carry TRUSTY_SANDBOX=1,
+#                 TRUSTY_SECRETS_EXTERNAL=1, <dir>/data and <dir>/mpm exactly
 #     argv        `serve --idle-timeout-secs 14400 --socket <dir>/home/...sock`
 #                 and `serve --http 127.0.0.1:<port>`; cwd <dir>/home
 #     no-leak     no fake secret value in the output or any file in <dir>
@@ -73,6 +76,9 @@ for role in secrets console; do
 #!/bin/sh
 role="${0##*/}"
 env | cut -d= -f1 | sort > "$HOME/$role.names"
+# #9793: the four pinned variables with their values; none is a secret.
+env | grep -E '^(TRUSTY_SANDBOX|TRUSTY_DATA_DIR_OVERRIDE|TRUSTY_MPM_ROOT|TRUSTY_SECRETS_EXTERNAL)=' \
+  | LC_ALL=C sort > "$HOME/$role.values"
 printf '%s\n' "$@" > "$HOME/$role.args"
 pwd -P > "$HOME/$role.pwd"
 trap 'exit 0' TERM INT
@@ -110,6 +116,9 @@ wait_for() {
   [ -s "$1" ]
 }
 
+# values FILE: the recorded NAME=value lines on one line.
+values() { tr '\n' ' ' < "$1"; }
+
 # names FILE: the recorded names without the ones /bin/sh exports itself.
 names() { grep -vxE 'PWD|OLDPWD|SHLVL|_' "$1" | tr '\n' ' '; }
 
@@ -138,6 +147,13 @@ else
   GOT="$(names "$H1/stub-console.names")"
   WANT="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ROOT TRUSTY_SANDBOX TRUSTY_SECRETS_EXTERNAL "
   expect_eq "allowlist console" "$GOT" "$WANT"
+  # #9793: the values, not only the names; a launcher pinning the wrong one fails.
+  GOT="$(values "$H1/stub-secrets.values")"
+  WANT="TRUSTY_DATA_DIR_OVERRIDE=$DIR1/data TRUSTY_SANDBOX=1 "
+  expect_eq "values secrets" "$GOT" "$WANT"
+  GOT="$(values "$H1/stub-console.values")"
+  WANT="TRUSTY_DATA_DIR_OVERRIDE=$DIR1/data TRUSTY_MPM_ROOT=$DIR1/mpm TRUSTY_SANDBOX=1 TRUSTY_SECRETS_EXTERNAL=1 "
+  expect_eq "values console" "$GOT" "$WANT"
 
   GOT="$(tr '\n' ' ' < "$H1/stub-secrets.args")"
   WANT="serve --idle-timeout-secs 14400 --socket $H1/.trusty-tools/trusty-secrets/secrets.sock "

@@ -92,6 +92,7 @@ pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
     default_backends, run_to_exit, serve, serve_with,
 };
+pub use sandbox::SandboxEnv;
 pub use settings::{
     AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
     DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,

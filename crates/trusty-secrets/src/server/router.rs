@@ -71,15 +71,18 @@ pub fn default_backends() -> BackendFactory {
 /// spawner's `PATH`; `op` comes from the pin or the fixed system directories.
 /// What: `backends_with` on `account_machine_config`, the file #7524
 /// reads `file` consent from, and the production 1Password directories; with
-/// no account home, every CLI backend is off.
+/// no account home, every CLI backend is off. #9793: `sandbox` is what the
+/// binary read at start, the same value it gives [`StartEnv`], so the
+/// factory and the server agree on whose machine config enables a backend.
 /// Test: `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
 pub fn backends_for(
     settings: &ServerSettings,
+    sandbox: &SandboxEnv,
     onepassword_token: Option<SecretValue>,
 ) -> BackendFactory {
     backends_with(
-        account_machine_config(),
+        account_machine_config(sandbox),
         settings,
         onepassword_token,
         crate::store::program::onepassword_dirs(),
@@ -168,6 +171,9 @@ pub struct StartEnv {
     /// The `PATH` the binary read at start; only its absolute entries are
     /// searched.
     pub search_path: Option<OsString>,
+    /// The sandbox variables the binary read at start (#9793); the default
+    /// is not sandboxed.
+    pub(crate) sandbox: SandboxEnv,
 }
 
 impl StartEnv {
@@ -182,6 +188,12 @@ impl StartEnv {
         self.search_path = path;
         self
     }
+
+    /// This environment with the sandbox variables read at start (#9793).
+    pub fn with_sandbox(mut self, sandbox: SandboxEnv) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
 }
 
 /// The account's own machine config: `MACHINE_CONFIG_SUBPATH` under
@@ -192,9 +204,10 @@ impl StartEnv {
 /// home's file stands in, so consent, enablement and doctor agree.
 /// Test: `server_file_consent_defaults_to_the_account_home_config`,
 /// `sandbox_consent_is_none_when_home_is_the_account_home`.
-fn account_machine_config() -> Option<PathBuf> {
+// #9793: `sandbox` is given, never read from the process environment.
+fn account_machine_config(sandbox: &SandboxEnv) -> Option<PathBuf> {
     let account_home = platform::account_home_dir().ok();
-    sandbox::file_consent_config_for(&SandboxEnv::read(), account_home.as_deref())
+    sandbox::file_consent_config_for(sandbox, account_home.as_deref())
 }
 
 /// The account machine config at `path`, if it is given and loads.
@@ -253,6 +266,12 @@ pub struct State {
     /// Whether `TRUSTY_SANDBOX` was exactly `1` at start; only `file` opens.
     // #9793: rulings Q2, Q6 — no Keychain and no CLI backend in a sandbox.
     pub(crate) sandboxed: bool,
+    /// Whether the sandbox consent override is active: the flag and every
+    /// other signal agreed (`sandbox_consent_config`).
+    // #9793: the delete sweep skips refused backends only when this holds;
+    // with the flag but no override (Q3) the real Keychain is in play, so a
+    // refused backend fails the delete closed.
+    pub(crate) sandbox_override: bool,
 }
 
 impl State {
@@ -260,16 +279,37 @@ impl State {
     ///
     /// What: the file consent config is `MACHINE_CONFIG_SUBPATH` under
     /// `platform::account_home_dir`; `None` when that home is unknown.
-    /// #9793: [`State::new_in`] with this process's sandbox variables.
-    /// Test: `server_file_consent_defaults_to_the_account_home_config`.
+    /// #9793: [`State::new_in`] with no sandbox; the library never reads the
+    /// process environment for it, [`State::with_start`] takes it from the
+    /// binary's [`StartEnv`].
+    /// Test: `server_file_consent_defaults_to_the_account_home_config`,
+    /// `state_takes_the_sandbox_from_start_env_and_new_is_never_sandboxed`.
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let account_home = platform::account_home_dir().ok();
         Self::new_in(
             settings,
             backends,
-            &SandboxEnv::read(),
+            &SandboxEnv::default(),
             account_home.as_deref(),
         )
+    }
+
+    /// [`State::new_in`] over `start`'s sandbox variables, keeping `start`.
+    ///
+    /// Why: #9793 — the sandbox decision is the binary's, read once beside
+    /// `PATH` and the token, and reaches the server only through here.
+    /// What: sandbox and consent from `start.sandbox`; `start` is what
+    /// `secrets.doctor` reports.
+    /// Test: `state_takes_the_sandbox_from_start_env_and_new_is_never_sandboxed`.
+    pub(crate) fn with_start(
+        settings: ServerSettings,
+        backends: BackendFactory,
+        start: StartEnv,
+        account_home: Option<&Path>,
+    ) -> Self {
+        let mut state = Self::new_in(settings, backends, &start.sandbox, account_home);
+        state.start = start;
+        state
     }
 
     /// [`State::new`] with the sandbox variables and account home given.
@@ -305,6 +345,7 @@ impl State {
             grants: Arc::new(GrantRegistry::os_default()),
             cache,
             sandboxed: sandbox.flag_set(),
+            sandbox_override: sandbox::sandbox_consent_config(sandbox, account_home).is_some(),
         }
     }
 
@@ -590,8 +631,9 @@ pub async fn serve_with(
     start: StartEnv,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
-    let mut state = State::new(settings, backends);
-    state.start = start;
+    // #9793: the sandbox comes from `start`, never from the process env.
+    let account_home = platform::account_home_dir().ok();
+    let state = State::with_start(settings, backends, start, account_home.as_deref());
     serve_state(state, shutdown).await
 }
 
