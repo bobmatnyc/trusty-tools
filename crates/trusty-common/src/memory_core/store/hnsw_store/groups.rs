@@ -201,9 +201,9 @@ impl HnswStore {
         let written = self.commit_group(drawer, vectors)?;
         // #9728: each tick restarts the watcher's budget; a stall gets none.
         progress.advance();
-        for (_n, ((id, shadows), vector)) in written.iter().zip(vectors).enumerate() {
+        for ((id, shadows), vector) in written.iter().zip(vectors) {
             #[cfg(test)]
-            index_pace::pace(drawer, _n);
+            index_pace::pace(drawer);
             self.index_point(vector, *id, *shadows)?;
             progress.advance();
         }

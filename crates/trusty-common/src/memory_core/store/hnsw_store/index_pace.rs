@@ -16,6 +16,8 @@ use std::time::Duration;
 struct Pace {
     delay: Duration,
     park_at: Option<usize>,
+    /// Index of the next point this pace sees.
+    next: usize,
     reached: Option<Sender<()>>,
     release: Option<Receiver<()>>,
 }
@@ -37,6 +39,7 @@ pub(crate) fn arm(drawer: &str, delay: Duration, park_at: Option<usize>) -> Park
     let pace = Pace {
         delay,
         park_at,
+        next: 0,
         reached: Some(reached_tx),
         release: Some(release_rx),
     };
@@ -46,13 +49,15 @@ pub(crate) fn arm(drawer: &str, delay: Duration, park_at: Option<usize>) -> Park
     Parked { reached, release }
 }
 
-/// Called by the index loop before point `n` of `drawer`.
-pub(super) fn pace(drawer: &str, n: usize) {
+/// Called by the index loop before each point of `drawer`.
+pub(super) fn pace(drawer: &str) {
     let (delay, park) = {
         let mut paces = PACES.lock().unwrap_or_else(PoisonError::into_inner);
         let Some((_, p)) = paces.iter_mut().find(|(d, _)| d == drawer) else {
             return;
         };
+        let n = p.next;
+        p.next += 1;
         let park = (p.park_at == Some(n)).then(|| (p.reached.take(), p.release.take()));
         (p.delay, park)
     };
