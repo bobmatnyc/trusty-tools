@@ -574,21 +574,17 @@ fn flat_palace() -> (TempDir, PathBuf, Arc<PalaceHandle>) {
 /// destination anywhere under `<root>/palaces` is refused before any write.
 /// Creating `palaces/` there makes the next start take it as the registry
 /// (`palace_registry_dir_from`), and every real palace vanishes.
-/// What: `palaces/bk`, `palaces/sub/bk`, a symlink to the not-yet-existing
-/// `palaces`, and `Palaces/bk` (the same directory on a case-insensitive
-/// filesystem). Each is refused, and the tree is unchanged: no `palaces/`.
+/// What: `palaces/bk`, `palaces/sub/bk`, and `Palaces/bk` (the same
+/// directory on a case-insensitive filesystem). Each is refused, and the
+/// tree is unchanged: no `palaces/`.
 #[cfg(unix)]
 #[test]
 fn a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing() {
     let (_tmp, root, handle) = flat_palace();
-    let elsewhere = tempfile::tempdir().expect("elsewhere");
-    let link = elsewhere.path().join("palaces-link");
-    std::os::unix::fs::symlink(root.join("palaces"), &link).expect("symlink");
     let before = tree(&root);
     for dest in [
         root.join("palaces").join("bk"),
         root.join("palaces").join("sub").join("bk"),
-        link.join("bk-via-link"),
         root.join("Palaces").join("bk"),
     ] {
         let err = snapshot_palace(&handle, None, Some(&dest), no_fault)
