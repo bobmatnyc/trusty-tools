@@ -23,7 +23,7 @@ pub fn palace_backup_definition() -> Value {
             "type": "object",
             "properties": {
                 "palace": {"type": "string", "description": "Palace id. Required unless the server was started with --palace."},
-                "dest":   {"type": "string", "description": "Absolute path of the backup directory to create; it must not exist and must not sit directly in the palace registry directory (<data root>, or <data root>/palaces when that exists). Default: <data root>/.trusty-memory/backups/manual/<palace>/<UTC timestamp>/, or <data root>/backups/manual/<palace>/<UTC timestamp>/ when palaces live under <data root>/palaces."}
+                "dest":   {"type": "string", "description": "Absolute path of the backup directory to create; it must not exist, must not sit directly in the palace registry directory (<data root>, or <data root>/palaces when that exists), and must not sit anywhere under <registry directory>/palaces in any letter case: in the flat layout that is <data root>/palaces, which the daemon would take as its registry once it exists. Default: <data root>/.trusty-memory/backups/manual/<palace>/<UTC timestamp>/, or <data root>/backups/manual/<palace>/<UTC timestamp>/ when palaces live under <data root>/palaces."}
             },
             "required": []
         }

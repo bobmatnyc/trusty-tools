@@ -190,7 +190,10 @@ pub enum PalaceAction {
         name: String,
         /// Directory to create for the backup; it must not exist, and it must
         /// not sit directly in the palace registry directory (<data root>, or
-        /// <data root>/palaces when that exists). Default:
+        /// <data root>/palaces when that exists), nor anywhere under
+        /// <registry directory>/palaces in any letter case: in the flat layout
+        /// that is <data root>/palaces, which the daemon would take as its
+        /// registry once it exists. Default:
         /// <data root>/.trusty-memory/backups/manual/<palace>/<UTC timestamp>/,
         /// or <data root>/backups/manual/<palace>/<UTC timestamp>/ when
         /// palaces live under <data root>/palaces.

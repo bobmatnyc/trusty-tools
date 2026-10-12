@@ -162,10 +162,14 @@ pub(crate) fn hash_file(path: &Path) -> Result<(u64, String)> {
 /// Why: the registry guard (#9282) must compare where a backup would really
 /// land, through symlinks and `..`, including for a path not created yet.
 /// What: walks the components from the root, keeping the prefix canonical:
-/// an existing component is canonicalised (symlinks followed), a missing one
-/// is appended as is, `..` pops one level. Any error other than "not found"
-/// is returned, so the guard fails closed.
-/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`.
+/// an existing component is canonicalised (symlinks followed), a dangling
+/// symlink is replaced by its target resolved the same way (a create would
+/// follow it), any other missing component is appended as is, `..` pops one
+/// level. Any error other than "not found" is returned, so the guard fails
+/// closed; a symlink loop is such an error (`ELOOP`).
+/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`,
+/// `a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing`,
+/// `an_unresolvable_dest_prefix_is_an_error_and_writes_nothing`.
 pub(crate) fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
     let abs = std::path::absolute(path)?;
     let mut base = PathBuf::new();
@@ -180,13 +184,26 @@ pub(crate) fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
                 let next = base.join(name);
                 base = match next.canonicalize() {
                     Ok(real) => real,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => next,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => dangling_target(&base, next)?,
                     Err(e) => return Err(e),
                 };
             }
         }
     }
     Ok(base)
+}
+
+/// `next` itself when it does not exist; its resolved target when it is a
+/// dangling symlink (#9282: a create through it lands at the target).
+fn dangling_target(base: &Path, next: PathBuf) -> io::Result<PathBuf> {
+    match std::fs::symlink_metadata(&next) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            resolve_existing_prefix(&base.join(std::fs::read_link(&next)?))
+        }
+        Ok(_) => Ok(next),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(next),
+        Err(e) => Err(e),
+    }
 }
 
 /// `<path><suffix>` in the same directory, so a rename stays atomic.

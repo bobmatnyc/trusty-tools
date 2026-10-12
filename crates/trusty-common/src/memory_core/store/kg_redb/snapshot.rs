@@ -89,6 +89,13 @@ pub enum SnapshotError {
         "snapshot destination {path} is directly inside the palace registry directory {registry}, where it would be listed as a palace; choose a directory outside it. Nothing was written"
     )]
     DestinationInRegistry { path: PathBuf, registry: PathBuf },
+    /// The destination lies under `<registry>/palaces`. Creating that
+    /// directory makes the next daemon start take it as the palace registry
+    /// (`palace_registry_dir_from`), so every existing palace vanishes (#9282).
+    #[error(
+        "snapshot destination {path} is under {palaces}; creating that directory would make the daemon switch its palace registry to it on the next start, and every existing palace would disappear from the daemon; choose a directory outside it. Nothing was written"
+    )]
+    DestinationSwitchesRegistry { path: PathBuf, palaces: PathBuf },
     /// A filesystem call failed.
     #[error("{op} {path}: {source}")]
     Io {
@@ -335,25 +342,45 @@ pub(crate) fn snapshot_palace(
     })
 }
 
-/// Refuse a snapshot destination directly in the palace registry (#9282).
+/// Refuse a snapshot destination the palace lister or the registry choice
+/// would misread (#9282).
 ///
 /// Why: the registry directory — the parent of every palace directory, so
 /// `<data root>` in the flat layout and `<data root>/palaces` in the legacy
 /// one — is where the palace lister looks. A backup there holds a
 /// `palace.json`, so it would be listed as a palace, and after a restart the
-/// live handle could point at the backup instead of the palace.
-/// What: resolves `dest` through its longest existing prefix (symlinks
-/// followed, `..` applied) and returns
-/// [`SnapshotError::DestinationInRegistry`] when the result's parent is the
-/// canonical parent of `palace_dir`. It only reads. [`snapshot_palace`] runs
-/// it before any write; a caller that does I/O of its own first (opening the
-/// chat store, opening the palace) runs it before that.
-/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`.
+/// live handle could point at the backup instead of the palace. In the flat
+/// layout a backup anywhere under `<data root>/palaces` creates that
+/// directory, and the next start switches the registry to it
+/// (`palace_registry_dir_from`): every real palace vanishes.
+/// What: resolves `dest` and `<registry>/palaces` through their longest
+/// existing prefix (symlinks followed, dangling ones too; `..` applied).
+/// Returns [`SnapshotError::DestinationInRegistry`] when the resolved
+/// `dest`'s parent is the canonical parent of `palace_dir`, and
+/// [`SnapshotError::DestinationSwitchesRegistry`] when it lies at or under
+/// the resolved `<registry>/palaces`, or its first component under the
+/// registry is `palaces` in any ASCII case (one directory on a
+/// case-insensitive filesystem), unless that `palaces` resolves to the
+/// registry itself. Every other arm is an error too: a `palace_dir` with no
+/// parent, and any I/O error while resolving. It only reads.
+/// [`snapshot_palace`] runs it before any write; a caller that does I/O of
+/// its own first (opening the chat store, opening the palace) runs it before
+/// that.
+/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`,
+/// `a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing`,
+/// `an_unresolvable_dest_prefix_is_an_error_and_writes_nothing`,
+/// `a_palace_dir_without_a_parent_is_refused`.
 pub fn check_snapshot_dest(palace_dir: &Path, dest: &Path) -> Result<()> {
     let palace_dir = std::path::absolute(palace_dir).map_err(io_err("resolve", palace_dir))?;
-    let Some(registry) = palace_dir.parent() else {
-        return Ok(());
-    };
+    // #9282: fail closed; no arm of this guard passes by default.
+    let registry = palace_dir.parent().ok_or_else(|| SnapshotError::Io {
+        op: "resolve",
+        path: palace_dir.clone(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the palace directory has no parent registry directory",
+        ),
+    })?;
     let registry = registry
         .canonicalize()
         .map_err(io_err("resolve", registry))?;
@@ -362,6 +389,21 @@ pub fn check_snapshot_dest(palace_dir: &Path, dest: &Path) -> Result<()> {
         return Err(SnapshotError::DestinationInRegistry {
             path: dest.to_path_buf(),
             registry,
+        });
+    }
+    // #9282: creating `<registry>/palaces` switches the next start's registry.
+    let switch = registry.join("palaces");
+    let palaces = resolve_existing_prefix(&switch).map_err(io_err("resolve", &switch))?;
+    let first_is_palaces = resolved
+        .strip_prefix(&registry)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("palaces"));
+    if palaces != registry && (resolved.starts_with(&palaces) || first_is_palaces) {
+        return Err(SnapshotError::DestinationSwitchesRegistry {
+            path: dest.to_path_buf(),
+            palaces,
         });
     }
     Ok(())

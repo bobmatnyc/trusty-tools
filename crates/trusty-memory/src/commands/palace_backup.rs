@@ -7,7 +7,8 @@
 //! daemon serves this data root, and otherwise opens the palace directly
 //! under the exclusive redb lock ([`backup_offline`]). A failed daemon call
 //! is an error, never a fallback to the direct open. Both refuse a
-//! destination directly in the palace registry dir (`check_snapshot_dest`).
+//! destination directly in the palace registry dir or under
+//! `<registry>/palaces` (`check_snapshot_dest`).
 //! [`handle_restore`] probes the daemon socket
 //! and then runs [`restore_into`], which refuses a foreign or malformed
 //! palace id and a live or unknown daemon before PR 1's
@@ -118,14 +119,16 @@ pub async fn handle_backup(name: String, dest: Option<PathBuf>) -> Result<()> {
 /// the length of the backup. If a daemon started in the meantime and holds
 /// the store, the open falls back to a copied file and
 /// `PalaceHandle::snapshot` refuses it (`SnapshotError::ReadOnlyHandle`).
-/// What: refuses a `dest` directly in the palace registry dir before the
-/// open, opens the palace with the read-only intent, snapshots it with no
-/// lent chat store (the read-only open of `chat_sessions.redb` works with no
-/// other holder), and returns [`snapshot_json`].
+/// What: refuses a `dest` that `check_snapshot_dest` rejects (in the palace
+/// registry dir, or under `<registry>/palaces`) before the open, opens the
+/// palace with the read-only intent, snapshots it with no lent chat store
+/// (the read-only open of `chat_sessions.redb` works with no other holder),
+/// and returns [`snapshot_json`].
 /// Test: `cli_backup_then_restore_into_a_fresh_root_keeps_counts`,
 /// `cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing`.
 pub fn backup_offline(palace: &Palace, dest: Option<&Path>) -> Result<Value> {
-    // #9282: a backup in the registry dir would be listed as a palace.
+    // #9282: a backup in the registry dir would be listed as a palace, and
+    // one under `<registry>/palaces` switches the registry.
     if let Some(d) = dest {
         check_snapshot_dest(&palace.data_dir, d)
             .with_context(|| format!("back up palace {}", palace.id))?;
