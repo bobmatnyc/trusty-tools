@@ -753,3 +753,20 @@ fn keeps_unrelated_trusty_memory_commands_allowed() {
         ]),
     );
 }
+
+#[test]
+fn denies_an_import_kuzu_split_by_a_redirection() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "trusty-memory import 2>/dev/null kuzu --discover",
+            "trusty-memory import 2> /dev/null kuzu --discover",
+            "trusty-memory import &>/dev/null kuzu --discover",
+            "trusty-memory >/tmp/o import kuzu --discover",
+            "trusty-memory import 2>&1 kuzu --discover",
+            "cat <(trusty-memory import kuzu --discover)",
+        ]),
+        "kuzu-store-read",
+    );
+}
