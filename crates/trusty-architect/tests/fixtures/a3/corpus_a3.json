@@ -1,0 +1,1207 @@
+{
+ "list_panes": [
+  [
+   "two_panes",
+   "tm-a\t%1\tclaude\t11\t/w/a\t0\ntm-b\t%22\t2.1.283\t01\t/w/b\t0\n"
+  ],
+  [
+   "short_rows",
+   "tm-a\t%1\tzsh\t10\nx\t%2\n\n"
+  ],
+  [
+   "tab_in_path",
+   "tm-a\t%3\tclaude\t11\t/w/a\tb\t0\n"
+  ],
+  [
+   "bad_pane_id",
+   "tm-a\tmain\tclaude\t11\t/w\t0\ntm-b\t%00\tclaude\t11\t/w\t1\n"
+  ],
+  [
+   "crlf_and_unicode",
+   "tm-\u00e9\t%4\tclaude\t11\t/w/\u00fc\t0\r\ntm-z\t%5\t-zsh\t00\t/\t1"
+  ],
+  [
+   "empty",
+   ""
+  ]
+ ],
+ "band": [
+  [
+   0.0,
+   16,
+   300,
+   70,
+   0,
+   null
+  ],
+  [
+   17.9,
+   16,
+   200,
+   20,
+   0,
+   null
+  ],
+  [
+   18.0,
+   16,
+   300,
+   70,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   199,
+   70,
+   0,
+   null
+  ],
+  [
+   30.0,
+   16,
+   300,
+   70,
+   0,
+   null
+  ],
+  [
+   30.1,
+   16,
+   300,
+   70,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   99,
+   70,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   100,
+   70,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   19,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   null,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   70,
+   1,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   20,
+   0,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   70,
+   null,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   70,
+   0.4,
+   null
+  ],
+  [
+   15.5,
+   16,
+   300,
+   70,
+   0,
+   "open"
+  ],
+  [
+   18.0,
+   16,
+   300,
+   70,
+   0,
+   "open"
+  ],
+  [
+   20.0,
+   16,
+   300,
+   70,
+   0,
+   "open"
+  ],
+  [
+   20.5,
+   16,
+   300,
+   70,
+   0,
+   "open"
+  ],
+  [
+   18.0,
+   16,
+   300,
+   70,
+   0,
+   "hold"
+  ],
+  [
+   16.0,
+   16,
+   300,
+   70,
+   0,
+   "hold"
+  ],
+  [
+   15.9,
+   16,
+   300,
+   70,
+   0,
+   "hold"
+  ],
+  [
+   15.9,
+   16,
+   300,
+   70,
+   0,
+   "stop"
+  ],
+  [
+   18.0,
+   16,
+   300,
+   70,
+   0,
+   "stop"
+  ],
+  [
+   30.5,
+   16,
+   300,
+   70,
+   0,
+   "open"
+  ],
+  [
+   5.0,
+   16,
+   150,
+   70,
+   0,
+   "open"
+  ],
+  [
+   5.0,
+   16,
+   150,
+   70,
+   0,
+   "hold"
+  ],
+  [
+   5.0,
+   16,
+   300,
+   70,
+   0,
+   "weird"
+  ],
+  [
+   4.0,
+   4,
+   250,
+   50,
+   0,
+   null
+  ],
+  [
+   7.5,
+   4,
+   250,
+   50,
+   0,
+   "open"
+  ]
+ ],
+ "band_alerts": [
+  {
+   "case": "first_run_then_change",
+   "state": {},
+   "steps": [
+    [
+     0.0,
+     1.0,
+     16,
+     300,
+     70,
+     0
+    ],
+    [
+     1.0,
+     1.0,
+     16,
+     300,
+     70,
+     0
+    ],
+    [
+     2.0,
+     13.2,
+     16,
+     180,
+     70,
+     0
+    ]
+   ]
+  },
+  {
+   "case": "rounding_ties",
+   "state": {
+    "band": "hold"
+   },
+   "steps": [
+    [
+     10.0,
+     0.25,
+     16,
+     2.5,
+     70.5,
+     0.5
+    ],
+    [
+     20.0,
+     0.35,
+     16,
+     300.5,
+     null,
+     null
+    ],
+    [
+     30.0,
+     31.25,
+     16,
+     300,
+     0.5,
+     0
+    ],
+    [
+     40.0,
+     1.0,
+     16,
+     300,
+     70,
+     2.5
+    ]
+   ]
+  },
+  {
+   "case": "unknown_stored_band",
+   "state": {
+    "band": "weird"
+   },
+   "steps": [
+    [
+     0.0,
+     1.0,
+     16,
+     300,
+     70,
+     0
+    ]
+   ]
+  }
+ ],
+ "host": [
+  {
+   "case": "spike_1min_low_15",
+   "probe": {
+    "loads": [
+     29.7,
+     16.8,
+     10.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "sustained_15_over",
+   "probe": {
+    "loads": [
+     30.0,
+     25.0,
+     20.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "load15_over_factor",
+   "probe": {
+    "loads": [
+     30.0,
+     31.0,
+     24.5
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "load15_at_factor",
+   "probe": {
+    "loads": [
+     30.0,
+     31.0,
+     24.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "factor_env_2",
+   "probe": {
+    "loads": [
+     10.0,
+     17.0,
+     17.0
+    ],
+    "cores": 8,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   },
+   "load_factor": "2.0"
+  },
+  {
+   "case": "factor_env_3",
+   "probe": {
+    "loads": [
+     10.0,
+     17.0,
+     17.0
+    ],
+    "cores": 8,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   },
+   "load_factor": "3"
+  },
+  {
+   "case": "disk_full",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     1000,
+     905,
+     95
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "disk_at_90",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     1000,
+     900,
+     100
+    ],
+    "swap": 0,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "swap_in_use",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 512.4,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "swap_error",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": "error",
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "swap_unknown",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": null,
+    "mem": 60.0
+   }
+  },
+  {
+   "case": "calm_15_keeps_hold",
+   "probe": {
+    "loads": [
+     30.0,
+     31.0,
+     20.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   },
+   "state": {
+    "band": "hold"
+   }
+  },
+  {
+   "case": "high_15_stops",
+   "probe": {
+    "loads": [
+     30.0,
+     31.0,
+     31.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0
+   },
+   "state": {
+    "band": "hold"
+   }
+  },
+  {
+   "case": "first_band",
+   "probe": {
+    "loads": [
+     2.0,
+     2.0,
+     2.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": null
+   },
+   "state": {}
+  },
+  {
+   "case": "every_alert",
+   "probe": {
+    "loads": [
+     50.0,
+     40.0,
+     33.3
+    ],
+    "cores": 16,
+    "disk": [
+     1099511627776,
+     1098437885952,
+     1073741824
+    ],
+    "swap": 2048.0,
+    "mem": 10.0
+   },
+   "state": {
+    "band": "open"
+   }
+  }
+ ],
+ "events": [
+  {
+   "case": "python_test_rows",
+   "steps": [
+    {
+     "mode": "w",
+     "text": ""
+    },
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\", \"message\": \"Claude needs your permission to use Bash\"}\n{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"idle_prompt\", \"message\": \"Claude is waiting for your input\"}\n{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"agent_needs_input\", \"message\": \"Agent needs input\"}\n{\"tmux_session\": \"tm-supervisor\", \"type\": \"permission_prompt\", \"message\": \"x\"}\n"
+    },
+    {
+     "mode": "a",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "case": "first_run_skips_backlog",
+   "steps": [
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\"}\n"
+    },
+    {
+     "mode": "a",
+     "text": "{\"tmux_session\": \"tm-b\", \"tmux_pane\": \"%9\", \"type\": \"agent_needs_input\", \"message\": \"\"}\n"
+    }
+   ]
+  },
+  {
+   "case": "rotation_rereads_from_zero",
+   "offset": 0,
+   "steps": [
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\", \"message\": \"one\"}\n{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\", \"message\": \"two\"}\n"
+    },
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"agent_needs_input\", \"message\": \"after rotation\"}\n"
+    }
+   ]
+  },
+  {
+   "case": "skip_sessions_and_bad_lines",
+   "offset": 0,
+   "steps": [
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-architect\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\"}\n{\"tmux_session\": \"tm-architect-poll\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\"}\n{\"tmux_session\": \"tm-supervisor-collector\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\"}\n{not json\n\n[]x\n{\"type\": \"permission_prompt\"}\n{\"tmux_session\": \"\", \"tmux_pane\": \"\", \"type\": \"permission_prompt\", \"message\": \"no session\"}\n{\"tmux_session\": \"tm-\\u00e9\", \"tmux_pane\": \"%1\", \"type\": \"permission_prompt\", \"message\": \"caf\\u00e9 \\u2014 API_KEY=abc123 ok\"}\n"
+    }
+   ]
+  },
+  {
+   "case": "truncated_last_line_then_completed",
+   "offset": 0,
+   "steps": [
+    {
+     "mode": "w",
+     "text": "{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"permission_prompt\", \"message\": \"whole\"}\n{\"tmux_session\": \"tm"
+    },
+    {
+     "mode": "a",
+     "text": "-api\", \"tmux_pane\": \"%3\", \"type\": \"agent_needs_input\"}\n{\"tmux_session\": \"tm-api\", \"tmux_pane\": \"%3\", \"type\": \"agent_needs_input\", \"message\": \"next\"}\n"
+    }
+   ]
+  },
+  {
+   "case": "missing_file",
+   "steps": [
+    {
+     "mode": "delete"
+    },
+    {
+     "mode": "delete"
+    }
+   ]
+  },
+  {
+   "case": "missing_file_with_offset",
+   "offset": 40,
+   "steps": [
+    {
+     "mode": "delete"
+    }
+   ]
+  }
+ ],
+ "self_ctx_alerts": [
+  {
+   "case": "over_threshold",
+   "files": [
+    {
+     "name": "over.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"user\", \"message\": {\"usage\": {\"input_tokens\": 1}}, \"entrypoint\": \"cli\"}",
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 100000, \"cache_read_input_tokens\": 300000, \"cache_creation_input_tokens\": 5000}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "newer_under_threshold",
+   "files": [
+    {
+     "name": "over.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 405000}}, \"entrypoint\": \"cli\"}"
+     ]
+    },
+    {
+     "name": "under.jsonl",
+     "mtime": 2000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 1000, \"cache_read_input_tokens\": 2000}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "newer_sdk_cli_ignored",
+   "files": [
+    {
+     "name": "supervisor.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 900000}}, \"entrypoint\": \"cli\"}"
+     ]
+    },
+    {
+     "name": "collector.jsonl",
+     "mtime": 9000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 1}}, \"entrypoint\": \"sdk-cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "missing_dir",
+   "missing": true,
+   "files": []
+  },
+  {
+   "case": "empty_dir",
+   "files": []
+  },
+  {
+   "case": "env_window_threshold",
+   "window": "1000",
+   "threshold": "5",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 50, \"cache_read_input_tokens\": 50}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "env_threshold_50",
+   "window": "1000",
+   "threshold": "50",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 50, \"cache_read_input_tokens\": 50}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "exactly_at_threshold",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 250000}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "just_under_threshold",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 249999}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "rounding_tie",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 625000}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "window_zero",
+   "window": "0",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 5}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "bad_window",
+   "window": "lots",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": 5}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  },
+  {
+   "case": "bad_usage_field",
+   "files": [
+    {
+     "name": "t.jsonl",
+     "mtime": 1000,
+     "lines": [
+      "{\"type\": \"assistant\", \"message\": {\"usage\": {\"input_tokens\": \"many\"}}, \"entrypoint\": \"cli\"}"
+     ]
+    }
+   ]
+  }
+ ],
+ "transcript": [
+  {
+   "case": "same_cwd_own_ctx",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-a",
+     "tmux": "tm-x:@1.%1",
+     "updatedAt": 1,
+     "raw": null
+    },
+    {
+     "name": "b.json",
+     "pid": "dead",
+     "sid": "sid-b",
+     "tmux": "tm-x:@1.%2",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-a",
+     "tokens": 450000,
+     "mtime": 2000
+    },
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-b",
+     "tokens": 180000,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%1",
+    "%2",
+    "%9",
+    "",
+    "%"
+   ]
+  },
+  {
+   "case": "pid_one_is_alive",
+   "sessions": [
+    {
+     "name": "b.json",
+     "pid": 1,
+     "sid": "sid-b",
+     "tmux": "tm-x:@1.%2",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-b",
+     "tokens": 180000,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%2",
+    "%22"
+   ]
+  },
+  {
+   "case": "newest_updated_wins",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-old",
+     "tmux": "tm-x:@1.%3",
+     "updatedAt": 5,
+     "raw": null
+    },
+    {
+     "name": "b.json",
+     "pid": "self",
+     "sid": "sid-new",
+     "tmux": "tm-x:@1.%3",
+     "updatedAt": 9,
+     "raw": null
+    },
+    {
+     "name": "c.json",
+     "pid": "dead",
+     "sid": "sid-dead",
+     "tmux": "tm-x:@1.%3",
+     "updatedAt": 99,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-old",
+     "tokens": 100000,
+     "mtime": 1000
+    },
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-new",
+     "tokens": 300000,
+     "mtime": 1000
+    },
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-dead",
+     "tokens": 900000,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%3"
+   ]
+  },
+  {
+   "case": "newest_transcript_folder_wins",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-a",
+     "tmux": "s:@1.%4",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-w-one",
+     "sid": "sid-a",
+     "tokens": 100000,
+     "mtime": 1000
+    },
+    {
+     "dir": "-w-two",
+     "sid": "sid-a",
+     "tokens": 230000,
+     "mtime": 3000
+    },
+    {
+     "dir": ".hidden",
+     "sid": "sid-a",
+     "tokens": 990000,
+     "mtime": 9000
+    }
+   ],
+   "queries": [
+    "%4"
+   ]
+  },
+  {
+   "case": "window_env",
+   "window": "500000",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-a",
+     "tmux": "s:@1.%5",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-a",
+     "tokens": 123456,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%5"
+   ]
+  },
+  {
+   "case": "window_zero",
+   "window": "0",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-a",
+     "tmux": "s:@1.%5",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-a",
+     "tokens": 123456,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%5"
+   ]
+  },
+  {
+   "case": "no_transcript_and_bad_entries",
+   "sessions": [
+    {
+     "name": "a.json",
+     "pid": "self",
+     "sid": "sid-a",
+     "tmux": "s:@1.%6",
+     "updatedAt": 1,
+     "raw": null
+    },
+    {
+     "name": "note.txt",
+     "pid": "self",
+     "sid": "sid-x",
+     "tmux": "s:@1.%7",
+     "updatedAt": 1,
+     "raw": null
+    },
+    {
+     "name": "bad.json",
+     "pid": null,
+     "sid": null,
+     "tmux": null,
+     "updatedAt": 1,
+     "raw": "{not json"
+    },
+    {
+     "name": "nopid.json",
+     "pid": null,
+     "sid": "sid-y",
+     "tmux": "s:@1.%8",
+     "updatedAt": 1,
+     "raw": "{\"sessionId\": \"sid-y\", \"tmux\": \"s:@1.%8\"}"
+    },
+    {
+     "name": "strpid.json",
+     "pid": "self-str",
+     "sid": "sid-z",
+     "tmux": "s:@1.%10",
+     "updatedAt": 1,
+     "raw": null
+    }
+   ],
+   "transcripts": [
+    {
+     "dir": "-Users-x-trusty-tools",
+     "sid": "sid-z",
+     "tokens": 470000,
+     "mtime": 1000
+    }
+   ],
+   "queries": [
+    "%6",
+    "%7",
+    "%8",
+    "%10"
+   ]
+  },
+  {
+   "case": "no_sessions_dir",
+   "missing_sessions": true,
+   "sessions": [],
+   "transcripts": [],
+   "queries": [
+    "%1"
+   ]
+  }
+ ],
+ "alert_rows": [
+  [
+   "idle",
+   "since-1000",
+   "idle 10 min, no agents running",
+   "tm-x",
+   "%1",
+   1600.0
+  ],
+  [
+   "permission_prompt",
+   "0123456789ab",
+   "caf\u00e9 \u2014 \u276f \ud83d\udcc5 \"quoted\" \\ tab\there",
+   "tm-\u00e9",
+   "%2",
+   1760000000.5
+  ],
+  [
+   "load",
+   "load",
+   "load 30.0/25.0/20.0 (15m > 1.5x16 cores)",
+   "",
+   "",
+   0.0
+  ],
+  [
+   "self_ctx",
+   "25",
+   "self ctx 41% (405000/1000000 tokens)",
+   "tm-architect",
+   "",
+   1759000000.25
+  ],
+  [
+   "dialog",
+   "abc",
+   "ctrl \u0001 and \u007f del",
+   "tm-y",
+   "%3",
+   86399.9999999
+  ]
+ ],
+ "now": 1760000000.5,
+ "dead_pid": 2147483000
+}

@@ -189,6 +189,15 @@ pub fn self_ctx_tokens(directory: &Path) -> Result<Option<i64>, SelfCtxError> {
     let Some(usage) = tail_last_assistant_usage(&path, USAGE_TAIL_START)? else {
         return Ok(None);
     };
+    usage_tokens(&usage).map(Some)
+}
+
+/// input + cache_read + cache_creation tokens of one usage object.
+///
+/// # Errors
+/// [`SelfCtxError::BadUsage`] when `usage` is not an object or a field is not
+/// an integer. Also used by the pane transcript reader (#9171 A3a).
+pub(crate) fn usage_tokens(usage: &Value) -> Result<i64, SelfCtxError> {
     let Value::Object(usage) = usage else {
         return Err(SelfCtxError::BadUsage("usage".to_owned()));
     };
@@ -197,9 +206,7 @@ pub fn self_ctx_tokens(directory: &Path) -> Result<Option<i64>, SelfCtxError> {
         "cache_read_input_tokens",
         "cache_creation_input_tokens",
     ];
-    keys.iter()
-        .try_fold(0i64, |sum, k| {
-            Ok(sum.saturating_add(usage_field(&usage, k)?))
-        })
-        .map(Some)
+    keys.iter().try_fold(0i64, |sum, k| {
+        Ok(sum.saturating_add(usage_field(usage, k)?))
+    })
 }

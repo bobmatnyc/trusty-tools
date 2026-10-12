@@ -6,11 +6,15 @@
 //! crate takes no `regex` dependency, so the scripts' patterns are matched by
 //! hand on top of these classes.
 //! What: Python's whitespace (`str.isspace`, `re` `\s`), word (`\w`) and
-//! decimal (`\d`, ASCII only) classes, `splitlines`, the strip family, `split()`
-//! with no separator, and `re.IGNORECASE` comparison against ASCII patterns.
-//! Known gaps: `\d` here is ASCII-only, and `\w` follows Rust's `Alphabetic`,
-//! which also admits combining marks Python's `isalpha` rejects.
-//! Test: `splitlines_matches_python_boundaries`, `strip_uses_python_space`.
+//! decimal (`\d`, every Unicode `Nd` digit) classes, `splitlines`, the strip
+//! family, `split()` with no separator, and `re.IGNORECASE` comparison against
+//! ASCII patterns.
+//! Known gap: `\w` follows Rust's `Alphabetic`, which also admits combining
+//! marks Python's `isalpha` rejects.
+//! Test: `splitlines_matches_python_boundaries`, `strip_uses_python_space`,
+//! `is_digit_matches_python_re_digit_for_every_code_point`.
+
+use crate::decimal_table::DIGIT_ZEROS;
 
 /// Python `str.isspace` for one character (also `re`'s `\s` on `str`).
 pub(crate) fn is_space(c: char) -> bool {
@@ -22,9 +26,43 @@ pub(crate) fn is_word(c: char) -> bool {
     c == '_' || c.is_alphanumeric()
 }
 
-/// `re`'s `\d`, restricted to ASCII digits (see the module note).
+/// `re`'s `\d` on `str`: any Unicode decimal digit (`Nd`).
+///
+/// Why: the parity claim covers non-ASCII digits too (#9171, Architect ruling
+/// Q6): Python reads `ctx` followed by Arabic-Indic four-seven `%` as 47.
+/// What: a binary search over `DIGIT_ZEROS`, the generated table of the first
+/// code point of every ten-digit run.
+/// Test: `is_digit_matches_python_re_digit_for_every_code_point`.
 pub(crate) fn is_digit(c: char) -> bool {
-    c.is_ascii_digit()
+    digit_value(c).is_some()
+}
+
+/// The value (0-9) of a `\d` character, as Python's `int()` reads it.
+pub(crate) fn digit_value(c: char) -> Option<u32> {
+    let cp = u32::from(c);
+    let idx = DIGIT_ZEROS.partition_point(|z| *z <= cp).checked_sub(1)?;
+    let offset = cp - DIGIT_ZEROS[idx];
+    (offset < 10).then_some(offset)
+}
+
+/// Python `int(s)` for a run of `\d` characters; `None` past `u64` or on a
+/// character that is not a digit.
+pub(crate) fn parse_digits(s: &[char]) -> Option<u64> {
+    s.iter().try_fold(0u64, |acc, c| {
+        acc.checked_mul(10)?
+            .checked_add(u64::from(digit_value(*c)?))
+    })
+}
+
+/// `s` with every `\d` character replaced by its ASCII digit, so Rust's
+/// number parsers read it the way Python's `int()` and `float()` do.
+pub(crate) fn ascii_digits(s: &str) -> String {
+    s.chars()
+        .map(|c| match digit_value(c) {
+            Some(d) => char::from(b'0' + d as u8),
+            None => c,
+        })
+        .collect()
 }
 
 /// Python `str.splitlines()` with no `keepends`.
@@ -130,6 +168,30 @@ mod tests {
             ["a", "b", "c", "d", "e"]
         );
         assert_eq!(splitlines("a\u{85}\u{0c}"), ["a", ""]);
+    }
+
+    /// `digits.jsonl` lists, as `[first, last]` ranges, every code point
+    /// Python's `re` `\d` matches, scanned by `regen_a3.py` independently of
+    /// the table `is_digit` reads.
+    #[test]
+    fn is_digit_matches_python_re_digit_for_every_code_point() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/a3/digits.jsonl");
+        let mut ranges = Vec::new();
+        for line in std::fs::read_to_string(path)?.lines() {
+            let r: [u32; 2] = serde_json::from_str(line)?;
+            ranges.push(r);
+        }
+        let python = |cp: u32| ranges.iter().any(|[lo, hi]| (*lo..=*hi).contains(&cp));
+        let mut count = 0;
+        for c in (0..=0x10_FFFF).filter_map(char::from_u32) {
+            assert_eq!(is_digit(c), python(u32::from(c)), "U+{:04X}", u32::from(c));
+            count += usize::from(is_digit(c));
+        }
+        assert_eq!(count, DIGIT_ZEROS.len() * 10);
+        assert_eq!(parse_digits(&['\u{664}', '\u{667}']), Some(47));
+        assert_eq!(digit_value('\u{1D7FF}'), Some(9));
+        Ok(())
     }
 
     #[test]

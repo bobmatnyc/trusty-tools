@@ -10,7 +10,7 @@
 //! `test_dedup_reemits_idle_every_30_minutes_but_not_dialog`,
 //! `dedup_matches_python_goldens`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde::ser::{SerializeMap, Serializer};
 
 use super::Alert;
@@ -32,7 +32,7 @@ pub const REEMIT: [(&str, f64); 10] = [
 ];
 
 /// When a dedup key was first and last emitted.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Seen {
     /// First emission of the current stretch.
     pub first: f64,
@@ -55,6 +55,21 @@ impl DedupState {
     /// Active keys in insertion order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.alerts.iter().map(|(k, _)| k.as_str())
+    }
+
+    /// True when no key is active.
+    pub fn is_empty(&self) -> bool {
+        self.alerts.is_empty()
+    }
+
+    /// Every `(key, seen)` pair in insertion order (#9171 A3a: the state file).
+    pub(crate) fn entries(&self) -> &[(String, Seen)] {
+        &self.alerts
+    }
+
+    /// A state holding `entries` in the given order.
+    pub(crate) fn from_entries(entries: Vec<(String, Seen)>) -> Self {
+        Self { alerts: entries }
     }
 }
 

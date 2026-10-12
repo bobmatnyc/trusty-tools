@@ -6,7 +6,7 @@ use std::str::FromStr;
 use crate::classify::matchers::strip_sgr;
 use crate::error::SendError;
 use crate::pystr::{splitlines, strip};
-use crate::tmux::{PaneId, Tmux, send_keys};
+use crate::tmux::{Keys, PaneId, Tmux, send_keys};
 
 /// What a Claude Code pane's input box (the last `❯` line) holds.
 ///
@@ -105,32 +105,87 @@ pub fn classify_input(capture: &str) -> (InputState, String) {
     (state, text)
 }
 
+/// An input-box reading taken by [`crate::input_state_for_send`], the only
+/// reading [`send_guarded`] accepts.
+///
+/// Why: `send_guarded` took a bare [`InputState`], so a caller could hand it
+/// [`classify_input`]'s reading, which reads a stale `❯` above a busy turn as
+/// `empty` (#9171 A3a reconcile list, PR #9799).
+/// What: wraps the state in a private field; outside this crate's tests the
+/// only constructor is [`crate::input_state_for_send`].
+/// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctest on
+/// [`send_guarded`] proves `classify_input`'s state does not type-check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendReading(InputState);
+
+impl SendReading {
+    pub(crate) fn new(state: InputState) -> Self {
+        Self(state)
+    }
+
+    /// A reading built from `state` directly, for this crate's unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(state: InputState) -> Self {
+        Self(state)
+    }
+
+    /// The input-box state this reading carries.
+    pub fn state(self) -> InputState {
+        self.0
+    }
+
+    /// True when keys may be sent: the box is `empty` or holds a `suggestion`.
+    pub fn accepts_input(self) -> bool {
+        self.0.accepts_input()
+    }
+}
+
+impl PartialEq<InputState> for SendReading {
+    fn eq(&self, other: &InputState) -> bool {
+        self.0 == *other
+    }
+}
+
+impl fmt::Display for SendReading {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Sends `keys` to `pane` only if its input box accepts input.
 ///
 /// Why: a send into a box holding a draft submits or corrupts the draft. The
 /// check belongs on the one path that sends, so no caller can skip it.
 /// What: when `observed.accepts_input()` is false, returns
 /// [`SendError::Refused`] and makes no tmux call; otherwise runs one
-/// `send-keys -t <pane> -- <keys…>`. `observed` must be read from the pane just
-/// before the call.
-/// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctest below
-/// proves the unguarded `send_keys` is not part of the public API.
+/// `send-keys` ([`Keys::Literal`] types text, [`Keys::Named`] presses keys).
+/// `observed` must be read from the pane just before the call.
+/// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctests below
+/// prove the unguarded `send_keys` is not public and that `classify_input`'s
+/// reading is not accepted.
 ///
 /// ```compile_fail,E0599
 /// use trusty_architect::{FakeTmux, PaneId, Tmux};
 /// let pane = PaneId::parse("%1").unwrap();
 /// let _ = FakeTmux::new().send_keys(&pane, &["x"]);
 /// ```
+///
+/// ```compile_fail,E0308
+/// use trusty_architect::{FakeTmux, Keys, PaneId, classify_input, send_guarded};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let (state, _) = classify_input("❯ ");
+/// let _ = send_guarded(&FakeTmux::new(), &pane, state, Keys::Literal("x"));
+/// ```
 pub fn send_guarded<T: Tmux + ?Sized>(
     tmux: &T,
     pane: &PaneId,
-    observed: InputState,
-    keys: &[&str],
+    observed: SendReading,
+    keys: Keys<'_>,
 ) -> Result<(), SendError> {
     if !observed.accepts_input() {
         return Err(SendError::Refused {
             pane: pane.to_string(),
-            state: observed,
+            state: observed.state(),
         });
     }
     send_keys(tmux, pane, keys)?;
@@ -140,7 +195,7 @@ pub fn send_guarded<T: Tmux + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FakeTmux;
+    use crate::{FakeTmux, NamedKey};
 
     #[test]
     fn input_state_names_round_trip() {
@@ -157,7 +212,10 @@ mod tests {
     #[test]
     fn send_guarded_refuses_typed_and_sends_on_empty() -> Result<(), crate::TmuxError> {
         let pane = PaneId::parse("%261")?;
-        let sent = [["send-keys", "-t", "%261", "--", "/tm-fleet-check", "Enter"]];
+        let sent = [
+            vec!["send-keys", "-t", "%261", "-l", "--", "/tm-fleet-check"],
+            vec!["send-keys", "-t", "%261", "Enter"],
+        ];
         let cases = [
             (InputState::Typed, false),
             (InputState::NoPrompt, false),
@@ -166,17 +224,19 @@ mod tests {
         ];
         for (state, sends) in cases {
             let fake = FakeTmux::new();
-            let result = send_guarded(&fake, &pane, state, &["/tm-fleet-check", "Enter"]);
+            let reading = SendReading::for_test(state);
+            let typed = send_guarded(&fake, &pane, reading, Keys::Literal("/tm-fleet-check"));
+            let entered = send_guarded(&fake, &pane, reading, Keys::Named(&[NamedKey::Enter]));
             if sends {
-                assert!(result.is_ok(), "{state}: {result:?}");
-                assert_eq!(fake.calls(), sent, "{state} must send exactly once");
+                assert!(typed.is_ok() && entered.is_ok(), "{state}: {typed:?} {entered:?}");
+                assert_eq!(fake.calls(), sent, "{state} must send exactly once each");
             } else {
                 assert!(
                     matches!(
-                        result,
+                        typed,
                         Err(SendError::Refused { ref pane, state: s }) if pane == "%261" && s == state
                     ),
-                    "{state} must be refused, got {result:?}"
+                    "{state} must be refused, got {typed:?}"
                 );
                 assert!(fake.calls().is_empty(), "{state} must send nothing");
             }

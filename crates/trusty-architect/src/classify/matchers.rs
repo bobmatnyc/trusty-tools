@@ -8,7 +8,9 @@
 //! Test: `ansi_strip_matches_python_alternatives`, `box_top_rule_accepts_a_short_label`,
 //! `timers_sub_removes_each_shape` (in `classify/tests.rs`).
 
-use crate::pystr::{contains_ci, is_digit, is_space, is_word, lstrip, rstrip, strip};
+use crate::pystr::{
+    contains_ci, is_digit, is_space, is_word, lstrip, parse_digits, rstrip, strip,
+};
 
 const ESC: char = '\u{1b}';
 const RULE_CHARS: [char; 2] = ['─', '━'];
@@ -376,6 +378,6 @@ pub(crate) fn find_pct(
         if d == 0 || s.get(j + d) != Some(&'%') {
             return None;
         }
-        s[j..j + d].iter().collect::<String>().parse().ok()
+        parse_digits(&s[j..j + d])
     })
 }

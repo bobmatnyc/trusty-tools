@@ -1,0 +1,8 @@
+{"case": "same_cwd_own_ctx", "results": [["%1", 45], ["%2", null], ["%9", null], ["", null], ["%", null]]}
+{"case": "pid_one_is_alive", "results": [["%2", 18], ["%22", null]]}
+{"case": "newest_updated_wins", "results": [["%3", 30]]}
+{"case": "newest_transcript_folder_wins", "results": [["%4", 23]]}
+{"case": "window_env", "results": [["%5", 24]]}
+{"case": "window_zero", "results": [["%5", null]]}
+{"case": "no_transcript_and_bad_entries", "results": [["%6", null], ["%7", null], ["%8", null], ["%10", 47]]}
+{"case": "no_sessions_dir", "results": [["%1", null]]}

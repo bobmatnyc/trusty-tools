@@ -9,7 +9,7 @@
 //! `ctx_crossing_22_and_25_at_live_bar`, `test_ctx_thresholds_follow_ruling_b7`,
 //! `test_alert_display_and_redaction`, `evaluate_matches_python_goldens`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::PaneInfo;
 use super::matchers::boundary_word_run;
@@ -49,12 +49,14 @@ pub struct Alert {
 }
 
 /// One pane's state across cycles (`fleet-poll.py`'s `ps` dict).
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+// #9171 A3a: Deserialize so poll-state.json's `panes` map reads back typed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneState {
     /// When the pane was first seen idle in the current idle stretch.
+    #[serde(default)]
     pub idle_since: Option<f64>,
     /// Error lines seen last cycle; `None` before the first sight.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<String>>,
 }
 

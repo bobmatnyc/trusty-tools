@@ -4,8 +4,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::Duration;
 
 use crate::error::TmuxError;
+use crate::process::{RunFailure, run_bounded};
 
 /// One tmux pane, named by its immutable `%N` id.
 ///
@@ -42,6 +44,13 @@ impl FromStr for PaneId {
     }
 }
 
+/// Serializes as the bare `%N` string, as the prototype's pane dicts hold it.
+impl serde::Serialize for PaneId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
 impl fmt::Display for PaneId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -54,41 +63,104 @@ impl fmt::Display for PaneId {
 /// trusty-mpm's `fleet/launch.rs` and `fleet/poller.rs`); the port needs one
 /// seam that tests can replace without a tmux server.
 /// What: [`Tmux::run`] runs one tmux command and returns its stdout.
-/// Test: `system_run_rejects_empty_args`, `send_keys_builds_exact_target_argv`
+/// Test: `system_run_rejects_empty_args`, `send_keys_presses_named_keys`
 /// (via [`crate::FakeTmux`]).
 pub trait Tmux {
     /// Runs `tmux <args>` and returns stdout. `args[0]` is the verb.
     fn run(&self, args: &[&str]) -> Result<String, TmuxError>;
 }
 
+/// A tmux key name the send path may press.
+///
+/// Why: the poller presses only Enter (submit) and BSpace (remove its own
+/// typed text); a closed set keeps a key name from ever carrying text.
+/// What: each variant is the exact tmux key name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedKey {
+    /// `Enter`: submit the input box.
+    Enter,
+    /// `BSpace`: delete one character before the cursor.
+    BSpace,
+}
+
+impl NamedKey {
+    /// The tmux key name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enter => "Enter",
+            Self::BSpace => "BSpace",
+        }
+    }
+}
+
+/// What one `send-keys` call delivers.
+///
+/// Why: A1's `send-keys -t P -- <keys>` cannot type the poller's pointer: the
+/// prototype's `wake()` sends `-l <msg>`, and after `--` a `-l` is typed as
+/// text (#9171 A3a plan finding 4).
+/// What: `Literal` types its text verbatim (`send-keys -t P -l -- <text>`);
+/// `Named` presses key names (`send-keys -t P <name>…`).
+/// Test: `send_keys_types_a_dash_leading_literal_as_text`,
+/// `send_keys_presses_named_keys`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keys<'a> {
+    /// Text typed as-is, never read as key names or flags.
+    Literal(&'a str),
+    /// Key names pressed in order.
+    Named(&'a [NamedKey]),
+}
+
 /// Sends `keys` to `pane` with `send-keys`, unguarded.
 ///
 /// Crate-private so [`crate::send_guarded`], which checks the input box first,
-/// is the only public way to send. The `--` ends tmux option parsing, so a key
-/// that starts with `-` (`-t foo`, `-l`) is sent as text, never read as a flag.
-/// Test: `send_keys_builds_exact_target_argv`,
-/// `send_keys_ends_options_before_dash_leading_keys`.
+/// is the only public way to send. In literal mode `-l` precedes `--`, so a
+/// text that starts with `-` (`-t foo`, `-l`) reaches the pane as text.
+/// Test: `send_keys_types_a_dash_leading_literal_as_text`,
+/// `send_keys_presses_named_keys`.
 pub(crate) fn send_keys<T: Tmux + ?Sized>(
     tmux: &T,
     pane: &PaneId,
-    keys: &[&str],
+    keys: Keys<'_>,
 ) -> Result<(), TmuxError> {
-    let mut args = vec!["send-keys", "-t", pane.as_target(), "--"];
-    args.extend_from_slice(keys);
+    let mut args = vec!["send-keys", "-t", pane.as_target()];
+    match keys {
+        Keys::Literal(text) => args.extend(["-l", "--", text]),
+        Keys::Named(names) => args.extend(names.iter().map(|k| k.as_str())),
+    }
     tmux.run(&args).map(drop)
 }
+
+/// How long one tmux call may run: the prototype's `timeout=10`.
+pub const TMUX_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The real [`Tmux`]: spawns the `tmux` binary on `PATH`.
 ///
 /// Why: production callers need a tmux server, optionally a non-default one
-/// (the fleet socket, or a throwaway `-S` socket in an end-to-end test).
+/// (the fleet socket, or a throwaway `-S` socket in an end-to-end test), and a
+/// hung server must not hang the poller (#9171 A3a).
 /// What: runs `tmux [-S <socket>] <args>` with stdin closed and stdout and
-/// stderr captured. A non-zero exit is [`TmuxError::Failed`]. There is no
-/// timeout yet; the poller port (#9171 A3) adds one.
-/// Test: `system_command_prepends_socket`, `system_run_rejects_empty_args`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// stderr drained on threads, bounded by a timeout ([`TMUX_TIMEOUT`] unless
+/// [`SystemTmux::with_timeout`] says otherwise). Past the deadline the child is
+/// killed and reaped and the call is [`TmuxError::Timeout`]; a non-zero exit is
+/// [`TmuxError::Failed`].
+/// Test: `system_command_prepends_socket`, `system_run_rejects_empty_args`,
+/// `system_tmux_times_out_and_reaps_the_child`,
+/// `system_tmux_reads_a_megabyte_of_stdout`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemTmux {
+    program: PathBuf,
     socket: Option<PathBuf>,
+    timeout: Duration,
+}
+
+impl Default for SystemTmux {
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from("tmux"),
+            socket: None,
+            timeout: TMUX_TIMEOUT,
+        }
+    }
 }
 
 impl SystemTmux {
@@ -101,12 +173,25 @@ impl SystemTmux {
     pub fn with_socket(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: Some(socket.into()),
+            ..Self::default()
         }
+    }
+
+    /// Runs `program` instead of `tmux`: a stand-in for the timeout tests.
+    pub fn with_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.program = program.into();
+        self
+    }
+
+    /// Bounds each call by `timeout` instead of [`TMUX_TIMEOUT`].
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// The `Command` [`Tmux::run`] spawns for `args`; building it spawns nothing.
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new("tmux");
+        let mut cmd = Command::new(&self.program);
         if let Some(socket) = &self.socket {
             cmd.arg("-S").arg(socket);
         }
@@ -117,23 +202,32 @@ impl SystemTmux {
 
 impl Tmux for SystemTmux {
     fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
-        let verb = *args.first().ok_or(TmuxError::EmptyCommand)?;
+        let verb = (*args.first().ok_or(TmuxError::EmptyCommand)?).to_owned();
         tracing::debug!(verb, "running tmux");
-        let output = self
-            .command(args)
-            .output()
-            .map_err(|source| TmuxError::Spawn {
-                verb: verb.to_owned(),
+        let done = run_bounded(self.command(args), self.timeout).map_err(|f| match f {
+            RunFailure::Spawn(source) => TmuxError::Spawn {
+                verb: verb.clone(),
                 source,
-            })?;
-        if !output.status.success() {
+            },
+            RunFailure::Timeout => TmuxError::Timeout {
+                verb: verb.clone(),
+                after: self.timeout,
+            },
+            RunFailure::Wait(source) => TmuxError::Wait {
+                verb: verb.clone(),
+                source,
+            },
+        })?;
+        if !done.status.success() {
+            // The prototype keeps the first 200 characters of stderr.
+            let stderr = String::from_utf8_lossy(&done.stderr);
             return Err(TmuxError::Failed {
-                verb: verb.to_owned(),
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                verb,
+                code: done.status.code(),
+                stderr: stderr.trim().chars().take(200).collect(),
             });
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&done.stdout).into_owned())
     }
 }
 
@@ -200,21 +294,70 @@ mod tests {
     }
 
     #[test]
-    fn send_keys_builds_exact_target_argv() -> Result<(), TmuxError> {
+    fn send_keys_presses_named_keys() -> Result<(), TmuxError> {
         let fake = FakeTmux::new();
-        send_keys(&fake, &PaneId::parse("%3")?, &["hello", "Enter"])?;
+        let pane = PaneId::parse("%3")?;
+        send_keys(&fake, &pane, Keys::Named(&[NamedKey::Enter]))?;
+        send_keys(&fake, &pane, Keys::Named(&[NamedKey::BSpace; 2]))?;
         assert_eq!(
             fake.calls(),
-            [["send-keys", "-t", "%3", "--", "hello", "Enter"]]
+            [
+                vec!["send-keys", "-t", "%3", "Enter"],
+                vec!["send-keys", "-t", "%3", "BSpace", "BSpace"]
+            ]
         );
         Ok(())
     }
 
     #[test]
-    fn send_keys_ends_options_before_dash_leading_keys() -> Result<(), TmuxError> {
+    fn send_keys_types_a_dash_leading_literal_as_text() -> Result<(), TmuxError> {
         let fake = FakeTmux::new();
-        send_keys(&fake, &PaneId::parse("%3")?, &["-X", "-l"])?;
-        assert_eq!(fake.calls(), [["send-keys", "-t", "%3", "--", "-X", "-l"]]);
+        send_keys(&fake, &PaneId::parse("%3")?, Keys::Literal("-t =x Enter"))?;
+        assert_eq!(
+            fake.calls(),
+            [["send-keys", "-t", "%3", "-l", "--", "-t =x Enter"]]
+        );
+        Ok(())
+    }
+
+    /// A shell stand-in for tmux: `args` run as `sh -c <script>`.
+    fn shell(timeout: Duration) -> SystemTmux {
+        SystemTmux::new()
+            .with_program("/bin/sh")
+            .with_timeout(timeout)
+    }
+
+    #[test]
+    fn system_tmux_times_out_and_reaps_the_child() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let pid_file = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+        let timeout = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let result = shell(timeout).run(&["-c", &script]);
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(TmuxError::Timeout { ref verb, after }) if verb == "-c" && after == timeout),
+            "{result:?}"
+        );
+        assert!(elapsed < timeout + Duration::from_secs(1), "{elapsed:?}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)?.trim().parse()?;
+        // SAFETY: kill with signal 0 only probes; a reaped pid is ESRCH, while
+        // an unreaped zombie would still answer 0.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "child {pid} was not reaped");
+        Ok(())
+    }
+
+    #[test]
+    fn system_tmux_reads_a_megabyte_of_stdout() -> Result<(), TmuxError> {
+        let out = shell(Duration::from_secs(20)).run(&["-c", "head -c 1048576 /dev/zero"])?;
+        assert_eq!(out.len(), 1_048_576);
+        let err = shell(Duration::from_secs(20)).run(&["-c", "echo boom >&2; exit 3"]);
+        assert!(
+            matches!(err, Err(TmuxError::Failed { code: Some(3), ref stderr, .. }) if stderr == "boom"),
+            "{err:?}"
+        );
         Ok(())
     }
 }
