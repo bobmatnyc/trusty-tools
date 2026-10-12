@@ -36,7 +36,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use trusty_common::memory_core::filter::{check_secret, FilterReject};
+use trusty_common::memory_core::filter::{check_secret, find_secret_spans, FilterReject};
 use trusty_common::memory_core::PalaceRegistry;
 
 use super::store_snapshot::{sweep_stale_copies, with_store_copy, SCRATCH_PREFIX, STALE_COPY_AGE};
@@ -189,23 +189,18 @@ fn tally_reject(counts: &mut RejectCounts, reject: FilterReject) {
     }
 }
 
-/// Split `content` into the tokens `find_secret_token` classifies.
+/// The text of each hit `check_secret` refuses `content` for, in order.
 ///
-/// Why: telling the `KEY=value` path apart needs the flagged tokens, and
-/// trusty-common returns only a redacted preview of the first.
-/// What: mirrors `find_secret_token`'s tokenizer in
-/// `trusty-common/src/memory_core/filter/secret.rs` — split on whitespace or a
-/// backtick, then trim everything but ASCII alphanumerics, `-` and `_` from
-/// both ends. `check_secret` on one such token is exactly the per-token test
-/// `find_secret_token` applies, because the split and trim are idempotent.
+/// Why: telling the `KEY=value` path apart needs the flagged tokens, not the
+/// redacted preview of the first.
+/// What: the text of each [`find_secret_spans`] span. #8623: this replaced a
+/// copy of trusty-common's tokenizer, which a PEM private-key block (one hit
+/// spanning many tokens) would have put out of step with `check_secret`.
 /// Test: `every_refused_drawer_has_a_flagged_token`.
 fn secret_tokens(content: &str) -> impl Iterator<Item = &str> {
-    content
-        .split(|c: char| c.is_whitespace() || c == '`')
-        .map(|raw| {
-            raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
-        })
-        .filter(|tok| check_secret(tok).is_err())
+    find_secret_spans(content)
+        .into_iter()
+        .map(move |span| &content[span.range])
 }
 
 /// True when `token` has the `KEY=value` shape #8589 started screening.
