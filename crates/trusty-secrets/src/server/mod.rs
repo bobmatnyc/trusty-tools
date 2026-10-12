@@ -24,6 +24,8 @@
 //! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
 //!   process-ancestry checks `secrets.grant` and `secrets.resolve` use (S8,
 //!   #9070).
+//! - `sandbox` — under `TRUSTY_SANDBOX=1`, `file` consent from the sandbox
+//!   home's machine config, and no Keychain or CLI backend (#9793).
 //! - `bridge` — `secrets.bridge.*`, the console bridge's entries: the
 //!   console's verdict on its HTTP client, taken only from the verified
 //!   `trusty-console` peer (S3a, #9066).

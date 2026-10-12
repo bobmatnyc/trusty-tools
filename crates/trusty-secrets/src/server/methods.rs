@@ -30,6 +30,7 @@ use super::errors::ErrorKind;
 use super::gate::{Gate, Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
+use super::sandbox;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
@@ -313,7 +314,9 @@ fn other_backends(
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
     for id in swept_backends(machine) {
-        if id == *configured {
+        // #9793: a sandboxed server never opened the Keychain or a CLI
+        // backend, so they hold nothing it wrote; `State::open` refuses them.
+        if id == *configured || (state.sandboxed && !sandbox::opens_in_sandbox(&id)) {
             continue;
         }
         match state.open(&id) {

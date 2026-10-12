@@ -319,6 +319,12 @@ impl State {
     /// Test: `server_keychain_is_never_opened_under_the_sandbox_flag`,
     /// `server_sandbox_flag_does_not_enable_cli_backends`.
     pub(crate) fn open(&self, id: &BackendId) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+        // #9793: refused before the factory, so nothing is opened or probed.
+        if self.sandboxed && !sandbox::opens_in_sandbox(id) {
+            return Err(SecretsError::BackendNotEnabled {
+                backend: id.to_string(),
+            });
+        }
         (self.backends)(id)
     }
 
