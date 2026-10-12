@@ -1,0 +1,6 @@
+crate   trusty-common
+version 0.63.0
+reason  Architect ruling 2026-10-12 07:31Z, under Bob's 2026-09-26 versioning ruling (a public-API break never forces a major version): the #9722/#9719 live L1 cache turns the pub field trusty_common::memory_core::retrieval::PalaceHandle::l1_drawers from Vec<Drawer> into Arc<RwLock<Vec<Drawer>>> (parking_lot) and PalaceHandle::refresh_l1 from &mut self into &self. Refs #9722, #9719.
+# cargo-semver-checks 0.50 has no lint for a pub field type change or a &mut self -> &self receiver change, so these two rows may report "covered nothing"; they record the break. scripts/check_semver_types.sh reports both as advisory CHANGED lines.
+accept  struct_pub_field_type_changed        PalaceHandle.l1_drawers
+accept  method_receiver_mut_ref_became_ref   PalaceHandle::refresh_l1
