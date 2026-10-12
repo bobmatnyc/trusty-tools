@@ -432,13 +432,13 @@ fn construct_on_unwritable_root_is_error() {
     }
 }
 
-/// #9274 (PR3 critic HIGH 2): the daemon opens the SM palace as writer, so an
-/// existing format-0 SM palace migrates at open. Under read-only intent it is
-/// refused with `FormatNeedsMigration`.
+/// #9274 (PR3 critic HIGH 2), re-pointed by #9275: the daemon opens the SM
+/// palace as writer, so an existing format-1 SM palace migrates at open. Under
+/// read-only intent it is refused with `FormatNeedsMigration`.
 /// Test: this is the test.
 #[test]
-fn an_existing_format_0_sm_palace_migrates_at_open() {
-    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+fn an_existing_format_1_sm_palace_migrates_at_open() {
+    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
     use trusty_common::memory_core::store::palace_format::{
         MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
     };
@@ -447,11 +447,11 @@ fn an_existing_format_0_sm_palace_migrates_at_open() {
     let dir = TempDir::new().expect("tempdir");
     let cfg = SmMemoryConfig::default();
     let palace_dir = dir.path().join(&cfg.palace);
-    write_format_0_palace(&palace_dir, &cfg.palace).expect("format-0 palace");
+    write_format_1_palace(&palace_dir, &cfg.palace).expect("format-1 palace");
 
     // #9274: the daemon's open, the one that migrates.
     let mem = SmMemory::open_with_intent(dir.path(), &cfg, OpenIntent::Writer)
-        .expect("a format-0 SM palace opens");
+        .expect("a format-1 SM palace opens");
     assert_eq!(mem.palace_id().as_str(), cfg.palace);
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(palace_dir.join("palace.json")).expect("read"))
@@ -670,18 +670,19 @@ fn open_the_sm_palace_as_the_daemon_child() {
 }
 
 /// #9659: `tm sm serve` started before the daemon must leave the daemon the
-/// writer. With a format-0 SM palace and `tm sm serve`'s open held for the
-/// whole test, the daemon's writer open migrates the palace and `remember`
-/// lands. `tm sm serve` cannot read a format-0 palace; its open may refuse.
+/// writer. With a format-1 SM palace (#9275) and `tm sm serve`'s open held
+/// for the whole test, the daemon's writer open migrates the palace and
+/// `remember` lands. `tm sm serve` cannot read a format-1 palace; its open may
+/// refuse.
 /// Test: this is the test.
 #[test]
 fn sm_serve_first_then_daemon_gets_the_writer_lock() {
-    use trusty_common::memory_core::store::format_v0_fixture::write_format_0_palace;
+    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
 
     seed_shared_embedder_with_mock();
     let dir = TempDir::new().expect("tempdir");
     let cfg = SmMemoryConfig::default();
-    write_format_0_palace(&dir.path().join(&cfg.palace), &cfg.palace).expect("format-0 palace");
+    write_format_1_palace(&dir.path().join(&cfg.palace), &cfg.palace).expect("format-1 palace");
 
     let _serve = SmMemory::open_with_intent(dir.path(), &cfg, sm_serve_intent());
     run_the_daemon_child(dir.path());

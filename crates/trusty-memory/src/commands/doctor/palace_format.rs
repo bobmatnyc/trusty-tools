@@ -1,7 +1,8 @@
 //! Doctor check: palaces the daemon has yet to migrate to this format (#9274).
 //!
-//! Why: ADR-0067 D3 rule 2 — a format-0 palace is refused to every read-only
-//! open (CLI, stdio MCP) until the daemon's writer-intent open migrates it.
+//! Why: ADR-0067 D3 rule 2 — a palace one format behind (format 1 since
+//! #9275) is refused to every read-only open (CLI, stdio MCP) until the
+//! daemon's writer-intent open migrates it; format 0 is refused outright.
 //! The operator needs that state by name, apart from a palace the binary
 //! refuses outright (newer, split, or a failed migration).
 //! What: one pass over the palace root, reading each palace's format state

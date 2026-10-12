@@ -133,7 +133,7 @@ impl SmMemory {
     /// Open the SM memory subsystem with an explicit redb open intent.
     ///
     /// Why: `tm daemon run` and `tm sm serve --stdio` open the same SM palace
-    /// (#9274). The daemon holds it as writer, so a format-0 palace migrates;
+    /// (#9274). The daemon holds it as writer, so a palace one format behind migrates;
     /// `tm sm serve` must read beside it, and a writer open there fails while
     /// the daemon holds `kg.redb`.
     /// What: opens the registry with `intent` (#9659: from hydration on),
@@ -143,7 +143,7 @@ impl SmMemory {
     /// `OpenIntent::Observer`, which never creates one. Both
     /// paths register the handle in the registry. Any failure is wrapped in
     /// [`SmMemoryError::Palace`].
-    /// Test: `an_existing_format_0_sm_palace_migrates_at_open` (writer),
+    /// Test: `an_existing_format_1_sm_palace_migrates_at_open` (writer),
     /// `a_read_only_open_recalls_while_a_writer_holds_the_palace` (read-only).
     pub fn open_with_intent(
         data_root: impl Into<PathBuf>,

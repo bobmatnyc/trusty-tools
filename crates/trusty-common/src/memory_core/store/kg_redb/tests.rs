@@ -411,8 +411,12 @@ mod tests {
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .expect("insert legacy drawer");
             }
-            // #9274: an old drawer row in a format-1 KG (rows are not rewritten).
-            crate::memory_core::store::palace_format::stamp_format(&wtx, 1).expect("stamp");
+            // #9274: an old drawer row in a current-format KG (rows are not rewritten).
+            crate::memory_core::store::palace_format::stamp_format(
+                &wtx,
+                crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED,
+            )
+            .expect("stamp");
             wtx.commit().expect("commit");
         }
 
@@ -494,8 +498,12 @@ mod tests {
                     .insert(id.as_bytes().as_slice(), bytes.as_slice())
                     .expect("insert pre-#4884 drawer");
             }
-            // #9274: an old drawer row in a format-1 KG (rows are not rewritten).
-            crate::memory_core::store::palace_format::stamp_format(&wtx, 1).expect("stamp");
+            // #9274: an old drawer row in a current-format KG (rows are not rewritten).
+            crate::memory_core::store::palace_format::stamp_format(
+                &wtx,
+                crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED,
+            )
+            .expect("stamp");
             wtx.commit().expect("commit");
         }
 

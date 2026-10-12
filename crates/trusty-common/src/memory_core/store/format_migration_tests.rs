@@ -1,16 +1,13 @@
-//! #9274 PR3: the palace format 0 → 1 migration, end to end.
+//! #9274 PR3, re-pointed by #9275: the palace format migration, end to end.
 //!
-//! Why: ADR-0067 D3 rules 2–4 and D4. A format-0 palace must migrate at its
-//! first writer-intent open behind a verified backup, every interrupted state
-//! must be completed by the next writer open, and the three branches that used
-//! to fail open (`migrate.rs` wrapper, skipped rows, the #702 recreate) must
-//! refuse the palace instead.
-//! What: the v0 fixture (`format_v0_fixture`) is written from the OLD on-disk
-//! shapes by hand — `palace.json` without `format_version`, legacy-shape
-//! drawer rows, the pre-#4810 triple key, no `kg_schema` table — never copied
-//! from a real palace. Every test drives the public open paths
-//! (`PalaceHandle`, `KgStoreRedb`) and reads the result through raw redb and
-//! JSON.
+//! Why: ADR-0067 D3 rules 2–4 and D4. A palace one format behind (format 1
+//! since #9275) must migrate at its first writer-intent open behind a verified
+//! backup, every interrupted state must be completed by the next writer open,
+//! and an unreadable KG must refuse the palace, never be recreated.
+//! What: the v1 fixture (`format_v1_fixture`) is written from the 0.33.x
+//! on-disk shapes by hand; the v0 fixture (`format_v0_fixture`) from the older
+//! ones. Every test drives the public open paths (`PalaceHandle`,
+//! `KgStoreRedb`) and reads the result through raw redb and JSON.
 //! Test: this file.
 
 use crate::memory_core::palace::{Palace, PalaceId};
@@ -18,14 +15,17 @@ use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
 pub(super) use crate::memory_core::store::format_v0_fixture::{
-    FORMAT_0_TRIPLES as ROWS, legacy_triple_key, write_format_0_palace_with,
+    legacy_triple_key, write_format_0_palace_with,
+};
+use crate::memory_core::store::format_v1_fixture::{
+    FORMAT_1_TRIPLES as ROWS, write_format_1_palace_with,
 };
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_store::{
-    KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, TripleValue, decode_value,
-    encode_triple_key, encode_value,
+    KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, decode_value, encode_value,
 };
 use crate::memory_core::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, is_format_refusal};
+use crate::memory_core::store::palace_store::PalaceStoreError;
 use redb::ReadableDatabase;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -35,13 +35,13 @@ use tempfile::TempDir;
 /// The record a migration leaves while it runs.
 const RECORD: &str = "format_migration.json";
 
-/// A v0 palace under `<root>/palaces/<id>`.
-pub(super) struct V0 {
+/// A fixture palace under `<root>/palaces/<id>`.
+pub(super) struct Fixture {
     pub(super) root: TempDir,
     pub(super) palace: Palace,
 }
 
-impl V0 {
+impl Fixture {
     pub(super) fn dir(&self) -> &Path {
         &self.palace.data_dir
     }
@@ -53,14 +53,17 @@ impl V0 {
     }
 }
 
-/// Build a format-0 palace under `<root>/palaces/<id>` (`format_v0_fixture`).
+/// A fixture writer: `format_v0_fixture` or `format_v1_fixture`.
+type Writer = fn(&Path, &str, fn(&redb::WriteTransaction)) -> anyhow::Result<()>;
+
+/// Build a palace under `<root>/palaces/<id>` with `write`.
 ///
 /// `extra` runs inside the KG write transaction, so a test can add a
-/// malformed row or a marker the old code wrote.
-pub(super) fn build_v0_with(id: &str, extra: fn(&redb::WriteTransaction)) -> V0 {
+/// malformed row or overwrite a marker.
+fn build_with(id: &str, write: Writer, extra: fn(&redb::WriteTransaction)) -> Fixture {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = root.path().join("palaces").join(id);
-    write_format_0_palace_with(&dir, id, extra).expect("write v0 palace");
+    write(&dir, id, extra).expect("write fixture palace");
     let palace = Palace {
         id: PalaceId::new(id),
         name: id.to_string(),
@@ -68,12 +71,22 @@ pub(super) fn build_v0_with(id: &str, extra: fn(&redb::WriteTransaction)) -> V0 
         created_at: chrono::Utc::now(),
         data_dir: dir,
     };
-    V0 { root, palace }
+    Fixture { root, palace }
 }
 
-/// A plain v0 palace.
-pub(super) fn build_v0(id: &str) -> V0 {
-    build_v0_with(id, |_| {})
+/// A plain format-0 palace (`format_v0_fixture`).
+pub(super) fn build_v0(id: &str) -> Fixture {
+    build_with(id, write_format_0_palace_with, |_| {})
+}
+
+/// A format-1 palace (`format_v1_fixture`); `extra` as in [`build_with`].
+pub(super) fn build_v1_with(id: &str, extra: fn(&redb::WriteTransaction)) -> Fixture {
+    build_with(id, write_format_1_palace_with, extra)
+}
+
+/// A plain format-1 palace.
+pub(super) fn build_v1(id: &str) -> Fixture {
+    build_v1_with(id, |_| {})
 }
 
 /// SHA-256 of every file under `dir`, keyed by relative path.
@@ -134,7 +147,7 @@ pub(super) fn has_triple_key(kg: &Path, key: &[u8]) -> bool {
 }
 
 /// Complete backup directories (those with a manifest), oldest first.
-pub(super) fn complete_backups(v0: &V0) -> Vec<PathBuf> {
+pub(super) fn complete_backups(v0: &Fixture) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(v0.backups()) else {
         return Vec::new();
     };
@@ -146,10 +159,11 @@ pub(super) fn complete_backups(v0: &V0) -> Vec<PathBuf> {
     out
 }
 
-/// Assert a migrated palace: both markers at 1, no record, data intact.
-pub(super) fn assert_migrated(v0: &V0) {
-    assert_eq!(mirror(v0.dir()), Some(1), "mirror");
-    assert_eq!(marker(&v0.kg()), Some(1), "marker");
+/// Assert a migrated palace: format 2 in both markers, triple key v1, no
+/// record, data intact.
+pub(super) fn assert_migrated(v0: &Fixture) {
+    assert_eq!(mirror(v0.dir()), Some(2), "mirror");
+    assert_eq!(marker(&v0.kg()), Some(2), "marker");
     assert_eq!(schema_row(&v0.kg(), KG_SCHEMA_TRIPLE_KEY), Some(1));
     assert!(!v0.dir().join(RECORD).exists(), "the record must be gone");
     let kg = KgStoreRedb::open(&v0.kg()).expect("migrated KG opens");
@@ -160,15 +174,19 @@ pub(super) fn assert_migrated(v0: &V0) {
     assert_eq!(kg.dump_all_triples().expect("dump").len(), ROWS.len());
 }
 
-fn open(v0: &V0, intent: OpenIntent) -> anyhow::Result<std::sync::Arc<PalaceHandle>> {
+pub(super) fn open(
+    v0: &Fixture,
+    intent: OpenIntent,
+) -> anyhow::Result<std::sync::Arc<PalaceHandle>> {
     PalaceHandle::open_with_intent(&v0.palace, intent)
 }
 
-/// AC1, ADR-0067 D4: a v0 palace migrates at its first writer open; the
-/// backup is complete and byte-identical; a second open migrates nothing.
+/// AC1, ADR-0067 D4 (#9275 T1): a v1 palace migrates to 2 at its first
+/// writer open; the backup is complete and byte-identical; a second open
+/// migrates nothing.
 #[test]
-fn a_format_0_palace_migrates_at_first_writer_open() {
-    let v0 = build_v0("v0-migrates");
+fn a_format_1_palace_migrates_to_2_at_first_writer_open() {
+    let v0 = build_v1("v1-migrates");
     let before = hash_tree(v0.dir());
 
     let handle = open(&v0, OpenIntent::Writer).expect("the writer open migrates");
@@ -199,18 +217,26 @@ fn a_format_0_palace_migrates_at_first_writer_open() {
     assert!(!v0.dir().join(RECORD).exists());
 }
 
-/// ADR-0067 D3 rule 2: a read-only open of a format-0 palace is refused with
-/// the daemon hint, and writes nothing — no backup, no record, no store file.
+/// ADR-0067 D3 rule 2 (#9275 T2): a read-only open of a format-1 palace is
+/// refused with the daemon hint, and writes nothing — no backup, no record,
+/// no store file.
 #[test]
-fn a_read_only_open_of_a_format_0_palace_is_refused_and_writes_nothing() {
-    let v0 = build_v0("v0-read-only");
+fn a_read_only_open_of_a_format_1_palace_is_refused_and_writes_nothing() {
+    let v0 = build_v1("v1-read-only");
     let before = hash_tree(v0.dir());
     let err = open(&v0, OpenIntent::ReadOnlyClient)
         .err()
-        .expect("a read-only open of format 0 is refused");
+        .expect("a read-only open of format 1 is refused");
     assert!(is_format_refusal(&err), "{err:#}");
     assert!(
-        format!("{err:#}").contains("FormatNeedsMigration"),
+        matches!(
+            err.downcast_ref::<PalaceStoreError>(),
+            Some(PalaceStoreError::FormatNeedsMigration {
+                found: 1,
+                supported: 2,
+                ..
+            })
+        ),
         "{err:#}"
     );
     assert_eq!(before, hash_tree(v0.dir()), "a byte changed");
@@ -222,7 +248,7 @@ fn a_read_only_open_of_a_format_0_palace_is_refused_and_writes_nothing() {
 /// changes and no record is left.
 #[test]
 fn a_blocked_backup_aborts_before_any_palace_byte_changes() {
-    let v0 = build_v0("v0-blocked");
+    let v0 = build_v1("v1-blocked");
     std::fs::write(v0.root.path().join("backups"), b"not a directory").expect("blocker");
     let before = hash_tree(v0.dir());
 
@@ -231,72 +257,58 @@ fn a_blocked_backup_aborts_before_any_palace_byte_changes() {
         .expect("a failed backup aborts the open");
     assert!(format!("{err:#}").contains("BackupFailed"), "{err:#}");
     assert_eq!(before, hash_tree(v0.dir()), "a palace byte changed");
-    assert_eq!(marker(&v0.kg()), None);
+    assert_eq!(marker(&v0.kg()), Some(1));
 
     std::fs::remove_file(v0.root.path().join("backups")).expect("unblock");
     drop(open(&v0, OpenIntent::Writer).expect("the retry migrates"));
     assert_migrated(&v0);
 }
 
-/// Put `v0` in the state a migration interrupted after `step` leaves:
-/// 0 = backup only, 1 = + record, 2 = + mirror, 3 = + KG committed.
-fn interrupt_after(v0: &V0, step: u8) {
-    let backup = ensure_format_backup(v0.root.path(), v0.palace.id.as_str(), v0.dir(), 0, 1)
+/// Put `v0` (a v1 palace) in the state a 1 → 2 migration interrupted after
+/// `step` leaves: 0 = backup only, 1 = + record, 2 = + mirror, 3 = + KG
+/// committed.
+pub(super) fn interrupt_after(v0: &Fixture, step: u8) {
+    let backup = ensure_format_backup(v0.root.path(), v0.palace.id.as_str(), v0.dir(), 1, 2)
         .expect("backup");
     if step >= 1 {
         let record = serde_json::json!({
-            "palace": v0.palace.id.as_str(), "from": 0, "to": 1, "backup": backup,
+            "palace": v0.palace.id.as_str(), "from": 1, "to": 2, "backup": backup,
         });
         std::fs::write(v0.dir().join(RECORD), record.to_string()).expect("record");
     }
     if step >= 2 {
-        let path = v0.dir().join("palace.json");
-        let mut v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
-        v["format_version"] = serde_json::json!(1);
-        std::fs::write(&path, v.to_string()).expect("mirror");
+        set_mirror(v0.dir(), 2);
     }
     if step >= 3 {
-        // The committed KG step: new keys, both markers, in one transaction.
-        let db = crate::redb_cache::create_palace_db(&v0.kg()).expect("kg");
-        let wtx = db.begin_write().expect("txn");
-        {
-            let mut t = wtx.open_table(TRIPLES).expect("triples");
-            for (s, p, o, to) in ROWS {
-                let value = TripleValue {
-                    object: o.into(),
-                    valid_from_ms: 1_700_000_000_000,
-                    valid_to_ms: to,
-                    confidence: 1.0,
-                    provenance: None,
-                };
-                let (old, new) = if to.is_some() {
-                    let ts = value.valid_from_ms.to_be_bytes();
-                    let mut old = b"hist:".to_vec();
-                    old.extend(legacy_triple_key(s, p));
-                    old.extend(ts);
-                    let mut new = b"hist:".to_vec();
-                    new.extend(encode_triple_key(s, p, o));
-                    new.extend(ts);
-                    (old, new)
-                } else {
-                    (legacy_triple_key(s, p), encode_triple_key(s, p, o))
-                };
-                t.remove(old.as_slice()).expect("rm");
-                let bytes = encode_value(&value).expect("enc");
-                t.insert(new.as_slice(), bytes.as_slice()).expect("ins");
-            }
-            let mut schema = wtx.open_table(KG_SCHEMA).expect("schema");
-            let one = encode_value(&KgSchemaMarker { schema_version: 1 }).expect("enc");
-            schema
-                .insert(KG_SCHEMA_TRIPLE_KEY, one.as_slice())
-                .expect("tk");
-            schema
-                .insert(KG_SCHEMA_PALACE_FORMAT, one.as_slice())
-                .expect("pf");
-        }
-        wtx.commit().expect("commit");
+        // The committed KG step: the format-2 stamp, in one transaction.
+        set_marker(&v0.kg(), 2);
     }
+}
+
+/// Set `palace.json`'s `format_version`.
+pub(super) fn set_mirror(dir: &Path, format: u32) {
+    let path = dir.join("palace.json");
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    v["format_version"] = serde_json::json!(format);
+    std::fs::write(&path, v.to_string()).expect("mirror");
+}
+
+/// Stamp the `palace_format` marker in `kg` at `format`.
+pub(super) fn set_marker(kg: &Path, format: u32) {
+    let db = crate::redb_cache::create_palace_db(kg).expect("kg");
+    let wtx = db.begin_write().expect("txn");
+    {
+        let mut schema = wtx.open_table(KG_SCHEMA).expect("schema");
+        let bytes = encode_value(&KgSchemaMarker {
+            schema_version: format,
+        })
+        .expect("enc");
+        schema
+            .insert(KG_SCHEMA_PALACE_FORMAT, bytes.as_slice())
+            .expect("pf");
+    }
+    wtx.commit().expect("commit");
 }
 
 /// AC3/AC4: every state an interrupted migration can leave — including the
@@ -305,7 +317,7 @@ fn interrupt_after(v0: &V0, step: u8) {
 #[test]
 fn each_interrupted_state_is_completed_by_the_next_writer_open() {
     for step in 0..=3u8 {
-        let v0 = build_v0(&format!("v0-interrupted-{step}"));
+        let v0 = build_v1(&format!("v1-interrupted-{step}"));
         interrupt_after(&v0, step);
         let err = open(&v0, OpenIntent::ReadOnlyClient)
             .err()
@@ -325,8 +337,8 @@ fn each_interrupted_state_is_completed_by_the_next_writer_open() {
 /// is not reused; the migration takes a new one of the current bytes.
 #[test]
 fn a_backup_of_an_older_source_is_not_reused_by_the_migration() {
-    let v0 = build_v0("v0-stale-backup");
-    let stale = ensure_format_backup(v0.root.path(), v0.palace.id.as_str(), v0.dir(), 0, 1)
+    let v0 = build_v1("v1-stale-backup");
+    let stale = ensure_format_backup(v0.root.path(), v0.palace.id.as_str(), v0.dir(), 1, 2)
         .expect("stale backup");
     std::fs::write(v0.dir().join("identity.txt"), b"changed since").expect("edit");
     // The backup directory stamp has millisecond resolution.
@@ -347,7 +359,7 @@ fn a_backup_of_an_older_source_is_not_reused_by_the_migration() {
 /// refuses the palace and leaves the record for the operator.
 #[test]
 fn a_resume_refuses_a_record_whose_backup_no_longer_verifies() {
-    let v0 = build_v0("v0-bad-backup");
+    let v0 = build_v1("v1-bad-backup");
     interrupt_after(&v0, 1);
     let backup = complete_backups(&v0).pop().expect("backup");
     std::fs::write(backup.join("kg.redb"), b"damaged").expect("damage");
@@ -360,12 +372,12 @@ fn a_resume_refuses_a_record_whose_backup_no_longer_verifies() {
         "{err:#}"
     );
     assert!(v0.dir().join(RECORD).exists(), "the record stays");
-    assert_eq!(mirror(v0.dir()), None, "nothing advanced");
-    assert_eq!(marker(&v0.kg()), None);
+    assert_eq!(mirror(v0.dir()), Some(1), "nothing advanced");
+    assert_eq!(marker(&v0.kg()), Some(1));
 }
 
-/// AC5, `migrate.rs:54`: a format-0 KG opened directly is refused, never
-/// opened un-migrated, and its legacy rows stay where they are.
+/// AC5: a format-0 KG opened directly is refused (`FormatTooOld` since
+/// #9275), never opened un-migrated, and its legacy rows stay where they are.
 #[test]
 fn a_direct_kg_open_of_a_format_0_file_is_refused() {
     let v0 = build_v0("v0-direct");
@@ -387,40 +399,11 @@ fn a_direct_kg_open_of_a_format_0_file_is_refused() {
     ));
 }
 
-/// AC5, `migrate.rs:206`: a legacy row that does not decode fails the
-/// migration; nothing is committed and the palace stays refused.
-#[test]
-fn an_undecodable_legacy_row_fails_the_migration_and_commits_nothing() {
-    let v0 = build_v0_with("v0-bad-row", |wtx| {
-        let mut t = wtx.open_table(TRIPLES).expect("triples");
-        t.insert(legacy_triple_key("zed", "is").as_slice(), &[0xFF_u8; 3][..])
-            .expect("bad row");
-    });
-    let err = open(&v0, OpenIntent::Writer)
-        .err()
-        .expect("an undecodable row fails the migration");
-    assert!(
-        format!("{err:#}").contains("FormatMigrationFailed"),
-        "{err:#}"
-    );
-    assert!(is_format_refusal(&err), "{err:#}");
-    assert_eq!(marker(&v0.kg()), None, "no marker committed");
-    assert_eq!(schema_row(&v0.kg(), KG_SCHEMA_TRIPLE_KEY), None);
-    assert!(has_triple_key(
-        &v0.kg(),
-        &legacy_triple_key("alice", "knows")
-    ));
-    let again = open(&v0, OpenIntent::Writer)
-        .err()
-        .expect("still refused, never opened un-migrated");
-    assert!(is_format_refusal(&again), "{again:#}");
-}
-
 /// AC5, ADR-0067 D1: a triple-key marker newer than the frozen v1 is not
 /// "already migrated"; the migration refuses it.
 #[test]
 fn a_newer_triple_key_marker_fails_the_migration() {
-    let v0 = build_v0_with("v0-tk2", |wtx| {
+    let v0 = build_v1_with("v1-tk2", |wtx| {
         let mut t = wtx.open_table(KG_SCHEMA).expect("schema");
         let two = encode_value(&KgSchemaMarker { schema_version: 2 }).expect("enc");
         t.insert(KG_SCHEMA_TRIPLE_KEY, two.as_slice()).expect("tk");
@@ -432,14 +415,14 @@ fn a_newer_triple_key_marker_fails_the_migration() {
         format!("{err:#}").contains("FormatMigrationFailed"),
         "{err:#}"
     );
-    assert_eq!(marker(&v0.kg()), None);
+    assert_eq!(marker(&v0.kg()), Some(1));
 }
 
 /// AC5, `concurrent_open.rs:334` (ADR-0067 D5): an unreadable `kg.redb` is
 /// refused under writer intent, never renamed aside and recreated empty.
 #[test]
 fn a_writer_open_refuses_an_incompatible_kg_with_bytes_unchanged() {
-    let v0 = build_v0("v0-garbage");
+    let v0 = build_v1("v1-garbage");
     std::fs::write(v0.kg(), b"this is not a redb file at all").expect("garbage");
     let before = hash_tree(v0.dir());
 

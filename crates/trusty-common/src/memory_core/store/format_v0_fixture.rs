@@ -1,14 +1,14 @@
 //! A format-0 palace, written by hand from the old on-disk shapes (#9274).
 //!
-//! Why: every `PalaceRegistry` that owns a palace root must open an existing
-//! format-0 palace, migrated, and the old shapes are private to this crate. A
-//! consumer test (trusty-mpm's SM and portfolio palaces) needs the same
-//! fixture this crate's migration tests use, never a copy of a real palace.
+//! Why: since #9275 a format-0 palace is two behind and must be refused
+//! `FormatTooOld` under every intent (ADR-0067 D3 rule 2), and the old shapes
+//! are private to this crate. A consumer test (trusty-mpm's SM palace) needs
+//! the same fixture this crate's tests use, never a copy of a real palace.
 //! What: [`write_format_0_palace_with`] writes `palace.json` without
 //! `format_version`, an `identity.txt`, and a `kg.redb` with pre-#61 drawer
 //! rows, the pre-#4810 triple key and no `kg_schema` table. Compiled for this
 //! crate's tests and under the `memory-core-test-support` feature.
-//! Test: `a_format_0_palace_migrates_at_first_writer_open`.
+//! Test: `a_format_0_palace_is_refused_too_old_under_every_intent_bytes_unchanged`.
 
 use super::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, TRIPLES, TripleValue, encode_u64, encode_value,

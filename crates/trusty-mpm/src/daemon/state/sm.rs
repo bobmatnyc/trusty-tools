@@ -37,12 +37,12 @@ const SM_DATA_SUBDIR: &str = "sm";
 /// Why: `tm daemon run` and `tm sm serve --stdio` both build a [`DaemonState`]
 /// over the same root. Only one process can hold a palace's `kg.redb` as
 /// writer, so the daemon owns the palaces and `tm sm serve` reads beside it.
-/// What: `Writer` opens with `OpenIntent::Writer`, so a format-0 palace
+/// What: `Writer` opens with `OpenIntent::Writer`, so a palace one format behind
 /// migrates; `ReadOnly` opens with `OpenIntent::Observer` (#9659), which reads
 /// a snapshot copy and never locks the live files, whether or not a daemon
-/// runs. It cannot create a palace or read a format-0 one.
+/// runs. It cannot create a palace or read a palace one format behind.
 /// Test: `a_read_only_open_recalls_while_a_writer_holds_the_palace`,
-/// `an_existing_format_0_sm_palace_migrates_at_open`,
+/// `an_existing_format_1_sm_palace_migrates_at_open`,
 /// `sm_serve_first_then_daemon_gets_the_writer_lock`,
 /// `daemon_not_running_sm_serve_still_recalls`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ impl DaemonState {
     /// Construct default state under `root`, opening the palaces as writer.
     ///
     /// Why: the daemon (`tm daemon run`, through [`Self::new`]) owns the SM and
-    /// portfolio palaces, so a format-0 palace migrates when it opens (#9274).
+    /// portfolio palaces, so a palace one format behind migrates when it opens (#9274).
     /// What: `Self::with_root_access` with [`PalaceAccess::Writer`].
     /// Test: `pairing_persists_to_disk`, `pairing_reset_clears_disk`.
     pub fn with_root(root: std::path::PathBuf) -> Self {
