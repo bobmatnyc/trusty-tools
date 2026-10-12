@@ -60,6 +60,8 @@ mod chunk_key_tests;
 #[cfg(test)]
 mod embed_store_tests;
 #[cfg(test)]
+mod l1_live_tests;
+#[cfg(test)]
 mod op_budget_remember_tests;
 #[cfg(test)]
 pub(crate) mod recall_log_tests;
