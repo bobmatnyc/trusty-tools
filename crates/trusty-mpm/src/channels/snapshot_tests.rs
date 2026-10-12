@@ -658,6 +658,28 @@ fn git_fault_reported_as_a_verdict_ages_to_deny() {
     }
 }
 
+#[test]
+fn stale_file_with_no_refusal_finding_ages_to_deny() {
+    // r-078 delta: a Stale file whose refusal is not recorded is unexplained,
+    // so it ages like a fault.
+    let (snap, clock, _) = scripted(|n| {
+        let mut report = bob_report();
+        if n > 0 {
+            report.per_file[0].state = FileState::Stale;
+        }
+        report
+    });
+    assert_eq!(bob_verdicts(&snap), Ok(()), "first load");
+    clock.set(secs(60.0));
+    assert_eq!(bob_verdicts(&snap), Ok(()), "inside max age");
+    clock.set(secs(61.0));
+    assert_snapshot_denies(
+        &snap,
+        |d| matches!(d, SnapshotDeny::Stale { .. }),
+        "unexplained Stale file past max age",
+    );
+}
+
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
