@@ -11,6 +11,7 @@
 //! Test: `src/policy/tests/reload.rs`.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::policy::fs::{read_host, read_project, ProjectRead};
@@ -78,6 +79,32 @@ impl Fingerprint {
             canonical,
             projects,
         }
+    }
+
+    /// A nonzero digest of every field, for `LoadReport::fingerprint`.
+    ///
+    /// Why: #8454 VC keys the daemon's egress verdict on it, and 0 is
+    /// reserved for "never cache" (a report no loader stamped).
+    /// What: hashes each field in order, the project count first; a digest
+    /// of 0 is moved to 1.
+    /// Test: `loader_report_carries_a_fingerprint_that_follows_its_sources`.
+    fn digest(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.host.hash(&mut h);
+        self.canonical.hash(&mut h);
+        self.projects.len().hash(&mut h);
+        for p in &self.projects {
+            p.dir.hash(&mut h);
+            p.real.hash(&mut h);
+            p.file.hash(&mut h);
+            // `BranchState` is public and not `Hash`; hash its fields here.
+            match &p.branch {
+                None => 0u8.hash(&mut h),
+                Some(Err(e)) => (1u8, e).hash(&mut h),
+                Some(Ok(b)) => (2u8, &b.default, &b.head, &b.commit).hash(&mut h),
+            }
+        }
+        h.finish().max(1)
     }
 }
 
@@ -182,6 +209,8 @@ impl PolicyLoader {
             // #8454 Q3: the host is the master switch.
             self.last_good.clear();
             self.report = assemble(prepared, &channels);
+            // #8454 VC: a denied reload is stamped too; the route answers it as not ready.
+            self.report.fingerprint = self.fingerprint.digest();
             return;
         }
         let first = assemble(prepared.clone(), &channels);
@@ -242,6 +271,8 @@ impl PolicyLoader {
         }
         self.last_good = last_good;
         self.report = report;
+        // #8454 VC: only a loader's report carries a fingerprint.
+        self.report.fingerprint = self.fingerprint.digest();
     }
 }
 
