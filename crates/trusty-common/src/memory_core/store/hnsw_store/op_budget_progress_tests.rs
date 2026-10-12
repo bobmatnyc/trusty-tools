@@ -97,6 +97,56 @@ async fn a_legal_group_slower_than_the_budget_completes_without_tripping() {
     assert_eq!(shapes[&id].rows, 200);
 }
 
+/// Why (#9728): health reads `oldest_op` and reports an op older than its
+/// wedge line (twice the budget by default) as a wedged `hnsw` lock. A group
+/// that keeps making progress may legally outlast the budget, so its op's age
+/// must follow progress, not the call's start.
+/// What: 200 chunks at 5 ms a point under a 300 ms budget; samples the op's
+/// age every 5 ms while the group runs. Asserts the group outlasted the
+/// budget, the op was seen, and no sampled age reached one budget.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_progressing_group_keeps_its_op_age_under_one_budget() {
+    let (_dir, store) = small_store();
+    let id = Uuid::new_v4();
+    let _pace = index_pace::arm(&id.to_string(), Duration::from_millis(5), None);
+
+    let started = Instant::now();
+    let write = store.upsert_chunks(id, spread(200, DIM, 7));
+    tokio::pin!(write);
+    let mut oldest_age = Duration::ZERO;
+    let mut samples = 0usize;
+    let sampled = async {
+        loop {
+            tokio::select! {
+                outcome = &mut write => break outcome,
+                () = tokio::time::sleep(Duration::from_millis(5)) => {
+                    if let Some(op) = store.hnsw_for_test().oldest_op() {
+                        oldest_age = oldest_age.max(op.since.elapsed());
+                        samples += 1;
+                    }
+                }
+            }
+        }
+    };
+    let outcome = tokio::time::timeout(WATCHDOG, sampled)
+        .await
+        .expect("a progressing group must finish, not hang");
+    let elapsed = started.elapsed();
+
+    outcome.expect("a group that keeps making progress must complete");
+    assert!(
+        elapsed > SMALL,
+        "the group took {elapsed:?}; it must outlast the {SMALL:?} budget to prove anything"
+    );
+    assert!(samples > 0, "the running op was never observed");
+    assert!(
+        oldest_age < SMALL,
+        "a progressing op aged {oldest_age:?} over {samples} samples; health must see \
+         under one {SMALL:?} budget"
+    );
+}
+
 /// Why (#9728 guard): the watchdog must still catch a real stall inside a
 /// large group within about one budget. A budget scaled by the chunk count
 /// would hold the thread and `write_mutex` for many budgets first.
@@ -115,16 +165,20 @@ async fn a_stall_inside_a_large_group_trips_one_budget_after_the_stall() {
         let outcome = store.upsert_chunks(id, spread(2000, DIM, 2)).await;
         (outcome, Instant::now())
     };
+    // #9728: bounded inside the outer watchdog. A trip before the park point
+    // ends the loop early and the sender in the static seam never drops, so
+    // a bare `recv` would block this thread and the runtime's shutdown.
     let stall = tokio::task::spawn_blocking(move || {
-        reached.recv().expect("the loop must reach the park point");
-        Instant::now()
+        reached.recv_timeout(WATCHDOG / 2).map(|()| Instant::now())
     });
     let ((outcome, tripped_at), stalled_at) =
         tokio::time::timeout(WATCHDOG, async { tokio::join!(write, stall) })
             .await
             .expect("a stalled group must cost its caller about one budget, not hang");
     drop(parked.release);
-    let stalled_at = stalled_at.expect("park watcher");
+    let stalled_at = stalled_at
+        .expect("park watcher")
+        .unwrap_or_else(|e| panic!("the loop never reached the park point ({e}); got {outcome:?}"));
 
     let err = outcome.expect_err("a stalled group must fail");
     assert!(
@@ -207,6 +261,37 @@ async fn a_stalled_group_trips_for_good_and_is_never_counted_complete() {
         "the abandoned tail is never indexed"
     );
     assert_eq!(breaker.spawned_ops(), spawned);
+}
+
+/// Why (#9728 guard): touching the op on progress must not hide a stall.
+/// Health has to keep seeing a stalled group's op age past its wedge line.
+/// What: a 20-chunk group parks before point 5 and trips. Reads the parked
+/// op, waits one more budget, and asserts its start never moved and its age
+/// passed twice the budget, the default wedge line.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_group_op_age_keeps_growing_past_the_budget() {
+    let (_dir, store) = small_store();
+    let id = Uuid::new_v4();
+    let parked = index_pace::arm(&id.to_string(), Duration::ZERO, Some(5));
+
+    let outcome = tokio::time::timeout(WATCHDOG, store.upsert_chunks(id, spread(20, DIM, 8)))
+        .await
+        .expect("a stalled group must give up at its budget");
+    outcome.expect_err("a stalled group must fail");
+    let at_trip = store.hnsw_for_test().oldest_op();
+    tokio::time::sleep(SMALL + Duration::from_millis(50)).await;
+    let later = store.hnsw_for_test().oldest_op();
+    drop(parked.release);
+
+    let at_trip = at_trip.expect("the parked op stays registered after the trip");
+    let later = later.expect("the parked op stays registered while it stalls");
+    assert_eq!(later.since, at_trip.since, "a stalled op is never touched");
+    let age = later.since.elapsed();
+    assert!(
+        age > SMALL * 2,
+        "a stalled op aged only {age:?}; health must see it past twice the {SMALL:?} budget"
+    );
 }
 
 /// Why (#9728 guard): a caller that drops its future (an HTTP disconnect,
