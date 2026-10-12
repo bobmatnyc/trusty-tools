@@ -81,8 +81,9 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// What: seeds the result set with `retrieve_l0_l1`, joins the optional BM25
 /// lane (query runs regardless of embedder state — BM25 has no embedder
 /// dependency), hydrates any BM25-only hits via `bm25_live_hits` (#9390: which
-/// refills past expired slots), merges without duplicating drawers already
-/// present, re-sorts by score descending, and truncates to `top_k`.
+/// refills past expired slots), merges them through `dedup_extend` (a hit on
+/// an L1 drawer replaces its layer-1 copy, #9719), re-sorts by score
+/// descending, and truncates to `top_k`.
 /// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
 /// another room's drawer just because the daemon happened to be warming. L1
@@ -96,7 +97,8 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
 /// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
 /// `bm25_alias_recall.rs::an_aliased_recall_reads_the_corpus_the_backfill_wrote`,
-/// `recall_returns_the_live_slot_past_twenty_expired_ones_while_warming`.
+/// `recall_returns_the_live_slot_past_twenty_expired_ones_while_warming`,
+/// `a_warming_lane_hit_replaces_its_l1_copy`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
@@ -115,11 +117,8 @@ async fn recall_without_embedder(
     // #9390: refilled past expired slots, which ADR-0028 D6 never deletes.
     let admits = |d: &Drawer| scope_admits(&allowed, d.room_id);
     if let Some(bm25_hits) = bm25_live_hits(state, handle, query, top_k, admits).await {
-        for hydrated in bm25_hits {
-            if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
-                results.push(hydrated);
-            }
-        }
+        // #9719: a lane hit replaces its L1 copy, as on the ready path.
+        trusty_common::memory_core::retrieval::dedup_extend(&mut results, bm25_hits);
     }
     results.sort_by(|a, b| {
         b.score
