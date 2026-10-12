@@ -1,5 +1,6 @@
 //! End-to-end proof that the Architect profile, not `TRUSTY_MPM_PM_UNRESTRICTED`,
-//! defines an Architect session's guard behaviour (#8453). The stamp and\n//! profile values stay the legacy `supervisor` the writers still emit (#9755).
+//! defines an Architect session's guard behaviour (#8453). The stamp and
+//! profile values stay the legacy `supervisor` the writers still emit (#9755).
 //!
 //! Why: the Architect acts directly, so the PM delegation rules must not bind
 //! it, while the destructive-command and worktree guards must. The exemption
@@ -156,6 +157,32 @@ fn a_stamp_without_the_file_keeps_the_pm_delegation_rules() {
         assert!(
             fourth_direct_edit(&stale).contains("\"deny\""),
             "file profile {profile:?}"
+        );
+    }
+}
+
+// #9755 (D07): an Architect launched before the rename keeps the `supervisor`
+// stamp across a `tm` upgrade, and its hooks run the new binary.
+#[test]
+fn legacy_stamp_supervisor_is_still_architect() {
+    let legacy = session(Some("supervisor"), Some("supervisor"), true);
+    assert_eq!(fourth_direct_edit(&legacy).trim(), "");
+}
+
+#[test]
+fn architect_stamp_is_architect() {
+    let renamed = session(Some("supervisor"), Some("architect"), true);
+    assert_eq!(fourth_direct_edit(&renamed).trim(), "");
+}
+
+#[test]
+fn unrecognised_stamp_is_not_architect() {
+    // Fail-closed: only the two Architect stamps grant the exemption.
+    for stamp in ["other", "Architect", "supervisor "] {
+        let s = session(Some("supervisor"), Some(stamp), true);
+        assert!(
+            fourth_direct_edit(&s).contains("\"deny\""),
+            "stamp {stamp:?}"
         );
     }
 }
