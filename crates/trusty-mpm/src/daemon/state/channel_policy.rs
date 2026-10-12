@@ -15,8 +15,8 @@ impl DaemonState {
     ///
     /// Why: one snapshot per daemon; a test daemon reads its pinned home,
     /// never the operator's (#8545).
-    /// What: built on first call, with no I/O until its first check. Its
-    /// checks may run git; call them from a blocking context.
+    /// What: built on first call, with no I/O until its first check. A
+    /// check never waits on git; refreshes run on their own thread (#9777).
     /// Test: `daemon_state_holds_snapshot_under_its_user_home`.
     pub fn channel_policy(&self) -> &DaemonPolicySnapshot {
         self.channel_policy
