@@ -60,7 +60,8 @@ fn doctor_lists_orphan_taint_files_and_deletes_none() {
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     for needle in [
         "b.json: orphaned",
-        "c.json: failed re-apply",
+        // #8433 B2: the hook's owner-less write, from marks it could not list.
+        "c.json: failed re-apply, tainted by the SessionStart hook (no owner",
         "d.json: unreadable",
         "managed/gone-1.json",
     ] {

@@ -180,6 +180,39 @@ fn a_hook_written_taint_retires_with_its_managed_session() {
     );
 }
 
+/// 🔴 #8433 (B2, r-078): marks that cannot be listed may cover any cwd, so an
+/// outage even at an unrelated cwd taints the new id with no owner and fails.
+#[test]
+fn outage_with_unlistable_marks_taints_the_new_id_with_no_owner() {
+    let ws = tempfile::tempdir().expect("ws");
+    let unrelated = tempfile::tempdir().expect("unrelated");
+    let home = tainted_workspace(ws.path());
+    let dir = taint_dir(home.path());
+    let managed = dir.join("managed");
+    std::fs::set_permissions(
+        &managed,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .expect("block the marks");
+    let result = settle_session_start(
+        Some(home.path()),
+        "new",
+        Some(unrelated.path()),
+        &no_answer(),
+    );
+    std::fs::set_permissions(
+        &managed,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("restore");
+    let err = result.expect_err("fails");
+    assert!(err.contains("tainted this session itself"), "{err}");
+    assert!(read_state(&dir, "new").is_tainted());
+    let record: channels_taint::TaintRecord =
+        serde_json::from_slice(&std::fs::read(dir.join("new.json")).expect("read")).expect("json");
+    assert_eq!(record.managed_session, "", "no owner");
+}
+
 /// 🔴 #8433 (r-078): a socket that accepts and then times out the exchange is no
 /// answer, and the event is never sent again over HTTP (#8531).
 #[tokio::test]
