@@ -108,7 +108,7 @@ async fn umask_000_child_scenario() {
     let rec = RecordingFs::default();
     let rec_dir = tmp.join("rec/kuzu-review/run");
     write_run(&rec, &rec_dir, &[sample_record()], &|_| Ok(())).expect("recorded run");
-    let seen = rec.seen.borrow();
+    let seen = rec.seen.take();
     assert_eq!(seen.len(), 4, "three directories and the staging file");
     for (path, got, want) in seen.iter() {
         assert_eq!(got, want, "{} at creation: {got:o}", path.display());
