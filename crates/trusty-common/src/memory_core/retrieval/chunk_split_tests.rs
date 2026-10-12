@@ -24,6 +24,7 @@ use crate::memory_core::store::vector::VectorStore;
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -117,6 +118,19 @@ fn part_id(head: Uuid, k: usize) -> Uuid {
     Uuid::new_v5(&head, format!("split:{k}").as_bytes())
 }
 
+/// The chunking mock's bucket for `word` (FNV-1a modulo `DIM`).
+fn bucket(word: &str) -> u64 {
+    let h = word.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    h % DIM as u64
+}
+
+/// Part `j` (1-based): the head for 1, else the deterministic tail id.
+fn part_at(head: Uuid, j: usize) -> Uuid {
+    if j == 1 { head } else { part_id(head, j) }
+}
+
 fn content_of(h: &PalaceHandle, id: Uuid) -> Option<String> {
     h.drawers
         .read()
@@ -184,17 +198,30 @@ async fn every_part_replans_within_the_cap_and_completes() {
 }
 
 /// Plan test 2: every original chunk sits whole inside one part, so a fact at
-/// a seam is never cut, and a needle at each seam is recalled at rank 1.
+/// a seam is never cut, and the chunk at each seam is recalled at rank 1 from the adjacent part.
 #[tokio::test]
 async fn a_needle_at_every_seam_is_recalled_at_rank_1() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let mut text: Vec<String> = words(OVER_CAP).split(' ').map(str::to_string).collect();
-    // Seam k starts part k+1 at chunk k*1024, i.e. at word 9*1024*k.
+    // Seam k starts part k+2 (1-based) at chunk (k+1)*1024, i.e. at word
+    // 9*1024*(k+1). #9735: the mock is a 16-bucket word-hash bag, where 25 of
+    // one part's 1024 `w<i>` chunks share a bag. So the chunk starting at each
+    // seam is ten copies of a token with its own bucket: its stored vector is
+    // one-hot and no other chunk matches it.
     let seams: Vec<usize> = (1..PARTS).map(|k| 9 * PART_CHUNKS * k).collect();
-    for (k, seam) in seams.iter().enumerate() {
-        for i in 0..4 {
-            text[seam - 2 + i] = format!("seam{k}needle{i}");
+    let mut used = HashSet::new();
+    let tokens: Vec<String> = (0..seams.len())
+        .map(|k| {
+            (0..)
+                .map(|i| format!("seam{k}n{i}"))
+                .find(|w| used.insert(bucket(w)))
+                .expect("a free bucket")
+        })
+        .collect();
+    for (seam, token) in seams.iter().zip(&tokens) {
+        for slot in &mut text[*seam..*seam + 10] {
+            *slot = token.clone();
         }
     }
     let text = text.join(" ");
@@ -209,22 +236,36 @@ async fn a_needle_at_every_seam_is_recalled_at_rank_1() {
         .iter()
         .map(|d| d.content().to_string())
         .collect();
-    for c in crate::embedder::chunk_text(&tok, &text, WINDOW).unwrap() {
+    let chunks = crate::embedder::chunk_text(&tok, &text, WINDOW).unwrap();
+    for c in &chunks {
         assert!(
             parts.iter().any(|p| p.contains(c.text)),
             "original chunk at bytes {:?} is cut by a seam",
             c.byte_range
         );
     }
-    let ids: Vec<Uuid> = family(&h, head).iter().map(|d| d.id).collect();
-    for k in 0..seams.len() {
-        let q = (0..4)
-            .map(|i| format!("seam{k}needle{i}"))
-            .collect::<Vec<_>>();
-        let v = e.embed_batch(&[q.join(" ")]).await.unwrap().remove(0);
+    // The seam chunk's own text embeds to its stored one-hot vector.
+    for (k, token) in tokens.iter().enumerate() {
+        let chunk = chunks
+            .iter()
+            .find(|c| c.text.split_whitespace().all(|w| w == token))
+            .expect("the seam chunk survives chunking");
+        let v = e
+            .embed_batch(&[chunk.text.to_string()])
+            .await
+            .unwrap()
+            .remove(0);
         let hits = h.vector_store.search(&v, 1).await.unwrap();
         let top = hits.first().expect("one hit").drawer_id;
-        assert!(ids.contains(&top), "seam {k} needle recalls a part");
+        // Seam k lies between 1-based parts k+1 and k+2; part 1 is the head and
+        // part j >= 2 has id `part_id(head, j)`.
+        let (before, after) = (part_at(head, k + 1), part_at(head, k + 2));
+        assert!(
+            top == before || top == after,
+            "seam {k} chunk recalls part {} or {}, got {top}",
+            k + 1,
+            k + 2
+        );
     }
 }
 
@@ -319,6 +360,37 @@ async fn head_keeps_id_fact_key_and_kg_triples() {
         fam[0].content(),
         "redb holds the shrunk head"
     );
+}
+
+/// ADR-0028 D6 (#9735): the tails of a Tier C head carry no expiry, so the
+/// sweep cannot hard-delete them while the head survives, and they keep the
+/// head's access history (the prune boost).
+#[tokio::test]
+async fn tier_c_head_tails_survive_its_expiry_and_keep_access_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let expires = chrono::Utc::now() + chrono::Duration::seconds(6);
+    let accessed = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let mut d = Drawer::new(Uuid::new_v4(), words(OVER_CAP));
+    d.created_at -= chrono::Duration::hours(1);
+    d.fact_key = Some("pr:9735/retiring".to_string());
+    d.expires_at = Some(expires);
+    d.access_count = 7;
+    d.last_accessed_at = Some(accessed);
+    let head = d.id;
+    h.kg.upsert_drawer(&d).await.unwrap();
+    h.add_drawer(d);
+    h.reembed_slice(&chunking(), &bounds()).await;
+    assert_split(&h, head);
+    for t in tails(&h, head) {
+        assert_eq!(t.expires_at, None, "a Tier C head's tail has no expiry");
+        assert_eq!(t.access_count, 7, "tail keeps the head's access count");
+        assert_eq!(t.last_accessed_at, Some(accessed));
+    }
+    let wait = (expires - chrono::Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(wait + Duration::from_millis(200)).await;
+    assert_eq!(h.purge_expired().await.unwrap(), 0, "D6: nothing is reaped");
+    assert_split(&h, head);
 }
 
 /// Plan test 4b: tail ids are `v5(head, "split:k")`, so a rerun cannot mint
@@ -465,9 +537,42 @@ async fn forget_head_journals_every_part() {
     assert_eq!(got, want, "one user_forget record per removed drawer");
 }
 
-/// Plan test 7b: every part carries the head's TTL, so the purge takes all.
+/// Fail-Open: one part's redb delete fails during the cascade. The head is
+/// gone and the caller gets an error, the failed part stays; a retried
+/// `forget(head)` reports `NotFound` yet still finishes the cascade.
 #[tokio::test]
-async fn dream_prune_expiry_applies_to_every_part() {
+async fn forget_head_retry_finishes_the_cascade_after_a_part_delete_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let head = oversized(&h, &words(OVER_CAP)).await;
+    drive(&h, &chunking()).await;
+    assert_split(&h, head);
+    let stuck = part_id(head, 3);
+    let store = h.kg.redb_store();
+    *store.test_hooks().txn_budget.lock().unwrap() = Some(Duration::from_millis(300));
+    *store.test_hooks().after_batch_op.lock().unwrap() =
+        Some(Arc::new(move |op: &BatchWriteOp| {
+            if let BatchWriteOp::DeleteDrawer(id) = op
+                && *id == stuck
+            {
+                std::thread::sleep(Duration::from_millis(900));
+            }
+        }));
+    assert!(h.forget(head).await.is_err(), "a failed part is surfaced");
+    let left: Vec<Uuid> = family(&h, head).iter().map(|d| d.id).collect();
+    assert_eq!(left, vec![stuck], "only the failed part is left behind");
+
+    *store.test_hooks().after_batch_op.lock().unwrap() = None;
+    *store.test_hooks().txn_budget.lock().unwrap() = None;
+    assert_eq!(h.forget(head).await.unwrap(), ForgetOutcome::NotFound);
+    assert!(family(&h, head).is_empty(), "the retry removed the part");
+    assert!(h.kg.load_drawer(stuck).unwrap().is_none());
+}
+
+/// Plan test 7b: every part of an ordinary head carries its TTL, so
+/// `purge_expired` takes all of them.
+#[tokio::test]
+async fn purge_expired_takes_every_part_of_an_ordinary_head() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let expires = chrono::Utc::now() + chrono::Duration::seconds(6);
