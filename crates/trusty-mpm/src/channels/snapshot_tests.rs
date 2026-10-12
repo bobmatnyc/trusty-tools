@@ -212,10 +212,11 @@ fn open_question() -> Vec<QuestionState> {
     }]
 }
 
+/// The egress and inbound refusals, when either check refused.
+type Refusals = (Option<Refusal<DenyReason>>, Option<Refusal<DropReason>>);
+
 /// Both checks for bob: `Ok(())` when both allow, else the two refusals.
-fn bob_verdicts<S: PolicySource, C: Clock>(
-    snap: &PolicySnapshot<S, C>,
-) -> Result<(), (Option<Refusal<DenyReason>>, Option<Refusal<DropReason>>)> {
+fn bob_verdicts<S: PolicySource, C: Clock>(snap: &PolicySnapshot<S, C>) -> Result<(), Refusals> {
     let egress = snap.check_egress(Channel::Slack, BOB, MessageKind::Question);
     let inbound = snap.check_inbound(Channel::Slack, BOB, &[1], &open_question());
     match (egress, inbound) {
