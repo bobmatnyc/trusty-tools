@@ -101,10 +101,10 @@ fn every_a3a_python_test_is_ported_by_name() -> TestResult {
     check("python_tests_a3a.txt", 28)
 }
 
-/// #9171 A3b-1: plan cases 1-10; A3b-2 appends cases 11-19.
+/// #9171 A3b: plan cases 1-10 (A3b-1) and 11-19 (A3b-2).
 #[test]
 fn every_a3b_python_test_is_ported_by_name() -> TestResult {
-    check("python_tests_a3b.txt", 10)
+    check("python_tests_a3b.txt", 19)
 }
 
 #[test]
