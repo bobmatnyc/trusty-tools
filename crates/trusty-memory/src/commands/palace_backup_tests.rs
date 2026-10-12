@@ -36,8 +36,8 @@ fn fixture() -> Fixture {
     {
         let handle = PalaceHandle::open(&palace).expect("open");
         let store = handle.kg.store();
-        let room = resolve_or_create_room_sync(&store, &RoomType::Custom("unit".into()))
-            .expect("room");
+        let room =
+            resolve_or_create_room_sync(&store, &RoomType::Custom("unit".into())).expect("room");
         for i in 0..2 {
             store
                 .upsert_drawer(&Drawer::new(room, format!("unit drawer {i}")))

@@ -296,7 +296,9 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             .context("join palace reclaim")?
         }
         // #9282: backup through the daemon when it serves; restore offline.
-        PalaceAction::Backup { name, dest } => super::palace_backup::handle_backup(name, dest).await,
+        PalaceAction::Backup { name, dest } => {
+            super::palace_backup::handle_backup(name, dest).await
+        }
         PalaceAction::Restore { snapshot, palace } => {
             super::palace_backup::handle_restore(snapshot, palace).await
         }

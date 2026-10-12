@@ -183,17 +183,22 @@ async fn palace_backup_lends_the_cached_chat_store() {
 
     let backup = {
         let fx = fx.clone();
-        tokio::spawn(async move { raw(&fx.state, "palace_backup", json!({"palace": "bk-chat"})).await })
+        tokio::spawn(
+            async move { raw(&fx.state, "palace_backup", json!({"palace": "bk-chat"})).await },
+        )
     };
     let mut chats = Vec::new();
     for _ in 0..16 {
         let fx = fx.clone();
         chats.push(tokio::spawn(async move {
-            fx.tool("chat_session_list", json!({"palace": "bk-chat"})).await
+            fx.tool("chat_session_list", json!({"palace": "bk-chat"}))
+                .await
         }));
     }
     for c in chats {
-        c.await.expect("join").expect("a chat call during the backup must succeed");
+        c.await
+            .expect("join")
+            .expect("a chat call during the backup must succeed");
     }
     let out = backup.await.expect("join").expect("palace_backup");
     assert_eq!(out["chat_tables"]["sessions"], 1, "{out}");
@@ -212,13 +217,25 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
     fx.palace("bk-err");
     let root = fx.tmp.path();
 
-    let rel = raw(&fx.state, "palace_backup", json!({"palace": "bk-err", "dest": "rel/dir"})).await;
+    let rel = raw(
+        &fx.state,
+        "palace_backup",
+        json!({"palace": "bk-err", "dest": "rel/dir"}),
+    )
+    .await;
     let err = rel.expect_err("a relative dest is refused");
     assert!(err.contains("absolute"), "{err}");
     assert!(!root.join("rel").exists());
 
-    let typed = raw(&fx.state, "palace_backup", json!({"palace": "bk-err", "dest": 7})).await;
-    assert!(typed.expect_err("a non-string dest is refused").contains("dest"));
+    let typed = raw(
+        &fx.state,
+        "palace_backup",
+        json!({"palace": "bk-err", "dest": 7}),
+    )
+    .await;
+    assert!(typed
+        .expect_err("a non-string dest is refused")
+        .contains("dest"));
 
     let existing = root.join("already-here");
     std::fs::create_dir(&existing).expect("mkdir");
@@ -229,18 +246,27 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
     )
     .await;
     assert!(
-        exists.expect_err("an existing dest is refused").contains("already exists"),
+        exists
+            .expect_err("an existing dest is refused")
+            .contains("already exists"),
         "the snapshot's own refusal must propagate"
     );
     assert_eq!(std::fs::read_dir(&existing).expect("ls").count(), 0);
 
-    let missing = raw(&fx.state, "palace_backup", json!({"palace": "no-such-palace"})).await;
+    let missing = raw(
+        &fx.state,
+        "palace_backup",
+        json!({"palace": "no-such-palace"}),
+    )
+    .await;
     missing.expect_err("a missing palace is an error");
     assert!(
         !root.join("no-such-palace").exists(),
         "a failed backup must not create the palace dir"
     );
-    assert!(!root.join(".trusty-memory/backups/manual/no-such-palace").exists());
+    assert!(!root
+        .join(".trusty-memory/backups/manual/no-such-palace")
+        .exists());
 }
 
 // --------------------------------------------------------------------- CLI
@@ -321,7 +347,16 @@ fn counts_under(data_dir: &Path, id: &str) -> (usize, usize) {
 
 /// Write a backup of `id` from `src` into `dest` through the binary.
 fn cli_backup(src: &Path, id: &str, dest: &Path) {
-    let out = run(src, &["palace", "backup", id, "--dest", dest.to_str().expect("utf8")]);
+    let out = run(
+        src,
+        &[
+            "palace",
+            "backup",
+            id,
+            "--dest",
+            dest.to_str().expect("utf8"),
+        ],
+    );
     assert!(out.status.success(), "backup: {}", text(&out));
     assert!(dest.join("manifest.json").is_file(), "{}", text(&out));
 }
@@ -341,12 +376,18 @@ fn cli_backup_then_restore_into_a_fresh_root_keeps_counts() {
     let snap = scratch.path().join("snap");
     cli_backup(src.path(), "cli-rt", &snap);
 
-    let out = run(dst.path(), &["palace", "restore", snap.to_str().expect("utf8")]);
+    let out = run(
+        dst.path(),
+        &["palace", "restore", snap.to_str().expect("utf8")],
+    );
     assert!(out.status.success(), "restore: {}", text(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(&format!("drawers {drawers}")), "{stdout}");
     assert!(stdout.contains("palace_reembed"), "the next step: {stdout}");
-    assert_eq!(counts_under(&data_dir(dst.path()), "cli-rt"), (drawers, rooms));
+    assert_eq!(
+        counts_under(&data_dir(dst.path()), "cli-rt"),
+        (drawers, rooms)
+    );
 }
 
 /// Why (#9282 review, requirement 2): restoring a backup of palace A under
@@ -365,10 +406,20 @@ fn cli_restore_refuses_a_palace_id_mismatch_and_writes_nothing() {
 
     let out = run(
         dst.path(),
-        &["palace", "restore", snap.to_str().expect("utf8"), "--palace", "other"],
+        &[
+            "palace",
+            "restore",
+            snap.to_str().expect("utf8"),
+            "--palace",
+            "other",
+        ],
     );
     assert!(!out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("is a backup of palace cli-mm"), "{}", text(&out));
+    assert!(
+        text(&out).contains("is a backup of palace cli-mm"),
+        "{}",
+        text(&out)
+    );
     let dd = data_dir(dst.path());
     assert!(!dd.join("other").exists() && !dd.join("cli-mm").exists());
 }
@@ -390,7 +441,10 @@ fn cli_restore_refuses_while_a_daemon_serves_the_root() {
     let dd = data_dir(dst.path());
     std::fs::create_dir_all(&dd).expect("mkdir data dir");
     let _listener = UnixListener::bind(dd.join("trusty-memory.sock")).expect("bind fake daemon");
-    let out = run(dst.path(), &["palace", "restore", snap.to_str().expect("utf8")]);
+    let out = run(
+        dst.path(),
+        &["palace", "restore", snap.to_str().expect("utf8")],
+    );
     assert!(!out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("daemon is serving"), "{}", text(&out));
     assert!(!dd.join("cli-live").exists(), "nothing may be written");
@@ -416,7 +470,13 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
     let snap = scratch.path().join("snap");
     let out = run(
         src.path(),
-        &["palace", "backup", "cli-fd", "--dest", snap.to_str().expect("utf8")],
+        &[
+            "palace",
+            "backup",
+            "cli-fd",
+            "--dest",
+            snap.to_str().expect("utf8"),
+        ],
     );
     assert!(!out.status.success(), "{}", text(&out));
     assert!(

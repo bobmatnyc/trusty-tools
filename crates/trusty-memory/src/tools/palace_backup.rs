@@ -65,7 +65,9 @@ fn parse_dest(args: &Value) -> Result<Option<PathBuf>> {
                 ))
             }
         }
-        Some(other) => Err(anyhow!("palace_backup: 'dest' must be a string, got {other}")),
+        Some(other) => Err(anyhow!(
+            "palace_backup: 'dest' must be a string, got {other}"
+        )),
     }
 }
 
