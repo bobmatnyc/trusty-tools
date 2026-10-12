@@ -10,12 +10,13 @@
 //! in-memory state and blocks every save while the error lasts. A corrupt
 //! file is first copied to `poll-state.json.corrupt.<unix>` (`create_new`);
 //! then the loop starts empty and may save. If that copy fails, saves stay
-//! blocked. A blocked session re-reads the file before each cycle; once it
+//! blocked and the partial copy is removed. A blocked session re-reads the file before each cycle; once it
 //! reads, the session adopts it and adds the wakes it owed meanwhile. A dry
 //! run copies nothing.
 //! Test: `load_state_io_skips_save`, `load_state_corrupt_keeps_copy`,
 //! `corrupt_state_whose_copy_fails_is_never_overwritten`,
-//! `blocked_state_recovers_and_keeps_owed_wake`.
+//! `blocked_state_recovers_and_keeps_owed_wake`,
+//! `failed_copies_across_cycles_leave_no_corrupt_files`.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -49,12 +50,24 @@ fn keep_copy(path: &Path, now: f64) -> io::Result<String> {
         .write(true)
         .create_new(true)
         .open(&name)?;
-    #[cfg(test)]
-    if tests::FAIL_COPY_WRITE.get() {
-        return Err(io::Error::other("injected write failure"));
+    // #9171: a copy that fails after the file exists must not stay behind; a
+    // blocked session retries every cycle under a new name and a full disk
+    // would otherwise leave one partial file per interval.
+    let written = (|| {
+        #[cfg(test)]
+        if tests::FAIL_COPY_WRITE.get() {
+            return Err(io::Error::other("injected write failure"));
+        }
+        f.write_all(&bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        drop(f);
+        if let Err(rm) = fs::remove_file(&name) {
+            tracing::warn!(error = %rm, "partial corrupt-state copy not removed");
+        }
+        return Err(e);
     }
-    f.write_all(&bytes)?;
-    f.sync_all()?;
     Ok(name.to_string_lossy().into_owned())
 }
 

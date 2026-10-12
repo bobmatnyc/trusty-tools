@@ -12,7 +12,8 @@
 //! failure logs `panes=? ERROR ...; cycle skipped`. [`Runner::run_loop`]
 //! checks the interval before any tmux call, takes `poll.lock`, loads the
 //! state ([`PollSession::load`]) and sleeps the interval exactly once after
-//! every cycle, whatever the cycle did. A dry run takes no lock, writes no
+//! every cycle, whatever the cycle did. Every cycle also logs each bad
+//! `Config::problems` entry with the sensor it turned off. A dry run takes no lock, writes no
 //! file, sends no keys and runs one cycle. No signal handler (A3 ruling Q8).
 //! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`.
 
@@ -77,6 +78,15 @@ pub fn parse_interval(text: &str) -> Result<Duration, ConfigError> {
     }
 }
 
+/// What a bad environment variable turns off (see [`Config::problems`]).
+fn sensor_off(name: &str) -> &'static str {
+    match name {
+        "LOAD_FACTOR" => "host alerts (load, disk, swap, band)",
+        "PANE_CTX_WINDOW" => "pane ctx",
+        _ => "self_ctx",
+    }
+}
+
 /// Everything the loop runs on.
 pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     /// The tmux server holding the fleet.
@@ -117,6 +127,14 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         let now = self.clock.now_unix();
         let mut log = Vec::new();
         session.retry_load(self.config, self.dry_run, now, &mut log);
+        // #9171: a bad variable is reported by every cycle, not once at loop
+        // start, so a quiet summary never reads as a healthy sensor.
+        log.extend(
+            self.config
+                .problems
+                .iter()
+                .map(|p| format!("config ERROR {p}; {} off", sensor_off(p.name))),
+        );
         let result = self.cycle(session, now, &mut log, hook);
         if let Err(e) = &result {
             log.push(format!("ERROR {e}"));
@@ -240,12 +258,6 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         };
         let (mut session, mut lines) =
             PollSession::load(self.config, self.dry_run, self.clock.now_unix());
-        lines.extend(
-            self.config
-                .problems
-                .iter()
-                .map(|p| format!("config ERROR {p}")),
-        );
         if !self.dry_run {
             lines.push(format!("poll start interval={}s", every.as_secs()));
         }
