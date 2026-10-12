@@ -1,14 +1,16 @@
-//! Exact Host/Origin match for the console's tailnet listener (#9035).
+//! Exact Host/Origin match for the console's listeners (#9035, #9792).
 //!
-//! Why: the console router answers every origin with permissive CORS, and the
-//! write guard lets safe methods through. So a page on any site, opened in the
-//! owner's browser on another of the owner's tailnet devices, passes the peer
-//! gate and can read `GET` responses. DNS rebinding reaches the same place.
-//! What: [`check_target`] accepts a request only when its `Host` names this
+//! Why: the write guard lets safe methods through, so without this check a
+//! page on any site, opened in the owner's browser, could read `GET`
+//! responses; DNS rebinding reaches the same place. Before #9792 the router
+//! also answered every origin with permissive CORS.
+//! What: [`check_target`] accepts a request only when its `Host` names the
 //! listener exactly (the tailnet `ip:port` or the node's MagicDNS name and
-//! port) and any `Origin` it carries, on every method, is that same `http://`
-//! authority. A missing `Host`, or a repeated or unreadable `Host` or
-//! `Origin`, is refused.
+//! port; for loopback, `ip:port` and `localhost:port`) and any `Origin` it
+//! carries, on every method, is that same `http://` authority. A missing
+//! `Host`, or a repeated or unreadable `Host` or `Origin`, is refused. The
+//! loopback guard also uses [`check_target_with_scheme`] for the `https://`
+//! MagicDNS origin `tailscale serve` fronts.
 //! Test: `check_target_refuses_every_unknown_shape`,
 //! `check_target_accepts_the_listener_authorities`.
 
@@ -44,6 +46,12 @@ impl SelfAuthorities {
         Self::new(listen, Some("localhost"))
     }
 
+    /// Exactly the authority `authority`, with no port added (#9792: the
+    /// MagicDNS name `tailscale serve` fronts on its default https port).
+    pub fn exact(authority: &str) -> Self {
+        Self(vec![authority.to_owned()])
+    }
+
     fn contains(&self, authority: &str) -> bool {
         self.0.iter().any(|a| a.eq_ignore_ascii_case(authority))
     }
@@ -64,6 +72,18 @@ pub fn check_target(
     uri: &Uri,
     allowed: &SelfAuthorities,
 ) -> Result<(), &'static str> {
+    check_target_with_scheme(headers, uri, allowed, "http")
+}
+
+/// [`check_target`] with `scheme` as the only origin scheme accepted.
+///
+/// Test: `magic_dns_name_is_served_over_https_when_known_9792`.
+pub fn check_target_with_scheme(
+    headers: &HeaderMap,
+    uri: &Uri,
+    allowed: &SelfAuthorities,
+    scheme: &str,
+) -> Result<(), &'static str> {
     let uri_authority = uri.authority().map(|a| a.as_str());
     let host = match single_header(headers, &header::HOST)? {
         Some(host) => {
@@ -78,7 +98,7 @@ pub fn check_target(
         return Err("Host is not this listener");
     }
     if let Some(origin) = single_header(headers, &header::ORIGIN)?
-        && !origin.eq_ignore_ascii_case(&format!("http://{host}"))
+        && !origin.eq_ignore_ascii_case(&format!("{scheme}://{host}"))
     {
         return Err("Origin is not this listener");
     }
