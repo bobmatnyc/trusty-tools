@@ -3,7 +3,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::classify::matchers::strip_sgr;
 use crate::error::SendError;
+use crate::pystr::{splitlines, strip};
 use crate::tmux::{PaneId, Tmux, send_keys};
 
 /// What a Claude Code pane's input box (the last `❯` line) holds.
@@ -12,8 +14,9 @@ use crate::tmux::{PaneId, Tmux, send_keys};
 /// which a plain capture shows exactly like a human's draft. The Architect must
 /// never submit or overwrite a draft.
 /// What: the four states `input-state.py` reports, under the same names
-/// (`no-prompt`, `empty`, `suggestion`, `typed`). Classifying a capture into a
-/// state is not ported yet (#9171 A2).
+/// (`no-prompt`, `empty`, `suggestion`, `typed`). [`classify_input`] is the
+/// parity port of the script's classifier; [`crate::input_state_for_send`] is
+/// the fail-closed reading `send_guarded` takes (#9171 A2).
 /// Test: `input_state_names_round_trip`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputState {
@@ -69,6 +72,37 @@ impl FromStr for InputState {
             .find(|s| s.as_str() == name)
             .ok_or_else(|| UnknownInputState(name.to_owned()))
     }
+}
+
+/// `input-state.py`'s `classify`: the state and text of the last `❯` row.
+///
+/// Why: the A2 parity port of the prototype classifier (#9171), kept exact so
+/// `parse_pane`'s `box` and `box_text` fields match the Python byte for byte.
+/// What: no `❯` row is `NoPrompt`; otherwise the text after the first `❯` on
+/// the last such row, SGR escapes removed and stripped, is `Empty` when blank,
+/// `Suggestion` when the raw row carries dim (`ESC[2m`), else `Typed`. It reads
+/// one row only and does not check that the row is the input box; use
+/// [`crate::input_state_for_send`] before sending keys.
+/// Test: `test_input_box_classifier_is_input_states`,
+/// `input_state_matches_python_goldens`.
+pub fn classify_input(capture: &str) -> (InputState, String) {
+    let Some(last) = splitlines(capture)
+        .into_iter()
+        .rev()
+        .find(|l| l.contains('❯'))
+    else {
+        return (InputState::NoPrompt, String::new());
+    };
+    let raw = last.split_once('❯').map_or("", |(_, r)| r);
+    let text = strip(&strip_sgr(raw)).to_owned();
+    let state = if text.is_empty() {
+        InputState::Empty
+    } else if raw.contains("\u{1b}[2m") {
+        InputState::Suggestion
+    } else {
+        InputState::Typed
+    };
+    (state, text)
 }
 
 /// Sends `keys` to `pane` only if its input box accepts input.

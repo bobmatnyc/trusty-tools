@@ -1,0 +1,4 @@
+{"case": "five_hour_91", "alerts": [{"ts": "1970-01-01T00:00:00Z", "session": "", "pane": "", "kind": "plan-limit", "fingerprint": "plan5h>=90", "detail": "5-hour plan usage 91% (status line of tm-a)", "display": "plan-limit: 5-hour plan usage 91% (status line of tm-a)"}]}
+{"case": "weekly_95", "alerts": [{"ts": "2025-09-27T19:06:40Z", "session": "", "pane": "", "kind": "plan-limit", "fingerprint": "planwk>=90", "detail": "weekly plan usage 95% (status line of tm-z)", "display": "plan-limit: weekly plan usage 95% (status line of tm-z)"}]}
+{"case": "below_threshold", "alerts": []}
+{"case": "no_panes", "alerts": []}

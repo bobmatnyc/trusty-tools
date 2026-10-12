@@ -1,0 +1,16 @@
+{"case": "highest_mtime_cli", "newest": "new.jsonl", "tokens": 2, "usage": {"input_tokens": 2}}
+{"case": "no_files", "newest": null, "tokens": null, "usage": null}
+{"case": "wrong_extension", "newest": null, "tokens": null, "usage": null}
+{"case": "sdk_cli_newer", "newest": "supervisor.jsonl", "tokens": 999000, "usage": {"input_tokens": 999000}}
+{"case": "limit_3", "newest": null, "tokens": 1, "usage": null}
+{"case": "limit_10", "newest": "cli.jsonl", "tokens": 1, "usage": {"input_tokens": 1}}
+{"case": "skips_non_assistant", "newest": "t.jsonl", "tokens": 30, "usage": {"cache_read_input_tokens": 20, "input_tokens": 10}}
+{"case": "empty_file", "newest": null, "tokens": null, "usage": null}
+{"case": "grows_window", "newest": "big.jsonl", "tokens": 900000, "usage": {"cache_read_input_tokens": 0, "input_tokens": 900000}}
+{"case": "last_of_several", "newest": "t.jsonl", "tokens": 3, "usage": {"input_tokens": 3}}
+{"case": "sums_three", "newest": "t.jsonl", "tokens": 600, "usage": {"cache_creation_input_tokens": 300, "cache_read_input_tokens": 200, "input_tokens": 100}}
+{"case": "missing_fields_zero", "newest": "t.jsonl", "tokens": 5, "usage": {"input_tokens": 5}}
+{"case": "no_assistant_usage", "newest": "t.jsonl", "tokens": null, "usage": null}
+{"case": "only_sdk_cli", "newest": null, "tokens": null, "usage": null}
+{"case": "malformed_and_empty_usage", "newest": "t.jsonl", "tokens": 7, "usage": {"cache_creation_input_tokens": null, "input_tokens": 7}}
+{"case": "newest_line_lacks_entrypoint", "newest": "t.jsonl", "tokens": 4, "usage": {"input_tokens": 4}}

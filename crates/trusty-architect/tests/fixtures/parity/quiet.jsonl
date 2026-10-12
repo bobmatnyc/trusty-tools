@@ -1,0 +1,22 @@
+{"case": "one_per_line", "sessions": ["tm-ai-power-rankings-01", "tm-hotstats-reporting-01"]}
+{"case": "missing", "sessions": []}
+{"case": "all_comments", "sessions": []}
+{"case": "crlf_and_tabs", "sessions": ["tm-a", "tm-b", "tm-c"]}
+["tm-xtest-1", true]
+["tm-xtest-anything", true]
+["tm-qa1-run", true]
+["tm-qa-x", true]
+["tm-r0", true]
+["tm-r42-worker", true]
+["tm-supervisor", false]
+["tm-hotstats-reporting-01", false]
+["tm-api", false]
+["tm-qa", false]
+["tm-r", false]
+["tm-rfoo", false]
+["tm-xtest", false]
+["tm-qa-", true]
+["tm-r9", true]
+["TM-R1", false]
+["tm-xtest-", true]
+["xtm-r1", false]
