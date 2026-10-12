@@ -24,6 +24,10 @@ use super::{
 use crate::memory_core::store::vector_key::{self, MAX_CHUNKS_PER_DRAWER};
 
 #[cfg(test)]
+#[path = "index_pace.rs"]
+pub(crate) mod index_pace;
+
+#[cfg(test)]
 thread_local! {
     /// Test-only fault: makes [`remove_drawer_rows`] fail on this thread.
     static FAIL_GROUP_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -188,7 +192,9 @@ impl HnswStore {
         }
         let _op = self.ops.begin(op_watch::HnswOpKind::Upsert);
         let written = self.commit_group(drawer, vectors)?;
-        for ((id, shadows), vector) in written.iter().zip(vectors) {
+        for (_n, ((id, shadows), vector)) in written.iter().zip(vectors).enumerate() {
+            #[cfg(test)]
+            index_pace::pace(drawer, _n);
             self.index_point(vector, *id, *shadows)?;
         }
         Ok(written.into_iter().map(|(id, _)| id).collect())
@@ -341,6 +347,17 @@ impl HnswStore {
     #[cfg(test)]
     pub(crate) fn fail_group_removal_for_test(on: bool) {
         FAIL_GROUP_REMOVAL.with(|f| f.set(on));
+    }
+
+    /// #9728 test seam: commit `vectors` as drawer `drawer`'s rows without
+    /// indexing them, so a reopen's parallel replay builds a large graph fast.
+    #[cfg(test)]
+    pub(crate) fn commit_group_unindexed_for_test(
+        &self,
+        drawer: &str,
+        vectors: &[Vec<f32>],
+    ) -> Result<()> {
+        self.commit_group(drawer, vectors).map(drop)
     }
 
     /// #9735 test seam: the next group write for `drawer` fails after its

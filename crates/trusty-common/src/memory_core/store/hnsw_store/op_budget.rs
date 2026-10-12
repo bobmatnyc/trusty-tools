@@ -437,3 +437,7 @@ impl HnswStore {
 #[cfg(test)]
 #[path = "op_budget_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "op_budget_progress_tests.rs"]
+mod progress_tests;
