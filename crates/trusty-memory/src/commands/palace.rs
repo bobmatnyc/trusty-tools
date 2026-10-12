@@ -175,8 +175,11 @@ pub enum PalaceAction {
     ///
     /// Goes through the running daemon when one serves this data root: the
     /// palace stays live and writers are not paused. With no daemon it opens
-    /// the palace directly, read-only; a palace in an older format is then
-    /// refused (start the daemon, which migrates it, and back up through it).
+    /// the palace directly. That open is not read-only: it takes the
+    /// exclusive redb lock on kg.redb until the backup ends, so a daemon
+    /// started meanwhile cannot open the palace. It never migrates; a palace
+    /// in an older format is refused (start the daemon, which migrates it,
+    /// and back up through it).
     /// Copies kg.redb, chat_sessions.redb, palace.json, identity.txt, the
     /// deletion journals and this palace's drawer_counts.jsonl lines, then
     /// writes manifest.json with row counts and a SHA-256 per file. The vector
@@ -185,8 +188,12 @@ pub enum PalaceAction {
     Backup {
         /// Palace id.
         name: String,
-        /// Directory to create for the backup; it must not exist. Default:
-        /// <data root>/backups/manual/<palace>/<UTC timestamp>/.
+        /// Directory to create for the backup; it must not exist, and it must
+        /// not sit directly in the palace registry directory (<data root>, or
+        /// <data root>/palaces when that exists). Default:
+        /// <data root>/.trusty-memory/backups/manual/<palace>/<UTC timestamp>/,
+        /// or <data root>/backups/manual/<palace>/<UTC timestamp>/ when
+        /// palaces live under <data root>/palaces.
         #[arg(long, value_name = "DIR")]
         dest: Option<PathBuf>,
     },
@@ -195,8 +202,9 @@ pub enum PalaceAction {
     /// OFFLINE: refuses while a trusty-memory daemon serves this data root;
     /// run `trusty-memory stop` first. Refuses a backup of another palace than
     /// `--palace`. Verifies every checksum and row count before it writes, and
-    /// writes only into an empty <data root>/<palace> directory, so it never
-    /// replaces a palace. Honours TRUSTY_DATA_DIR_OVERRIDE.
+    /// writes only into an empty palace directory, so it never replaces a
+    /// palace: <data root>/palaces/<palace> when <data root>/palaces exists,
+    /// else <data root>/<palace>. Honours TRUSTY_DATA_DIR_OVERRIDE.
     ///
     /// The vector index is not in a backup. After the restore, start the
     /// daemon and call the MCP tool palace_reembed with dry_run=false until it

@@ -4,9 +4,11 @@
 //! the daemon is running, and one that restores it without ever racing a
 //! live daemon or writing over a palace.
 //! What: [`handle_backup`] calls the daemon's `palace_backup` tool when a
-//! daemon serves this data root, and otherwise opens the palace directly,
-//! read-only ([`backup_offline`]). A failed daemon call is an error, never a
-//! fallback to the direct open. [`handle_restore`] probes the daemon socket
+//! daemon serves this data root, and otherwise opens the palace directly
+//! under the exclusive redb lock ([`backup_offline`]). A failed daemon call
+//! is an error, never a fallback to the direct open. Both refuse a
+//! destination directly in the palace registry dir (`check_snapshot_dest`).
+//! [`handle_restore`] probes the daemon socket
 //! and then runs [`restore_into`], which refuses a foreign or malformed
 //! palace id and a live or unknown daemon before PR 1's
 //! `restore_palace_snapshot` verifies and writes. Every refusal is a typed
@@ -22,7 +24,9 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::palace::Palace;
 use trusty_common::memory_core::retrieval::PalaceHandle;
 use trusty_common::memory_core::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
-use trusty_common::memory_core::store::kg_redb::{restore_palace_snapshot, SnapshotManifest};
+use trusty_common::memory_core::store::kg_redb::{
+    check_snapshot_dest, restore_palace_snapshot, SnapshotManifest,
+};
 use trusty_common::memory_core::store::OpenIntent;
 use trusty_common::uds::{probe_socket_verdict, SocketVerdict};
 
@@ -109,14 +113,23 @@ pub async fn handle_backup(name: String, dest: Option<PathBuf>) -> Result<()> {
 
 /// Back up `palace` with no daemon running.
 ///
-/// Why: the read-only intent never migrates or purges. If a daemon started
-/// in the meantime and holds the store, the open falls back to a copied file
-/// and `PalaceHandle::snapshot` refuses it (`SnapshotError::ReadOnlyHandle`).
-/// What: opens the palace read-only, snapshots it with no lent chat store
-/// (the read-only open of `chat_sessions.redb` works with no other holder),
-/// and returns [`snapshot_json`].
-/// Test: `cli_backup_then_restore_into_a_fresh_root_keeps_counts`.
+/// Why: the read-only intent never migrates or purges, but it is not a
+/// read-only file open: it takes the exclusive redb lock on `kg.redb` for
+/// the length of the backup. If a daemon started in the meantime and holds
+/// the store, the open falls back to a copied file and
+/// `PalaceHandle::snapshot` refuses it (`SnapshotError::ReadOnlyHandle`).
+/// What: refuses a `dest` directly in the palace registry dir before the
+/// open, opens the palace with the read-only intent, snapshots it with no
+/// lent chat store (the read-only open of `chat_sessions.redb` works with no
+/// other holder), and returns [`snapshot_json`].
+/// Test: `cli_backup_then_restore_into_a_fresh_root_keeps_counts`,
+/// `cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing`.
 pub fn backup_offline(palace: &Palace, dest: Option<&Path>) -> Result<Value> {
+    // #9282: a backup in the registry dir would be listed as a palace.
+    if let Some(d) = dest {
+        check_snapshot_dest(&palace.data_dir, d)
+            .with_context(|| format!("back up palace {}", palace.id))?;
+    }
     let handle = PalaceHandle::open_with_intent_purging(palace, OpenIntent::ReadOnlyClient, false)
         .with_context(|| format!("open palace {}", palace.id))?;
     let snapshot = handle

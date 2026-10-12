@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::kg_redb::PalaceSnapshot;
+use trusty_common::memory_core::store::kg_redb::{check_snapshot_dest, PalaceSnapshot};
 
 use super::helpers::{open_palace_handle, resolve_palace};
 use crate::AppState;
@@ -30,14 +30,23 @@ use crate::AppState;
 /// What: resolves `palace` as the other palace tools do, parses `dest`
 /// (absent, or an absolute path that must not exist), opens the handle
 /// FIRST so a missing palace errors before the session store could create
-/// its directory, then snapshots. Every failure is an `Err`.
+/// its directory, refuses a `dest` directly in the palace registry dir
+/// before the session store is opened, then snapshots. Every failure is an
+/// `Err`.
 /// Test: `palace_backup_manifest_counts_equal_the_palace_counts`,
 /// `palace_backup_lends_the_cached_chat_store`,
-/// `palace_backup_error_arms_fail_and_write_nothing`.
+/// `palace_backup_error_arms_fail_and_write_nothing`,
+/// `palace_backup_refuses_a_dest_in_the_registry_dir`.
 pub(crate) async fn handle_palace_backup(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_backup")?;
     let dest = parse_dest(&args)?;
     let handle = open_palace_handle(state, &palace)?;
+    // #9282: a backup in the registry dir would be listed as a palace; refuse
+    // it before the chat store below is opened (it can create a file).
+    if let (Some(d), Some(palace_dir)) = (dest.as_deref(), handle.data_dir.as_deref()) {
+        check_snapshot_dest(palace_dir, d)
+            .with_context(|| format!("palace_backup: back up palace {palace}"))?;
+    }
     // #9282: lend the cached store, keyed by the handle's canonical id.
     let chat = state.session_store(handle.id.as_str())?;
     let snapshot =

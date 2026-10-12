@@ -43,7 +43,8 @@ mod io_util;
 #[path = "snapshot_restore.rs"]
 mod restore;
 use io_util::{
-    StagingDir, copy_verified, hash_file, io_err, redb_err, sibling, sync_file, write_verified,
+    StagingDir, copy_verified, hash_file, io_err, redb_err, resolve_existing_prefix, sibling,
+    sync_file, write_verified,
 };
 pub use restore::restore_palace_snapshot;
 
@@ -82,6 +83,12 @@ pub enum SnapshotError {
     /// The snapshot directory already exists.
     #[error("snapshot destination {path} already exists")]
     DestinationExists { path: PathBuf },
+    /// The destination sits directly in the palace registry directory, where
+    /// the palace lister would take the backup for a palace (#9282).
+    #[error(
+        "snapshot destination {path} is directly inside the palace registry directory {registry}, where it would be listed as a palace; choose a directory outside it. Nothing was written"
+    )]
+    DestinationInRegistry { path: PathBuf, registry: PathBuf },
     /// A filesystem call failed.
     #[error("{op} {path}: {source}")]
     Io {
@@ -270,6 +277,9 @@ pub(crate) fn snapshot_palace(
         Some(d) => d.to_path_buf(),
         None => default_snapshot_dir(&palace_dir, &palace, taken_at),
     };
+    // #9282: a backup beside the palaces would be listed as one; refuse it
+    // before anything is created.
+    check_snapshot_dest(&palace_dir, &final_dir)?;
     if final_dir.try_exists().map_err(io_err("stat", &final_dir))? {
         return Err(SnapshotError::DestinationExists { path: final_dir });
     }
@@ -323,6 +333,38 @@ pub(crate) fn snapshot_palace(
         dir: final_dir,
         manifest,
     })
+}
+
+/// Refuse a snapshot destination directly in the palace registry (#9282).
+///
+/// Why: the registry directory — the parent of every palace directory, so
+/// `<data root>` in the flat layout and `<data root>/palaces` in the legacy
+/// one — is where the palace lister looks. A backup there holds a
+/// `palace.json`, so it would be listed as a palace, and after a restart the
+/// live handle could point at the backup instead of the palace.
+/// What: resolves `dest` through its longest existing prefix (symlinks
+/// followed, `..` applied) and returns
+/// [`SnapshotError::DestinationInRegistry`] when the result's parent is the
+/// canonical parent of `palace_dir`. It only reads. [`snapshot_palace`] runs
+/// it before any write; a caller that does I/O of its own first (opening the
+/// chat store, opening the palace) runs it before that.
+/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`.
+pub fn check_snapshot_dest(palace_dir: &Path, dest: &Path) -> Result<()> {
+    let palace_dir = std::path::absolute(palace_dir).map_err(io_err("resolve", palace_dir))?;
+    let Some(registry) = palace_dir.parent() else {
+        return Ok(());
+    };
+    let registry = registry
+        .canonicalize()
+        .map_err(io_err("resolve", registry))?;
+    let resolved = resolve_existing_prefix(dest).map_err(io_err("resolve", dest))?;
+    if resolved.parent() == Some(registry.as_path()) {
+        return Err(SnapshotError::DestinationInRegistry {
+            path: dest.to_path_buf(),
+            registry,
+        });
+    }
+    Ok(())
 }
 
 /// `<data root>/backups/manual/<palace>/<UTC>`, beside the migration backups.

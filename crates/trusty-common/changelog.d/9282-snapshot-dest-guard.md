@@ -1,0 +1,2 @@
+Fixed
+- `PalaceHandle::snapshot` refuses a destination directly inside the palace registry directory (`<data root>` in the flat layout, `<data root>/palaces` in the legacy one), resolved through symlinks and `..`, before it writes anything. A backup there was listed as a palace, and after a restart the live handle could point at it. The new public `check_snapshot_dest` runs the same rule for callers that do I/O before the snapshot (#9282).

@@ -8,7 +8,7 @@
 use super::{Result, SnapshotError, SnapshotFile, SnapshotHook, SnapshotStep};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Read buffer for hashing.
 const BUF: usize = 1 << 20;
@@ -155,6 +155,38 @@ pub(crate) fn hash_file(path: &Path) -> Result<(u64, String)> {
         len += n as u64;
     }
     Ok((len, hex::encode(hasher.finalize())))
+}
+
+/// `path` made absolute and resolved the way a later create would see it.
+///
+/// Why: the registry guard (#9282) must compare where a backup would really
+/// land, through symlinks and `..`, including for a path not created yet.
+/// What: walks the components from the root, keeping the prefix canonical:
+/// an existing component is canonicalised (symlinks followed), a missing one
+/// is appended as is, `..` pops one level. Any error other than "not found"
+/// is returned, so the guard fails closed.
+/// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`.
+pub(crate) fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
+    let abs = std::path::absolute(path)?;
+    let mut base = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => base.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                base.pop();
+            }
+            Component::Normal(name) => {
+                let next = base.join(name);
+                base = match next.canonicalize() {
+                    Ok(real) => real,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => next,
+                    Err(e) => return Err(e),
+                };
+            }
+        }
+    }
+    Ok(base)
 }
 
 /// `<path><suffix>` in the same directory, so a rename stays atomic.
