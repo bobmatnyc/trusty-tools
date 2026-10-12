@@ -9,12 +9,12 @@
 //! Test: `round_trip_send_and_inbox`, `mark_read_is_atomic_under_concurrency`,
 //! `mark_read_is_idempotent`.
 
-use anyhow::{Context, Result};
-use std::path::Path;
-use std::sync::Arc;
 use crate::engine::palace::{Drawer, RoomType};
 use crate::engine::retrieval::RememberOptions;
 use crate::engine::PalaceHandle;
+use anyhow::{Context, Result};
+use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::types::{build_message_tags, Message, MSG_MARKER_TAG, TAG_READ_PREFIX};

@@ -79,9 +79,7 @@ fn coverage(handle: &crate::engine::PalaceHandle) -> Value {
 /// The chunk-count check as `ran` or `unavailable` (#9275).
 ///
 /// `unavailable` means `short` is unknown, not zero.
-pub(crate) fn chunk_state(
-    check: &crate::engine::retrieval::ChunkCheck,
-) -> &'static str {
+pub(crate) fn chunk_state(check: &crate::engine::retrieval::ChunkCheck) -> &'static str {
     match check.unavailable_reason() {
         Some(_) => "unavailable",
         None => "ran",
@@ -262,12 +260,11 @@ pub(crate) async fn handle_palace_embed_sweep(state: &AppState, _args: Value) ->
     // #4786: from disk, not `state.registry.list()`. The cache holds only what
     // this process has already opened, which is the blind spot that let three
     // active palaces report zero drawers with nothing raising it.
-    let palaces = tokio::task::spawn_blocking(move || {
-        crate::engine::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .map_err(|e| anyhow!("join list_palaces: {e}"))?
-    .map_err(|e| anyhow!("list palaces: {e:#}"))?;
+    let palaces =
+        tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+            .await
+            .map_err(|e| anyhow!("join list_palaces: {e}"))?
+            .map_err(|e| anyhow!("list palaces: {e:#}"))?;
 
     let mut rows = Vec::with_capacity(palaces.len());
     let (mut unhealthy, mut unreadable) = (0usize, 0usize);

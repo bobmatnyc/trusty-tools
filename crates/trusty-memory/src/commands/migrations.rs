@@ -18,9 +18,9 @@
 //! Test: see the module-level `tests` block — covers the rename, idempotency,
 //! and the negative case where the palace has already been renamed.
 
+use crate::engine::store::{PalaceStore, PalaceStoreError};
 use anyhow::{Context, Result};
 use std::path::Path;
-use crate::engine::store::{PalaceStore, PalaceStoreError};
 
 /// Stable on-disk identifier for the default unscoped palace.
 const DEFAULT_PALACE_ID: &str = "localLLM";
@@ -84,9 +84,9 @@ pub fn migrate_default_palace_name(registry_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::palace::{Palace, PalaceId};
     use chrono::Utc;
     use tempfile::tempdir;
-    use crate::engine::palace::{Palace, PalaceId};
 
     /// Build a `Palace` with the given id + name and persist it under
     /// `<registry_root>/<id>/palace.json`. Returns the persisted palace.

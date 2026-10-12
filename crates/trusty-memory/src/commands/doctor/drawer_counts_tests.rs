@@ -4,9 +4,9 @@
 use super::*;
 use crate::commands::doctor::CheckStatus;
 use crate::drawer_counts::{take_snapshot, CountLine, CountSource};
-use chrono::Duration;
 use crate::engine::maintenance_log::{record, DeletionReason, MaintenanceDeletion};
 use crate::engine::{Palace, PalaceId, PalaceRegistry};
+use chrono::Duration;
 use uuid::Uuid;
 
 fn count(palace: &str, at: DateTime<Utc>, drawers: Option<usize>) -> CountLine {
@@ -149,12 +149,7 @@ async fn drawer_counts_doctor_green_for_user_forget() {
     let mut ids = Vec::new();
     for text in ["first fact to keep around", "second fact the user forgets"] {
         let id = handle
-            .remember(
-                text.into(),
-                crate::engine::RoomType::General,
-                vec![],
-                0.5,
-            )
+            .remember(text.into(), crate::engine::RoomType::General, vec![], 0.5)
             .await
             .expect("remember");
         ids.push(id);

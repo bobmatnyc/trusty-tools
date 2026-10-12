@@ -31,11 +31,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::engine::{Palace, PalaceHandle, PalaceRegistry};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use crate::engine::{Palace, PalaceHandle, PalaceRegistry};
 
 use crate::console_metrics::disk_stats;
 use crate::idle_evict::EvictGate;

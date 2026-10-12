@@ -50,10 +50,7 @@ async fn backfill_state_palace_is_disabled_without_a_lane() {
 /// disk — `PalaceHandle::new` takes an in-memory vector store and KG.
 /// What: an empty palace with the given drawer contents pushed in.
 /// Test: used by the tests above and below.
-fn test_handle(
-    dir: &std::path::Path,
-    contents: &[&str],
-) -> crate::engine::retrieval::PalaceHandle {
+fn test_handle(dir: &std::path::Path, contents: &[&str]) -> crate::engine::retrieval::PalaceHandle {
     use crate::engine::palace::PalaceId;
     use crate::engine::store::kg::KnowledgeGraph;
     use crate::engine::store::vector::UsearchStore;

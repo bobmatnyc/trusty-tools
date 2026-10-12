@@ -11,8 +11,8 @@
 //! (`chat_session_*`) rather than a folded one, so it goes through the
 //! fallback and needs no separate wire test.
 
-use serde_json::json;
 use crate::engine::palace::PalaceId;
+use serde_json::json;
 
 /// Build a fresh `AppState` rooted in an ephemeral tempdir.
 fn test_state() -> crate::AppState {

@@ -16,10 +16,7 @@ use super::*;
 
 /// Put a drawer in the palace with no vector, the way a dropped deferred embed
 /// leaves one: durable in redb, permanently invisible to vector recall.
-fn add_vectorless_drawer(
-    handle: &crate::engine::PalaceHandle,
-    content: &str,
-) -> uuid::Uuid {
+fn add_vectorless_drawer(handle: &crate::engine::PalaceHandle, content: &str) -> uuid::Uuid {
     let drawer = crate::engine::palace::Drawer::new(uuid::Uuid::new_v4(), content);
     let id = drawer.id;
     handle.add_drawer(drawer);
@@ -249,15 +246,13 @@ async fn embed_sweep_reports_a_palace_it_could_not_open() {
     let broken = "sweep-unreadable";
     let data_dir = tmp.path().join(broken);
     std::fs::create_dir_all(&data_dir).expect("mkdir palace data dir");
-    crate::engine::store::PalaceStore::save_palace(
-        &crate::engine::Palace {
-            id: crate::engine::PalaceId::new(broken),
-            name: broken.to_string(),
-            description: None,
-            created_at: chrono::Utc::now(),
-            data_dir: data_dir.clone(),
-        },
-    )
+    crate::engine::store::PalaceStore::save_palace(&crate::engine::Palace {
+        id: crate::engine::PalaceId::new(broken),
+        name: broken.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: data_dir.clone(),
+    })
     .expect("persist palace metadata");
     std::fs::write(data_dir.join("index.usearch.redb"), [0xABu8; 4096])
         .expect("write incompatible-format store");

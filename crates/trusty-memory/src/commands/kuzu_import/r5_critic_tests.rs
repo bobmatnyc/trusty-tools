@@ -7,9 +7,9 @@
 
 use std::path::PathBuf;
 
-use serde_json::json;
 use crate::engine::filter::check_secret;
 use crate::engine::store::Triple;
+use serde_json::json;
 
 use super::apply::HandleSink;
 use super::palace_io::open_palace_for_write;

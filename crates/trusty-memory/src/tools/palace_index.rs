@@ -20,11 +20,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use serde_json::{json, Value};
 use crate::engine::room_identity::room_type_tag;
 use crate::engine::store::kg_redb::KgStoreRedb;
 use crate::engine::store::rooms::{list_room_summaries, RoomSummary};
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::helpers::open_palace_handle;
@@ -86,11 +86,10 @@ pub(crate) async fn resolve_palace_or_index(
 /// `palace_index_on_an_empty_estate_is_still_a_success`.
 pub(crate) async fn palace_index(state: &AppState, tool: &str) -> Result<Value> {
     let root = state.data_root.clone();
-    let palaces = tokio::task::spawn_blocking(move || {
-        crate::engine::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .context("join list_palaces")??;
+    let palaces =
+        tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+            .await
+            .context("join list_palaces")??;
 
     let total = palaces.len();
     let dirs: Vec<(String, PathBuf)> = palaces

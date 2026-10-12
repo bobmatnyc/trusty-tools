@@ -8,9 +8,9 @@
 //! Test: this IS the test module.
 
 use super::*;
+use crate::engine::palace::{Palace, PalaceId};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::engine::palace::{Palace, PalaceId};
 
 /// Upper bound on any single condition wait in this module.
 const SETTLE: Duration = Duration::from_secs(10);

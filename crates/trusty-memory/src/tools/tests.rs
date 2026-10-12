@@ -8,9 +8,9 @@
 //! Test: this IS the test module.
 
 use super::*;
+use crate::engine::palace::PalaceId;
 use crate::AppState;
 use serde_json::json;
-use crate::engine::palace::PalaceId;
 use uuid::Uuid;
 
 /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests

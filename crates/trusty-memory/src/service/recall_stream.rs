@@ -30,15 +30,15 @@
 //! `recall_streamed_visits_every_palace_in_bounded_batches` in
 //! `recall_stream_tests`; the ADR-0071 criteria in `recall_scope_tests`.
 
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult};
+use crate::engine::PalaceHandle;
 use crate::AppState;
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult};
-use crate::engine::PalaceHandle;
 use uuid::Uuid;
 
 use super::helpers::{list_palaces_blocking, open_palaces_blocking};

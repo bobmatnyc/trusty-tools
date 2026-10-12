@@ -17,12 +17,12 @@ use super::health::{
     HealthProbeError, HealthQuery, PROBE_SENTINEL_CONTENT,
 };
 use super::HEALTH_PROBE_PALACE;
-use serde_json::Value;
 use crate::engine::palace::PalaceId;
 use crate::engine::retrieval::{PalaceHandle, RecallResult};
 use crate::engine::store::hnsw_store::OpPark;
 use crate::engine::store::kg::KnowledgeGraph;
 use crate::engine::store::vector::{UsearchStore, VectorHit, VectorStore};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// `GET /health` returns HTTP 200 with `status: "ok"` after the

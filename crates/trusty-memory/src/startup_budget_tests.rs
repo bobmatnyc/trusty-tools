@@ -9,8 +9,8 @@
 //! Test: this file.
 
 use super::*;
-use std::sync::atomic::AtomicUsize;
 use crate::engine::palace::{Palace, PalaceId};
+use std::sync::atomic::AtomicUsize;
 
 /// Why (#7106): the whole fix rests on "at most N palaces open at once". A gate
 /// that admitted N+1 under contention would leave the daemon exactly as it was

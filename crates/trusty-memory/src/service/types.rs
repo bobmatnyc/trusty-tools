@@ -10,9 +10,9 @@
 //! Test: covered indirectly via the HTTP tests in `web::tests` and
 //! `service::tests`.
 
-use serde::{Deserialize, Serialize};
 use crate::engine::dream::PersistedDreamStats;
 use crate::engine::store::kg::Triple;
+use serde::{Deserialize, Serialize};
 
 /// Serializable palace summary used by `GET /api/v1/palaces` and
 /// `GET /api/v1/palaces/{id}`.

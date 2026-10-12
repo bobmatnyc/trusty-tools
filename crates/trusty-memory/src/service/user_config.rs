@@ -20,9 +20,9 @@
 //! `dream_config_from_user_config_prefers_openrouter_model_with_key`,
 //! `semantic_consolidation_is_off_without_a_config_file`.
 
-use serde::Deserialize;
 use crate::engine::dream::DreamConfig;
 use crate::engine::semantic_consolidation::SemanticConsolidationConfig;
+use serde::Deserialize;
 
 /// Minimal mirror of the user-config schema.
 #[derive(Deserialize, Default, Clone)]

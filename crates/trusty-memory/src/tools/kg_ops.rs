@@ -11,13 +11,13 @@
 //! Test: `dispatch_kg_assert_then_query`, `dispatch_discover_aliases_*`,
 //! `dispatch_kg_gaps_returns_cached` in `tools::tests`.
 
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg::Triple;
 use crate::kg_write::CachePolicy;
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use crate::engine::palace::PalaceId;
-use crate::engine::store::kg::Triple;
 
 use super::helpers::{open_palace_handle, resolve_palace};
 // #6318: the KG READ tools fall back to a palace index; `kg_assert`,

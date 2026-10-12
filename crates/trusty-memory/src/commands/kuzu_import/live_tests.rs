@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use crate::engine::retrieval::{shared_embedder, shared_embedder_initialized};
+use sha2::{Digest, Sha256};
 
 use super::bridge::{KuzuExport, SystemRunner};
 use super::discovery::{resolve_from, DiscoveredStore, STORE_DB_NAME, STORE_DIR_NAME};

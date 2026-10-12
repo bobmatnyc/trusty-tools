@@ -2,8 +2,8 @@
 //! Every test runs on a tempdir palace root; none touches the live store.
 
 use super::*;
-use chrono::Duration as ChronoDuration;
 use crate::engine::{Drawer, PalaceId};
+use chrono::Duration as ChronoDuration;
 
 fn palace(root: &Path, name: &str) -> Palace {
     Palace {

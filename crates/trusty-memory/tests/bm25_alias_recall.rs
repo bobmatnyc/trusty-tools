@@ -24,8 +24,8 @@
 mod alias_lane;
 
 use serde_json::json;
-use trusty_memory::engine::palace::{Drawer, PalaceId};
 use trusty_memory::bm25_backfill::run_startup_sweep;
+use trusty_memory::engine::palace::{Drawer, PalaceId};
 use trusty_memory::tools::dispatch_tool;
 
 /// Why: the startup sweep writes the CANONICAL palace's corpus and never sees

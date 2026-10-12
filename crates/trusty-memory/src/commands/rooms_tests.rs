@@ -10,11 +10,11 @@
 //! Test: this file.
 
 use super::*;
-use std::collections::BTreeMap;
-use std::path::Path;
 use crate::engine::palace::{Drawer, PalaceId, RoomType};
 use crate::engine::room_identity::room_to_uuid;
 use crate::engine::store::PalaceStore;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Create a palace on disk holding one legacy-id drawer per room.
 ///

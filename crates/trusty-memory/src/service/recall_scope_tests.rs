@@ -15,10 +15,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::Utc;
-use serde_json::{json, Value};
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::{Drawer, PalaceRegistry};
+use chrono::Utc;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::core::MemoryService;
@@ -555,9 +555,9 @@ impl crate::engine::embed::Embedder for FailFirstEmbedder {
 #[tokio::test]
 async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
     use super::recall_stream::{recall_all_scoped, RecallAllScope};
-    use std::sync::Arc;
     use crate::engine::embed::Embedder;
     use crate::engine::retrieval::recall_across_palaces_reporting;
+    use std::sync::Arc;
 
     for scope in [RecallAllScope::Resident, RecallAllScope::All] {
         let tmp = tempfile::tempdir().expect("tempdir");

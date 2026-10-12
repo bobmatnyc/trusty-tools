@@ -33,11 +33,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::engine::filter::{check_secret, find_secret_spans, FilterReject};
+use crate::engine::PalaceRegistry;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use crate::engine::filter::{check_secret, find_secret_spans, FilterReject};
-use crate::engine::PalaceRegistry;
 
 use super::store_snapshot::{sweep_stale_copies, with_store_copy, SCRATCH_PREFIX, STALE_COPY_AGE};
 

@@ -5,10 +5,8 @@
 
 use std::path::Path;
 
+use crate::engine::filter::{classify_secret, find_secret_spans, SECRET_FILTER_VERSION};
 use serde_json::json;
-use crate::engine::filter::{
-    classify_secret, find_secret_spans, SECRET_FILTER_VERSION,
-};
 
 use super::super::apply::{plan_store, HandleSink, PalaceView};
 use super::super::ledger::Ledger;

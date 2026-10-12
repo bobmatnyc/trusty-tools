@@ -11,8 +11,8 @@
 //! Test: `ledger_plans_new_unchanged_changed`,
 //! `moved_store_reimports_nothing_and_shared_ids_are_reported`.
 
-use std::collections::HashMap;
 use crate::engine::palace::Drawer;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::mapping::{

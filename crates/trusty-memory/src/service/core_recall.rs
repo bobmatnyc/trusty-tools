@@ -14,11 +14,11 @@
 //! (`tests/recall_temporal_rank.rs`); `recall_entry_json_hoists_drawer_fields`;
 //! `recall_all_never_opens_an_empty_palace` (#9141).
 
-use serde_json::{json, Value};
 use crate::engine::retrieval::{
     recall_across_palaces_reporting, recall_deep_with_default_embedder,
     recall_with_default_embedder, shared_embedder, RecallResult,
 };
+use serde_json::{json, Value};
 
 use super::core::MemoryService;
 use super::helpers::recall_entry_json;

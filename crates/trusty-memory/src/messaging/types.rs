@@ -8,11 +8,11 @@
 //! Test: `build_message_tags_includes_all_fields`,
 //! `decode_message_from_drawer_round_trips`, `slug_derivation_cases`.
 
+use crate::engine::palace::Drawer;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 /// Tag namespace prefix marking a drawer as a v1 inter-project message.

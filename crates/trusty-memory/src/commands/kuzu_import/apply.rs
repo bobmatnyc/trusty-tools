@@ -20,13 +20,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, DrawerType, RoomType};
-use crate::engine::retrieval::{
-    embed_chunks, shared_embedder, PalaceHandle, RememberOptions,
-};
+use crate::engine::retrieval::{embed_chunks, shared_embedder, PalaceHandle, RememberOptions};
 use crate::engine::store::Triple;
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use super::bridge::KuzuExport;

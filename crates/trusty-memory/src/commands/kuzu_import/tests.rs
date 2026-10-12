@@ -11,11 +11,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use serde_json::{json, Value};
 use crate::engine::palace::{Drawer, Palace, PalaceId};
 use crate::engine::store::Triple;
 use crate::engine::{PalaceHandle, PalaceRegistry};
+use async_trait::async_trait;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
@@ -885,8 +885,8 @@ fn deprecated_kuzu_data_forwards_to_import() {
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_memory_rewrites_the_whole_chunk_group() {
-    use trusty_common::embedder::{chunk_text, MockEmbedder};
     use crate::engine::embed::Embedder as _;
+    use trusty_common::embedder::{chunk_text, MockEmbedder};
     let tmp = tempfile::tempdir().expect("tmp");
     let sink = HandleSink {
         handle: palace(tmp.path(), "kuzu-chunks"),

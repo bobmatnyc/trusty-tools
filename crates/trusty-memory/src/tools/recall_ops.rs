@@ -18,14 +18,14 @@
 //! Test: `dispatch_recall_room_filter_scopes_results` in `tools::tests`;
 //! `stdio_serve_recall_all_bounded`; `tests/recall_query_discrimination.rs`.
 
-use crate::{AppState, DaemonReadiness};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
 use crate::engine::palace::{Drawer, RoomType};
 use crate::engine::retrieval::{
     recall_across_palaces_reporting, recall_deep_scoped, recall_scoped, scope_admits,
     CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope,
 };
+use crate::{AppState, DaemonReadiness};
+use anyhow::{anyhow, Context, Result};
+use serde_json::{json, Value};
 
 use crate::service::recall_stream::{recall_all_scoped, RecallAllScope};
 
@@ -398,12 +398,13 @@ async fn recall_all_without_embedder(
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
         let hits = recall_without_embedder(state, handle, query, &RecallScope::All, top_k).await;
-        merged.extend(hits.into_iter().map(|result| {
-            crate::engine::retrieval::CrossPalaceResult {
-                palace_id: palace_id.clone(),
-                result,
-            }
-        }));
+        merged.extend(
+            hits.into_iter()
+                .map(|result| crate::engine::retrieval::CrossPalaceResult {
+                    palace_id: palace_id.clone(),
+                    result,
+                }),
+        );
     }
     merged.sort_by(|a, b| {
         b.result

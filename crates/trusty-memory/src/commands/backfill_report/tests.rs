@@ -6,8 +6,8 @@
 
 use std::path::Path;
 
-use chrono::{Duration, Utc};
 use crate::engine::palace::{Drawer, DrawerType};
+use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use super::candidates::build_census;
@@ -360,23 +360,21 @@ fn predates_log_window_is_silent_when_no_log_was_scanned() {
 
 /// Build a palace on disk and return (registry_dir, palace_slug).
 fn fixture_palace(root: &Path, slug: &str, drawers: &[Drawer]) {
-    use std::sync::Arc;
     use crate::engine::store::kg_redb::KgStoreRedb;
     use crate::engine::store::OpenIntent;
+    use std::sync::Arc;
 
     let data_dir = root.join(slug);
     std::fs::create_dir_all(&data_dir).expect("palace dir");
     // A palace is discovered by `PalaceStore::list_palaces` via its metadata;
     // write it the same way the store does.
-    crate::engine::store::PalaceStore::save_palace(
-        &crate::engine::palace::Palace {
-            id: crate::engine::palace::PalaceId(slug.to_string()),
-            name: slug.to_string(),
-            description: None,
-            created_at: Utc::now(),
-            data_dir: data_dir.clone(),
-        },
-    )
+    crate::engine::store::PalaceStore::save_palace(&crate::engine::palace::Palace {
+        id: crate::engine::palace::PalaceId(slug.to_string()),
+        name: slug.to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_dir.clone(),
+    })
     .expect("save palace");
 
     let store = KgStoreRedb::open_with_intent(&data_dir.join("kg.redb"), OpenIntent::Writer)

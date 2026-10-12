@@ -10,9 +10,9 @@
 //! pulling a whole graph by asking for one.
 //! Test: `super::super::uds::tests` — `rpc_kg_*`, `rpc_dream_*`.
 
+use crate::engine::store::kg::ExpandDirection;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use crate::engine::store::kg::ExpandDirection;
 
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::transport::api_error::ApiError;

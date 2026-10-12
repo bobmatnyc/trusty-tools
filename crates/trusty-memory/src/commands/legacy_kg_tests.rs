@@ -511,8 +511,8 @@ async fn apply_with_a_failing_backup_writes_nothing() {
 /// Test: itself.
 #[tokio::test]
 async fn apply_leaves_a_verified_backup_of_the_pre_apply_bytes() {
-    use sha2::{Digest, Sha256};
     use crate::engine::store::vector::UsearchStore;
+    use sha2::{Digest, Sha256};
     crate::engine::retrieval::seed_shared_embedder_with_mock();
     let (_root, palace) = fixture();
     let dir = &palace.data_dir;

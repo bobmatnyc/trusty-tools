@@ -8,12 +8,12 @@
 //! create/query/complete Task drawers via the standard palace storage pipeline.
 //! Test: `crates/trusty-memory/tests/task_mcp.rs`.
 
+use crate::engine::palace::{DrawerType, RoomType};
+use crate::engine::retrieval::RememberOptions;
 use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
-use crate::engine::palace::{DrawerType, RoomType};
-use crate::engine::retrieval::RememberOptions;
 use uuid::Uuid;
 
 use super::helpers::{

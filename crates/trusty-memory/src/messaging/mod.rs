@@ -43,11 +43,11 @@ pub use types::{
 mod tests {
     use super::*;
     use crate::attribution::{CreatorInfo, CreatorSource};
+    use crate::engine::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
     use chrono::Utc;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use crate::engine::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
 
     /// RAII guard that sets or clears an environment variable for the duration
     /// of a test and restores the prior value on drop.
@@ -174,8 +174,8 @@ mod tests {
 
     #[test]
     fn decode_message_from_drawer_round_trips() {
-        use chrono::DateTime;
         use crate::engine::palace::Drawer;
+        use chrono::DateTime;
         use uuid::Uuid;
         let ts = "2026-05-25T12:34:56+00:00"
             .parse::<DateTime<chrono::FixedOffset>>()

@@ -20,14 +20,14 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use clap::Subcommand;
 use crate::engine::dream::{kg_compact_pass, DreamConfig};
 use crate::engine::palace::Palace;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::kg_redb::KgRedbStats;
 use crate::engine::store::OpenIntent;
 use crate::engine::{MaintenanceLease, PalaceRegistry};
+use anyhow::{Context, Result};
+use clap::Subcommand;
 
 use super::maintenance_gate::{open_purging_under_lease, require_lease};
 
@@ -483,10 +483,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join(name);
         std::fs::create_dir_all(&data_dir).expect("mkdir");
-        let kg = crate::engine::store::kg_redb::KgStoreRedb::open(
-            &data_dir.join("kg.redb"),
-        )
-        .expect("open kg");
+        let kg = crate::engine::store::kg_redb::KgStoreRedb::open(&data_dir.join("kg.redb"))
+            .expect("open kg");
         for i in 0..n {
             kg.assert(&crate::engine::store::Triple {
                 subject: format!("s{i}"),

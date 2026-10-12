@@ -55,6 +55,7 @@ use crate::hook_emit::{post_hook_event, HookEventPayload};
 use crate::prompt_log::{PromptLogEntry, PromptLogger, RecallQueryShape};
 use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
+use crate::engine::retrieval::DEFAULT_RELEVANCE_FLOOR;
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};
 use filter::{
     filter_drawers_by_deny_tags, filter_drawers_by_project_scope,
@@ -62,7 +63,6 @@ use filter::{
 };
 use format::{compose_injection, count_facts};
 use query::{configured_query_budget, shape_recall_query, warn_if_reshaped};
-use crate::engine::retrieval::DEFAULT_RELEVANCE_FLOOR;
 
 pub use query::ENV_QUERY_TOKEN_BUDGET;
 

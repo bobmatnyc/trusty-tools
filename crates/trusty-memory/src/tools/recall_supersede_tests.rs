@@ -1,10 +1,10 @@
 //! Unit tests for `tools::recall_supersede` (#9421).
 
 use super::*;
+use crate::engine::palace::Drawer;
 use crate::service::core_tests::LogCapture;
 use crate::tools::recall_rank::{by_score_desc, demote_stale_snapshots};
 use chrono::Utc;
-use crate::engine::palace::Drawer;
 
 fn hit(score: f32) -> RecallResult {
     RecallResult {

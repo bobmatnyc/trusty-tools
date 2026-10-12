@@ -9,9 +9,9 @@
 //! safe with the daemon up.
 //! Test: `palace_deletions_shows_the_survivor_and_score_for_a_removed_drawer`.
 
-use anyhow::{Context, Result};
 use crate::engine::maintenance_log::{read_journal, MaintenanceDeletion};
 use crate::engine::palace::Palace;
+use anyhow::{Context, Result};
 use uuid::Uuid;
 
 /// Render the deletion trail for `palace` as text or JSON.

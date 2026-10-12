@@ -7,11 +7,11 @@
 //! verbatim from the original single impl.
 //! Test: covered by the corresponding `web::tests` / `service::tests`.
 
+use crate::engine::dream::{DreamConfig, Dreamer, PersistedDreamStats};
+use crate::engine::palace::PalaceId;
 use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
-use crate::engine::dream::{DreamConfig, Dreamer, PersistedDreamStats};
-use crate::engine::palace::PalaceId;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
 use crate::engine::store::kg::{ExpandDirection, Triple};
 use crate::engine::store::palace_format::is_format_refusal;

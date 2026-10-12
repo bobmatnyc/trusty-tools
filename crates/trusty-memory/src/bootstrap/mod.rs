@@ -26,9 +26,9 @@ pub use types::{
     KG_SUBJECT_NOT_FOUND_HINT,
 };
 
+use crate::engine::store::kg::Triple;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use crate::engine::store::kg::Triple;
 
 use crate::AppState;
 

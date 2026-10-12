@@ -21,9 +21,9 @@
 //! `weight_retained_needs_both_age_and_weight`, `no_signal_implies_empty_list`,
 //! `predates_log_window_fires_only_outside_coverage`.
 
-use chrono::{DateTime, Utc};
 use crate::engine::decay::DecayConfig;
 use crate::engine::palace::Drawer;
+use chrono::{DateTime, Utc};
 
 /// Characters of content scanned for an opening date stamp.
 ///

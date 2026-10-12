@@ -31,8 +31,8 @@
 use std::time::Duration;
 
 use serde_json::json;
-use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::bm25_lane::Bm25Lane;
+use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 

@@ -37,6 +37,8 @@
 // `mcp_service` is the serving surface, compiled only under `server`.
 #[cfg(feature = "server")]
 use {
+    crate::engine::embed::Embedder,
+    crate::engine::{store::ChatSessionStore, PalaceRegistry},
     crate::session_store_cache::SessionStoreCache,
     anyhow::Result,
     std::net::SocketAddr,
@@ -44,8 +46,6 @@ use {
     std::sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     std::sync::{Arc, OnceLock},
     tokio::sync::{broadcast, OnceCell, RwLock},
-    crate::engine::embed::Embedder,
-    crate::engine::{store::ChatSessionStore, PalaceRegistry},
     trusty_common::ChatProvider,
 };
 

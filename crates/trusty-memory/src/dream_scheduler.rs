@@ -38,13 +38,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::watch;
-use tracing::{info, warn};
 use crate::engine::dream::{
     dream_max_concurrent, stagger_offset, AfterCycle, Dreamer, PersistedDreamStats,
 };
 use crate::engine::palace::PalaceId;
 use crate::engine::PalaceRegistry;
+use tokio::sync::watch;
+use tracing::{info, warn};
 
 /// Environment variable that disables autonomous dream scheduling when set to
 /// any non-empty value (convention: set to `"1"`).
@@ -404,13 +404,13 @@ pub fn spawn_shutdown_bridge(tx: watch::Sender<bool>) -> tokio::task::JoinHandle
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-    use std::sync::Arc;
-    use std::time::Duration;
     use crate::engine::dream::DreamConfig;
     use crate::engine::dream::Dreamer;
     use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::PalaceRegistry;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// Helper: build a minimal `Palace` + open its `PalaceHandle` into a temp
     /// dir, register it in the given registry, and return the `PalaceId`.
@@ -655,10 +655,9 @@ mod tests {
         // PersistedDreamStats is written to handle.data_dir, which is
         // `<data_root>/<palace_id>/` (not `<data_root>/` directly).
         let palace_data_dir = tmp.path().join(id.as_str());
-        let persisted =
-            crate::engine::dream::PersistedDreamStats::load(&palace_data_dir)
-                .expect("load persisted stats")
-                .expect("persisted stats should exist after a cycle");
+        let persisted = crate::engine::dream::PersistedDreamStats::load(&palace_data_dir)
+            .expect("load persisted stats")
+            .expect("persisted stats should exist after a cycle");
         assert_eq!(
             persisted.stats.merged, stats.merged,
             "persisted merged should match returned stats"

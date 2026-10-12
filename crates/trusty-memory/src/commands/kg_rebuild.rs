@@ -13,11 +13,11 @@
 //! Test: `kg_rebuild_processes_all_drawers`,
 //! `kg_rebuild_processes_named_palace_only`.
 
-use anyhow::{Context, Result};
-use std::collections::BTreeMap;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use crate::engine::store::OpenIntent;
+use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 
 use super::kg_twin_merge::report_merge;
 use super::maintenance_gate::require_state_lease;

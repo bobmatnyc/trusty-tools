@@ -11,14 +11,14 @@
 //! service-layer unit tests live here too (1500-SLOC test cap applies).
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::RecallResult;
+use crate::engine::PalaceHandle;
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use crate::engine::palace::{Palace, PalaceId};
-use crate::engine::retrieval::RecallResult;
-use crate::engine::PalaceHandle;
 use uuid::Uuid;
 
 use super::types::{PalaceInfo, ServiceResult};
@@ -215,12 +215,10 @@ where
 /// Test: exercised by every `list_palaces`/`status` service test.
 pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace>> {
     let root = state.data_root.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::engine::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .map_err(|e| anyhow!("join list_palaces: {e}"))?
-    .map_err(|e| anyhow!("list palaces: {e:#}"))
+    tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+        .await
+        .map_err(|e| anyhow!("join list_palaces: {e}"))?
+        .map_err(|e| anyhow!("list palaces: {e:#}"))
 }
 
 /// How many palaces a recall-all fan-out opens at once (#9141).
@@ -626,8 +624,8 @@ pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration as ChronoDuration, Utc};
     use crate::engine::palace::{Drawer, Palace};
+    use chrono::{Duration as ChronoDuration, Utc};
 
     fn test_state() -> AppState {
         let tmp = tempfile::tempdir().expect("tempdir");

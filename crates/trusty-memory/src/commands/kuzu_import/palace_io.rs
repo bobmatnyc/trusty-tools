@@ -16,10 +16,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::store::{KnowledgeGraph, OpenIntent};
 use crate::engine::{PalaceHandle, PalaceRegistry};
+use async_trait::async_trait;
 use trusty_common::palace_resolve::PalaceSource;
 
 use super::apply::SnapshotView;

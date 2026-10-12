@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
-use serde_json::json;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use crate::engine::MaintenanceLease;
+use anyhow::Result;
+use serde_json::json;
 
 use super::{kg_rebuild_at, purge_palaces, scan_active_triples, KgRebuildOptions};
 use crate::commands::kg_twin_merge::merge_palaces;

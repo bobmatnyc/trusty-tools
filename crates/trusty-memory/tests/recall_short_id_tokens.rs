@@ -17,10 +17,10 @@ mod recall_support;
 
 use recall_support::{create_palaces, rank_of, recall, remember};
 use tempfile::TempDir;
+use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::engine::retrieval::{seed_shared_embedder_with_mock, shared_embedder};
 use trusty_memory::engine::store::vector::VectorStore;
-use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::service::MemoryService;
 use trusty_memory::AppState;
 use uuid::Uuid;

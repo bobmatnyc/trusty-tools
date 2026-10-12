@@ -20,10 +20,10 @@
 //! `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
 //! `merge_reports_a_failed_repoint_and_leaves_the_fact_readable`.
 
-use anyhow::{Context, Result};
-use std::collections::HashSet;
 use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use crate::engine::store::OpenIntent;
+use anyhow::{Context, Result};
+use std::collections::HashSet;
 
 use super::kg_rebuild::{scan_active_triples, STRUCTURAL_PREFIXES};
 use super::maintenance_gate::require_state_lease;
@@ -361,8 +361,8 @@ async fn repoint(
 mod tests {
     use super::*;
     use crate::commands::kg_rebuild::stale_subject_candidates;
-    use serde_json::json;
     use crate::engine::palace::PalaceId;
+    use serde_json::json;
 
     /// Build an active triple for the selection tests.
     fn triple(subject: &str, predicate: &str, object: &str, provenance: Option<&str>) -> Triple {

@@ -19,9 +19,9 @@
 //!
 //! Test: run with `cargo test -p trusty-memory service::core_kg_tests`.
 
-use serde_json::{json, Value};
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::Triple;
+use serde_json::{json, Value};
 
 use crate::service::{CreatePalaceBody, KgAssertBody, MemoryService, ServiceError};
 use crate::transport::methods::kg as folded;

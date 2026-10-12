@@ -30,10 +30,7 @@ pub(super) fn lock_stall_threshold() -> Duration {
     let override_secs = std::env::var(LOCK_STALL_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok());
-    derive_lock_stall_threshold(
-        override_secs,
-        crate::engine::timeouts::write_lock_timeout(),
-    )
+    derive_lock_stall_threshold(override_secs, crate::engine::timeouts::write_lock_timeout())
 }
 
 /// [`lock_stall_threshold`] with its inputs supplied, so a test reads no env.

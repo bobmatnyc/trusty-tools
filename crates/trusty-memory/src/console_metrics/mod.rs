@@ -22,11 +22,11 @@
 pub(crate) mod disk_stats;
 mod usage;
 
+use crate::engine::store::rooms::list_room_summaries;
+use crate::engine::PalaceRegistry;
 use anyhow::Result;
 use serde_json::{json, Value};
 use trusty_common::console_metrics::{make_report, ServiceHealth};
-use crate::engine::store::rooms::list_room_summaries;
-use crate::engine::PalaceRegistry;
 
 use crate::AppState;
 
@@ -222,10 +222,7 @@ fn insert_ram_breakdown(metrics: &mut Value, usage: &usage::DaemonUsage) {
 /// `list_room_summaries` over the live store, or the `ROOMS` table length.
 /// Test: `console_metrics_reports_real_counts_for_an_uncached_palace`,
 /// `console_metrics_uses_cache_only_and_does_not_evict`.
-fn count_palace(
-    registry: &PalaceRegistry,
-    info: &crate::engine::Palace,
-) -> PalaceCounts {
+fn count_palace(registry: &PalaceRegistry, info: &crate::engine::Palace) -> PalaceCounts {
     match registry.peek(&info.id) {
         Some(handle) => cached_counts(info, &handle),
         None => match disk_stats::read(&info.data_dir) {

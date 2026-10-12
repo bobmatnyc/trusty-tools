@@ -927,9 +927,7 @@ async fn create_and_evict(svc: &MemoryService, state: &AppState, id: &str) -> st
     svc.create_palace(palace_body(id), ActivitySource::Http)
         .await
         .expect("palace create must succeed");
-    state
-        .registry
-        .remove(&crate::engine::PalaceId::new(id));
+    state.registry.remove(&crate::engine::PalaceId::new(id));
     state.data_root.join(id)
 }
 

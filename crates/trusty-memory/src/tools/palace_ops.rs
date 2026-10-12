@@ -9,10 +9,10 @@
 //! Test: `dispatch_palace_create_persists`, `dispatch_palace_delete_*`,
 //! `dispatch_palace_update_*` in `tools::tests`.
 
+use crate::engine::palace::{Palace, PalaceId};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use crate::engine::palace::{Palace, PalaceId};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
@@ -166,11 +166,10 @@ pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Resul
 
 pub(crate) async fn handle_palace_list(state: &AppState, _args: Value) -> Result<Value> {
     let root = state.data_root.clone();
-    let palaces = tokio::task::spawn_blocking(move || {
-        crate::engine::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .context("join list_palaces")??;
+    let palaces =
+        tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+            .await
+            .context("join list_palaces")??;
     let ids: Vec<String> = palaces.iter().map(|p| p.id.as_str().to_string()).collect();
     Ok(json!({ "palaces": ids }))
 }

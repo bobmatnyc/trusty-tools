@@ -18,10 +18,10 @@
 
 use std::path::Path;
 
-use redb::{ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableError};
 use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DELETED_VECTORS, DRAWERS, ROOMS, VECTORS,
 };
+use redb::{ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableError};
 
 /// The redb file holding drawers, rooms and triples, relative to the palace dir.
 ///
@@ -220,10 +220,8 @@ mod tests {
             .create_palace(root, palace)
             .unwrap_or_else(|e| panic!("create_palace({name}): {e:#}"));
         for i in 0..drawers {
-            let drawer = crate::engine::Drawer::new(
-                uuid::Uuid::new_v4(),
-                format!("seeded drawer {i}"),
-            );
+            let drawer =
+                crate::engine::Drawer::new(uuid::Uuid::new_v4(), format!("seeded drawer {i}"));
             handle
                 .kg
                 .store()

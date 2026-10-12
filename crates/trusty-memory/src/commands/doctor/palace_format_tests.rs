@@ -100,12 +100,7 @@ fn palace_format_check_warns_on_a_palace_it_cannot_verify() {
 
 /// Copy the checked-in 0.33.0 palace (`testdata/palace-format/v1/`) to
 /// `<root>/palaces/personal`, returning the palace and the blob directory.
-fn copy_v1_blob(
-    root: &Path,
-) -> (
-    crate::engine::palace::Palace,
-    std::path::PathBuf,
-) {
+fn copy_v1_blob(root: &Path) -> (crate::engine::palace::Palace, std::path::PathBuf) {
     let blob = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palace-format/v1/personal");
     let dir = root.join("palaces").join("personal");
     std::fs::create_dir_all(&dir).expect("dir");

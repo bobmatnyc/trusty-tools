@@ -146,8 +146,8 @@ async fn recall_all_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold() {
 /// below it on both single-palace recall tools.
 #[tokio::test]
 async fn the_warming_path_demotes_stale_snapshots() {
-    use trusty_memory::engine::palace::{Drawer, PalaceId};
     use trusty_memory::bm25_lane::Bm25Lane;
+    use trusty_memory::engine::palace::{Drawer, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let lane = Bm25Lane::new(tmp.path().join("bm25"));
@@ -219,8 +219,8 @@ async fn the_warming_path_demotes_stale_snapshots() {
 /// `memory_list` still lists the expired drawer (excluded, not deleted).
 #[tokio::test]
 async fn an_expired_slot_is_not_returned_by_the_warming_path() {
-    use trusty_memory::engine::palace::{Drawer, PalaceId};
     use trusty_memory::bm25_lane::Bm25Lane;
+    use trusty_memory::engine::palace::{Drawer, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let lane = Bm25Lane::new(tmp.path().join("bm25"));
@@ -313,8 +313,8 @@ async fn an_expired_slot_is_not_returned_by_the_warming_path() {
 /// live slot and no expired one.
 #[tokio::test]
 async fn recall_returns_the_live_slot_past_twenty_expired_ones_while_warming() {
-    use trusty_memory::engine::palace::{Drawer, PalaceId};
     use trusty_memory::bm25_lane::Bm25Lane;
+    use trusty_memory::engine::palace::{Drawer, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let lane = Bm25Lane::new(tmp.path().join("bm25"));
@@ -399,8 +399,8 @@ async fn recall_returns_the_live_slot_past_twenty_expired_ones_while_warming() {
 /// drawer appears once, at the lexical lane's layer (4), not layer 1.
 #[tokio::test]
 async fn a_warming_lane_hit_replaces_its_l1_copy() {
-    use trusty_memory::engine::palace::{Drawer, PalaceId};
     use trusty_memory::bm25_lane::Bm25Lane;
+    use trusty_memory::engine::palace::{Drawer, PalaceId};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let lane = Bm25Lane::new(tmp.path().join("bm25"));

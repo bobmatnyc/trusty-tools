@@ -11,13 +11,13 @@
 //! on the intermediate `Vec`, because the wire shape is what a caller pays for.
 //! Test: this IS the test module.
 
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::RecallResult;
 use crate::tools::recall_projection::{
     apply_score_floor, candidate_window, include_creator_tags_arg, min_score_arg, serialize_recall,
     RecallProjection, MAX_CANDIDATE_WINDOW,
 };
 use serde_json::json;
-use crate::engine::palace::Drawer;
-use crate::engine::retrieval::RecallResult;
 use uuid::Uuid;
 
 /// The attribution a real MCP write attaches to every drawer (DOC-53).

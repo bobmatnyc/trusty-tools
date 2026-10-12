@@ -28,12 +28,12 @@
 //! `ChatBody`) come from the sibling `tools` submodule.
 //! Test: `crate::transport::uds::tests` — `rpc_chat_*`.
 
+use crate::engine::palace::PalaceId;
+use crate::engine::PalaceRegistry;
 use crate::service::{load_user_config, MemoryService};
 use crate::AppState;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use crate::engine::palace::PalaceId;
-use crate::engine::PalaceRegistry;
 use trusty_common::uds::server::{RpcError, RpcStreamItems};
 use trusty_common::{ChatEvent, ChatMessage};
 
@@ -445,17 +445,14 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
                     tool_calls: None,
                 });
             }
-            let core_history: Vec<crate::engine::store::chat_sessions::ChatMessage> =
-                history
-                    .iter()
-                    .map(
-                        |m| crate::engine::store::chat_sessions::ChatMessage {
-                            attachments: vec![],
-                            role: m.role.clone(),
-                            content: m.content.clone(),
-                        },
-                    )
-                    .collect();
+            let core_history: Vec<crate::engine::store::chat_sessions::ChatMessage> = history
+                .iter()
+                .map(|m| crate::engine::store::chat_sessions::ChatMessage {
+                    attachments: vec![],
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                })
+                .collect();
             if let Err(e) = store.upsert_session(sid, &core_history) {
                 tracing::warn!("upsert_session failed: {e:#}");
             }

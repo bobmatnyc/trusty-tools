@@ -15,9 +15,9 @@
 //! `moved_store_reimports_nothing_and_shared_ids_are_reported`,
 //! `store_supplied_tags_and_triples_pass_the_secret_screen`.
 
+use crate::engine::store::kg::Triple;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
-use crate::engine::store::kg::Triple;
 
 use super::bridge::{KuzuEntityRow, KuzuMemoryRow};
 use super::screen::{screen, SecretRule};

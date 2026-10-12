@@ -14,10 +14,10 @@
 //! Test: `crates/trusty-memory/tests/dream_room_mcp.rs` (wiring + no-op) and
 //! trusty-common's `dream::tests::consolidate_scoped_*` (behaviour).
 
+use crate::engine::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
 use crate::AppState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use crate::engine::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
 
 use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
 use crate::engine::palace::RoomType;

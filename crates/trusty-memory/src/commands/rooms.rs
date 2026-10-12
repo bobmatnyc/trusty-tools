@@ -17,12 +17,12 @@
 //! Test: `dry_run_reports_without_writing`, `apply_writes_the_planned_rooms`,
 //! `audit_can_be_scoped_to_one_palace`.
 
-use anyhow::{Context, Result};
 use crate::engine::palace::Palace;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::room_plan::{plan_rooms, RoomPlanAction, RoomPlanEntry};
 use crate::engine::store::{backfill_rooms, OpenIntent};
 use crate::engine::{MaintenanceLease, PalaceRegistry};
+use anyhow::{Context, Result};
 
 use super::maintenance_gate::open_purging_under_lease;
 
