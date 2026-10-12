@@ -45,7 +45,7 @@ fn portfolio_palace_reports_unavailable_without_feature() {
 #[cfg(feature = "manager-memory")]
 #[test]
 fn portfolio_palace_provisions_and_is_idempotent() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -90,7 +90,7 @@ fn portfolio_palace_provisions_and_is_idempotent() {
 #[cfg(feature = "manager-memory")]
 #[test]
 fn portfolio_ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -155,7 +155,7 @@ fn portfolio_ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_p
 #[test]
 #[should_panic(expected = "#8545")]
 fn portfolio_palace_under_a_fenced_home_is_refused() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let root = crate::core::home_write_fence::armed_roots()
@@ -171,7 +171,7 @@ fn portfolio_palace_under_a_fenced_home_is_refused() {
 #[cfg(feature = "manager-memory")]
 #[tokio::test]
 async fn portfolio_memory_remember_then_recall_round_trips() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -203,12 +203,10 @@ async fn portfolio_memory_remember_then_recall_round_trips() {
 #[cfg(feature = "manager-memory")]
 #[test]
 fn an_existing_format_1_portfolio_palace_migrates_at_open() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
-    use trusty_common::memory_core::store::OpenIntent;
-    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
-    use trusty_common::memory_core::store::palace_format::{
-        MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
-    };
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::store::OpenIntent;
+    use trusty_memory::engine::store::format_v1_fixture::write_format_1_palace;
+    use trusty_memory::engine::store::palace_format::{MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED};
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -255,8 +253,8 @@ fn portfolio_palace_dir(framework_root: &std::path::Path) -> std::path::PathBuf 
 #[test]
 #[ignore = "child process of the #9659 portfolio sm-serve-first test"]
 fn open_the_portfolio_palace_as_the_daemon_child() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
-    use trusty_common::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::store::palace_format::PALACE_FORMAT_SUPPORTED;
 
     let Some(root) = std::env::var_os(PORTFOLIO_DAEMON_ROOT_ENV).map(std::path::PathBuf::from)
     else {
@@ -303,8 +301,8 @@ fn open_the_portfolio_palace_as_the_daemon_child() {
 #[cfg(feature = "manager-memory")]
 #[test]
 fn sm_serve_first_then_daemon_gets_the_portfolio_writer_lock() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
-    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::store::format_v1_fixture::write_format_1_palace;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -342,7 +340,7 @@ fn sm_serve_first_then_daemon_gets_the_portfolio_writer_lock() {
 #[cfg(feature = "manager-memory")]
 #[test]
 fn a_writer_provision_beside_a_kg_holder_is_unavailable_with_a_reason() {
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let dir = tempfile::tempdir().expect("tempdir");

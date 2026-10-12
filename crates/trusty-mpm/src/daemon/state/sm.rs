@@ -56,8 +56,8 @@ pub enum PalaceAccess {
 impl PalaceAccess {
     /// The trusty-common open intent for this access.
     #[cfg(any(feature = "sm-memory", feature = "manager-memory"))]
-    pub(crate) fn open_intent(self) -> trusty_common::memory_core::store::OpenIntent {
-        use trusty_common::memory_core::store::OpenIntent;
+    pub(crate) fn open_intent(self) -> trusty_memory::engine::store::OpenIntent {
+        use trusty_memory::engine::store::OpenIntent;
         match self {
             Self::Writer => OpenIntent::Writer,
             // #9659: `tm sm serve` must leave the live files to the daemon.

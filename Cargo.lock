@@ -11638,6 +11638,7 @@ dependencies = [
  "trusty-channels",
  "trusty-common",
  "trusty-mcp",
+ "trusty-memory",
  "trusty-progress",
  "trusty-secrets",
  "unicode-width",

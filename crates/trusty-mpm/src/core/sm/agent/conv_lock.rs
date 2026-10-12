@@ -11,7 +11,7 @@
 //! Serializing turns per `conv_id` closes the read-modify-write race with the
 //! lightest correct mechanism — a per-`conv_id` async lock held across
 //! open → record → save — mirroring the per-palace `write_mutex` precedent in
-//! `trusty_common::memory_core::retrieval::handle`.
+//! `trusty_memory::engine::retrieval::handle`.
 //! What: [`ConvLocks`] is a small registry of per-`conv_id` [`tokio::sync::Mutex`]es.
 //! [`ConvLocks::acquire`] hands back an owned guard the turn holds for its whole
 //! duration; concurrent turns for the SAME id wait for it, turns for DIFFERENT ids

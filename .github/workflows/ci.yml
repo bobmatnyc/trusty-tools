@@ -311,6 +311,16 @@ jobs:
       - name: Startup-context budget gate (#7424)
         run: bash scripts/check_context_budget.sh
 
+      # #9270: consumers reach the memory engine through
+      # `trusty_memory::engine`, never `trusty_common::memory_core`. A step of
+      # this job for the reason the budget gate above is: no new required
+      # context, no toolchain. Selftest first, so the gate is shown able to fail.
+      - name: Engine import-path selftest (#9270)
+        run: bash scripts/check_engine_import_path_selftest.sh
+
+      - name: Engine import-path gate (#9270)
+        run: bash scripts/check_engine_import_path.sh
+
       # #8389: content-release.yml runs only on dispatch, so a packager change
       # would otherwise meet its selftest for the first time at release time.
       - name: Content-bundle packager selftest (#8389)
@@ -1899,6 +1909,13 @@ jobs:
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo check --workspace --exclude trusty-code-gui --exclude trusty-agents-ui
+
+      # #9270: a default trusty-mpm build must not pull in trusty-memory or the
+      # engine's heavy crates (owner ruling 2026-09-27). `cargo tree` only
+      # resolves; the toolchain and the fetched registry above are what it needs.
+      - name: trusty-mpm default graph has no memory engine (#9270)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: bash scripts/check_engine_import_path.sh --dep-graph
 
   # --------------------------------------------------------------------------
   # agents-ui: build- and lint-verify the trusty-agents Tauri desktop app

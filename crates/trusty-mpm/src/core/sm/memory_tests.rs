@@ -11,7 +11,7 @@
 
 use super::*;
 use tempfile::TempDir;
-use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
 use crate::core::sm::config::SmMemoryConfig;
 
@@ -438,10 +438,8 @@ fn construct_on_unwritable_root_is_error() {
 /// Test: this is the test.
 #[test]
 fn an_existing_format_1_sm_palace_migrates_at_open() {
-    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
-    use trusty_common::memory_core::store::palace_format::{
-        MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED,
-    };
+    use trusty_memory::engine::store::format_v1_fixture::write_format_1_palace;
+    use trusty_memory::engine::store::palace_format::{MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED};
 
     seed_shared_embedder_with_mock();
     let dir = TempDir::new().expect("tempdir");
@@ -637,7 +635,7 @@ fn run_the_daemon_child(root: &std::path::Path) {
 #[test]
 #[ignore = "child process of the #9659 sm-serve-first tests"]
 fn open_the_sm_palace_as_the_daemon_child() {
-    use trusty_common::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+    use trusty_memory::engine::store::palace_format::PALACE_FORMAT_SUPPORTED;
 
     let Some(root) = std::env::var_os(DAEMON_ROOT_ENV).map(std::path::PathBuf::from) else {
         return;
@@ -677,7 +675,7 @@ fn open_the_sm_palace_as_the_daemon_child() {
 /// Test: this is the test.
 #[test]
 fn sm_serve_first_then_daemon_gets_the_writer_lock() {
-    use trusty_common::memory_core::store::format_v1_fixture::write_format_1_palace;
+    use trusty_memory::engine::store::format_v1_fixture::write_format_1_palace;
 
     seed_shared_embedder_with_mock();
     let dir = TempDir::new().expect("tempdir");

@@ -16,7 +16,7 @@
 //! **Every write goes over the socket.** This module opens no palace store of
 //! its own, so it cannot become the second in-process writer of a palace the
 //! daemon already serves — the redb exclusive-lock hazard #1078 fixed and
-//! `trusty_common::memory_core::registry` documents. It therefore adds no
+//! `trusty_memory::engine::registry` documents. It therefore adds no
 //! `memory-core` edge: the default `trusty-mpm` build pays no HNSW/ONNX cost
 //! for these verbs, and there is deliberately NO no-daemon read path (a
 //! read-only snapshot fallback would need exactly that edge, behind a
