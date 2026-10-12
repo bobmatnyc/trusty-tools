@@ -29,6 +29,7 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
+use crate::commands::egress_guard_taint::{TAINT_CHECK, taint_verdict};
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
 };
@@ -225,6 +226,24 @@ pub(crate) fn verdict(
     decide(read, table)
 }
 
+/// [`verdict`], then the channel-taint arm for a call it allowed (#8433).
+///
+/// What: a deny stands; an allow of a readable payload becomes a
+/// [`TAINT_CHECK`] deny when [`taint_verdict`] refuses it.
+/// Test: `with_taint_denies_an_allowed_gated_call_of_a_tainted_session`.
+pub(crate) fn with_taint(
+    first: Verdict,
+    read: &Result<serde_json::Value, HookStdinError>,
+    home: Option<&std::path::Path>,
+) -> Verdict {
+    match (first, read) {
+        (Verdict::Allow, Ok(payload)) => {
+            taint_verdict(payload, home).map_or(Verdict::Allow, |reason| deny(TAINT_CHECK, reason))
+        }
+        (first, _) => first,
+    }
+}
+
 /// Run one guard pass, answering a deny if it panics.
 ///
 /// Why (§4, Architect Q5): Claude Code treats a non-zero hook exit as
@@ -253,10 +272,10 @@ where
 async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let read = read_stdin_hook_payload_strict(PM_GUARD_STDIN_TIMEOUT).await;
     // #8454 D1: the floor reads the ambient home and user config, as pm-guard's.
-    let anchor = |payload: &serde_json::Value| {
-        evaluate(payload, &HookEnv::ambient(), MpmConfig::load_default)
-    };
-    let Verdict::Deny { check, reason } = verdict(&read, &FamilyTable::builtin(), anchor) else {
+    let env = HookEnv::ambient();
+    let anchor = |payload: &serde_json::Value| evaluate(payload, &env, MpmConfig::load_default);
+    let first = verdict(&read, &FamilyTable::builtin(), anchor);
+    let Verdict::Deny { check, reason } = with_taint(first, &read, env.home.as_deref()) else {
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.

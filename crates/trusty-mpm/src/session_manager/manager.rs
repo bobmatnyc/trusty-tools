@@ -326,6 +326,9 @@ pub struct SessionManager {
     /// `worktree_claude_registry.rs`.
     pub(crate) claude_registry:
         std::sync::OnceLock<super::worktree_claude_registry::RegistryReader>,
+    /// #8433: the channel taint directory a session end retires from.
+    /// Installed by the daemon only; see `channel_taint.rs`.
+    pub(crate) taint_dir: std::sync::OnceLock<PathBuf>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -372,6 +375,7 @@ impl SessionManager {
             // removed by a `ResumeInFlightGuard` within one resume call.
             resume_in_flight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             claude_registry: std::sync::OnceLock::new(),
+            taint_dir: std::sync::OnceLock::new(),
         })
     }
 

@@ -43,6 +43,8 @@ pub(crate) mod egress_guard;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
+// #8433 P0: the channel-taint arm of the egress guard.
+pub(crate) mod egress_guard_taint;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
@@ -97,6 +99,8 @@ pub(crate) mod guided_resume;
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
 pub(crate) mod hook_payload;
+// #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
+pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;

@@ -272,6 +272,12 @@ pub async fn serve_with_shutdown(
     // The boot reconcile inside `session_manager()` defers its own auto-resume
     // to the supervisor for exactly that reason; see `session_manager::reconcile`.
     managed_routes::auto_relaunch::install_auto_relauncher(&state).await;
+    // #8433 (Dfc): a stop or decommission retires the session's channel taint
+    // from the same tree the SessionStart re-apply writes.
+    if let Some(home) = state.user_home() {
+        let dir = crate::core::channels_taint::taint_dir(&home);
+        state.session_manager().await.install_taint_dir(dir);
+    }
     // #8233 review round 2 (finding 4): sweep launch specs abandoned by an
     // earlier process. Each carries `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` in
     // cleartext, and the per-launch sweep only runs when a NEXT launch happens.
