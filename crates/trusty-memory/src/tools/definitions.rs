@@ -60,10 +60,13 @@ pub fn tool_definitions() -> Value {
 /// `required` arrays.
 /// Test: `tool_definitions_drops_palace_required_when_default_set`.
 pub fn tool_definitions_with(has_default: bool) -> Value {
+    // #9746: the body is `text` or its alias `content`. Neither is required
+    // here, so an alias-only call passes a schema-validating client; the
+    // handler refuses a call with neither.
     let memory_remember_required: Vec<&str> = if has_default {
-        vec!["text"]
+        vec![]
     } else {
-        vec!["palace", "text"]
+        vec!["palace"]
     };
     // #6318: `palace` is never required on a palace-scoped READ tool. With
     // neither an argument nor a `--palace` default the handler answers with an
@@ -90,10 +93,12 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     };
     let palace_info_required: Vec<&str> = vec![];
     let palace_compact_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // #9746: `memory_remember`'s rule from the mirror side — `content` or its
+    // alias `text`.
     let memory_note_required: Vec<&str> = if has_default {
-        vec!["content"]
+        vec![]
     } else {
-        vec!["palace", "content"]
+        vec!["palace"]
     };
     // Issue #664: add_alias and discover_aliases both call resolve_palace() but
     // previously omitted `palace` from their schemas, making them uncallable
@@ -114,7 +119,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "palace":  {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
-                        "text":    {"type": "string", "description": "Memory content"},
+                        "text":    {"type": "string", "description": "Memory content. One of `text` or `content` is required."},
                         "room":    {"type": "string", "description": "Room type (optional)"},
                         "wing":    {"type": "string", "description": "ADR-0027: optional wing (scope/ownership) id or label that OWNS this room — e.g. an agent type such as `engineer`. Omit for the palace's default wing, which is the pre-wing behaviour. With it, `engineer`+`Planning` and `pm`+`Planning` are two distinct rooms. Errors if the wing does not exist; create it with wing_create or list wings with wing_list."},
                         "tags":    {"type": "array", "items": {"type": "string"}},
@@ -136,7 +141,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "palace":  {"type": "string"},
-                        "content": {"type": "string", "description": "Brief fact to remember"},
+                        "content": {"type": "string", "description": "Brief fact to remember. One of `text` or `content` is required."},
                         "room":    {"type": "string", "description": "ADR-0027: room to file this note in (Frontend, Backend, Testing, Planning, Documentation, Research, Configuration, Meetings, General, or any custom name). Defaults to General; list a palace's rooms with room_list."},
                         "tags":    {"type": "array", "items": {"type": "string"}},
                         "context": {"type": "string", "description": "Optional surrounding context. Prepended to `content` (separated by `---`) when supplied; with very short content (< 4 words) and no context the write is skipped (issue #215)."},

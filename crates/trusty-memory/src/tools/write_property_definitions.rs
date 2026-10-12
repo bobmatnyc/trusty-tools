@@ -65,14 +65,15 @@ fn verify_property() -> Value {
 /// An optional string property that is an alias of the documented field
 /// `name` (#9746).
 ///
-/// Why: `required` keeps naming only `name`, because several MCP clients
-/// reject a top-level `anyOf` in a tool's input schema; the alias is listed
-/// here so a client can still learn it.
-/// What: the handler resolves both names with `helpers::resolve_aliased_str_arg`.
+/// Why: several MCP clients reject a top-level `anyOf` in a tool's input
+/// schema, so "one of the two" cannot be stated structurally. Neither name is
+/// in `required`; both descriptions state the rule instead.
+/// What: the handler resolves both names with `helpers::resolve_aliased_str_arg`
+/// and refuses a call that sends neither.
 /// Test: `write_schemas_advertise_the_text_content_alias`.
 fn alias_property(name: &str) -> Value {
     json!({
         "type": "string",
-        "description": format!("#9746: alias of `{name}`. Send either name; `{name}` is the documented one. Both with the same value is accepted; both with different values is an error and nothing is written.")
+        "description": format!("#9746: alias of `{name}`. One of `text` or `content` is required; `{name}` is the documented one. Both with the same value is accepted; both with different values is an error and nothing is written.")
     })
 }
