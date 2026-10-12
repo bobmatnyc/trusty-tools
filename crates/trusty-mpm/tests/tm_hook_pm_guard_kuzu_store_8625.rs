@@ -101,7 +101,8 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
             "kuzu-store-read",
         ),
         (
-            bash_payload(fx, "echo kuzu | xargs -I % $'trusty-memory' import %"),
+            // A `$'…'` spelling is refused first by the ANSI-C quoting rule.
+            bash_payload(fx, "echo kuzu | xargs -I % trusty-memory import %"),
             "kuzu-store-read",
         ),
     ]
