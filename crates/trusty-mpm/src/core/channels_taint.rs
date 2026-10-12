@@ -11,7 +11,9 @@
 //! atomically with mode 0600 ([`write_taint`]). The managed session's own
 //! taint lives beside them at `managed/<managed_id>.json` ([`mark_managed`]),
 //! inside the same trust anchor, so it survives a Claude `session_id` change
-//! (Dfc) and [`reapply`] re-writes the taint for the new id. Only [`retire`]
+//! (Dfc) and [`reapply`] re-writes the taint for the new id. The mark names
+//! the session's workspace, so [`covering_mark`] scopes the SessionStart
+//! hook's own re-apply (D09) to that workspace. Only [`retire`]
 //! removes either, when the managed session ends; no timer exists. The
 //! verdict reads presence only: absent is untainted, and every other outcome,
 //! including an unreadable or malformed file and a bad id, is tainted.
@@ -32,7 +34,9 @@ pub const REAPPLY_FAILED_CHANNEL: &str = "reapply-failed";
 /// The subdirectory holding the per-managed-session markers.
 const MANAGED_DIR: &str = "managed";
 
-/// The file the hook appends to when its own re-apply write fails too (D09).
+/// The file in the taint directory the hook appends to when its own re-apply
+/// write fails too (D09). It sits under the trust anchor so no session can
+/// delete it, and its `.jsonl` name keeps it out of [`list_taints`].
 pub const REAPPLY_FAILURES_FILE: &str = "reapply-failures.jsonl";
 
 /// The longest id accepted as a file name.
@@ -110,12 +114,24 @@ pub enum Cover {
     Unknown,
 }
 
-/// The managed session whose mark covers a `SessionStart` at `cwd`.
-pub fn covering_mark(_dir: &Path, _cwd: Option<&Path>) -> Cover {
-    Cover::Unknown
-}
-
 impl TaintMark {
+    /// Whether this mark covers a `SessionStart` at the canonical `cwd`.
+    ///
+    /// What: an unknown cwd and a relative or empty workspace cover every
+    /// cwd (fail closed); otherwise `cwd` must be the workspace or under it,
+    /// compared after canonicalizing the workspace.
+    pub fn covers(&self, cwd: Option<&Path>) -> bool {
+        let Some(cwd) = cwd else {
+            return true;
+        };
+        if !self.workspace.is_absolute() {
+            return true;
+        }
+        let workspace =
+            std::fs::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone());
+        cwd.starts_with(&workspace)
+    }
+
     /// The taint record this mark writes for one Claude session id.
     pub fn record_for(&self, session_id: &str, managed_session: &str) -> TaintRecord {
         TaintRecord {
@@ -356,38 +372,12 @@ pub enum Presence {
     Unknown,
 }
 
-/// [`Presence`] of taint under `dir`, the markers in `managed/` included.
+/// The entry names of `dir`, sorted; an absent directory has none.
 ///
-/// Test: `reapply_daemon_unreachable_at_session_start_egress_denies`,
-/// `daemon_unreachable_with_no_taint_anywhere_writes_nothing`.
-pub fn presence(dir: &Path) -> Presence {
-    let mut seen = Presence::None;
-    for sub in [dir.to_path_buf(), dir.join(MANAGED_DIR)] {
-        let entries = match std::fs::read_dir(&sub) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Presence::Unknown,
-            Ok(entries) => entries,
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                return Presence::Unknown;
-            };
-            if entry.file_name() != MANAGED_DIR {
-                seen = Presence::Some;
-            }
-        }
-    }
-    seen
-}
-
-/// One listed taint file: its path, and its record or why it is unreadable.
-pub type ListedTaint = (PathBuf, Result<TaintRecord, String>);
-
-/// Every taint file in `dir` with its parse, for the doctor row.
-///
-/// What: `*.json` entries of `dir` (not `managed/`), each with its record or
-/// the reason it could not be read; temp files are skipped.
-pub fn list_taints(dir: &Path) -> Result<Vec<ListedTaint>, TaintError> {
+/// What: one listing for [`presence`], [`list_taints`], [`marked_managed`]
+/// and [`covering_mark`], so a directory or entry read error is one `Err`
+/// each caller fails closed on.
+fn entry_names(dir: &Path) -> Result<Vec<String>, TaintError> {
     let io = |source| TaintError::Io {
         path: dir.to_owned(),
         source,
@@ -396,46 +386,97 @@ pub fn list_taints(dir: &Path) -> Result<Vec<ListedTaint>, TaintError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         other => other.map_err(io)?,
     };
+    let mut names = entries
+        .map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io)?;
+    names.sort();
+    Ok(names)
+}
+
+/// The id a `<id>.json` name stands for; temp files and other names are not.
+fn json_stem(name: &str) -> Option<&str> {
+    name.strip_suffix(".json")
+        .filter(|stem| sanitize_id(stem).is_ok())
+}
+
+/// [`Presence`] of taint under `dir`, the markers in `managed/` included.
+///
+/// What: any entry other than `managed/` itself is `Some`, the
+/// [`REAPPLY_FAILURES_FILE`] included; a listing error is `Unknown`.
+/// Test: `presence_counts_files_and_marks`,
+/// `presence_is_unknown_when_a_dir_cannot_be_read`.
+pub fn presence(dir: &Path) -> Presence {
+    let mut seen = Presence::None;
+    for sub in [dir.to_path_buf(), dir.join(MANAGED_DIR)] {
+        match entry_names(&sub) {
+            Err(_) => return Presence::Unknown,
+            Ok(names) if names.iter().any(|name| name != MANAGED_DIR) => seen = Presence::Some,
+            Ok(_) => {}
+        }
+    }
+    seen
+}
+
+/// The managed session whose mark covers a `SessionStart` at `cwd` (D09).
+///
+/// Why (critic HIGH 2): the hook settles an unconfirmed `SessionStart` from
+/// the user tier, so a taint must reach only the sessions of its own
+/// workspace, and the record it writes must name a managed session whose
+/// retire removes it.
+/// What: reads each `managed/<id>.json` in id order; the first mark that
+/// [`TaintMark::covers`] the canonical `cwd` names its id. A mark that cannot
+/// be read covers every cwd. A listing error is [`Cover::Unknown`].
+/// Test: `covering_mark_follows_the_workspace_and_fails_closed`.
+pub fn covering_mark(dir: &Path, cwd: Option<&Path>) -> Cover {
+    let Ok(names) = entry_names(&dir.join(MANAGED_DIR)) else {
+        return Cover::Unknown;
+    };
+    let cwd = cwd.map(|cwd| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
+    for managed in names.iter().filter_map(|name| json_stem(name)) {
+        let covers = match managed_mark(dir, managed) {
+            Ok(Some(mark)) => mark.covers(cwd.as_deref()),
+            // Retired between the listing and the read.
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if covers {
+            return Cover::Managed(managed.to_owned());
+        }
+    }
+    Cover::None
+}
+
+/// One listed taint file: its path, and its record or why it is unreadable.
+pub type ListedTaint = (PathBuf, Result<TaintRecord, String>);
+
+/// Every taint file in `dir` with its parse, for the doctor row.
+///
+/// What: `*.json` entries of `dir` (not `managed/`), each with its record or
+/// the reason it could not be read; temp files and [`REAPPLY_FAILURES_FILE`]
+/// are skipped.
+/// Test: `the_reapply_failures_record_is_not_a_taint_file`.
+pub fn list_taints(dir: &Path) -> Result<Vec<ListedTaint>, TaintError> {
     let mut out = Vec::new();
-    for entry in entries {
-        let path = entry.map_err(io)?.path();
-        if path.extension().is_none_or(|ext| ext != "json") {
+    for name in entry_names(dir)? {
+        if !name.ends_with(".json") {
             continue;
         }
+        let path = dir.join(&name);
         let parsed = std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()));
         out.push((path, parsed));
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
 /// The managed ids that carry a marker in `dir`.
 pub fn marked_managed(dir: &Path) -> Result<Vec<String>, TaintError> {
-    let sub = dir.join(MANAGED_DIR);
-    let entries = match std::fs::read_dir(&sub) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        other => other.map_err(|source| TaintError::Io {
-            path: sub.clone(),
-            source,
-        })?,
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| TaintError::Io {
-            path: sub.clone(),
-            source,
-        })?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json")
-            && let Some(stem) = path.file_stem()
-        {
-            out.push(stem.to_string_lossy().into_owned());
-        }
-    }
-    out.sort();
-    Ok(out)
+    Ok(entry_names(&dir.join(MANAGED_DIR))?
+        .iter()
+        .filter_map(|name| json_stem(name).map(str::to_owned))
+        .collect())
 }
 
 /// Retire managed session `managed`: remove its taint files, then its mark.

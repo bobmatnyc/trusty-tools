@@ -15,7 +15,7 @@
 //! directory all deny). With no live taint it defers to the parent, so the
 //! Architect's other writes are unchanged.
 //! Residual: the parent's — `xargs rm`, `find -delete`, a glob after a `cd`
-//! and writers outside its verb list (`truncate`, `dd`, interpreters). A
+//! and writers outside its verb list (`dd`, interpreters). A
 //! truncated or emptied taint file still reads tainted (malformed).
 //! Test: `pm_guard_trust_anchor_taint_tests.rs`.
 
@@ -53,8 +53,10 @@ impl TaintAnchor {
 
     /// Seal the directory: guarded with every directory above it, and fenced.
     ///
-    /// What: a directory that does not resolve is fenced as spelled, so every
-    /// write under it denies — fail closed.
+    /// What: a directory that does not resolve is guarded and fenced as
+    /// spelled, so every write under it and every move or delete above it
+    /// denies — fail closed.
+    /// Test: `an_unresolvable_taint_dir_still_guards_the_dirs_above_it`.
     pub(super) fn extend(
         &self,
         guarded: &mut Vec<PathBuf>,
@@ -68,7 +70,12 @@ impl TaintAnchor {
                 fence.push(dir.clone());
                 paths.push(dir.clone());
             }
-            None => fence.push(self.lexical.clone()),
+            // #8433 fix round: guard the directories above it too, so `rm -rf`
+            // of its parent cannot remove a taint the guard cannot see.
+            None => {
+                guarded.push(self.lexical.clone());
+                fence.push(self.lexical.clone());
+            }
         }
     }
 }
