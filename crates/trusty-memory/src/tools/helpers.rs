@@ -278,6 +278,38 @@ pub(crate) fn resolve_tier_c(args: &Value, tool: &str) -> Result<TierCAdmission>
     ))
 }
 
+/// Resolve a required string argument that also accepts one alias (#9746).
+///
+/// Why: `memory_remember` documents its body as `text` and `memory_note` as
+/// `content`, and callers send the other name. Two different bodies in one
+/// call leave no basis to choose, and storing either one loses the other.
+/// What: reads `name` and `alias`; absent or JSON `null` counts as not sent,
+/// and any other non-string is an `Err` naming that field. One string, or the
+/// same string under both names, is returned. Two different values, or
+/// neither name, is an `Err` naming both fields.
+/// Test: `aliased_write_field_stores_the_same_drawer_as_the_documented_name`,
+/// `conflicting_text_and_content_is_refused_and_writes_nothing`,
+/// `missing_text_and_content_error_names_both_fields`.
+pub(crate) fn resolve_aliased_str_arg<'a>(
+    args: &'a Value,
+    tool: &str,
+    name: &str,
+    alias: &str,
+) -> Result<&'a str> {
+    let sent = |key: &str| match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(other) => Err(anyhow!("{tool}: '{key}' must be a string, got {other}")),
+    };
+    match (sent(name)?, sent(alias)?) {
+        (Some(a), Some(b)) if a != b => Err(anyhow!(
+            "{tool}: '{name}' and its alias '{alias}' have different values; send one of them"
+        )),
+        (Some(v), _) | (None, Some(v)) => Ok(v),
+        (None, None) => Err(anyhow!("{tool}: missing '{name}' (or its alias '{alias}')")),
+    }
+}
+
 /// Resolve `memory_remember`'s optional drawer `type` argument (#9144).
 ///
 /// Why: a write that names a type must store that type or fail. An unknown

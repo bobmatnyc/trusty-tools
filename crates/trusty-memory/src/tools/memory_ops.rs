@@ -23,8 +23,8 @@ use super::bm25::bm25_delete_document;
 use super::helpers::{
     apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate, content_gate,
     dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
-    resolve_palace, resolve_tier_c, resolve_type_arg, resolve_verify_arg, room_label,
-    skipped_envelope, write_drawer, WriteDrawerParams,
+    resolve_aliased_str_arg, resolve_palace, resolve_tier_c, resolve_type_arg, resolve_verify_arg,
+    room_label, skipped_envelope, write_drawer, WriteDrawerParams,
 };
 // #6318: the read tools below fall back to a palace index; the write tools in
 // this file keep `resolve_palace`'s error.
@@ -44,11 +44,9 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     let defer_embedding = state.readiness() == DaemonReadiness::Warming;
     let palace = resolve_palace(state, &args, "memory_remember")?;
     let palace = palace.as_str();
-    let raw_text = args
-        .get("text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
-        .to_string();
+    // #9746: `content` is an alias of `text`.
+    let raw_text =
+        resolve_aliased_str_arg(&args, "memory_remember", "text", "content")?.to_string();
     // #9144: parse the optional drawer `type` before every content gate, so a
     // gate's "skipped" success envelope can never mask a bad type.
     let classify_as = resolve_type_arg(&args, "memory_remember")?;
@@ -213,11 +211,8 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // and `importance = 1.0` so the entry surfaces in L1 essentials.
     let palace = resolve_palace(state, &args, "memory_note")?;
     let palace = palace.as_str();
-    let raw_content = args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
-        .to_string();
+    // #9746: `text` is an alias of `content`.
+    let raw_content = resolve_aliased_str_arg(&args, "memory_note", "content", "text")?.to_string();
     // #9390: refuse a bad `verify` before any content gate can skip the write.
     let verify = resolve_verify_arg(&args, "memory_note")?;
     // Issue #220: blocklist gate — silently drop content matching

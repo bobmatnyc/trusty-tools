@@ -306,7 +306,8 @@ async fn default_palace_used_when_arg_omitted() {
         !required.contains(&"palace"),
         "palace must not be required when default is configured; got {required:?}"
     );
-    assert!(required.contains(&"text"));
+    // #9746: `text` or its alias `content`; the handler enforces one of them.
+    assert!(!required.contains(&"text"), "got {required:?}");
 
     // (c) tools/call resolves the default when arg is omitted.
     let call = handle_message(
