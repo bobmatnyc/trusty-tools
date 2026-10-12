@@ -1,2 +1,0 @@
-Fixed
-- `uds::bind_hardened` no longer exposes the socket path at the umask mode between `bind` and `chmod`. It binds a temporary name in the same directory, narrows it to `0600`, then hard-links it to the final path, so a client sees the path at `0600` or not at all. Before, a same-uid client that dialled in that gap was refused by `verify_socket_for_connect` as an untrusted `0755` socket. An occupied final path still fails with `EADDRINUSE`, and no temporary name is left behind on success or failure (#9714).

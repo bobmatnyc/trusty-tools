@@ -6,6 +6,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.35.0] — 2026-10-12
+
+### Breaking
+
+- Picks up palace format 2 from trusty-common: the daemon migrates each format-1 palace to format 2 at startup, a format-0 palace is refused `FormatTooOld`, and a migrated palace is refused by trusty-memory 0.33.x. `doctor` reports a format-1 palace as needing migration. Rollback: restore the backup, delete `index.usearch.redb`, run `palace_reembed` with `dry_run: false` (0.33.0 defaults it to `true`, which re-embeds nothing). trusty-memory 0.32.0 and 0.32.1 already refuse a format-2 palace; binaries older than 0.32.0 have no format gate and must not open one (#9275).
+
+### Added
+
+- `trusty_memory::engine` re-exports the memory storage engine (`trusty_common::memory_core`) under every feature set, including `--no-default-features`. Each item has the same type through both paths, so a consumer can switch its imports to `trusty_memory::engine` now (#9270).
+- `palace_verify_embedded` answers `chunk_check`, `chunk_check_error`, `embedder_ready`, and `embedder_state` (`ready`, `warming` or `failed`) with `embedder_error` naming a failed startup warm-up, so a caller can tell a warm-up in progress from one that failed (#9275).
+- `memory_remember` and `memory_note` accept an optional `verify`: the command that re-reads a Tier C slot's fact, e.g. `gh pr view 123 --json headRefOid`. It needs `fact_key`; a `verify` without one, or an empty one, is an error and nothing is written. `memory_list` reports `verify` per drawer (null when none, and always null for a drawer with no `fact_key`). If the command fails to record after the drawer commits, the drawer is still indexed for BM25 and announced, and the call then returns the error. A later write to the same slot closes the retired drawer's command. Palace export does not carry the command, since export already skips Tier C slots (#9390).
+
+### Fixed
+
+- `memory_recall`, `memory_recall_deep` and `memory_recall_all` no longer return a drawer past its `expires_at` while the embedder is warming. The BM25 lexical lane hydrated its hits without the expiry check the other recall layers apply, so an expired Tier C slot matching the query came back. The drawer is skipped, not deleted; `memory_list` still lists it (#9390).
+- While the embedder is warming, `memory_recall`, `memory_recall_deep` and `memory_recall_all` fetch more BM25 hits when expired Tier C slots fill the lexical window, up to the same 1024-hit cap as the vector lanes. Before, 20 or more expired slots matching the query hid the live slot. Nothing is deleted (#9390).
+- A tool call or service request against a palace refused over its on-disk format (`FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable`, `FormatMigrationFailed`) now answers JSON-RPC `-32006` (refused) instead of `-32603` (internal error). The message still leads with the variant name. Backup, disk-space and I/O failures stay `-32603` (#9665).
+
+### Changed
+
+- `palace_verify_embedded` reports a drawer with missing chunk rows under `missing`, and `verified` is false while the chunk-count check could not run. `palace_reembed` reports and repairs short drawers (`short`, `still_short_ids`, `chunk_check`), and `palace_embed_sweep` rows carry `short` and `chunk_check`. The kuzu import rewrites a drawer's whole chunk group (#9275).
+- Version 0.34.0 was skipped on purpose and never published or tagged; 0.35.0 follows 0.33.0 on crates.io (owner ruling Dfa).
+
 ## [0.33.0] — 2026-10-10
 
 ### Added
