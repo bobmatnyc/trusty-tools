@@ -32,7 +32,8 @@ const LIST_SHORT_FLAGS: [char; 2] = ['f', 'm'];
 ///
 /// Why: see the module doc.
 /// What: [`without_text_slots`] removes each quoted `--body`, `--title`,
-/// `--message`, `--note` or `-m` value; the text then loses every `'`, `"`,
+/// `--message`, `--note` or `-m` value; each `\`+newline continuation becomes
+/// a space; the text then loses every `'`, `"`,
 /// `$` and `\` and is cut at `;`, `|`, `&` and newlines. A segment denies
 /// when it holds a word whose basename is `file` (any case), a later
 /// list-reading flag ([`reads_a_list`]), and a later word in the #7266
@@ -44,7 +45,12 @@ const LIST_SHORT_FLAGS: [char; 2] = ['f', 'm'];
 /// `a_lone_echo_of_the_call_denies_with_the_body_file_hint`.
 pub(crate) fn file_list_flag_text(command: &str) -> Option<String> {
     // #9791 (D5b): the threat model is mistakes only, not deliberate evasion.
-    let normal: String = without_text_slots(command)
+    // #9791: join a `\`+newline continuation into a space before the cut at
+    // `\n`, as the #7266 splitter does, so a wrapped call stays one segment.
+    let joined = without_text_slots(command)
+        .replace("\\\r\n", " ")
+        .replace("\\\n", " ");
+    let normal: String = joined
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '$' | '\\'))
         .collect();
