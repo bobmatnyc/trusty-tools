@@ -7,7 +7,10 @@
 //! Test: this file IS the tests.
 
 use super::deferred_embed::{EmbedLoss, RetryPolicy, embed_and_store};
-use super::embed_store::{embed_chunks, embed_chunks_within, expected_chunk_count, plan_chunks};
+use super::embed_store::{
+    chunked_embed_timeout, clamp_chunked_timeout, embed_chunks, embed_chunks_within,
+    expected_chunk_count, plan_chunks,
+};
 use super::handle::PalaceHandle;
 use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
 use crate::memory_core::embed::Embedder;
@@ -322,4 +325,39 @@ async fn a_wedged_chunked_embed_ends_at_the_scaled_bound() {
         took >= per_chunk * n && took < std::time::Duration::from_secs(30),
         "{took:?} for {n} chunks"
     );
+}
+
+/// #9735 Q3: 4096 chunks at 30 s each was a 34 h ceiling.
+#[test]
+fn chunked_embed_timeout_is_clamped_at_the_cap() {
+    let cap = std::time::Duration::from_secs(
+        crate::memory_core::timeouts::DEFAULT_EMBED_CHUNKED_CAP_SECS,
+    );
+    let got = clamp_chunked_timeout(std::time::Duration::from_secs(30), 4096, cap);
+    assert_eq!(got, std::time::Duration::from_secs(600));
+    // Below the cap the scaled bound is unchanged.
+    let small = clamp_chunked_timeout(std::time::Duration::from_secs(30), 4, cap);
+    assert_eq!(small, std::time::Duration::from_secs(120));
+}
+
+/// #9735 Q3: the operator's `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` is the floor.
+#[test]
+fn chunked_embed_timeout_never_drops_below_the_operators_per_chunk() {
+    let cap = std::time::Duration::from_secs(600);
+    let per_chunk = std::time::Duration::from_secs(900);
+    assert_eq!(clamp_chunked_timeout(per_chunk, 4096, cap), per_chunk);
+    assert_eq!(clamp_chunked_timeout(per_chunk, 1, cap), per_chunk);
+}
+
+/// #9735 Q3: the cap is `TRUSTY_EMBED_CHUNKED_CAP_SECS`, not a constant.
+#[test]
+fn chunked_embed_timeout_honours_the_cap_env() {
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    unsafe { std::env::set_var("TRUSTY_EMBED_CHUNKED_CAP_SECS", "60") };
+    let got = chunked_embed_timeout(std::time::Duration::from_secs(30), 4096);
+    unsafe { std::env::remove_var("TRUSTY_EMBED_CHUNKED_CAP_SECS") };
+    assert_eq!(got, std::time::Duration::from_secs(60));
 }

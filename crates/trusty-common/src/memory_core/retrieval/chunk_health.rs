@@ -99,7 +99,12 @@ pub(super) fn short_chunk_ids(
             Ok(expected) if shape.is_complete(expected) => {}
             Ok(_) => short.push(id),
             Err(e) => {
-                tracing::warn!(drawer = %id, "#9275: drawer text will not split: {e:#}");
+                // #9735 gap 13: health runs every tick; warn once per drawer.
+                if first_sighting(id) {
+                    tracing::warn!(drawer = %id, "#9275: drawer text will not split: {e:#}");
+                } else {
+                    tracing::debug!(drawer = %id, "#9275: drawer text will not split: {e:#}");
+                }
                 short.push(id);
             }
         }
@@ -109,4 +114,47 @@ pub(super) fn short_chunk_ids(
 
 fn unavailable(reason: String) -> (Vec<Uuid>, ChunkCheck) {
     (Vec::new(), ChunkCheck::Unavailable(reason))
+}
+
+/// Most drawers remembered by [`first_sighting`]; past it every call is `false`.
+pub(super) const SIGHTING_CAP: usize = 4096;
+
+/// A capped set of drawer ids already reported.
+/// Test: `first_sighting_set_is_bounded`.
+pub(super) struct Sightings {
+    seen: HashSet<Uuid>,
+    cap: usize,
+}
+
+impl Sightings {
+    pub(super) fn new(cap: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            cap,
+        }
+    }
+
+    /// True the first time `id` is seen while the set has room; else false.
+    pub(super) fn first(&mut self, id: Uuid) -> bool {
+        if self.seen.len() >= self.cap {
+            return false;
+        }
+        self.seen.insert(id)
+    }
+}
+
+/// Whether this is the first unsplittable-drawer report for `id` in this
+/// process.
+///
+/// Why (#9735 gap 13): the backfill ticker runs the health check every tick,
+/// and a warning per unsplittable drawer per tick floods the log.
+/// What: a process-wide [`Sightings`] capped at [`SIGHTING_CAP`]; true on the
+/// first call for an id, false after, and false for any id once it is full.
+/// Test: `first_sighting_is_true_once_per_drawer_per_process`,
+/// `repeated_health_calls_warn_once_for_an_unsplittable_drawer`.
+pub(super) fn first_sighting(id: Uuid) -> bool {
+    static SEEN: std::sync::OnceLock<parking_lot::Mutex<Sightings>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| parking_lot::Mutex::new(Sightings::new(SIGHTING_CAP)))
+        .lock()
+        .first(id)
 }

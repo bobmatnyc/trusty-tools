@@ -12,6 +12,7 @@
 use crate::embedder::{ChunkTokenizer, chunk_text};
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,12 +116,28 @@ pub async fn embed_chunks(embedder: &dyn Embedder, text: &str) -> Result<Vec<Vec
 /// Why (#9275 fix round): `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` was sized for one
 /// input. Applied once to a whole drawer's chunks, it timed out a long drawer
 /// that got one vector before chunking, and it then got none.
-/// What: `per_chunk × max(chunks, 1)`, saturating. Bounded, because a split
-/// never yields more than `MAX_CHUNKS_PER_DRAWER` chunks.
+/// What: `per_chunk × max(chunks, 1)`, saturating, clamped by
+/// [`clamp_chunked_timeout`] at `TRUSTY_EMBED_CHUNKED_CAP_SECS` (#9735 Q3).
 /// Test: `a_multi_chunk_drawer_inside_the_scaled_embed_timeout_gets_every_vector`,
-/// `a_wedged_chunked_embed_ends_at_the_scaled_bound`.
+/// `a_wedged_chunked_embed_ends_at_the_scaled_bound`,
+/// `chunked_embed_timeout_honours_the_cap_env`.
 pub(crate) fn chunked_embed_timeout(per_chunk: Duration, chunks: usize) -> Duration {
-    per_chunk.saturating_mul(u32::try_from(chunks.max(1)).unwrap_or(u32::MAX))
+    clamp_chunked_timeout(per_chunk, chunks, timeouts::chunked_embed_cap())
+}
+
+/// `min(per_chunk × chunks, max(per_chunk, cap))`.
+///
+/// Why (#9735 Q3): the scaled bound needs a ceiling, but an operator who
+/// raised `TRUSTY_EMBED_BATCH_TIMEOUT_SECS` above the cap must keep at least
+/// one chunk's worth.
+/// What: with `per_chunk` above `cap` and more than one chunk, the ceiling is
+/// `per_chunk`; otherwise it is the scaled bound, capped at `cap`.
+/// Test: `chunked_embed_timeout_is_clamped_at_the_cap`,
+/// `chunked_embed_timeout_never_drops_below_the_operators_per_chunk`.
+pub(crate) fn clamp_chunked_timeout(per_chunk: Duration, chunks: usize, cap: Duration) -> Duration {
+    let scaled = per_chunk.saturating_mul(u32::try_from(chunks.max(1)).unwrap_or(u32::MAX));
+    // #9735: the operator's per-chunk value is the floor of the ceiling.
+    scaled.min(per_chunk.max(cap))
 }
 
 /// [`embed_chunks`] under [`chunked_embed_timeout`]: the one bounded chunked
