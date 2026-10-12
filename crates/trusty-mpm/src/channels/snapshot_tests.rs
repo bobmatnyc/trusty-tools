@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
 use trusty_channels::policy::{
@@ -227,7 +227,9 @@ fn open_question() -> Vec<QuestionState> {
 type Refusals = (Option<Refusal<DenyReason>>, Option<Refusal<DropReason>>);
 
 /// Both checks for bob: `Ok(())` when both allow, else the two refusals.
-fn bob_verdicts<S: PolicySource, C: Clock>(snap: &PolicySnapshot<S, C>) -> Result<(), Refusals> {
+fn bob_verdicts<S: PolicySource + 'static, C: Clock + Send + Sync + 'static>(
+    snap: &PolicySnapshot<S, C>,
+) -> Result<(), Refusals> {
     let egress = snap.check_egress(Channel::Slack, BOB, MessageKind::Question);
     let inbound = snap.check_inbound(Channel::Slack, BOB, &[1], &open_question());
     match (egress, inbound) {
@@ -241,7 +243,7 @@ fn bob_verdicts<S: PolicySource, C: Clock>(snap: &PolicySnapshot<S, C>) -> Resul
 }
 
 /// Assert both checks are refused by the snapshot for `why`.
-fn assert_snapshot_denies<S: PolicySource, C: Clock>(
+fn assert_snapshot_denies<S: PolicySource + 'static, C: Clock + Send + Sync + 'static>(
     snap: &PolicySnapshot<S, C>,
     why: impl Fn(&SnapshotDeny) -> bool,
     what: &str,
@@ -269,18 +271,22 @@ fn refresh_within_interval_spawns_no_git() {
         0,
         "construction loads nothing"
     );
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     assert_eq!(calls.load(Ordering::SeqCst), 1, "the first check loads");
     for at in [0.5, 2.0, 4.999] {
         clock.set(secs(at));
+        settle(&snap);
         assert_eq!(bob_verdicts(&snap), Ok(()));
         assert!(snap.current().is_ok());
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1, "refreshed inside 5 s");
     clock.set(secs(5.0));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     assert_eq!(calls.load(Ordering::SeqCst), 2, "no refresh at 5 s");
     clock.set(secs(9.9));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     assert_eq!(calls.load(Ordering::SeqCst), 2, "refreshed inside 5 s");
 
@@ -292,9 +298,11 @@ fn refresh_within_interval_spawns_no_git() {
     home.write_host(&host(&[&dir]));
     let clock = TestClock::default();
     let snap = PolicySnapshot::new(LoaderSource::new(home.request()), clock.clone());
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     commit_routes(&dir, &routes(&[("bob-dm", BOB), ("eve-dm", EVE)]));
     clock.set(secs(4.9));
+    settle(&snap);
     let eve = snap.check_egress(Channel::Slack, EVE, MessageKind::Question);
     assert_eq!(
         eve.err(),
@@ -302,6 +310,7 @@ fn refresh_within_interval_spawns_no_git() {
         "reloaded early"
     );
     clock.set(secs(5.0));
+    settle(&snap);
     let eve = snap.check_egress(Channel::Slack, EVE, MessageKind::Question);
     assert_eq!(
         eve.map(|r| r.name().to_string()).ok().as_deref(),
@@ -317,14 +326,17 @@ fn snapshot_older_than_max_age_denies() {
         _ => panic!("scripted refresh failure"),
     });
     assert_eq!(MAX_AGE, Duration::from_secs(60));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     clock.set(secs(60.0));
+    settle(&snap);
     assert_eq!(
         bob_verdicts(&snap),
         Ok(()),
         "60 s is not older than max age"
     );
     clock.set(secs(60.001));
+    settle(&snap);
     assert_snapshot_denies(
         &snap,
         |d| matches!(d, SnapshotDeny::Stale { .. }),
@@ -348,10 +360,12 @@ fn denied_report_denies_egress_and_inbound() {
         report.denied = true;
         report
     });
+    settle(&snap);
     assert_snapshot_denies(&snap, |d| *d == SnapshotDeny::Denied, "denied report");
     assert_eq!(snap.current().err(), Some(SnapshotDeny::Denied));
     // Control: the same report without the flag allows.
     let (snap, _, _) = scripted(|_| bob_report());
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
 }
 
@@ -365,6 +379,7 @@ fn overlapping_routes_deny_daemon_snapshot() {
     commit_routes(&b, &routes(&[("bob-too", BOB), ("eve-dm", EVE)]));
     home.write_host(&host(&[&a, &b]));
     let snap = PolicySnapshot::new(LoaderSource::new(home.request()), TestClock::default());
+    settle(&snap);
     assert_snapshot_denies(&snap, |d| *d == SnapshotDeny::Denied, "overlap");
     let eve = snap.check_egress(Channel::Slack, EVE, MessageKind::Question);
     assert_eq!(eve.err(), Some(Refusal::Snapshot(SnapshotDeny::Denied)));
@@ -397,27 +412,32 @@ fn routes_edit_outside_config_yaml_has_no_effect_in_daemon() {
         let inbound = snap.check_inbound(Channel::Slack, EVE, &[1], &[]);
         assert!(inbound.is_err(), "{what}: eve inbound accepted");
     };
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     eve_denied("unlisted project");
 
     let widened = routes(&[("bob-dm", BOB), ("eve-dm", EVE)]);
     write_routes(&dir, &widened);
     clock.set(secs(5.0));
+    settle(&snap);
     eve_denied("uncommitted edit");
     assert_eq!(bob_verdicts(&snap), Ok(()), "uncommitted edit");
 
     git(&dir, &["add", ".trusty-channels/routes.toml"]);
     clock.set(secs(10.0));
+    settle(&snap);
     eve_denied("staged edit");
     assert_eq!(bob_verdicts(&snap), Ok(()), "staged edit");
     // An unreviewed edit is not a fault: the snapshot stays fresh.
     clock.set(secs(120.0));
+    settle(&snap);
     eve_denied("staged edit, two minutes on");
     assert_eq!(bob_verdicts(&snap), Ok(()), "staged edit, two minutes on");
 
     // Control: the reviewed path does reach the daemon.
     git(&dir, &["commit", "-q", "-m", "routes"]);
     clock.set(secs(125.0));
+    settle(&snap);
     let eve = snap.check_egress(Channel::Slack, EVE, MessageKind::Question);
     assert_eq!(
         eve.map(|r| r.name().to_string()).ok().as_deref(),
@@ -432,6 +452,7 @@ fn empty_policy_with_enabled_channel_denies() {
     for listed in [vec![], vec![dir.as_path()]] {
         home.write_host(&host(&listed));
         let snap = PolicySnapshot::new(LoaderSource::new(home.request()), TestClock::default());
+        settle(&snap);
         let report = snap.current().expect("an empty policy is a valid load");
         assert!(report.policy.is_empty(), "{listed:?}");
         let egress = snap.check_egress(Channel::Slack, BOB, MessageKind::Question);
@@ -501,9 +522,11 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
     }
     for (what, script) in cases {
         let (snap, clock, calls) = scripted(script);
+        settle(&snap);
         assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: first load");
         for at in [5.0, 30.0, 60.0] {
             clock.set(secs(at));
+            settle(&snap);
             assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: last good at {at} s");
         }
         assert!(
@@ -511,12 +534,14 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
             "{what}: no failed refresh ran"
         );
         clock.set(secs(61.0));
+        settle(&snap);
         assert_snapshot_denies(
             &snap,
             |d| matches!(d, SnapshotDeny::Stale { .. }),
             &format!("{what}: past max age"),
         );
         clock.set(secs(600.0));
+        settle(&snap);
         assert_snapshot_denies(
             &snap,
             |d| matches!(d, SnapshotDeny::Stale { .. }),
@@ -526,6 +551,7 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
 
     // A first load that panics leaves nothing to serve.
     let (snap, _, _) = scripted(|_| panic!("scripted first-load failure"));
+    settle(&snap);
     assert_snapshot_denies(
         &snap,
         |d| *d == SnapshotDeny::NeverLoaded,
@@ -538,10 +564,13 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
         1 => panic!("scripted refresh failure"),
         _ => bob_report(),
     });
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     clock.set(secs(5.0));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     clock.set(secs(64.0));
+    settle(&snap);
     assert_eq!(
         bob_verdicts(&snap),
         Ok(()),
@@ -558,16 +587,19 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
     home.write_host(&host(&[&dir]));
     let clock = TestClock::default();
     let snap = PolicySnapshot::new(LoaderSource::new(home.request()), clock.clone());
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()), "real: first load");
     let file = dir.join(".trusty-channels/routes.toml");
     set_mode(&file, 0o000);
     clock.set(secs(5.0));
+    settle(&snap);
     assert_eq!(
         bob_verdicts(&snap),
         Ok(()),
         "real: last good inside max age"
     );
     clock.set(secs(61.0));
+    settle(&snap);
     let denied = bob_verdicts(&snap);
     set_mode(&file, 0o644);
     match denied {
@@ -591,8 +623,10 @@ fn refresh_that_outlasts_max_age_denies() {
             })
         }
     });
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     clock.set(secs(5.0));
+    settle(&snap);
     match snap.current() {
         Err(SnapshotDeny::Stale { age, max }) => {
             assert_eq!(max, MAX_AGE);
@@ -612,11 +646,14 @@ fn git_fault_reported_as_a_verdict_ages_to_deny() {
     home.write_host(&host(&[&dir]));
     let clock = TestClock::default();
     let snap = PolicySnapshot::new(LoaderSource::new(home.request()), clock.clone());
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()), "first load");
     std::fs::write(dir.join(".git/config"), "[core\nbroken").expect("corrupt config");
     clock.set(secs(5.0));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()), "last good inside max age");
     clock.set(secs(61.0));
+    settle(&snap);
     assert_snapshot_denies(
         &snap,
         |d| matches!(d, SnapshotDeny::Stale { .. }),
@@ -650,9 +687,11 @@ fn git_fault_reported_as_a_verdict_ages_to_deny() {
             0 => bob_report(),
             _ => stale_bob_report(verdict.clone()),
         });
+        settle(&snap);
         assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: first load");
         for at in [5.0, 61.0, 120.0] {
             clock.set(secs(at));
+            settle(&snap);
             assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: at {at} s");
         }
     }
@@ -669,10 +708,13 @@ fn stale_file_with_no_refusal_finding_ages_to_deny() {
         }
         report
     });
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()), "first load");
     clock.set(secs(60.0));
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()), "inside max age");
     clock.set(secs(61.0));
+    settle(&snap);
     assert_snapshot_denies(
         &snap,
         |d| matches!(d, SnapshotDeny::Stale { .. }),
@@ -701,11 +743,12 @@ fn running_as_root() -> bool {
 #[test]
 fn poisoned_snapshot_lock_denies() {
     let (snap, _, _) = scripted(|_| bob_report());
+    settle(&snap);
     assert_eq!(bob_verdicts(&snap), Ok(()));
     let snap = Arc::new(snap);
     let held = Arc::clone(&snap);
     let poisoner = std::thread::spawn(move || {
-        let _guard = held.state.lock();
+        let _guard = held.inner.published.lock();
         panic!("poison the snapshot lock");
     });
     assert!(poisoner.join().is_err());
@@ -718,7 +761,9 @@ const HANG_GUARD: Duration = Duration::from_secs(10);
 
 /// Start the refresh a check at the clock's time would start, then wait
 /// until no refresh is in flight.
-fn settle<S: PolicySource, C: Clock>(snap: &PolicySnapshot<S, C>) {
+fn settle<S: PolicySource + 'static, C: Clock + Send + Sync + 'static>(
+    snap: &PolicySnapshot<S, C>,
+) {
     let _ = snap.current();
     snap.wait_idle();
 }
@@ -903,6 +948,109 @@ fn never_loaded_denies_while_first_refresh_in_flight() {
     assert!(snap.current().is_ok(), "the first load was not published");
 }
 
+#[test]
+fn unverified_refresh_keeps_previous_report_and_ages() {
+    // #9777: unverified reports from the refresh thread never move the fresh
+    // time, so checks that never wait see the snapshot age to deny.
+    let (snap, clock, calls) = scripted(|n| match n {
+        0 => bob_report(),
+        _ => stale_bob_report(ProjectFileError::Gate {
+            error: GateError::GitTimedOut { step: "show" },
+        }),
+    });
+    settle(&snap);
+    for at in [5.0, 30.0, 60.0] {
+        clock.set(secs(at));
+        assert_eq!(bob_verdicts(&snap), Ok(()), "last good at {at} s");
+    }
+    clock.set(secs(61.0));
+    assert_snapshot_denies(
+        &snap,
+        |d| matches!(d, SnapshotDeny::Stale { .. }),
+        "past max age, no wait",
+    );
+    snap.wait_idle();
+    assert!(calls.load(Ordering::SeqCst) >= 2, "no failed refresh ran");
+    assert_snapshot_denies(
+        &snap,
+        |d| matches!(d, SnapshotDeny::Stale { .. }),
+        "past max age, every refresh returned",
+    );
+}
+
+#[test]
+fn refresh_panic_clears_in_flight_and_keeps_report() {
+    // #9777: a refresh that panics on its own thread ends its flight.
+    let (snap, clock, calls) = scripted(|n| match n {
+        0 => bob_report(),
+        _ => panic!("scripted refresh failure"),
+    });
+    settle(&snap);
+    let before = snap.current().expect("first load");
+    clock.set(secs(5.0));
+    settle(&snap);
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the refresh at 5 s ran");
+    let after = snap.current().expect("last good inside max age");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "a panicked refresh replaced it"
+    );
+    clock.set(secs(10.0));
+    settle(&snap);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "a panicked refresh wedged the snapshot"
+    );
+    clock.set(secs(61.0));
+    match snap.current() {
+        Err(SnapshotDeny::Stale { age, .. }) => assert_eq!(age, secs(61.0)),
+        other => panic!("age counts from the clean load at 0 s: {other:?}"),
+    }
+}
+
+#[test]
+fn concurrent_due_checks_start_one_refresh() {
+    // #9777: eight checks find a refresh due at once; one refresh runs.
+    let (gate, held) = gate();
+    let active = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    let (now_active, most_active) = (Arc::clone(&active), Arc::clone(&most));
+    let (snap, clock, calls) = scripted(move |n| {
+        let running = now_active.fetch_add(1, Ordering::SeqCst) + 1;
+        most_active.fetch_max(running, Ordering::SeqCst);
+        if n == 1 {
+            held.hold();
+        }
+        now_active.fetch_sub(1, Ordering::SeqCst);
+        bob_report()
+    });
+    settle(&snap);
+    let snap = Arc::new(snap);
+    clock.set(secs(5.0));
+    let barrier = Arc::new(Barrier::new(8));
+    let checks: Vec<_> = (0..8)
+        .map(|_| {
+            let (tx, rx) = mpsc::channel();
+            let (snap, barrier) = (Arc::clone(&snap), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = tx.send(snap.current());
+            });
+            rx
+        })
+        .collect();
+    assert!(gate.entered(), "the due refresh never reached the source");
+    for rx in checks {
+        let checked = rx.recv_timeout(HANG_GUARD);
+        assert!(matches!(checked, Ok(Ok(_))), "{checked:?}");
+    }
+    gate.open();
+    snap.wait_idle();
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "more than one refresh ran");
+    assert_eq!(most.load(Ordering::SeqCst), 1, "two refreshes overlapped");
+}
+
 #[cfg(feature = "daemon")]
 #[tokio::test]
 async fn daemon_state_holds_snapshot_under_its_user_home() {
@@ -912,6 +1060,7 @@ async fn daemon_state_holds_snapshot_under_its_user_home() {
     let home = state.user_home().expect("pinned home");
     assert!(home.starts_with(&root), "{home:?}");
     let snap = state.channel_policy();
+    settle(snap);
     // No config.yaml under the pinned home: the host is missing, deny all.
     assert_eq!(snap.current().err(), Some(SnapshotDeny::Denied));
     assert!(
