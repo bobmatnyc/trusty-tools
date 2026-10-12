@@ -73,14 +73,14 @@ async fn oversized(h: &PalaceHandle, text: &str) -> Uuid {
     id
 }
 
-/// Run slices until one visits nothing; at most six.
+/// Run slices until health has nothing to repair; at most six. A split slice
+/// embeds nothing, so a slice's own counts cannot say the work is done.
 async fn drive(h: &PalaceHandle, e: &Emb) -> Vec<SliceReport> {
     let mut reports = Vec::new();
     for _ in 0..6 {
-        let r = h.reembed_slice(e, &bounds()).await;
-        let idle = r.attempted == 0 && r.stale == 0 && r.stop == SliceStop::QueueEmpty;
-        reports.push(r);
-        if idle {
+        reports.push(h.reembed_slice(e, &bounds()).await);
+        let health = h.embed_health_with(Some(e.as_ref()));
+        if health.missing_vector_ids.is_empty() && health.short_chunk_ids.is_empty() {
             break;
         }
     }
