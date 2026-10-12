@@ -9,8 +9,8 @@
 //! Test: this is the test module.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use trusty_channels::policy::{
@@ -135,7 +135,10 @@ fn ask_loaded(snap: &Snap, cache: &VerdictCache) -> VerdictReply {
         if reply != cold {
             return reply;
         }
-        assert!(started.elapsed() < POLL_GUARD, "the first load never landed");
+        assert!(
+            started.elapsed() < POLL_GUARD,
+            "the first load never landed"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -144,7 +147,10 @@ fn ask_loaded(snap: &Snap, cache: &VerdictCache) -> VerdictReply {
 fn wait_for_fingerprint(snap: &Snap, fingerprint: u64) {
     let started = Instant::now();
     while !matches!(snap.current_aged(), Ok((r, _)) if r.fingerprint == fingerprint) {
-        assert!(started.elapsed() < POLL_GUARD, "fingerprint {fingerprint} never landed");
+        assert!(
+            started.elapsed() < POLL_GUARD,
+            "fingerprint {fingerprint} never landed"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }

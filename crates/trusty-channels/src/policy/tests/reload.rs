@@ -352,7 +352,11 @@ fn loader_report_carries_a_fingerprint_that_follows_its_sources() {
     let first = loader.report().fingerprint;
     assert_ne!(first, 0, "a loader report must carry a fingerprint");
     assert!(!loader.refresh(), "nothing changed");
-    assert_eq!(loader.report().fingerprint, first, "a no-op refresh moved it");
+    assert_eq!(
+        loader.report().fingerprint,
+        first,
+        "a no-op refresh moved it"
+    );
     repo.commit_routes(&bob_and_eve());
     assert!(loader.refresh());
     let second = loader.report().fingerprint;

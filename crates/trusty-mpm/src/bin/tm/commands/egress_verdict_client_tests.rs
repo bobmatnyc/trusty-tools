@@ -225,7 +225,11 @@ async fn malformed_daemon_answer_denies() {
             "{body:?}: {result:?}"
         );
         assert_eq!(runs, 0, "{body:?}");
-        assert_eq!(parse(body.as_bytes()), Err(QueryError::Malformed), "{body:?}");
+        assert_eq!(
+            parse(body.as_bytes()),
+            Err(QueryError::Malformed),
+            "{body:?}"
+        );
     }
 }
 
@@ -267,7 +271,10 @@ async fn non_2xx_daemon_answer_denies() {
 #[tokio::test]
 async fn ready_answer_skips_the_inline_load() {
     let ready = json!({"answer": "ready", "fingerprint": 9, "age_ms": 10});
-    assert_eq!(ready_against(Some(ok(&ready)), no_inline).await, (Ok(()), 0));
+    assert_eq!(
+        ready_against(Some(ok(&ready)), no_inline).await,
+        (Ok(()), 0)
+    );
     let not_ready = json!({"answer": "not_ready", "slug": "egress-policy-not-ready",
                            "not_ready": "NoRoutes", "fingerprint": 9, "age_ms": 10});
     assert_eq!(
@@ -348,10 +355,8 @@ async fn untainted_session_never_queries_the_daemon() {
     let kept = with_taint_async(first.clone(), &read_call(SESSION), at, never).await;
     assert_eq!(kept, first);
     // Control: the tainted session's call does ask.
-    let asked = with_taint_async(Verdict::Allow, &read_call(SESSION), at, || async {
-        Ok(())
-    })
-    .await;
+    let asked =
+        with_taint_async(Verdict::Allow, &read_call(SESSION), at, || async { Ok(()) }).await;
     assert!(matches!(
         asked,
         Verdict::Deny {

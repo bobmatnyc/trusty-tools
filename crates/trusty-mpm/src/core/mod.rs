@@ -86,10 +86,6 @@ pub mod channels_taint;
 pub mod channels_readiness;
 #[cfg(test)]
 mod channels_readiness_tests;
-// #8454 VC: the egress verdict contract between the daemon and the hook.
-pub mod egress_verdict;
-#[cfg(test)]
-mod egress_verdict_tests;
 pub mod circuit;
 pub mod claude_config;
 // Issue #4467: the shared set of Claude Code process-local session markers every
@@ -157,6 +153,10 @@ pub mod disk_usage_guard;
 pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
+// #8454 VC: the egress verdict contract between the daemon and the hook.
+pub mod egress_verdict;
+#[cfg(test)]
+mod egress_verdict_tests;
 pub mod framework_content;
 // #7678: `tm doctor --fix`'s session-scope arm — re-applies the plugin and MCP
 // scope writes to a live project through the launch path's own writers.
