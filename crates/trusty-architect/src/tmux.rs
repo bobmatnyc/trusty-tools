@@ -57,17 +57,46 @@ impl fmt::Display for PaneId {
     }
 }
 
+/// Proof that a call came from this crate's guarded send path.
+///
+/// Why: [`Tmux::run`] must not carry `send-keys`, yet [`send_guarded`] has to
+/// reach the same tmux. The token has no public constructor, so only code in
+/// this crate can pass one to [`Tmux::execute`].
+/// What: a zero-sized value; [`Tmux::run`] and the crate-private `send_keys`
+/// are the only places that make one.
+/// Test: `run_refuses_send_keys_on_every_implementation`.
+///
+/// [`send_guarded`]: crate::send_guarded
+#[derive(Debug, Clone, Copy)]
+pub struct Permit(());
+
 /// Access to one tmux server.
 ///
 /// Why: three copies of "shell out to tmux" exist today (Python `fleet-poll.py`,
 /// trusty-mpm's `fleet/launch.rs` and `fleet/poller.rs`); the port needs one
 /// seam that tests can replace without a tmux server.
-/// What: [`Tmux::run`] runs one tmux command and returns its stdout.
+/// What: [`Tmux::run`] runs one tmux command and returns its stdout, except
+/// `send-keys`, which it refuses with [`TmuxError::SendKeysRefused`]. Keys go
+/// out only through [`crate::send_guarded`], which checks the input box and
+/// then calls [`Tmux::execute`] with a [`Permit`] that only this crate can
+/// make. An implementor writes `execute`; `run` is not overridden.
 /// Test: `system_run_rejects_empty_args`, `send_keys_presses_named_keys`
-/// (via [`crate::FakeTmux`]).
+/// (via [`crate::FakeTmux`]), `run_refuses_send_keys_on_every_implementation`.
 pub trait Tmux {
-    /// Runs `tmux <args>` and returns stdout. `args[0]` is the verb.
-    fn run(&self, args: &[&str]) -> Result<String, TmuxError>;
+    /// Runs `tmux <args>` and returns stdout. `args[0]` is the verb; a
+    /// `send-keys` verb is [`TmuxError::SendKeysRefused`].
+    fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
+        if args.first() == Some(&"send-keys") {
+            return Err(TmuxError::SendKeysRefused);
+        }
+        self.execute(args, Permit(()))
+    }
+
+    /// Runs `tmux <args>` with no verb filter. A caller outside this crate
+    /// cannot make the [`Permit`], so it cannot call this; implementors only
+    /// supply the body.
+    #[doc(hidden)]
+    fn execute(&self, args: &[&str], permit: Permit) -> Result<String, TmuxError>;
 }
 
 /// A tmux key name the send path may press.
@@ -112,8 +141,10 @@ pub enum Keys<'a> {
 
 /// Sends `keys` to `pane` with `send-keys`, unguarded.
 ///
-/// Crate-private so [`crate::send_guarded`], which checks the input box first,
-/// is the only public way to send. In literal mode `-l` precedes `--`, so a
+/// Crate-private, and the only caller of [`Tmux::execute`] with `send-keys`, so
+/// [`crate::send_guarded`], which checks the input box first, is the only way
+/// to send through a [`Tmux`] (a caller that bypasses the trait and spawns
+/// `tmux` itself is outside what this crate can stop). In literal mode `-l` precedes `--`, so a
 /// text that starts with `-` (`-t foo`, `-l`) reaches the pane as text.
 /// Test: `send_keys_types_a_dash_leading_literal_as_text`,
 /// `send_keys_presses_named_keys`.
@@ -127,7 +158,7 @@ pub(crate) fn send_keys<T: Tmux + ?Sized>(
         Keys::Literal(text) => args.extend(["-l", "--", text]),
         Keys::Named(names) => args.extend(names.iter().map(|k| k.as_str())),
     }
-    tmux.run(&args).map(drop)
+    tmux.execute(&args, Permit(())).map(drop)
 }
 
 /// How long one tmux call may run: the prototype's `timeout=10`.
@@ -201,7 +232,7 @@ impl SystemTmux {
 }
 
 impl Tmux for SystemTmux {
-    fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
+    fn execute(&self, args: &[&str], _permit: Permit) -> Result<String, TmuxError> {
         let verb = (*args.first().ok_or(TmuxError::EmptyCommand)?).to_owned();
         tracing::debug!(verb, "running tmux");
         let done = run_bounded(self.command(args), self.timeout).map_err(|f| match f {

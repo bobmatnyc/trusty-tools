@@ -1,23 +1,28 @@
 //! `poll-state.json`: the poller's state across cycles.
 //!
 //! Why: dedup, the idle clocks, the events offset and the builder band live
-//! here. The prototype writes it with `json.dump` to a `.tmp` file and
+//! here. The prototype writes it with `json.dump` to a fixed `.tmp` file and
 //! `os.replace`, with no fsync, and treats an unreadable file as empty. Rust
 //! owns the format (Architect ruling Q7) but must keep every key it does not
 //! know, so a rollback to Python keeps its state (#9171 A3a).
 //! What: [`PollState`] types the keys A2/A3a code reads and keeps every other
-//! key in [`PollState::other`] unchanged. [`save_state`] writes
-//! `<path>.tmp`, syncs it, renames it over `path` and syncs the directory, so
-//! a kill at any point leaves either the old file or the new one, never a
-//! truncated one. [`load_state`] returns an empty state for a missing file and
+//! key in [`PollState::other`] unchanged. [`save_state`] creates a uniquely
+//! named sibling (`<path>.<pid>.<n>.tmp`, `create_new`), so two writers never
+//! share a temporary file, writes and syncs it, renames it over `path` and
+//! syncs the directory. A kill at any point leaves either the old file or the
+//! new one, never a truncated one; a save that fails removes its temporary
+//! file, while a SIGKILL can leave one behind. [`load_state`] returns an empty state for a missing file and
 //! an empty state plus the error for an unreadable or corrupt one.
 //! Test: `a_save_killed_between_steps_leaves_a_state_that_parses`,
-//! `state_survives_sigkill_mid_save`, `unknown_state_keys_round_trip`.
+//! `state_survives_sigkill_mid_save`, `unknown_state_keys_round_trip`,
+//! `concurrent_saves_use_distinct_temporary_files`,
+//! `a_failed_save_leaves_no_temporary_file`.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
@@ -84,11 +89,11 @@ fn de_dedup<'de, D: Deserializer<'de>>(d: D) -> Result<DedupState, D::Error> {
 /// A point inside [`save_state_with`] where a kill can land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveStep {
-    /// The bytes are in `<path>.tmp`, not yet synced.
+    /// The bytes are in the temporary file, not yet synced.
     Written,
-    /// `<path>.tmp` is synced, not yet renamed.
+    /// The temporary file is synced, not yet renamed.
     Synced,
-    /// `<path>.tmp` is renamed over `path`; the directory is not yet synced.
+    /// The temporary file is renamed over `path`; the directory is not yet synced.
     Renamed,
 }
 
@@ -99,14 +104,33 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> StateError + '_ {
     }
 }
 
-/// `<path>.tmp`, the prototype's temporary name.
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
-    PathBuf::from(name)
+/// Distinguishes the temporary files of saves in one process.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// How many names to try before giving up on a directory full of stale files.
+const TMP_ATTEMPTS: u32 = 32;
+
+/// Creates `<path>.<pid>.<n>.tmp` with `create_new`, so it never opens a file
+/// another writer (or a stale one from a reused pid) already holds.
+fn create_tmp(path: &Path) -> io::Result<(File, PathBuf)> {
+    for _ in 0..TMP_ATTEMPTS {
+        let mut name = path.as_os_str().to_owned();
+        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        name.push(format!(".{}.{n}.tmp", std::process::id()));
+        let tmp = PathBuf::from(name);
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(f) => return Ok((f, tmp)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no unused temporary file name",
+    ))
 }
 
-/// Writes `state` to `path` atomically (tmp + fsync + rename + dir fsync).
+/// Writes `state` to `path` atomically (unique tmp + fsync + rename + dir fsync).
 ///
 /// # Errors
 /// [`StateError::Io`] when any step fails; `path` then still holds the old
@@ -129,14 +153,29 @@ pub fn save_state_with(
         path: path.to_owned(),
         source: io::Error::other(e),
     })?;
-    let tmp = tmp_path(path);
-    let mut f = File::create(&tmp).map_err(io_err(&tmp))?;
-    f.write_all(text.as_bytes()).map_err(io_err(&tmp))?;
-    at(SaveStep::Written).map_err(io_err(&tmp))?;
-    f.sync_all().map_err(io_err(&tmp))?;
-    drop(f);
-    at(SaveStep::Synced).map_err(io_err(&tmp))?;
-    fs::rename(&tmp, path).map_err(io_err(path))?;
+    let (mut f, tmp) = create_tmp(path).map_err(io_err(path))?;
+    let saved = write_and_rename(&mut f, &tmp, path, text.as_bytes(), at);
+    if saved.is_err() {
+        // Best effort: after a rename the file is already gone (NotFound).
+        drop(f);
+        let _ = fs::remove_file(&tmp);
+    }
+    saved
+}
+
+/// The steps of [`save_state_with`] after the temporary file exists.
+fn write_and_rename(
+    f: &mut File,
+    tmp: &Path,
+    path: &Path,
+    text: &[u8],
+    at: &mut dyn FnMut(SaveStep) -> io::Result<()>,
+) -> Result<(), StateError> {
+    f.write_all(text).map_err(io_err(tmp))?;
+    at(SaveStep::Written).map_err(io_err(tmp))?;
+    f.sync_all().map_err(io_err(tmp))?;
+    at(SaveStep::Synced).map_err(io_err(tmp))?;
+    fs::rename(tmp, path).map_err(io_err(path))?;
     at(SaveStep::Renamed).map_err(io_err(path))?;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         File::open(dir)

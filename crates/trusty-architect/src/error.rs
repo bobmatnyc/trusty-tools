@@ -9,6 +9,10 @@ pub enum TmuxError {
     /// `run` was given no arguments, so there is no tmux verb to run.
     #[error("tmux: no verb given")]
     EmptyCommand,
+    /// `Tmux::run` was given the `send-keys` verb. Keys go out only through
+    /// [`crate::send_guarded`], which checks the input box first.
+    #[error("tmux send-keys is refused here; use send_guarded")]
+    SendKeysRefused,
     /// The `tmux` process could not be started (not on `PATH`, no permission).
     #[error("tmux {verb}: could not start: {source}")]
     Spawn {
@@ -88,8 +92,11 @@ pub enum SelfCtxError {
 
 /// An environment value the poller cannot use (#9171 A3a).
 ///
-/// The prototype re-reads these on every cycle and fails that cycle; the port
-/// reads them once, so a bad value fails at startup instead.
+/// The prototype re-reads these on every cycle. A bad `LOAD_FACTOR` fails the
+/// whole host check there, so [`crate::poller::Config::from_env`] returns this
+/// error for it. A bad `PANE_CTX_WINDOW`, `SELF_CTX_WINDOW` or
+/// `SELF_CTX_THRESHOLD` is caught inside its own sensor there, so the port
+/// keeps the config and lists the error in `Config::problems`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("environment {name}={value:?} is not a valid {want}")]
 pub struct ConfigError {

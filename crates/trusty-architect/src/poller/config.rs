@@ -6,11 +6,15 @@
 //! port reads the environment once through a caller-supplied lookup (#9171 A3a).
 //! What: [`Config::from_env`] builds every path and threshold the A3a sensors
 //! use. Paths fall back like `os.environ.get(X) or default`; numbers parse like
-//! Python's `float()`/`int()`; a bad `LOAD_FACTOR`, `SELF_CTX_WINDOW`,
-//! `SELF_CTX_THRESHOLD` or `PANE_CTX_WINDOW` is a [`ConfigError`] (the
-//! prototype raises on each cycle), while a bad `BAND_*` value falls back to
-//! its default (the prototype's `_env_float`).
-//! Test: `config_reads_env_once_like_the_prototype`.
+//! Python's `float()`/`int()`. A bad `LOAD_FACTOR` is a [`ConfigError`]: the
+//! prototype's `host_alerts` raises on it each cycle and the cycle fails. A bad
+//! `PANE_CTX_WINDOW`, `SELF_CTX_WINDOW` or `SELF_CTX_THRESHOLD` builds the
+//! config anyway, turns only the sensor that reads it off (the field is
+//! `None`) and lands in [`Config::problems`] for the caller to log; the
+//! prototype catches `ValueError` inside those two sensors. A bad `BAND_*`
+//! value falls back to its default (the prototype's `_env_float`).
+//! Test: `config_reads_env_once_like_the_prototype`,
+//! `bad_ctx_variables_switch_off_their_sensor_and_are_reported`.
 
 use std::path::{Path, PathBuf};
 
@@ -42,11 +46,15 @@ pub struct Config {
     /// `LOAD_FACTOR`.
     pub load_factor: f64,
     /// `PANE_CTX_WINDOW`: the window a PM pane's transcript tokens divide by.
-    pub pane_ctx_window: i64,
-    /// `SELF_CTX_WINDOW`.
-    pub self_ctx_window: i64,
-    /// `SELF_CTX_THRESHOLD`.
-    pub self_ctx_threshold: i64,
+    /// `None` when the value is not an integer: pane ctx is then off.
+    pub pane_ctx_window: Option<i64>,
+    /// `SELF_CTX_WINDOW`. `None` when bad: `self_ctx` is then off.
+    pub self_ctx_window: Option<i64>,
+    /// `SELF_CTX_THRESHOLD`. `None` when bad: `self_ctx` is then off.
+    pub self_ctx_threshold: Option<i64>,
+    /// Each bad `PANE_CTX_WINDOW` / `SELF_CTX_*` value, for the caller to log
+    /// (the prototype logs `self_ctx ERROR ...` and `transcript ctx ERROR ...`).
+    pub problems: Vec<ConfigError>,
     /// The builder-band lines (`BAND_*`).
     pub band: BandConfig,
 }
@@ -56,7 +64,8 @@ impl Config {
     /// `root` is the Architect project directory; `home` is the user's home.
     ///
     /// # Errors
-    /// [`ConfigError`] for a numeric variable Python's `float()`/`int()` rejects.
+    /// [`ConfigError`] for a `LOAD_FACTOR` Python's `float()` rejects. A bad ctx
+    /// variable is not an error here; see [`Config::problems`].
     pub fn from_env(
         root: &Path,
         home: &Path,
@@ -75,12 +84,16 @@ impl Config {
                 want: "number",
             }),
         };
-        let int = |name: &'static str, default: i64| match get(name) {
-            None => Ok(default),
-            Some(v) => py_int(&v).ok_or(ConfigError {
-                name,
-                value: v,
-                want: "integer",
+        let mut problems = Vec::new();
+        let mut int = |name: &'static str, default: i64| match get(name) {
+            None => Some(default),
+            Some(v) => py_int(&v).or_else(|| {
+                problems.push(ConfigError {
+                    name,
+                    value: v,
+                    want: "integer",
+                });
+                None
             }),
         };
         let config = home.join(".trusty-tools/trusty-mpm/claude-config");
@@ -88,6 +101,10 @@ impl Config {
         let lenient =
             |name: &str, default: f64| get(name).and_then(|v| py_float(&v)).unwrap_or(default);
         let root_text = root.to_string_lossy();
+        let load_factor = float("LOAD_FACTOR", LOAD_FACTOR_DEFAULT)?;
+        let pane_ctx_window = int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
+        let self_ctx_window = int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
+        let self_ctx_threshold = int("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT);
         Ok(Self {
             inbox: path("SUPERVISOR_INBOX_DIR", root.join("inbox")),
             sessions_dir: path("SESSIONS_DIR", config.join("sessions")),
@@ -96,10 +113,11 @@ impl Config {
             tmux_socket: get("TMUX_SOCKET")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
-            load_factor: float("LOAD_FACTOR", LOAD_FACTOR_DEFAULT)?,
-            pane_ctx_window: int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT)?,
-            self_ctx_window: int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT)?,
-            self_ctx_threshold: int("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT)?,
+            load_factor,
+            pane_ctx_window,
+            self_ctx_window,
+            self_ctx_threshold,
+            problems,
             band: BandConfig {
                 stop_load_factor: lenient("BAND_STOP_LOAD_FACTOR", band_default.stop_load_factor),
                 hold_load_factor: lenient("BAND_HOLD_LOAD_FACTOR", band_default.hold_load_factor),
@@ -157,7 +175,7 @@ mod tests {
             c.self_ctx_dir,
             Path::new("/home/u/.trusty-tools/trusty-mpm/claude-config/projects/-arch")
         );
-        assert_eq!((c.load_factor, c.self_ctx_threshold), (1.5, 25));
+        assert_eq!((c.load_factor, c.self_ctx_threshold), (1.5, Some(25)));
         assert_eq!(c.band, BandConfig::default());
         assert_eq!(c.tmux_socket, None);
 
@@ -179,13 +197,48 @@ mod tests {
         assert_eq!(c.band.stop_free_gib, 100.0, "_env_float falls back");
         assert_eq!(c.band.hold_free_gib, 150.0);
 
-        let bad = |k: &str| (k == "SELF_CTX_WINDOW").then(|| "lots".to_owned());
+        let bad = |k: &str| (k == "LOAD_FACTOR").then(|| "lots".to_owned());
         let err = Config::from_env(Path::new("/a"), Path::new("/h"), &bad);
         assert_eq!(
             err.err().map(|e| e.name),
-            Some("SELF_CTX_WINDOW"),
-            "Python's int() raises on it"
+            Some("LOAD_FACTOR"),
+            "Python's float() raises in host_alerts each cycle"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bad_ctx_variables_switch_off_their_sensor_and_are_reported() -> Result<(), ConfigError> {
+        let bad = |k: &str| match k {
+            "PANE_CTX_WINDOW" => Some(String::new()),
+            "SELF_CTX_WINDOW" => Some("lots".to_owned()),
+            "SELF_CTX_THRESHOLD" => Some("25%".to_owned()),
+            "LOAD_FACTOR" => Some("2".to_owned()),
+            _ => None,
+        };
+        let c = Config::from_env(Path::new("/a"), Path::new("/h"), &bad)?;
+        assert_eq!(
+            (c.pane_ctx_window, c.self_ctx_window, c.self_ctx_threshold),
+            (None, None, None)
+        );
+        assert_eq!(c.load_factor, 2.0, "the other variables still apply");
+        let names: Vec<_> = c
+            .problems
+            .iter()
+            .map(|p| (p.name, p.value.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("PANE_CTX_WINDOW", ""),
+                ("SELF_CTX_WINDOW", "lots"),
+                ("SELF_CTX_THRESHOLD", "25%")
+            ]
+        );
+        let none = |_: &str| None;
+        let ok = Config::from_env(Path::new("/a"), Path::new("/h"), &none)?;
+        assert!(ok.problems.is_empty());
+        assert_eq!(ok.self_ctx_window, Some(1_000_000));
         Ok(())
     }
 }

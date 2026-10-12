@@ -202,3 +202,71 @@ fn a_truncated_last_alert_line_does_not_corrupt_the_next_append() -> TestResult 
     assert_eq!(lines_parse(&path)?, [true, false, true]);
     Ok(())
 }
+
+/// Names in `dir`, sorted.
+fn names(dir: &Path) -> io::Result<Vec<String>> {
+    let mut v = fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<io::Result<Vec<_>>>()?;
+    v.sort();
+    Ok(v)
+}
+
+/// Two writers in flight at once never share a temporary file. Writer A is
+/// held after its bytes are written while writer B completes a whole save;
+/// A must then finish too. Red against a fixed `<path>.tmp`: B truncates and
+/// renames A's file, so A's sync-then-rename fails.
+#[test]
+fn concurrent_saves_use_distinct_temporary_files() -> TestResult {
+    use std::sync::mpsc::channel;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("poll-state.json");
+    let (parked_tx, parked_rx) = channel::<()>();
+    let (go_tx, go_rx) = channel::<()>();
+    let a = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let mut at = |s: SaveStep| {
+                if s == SaveStep::Written {
+                    parked_tx.send(()).map_err(io::Error::other)?;
+                    go_rx.recv().map_err(io::Error::other)?;
+                }
+                Ok(())
+            };
+            save_state_with(&path, &sample(1), &mut at)
+        })
+    };
+    parked_rx.recv()?;
+    let b = save_state(&path, &sample(2));
+    go_tx.send(())?;
+    let a = a.join().map_err(|_| "writer A panicked")?;
+    assert!(b.is_ok(), "writer B: {b:?}");
+    assert!(a.is_ok(), "writer A: {a:?}");
+    let (st, err) = load_state(&path);
+    assert!(err.is_none(), "{err:?}");
+    assert_eq!(st, sample(1), "A renamed last, so A's bytes are on disk");
+    assert_eq!(names(dir.path())?, ["poll-state.json"], "no stray tmp");
+    Ok(())
+}
+
+/// A save that fails after its temporary file exists removes that file.
+#[test]
+fn a_failed_save_leaves_no_temporary_file() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("poll-state.json");
+    save_state(&path, &sample(1))?;
+    for stop in [SaveStep::Written, SaveStep::Synced, SaveStep::Renamed] {
+        let mut at = |s: SaveStep| {
+            if s == stop {
+                Err(io::Error::other("killed"))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(save_state_with(&path, &sample(2), &mut at).is_err());
+        let left = names(dir.path())?;
+        assert_eq!(left, ["poll-state.json"], "after {stop:?}: {left:?}");
+        save_state(&path, &sample(1))?;
+    }
+    Ok(())
+}

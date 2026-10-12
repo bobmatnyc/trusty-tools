@@ -352,14 +352,13 @@ fn self_ctx_alerts_match_python_goldens() -> TestResult {
                 vars.push((var, v.to_owned()));
             }
         }
-        // The prototype logs a bad value and raises no alert; the port refuses
-        // the value when the config is built.
-        let (alerts, logged) = match config(dir.path(), &vars) {
+        // The prototype logs a bad value and raises no alert. The port builds
+        // the config, switches the sensor off and lists the value in
+        // `problems` for the caller to log.
+        let cfg = config(dir.path(), &vars)?;
+        let (alerts, logged) = match self_ctx_alerts(&cfg, now) {
+            Ok(a) => (a, !cfg.problems.is_empty()),
             Err(_) => (Vec::new(), true),
-            Ok(cfg) => match self_ctx_alerts(&cfg, now) {
-                Ok(a) => (a, false),
-                Err(_) => (Vec::new(), true),
-            },
         };
         rows.push(to_python_json(
             &SelfCtxRow {

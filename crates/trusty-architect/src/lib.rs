@@ -39,4 +39,4 @@ pub use error::{ConfigError, SelfCtxError, SendError, StateError, TmuxError};
 pub use fake::FakeTmux;
 pub use input::{InputState, SendReading, UnknownInputState, classify_input, send_guarded};
 pub use pyjson::to_python_json;
-pub use tmux::{Keys, NamedKey, PaneId, SystemTmux, TMUX_TIMEOUT, Tmux};
+pub use tmux::{Keys, NamedKey, PaneId, Permit, SystemTmux, TMUX_TIMEOUT, Tmux};

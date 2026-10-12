@@ -157,7 +157,9 @@ impl TranscriptCtx {
     /// [`SelfCtxError`] when the transcript cannot be read or its usage is not
     /// numeric; the prototype logs these and reads `None`.
     pub fn pct(&mut self, cfg: &Config, pane: &str) -> Result<Option<u64>, SelfCtxError> {
-        let window = cfg.pane_ctx_window;
+        let Some(window) = cfg.pane_ctx_window else {
+            return Ok(None);
+        };
         let Some(sid) = pane_session_id(&cfg.sessions_dir, pane) else {
             return Ok(None);
         };

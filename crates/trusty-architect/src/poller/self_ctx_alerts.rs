@@ -16,13 +16,17 @@ use crate::error::SelfCtxError;
 use crate::self_ctx::self_ctx_tokens;
 
 /// One `self_ctx` alert when the Architect's own context is at or over the
-/// threshold; none for a missing directory or transcript, or a window <= 0.
+/// threshold; none for a missing directory or transcript, a window <= 0, or a
+/// bad `SELF_CTX_WINDOW` / `SELF_CTX_THRESHOLD` (the sensor is off; see
+/// [`Config::problems`]).
 ///
 /// # Errors
 /// [`SelfCtxError`] when the transcript cannot be read; the prototype logs
 /// `self_ctx ERROR` and raises no alert.
 pub fn self_ctx_alerts(cfg: &Config, now: f64) -> Result<Vec<Alert>, SelfCtxError> {
-    let (window, threshold) = (cfg.self_ctx_window, cfg.self_ctx_threshold);
+    let (Some(window), Some(threshold)) = (cfg.self_ctx_window, cfg.self_ctx_threshold) else {
+        return Ok(Vec::new());
+    };
     let Some(tokens) = self_ctx_tokens(&cfg.self_ctx_dir)? else {
         return Ok(Vec::new());
     };
