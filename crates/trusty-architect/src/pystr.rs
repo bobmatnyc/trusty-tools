@@ -21,6 +21,38 @@ pub(crate) fn is_space(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
+/// Python's `repr()` of a `str`, for messages the prototype formats with `!r`.
+///
+/// Single quotes unless the text holds `'` and no `"`; backslash, the chosen
+/// quote, `\n`, `\r`, `\t` and other C0/DEL controls escaped as Python does.
+/// Non-printable non-ASCII characters are kept as-is (Python would escape
+/// some); the poller only formats tmux session names here.
+pub(crate) fn py_repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// `re`'s `\w` on `str`: a letter, a number, or `_`.
 pub(crate) fn is_word(c: char) -> bool {
     c == '_' || c.is_alphanumeric()
@@ -157,6 +189,16 @@ pub(crate) fn contains_ci(text: &[char], pattern: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn py_repr_matches_python_quoting() {
+        // Expected values printed by Python 3.14 `repr()`.
+        assert_eq!(py_repr("tm-api"), "'tm-api'");
+        assert_eq!(py_repr("it's"), "\"it's\"");
+        assert_eq!(py_repr("a\"b"), "'a\"b'");
+        assert_eq!(py_repr("x\ny\u{1}\\"), "'x\\ny\\x01\\\\'");
+        assert_eq!(py_repr("both'\""), "'both\\'\"'");
+    }
 
     #[test]
     fn splitlines_matches_python_boundaries() {

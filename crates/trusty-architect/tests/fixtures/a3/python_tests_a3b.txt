@@ -1,0 +1,17 @@
+# #9171 A3b: every prototype test this phase owns, by Python name.
+# tests/ported_names.rs fails when one has no Rust test of the same name
+# preceded by a `// Python: <name>` line. Source files at Architect 988152c.
+# A3b-1 (the send path) owns plan cases 1-10 below; A3b-2 appends cases 11-19
+# (quiet/exited, windows, architect_busy) and raises the count in
+# ported_names.rs.
+# tests/test_fleet_poll.py: wake(), dispatch_wake(), send_to_supervisor()
+test_wake_reports_no_input_box_found_not_a_misleading_box_state
+test_wake_reports_input_typed_when_a_real_box_holds_a_draft
+test_wake_confirms_a_message_that_wraps_across_screen_rows
+test_wake_cleans_up_its_own_text_when_confirmation_fails
+test_wake_detects_its_own_stale_pointer_and_does_not_send
+test_wake_does_not_mistake_a_human_draft_starting_with_poll_for_its_own
+test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once
+test_dispatch_wake_carries_pending_on_a_failed_confirm
+test_dispatch_wake_none_when_nothing_pending
+test_send_refuses_any_pane_outside_tm_supervisor
