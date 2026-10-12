@@ -16,6 +16,8 @@
 mod chunk_backfill;
 mod chunk_health;
 mod chunk_progress;
+// #9735: `pub(crate)` so the dream merge can refuse a split part.
+pub(crate) mod chunk_split;
 mod deferred_embed;
 mod embed_repair;
 mod embed_store;
@@ -59,6 +61,9 @@ mod chunk_backfill_tests;
 mod chunk_health_tests;
 #[cfg(test)]
 mod chunk_key_tests;
+// #9735 PR 1b: the oversized-drawer split.
+#[cfg(test)]
+mod chunk_split_tests;
 #[cfg(test)]
 mod embed_store_tests;
 #[cfg(test)]

@@ -836,3 +836,67 @@ async fn a_cycle_that_fails_after_a_merge_still_calls_the_hook() {
         "#8246: a cycle that failed after a merge must still call the hook"
     );
 }
+
+/// #9735 plan test 7a: a split part never merges, even the last tail, which
+/// is under `MERGE_MAX_BYTES`. A merge would move text into or out of the
+/// split, and a forget of its head would then miss or overreach it.
+#[tokio::test]
+async fn dream_never_merges_a_split_part() {
+    use super::helpers::{MERGE_MAX_BYTES, persist_merge};
+    use crate::embedder::MockEmbedder;
+    use crate::memory_core::retrieval::SliceBounds;
+    let dir = tempdir().unwrap();
+    let handle = open(&palace_in(&dir, "split-no-merge"));
+    // 4097 chunks at the window-12 mock: four 1024-chunk parts and one tail
+    // of a single chunk.
+    let text = (0..10 + 9 * 4096)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut d = Drawer::new(Uuid::new_v4(), text);
+    d.created_at = Utc::now() - ChronoDuration::hours(1);
+    let head = d.id;
+    handle.kg.upsert_drawer(&d).await.unwrap();
+    handle.add_drawer(d);
+    let other = put(
+        &handle,
+        &Spec {
+            content: "w36870 w36871 w36872 w36873 an unrelated short note",
+            importance: 0.5,
+            age_days: 0,
+            tags: &[],
+            fact_key: None,
+        },
+    )
+    .await;
+    let dim = handle.vector_store.dim();
+    let e: Arc<dyn Embedder + Send + Sync> = Arc::new(MockEmbedder::new(dim).with_chunking(12));
+    let bounds = SliceBounds {
+        min_age: Duration::ZERO,
+        ledger_backoff: Duration::ZERO,
+        ..SliceBounds::default()
+    };
+    handle.reembed_slice(&e, &bounds).await;
+    let last = Uuid::new_v5(&head, b"split:5");
+    let tail_len = handle
+        .drawers
+        .read()
+        .iter()
+        .find(|d| d.id == last)
+        .map(|d| d.content().len());
+    assert!(
+        tail_len.is_some_and(|n| n < MERGE_MAX_BYTES),
+        "precondition: the split left a small last tail: {tail_len:?}"
+    );
+    for (a, b) in [(last, other), (other, last), (head, other)] {
+        let merged = persist_merge(&handle, a, b, &ConstEmbedder, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(merged, None, "a split part merged with {b}");
+    }
+    assert_eq!(
+        ids(&handle).len(),
+        6,
+        "every part and the other drawer stay"
+    );
+}

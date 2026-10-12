@@ -9,6 +9,7 @@
 //! takes the mutex only to recheck the drawer text and run one upsert.
 //! Test: `chunk_backfill_tests`.
 
+use super::chunk_split::{SplitStep, is_split_part};
 use super::deferred_embed::{EmbedLoss, RetryPolicy, with_retry};
 use super::embed_repair::EmbedHealth;
 use super::embed_store::{chunked_embed_timeout, embed_planned, embed_planned_within, plan_chunks};
@@ -198,7 +199,8 @@ impl PalaceHandle {
     /// What: recomputes health with `embedder`; returns before any embed on a
     /// read-only handle or an unrun chunk check. Queues missing-vector drawers
     /// older than `min_age`, then short drawers by importance, skipping any
-    /// with a ledger row younger than `ledger_backoff`. Per drawer: split, embed
+    /// with a ledger row younger than `ledger_backoff`. Per drawer: plan (#9735 PR 1b:
+    /// a drawer over the chunk cap is split by `split_in_slice` instead), embed
     /// under `embed_timeout` with no lock, then [`Self::commit_if_current`].
     /// Stops on the bounds, a lock timeout, a store error, an embed timeout
     /// (that drawer is ledgered as drawer-specific), or `host_failures`
@@ -240,10 +242,26 @@ impl PalaceHandle {
             let chunks: Vec<String> = match plan_chunks(embedder.as_ref(), &text) {
                 Ok(c) => c.into_iter().map(str::to_string).collect(),
                 Err(e) => {
+                    // #9735 PR 1b: an oversized drawer is split, not ledgered.
+                    let reason = match self
+                        .split_in_slice(
+                            embedder.as_ref(),
+                            id,
+                            &text,
+                            &e,
+                            bounds.lock_wait,
+                            &mut report,
+                        )
+                        .await
+                    {
+                        SplitStep::Next => continue,
+                        SplitStep::Stop => break,
+                        SplitStep::Fail(reason) => reason,
+                    };
                     // #9735 gap 12: a split error is the drawer's, never the host's.
                     report.attempted += 1;
                     report.failed += 1;
-                    rows.push(PendingRow::new(id, embed_loss(format!("{e:#}")), true));
+                    rows.push(PendingRow::new(id, embed_loss(reason), true));
                     continue;
                 }
             };
@@ -360,9 +378,11 @@ impl PalaceHandle {
     /// a young one may still have a deferred embed in flight.
     /// What: drops drawers with a ledger row younger than `ledger_backoff`
     /// and missing-vector drawers younger than `min_age`; short drawers sort
-    /// by descending importance. The age rule never applies to short drawers.
+    /// by descending importance. The age rule never applies to short drawers
+    /// or to split parts (#9735).
     /// Test: `queue_orders_missing_first_then_short_by_importance`,
-    /// `missing_vector_drawer_younger_than_two_minutes_is_skipped`.
+    /// `missing_vector_drawer_younger_than_two_minutes_is_skipped`,
+    /// `split_part_younger_than_two_minutes_still_embeds`.
     pub(crate) fn backfill_queue(
         &self,
         health: &EmbedHealth,
@@ -389,7 +409,8 @@ impl PalaceHandle {
             .filter(|id| {
                 by_id
                     .get(id)
-                    .is_some_and(|d| !younger(d.created_at, bounds.min_age))
+                    // #9735 PR 1b: no deferred embed is in flight for a split part.
+                    .is_some_and(|d| is_split_part(d) || !younger(d.created_at, bounds.min_age))
             })
             .copied()
             .collect();

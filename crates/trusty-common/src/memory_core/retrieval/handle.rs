@@ -904,11 +904,12 @@ impl PalaceHandle {
     /// What: Records whether the drawer table holds `id`, drops the persistent
     /// metadata row, then the vector, then the KG triples, then the in-memory
     /// row, and persists the L1 snapshot so the drop survives a restart.
+    /// #9735: then forgets every part of a split this drawer heads.
     /// Returns [`ForgetOutcome::NotFound`] when no such drawer existed.
     /// Test: `cli_forget_removes_drawer` asserts a recalled drawer disappears
     /// after forget; `forget_reports_not_found_for_an_unknown_drawer` and
     /// `forget_reports_deleted_and_the_drawer_stays_gone_after_reopen` cover
-    /// the reported outcome.
+    /// the reported outcome; `forget_head_removes_every_part` the #9735 cascade.
     ///
     /// # Errors
     ///
@@ -926,8 +927,11 @@ impl PalaceHandle {
         if let Some(drawer) = &removed {
             crate::memory_core::maintenance_log::record_user_forget(self, drawer);
         }
+        // #9735: a split head takes every part with it, each journalled.
+        let parts = self.forget_split_parts(id).await;
         // #8729: journalled before the L1 error surfaces; the row is gone.
         l1_saved?;
+        parts?;
         Ok(if removed.is_some() {
             ForgetOutcome::Deleted
         } else {

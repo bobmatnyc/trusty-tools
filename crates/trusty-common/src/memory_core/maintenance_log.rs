@@ -68,6 +68,9 @@ pub enum DeletionReason {
     ForgetOfMergedSurvivor,
     /// #9283: a user forget (MCP, HTTP/UDS delete, reclaim). Hash only, no copy.
     UserForget,
+    /// #9735: the backfill split an oversized drawer. The head keeps its id
+    /// and shrinks to part 1; the record holds the original content hash.
+    SplitOversized,
 }
 
 impl DeletionReason {
@@ -82,6 +85,7 @@ impl DeletionReason {
             Self::ExpiredPurgeAtOpen => "expired_purge_at_open",
             Self::ForgetOfMergedSurvivor => "forget_of_merged_survivor",
             Self::UserForget => "user_forget",
+            Self::SplitOversized => "split_oversized",
         }
     }
 }
@@ -299,7 +303,11 @@ pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutco
             // #8729: each removal is logged with its id and reason, not only
             // counted in the pass summary. #9283: a user forget is already
             // logged once by its caller (`log_user_forget`); no second line.
-            if rec.reason != DeletionReason::UserForget {
+            // #9735: a split removes nothing; `split_oversized` logs it.
+            if !matches!(
+                rec.reason,
+                DeletionReason::UserForget | DeletionReason::SplitOversized
+            ) {
                 tracing::warn!(
                     palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
                     survivor_id = ?rec.survivor_id, score = ?rec.score,

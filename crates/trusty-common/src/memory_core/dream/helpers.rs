@@ -8,6 +8,7 @@
 
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
+use crate::memory_core::retrieval::chunk_split::is_split_part;
 use crate::memory_core::retrieval::{
     ChunkPlanner, PalaceHandle, embed_chunks_within, embed_planned_within, shared_embedder,
 };
@@ -193,13 +194,19 @@ pub(crate) fn merged_drawer(survivor: &Drawer, loser: &Drawer) -> Option<Drawer>
 /// Why (#9172): importance alone let an older note replace the current one.
 /// A drawer holding a `fact_key` slot is the live fact for that slot; deleting
 /// it releases the slot.
-/// What: returns `None` when both drawers hold a slot. Otherwise the survivor
+/// What: returns `None` when both drawers hold a slot, or either is a split
+/// part (#9735). Otherwise the survivor
 /// is the drawer that ranks higher on, in order: holds a slot, carries
 /// [`RULING_TAG`], newer `created_at`, higher importance. A full tie keeps `a`.
 /// Test: `dedup_survivor_tests::a_newer_status_note_survives_an_older_higher_importance_duplicate`,
-/// `dedup_survivor_tests::a_slot_holder_or_ruling_outlives_a_more_important_duplicate`.
+/// `dedup_survivor_tests::a_slot_holder_or_ruling_outlives_a_more_important_duplicate`,
+/// `dedup_survivor_tests::dream_never_merges_a_split_part`.
 pub(crate) fn pick_survivor<'a>(a: &'a Drawer, b: &'a Drawer) -> Option<(&'a Drawer, &'a Drawer)> {
     if a.is_tier_c() && b.is_tier_c() {
+        return None;
+    }
+    // #9735: a merge would move text into or out of a split's parts.
+    if is_split_part(a) || is_split_part(b) {
         return None;
     }
     let rank = |d: &Drawer| (d.is_tier_c(), d.tags.iter().any(|t| t == RULING_TAG));
