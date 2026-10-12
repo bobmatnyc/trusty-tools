@@ -73,13 +73,10 @@ pub enum Unserved {
     NeverLoaded,
     /// The snapshot is older than its max age.
     Stale,
-    /// The snapshot or the verdict cache lock is poisoned.
+    /// The snapshot lock is poisoned.
     Poisoned,
     /// The snapshot refused for any other reason.
     Refused,
     /// The report carries no loader fingerprint (0).
     NoFingerprint,
-    /// The fingerprint differs from the cached verdict's, or nothing is
-    /// cached yet: the verdict is stored and served from the next query.
-    FingerprintChanged,
 }

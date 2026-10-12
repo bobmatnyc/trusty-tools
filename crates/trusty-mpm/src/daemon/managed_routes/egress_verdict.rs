@@ -9,12 +9,12 @@
 //! What: [`router`] registers [`VERDICT_ROUTE`]; [`answer`] is the whole
 //! decision. A verdict is served only for the daemon's own home, from a
 //! snapshot within max age, for a loader-stamped fingerprint (never 0), and
-//! only once that fingerprint's verdict was cached by an earlier query. Any
+//! is always judged on the report the snapshot publishes at that query. Any
 //! other case is `Unserved`, and the hook runs its inline load.
 //! Test: `egress_verdict_tests.rs`.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::post};
@@ -26,28 +26,18 @@ use crate::core::channels_readiness::{NOT_READY_CHECK, NotReady};
 use crate::core::egress_verdict::{Unserved, VERDICT_ROUTE, VerdictReply, VerdictRequest};
 use crate::daemon::state::DaemonState;
 
-/// The verdict last judged, keyed by the report fingerprint it was judged on.
-#[derive(Debug, Default)]
-pub struct VerdictCache {
-    entry: Mutex<Option<(u64, Result<(), NotReady>)>>,
-}
-
 /// The egress verdict sub-router, merged into the daemon router by `api.rs`.
 ///
-/// What: one [`VerdictCache`] per router, shared by every query it serves.
+/// What: each query reads the daemon's policy snapshot and [`answer`]s it.
 /// Test: `route_answers_a_denied_daemon_policy_as_not_ready`.
 pub fn router() -> Router<Arc<DaemonState>> {
-    let cache = Arc::new(VerdictCache::default());
     Router::new().route(
         VERDICT_ROUTE,
         post(
-            move |State(state): State<Arc<DaemonState>>, Json(req): Json<VerdictRequest>| {
-                let cache = Arc::clone(&cache);
-                async move {
-                    let home = state.user_home();
-                    let read = || state.channel_policy().current_aged();
-                    Json(answer(read, &cache, home.as_deref(), &req.home))
-                }
+            |State(state): State<Arc<DaemonState>>, Json(req): Json<VerdictRequest>| async move {
+                let home = state.user_home();
+                let read = || state.channel_policy().current_aged();
+                Json(answer(read, home.as_deref(), &req.home))
             },
         ),
     )
@@ -56,22 +46,22 @@ pub fn router() -> Router<Arc<DaemonState>> {
 /// The verdict for a hook that asked under `asked`.
 ///
 /// Why: see the module doc. The inline check is the reference: a served
-/// verdict is the inline check's verdict on the same report.
+/// verdict is the inline check's verdict on the same report. The snapshot
+/// is the cache; a verdict stored apart from it could outlive the report it
+/// was judged on (#8454: a report stamped with a fingerprint read before its
+/// files, and sources that return to that fingerprint).
 /// What: in order, `asked` not the daemon's home, a snapshot refusal
 /// (`read` runs only after the home matched), an age past [`MAX_AGE`] and a
-/// fingerprint of 0 are each `Unserved`. Then a cached verdict for this
-/// fingerprint is served; on any other fingerprint, or none cached, the
-/// report is [`classify`]d, stored, and `Unserved` (`FingerprintChanged`)
-/// is answered. A denied report is never stored as ready.
+/// fingerprint of 0 are each `Unserved`. Otherwise the published report is
+/// [`classify`]d at this query and served. A denied report is never ready.
 /// Test: `cached_verdict_reused_while_fingerprint_unchanged`,
 /// `fingerprint_change_invalidates_cached_verdict`,
+/// `verdict_is_judged_on_the_published_report_only`,
 /// `snapshot_older_than_max_age_is_not_served`,
 /// `denied_policy_report_is_cached_as_deny_not_allow`,
-/// `zero_fingerprint_is_never_served`, `home_mismatch_is_not_served`,
-/// `poisoned_verdict_cache_is_not_served`.
+/// `zero_fingerprint_is_never_served`, `home_mismatch_is_not_served`.
 pub fn answer(
     read: impl FnOnce() -> Result<(Arc<LoadReport>, Duration), SnapshotDeny>,
-    cache: &VerdictCache,
     daemon_home: Option<&Path>,
     asked: &Path,
 ) -> VerdictReply {
@@ -94,18 +84,8 @@ pub fn answer(
     if report.fingerprint == 0 {
         return unserved(Unserved::NoFingerprint);
     }
-    let Ok(mut entry) = cache.entry.lock() else {
-        return unserved(Unserved::Poisoned);
-    };
-    match &*entry {
-        Some((fingerprint, verdict)) if *fingerprint == report.fingerprint => {
-            served(verdict, *fingerprint, age)
-        }
-        _ => {
-            *entry = Some((report.fingerprint, judge(&report)));
-            unserved(Unserved::FingerprintChanged)
-        }
-    }
+    // #8454: judged on the published report at every query, never stored.
+    served(&judge(&report), report.fingerprint, age)
 }
 
 /// [`classify`], with a denied report never read as ready.

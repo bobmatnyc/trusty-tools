@@ -34,9 +34,9 @@ fn verdict_reply_wire_shape_is_closed() {
         ),
         (
             VerdictReply::Unserved {
-                why: Unserved::FingerprintChanged,
+                why: Unserved::NoFingerprint,
             },
-            json!({"answer": "unserved", "why": "fingerprint_changed"}),
+            json!({"answer": "unserved", "why": "no_fingerprint"}),
         ),
     ];
     for (reply, wire) in cases {
@@ -47,6 +47,8 @@ fn verdict_reply_wire_shape_is_closed() {
     for bad in [
         json!({"answer": "allow", "fingerprint": 7, "age_ms": 1}),
         json!({"answer": "unserved", "why": "something_new"}),
+        // #8454: the retired store-then-unserved reason is no longer a reply.
+        json!({"answer": "unserved", "why": "fingerprint_changed"}),
         json!({"answer": "ready", "fingerprint": 7}),
         json!({"fingerprint": 7, "age_ms": 1}),
     ] {

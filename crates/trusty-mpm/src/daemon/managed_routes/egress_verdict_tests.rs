@@ -2,8 +2,8 @@
 //!
 //! Why: the route is a Fail-Open Check site. Each test goes red if an arm
 //! that must serve no verdict (home mismatch, never loaded, stale, poisoned,
-//! fingerprint 0, a changed fingerprint) serves one, or if a denied report
-//! is served as ready.
+//! fingerprint 0) serves one, if a denied report is served as ready, or if
+//! a verdict judged on any report but the published one is served.
 //! What: [`answer`] over a scripted policy snapshot with a settable clock,
 //! or over an injected read; one test drives the real router.
 //! Test: this is the test module.
@@ -17,7 +17,7 @@ use trusty_channels::policy::{
     Channel, Clock, LoadReport, ProjectInput, merge_for, parse_host, parse_project_file,
 };
 
-use super::{VerdictCache, answer};
+use super::answer;
 use crate::channels::snapshot::{
     MAX_AGE, PolicySnapshot, PolicySource, REFRESH_INTERVAL, SnapshotDeny,
 };
@@ -119,16 +119,16 @@ fn denied_report(fingerprint: u64) -> LoadReport {
 }
 
 /// Ask the snapshot-backed route once under the daemon's own home.
-fn ask(snap: &Snap, cache: &VerdictCache) -> VerdictReply {
+fn ask(snap: &Snap) -> VerdictReply {
     let home = home();
-    answer(|| snap.current_aged(), cache, Some(&home), &home)
+    answer(|| snap.current_aged(), Some(&home), &home)
 }
 
 /// Ask until the answer is not `NeverLoaded`, or panic at [`POLL_GUARD`].
-fn ask_loaded(snap: &Snap, cache: &VerdictCache) -> VerdictReply {
+fn ask_loaded(snap: &Snap) -> VerdictReply {
     let started = Instant::now();
     loop {
-        let reply = ask(snap, cache);
+        let reply = ask(snap);
         let cold = VerdictReply::Unserved {
             why: Unserved::NeverLoaded,
         };
@@ -155,26 +155,38 @@ fn wait_for_fingerprint(snap: &Snap, fingerprint: u64) {
     }
 }
 
-fn changed() -> VerdictReply {
-    VerdictReply::Unserved {
-        why: Unserved::FingerprintChanged,
-    }
-}
-
 fn is_ready(reply: &VerdictReply) -> bool {
     matches!(reply, VerdictReply::Ready { .. })
 }
 
-/// 🔴 #8454 VC (plan :128): once a fingerprint's verdict is cached, the next
-/// query is answered from it with no refresh, so no git runs.
+/// The ready reply for `fingerprint`, any age.
+fn is_ready_for(reply: &VerdictReply, want: u64) -> bool {
+    matches!(reply, VerdictReply::Ready { fingerprint, .. } if *fingerprint == want)
+}
+
+/// True when `reply` is the `Denied` not-ready verdict for `want`.
+fn is_denied_for(reply: &VerdictReply, want: u64) -> bool {
+    matches!(
+        reply,
+        VerdictReply::NotReady {
+            slug,
+            not_ready: NotReady::Denied { .. },
+            fingerprint,
+            ..
+        } if slug == NOT_READY_CHECK && *fingerprint == want
+    )
+}
+
+/// 🔴 #8454 VC (plan :128): while the fingerprint is unchanged, queries are
+/// answered from the snapshot's report with no refresh, so no git runs.
 #[test]
 fn cached_verdict_reused_while_fingerprint_unchanged() {
     let (snap, _clock, calls) = scripted(|_| ready_report(11));
-    let cache = VerdictCache::default();
-    assert_eq!(ask_loaded(&snap, &cache), changed(), "first sight caches");
+    let first = ask_loaded(&snap);
+    assert!(is_ready_for(&first, 11), "the first loaded query: {first:?}");
     let before = calls.load(Ordering::SeqCst);
     for _ in 0..3 {
-        match ask(&snap, &cache) {
+        match ask(&snap) {
             VerdictReply::Ready {
                 fingerprint,
                 age_ms,
@@ -194,7 +206,7 @@ fn cached_verdict_reused_while_fingerprint_unchanged() {
 
 /// 🔴 #8454 VC (plan :129): a new fingerprint is never answered with the
 /// old verdict. Ready under 21, then a denied load under 22: the first
-/// query after the change serves nothing, the next serves the deny.
+/// query after the change serves the deny.
 #[test]
 fn fingerprint_change_invalidates_cached_verdict() {
     let (snap, clock, _calls) = scripted(|n| {
@@ -204,22 +216,41 @@ fn fingerprint_change_invalidates_cached_verdict() {
             denied_report(22)
         }
     });
-    let cache = VerdictCache::default();
-    assert_eq!(ask_loaded(&snap, &cache), changed());
-    assert!(is_ready(&ask(&snap, &cache)), "fixture: 21 is ready");
+    assert!(is_ready_for(&ask_loaded(&snap), 21), "fixture: 21 is ready");
     clock.set(REFRESH_INTERVAL);
     let _ = snap.current_aged();
     wait_for_fingerprint(&snap, 22);
-    assert_eq!(ask(&snap, &cache), changed(), "the old verdict was served");
-    match ask(&snap, &cache) {
-        VerdictReply::NotReady {
-            fingerprint, slug, ..
-        } => {
-            assert_eq!(fingerprint, 22);
-            assert_eq!(slug, NOT_READY_CHECK);
-        }
-        other => panic!("22 is denied: {other:?}"),
-    }
+    let reply = ask(&snap);
+    assert!(is_denied_for(&reply, 22), "the old verdict was served: {reply:?}");
+}
+
+/// 🔴 #8454 VC (critic, item 4): a verdict is judged on the report the
+/// snapshot publishes now, never one judged earlier under the same
+/// fingerprint. A loader stamps its fingerprint before it reads the files,
+/// so a commit in between publishes the new state (ready) under the old
+/// fingerprint F1; the sources then return to F1 (a not-ready state) with
+/// no query in between. The query must answer not ready.
+#[test]
+fn verdict_is_judged_on_the_published_report_only() {
+    let (snap, clock, _calls) = scripted(|n| match n {
+        0 => ready_report(61),
+        1 => ready_report(62),
+        _ => denied_report(61),
+    });
+    assert!(is_ready_for(&ask_loaded(&snap), 61), "fixture: S2 under F1");
+    clock.set(REFRESH_INTERVAL);
+    let _ = snap.current_aged();
+    wait_for_fingerprint(&snap, 62);
+    clock.set(REFRESH_INTERVAL * 2);
+    let _ = snap.current_aged();
+    wait_for_fingerprint(&snap, 61);
+    let published = snap.current_aged().expect("published").0;
+    assert!(published.denied, "fixture: S1 under F1 is denied");
+    let reply = ask(&snap);
+    assert!(
+        is_denied_for(&reply, 61),
+        "a verdict judged on another report under F1 was served: {reply:?}"
+    );
 }
 
 /// 🔴 #8454 VC (plan :130): past max age no verdict is served, cached or
@@ -227,29 +258,27 @@ fn fingerprint_change_invalidates_cached_verdict() {
 #[test]
 fn snapshot_older_than_max_age_is_not_served() {
     let (snap, clock, _calls) = scripted(|_| ready_report(31));
-    let cache = VerdictCache::default();
-    assert_eq!(ask_loaded(&snap, &cache), changed());
-    assert!(is_ready(&ask(&snap, &cache)), "fixture: 31 is ready");
+    assert!(is_ready_for(&ask_loaded(&snap), 31), "fixture: 31 is ready");
     clock.set(MAX_AGE + Duration::from_millis(1));
     let stale = VerdictReply::Unserved {
         why: Unserved::Stale,
     };
-    assert_eq!(ask(&snap, &cache), stale, "a stale snapshot was served");
+    assert_eq!(ask(&snap), stale, "a stale snapshot was served");
     // The route's own age check, for a read that reports an old report.
     let report = Arc::new(ready_report(31));
     let old = || Ok((Arc::clone(&report), MAX_AGE + Duration::from_millis(1)));
-    assert_eq!(answer(old, &cache, Some(&home()), &home()), stale);
+    assert_eq!(answer(old, Some(&home()), &home()), stale);
 }
 
 /// 🔴 #8454 VC (plan :132): a denied report, even one that still carries a
-/// route, is cached and served as not ready, never as ready.
+/// route, is served as not ready on every query, never as ready.
 #[test]
 fn denied_policy_report_is_cached_as_deny_not_allow() {
     let (snap, _clock, _calls) = scripted(|_| denied_report(41));
-    let cache = VerdictCache::default();
-    assert_eq!(ask_loaded(&snap, &cache), changed());
+    let first = ask_loaded(&snap);
+    assert!(is_denied_for(&first, 41), "the first loaded query: {first:?}");
     for _ in 0..2 {
-        match ask(&snap, &cache) {
+        match ask(&snap) {
             VerdictReply::NotReady {
                 slug,
                 not_ready,
@@ -268,17 +297,16 @@ fn denied_policy_report_is_cached_as_deny_not_allow() {
     }
 }
 
-/// 🔴 #8454 VC (R1): a report with fingerprint 0 is never cached or served.
+/// 🔴 #8454 VC (R1): a report with fingerprint 0 is never served.
 #[test]
 fn zero_fingerprint_is_never_served() {
     let report = Arc::new(ready_report(0));
-    let cache = VerdictCache::default();
     let none = VerdictReply::Unserved {
         why: Unserved::NoFingerprint,
     };
     for _ in 0..3 {
         let read = || Ok((Arc::clone(&report), Duration::ZERO));
-        assert_eq!(answer(read, &cache, Some(&home()), &home()), none);
+        assert_eq!(answer(read, Some(&home()), &home()), none);
     }
 }
 
@@ -286,7 +314,6 @@ fn zero_fingerprint_is_never_served() {
 /// gets no verdict, and the snapshot is not read for it.
 #[test]
 fn home_mismatch_is_not_served() {
-    let cache = VerdictCache::default();
     let mismatch = VerdictReply::Unserved {
         why: Unserved::HomeMismatch,
     };
@@ -294,14 +321,13 @@ fn home_mismatch_is_not_served() {
         panic!("the snapshot was read for a foreign home")
     };
     let other = Path::new("/home/someone-else");
-    assert_eq!(answer(never, &cache, Some(&home()), other), mismatch);
-    assert_eq!(answer(never, &cache, None, &home()), mismatch);
+    assert_eq!(answer(never, Some(&home()), other), mismatch);
+    assert_eq!(answer(never, None, &home()), mismatch);
 }
 
 /// 🔴 #8454 VC: each snapshot refusal serves no verdict.
 #[test]
 fn snapshot_refusals_are_not_served() {
-    let cache = VerdictCache::default();
     let cases = [
         (SnapshotDeny::NeverLoaded, Unserved::NeverLoaded),
         (
@@ -315,29 +341,9 @@ fn snapshot_refusals_are_not_served() {
         (SnapshotDeny::Denied, Unserved::Refused),
     ];
     for (deny, why) in cases {
-        let reply = answer(|| Err(deny), &cache, Some(&home()), &home());
+        let reply = answer(|| Err(deny), Some(&home()), &home());
         assert_eq!(reply, VerdictReply::Unserved { why }, "{deny:?}");
     }
-}
-
-/// 🔴 #8454 VC: a poisoned verdict cache serves nothing.
-#[test]
-fn poisoned_verdict_cache_is_not_served() {
-    let cache = Arc::new(VerdictCache::default());
-    let poisoner = Arc::clone(&cache);
-    let _ = std::thread::spawn(move || {
-        let _guard = poisoner.entry.lock();
-        panic!("poison the verdict cache");
-    })
-    .join();
-    let report = Arc::new(ready_report(51));
-    let read = || Ok((Arc::clone(&report), Duration::ZERO));
-    assert_eq!(
-        answer(read, &cache, Some(&home()), &home()),
-        VerdictReply::Unserved {
-            why: Unserved::Poisoned
-        }
-    );
 }
 
 /// POST the route on `router` under `home`; the parsed reply.

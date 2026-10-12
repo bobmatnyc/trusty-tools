@@ -337,13 +337,12 @@ async fn zero_fingerprint_answer_falls_back_to_inline_load() {
     }
 }
 
-/// 🔴 #8454 VC (R2): every reply that serves no verdict — a changed
-/// fingerprint, a home mismatch, a stale or unloaded snapshot — runs the
-/// inline load, whose refusal stands.
+/// 🔴 #8454 VC (R2): every reply that serves no verdict — a home mismatch,
+/// a stale, unloaded or poisoned snapshot, no fingerprint — runs the inline
+/// load, whose refusal stands.
 #[tokio::test]
 async fn unserved_answers_fall_back_to_inline_load() {
     for why in [
-        Unserved::FingerprintChanged,
         Unserved::HomeMismatch,
         Unserved::Stale,
         Unserved::NeverLoaded,
