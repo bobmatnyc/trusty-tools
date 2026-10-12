@@ -1,0 +1,28 @@
+# #9171: the Architect's launcher and poller library. A leaf: `tm` calls this
+# crate, so it must never depend on `trusty-mpm` or on any crate that does.
+# `tests/dependency_boundary.rs` fails the build if one appears here.
+[package]
+name = "trusty-architect"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Leaf library for the trusty-mpm Architect: tmux access behind a trait and the guarded send path that never overwrites a typed draft."
+keywords = ["tmux", "claude-code", "orchestration", "trusty"]
+categories = ["command-line-utilities"]
+homepage = "https://trustytools.dev"
+readme = "README.md"
+# Ship the library, README and changelog; `tests/` and `changelog.d/` stay out.
+include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+# #9171 A1: dependencies are limited to std, serde, thiserror and tracing
+# (serde arrives with the A2 JSON output).
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Parses this crate's own Cargo.toml in `tests/dependency_boundary.rs`.
+toml = { workspace = true }
