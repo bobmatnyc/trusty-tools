@@ -119,6 +119,18 @@ pub struct PolicyLoader {
 impl PolicyLoader {
     /// Load once for `req`. A fault at start has no last-good to keep.
     pub fn new(req: LoadRequest) -> Self {
+        Self::new_with(req, prepare)
+    }
+
+    /// [`PolicyLoader::new`], reading through `prepare_fn`.
+    ///
+    /// Why: #9808: a test must change the sources inside the load's read.
+    /// What: production passes [`prepare`]; a test wraps it.
+    /// Test: `new_after_change_and_revert_during_load_reloads`.
+    pub(crate) fn new_with(
+        req: LoadRequest,
+        prepare_fn: impl FnOnce(&LoadRequest) -> Prepared,
+    ) -> Self {
         let fingerprint = Fingerprint::of(&req);
         let mut loader = Self {
             req,
@@ -126,7 +138,7 @@ impl PolicyLoader {
             report: LoadReport::empty(),
             last_good: HashMap::new(),
         };
-        loader.apply(prepare(&loader.req));
+        loader.apply(prepare_fn(&loader.req));
         loader
     }
 
@@ -147,6 +159,14 @@ impl PolicyLoader {
     /// Test: `same_size_same_mtime_edit_is_seen_on_reload`,
     /// `branch_switch_with_identical_bytes_regates`.
     pub fn refresh(&mut self) -> bool {
+        self.refresh_with(prepare)
+    }
+
+    /// [`PolicyLoader::refresh`], reading through `prepare_fn` (#9808).
+    pub(crate) fn refresh_with(
+        &mut self,
+        prepare_fn: impl FnOnce(&LoadRequest) -> Prepared,
+    ) -> bool {
         let now = Fingerprint::of(&self.req);
         if now == self.fingerprint {
             return false;
@@ -154,7 +174,7 @@ impl PolicyLoader {
         // Recorded before the load reads: a change in between only causes
         // one more reload, never a missed one.
         self.fingerprint = now;
-        self.apply(prepare(&self.req));
+        self.apply(prepare_fn(&self.req));
         true
     }
 
@@ -172,8 +192,13 @@ impl PolicyLoader {
     /// `host_fault_on_reload_denies_all_at_once`,
     /// `valid_narrowing_reload_applies_at_once`.
     pub fn reload(&mut self) {
+        self.reload_with(prepare);
+    }
+
+    /// [`PolicyLoader::reload`], reading through `prepare_fn` (#9808).
+    pub(crate) fn reload_with(&mut self, prepare_fn: impl FnOnce(&LoadRequest) -> Prepared) {
         self.fingerprint = Fingerprint::of(&self.req);
-        self.apply(prepare(&self.req));
+        self.apply(prepare_fn(&self.req));
     }
 
     fn apply(&mut self, prepared: Prepared) {
