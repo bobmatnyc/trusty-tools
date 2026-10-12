@@ -46,13 +46,13 @@ impl Scratch {
             .output()
     }
 
-    fn screen(&self, pane: &str) -> io::Result<String> {
-        let out = self.tmux(&["capture-pane", "-p", "-t", pane])?;
+    fn screen(&self, pane: &PaneId) -> io::Result<String> {
+        let out = self.tmux(&["capture-pane", "-p", "-t", pane.as_target()])?;
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// Polls the pane until `want` holds, for at most five seconds.
-    fn until(&self, pane: &str, want: impl Fn(&str) -> bool) -> io::Result<String> {
+    fn until(&self, pane: &PaneId, want: impl Fn(&str) -> bool) -> io::Result<String> {
         let start = Instant::now();
         loop {
             let screen = self.screen(pane)?;
@@ -117,13 +117,20 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
     assert!(started.status.success(), "{started:?}");
     let id = String::from_utf8_lossy(
         &scratch
-            .tmux(&["display-message", "-p", "-t", SESSION, "#{pane_id}"])?
+            // Exact session target for SESSION (this leaf crate cannot use trusty_common).
+            .tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                "=scratch-a3b1:",
+                "#{pane_id}",
+            ])?
             .stdout,
     )
     .trim()
     .to_owned();
     let pane = PaneId::parse(&id)?;
-    let ready = scratch.until(&id, |s| s.contains('\u{276f}'))?;
+    let ready = scratch.until(&pane, |s| s.contains('\u{276f}'))?;
     println!("--- capture before the wake ---\n{ready}");
 
     let tmux = SystemTmux::with_socket(&scratch.socket).with_program(&wrapper);
@@ -146,7 +153,7 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
     // 1. Empty box: the pointer is typed, confirmed and submitted.
     let sent = waker.wake_as(SESSION, &panes, 1, None)?;
     println!("wake 1 -> {sent}");
-    let after = scratch.until(&id, |s| s.contains('\u{276f}') && !s.contains("[poll"))?;
+    let after = scratch.until(&pane, |s| s.contains('\u{276f}') && !s.contains("[poll"))?;
     println!("--- capture after wake 1 ---\n{after}");
     let submitted = fs::read_to_string(&log)?;
     println!("--- submitted.log ---\n{submitted}");
@@ -158,14 +165,20 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
     );
 
     // 2. A draft in the box: the wake refuses and sends nothing.
-    scratch.tmux(&["send-keys", "-t", &id, "-l", "half-typed draft"])?;
-    let drafted = scratch.until(&id, |s| s.contains("half-typed draft"))?;
+    scratch.tmux(&[
+        "send-keys",
+        "-t",
+        pane.as_target(),
+        "-l",
+        "half-typed draft",
+    ])?;
+    let drafted = scratch.until(&pane, |s| s.contains("half-typed draft"))?;
     let refused = waker.wake_as(SESSION, &panes, 1, None)?;
     println!("wake 2 -> {refused}");
     let still = capture(&tmux, &pane)?;
-    println!("--- capture after wake 2 ---\n{}", scratch.screen(&id)?);
+    println!("--- capture after wake 2 ---\n{}", scratch.screen(&pane)?);
     assert_eq!(refused, "skipped: input typed");
-    assert_eq!(drafted, scratch.screen(&id)?, "the pane did not change");
+    assert_eq!(drafted, scratch.screen(&pane)?, "the pane did not change");
     assert!(still.contains("half-typed draft"));
     assert_eq!(
         fs::read_to_string(&log)?.lines().count(),
