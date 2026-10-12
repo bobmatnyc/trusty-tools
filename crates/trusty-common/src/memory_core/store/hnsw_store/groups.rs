@@ -17,6 +17,7 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, Table};
 
 use super::exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS;
 use super::key_cache::KeyMap;
+use super::op_budget::OpProgress;
 use super::{
     DELETED_VECTORS, HnswStore, HnswStoreError, Result, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
     allocate_vector_id, op_watch,
@@ -155,7 +156,8 @@ impl HnswStore {
     /// `single_upsert_drops_stale_chunk_rows`,
     /// `replace_group_rejects_an_empty_or_hash_drawer_key`.
     pub fn replace_group(&self, drawer: &str, vectors: &[Vec<f32>]) -> Result<Vec<u64>> {
-        self.replace_group_capped(drawer, vectors, MAX_CHUNKS_PER_DRAWER)
+        let progress = OpProgress::default();
+        self.replace_group_capped(drawer, vectors, MAX_CHUNKS_PER_DRAWER, &progress)
     }
 
     /// [`Self::replace_group`] with the chunk-count cap passed in.
@@ -166,13 +168,18 @@ impl HnswStore {
     /// What: `cap` must be at most [`MAX_CHUNKS_PER_DRAWER`], so a chunk
     /// index fits the `u32` key suffix. A count outside `1..=cap` is
     /// [`HnswStoreError::ChunkCount`] naming `cap`, before any write.
-    /// Test: `upsert_chunks_rejects_empty_and_over_cap`.
+    /// #9728: `progress` ticks once after the redb commit and once after each
+    /// indexed point, so a `run_bounded_progress` watcher sees a slow legal
+    /// group advancing and abandons only a stalled one.
+    /// Test: `upsert_chunks_rejects_empty_and_over_cap`,
+    /// `a_legal_group_slower_than_the_budget_completes_without_tripping`.
     // #9275: cap seam so the boundary test fits the op budget.
     pub(crate) fn replace_group_capped(
         &self,
         drawer: &str,
         vectors: &[Vec<f32>],
         cap: usize,
+        progress: &OpProgress,
     ) -> Result<Vec<u64>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
@@ -192,10 +199,13 @@ impl HnswStore {
         }
         let _op = self.ops.begin(op_watch::HnswOpKind::Upsert);
         let written = self.commit_group(drawer, vectors)?;
+        // #9728: each tick restarts the watcher's budget; a stall gets none.
+        progress.advance();
         for (_n, ((id, shadows), vector)) in written.iter().zip(vectors).enumerate() {
             #[cfg(test)]
             index_pace::pace(drawer, _n);
             self.index_point(vector, *id, *shadows)?;
+            progress.advance();
         }
         Ok(written.into_iter().map(|(id, _)| id).collect())
     }

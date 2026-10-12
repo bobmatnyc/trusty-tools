@@ -10,7 +10,10 @@
 //! write-transaction deadline). The vector layer runs its blocking work
 //! through [`HnswStore::run_bounded`], whose spawned watcher runs the budget
 //! clock even after the caller is dropped, trips the store's [`OpBreaker`],
-//! and counts each overrun once.
+//! and counts each overrun once. #9728: an operation that reports progress
+//! through [`OpProgress`] (a group write, one tick per indexed point) is
+//! abandoned only after a whole budget passes with no tick, so a long legal
+//! group completes while a stall still trips within one budget.
 //! From then on every bounded operation returns [`OpBudgetError::Wedged`]
 //! without spawning a thread or waiting on a lock. The breaker never resets:
 //! it lives on the `HnswStore`, so it clears only when the palace is reopened
@@ -19,11 +22,12 @@
 //! after their palace is evicted.
 //! Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
 //! `a_tripped_store_refuses_the_next_call_without_spawning`,
-//! `a_dropped_caller_still_trips_the_breaker_at_the_budget`.
+//! `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
+//! `a_legal_group_slower_than_the_budget_completes_without_tripping`.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::{MutexGuard, RwLockReadGuard};
@@ -164,11 +168,37 @@ const ABANDONED: u8 = 2;
 /// it counts an overrun — the watcher for a hung task, the task for an inner
 /// lock bound's `BudgetExceeded` — so each overrun counts once. The inner
 /// bounds themselves never count.
+/// #9728: `progress_ms` is the time of the last progress tick, in ms since
+/// `started`; the watcher's deadline is that tick plus one budget.
 struct OpSlot {
     state: AtomicU8,
     breaker: Arc<OpBreaker>,
     palace: Arc<str>,
     op: &'static str,
+    started: Instant,
+    progress_ms: AtomicU64,
+}
+
+/// A bounded operation's progress signal to its watcher (#9728).
+///
+/// Why: a group write indexes thousands of points one after another; a wall
+/// clock over the whole call trips the sticky breaker on legal slow work.
+/// What: [`OpProgress::advance`] records "now" on the operation's slot, which
+/// pushes the watcher's deadline to one budget past it. The default handle
+/// is attached to no slot and does nothing, for callers with no watcher.
+/// Test: `a_legal_group_slower_than_the_budget_completes_without_tripping`,
+/// `a_stall_inside_a_large_group_trips_one_budget_after_the_stall`.
+#[derive(Clone, Default)]
+pub(crate) struct OpProgress(Option<Arc<OpSlot>>);
+
+impl OpProgress {
+    /// Record that the operation finished one unit of work just now.
+    pub(crate) fn advance(&self) {
+        if let Some(slot) = &self.0 {
+            let ms = u64::try_from(slot.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            slot.progress_ms.store(ms, Ordering::Release);
+        }
+    }
 }
 
 /// Settles the slot when the task ends, even by panic, then wakes the
@@ -193,24 +223,52 @@ impl Drop for TaskEnd {
     }
 }
 
-/// Own one bounded operation's budget clock (#9487 F1, F2, F5).
+/// Own one bounded operation's budget clock (#9487 F1, F2, F5; #9728).
 ///
 /// Why: a clock inside the caller's future stops when that future is
 /// dropped, so a stuck task was detached uncounted and health stayed ok.
-/// What: waits for the task to end, up to the budget. At the budget it
-/// raises the gauge, then abandons the task by compare-and-swap; on a win it
-/// trips, counts and logs once, and sends the caller its verdict. The gauge
-/// rises before the swap, so the task's decrement never runs ahead of it.
+/// #9728: a wall clock over a whole group write tripped on legal slow work,
+/// so the clock measures time since the last progress tick instead.
+/// What: waits for the task to end until one budget past the slot's last
+/// progress tick (its start, for an operation that never ticks). A tick in
+/// the meantime moves the deadline and the wait resumes. A deadline reached
+/// with no new tick is a stall: it raises the gauge, then abandons the task
+/// by compare-and-swap; on a win it trips, counts and logs once, and sends
+/// the caller its verdict. The gauge rises before the swap, so the task's
+/// decrement never runs ahead of it.
 /// Test: `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
-/// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
+/// `a_hung_closure_exceeds_the_join_budget_without_any_lock`,
+/// `a_legal_group_slower_than_the_budget_completes_without_tripping`,
+/// `a_stall_inside_a_large_group_trips_one_budget_after_the_stall`,
+/// `a_dropped_caller_of_a_slow_group_leaves_every_chunk_indexed`.
 async fn watch_op(
     slot: Arc<OpSlot>,
     budget: Duration,
-    task_end: oneshot::Receiver<()>,
+    mut task_end: oneshot::Receiver<()>,
     verdict: oneshot::Sender<OpBudgetError>,
 ) {
-    if tokio::time::timeout(budget, task_end).await.is_ok() {
-        return;
+    // #9728: trip only after a whole budget with no progress tick.
+    loop {
+        let last = slot.progress_ms.load(Ordering::Acquire);
+        let Some(deadline) = slot
+            .started
+            .checked_add(Duration::from_millis(last))
+            .and_then(|t| t.checked_add(budget))
+        else {
+            // A budget past the clock's range never fires (as `timeout` did).
+            let _ = task_end.await;
+            return;
+        };
+        let deadline = tokio::time::Instant::from_std(deadline);
+        if tokio::time::timeout_at(deadline, &mut task_end)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if slot.progress_ms.load(Ordering::Acquire) == last {
+            break;
+        }
     }
     ABANDONED_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
     let won = slot
@@ -335,6 +393,17 @@ impl HnswStore {
         &self.breaker
     }
 
+    /// `Wedged` once the breaker has tripped (#9728).
+    ///
+    /// Why: a tripped group's rows are committed but its tail never reached
+    /// the graph, so a read of the redb rows alone would call it complete.
+    /// Test: `a_stalled_group_trips_for_good_and_is_never_counted_complete`.
+    pub(crate) fn refuse_if_tripped(&self) -> Result<()> {
+        self.breaker
+            .check(&self.palace)
+            .map_err(HnswStoreError::from)
+    }
+
     /// Take the insert gate within the budget, or trip the breaker (#9487).
     pub(super) fn bounded_gate(&self, op: &'static str) -> Result<MutexGuard<'_, ()>> {
         self.breaker.check(&self.palace)?;
@@ -356,6 +425,22 @@ impl HnswStore {
 
     /// Run `work` on the blocking pool, bounded by the budget (#9487).
     ///
+    /// [`Self::run_bounded_progress`] with a closure that never reports
+    /// progress, so the whole call must finish within one budget.
+    /// Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
+    /// `a_tripped_store_refuses_the_next_call_without_spawning`,
+    /// `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
+    /// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
+    pub async fn run_bounded<T, F>(&self, op: &'static str, work: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    {
+        self.run_bounded_progress(op, move |_| work()).await
+    }
+
+    /// Run `work` on the blocking pool under a stall watchdog (#9487, #9728).
+    ///
     /// Why: a `spawn_blocking` task cannot be cancelled, so an unbounded join
     /// hands a stuck operation's wait to every async caller. The budget clock
     /// must outlive the caller: an HTTP client that disconnects, or the
@@ -366,14 +451,20 @@ impl HnswStore {
     /// waits. The task replies to the caller directly (no scheduler hop, so a
     /// `block_on` caller on a current-thread runtime still completes); the
     /// caller returns that reply or the watcher's `BudgetExceeded` verdict.
-    /// Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
-    /// `a_tripped_store_refuses_the_next_call_without_spawning`,
-    /// `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
-    /// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
-    pub async fn run_bounded<T, F>(&self, op: &'static str, work: F) -> anyhow::Result<T>
+    /// #9728: `work` gets an [`OpProgress`] for the slot; each
+    /// [`OpProgress::advance`] restarts the budget, so the watcher abandons
+    /// the task only after one budget with no progress.
+    /// Test: `a_legal_group_slower_than_the_budget_completes_without_tripping`,
+    /// `a_stall_inside_a_large_group_trips_one_budget_after_the_stall`,
+    /// `a_dropped_caller_of_a_slow_group_leaves_every_chunk_indexed`.
+    pub(crate) async fn run_bounded_progress<T, F>(
+        &self,
+        op: &'static str,
+        work: F,
+    ) -> anyhow::Result<T>
     where
         T: Send + 'static,
-        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce(OpProgress) -> anyhow::Result<T> + Send + 'static,
     {
         self.breaker
             .check(&self.palace)
@@ -384,7 +475,10 @@ impl HnswStore {
             breaker: Arc::clone(&self.breaker),
             palace: Arc::clone(&self.palace),
             op,
+            started: Instant::now(),
+            progress_ms: AtomicU64::new(0),
         });
+        let progress = OpProgress(Some(Arc::clone(&slot)));
         let (reply, mut outcome) = oneshot::channel();
         let (ended, task_end) = oneshot::channel();
         let (verdict_tx, verdict) = oneshot::channel();
@@ -394,7 +488,7 @@ impl HnswStore {
             _ended: ended,
         };
         let _detached = tokio::task::spawn_blocking(move || {
-            let result = work();
+            let result = work(progress);
             end.overrun = matches!(
                 result.as_ref().map_err(op_budget_error),
                 Err(Some(OpBudgetError::BudgetExceeded { .. }))
