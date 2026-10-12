@@ -328,11 +328,12 @@ async fn loopback_listener_is_not_gated() {
     let router = console_router();
     let (tailnet, _stop) = spawn_tailnet(router.clone(), gate(Arc::clone(&resolver))).await;
 
-    // The loopback listener is served exactly as `run_serve` serves it: the
-    // same router value, plain `axum::serve`, no gate.
+    // The loopback listener is served as `run_serve` serves it: the same
+    // router value behind its Host/Origin check (#9792), no peer gate.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let loopback = listener.local_addr().expect("local addr");
-    tokio::spawn(async move { axum::serve(listener, router).await });
+    let app = guard_loopback(router, loopback, OwnMagicDns::default());
+    tokio::spawn(async move { axum::serve(listener, app).await });
 
     assert_eq!(status_of(tailnet, "GET", "/health", None).await, 403);
     let calls_after_tailnet = resolver.calls();
@@ -531,9 +532,13 @@ const WILDCARD: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 /// Serve the console router on `addrs` through `serve_listeners`, the
 /// production path `run_serve` uses, and return the bound addresses.
 async fn serve_all(addrs: &[SocketAddr], resolver: Arc<Scripted>) -> Vec<SocketAddr> {
-    serve_listeners(addrs, &console_router(), resolver, || {
-        std::future::pending::<()>()
-    })
+    serve_listeners(
+        addrs,
+        &console_router(),
+        resolver,
+        &OwnMagicDns::default(),
+        std::future::pending::<()>,
+    )
     .await
     .expect("serve listeners")
     .bound

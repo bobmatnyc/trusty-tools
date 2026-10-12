@@ -28,7 +28,8 @@ use super::tests::{
 use super::{CSRF_HEADER, SecretsBridge};
 use crate::server::{AppState, build_router};
 use crate::tailnet_peer::{
-    PeerIdentity, PeerResolver, TailnetPeerGate, WhoisError, serve_listeners, serve_tailnet,
+    OwnMagicDns, PeerIdentity, PeerResolver, TailnetPeerGate, WhoisError, serve_listeners,
+    serve_tailnet,
 };
 
 /// A bridge to the stub at `socket`, owning `own` and judging with `table`.
@@ -193,11 +194,12 @@ async fn the_real_router_sends_no_cors_header_on_secrets_routes() {
         .body(Body::empty())
         .expect("request");
     let response = app.oneshot(console).await.expect("response");
+    // #9792: the permissive CORS layer is gone from /api/console/* too.
     assert!(
-        response
+        !response
             .headers()
             .contains_key("access-control-allow-origin"),
-        "/api/console/* keeps the permissive CORS layer"
+        "/api/console/* must carry no CORS header"
     );
 }
 
@@ -346,6 +348,7 @@ async fn a_loopback_request_is_judged_from_the_pid_found_at_accept() {
         &["127.0.0.1:0".parse().expect("addr")],
         &build_router(state),
         Arc::new(AnyOwner),
+        &OwnMagicDns::default(),
         move || {
             let mut stopped = stopped.clone();
             async move {
@@ -394,6 +397,7 @@ async fn a_slow_lookup_delays_no_accept_and_no_other_route() {
         &["127.0.0.1:0".parse().expect("addr")],
         &build_router(AppState::new(Vec::new())),
         Arc::new(AnyOwner),
+        &OwnMagicDns::default(),
         move || {
             let mut stopped = stopped.clone();
             async move {

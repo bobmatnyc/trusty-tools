@@ -11351,7 +11351,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.12.6"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axum",

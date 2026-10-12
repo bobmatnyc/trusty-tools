@@ -239,8 +239,8 @@ impl crate::server::AppState {
 
 /// Every `/api/secrets/*` route, behind the bridge's guard.
 ///
-/// Why: mounted as its own sub-router, after the console's permissive CORS
-/// layer and write-origin guard, so neither applies here (A6).
+/// Why: mounted as its own sub-router, after the console's write-origin
+/// guard, so it does not apply here (A6).
 /// What: `session`, the picker routes (`projects`, `scopes`, and
 /// `backends` for copy, #9067),
 /// five credential verbs, `resolve` (501), and a catch-all (404) so no

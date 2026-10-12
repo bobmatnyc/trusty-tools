@@ -3,6 +3,8 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // #5936: emptyOutDir below deletes the tracked ui-source-hash.txt; this
 // re-writes it after the build that removed it.
 import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
+// #9792: dev proxy rows the console's Host/Origin check admits.
+import { consoleProxy } from '../../../scripts/lib/vite-console-proxy.mjs';
 
 // Why: the console embeds this bundle with rust-embed and serves it at
 // `/tools/memory/`; the bytes must therefore be self-contained and
@@ -40,11 +42,7 @@ export default defineConfig({
     // no HTTP listener since #6286. They forward to the console's bridge
     // prefix instead, which is the only way in.
     port: 5174,
-    proxy: {
-      '/api/v1': 'http://127.0.0.1:7788/api/memory',
-      '/health': 'http://127.0.0.1:7788/api/memory',
-      '/sse': 'http://127.0.0.1:7788/api/memory'
-    }
+    proxy: consoleProxy('http://127.0.0.1:7788/api/memory', ['/api/v1', '/health', '/sse'])
   },
   // Why (#6155): `src/lib/base.js` snapshots `document.baseURI` at module load,
   // so anything importing `api.js` needs a DOM. jsdom gives vitest one.

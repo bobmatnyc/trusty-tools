@@ -890,27 +890,44 @@ async fn write_route_allows_missing_origin() {
     );
 }
 
-/// Why: the guard must NOT block safe cross-origin reads — the CORS policy is
-/// intentionally open for GETs so the SPA and tooling can read fleet state.
-/// A cross-origin `GET` must pass the guard (and then degrade to 503 with no
-/// binary), proving the middleware is method-aware.
-/// What: issues `GET /api/console/sessions` with a remote Origin; asserts the
-/// status is NOT 403.
+/// The router as the loopback listener serves it (#9792): the console router
+/// behind the listener's Host/Origin check, for a listener on `127.0.0.1:7788`.
+fn loopback_served_router() -> axum::Router {
+    crate::tailnet_peer::guard_loopback(
+        build_router(make_test_state()),
+        "127.0.0.1:7788".parse().expect("addr"),
+        crate::tailnet_peer::OwnMagicDns::default(),
+    )
+}
+
+/// Why: #9792 flipped this pin. Reads used to be open to every origin, so
+/// any page the operator visited could read sessions, pids and host
+/// metrics. A cross-origin `GET` is now refused like a write.
+/// What: issues `GET /api/console/sessions` with the listener's own `Host`
+/// and a foreign `Origin` through the loopback serve wiring; asserts 403 and
+/// no `access-control-allow-origin` header.
 /// Test: this test itself.
 #[tokio::test]
-async fn read_route_allows_cross_origin() {
-    let router = build_router(make_test_state());
+async fn read_route_refuses_cross_origin() {
     let req = Request::builder()
         .method("GET")
         .uri("/api/console/sessions")
+        .header("host", "127.0.0.1:7788")
         .header("origin", "http://evil.example.com")
         .body(Body::empty())
         .expect("request");
-    let resp = router.oneshot(req).await.expect("response");
-    assert_ne!(
+    let resp = loopback_served_router()
+        .oneshot(req)
+        .await
+        .expect("response");
+    assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "cross-origin GET (read) must not be blocked by the write guard"
+        "cross-origin GET (read) must be refused"
+    );
+    assert!(
+        !resp.headers().contains_key("access-control-allow-origin"),
+        "a refused cross-origin read must carry no CORS header"
     );
 }
 
@@ -945,27 +962,29 @@ async fn proxy_route_rejects_cross_origin_write() {
     );
 }
 
-/// Why: #3268 companion — the router-wide guard must still let a
-/// cross-origin, safe `GET` through the proxy pass (read traffic is not
-/// the CSRF threat model); this proves the router-wide `.layer()` stayed
-/// method-aware after replacing the route-scoped `route_layer`.
-/// What: issues `GET /api/search/status` with a remote Origin; asserts
-/// the response is NOT 403 (it degrades to 503/502 with no live daemon).
+/// Why: #9792 flipped this #3268 companion pin. A cross-origin `GET`
+/// through the proxy reached the daemon behind it; reads now face the same
+/// Host/Origin check as writes.
+/// What: issues `GET /api/search/status` with the listener's own `Host` and
+/// a foreign `Origin` through the loopback serve wiring; asserts 403.
 /// Test: this test itself.
 #[tokio::test]
-async fn proxy_route_allows_cross_origin_read() {
-    let router = build_router(make_test_state());
+async fn proxy_route_refuses_cross_origin_read() {
     let req = Request::builder()
         .method("GET")
         .uri("/api/search/status")
+        .header("host", "127.0.0.1:7788")
         .header("origin", "http://evil.example.com")
         .body(Body::empty())
         .expect("request");
-    let resp = router.oneshot(req).await.expect("response");
-    assert_ne!(
+    let resp = loopback_served_router()
+        .oneshot(req)
+        .await
+        .expect("response");
+    assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "cross-origin GET through the reverse proxy must not be blocked by the write guard"
+        "cross-origin GET through the reverse proxy must be refused"
     );
 }
 
