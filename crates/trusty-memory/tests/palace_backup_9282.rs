@@ -318,7 +318,12 @@ async fn palace_backup_refuses_a_dest_in_the_registry_dir() {
             "{}: {err}",
             dest.display()
         );
-        assert_eq!(tree(&registry), before, "{} wrote something", dest.display());
+        assert_eq!(
+            tree(&registry),
+            before,
+            "{} wrote something",
+            dest.display()
+        );
     }
 }
 
