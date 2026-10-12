@@ -103,7 +103,7 @@ pub(crate) fn workstream_summary_tag(name: &str) -> String {
 }
 
 /// One row as returned by trusty-memory's `memory.drawers_list`
-/// — a subset of `trusty_common::memory_core::palace::Drawer`'s fields (only
+/// — a subset of `trusty_memory::engine::palace::Drawer`'s fields (only
 /// what grouping/summary needs).
 #[derive(Debug, Clone, Deserialize)]
 struct DrawerRow {
