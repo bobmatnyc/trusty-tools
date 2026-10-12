@@ -34,7 +34,12 @@ const BYPASS_ENV: &[&str] = &[
 /// A `tm hook --egress-guard` command with its data directory at `data`, every
 /// bypass variable stripped, then `env` applied on top.
 fn guard_command(data: &Path, env: &[(&str, &str)]) -> Command {
-    let mut command = common::tm_command_in(common::tm_spawn_home());
+    guard_command_in(common::tm_spawn_home(), data, env)
+}
+
+/// [`guard_command`] with `HOME` at `home` (#9741: a tainted temp home).
+fn guard_command_in(home: &Path, data: &Path, env: &[(&str, &str)]) -> Command {
+    let mut command = common::tm_command_in(home);
     command
         .args(["--url", UNREACHABLE_DAEMON, "hook", "--egress-guard"])
         .env("TRUSTY_DATA_DIR_OVERRIDE", data)
@@ -548,4 +553,91 @@ fn bash_egress_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
     drop(pipe);
     let out = wait_within_9720(child, REPRO_BOUND_9720);
     assert!(out.status.success(), "the guard exits 0: {out:?}");
+}
+
+/// The channel-tainted session the #9741 cases run as.
+const TAINTED: &str = "s-9741";
+
+/// A canonical temp root holding `home`, with [`TAINTED`] tainted under it.
+fn tainted_home() -> (tempfile::TempDir, std::path::PathBuf) {
+    let root = tempfile::tempdir().expect("tempdir");
+    let home = std::fs::canonicalize(root.path())
+        .expect("canonical")
+        .join("home");
+    std::fs::create_dir(&home).expect("mkdir home");
+    let mark = trusty_mpm::core::channels_taint::TaintMark {
+        channel: "slack".into(),
+        route: "owner-dm".into(),
+        question_id: "Q-1".into(),
+        tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
+    };
+    let dir = trusty_mpm::core::channels_taint::taint_dir(&home);
+    trusty_mpm::core::channels_taint::taint_managed_session(&dir, "m-9741", TAINTED, &mark)
+        .expect("taint");
+    (root, home)
+}
+
+/// 🔴 #9741 A8 (#8454 G3): the hook refuses a tainted session's gated call
+/// when its `config.yaml` is missing or unreadable — with no bypass, under
+/// both pm-guard bypass variables, and for a subagent — as
+/// `egress-policy-not-ready`, the reason naming the failed branch.
+#[test]
+fn egress_policy_not_ready_denies_under_both_bypasses_and_subagent() {
+    let bypassed = [
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+    ];
+    let subagent = [("CLAUDE_MPM_SUB_AGENT", "1")];
+    for (branch, unreadable) in [
+        ("config.yaml is missing", false),
+        ("config.yaml is unreadable", true),
+    ] {
+        let (root, home) = tainted_home();
+        if unreadable {
+            // A directory where the file belongs: the read refuses it.
+            let path = trusty_common::crate_config::crate_config_path_at(&home, "trusty-mpm");
+            std::fs::create_dir_all(path).expect("a directory at config.yaml");
+        }
+        for (who, env) in [
+            ("no bypass", &[][..]),
+            ("both bypasses", &bypassed[..]),
+            ("subagent", &subagent[..]),
+        ] {
+            let mut call = serde_json::json!({
+                "session_id": TAINTED,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+                "tool_input": {"file_path": home.join("notes.md").display().to_string()},
+            });
+            if who == "subagent" {
+                call["agent_id"] = serde_json::json!("agent-1");
+                call["agent_type"] = serde_json::json!("engineer");
+            }
+            let case = format!("{branch}, {who}");
+            let data = root
+                .path()
+                .join(format!("data-{}-{}", unreadable, env.len()));
+            std::fs::create_dir_all(&data).expect("mkdir data");
+            let mut child = guard_command_in(&home, &data, env)
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("spawn tm hook --egress-guard");
+            let mut pipe = child.stdin.take().expect("child stdin");
+            let _ = pipe.write_all(call.to_string().as_bytes());
+            drop(pipe);
+            let out = child.wait_with_output().expect("wait for the guard");
+            assert_denied(&out, &case);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(stdout.contains(branch), "{case}: {stdout}");
+            let errors = aggregate_errors_from_paths(&store_paths_under(&data), 100);
+            assert!(
+                errors.iter().any(|e| {
+                    e.record.fields.contains("check=egress-policy-not-ready")
+                        && e.record.fields.contains(&format!("session={TAINTED}"))
+                }),
+                "{case}: no egress-policy-not-ready record among {errors:#?}"
+            );
+        }
+    }
 }

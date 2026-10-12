@@ -10,17 +10,46 @@
 //! `session_id`, under the hook's home. A tainted session, a gated call with no
 //! string `session_id`, and an unknown home each deny; an untainted session
 //! and every other tool are not judged here. Bypass variables and `agent_id`
-//! are never read.
-//! Test: `egress_guard_taint_tests.rs`; end to end in
-//! `tests/tm_hook_session_start_taint_8433.rs`.
+//! are never read. #9741 (#8454 S4, ruling a): before that deny the guard
+//! checks the route policy; a policy that is not ready denies as
+//! [`POLICY_CHECK`] with [`policy_not_ready_reason`].
+//! Test: `egress_guard_taint_tests.rs`, `egress_guard_policy_tests.rs`; end to
+//! end in `tests/tm_hook_session_start_taint_8433.rs` and
+//! `tests/tm_hook_egress_guard_8454.rs`.
 
 use std::path::Path;
 
 use serde_json::Value;
+use trusty_mpm::core::channels_readiness::{NOT_READY_CHECK, NotReady};
 use trusty_mpm::core::channels_taint;
 
 /// The audit slug a taint deny records.
 pub(crate) const TAINT_CHECK: &str = "egress-channel-tainted";
+
+/// The audit slug of a deny because the route policy is not ready (#9741).
+pub(crate) const POLICY_CHECK: &str = NOT_READY_CHECK;
+
+/// The deny reason for a gated call refused because the policy is not ready.
+///
+/// What: names the tool and the failed branch, then keeps `taint`, the taint
+/// arm's own reason, so neither cause is hidden.
+/// Test: `config_missing_denies_a_gated_call`.
+pub(crate) fn policy_not_ready_reason(
+    payload: &Value,
+    not_ready: &NotReady,
+    taint: &str,
+) -> String {
+    let tool = payload
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("this tool");
+    format!(
+        "tm hook --egress-guard denies `{tool}`: the channel route policy is not ready — \
+         {not_ready} — so the guard refuses this call before its channel-taint check (#9741, \
+         #8454). `tm doctor` shows the cause in its `channels_*` and `egress_policy_ready` rows. \
+         The taint check refuses it too: {taint}"
+    )
+}
 
 /// The tools whose calls can reach a path (the S4 plan's gated class).
 const GATED_TOOLS: &[&str] = &[
@@ -77,3 +106,7 @@ pub(crate) fn taint_verdict(payload: &Value, home: Option<&Path>) -> Option<Stri
 #[cfg(test)]
 #[path = "egress_guard_taint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "egress_guard_policy_tests.rs"]
+mod policy_tests;

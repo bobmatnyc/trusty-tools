@@ -89,11 +89,13 @@ fn non_gated_tool_is_not_judged() {
 }
 
 /// 🔴 #8433: the arm turns the guard's allow into a deny, and a deny stands.
+/// #9741: the policy reads ready here, so the taint deny is the verdict.
 #[test]
 fn with_taint_denies_an_allowed_gated_call_of_a_tainted_session() {
     let home = tainted_home();
     let read = Ok(call("Read", Some("s-tainted")));
-    let verdict = with_taint(Verdict::Allow, &read, Some(home.path()));
+    let ready = || Ok(());
+    let verdict = with_taint(Verdict::Allow, &read, Some(home.path()), ready);
     assert!(
         matches!(
             verdict,
@@ -108,10 +110,13 @@ fn with_taint_denies_an_allowed_gated_call_of_a_tainted_session() {
         check: "egress-family",
         reason: "x".into(),
     };
-    assert_eq!(with_taint(first.clone(), &read, Some(home.path())), first);
+    assert_eq!(
+        with_taint(first.clone(), &read, Some(home.path()), ready),
+        first
+    );
     let clean = Ok(call("Read", Some("s-clean")));
     assert_eq!(
-        with_taint(Verdict::Allow, &clean, Some(home.path())),
+        with_taint(Verdict::Allow, &clean, Some(home.path()), ready),
         Verdict::Allow
     );
 }

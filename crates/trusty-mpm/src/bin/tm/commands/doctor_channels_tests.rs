@@ -22,11 +22,13 @@ use super::{
     rows_with, view_row,
 };
 
-const NAMES: [&str; 4] = [
+const NAMES: [&str; 5] = [
     "channels_host",
     "channels_routes",
     "channels_gchat",
     "channels_gate",
+    // #9741: the egress guard's policy readiness, over the daemon view.
+    "egress_policy_ready",
 ];
 
 /// A canonical temp home (macOS tempdirs sit under a symlink).
@@ -658,4 +660,38 @@ fn host_loaded_but_unreadable_details_is_unknown() {
         ceiling: None,
     }));
     assert_eq!(host.status, CheckStatus::Unknown, "{host:?}");
+}
+
+/// 🔴 #9741: `egress_policy_ready` is Ok only for a ready daemon view or the
+/// not-configured state; a not-ready view warns and names the branch, and an
+/// unfinished load is Unknown.
+#[test]
+fn egress_policy_ready_row_is_ok_only_when_ready() {
+    use crate::commands::doctor_channels_egress::egress_ready_row;
+    let home = Home::new();
+    let dir = home.home.join("proj");
+    let host = slack_host(&[&dir]);
+    let route = || parse_project_file(&slack_route("bob-dm", "U0ABCDEF1"), Some(&home.home));
+    let ready = merged(&home, &host, vec![input(&dir, route())]);
+    let row = egress_ready_row(&Ok(vec![ready]));
+    assert_eq!(row.status, CheckStatus::Ok, "{row:?}");
+    assert!(row.message.contains("ready"), "{row:?}");
+
+    let broken = Err(ProjectFileError::Parse {
+        reason: "expected a table".into(),
+    });
+    let refused = merged(&home, &host, vec![input(&dir, broken)]);
+    let empty = merged(&home, &slack_host(&[]), Vec::new());
+    for (report, branch) in [(refused, "FileRefused"), (empty, "no route is in effect")] {
+        let row = egress_ready_row(&Ok(vec![report]));
+        assert_eq!(row.status, CheckStatus::Warn, "{row:?}");
+        assert!(row.message.contains(branch), "{branch}: {row:?}");
+        assert!(row.message.contains("egress-policy-not-ready"), "{row:?}");
+    }
+
+    let timed_out: Outcome<Vec<LoadReport>> = Err(Unfinished::TimedOut(Duration::from_secs(30)));
+    for outcome in [timed_out, Err(Unfinished::Stopped), Ok(Vec::new())] {
+        let row = egress_ready_row(&outcome);
+        assert_eq!(row.status, CheckStatus::Unknown, "{row:?}");
+    }
 }

@@ -14,7 +14,9 @@
 //! `ChannelPolicy::check_egress`: an `Allow` from a channel policy must not
 //! read as permission to run a family tool.
 //! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
-//! trust-anchor floor ([`verdict`]), [`decide`]s, and on a deny records it through `pm_guard_deny_log`, prints the deny from
+//! trust-anchor floor ([`verdict`]), [`decide`]s, applies the channel-taint
+//! arm with its policy readiness gate ([`with_taint`], #8433, #9741), and on
+//! a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
 //! output, which Claude Code reads as "no decision".
@@ -29,13 +31,16 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
-use crate::commands::egress_guard_taint::{TAINT_CHECK, taint_verdict};
+use crate::commands::egress_guard_taint::{
+    POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
+};
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, post_deny_audit, record_deny};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
 use crate::commands::pm_guard_trust_anchor::{HookEnv, TRUST_ANCHOR_RULE, evaluate};
+use trusty_mpm::core::channels_readiness::{NotReady, policy_ready};
 use trusty_mpm::core::config::MpmConfig;
 
 /// The deny reason printed when the guard panics.
@@ -226,20 +231,35 @@ pub(crate) fn verdict(
     decide(read, table)
 }
 
-/// [`verdict`], then the channel-taint arm for a call it allowed (#8433).
+/// [`verdict`], then the channel-taint arm for a call it allowed (#8433),
+/// with the policy readiness gate ahead of the taint deny (#9741).
 ///
-/// What: a deny stands; an allow of a readable payload becomes a
-/// [`TAINT_CHECK`] deny when [`taint_verdict`] refuses it.
-/// Test: `with_taint_denies_an_allowed_gated_call_of_a_tainted_session`.
+/// Why (#9741, Architect ruling a): a tainted session's gated call is denied
+/// either way; a policy that is not ready is reported as the cause first.
+/// What: a deny stands. An allow of a readable payload that [`taint_verdict`]
+/// refuses runs `ready`: not ready is a [`POLICY_CHECK`] deny naming the
+/// branch, ready is the [`TAINT_CHECK`] deny. `ready` runs for no other call.
+/// Test: `with_taint_denies_an_allowed_gated_call_of_a_tainted_session`,
+/// `config_missing_denies_a_gated_call`, `ready_policy_falls_through_to_taint_deny`,
+/// `untainted_session_never_reads_the_policy`.
 pub(crate) fn with_taint(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
+    ready: impl FnOnce() -> Result<(), NotReady>,
 ) -> Verdict {
     match (first, read) {
-        (Verdict::Allow, Ok(payload)) => {
-            taint_verdict(payload, home).map_or(Verdict::Allow, |reason| deny(TAINT_CHECK, reason))
-        }
+        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home) {
+            None => Verdict::Allow,
+            // #9741: readiness runs before the taint deny; both arms deny.
+            Some(taint) => match ready() {
+                Ok(()) => deny(TAINT_CHECK, taint),
+                Err(not_ready) => deny(
+                    POLICY_CHECK,
+                    policy_not_ready_reason(payload, &not_ready, &taint),
+                ),
+            },
+        },
         (first, _) => first,
     }
 }
@@ -275,7 +295,10 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let env = HookEnv::ambient();
     let anchor = |payload: &serde_json::Value| evaluate(payload, &env, MpmConfig::load_default);
     let first = verdict(&read, &FamilyTable::builtin(), anchor);
-    let Verdict::Deny { check, reason } = with_taint(first, &read, env.home.as_deref()) else {
+    let home = env.home.as_deref();
+    // #9741: the policy loads under the same home the taint is read from.
+    let ready = || policy_ready(home);
+    let Verdict::Deny { check, reason } = with_taint(first, &read, home, ready) else {
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.
