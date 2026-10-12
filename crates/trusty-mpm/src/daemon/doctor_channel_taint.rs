@@ -8,16 +8,18 @@
 //! the manager's records, and [`channel_taint_row`] grades them: `Unknown`
 //! when the directory cannot be listed; `Fail` when the hook recorded a double
 //! failure; `Warn` naming each orphaned file or marker (its managed session is
-//! missing or terminal), each failed re-apply and each unreadable file; `Ok`
-//! otherwise.
-//! Test: `doctor_lists_orphan_taint_files_and_deletes_none`.
+//! missing, terminal or deliberately stopped, so its retire did not complete),
+//! each failed re-apply and each unreadable file; `Ok` otherwise.
+//! Test: `doctor_lists_orphan_taint_files_and_deletes_none`,
+//! `doctor_row_is_unknown_when_taint_cannot_be_listed`,
+//! `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`.
 
 use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::channels_taint;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
-use crate::session_manager::SessionManager;
+use crate::session_manager::{ManagedSessionState, SessionManager, StopCause};
 
 /// The row's name.
 pub(crate) const NAME: &str = "channel_taint";
@@ -31,20 +33,30 @@ pub(crate) async fn check_channel_taint(mgr: &SessionManager) -> DoctorCheck {
 }
 
 /// [`check_channel_taint`] for the taint directory `dir`.
+///
+/// What: a managed session is live unless it is terminal or was stopped
+/// deliberately. A deliberate stop ends the session and retires its taint
+/// (Dfc), so a taint that outlives one is a retire that failed (critic MEDIUM).
+/// Test: `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`.
 pub(crate) async fn check_channel_taint_in(mgr: &SessionManager, dir: &Path) -> DoctorCheck {
     let live: HashSet<String> = mgr
         .list()
         .await
         .into_iter()
-        .filter(|r| !r.state.is_terminal())
+        .filter(|r| {
+            let ended = r.state == ManagedSessionState::Stopped
+                && r.stop_cause == Some(StopCause::Deliberate);
+            !r.state.is_terminal() && !ended
+        })
         .map(|r| r.id.to_string())
         .collect();
     channel_taint_row(dir, &live)
 }
 
-/// The row for the taint directory `dir`, given the non-terminal managed ids.
+/// The row for the taint directory `dir`, given the live managed ids.
 ///
-/// Test: `doctor_lists_orphan_taint_files_and_deletes_none`.
+/// Test: `doctor_lists_orphan_taint_files_and_deletes_none`,
+/// `doctor_row_is_unknown_when_taint_cannot_be_listed`.
 pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorCheck {
     let (files, marks) = match (
         channels_taint::list_taints(dir),
@@ -67,13 +79,20 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
             .unwrap_or_default();
         match parsed {
             Err(why) => lines.push(format!("{name}: unreadable ({why}); reads tainted")),
+            // #8433 fix round: an owner-less one (the marks could not be
+            // listed) is never retired; the operator removes it.
             Ok(r) if r.channel == channels_taint::REAPPLY_FAILED_CHANNEL => {
+                let owner = match r.managed_session.as_str() {
+                    "" => "no owner, so no retire removes it".to_owned(),
+                    m => format!("retired with managed session {m}"),
+                };
                 lines.push(format!(
-                    "{name}: failed re-apply, tainted by the SessionStart hook"
+                    "{name}: failed re-apply, tainted by the SessionStart hook ({owner})"
                 ));
             }
             Ok(r) if !live.contains(&r.managed_session) => lines.push(format!(
-                "{name}: orphaned, managed session {} is gone or ended",
+                "{name}: orphaned, managed session {} is gone or ended (a retire that did not \
+                 complete)",
                 r.managed_session
             )),
             Ok(_) => {}
@@ -84,10 +103,9 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
             "managed/{managed}.json: orphaned mark, the session is gone or ended"
         ));
     }
-    let failures = dir
-        .parent()
-        .map(|p| p.join(channels_taint::REAPPLY_FAILURES_FILE))
-        .and_then(|f| std::fs::read_to_string(f).ok())
+    // #8433 fix round: the record sits in the anchored taint dir.
+    let failures = std::fs::read_to_string(dir.join(channels_taint::REAPPLY_FAILURES_FILE))
+        .ok()
         .map_or(0, |text| {
             text.lines().filter(|l| !l.trim().is_empty()).count()
         });

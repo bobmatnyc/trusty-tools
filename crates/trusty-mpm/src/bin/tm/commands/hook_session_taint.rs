@@ -11,10 +11,11 @@
 //! What: [`post_lifecycle`] routes `SessionEnd` to the unchanged best-effort
 //! socket post, and `SessionStart` to [`deliver_session_start`] (socket, then
 //! HTTP, reporting the outcome) and [`settle_session_start`]. A daemon that
-//! answers 2xx settles nothing. Otherwise, when no taint exists anywhere under
-//! the home, there is nothing to re-apply and the hook succeeds as before;
-//! when some taint exists, or its presence cannot be read, the hook taints the
-//! new id (channel `reapply-failed`) and fails. If that write fails too, the
+//! answers 2xx settles nothing. Otherwise, when no managed session's taint
+//! covers the payload's cwd, there is nothing to re-apply and the hook
+//! succeeds as before; when one does, or the marks cannot be listed, the hook
+//! taints the new id (channel `reapply-failed`) for that managed session and
+//! fails. If that write fails too, the
 //! hook records the double failure for `tm doctor` and fails.
 //! Test: `hook_session_taint_tests.rs`; end to end in
 //! `tests/tm_hook_session_start_taint_8433.rs`.
@@ -24,7 +25,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
-use trusty_mpm::core::channels_taint::{self, Presence, TaintRecord};
+use trusty_mpm::core::channels_taint::{self, Cover, TaintRecord};
 
 /// What the daemon said to a `SessionStart`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +73,8 @@ pub(crate) async fn post_lifecycle(
 /// HTTP (500 ms connect, 2 s total), so the daemon never ingests the event
 /// twice (#8531).
 /// Test: `tests/tm_hook_session_start_8531.rs`,
-/// `tests/tm_hook_session_start_taint_8433.rs`.
+/// `tests/tm_hook_session_start_taint_8433.rs`,
+/// `socket_exchange_failure_is_no_answer_without_http_fallback`.
 pub(crate) async fn deliver_session_start(
     socket: Option<&Path>,
     url: &str,
@@ -115,13 +117,21 @@ pub(crate) async fn deliver_session_start(
 /// Settle a `SessionStart` the daemon did not confirm (D09); `Err` fails it.
 ///
 /// Why: the daemon is the re-apply's writer; when it did not confirm, this
-/// side cannot tell whether the new id needed a taint, so it taints whenever
-/// any taint exists. With no taint anywhere there is nothing to re-apply.
-/// What: see the module doc. An unknown home and an unreadable taint
-/// directory fail closed like a present taint.
+/// side cannot tell whether the new id needed a taint. The hook runs in the
+/// user tier, for every session on the machine, so it taints only where a
+/// managed session's taint covers the cwd (critic HIGH 2): one taint must not
+/// spread to every session an outage touches.
+/// What: [`channels_taint::covering_mark`] for the cwd. No covering mark:
+/// nothing to re-apply, the hook succeeds as before. A covering mark: the new
+/// id is tainted for that managed session, so its retire removes the file.
+/// Marks that cannot be listed: the new id is tainted with no owner, which
+/// the doctor row reports. An unknown home fails closed.
 /// Test: `accepted_delivery_settles_nothing`,
 /// `daemon_unreachable_with_no_taint_anywhere_writes_nothing`,
 /// `unconfirmed_delivery_with_taint_present_taints_the_new_id_and_fails`,
+/// `outage_at_an_unrelated_cwd_taints_nothing`,
+/// `outage_at_the_tainted_workspace_taints_the_new_id_for_its_managed_session`,
+/// `a_hook_written_taint_retires_with_its_managed_session`,
 /// `double_failure_is_recorded_and_fails`.
 pub(crate) fn settle_session_start(
     home: Option<&Path>,
@@ -129,7 +139,6 @@ pub(crate) fn settle_session_start(
     cwd: Option<&Path>,
     delivery: &Delivery,
 ) -> Result<(), String> {
-    let _ = cwd;
     let why = match delivery {
         Delivery::Accepted => return Ok(()),
         Delivery::Refused(why) | Delivery::NoAnswer(why) => why,
@@ -141,9 +150,11 @@ pub(crate) fn settle_session_start(
         ));
     };
     let dir = channels_taint::taint_dir(home);
-    if channels_taint::presence(&dir) == Presence::None {
-        return Ok(());
-    }
+    let owner = match channels_taint::covering_mark(&dir, cwd) {
+        Cover::None => return Ok(()),
+        Cover::Managed(managed) => managed,
+        Cover::Unknown => String::new(),
+    };
     if channels_taint::read_state(&dir, session_id).is_tainted() {
         return Err(format!(
             "trusty-mpm: the daemon did not confirm SessionStart ({why}); this session already \
@@ -153,7 +164,7 @@ pub(crate) fn settle_session_start(
     let record = TaintRecord {
         v: channels_taint::FORMAT_VERSION,
         session_id: session_id.to_owned(),
-        managed_session: String::new(),
+        managed_session: owner,
         channel: channels_taint::REAPPLY_FAILED_CHANNEL.to_owned(),
         route: String::new(),
         question_id: String::new(),
@@ -175,17 +186,15 @@ pub(crate) fn settle_session_start(
     }
 }
 
-/// Append one line naming a double re-apply failure beside the taint dir.
+/// Append one line naming a double re-apply failure to the taint dir's
+/// [`channels_taint::REAPPLY_FAILURES_FILE`].
 ///
-/// What: best effort — `channels/reapply-failures.jsonl`; a failed append is
-/// one stderr line. The `channel_taint` doctor row reads the file.
+/// What: best effort, mode 0600; a failed append is one stderr line. The
+/// file sits under the taint-dir trust anchor, so no session can delete it,
+/// and the `channel_taint` doctor row reads it.
 fn record_double_failure(dir: &Path, session_id: &str, daemon: &str, hook: &str) {
-    let Some(file) = dir
-        .parent()
-        .map(|p| p.join(channels_taint::REAPPLY_FAILURES_FILE))
-    else {
-        return;
-    };
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = dir.join(channels_taint::REAPPLY_FAILURES_FILE);
     let line = serde_json::json!({
         "at": chrono::Utc::now().to_rfc3339(),
         "session_id": session_id,
@@ -195,6 +204,7 @@ fn record_double_failure(dir: &Path, session_id: &str, daemon: &str, hook: &str)
     let appended = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(0o600)
         .open(&file)
         .and_then(|mut out| out.write_all(format!("{line}\n").as_bytes()));
     if let Err(e) = appended {

@@ -174,7 +174,10 @@ fn a_hook_written_taint_retires_with_its_managed_session() {
     assert!(read_state(&dir, "new").is_tainted());
     channels_taint::retire(&dir, "m-1").expect("retire");
     assert_eq!(read_state(&dir, "new"), TaintState::Untainted);
-    assert_eq!(channels_taint::presence(&dir), Presence::None);
+    assert_eq!(
+        channels_taint::presence(&dir),
+        channels_taint::Presence::None
+    );
 }
 
 /// 🔴 #8433 (r-078): a socket that accepts and then times out the exchange is no

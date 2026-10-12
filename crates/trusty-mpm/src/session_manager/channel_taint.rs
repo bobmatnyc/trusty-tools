@@ -10,7 +10,8 @@
 //! session tainted: the fail-closed direction. A failed retire is logged at
 //! ERROR, leaves the files in place, and the `channel_taint` doctor row
 //! reports them.
-//! Test: `stop_and_decommission_retire_taint` in `channel_taint_tests.rs`.
+//! Test: `stop_and_decommission_retire_taint`,
+//! `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`.
 
 use std::path::PathBuf;
 
@@ -41,7 +42,9 @@ impl SessionManager {
     /// Retire `id`'s channel taint, because the managed session ended (Dfc).
     ///
     /// What: no-op without an installed directory. A retire error is logged
-    /// at ERROR and the files stay, so the session stays tainted.
+    /// at ERROR and the files stay, so the session stays tainted; the doctor
+    /// row reads the deliberate stop and reports the taint as orphaned.
+    /// Test: `failed_retire_at_deliberate_stop_keeps_taint_and_doctor_reports_it`.
     pub(crate) fn retire_channel_taint(&self, id: &ManagedSessionId) {
         let Some(dir) = self.taint_dir.get() else {
             return;

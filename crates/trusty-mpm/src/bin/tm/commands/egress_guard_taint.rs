@@ -26,6 +26,8 @@ pub(crate) const TAINT_CHECK: &str = "egress-channel-tainted";
 const GATED_TOOLS: &[&str] = &[
     "Read",
     "Edit",
+    // #8433 fix round: writes a path like `Edit` (`pm_guard.rs` EDIT_TOOLS).
+    "MultiEdit",
     "Write",
     "NotebookEdit",
     "Glob",
@@ -41,7 +43,8 @@ const GATED_TOOLS: &[&str] = &[
 /// tainted session's, so they deny like one.
 /// Test: `untainted_session_gated_call_is_not_judged`,
 /// `tainted_session_gated_call_denies`, `gated_call_without_session_id_denies`,
-/// `unknown_home_denies_gated_call`, `non_gated_tool_is_not_judged`.
+/// `unknown_home_denies_gated_call`, `non_gated_tool_is_not_judged`,
+/// `tainted_session_multiedit_denies`.
 pub(crate) fn taint_verdict(payload: &Value, home: Option<&Path>) -> Option<String> {
     let tool = payload.get("tool_name").and_then(Value::as_str)?;
     if !GATED_TOOLS.contains(&tool) {
