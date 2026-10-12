@@ -4,7 +4,8 @@ use crate::chat_attachments::{Attachment, decode_image, validate_metadata};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 
-const ASSETS: TableDefinition<&str, &[u8]> = TableDefinition::new("chat_image_assets");
+// #9282: crate-visible so a palace snapshot can copy this table.
+pub(crate) const ASSETS: TableDefinition<&str, &[u8]> = TableDefinition::new("chat_image_assets");
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatImageAsset {
     pub session_id: String,

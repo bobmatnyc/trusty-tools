@@ -1,0 +1,2 @@
+Added
+- `PalaceHandle::snapshot` takes a consistent backup of a live palace into `<data root>/backups/manual/<palace>/<UTC>/`: `kg.redb` and `chat_sessions.redb` are each copied from one redb read transaction (writers are not paused), journals up to their last complete line, with a manifest of per-table row counts and a SHA-256 per file. `restore_palace_snapshot` verifies that manifest before it writes anything, and writes only into an empty palace root (#9282).

@@ -24,6 +24,8 @@
 
 mod assets;
 pub use assets::ChatImageAsset;
+// #9282: the snapshot copies every chat table by name.
+pub(crate) use assets::ASSETS as CHAT_ASSETS_TABLE;
 mod store;
 mod types;
 
