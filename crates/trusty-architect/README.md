@@ -46,22 +46,34 @@ are ported by name in `tests/classify_ported.rs`, `tests/quiet_ported.rs` and
 - `self_ctx`: the Architect's own context from its newest interactive
   transcript. Directories are passed in; nothing reads the environment.
 - `to_python_json`: JSON text in Python's `json.dumps` form.
+- `poller`: the poller's sensors and `poll-state.json` (A3a), and the wake
+  send path (A3b-1). `Waker::wake` types a one-line pointer into the
+  Architect's input box only when the pane's live session is `tm-architect`
+  and the box reads `empty` or `suggestion`; it presses Enter only when the
+  box text equals the pointer, and erases only its own trailing text.
+  `dispatch_wake` keeps the pending count until a send succeeds.
+- `Clock` (`SystemClock`, `FakeClock`) and `ScriptedTmux`: the time and tmux
+  seams the wake tests script.
+
+A `SendReading` is neither `Copy` nor `Clone`: each send needs a fresh
+reading of the pane.
 
 ```rust
-use trusty_architect::{FakeTmux, InputState, PaneId, SendError, send_guarded};
+use trusty_architect::{FakeTmux, Keys, PaneId, SendError, input_state_for_send, send_guarded};
 
 let tmux = FakeTmux::new();
 let pane = PaneId::parse("%12").expect("a %N pane id");
-let refused = send_guarded(&tmux, &pane, InputState::Typed, &["hi", "Enter"]);
+let reading = input_state_for_send("no input box on this screen");
+let refused = send_guarded(&tmux, &pane, reading, Keys::Literal("hi"));
 assert!(matches!(refused, Err(SendError::Refused { .. })));
 assert!(tmux.calls().is_empty());
 ```
 
 ## Dependency rule
 
-The crate depends only on std, `serde`, `serde_json`, `thiserror` and
-`tracing`; pattern matching and the SHA-1 fingerprint are written by hand to
-stay inside that list. `trusty-mpm` calls
+The crate depends only on std, `serde`, `serde_json`, `thiserror`,
+`tracing` and `libc`; pattern matching and the SHA-1 fingerprint are written
+by hand to stay inside that list. `trusty-mpm` calls
 it, so it must never depend on `trusty-mpm` or on any crate that does;
 `tests/dependency_boundary.rs` enforces this.
 

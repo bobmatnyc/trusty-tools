@@ -13,7 +13,9 @@
 //! [`self_ctx`] (`self-ctx.py`), with [`to_python_json`] writing Python's
 //! `json.dumps` shape. Phase A3a adds the poller's sensors and state
 //! ([`poller`]), a bounded [`SystemTmux`], and the [`SendReading`] /
-//! [`Keys`] send contract.
+//! [`Keys`] send contract. Phase A3b-1 adds the wake send path
+//! ([`poller::Waker`], [`poller::dispatch_wake`]) on a [`Clock`], with
+//! [`ScriptedTmux`] and [`FakeClock`] for tests.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
 //! `send_guarded_refuses_typed_and_sends_on_empty` (the send contract);
 //! `parse_pane_matches_python_goldens` (parity).
@@ -21,22 +23,27 @@
 // See #9171
 
 pub mod classify;
+mod clock;
 mod decimal_table;
 mod error;
 mod fake;
 mod input;
+mod pointer;
 pub mod poller;
 mod process;
 mod pyjson;
 mod pystr;
 pub mod quiet;
+mod scripted;
 pub mod self_ctx;
 mod sha1;
 mod tmux;
 
 pub use classify::input_state_for_send;
-pub use error::{ConfigError, SelfCtxError, SendError, StateError, TmuxError};
+pub use clock::{Clock, FakeClock, SystemClock};
+pub use error::{ConfigError, SelfCtxError, SendError, StateError, TmuxError, WakeError};
 pub use fake::FakeTmux;
 pub use input::{InputState, SendReading, UnknownInputState, classify_input, send_guarded};
 pub use pyjson::to_python_json;
+pub use scripted::ScriptedTmux;
 pub use tmux::{Keys, NamedKey, PaneId, Permit, SystemTmux, TMUX_TIMEOUT, Tmux};
