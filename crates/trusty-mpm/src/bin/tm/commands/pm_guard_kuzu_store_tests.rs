@@ -914,6 +914,17 @@ fn the_exception_cannot_widen() {
         format!("{ok} | tee {review}/../../.zshrc"),
         format!("{ok} | tee {review}/./r.txt"),
         format!("{ok} | tee {review}//r.txt"),
+        // A tee that would truncate a run's own artifacts (#9794).
+        format!(
+            "trusty-memory import kuzu review status --run R 2>&1 | tee {review}/R/ledger.jsonl"
+        ),
+        format!("trusty-memory import kuzu review status --run R | tee {review}/R/masked.jsonl"),
+        format!("trusty-memory import kuzu review status --run R | tee {review}/R/ledger.seal"),
+        format!(
+            "trusty-memory import kuzu review status --run R | tee {review}/R/.masked.jsonl.partial"
+        ),
+        format!("{ok} | tee {review}/ledger.jsonl"),
+        format!("{ok} | tee {SCRATCH}/R/ledger.jsonl"),
         format!("{ok} | tee {review}/"),
         format!("{ok} | tee {review}"),
         format!("{ok} | tee ~/.trusty-tools/kuzu-reviewx/r.txt"),
