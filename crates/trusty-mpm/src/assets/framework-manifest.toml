@@ -302,6 +302,7 @@ universal = [
   "tm-git-file-tracking",
   "tm-init",
   "tm-issues-prune",
+  "tm-memory-import",
   "tm-postmortem",
   "tm-prose-style",
   "tm-secrets",

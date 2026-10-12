@@ -103,6 +103,9 @@ const PENDING_OWNER_RULING: &[&str] = &[
     // Out as source-control mechanics, while `tm-git-file-tracking` is on the
     // floor as a harness protocol. If either ruling is wrong they move together.
     "git-workflow",
+    // #8625 (Architect Q4): it drives a kuzu import that writes palaces, so it
+    // stays off the floor until the owner widens it.
+    "tm-memory-import",
 ];
 
 /// Skills trusty-mpm ships for the Architect's project only (#8436 rulings D

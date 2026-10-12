@@ -347,6 +347,10 @@ path = "skills/tm-issues-prune.md"
 version = "1.2.0"
 
 [[member]]
+path = "skills/tm-memory-import.md"
+version = "1.0.0"
+
+[[member]]
 path = "skills/tm-postmortem.md"
 version = "1.0.0"
 
