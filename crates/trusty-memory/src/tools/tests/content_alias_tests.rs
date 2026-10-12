@@ -147,7 +147,7 @@ fn write_schemas_advertise_the_text_content_alias() {
             .iter()
             .find(|t| t["name"] == tool)
             .unwrap_or_else(|| panic!("{tool} listed"))["inputSchema"];
-        assert_eq!(schema["properties"][alias]["type"], "string", "{schema}");
+        assert_eq!(schema["properties"][alias]["type"], "string", "{tool}");
         let required = schema["required"].as_array().expect("required array");
         assert!(required.contains(&json!(name)), "{tool}: {required:?}");
         assert!(!required.contains(&json!(alias)), "{tool}: {required:?}");
