@@ -11147,6 +11147,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-architect"
+version = "0.1.0"
+dependencies = [
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "trusty-channels"
 version = "0.1.0"
 dependencies = [
