@@ -109,6 +109,12 @@ pub struct StoreCounts {
     pub unsupported_edges: BTreeMap<String, usize>,
     /// Why the export could not count those tables, when it could not.
     pub unsupported_error: Option<String>,
+    /// Refused rows a review-ledger verdict admitted redacted (#8624).
+    pub review_admitted: usize,
+    /// Refused rows admitted verbatim by the review carve-out (#8624).
+    pub review_overrides: usize,
+    /// Refused rows the review ledger left refused, by reason (#8624).
+    pub review_refusals: RuleTally,
 }
 
 impl StoreCounts {
@@ -241,6 +247,10 @@ enum Endpoint {
 
 /// The rule by which the secret screen refuses `m`'s content (#277 M6).
 fn content_rule(m: &MappedMemory) -> Option<SecretRule> {
+    // #8624: only the review carve-out sets `review_override`.
+    if m.review_override {
+        return None;
+    }
     screen(m.content.trim())
 }
 
@@ -460,6 +470,8 @@ impl PalaceSink for HandleSink {
             force: true,
             enforce_min_tokens: false,
             classify_as: Some(DrawerType::Unknown),
+            // #8624: the carve-out admits secret-shaped content verbatim.
+            allow_secret_like: m.review_override,
             ..RememberOptions::default()
         };
         self.handle

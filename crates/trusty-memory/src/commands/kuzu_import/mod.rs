@@ -60,8 +60,9 @@ pub mod palace_io;
 mod r5_critic_tests;
 pub mod report;
 pub mod retract;
-// #8624: `--export-refusals`, the masked export of refused rows.
-mod review;
+// #8624: `--export-refusals`, the masked export of refused rows, and the
+// review ledger (`review record|status|finish`, `--review-ledger`).
+pub mod review;
 #[cfg(test)]
 mod safety_tests;
 pub mod screen;
@@ -168,6 +169,8 @@ pub enum ImportSource {
 
 /// Flags for `trusty-memory import kuzu`.
 #[derive(Debug, Clone, clap::Args)]
+// #8624: `import kuzu review ...` takes none of the import's flags.
+#[command(args_conflicts_with_subcommands = true)]
 pub struct KuzuImportArgs {
     /// Walk $HOME (plus every --root) for `.kuzu-memory` stores.
     #[arg(long)]
@@ -200,6 +203,13 @@ pub struct KuzuImportArgs {
     /// ~/.trusty-tools/kuzu-review/<run>/masked.jsonl for review.
     #[arg(long, requires = "dry_run")]
     pub export_refusals: bool,
+    /// Apply the agent verdicts in this sealed review ledger
+    /// (~/.trusty-tools/kuzu-review/<run>/ledger.jsonl).
+    #[arg(long, value_name = "PATH")]
+    pub review_ledger: Option<PathBuf>,
+    /// `review record|status|finish` (#8624).
+    #[command(subcommand)]
+    pub command: Option<review::KuzuCommand>,
 }
 
 impl Default for KuzuImportArgs {
@@ -215,6 +225,8 @@ impl Default for KuzuImportArgs {
             python: None,
             bridge_timeout_secs: DEFAULT_BRIDGE_TIMEOUT_SECS,
             export_refusals: false,
+            review_ledger: None,
+            command: None,
         }
     }
 }
@@ -288,6 +300,10 @@ pub async fn handle_import(source: ImportSource) -> anyhow::Result<()> {
 /// Test: `kuzu_import::tests` drives each stage; the CLI shape is covered by
 /// `import_kuzu_cli_parses_flags`.
 pub async fn handle_import_kuzu(args: KuzuImportArgs) -> anyhow::Result<()> {
+    // #8624: `import kuzu review ...` reads and writes only the review root.
+    if let Some(review::KuzuCommand::Review(cmd)) = &args.command {
+        return review::cli::handle_review(cmd);
+    }
     let stores = select_stores(&args)?;
     if stores.is_empty() {
         println!("No kuzu-memory stores found.");
@@ -358,9 +374,15 @@ pub(crate) async fn run_import_in(
         review_root,
         env.data_root,
     )?;
+    // #8624: the sealed ledger is read before any store; any defect aborts.
+    let ledger = args
+        .review_ledger
+        .as_deref()
+        .map(review::load_sealed)
+        .transpose()?;
     let mut reports = Vec::new();
     for store in stores {
-        let report = import_one(env, store, args, batch.as_mut()).await;
+        let report = import_one(env, store, args, batch.as_mut(), ledger.as_ref()).await;
         print_report(&report, args.update);
         reports.push(report);
     }
@@ -403,6 +425,7 @@ async fn import_one(
     store: &DiscoveredStore,
     args: &KuzuImportArgs,
     batch: Option<&mut review::ReviewBatch>,
+    ledger: Option<&review::ReviewLedger>,
 ) -> StoreReport {
     let mut report = StoreReport {
         store: store.dir.clone(),
@@ -439,7 +462,10 @@ async fn import_one(
     }
     let counts = if args.dry_run {
         match open_snapshot_view(env.data_root, &target.palace) {
-            Ok(view) => run_plan(&export, &store_tag, Target::DryRun(&view), args.update).await,
+            Ok(view) => {
+                let target = Target::DryRun(&view);
+                run_plan_with(&export, &store_tag, target, args.update, ledger).await
+            }
             Err(e) => {
                 report.status = StoreStatus::Failed(e);
                 return report;
@@ -449,7 +475,8 @@ async fn import_one(
         match open_palace_for_write(env.data_root, &target.palace) {
             Ok(handle) => {
                 let sink = HandleSink { handle };
-                let counts = run_plan(&export, &store_tag, Target::Write(&sink), args.update).await;
+                let target = Target::Write(&sink);
+                let counts = run_plan_with(&export, &store_tag, target, args.update, ledger).await;
                 // #277 L6: a flush failure is the operator's to see.
                 if let Err(e) = sink.handle.flush() {
                     report.flush_error = Some(format!("{e:#}"));
@@ -491,18 +518,31 @@ pub async fn run_plan(
     target: Target<'_>,
     update: bool,
 ) -> StoreCounts {
-    match target {
-        Target::DryRun(view) => {
-            let ledger = Ledger::from_drawers(&view.drawers());
-            let plan = plan_store(export, store, &ledger, &store_is_live);
-            execute(plan, view, None, update).await
-        }
-        Target::Write(sink) => {
-            let ledger = Ledger::from_drawers(&sink.drawers());
-            let plan = plan_store(export, store, &ledger, &store_is_live);
-            execute(plan, sink, Some(sink), update).await
-        }
+    run_plan_with(export, store, target, update, None).await
+}
+
+/// [`run_plan`], applying a sealed review ledger to the plan when given.
+///
+/// Why (#8624): verdicts change only which refused rows are admitted and in
+/// what form; the plan, the screen and the sink stay the import's own.
+/// Test: `redacted_and_override_rows_land_through_the_handle_sink`.
+pub(crate) async fn run_plan_with(
+    export: &KuzuExport,
+    store: &str,
+    target: Target<'_>,
+    update: bool,
+    verdicts: Option<&review::ReviewLedger>,
+) -> StoreCounts {
+    let (view, sink): (&dyn PalaceView, Option<&dyn PalaceSink>) = match target {
+        Target::DryRun(view) => (view, None),
+        Target::Write(sink) => (sink, Some(sink)),
+    };
+    let ledger = Ledger::from_drawers(&view.drawers());
+    let mut plan = plan_store(export, store, &ledger, &store_is_live);
+    if let Some(v) = verdicts {
+        review::apply_verdicts(&mut plan, v);
     }
+    execute(plan, view, sink, update).await
 }
 
 /// The terminal status implied by a store's counts.
