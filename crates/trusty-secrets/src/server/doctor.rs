@@ -373,7 +373,7 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
             return BackendStatus::unavailable(id, reason, detail);
         }
     }
-    match (state.backends)(&id) {
+    match state.open(&id) {
         Ok(backend) => BackendStatus::available(id, backend.capabilities()),
         Err(e) => BackendStatus::unavailable(id, Unavailable::of(&e), e.to_string()),
     }

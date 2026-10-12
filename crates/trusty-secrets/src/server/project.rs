@@ -130,7 +130,7 @@ impl ProjectContext {
     /// `keychain`, from the configs read by [`Self::resolve`].
     /// Test: `server_set_list_delete_round_trip_over_a_real_socket`.
     pub fn backend(&self, state: &State) -> Result<Arc<dyn SecretBackend>, ErrorKind> {
-        Ok((state.backends)(&self.resolved_config().backend)?)
+        Ok(state.open(&self.resolved_config().backend)?)
     }
 
     /// Open backend `id` to write values into, after the `file` posture check.
@@ -158,7 +158,7 @@ impl ProjectContext {
         // #7524 H1: consent is the account's file, never the request's machine config.
         let consent = state.file_consent_config.as_deref();
         config::check_value_write_for(id, consent, self.keychain_compiled)?;
-        Ok((state.backends)(id)?)
+        Ok(state.open(id)?)
     }
 
     /// The machine config read by [`Self::resolve`], if the file exists.

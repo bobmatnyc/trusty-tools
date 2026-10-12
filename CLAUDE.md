@@ -41,8 +41,9 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   gate at a worktree-local `target/` — that is a cold build of the whole
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 **A live check needing an isolated daemon starts it with
-  `scripts/sandbox_daemon.sh` (tm) or `scripts/sandbox_search_daemon.sh`
-  (trusty-search) only (#9121)** — a hand-built daemon inherits bot tokens,
+  `scripts/sandbox_daemon.sh` (tm), `scripts/sandbox_search_daemon.sh`
+  (trusty-search) or `scripts/sandbox_secrets_console.sh` (trusty-secrets +
+  console, #9793) only (#9121)** — a hand-built daemon inherits bot tokens,
   loads the `.env.local` at or above its cwd (#9161), and reaches the
   per-user Keychain.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
