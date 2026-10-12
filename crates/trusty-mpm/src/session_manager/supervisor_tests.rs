@@ -278,3 +278,15 @@ fn the_supervisor_id_is_stable_per_dir_and_role() {
         ManagedSessionId::for_supervisor(other.path(), "supervisor")
     );
 }
+
+/// D07 pin (#9755): the Architect ids for `/` are the literals computed
+/// before the rename; a changed namespace or role string would orphan every
+/// existing Architect record and mint a second Architect.
+#[test]
+fn the_architect_id_is_stable_across_the_rename() {
+    let root = std::path::Path::new("/");
+    let id = |role: &str| ManagedSessionId::for_supervisor(root, role).to_string();
+    assert_eq!(id("supervisor"), "0708af71-2b5e-5dab-8c92-739ebdb04941");
+    assert_eq!(id("-poll"), "f75797ca-cc1e-5fdf-a528-5e24a3c627b5");
+    assert_eq!(id("-collector"), "46358247-da91-5895-a720-10b693332f6e");
+}

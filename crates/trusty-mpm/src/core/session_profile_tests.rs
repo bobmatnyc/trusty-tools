@@ -455,3 +455,28 @@ fn cli_launch_stamps_the_profile_its_prompt_was_composed_for() {
     );
     assert!(!cli.prompt.contains("# Trusty Fleet Supervisor"));
 }
+
+/// D07 pin (#9755): the pre-rename values an installed Architect carries — a
+/// `[supervisor] projects` table, `profile = "supervisor"` and the stamp
+/// `supervisor` — resolve the Architect, and the launch still stamps
+/// `supervisor`. Literals, not consts, so a rename cannot move the pin.
+#[test]
+fn pre_d07_profile_table_and_stamp_still_resolve_the_architect() {
+    let project = project_with("profile = \"supervisor\"\n");
+    let toml = format!("[supervisor]\nprojects = [{:?}]\n", project.path());
+    let config: MpmConfig = toml::from_str(&toml).expect("the legacy table parses");
+    assert!(
+        resolve(project.path(), &config) != SessionProfile::Pm,
+        "the legacy table and profile value must not demote the Architect"
+    );
+    let hook = hook_profile(
+        Some(OsString::from("supervisor")),
+        Some(project.path().as_os_str().to_owned()),
+        || config.clone(),
+    );
+    assert!(
+        hook != SessionProfile::Pm,
+        "the legacy stamp must not demote"
+    );
+    assert_eq!(launch_env(resolve(project.path(), &config)).1, "supervisor");
+}
