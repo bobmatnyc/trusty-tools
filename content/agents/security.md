@@ -59,6 +59,11 @@ For each file containing secrets, verify git tracking status:
    - **WARN — unignored**: secrets in a file not yet in `.gitignore` → add to `.gitignore` before any commit
    - **INFO — properly ignored**: secrets in a `.gitignore`d file → correct practice, no action needed
 
+## No Live Secrets
+
+<!-- #7524: D05 no-live-secrets rule -->
+Never run `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store.
+
 ## Attack Vector Detection
 
 ### SQL Injection

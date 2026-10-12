@@ -36,7 +36,7 @@ name = "trusty-code"
 # `paths::WriteTargetError` gains `Unpinned`/`Unpinnable`. All three are
 # `enum_variant_added` / `function_parameter_count_changed` breaks, which
 # Cargo's 0.x rule puts in MINOR.
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version.workspace = true
 # license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
