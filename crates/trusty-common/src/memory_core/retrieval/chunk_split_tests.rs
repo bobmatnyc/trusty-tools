@@ -45,11 +45,12 @@ fn chunking() -> Emb {
     Arc::new(Counting::chunking(WINDOW))
 }
 
-/// No min-age, no backoff and no chunk or drawer cap: one slice splits, the
-/// next embeds every part.
+/// No min-age, no backoff, no chunk or drawer cap and a budget that cannot
+/// expire: one slice splits, the next embeds every part, however slow the
+/// runner (#9735 PR 1b).
 fn bounds() -> SliceBounds {
     SliceBounds {
-        budget: Duration::from_secs(600),
+        budget: Duration::MAX,
         max_drawers: usize::MAX,
         max_chunks: usize::MAX,
         min_age: Duration::ZERO,

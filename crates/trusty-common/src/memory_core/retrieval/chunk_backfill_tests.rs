@@ -139,6 +139,16 @@ fn bounds() -> SliceBounds {
     }
 }
 
+/// `bounds()` with a slice budget that cannot expire. A test that asserts a
+/// whole queue was visited in one slice must not depend on how fast the runner
+/// is: under coverage instrumentation the 20 s default ran out (#9735 PR 1b).
+fn unexpiring() -> SliceBounds {
+    SliceBounds {
+        budget: Duration::MAX,
+        ..bounds()
+    }
+}
+
 /// #9735: every env-mutating test here holds the lib target's one env lock.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     crate::data_dir::ENV_LOCK
@@ -515,7 +525,7 @@ async fn an_oversized_drawer_does_not_count_as_a_host_failure() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let (huge, good) = oversized_fixture(&h).await;
-    let report = h.reembed_slice(&picky(false), &bounds()).await;
+    let report = h.reembed_slice(&picky(false), &unexpiring()).await;
     assert_ne!(report.stop, SliceStop::HostFailure, "{report:?}");
     assert!(full(&h, good));
     assert!(
@@ -530,7 +540,7 @@ async fn an_oversized_drawer_is_split_and_does_not_stall_the_queue() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let (huge, good) = oversized_fixture(&h).await;
-    h.reembed_slice(&picky(false), &bounds()).await;
+    h.reembed_slice(&picky(false), &unexpiring()).await;
     assert!(full(&h, good));
     let tag = format!("split-of:{huge}");
     let parts: Vec<Uuid> = h
@@ -543,7 +553,7 @@ async fn an_oversized_drawer_is_split_and_does_not_stall_the_queue() {
     assert_eq!(parts.len(), 5, "41 000 words split into five parts");
     let uncapped = SliceBounds {
         max_chunks: usize::MAX,
-        ..bounds()
+        ..unexpiring()
     };
     let again = h.reembed_slice(&chunking(), &uncapped).await;
     assert_eq!(again.repaired, 5, "every part embeds: {again:?}");
