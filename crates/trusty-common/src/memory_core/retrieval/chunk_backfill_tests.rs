@@ -615,3 +615,91 @@ fn slice_bounds_read_their_env_overrides() {
     assert_eq!(b.max_chunks, 7);
     assert_eq!(b.embed_timeout, SliceBounds::default().embed_timeout);
 }
+
+// #9735 Q5: the operator path, `backfill_with`, through the recheck helper.
+
+fn backfill_opts(
+    attempts: u32,
+    base_delay: Duration,
+) -> super::embed_repair::VectorBackfillOptions {
+    super::embed_repair::VectorBackfillOptions {
+        dry_run: false,
+        limit: None,
+        retry: super::deferred_embed::RetryPolicy {
+            attempts,
+            base_delay,
+        },
+    }
+}
+
+#[tokio::test]
+async fn backfill_forget_between_read_and_upsert_leaves_no_orphan_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let (e, entered, release) = gated();
+    let (report, ()) = tokio::join!(
+        h.backfill_with(backfill_opts(1, Duration::ZERO), &e),
+        async {
+            entered.notified().await;
+            h.forget(id).await.unwrap();
+            release.notify_one();
+        }
+    );
+    report.unwrap();
+    let orphan = h
+        .vector_store
+        .chunk_shapes()
+        .unwrap()
+        .keys()
+        .any(|k| *k == id);
+    assert!(!orphan, "a vector row survived the forget");
+}
+
+#[tokio::test]
+async fn backfill_changed_text_is_not_overwritten_with_a_stale_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let (e, entered, release) = gated();
+    let (report, ()) = tokio::join!(
+        h.backfill_with(backfill_opts(1, Duration::ZERO), &e),
+        async {
+            entered.notified().await;
+            let mut drawers = h.drawers.write();
+            let d = drawers.iter_mut().find(|d| d.id == id).unwrap();
+            d.set_content(format!("{} tail", words(100)));
+            drop(drawers);
+            release.notify_one();
+        }
+    );
+    report.unwrap();
+    assert_eq!(
+        shape(&h, id),
+        Some((1, 0)),
+        "the group for the old text was committed"
+    );
+}
+
+#[tokio::test]
+async fn backfill_stale_drawer_is_not_failing_and_writes_no_ledger_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let (e, entered, release) = gated();
+    let (report, ()) = tokio::join!(
+        h.backfill_with(backfill_opts(1, Duration::ZERO), &e),
+        async {
+            entered.notified().await;
+            h.forget(id).await.unwrap();
+            release.notify_one();
+        }
+    );
+    let report = report.unwrap();
+    assert_eq!(
+        (report.attempted, report.repaired, report.still_failing),
+        (0, 0, 0),
+        "{report:?}"
+    );
+    assert!(ledger_ids(dir.path()).is_empty());
+}
