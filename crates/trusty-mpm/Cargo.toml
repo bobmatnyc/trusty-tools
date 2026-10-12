@@ -248,7 +248,12 @@ bedrock = ["trusty-common/bedrock-client"]
 # in via `[dev-dependencies]` below — Cargo unifies dev-dependency features only
 # for test/bench/example builds, so `cargo test` gets the mock while a plain
 # `cargo build --features sm-memory` does not.
-sm-memory = ["trusty-common/memory-core"]
+#
+# #9270: the code reaches the engine as `trusty_memory::engine`, so the feature
+# also turns on the optional `trusty-memory` edge (`dep:` keeps it from becoming
+# an implicit feature). `trusty-common/memory-core` stays listed so the feature
+# does not depend on trusty-memory enabling it transitively.
+sm-memory = ["trusty-common/memory-core", "dep:trusty-memory"]
 
 # `manager-memory` gates the Layer-3 `tm manager` PORTFOLIO memory palace (WI-5,
 # #2582, DOC-36 §3.4) — a single portfolio-scoped `trusty-memory` palace holding
@@ -261,7 +266,8 @@ sm-memory = ["trusty-common/memory-core"]
 # is compiled only under this flag. Build/test with `--features manager-memory`;
 # the `embedder-test-support` dev-dependency below supplies the mock embedder so
 # `cargo test --features manager-memory` runs without the ONNX model.
-manager-memory = ["trusty-common/memory-core"]
+# #9270: the optional `trusty-memory` edge, as for `sm-memory` above.
+manager-memory = ["trusty-common/memory-core", "dep:trusty-memory"]
 
 # ── Library ────────────────────────────────────────────────────────────────────
 [lib]
@@ -412,6 +418,13 @@ toml.workspace = true
 trusty-secrets = { workspace = true, features = ["server"] }
 # #8454 S2c: `tm doctor` loads the channel route policy read-only.
 trusty-channels = { workspace = true, optional = true }
+# #9270: the memory engine's stable path, `trusty_memory::engine`. OPTIONAL and
+# enabled only by `sm-memory` / `manager-memory`: trusty-memory always turns on
+# `trusty-common/memory-core` (usearch + ONNX Runtime), and a default trusty-mpm
+# build must not compile it (owner ruling 2026-09-27). `default-features = false`
+# drops trusty-memory's `server` surface. `scripts/check_engine_import_path.sh
+# --dep-graph` proves both halves from the resolved graph.
+trusty-memory = { path = "../trusty-memory", version = "0.35", default-features = false, optional = true }
 # #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
 # unrelated keys; already in this crate's graph through trusty-common.
 toml_edit.workspace = true

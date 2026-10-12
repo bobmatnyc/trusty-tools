@@ -291,13 +291,13 @@ pub enum PortfolioMemoryError {
 ///
 /// Why: mirrors [`crate::core::sm::memory::SmMemory`] — a DIRECT `memory-core`
 /// library call (not over MCP) scoped to a single
-/// [`PalaceId`](trusty_common::memory_core::palace::PalaceId) so the manager
+/// [`PalaceId`](trusty_memory::engine::palace::PalaceId) so the manager
 /// can never touch another namespace. Binding one id for the struct's lifetime
 /// makes "manager only ever reads/writes its own portfolio palace" a structural
 /// invariant, not caller discipline (the DOC-36 §3.4 "never duplicates project
 /// state" guarantee).
 /// What: owns the open-handle
-/// [`PalaceRegistry`](trusty_common::memory_core::registry::PalaceRegistry),
+/// [`PalaceRegistry`](trusty_memory::engine::registry::PalaceRegistry),
 /// the on-disk `data_root`, and
 /// the bound `palace_id`. Built via [`Self::open`], which idempotently ensures
 /// exactly one palace. Phase 1a exposes the minimal remember/recall surface
@@ -309,11 +309,11 @@ pub enum PortfolioMemoryError {
 #[derive(Clone)]
 pub struct PortfolioMemory {
     /// Open-handle registry (LRU-bounded). Cheap to clone — state is behind `Arc`.
-    registry: trusty_common::memory_core::registry::PalaceRegistry,
+    registry: trusty_memory::engine::registry::PalaceRegistry,
     /// Directory under which the portfolio palace's `<id>/` subtree lives.
     data_root: std::path::PathBuf,
     /// The single palace this instance is bound to. Never changes.
-    palace_id: trusty_common::memory_core::palace::PalaceId,
+    palace_id: trusty_memory::engine::palace::PalaceId,
 }
 
 #[cfg(feature = "manager-memory")]
@@ -324,12 +324,12 @@ mod live {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-    use trusty_common::memory_core::registry::PalaceRegistry;
-    use trusty_common::memory_core::retrieval::{
+    use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
+    use trusty_memory::engine::registry::PalaceRegistry;
+    use trusty_memory::engine::retrieval::{
         PalaceHandle, RecallResult, RememberOptions, recall_with_default_embedder,
     };
-    use trusty_common::memory_core::store::{OpenIntent, PalaceStore};
+    use trusty_memory::engine::store::{OpenIntent, PalaceStore};
 
     /// Result alias for portfolio memory operations.
     pub type PortfolioMemoryResult<T> = std::result::Result<T, PortfolioMemoryError>;
