@@ -54,7 +54,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::daemon::search_rpc::{self, SearchRpcError};
+// #9776: the client lives in trusty-common; `crate::daemon` is gated on `daemon`.
+use trusty_common::search_rpc::{self, SearchRpcError};
 
 /// Per-request timeout for the index delete.
 ///

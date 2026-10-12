@@ -162,6 +162,9 @@ pub mod exit_codes;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+// #9776: per-account gh config dir bootstrap, moved out of `daemon` so
+// `gh_session_account` compiles without it.
+pub(crate) mod account_config_dir;
 // #8510: the gh config dirs an account-only pin may ask for a candidate token.
 pub(crate) mod gh_account_dir;
 // #8510: proves a candidate token is the pinned account's with `GET /user`.
@@ -312,6 +315,10 @@ pub mod base_ref_freshness;
 pub mod reinstall;
 // #8934: the one "has an origin remote / local-only" predicate and the no-gh pin.
 pub mod remote_mode;
+// #9776: `origin` remote read and repos-root paths, moved out of `daemon`'s
+// `inproject` so `remote_mode` and `project::resolver` compile without it.
+pub mod git_origin;
+pub mod repo_paths;
 // #9124: the one helper that strips `user:token@` from a URL before it reaches
 // a log line or an error message.
 pub mod remote_url_redact;

@@ -70,12 +70,9 @@ pub(crate) fn candidate_settings_files(
     set.into_iter().collect()
 }
 
-/// Read and parse one settings file, tolerating a missing or malformed file.
-pub(crate) fn read_settings(path: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&text).ok()?;
-    val.is_object().then_some(val)
-}
+// #9776: lives in `core::statusline_settings` (its `tier_state` reads it);
+// re-exported so every path still resolves.
+pub(crate) use crate::core::statusline_settings::read_settings;
 
 /// Probe every reachable project settings file for tm hook contamination and
 /// foreign (claude-mpm) hook conflicts (issue #2940).

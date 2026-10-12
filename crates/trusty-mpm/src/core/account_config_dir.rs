@@ -209,7 +209,9 @@ fn render_single_account_hosts_yml(login: &str) -> String {
 /// `gh_config_dir`'s own last-resort fallback shape).
 /// Test: none directly (thin, ambient-environment wiring); the logic it
 /// delegates to is covered by [`ensure_account_config_dir`]'s tests.
-pub(super) fn ensure_account_config_dir_default(login: &str) -> Result<PathBuf, String> {
+// #9776: `pub(crate)`, not `pub(super)`, since the move to `core/` — its
+// caller (`daemon::managed_routes::inproject::account_clone`) is outside `core`.
+pub(crate) fn ensure_account_config_dir_default(login: &str) -> Result<PathBuf, String> {
     let state_root = crate::core::paths::FrameworkPaths::default().root;
     let operator_gh_config_dir = crate::core::gh_account::gh_config_dir()
         .unwrap_or_else(|| PathBuf::from(".config").join("gh"));

@@ -127,7 +127,7 @@ pub(crate) fn session_origin(
 /// What: refuses an existing dir that cannot be listed (never repaired), and a
 /// login neither the dir nor the operator's `hosts.yml` names. Builds or reuses
 /// the dir through
-/// [`crate::daemon::managed_routes::inproject::ensure_account_config_dir`];
+/// [`crate::core::account_config_dir::ensure_account_config_dir`];
 /// its `hosts.yml` must parse and name `login`. The dir is set to 0700 and its
 /// `hosts.yml`/`config.yml` to 0600. A token for `login` from the dir or from
 /// `operator_gh_config_dir` must pass `GET /user` on the origin's host; it is
@@ -163,7 +163,8 @@ pub(crate) fn prepare_session_account_with(
             operator_gh_config_dir.display()
         )));
     }
-    crate::daemon::managed_routes::inproject::ensure_account_config_dir(
+    // #9776: `core::account_config_dir` — `daemon` is optional.
+    crate::core::account_config_dir::ensure_account_config_dir(
         state_root,
         operator_gh_config_dir,
         login,

@@ -425,7 +425,7 @@ pub fn fleet_by_project(sessions: &[SessionRecord], projects: &[Project]) -> Vec
 /// ([`parse_github_path`](trusty_common::github_path::parse_github_path)) and
 /// resolved to the managed clone under the projects root —
 /// `<repos_root>/<owner>/<repo>`, via
-/// [`base_clone_path`](crate::daemon::managed_routes::inproject::base_clone_path),
+/// [`base_clone_path`](crate::core::repo_paths::base_clone_path),
 /// so this agrees with every other managed checkout. `None` when `repo_url` is
 /// empty, names no repository, or names one with no owner: a guessed directory
 /// is worse than no answer. Existence is NOT checked here — the caller decides
@@ -462,7 +462,8 @@ pub fn local_checkout_for_url(repo_url: &str) -> Option<PathBuf> {
     if gh.owner == trusty_common::github_path::UNKNOWN_OWNER {
         return None;
     }
-    Some(crate::daemon::managed_routes::inproject::base_clone_path(
+    // #9776: `core::repo_paths` — `daemon` is optional.
+    Some(crate::core::repo_paths::base_clone_path(
         &gh.owner, &gh.repo,
     ))
 }

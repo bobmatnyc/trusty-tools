@@ -378,8 +378,10 @@ pub fn repair_statusline(settings_files: &[PathBuf], mode: RepairMode) -> Vec<Re
 /// `Applied`/`Refused` when writing.
 /// Test: see [`repair_statusline`].
 fn statusline_step(path: &Path, mode: RepairMode) -> Option<RepairStep> {
-    use crate::core::statusline_settings::{StatuslineWrite, ensure_statusline_entry_in};
-    use crate::daemon::doctor::doctor_statusline::{TierState, tier_state};
+    // #9776: `TierState`/`tier_state` come from `core` — `daemon` is optional.
+    use crate::core::statusline_settings::{
+        StatuslineWrite, TierState, ensure_statusline_entry_in, tier_state,
+    };
 
     if tier_state(path) == TierState::Wired {
         return None;

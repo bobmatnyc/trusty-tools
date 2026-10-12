@@ -11,6 +11,8 @@
 //! unit tests in `stream_json` and `tmux` sub-modules.
 
 pub mod stream_json;
+// #9776: `TmuxBackend` wraps `daemon::tmux::TmuxDriver`, so it needs `daemon`.
+#[cfg(feature = "daemon")]
 pub mod tmux;
 
 use anyhow::Result;

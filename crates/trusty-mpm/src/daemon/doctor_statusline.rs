@@ -23,41 +23,9 @@ use crate::core::doctor::{CheckStatus, DoctorCheck};
 /// The check's name, asserted on by the tests and by `tm doctor --json`.
 pub(crate) const NAME: &str = "statusline";
 
-/// What one settings tier says about `statusLine`.
-///
-/// Why: "absent" and "present but pointing at a binary that is gone" need
-/// different remediation, and #7262's build-tree damage is the second kind.
-/// Test: `a_tier_with_no_entry_is_reported_missing`,
-/// `a_tier_with_a_stale_command_is_reported_stale`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TierState {
-    /// No `statusLine` key at all.
-    Missing,
-    /// Present, but the command's binary is ephemeral or no longer on disk.
-    Stale,
-    /// Present and pointing at a binary that exists.
-    Wired,
-}
-
-/// Read one settings file's `statusLine` verdict.
-///
-/// What: [`TierState::Missing`] for an absent key, an unreadable file, or one
-/// that is not a JSON object — none of those can carry a working entry.
-/// Test: `a_tier_with_no_entry_is_reported_missing`,
-/// `a_tier_with_a_stale_command_is_reported_stale`,
-/// `a_tier_with_a_live_command_is_reported_wired`.
-pub(crate) fn tier_state(settings_path: &Path) -> TierState {
-    let Some(value) = super::doctor_hooks_hygiene::read_settings(settings_path) else {
-        return TierState::Missing;
-    };
-    match value.get("statusLine") {
-        None => TierState::Missing,
-        Some(entry) if crate::core::session_launch::is_stale_statusline_command(entry) => {
-            TierState::Stale
-        }
-        Some(_) => TierState::Wired,
-    }
-}
+// #9776: lives in `core::statusline_settings` so `core::doctor_repair`
+// compiles without `daemon`; re-exported so every path still resolves.
+pub(crate) use crate::core::statusline_settings::{TierState, tier_state};
 
 /// Probe whether the `💸` segment can render for this machine.
 ///
