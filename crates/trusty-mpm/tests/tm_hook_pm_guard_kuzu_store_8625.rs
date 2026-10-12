@@ -95,6 +95,15 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
             ),
             "kuzu-store-read",
         ),
+        // #8625 D5b: the text rule holds on both paths too.
+        (
+            bash_payload(fx, "trusty-memory import kuzu>/tmp/o"),
+            "kuzu-store-read",
+        ),
+        (
+            bash_payload(fx, "echo kuzu | xargs -I % $'trusty-memory' import %"),
+            "kuzu-store-read",
+        ),
     ]
 }
 

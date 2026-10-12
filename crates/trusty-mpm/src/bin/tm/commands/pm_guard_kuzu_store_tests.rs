@@ -405,10 +405,10 @@ fn keeps_ordinary_commands_allowed() {
             "echo kuzu-memory is retired".into(),
             "ls .kuzu-memory".into(),
             format!("stat {}", fx.store()),
-            "cargo test -p trusty-memory kuzu".into(),
+            "cargo test -p trusty-memory".into(),
+            "rg kuzu crates/trusty-search".into(),
             "gh issue comment 1 --body \"the .kuzu-memory store\"".into(),
             "sed -n '/x.*y/p' notes.md".into(),
-            "trusty-memory recall kuzu".into(),
         ],
     );
     for path in [
@@ -503,6 +503,15 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
                 &fx,
                 "Bash",
                 json!({ "command": "tm env keys .kuzu-memory/.env.local" }),
+            ),
+            KUZU_STORE_RULE,
+        ),
+        // #8625 D5b: the text rule binds the Architect too.
+        (
+            payload(
+                &fx,
+                "Bash",
+                json!({ "command": "$'trusty-memory' import kuzu>/tmp/o" }),
             ),
             KUZU_STORE_RULE,
         ),
@@ -741,14 +750,9 @@ fn keeps_unrelated_trusty_memory_commands_allowed() {
             "trusty-memory doctor",
             "trusty-memory import other",
             "trusty-memory import --help",
-            "trusty-memory -v recall kuzu",
             "ls ~/p",
             "git commit -m \"docs: trusty-memory import kuzu is denied under the guard\"",
             "gh issue comment 1 --body \"run trusty-memory import kuzu from your shell\"",
-            "grep -rn \"trusty-memory import kuzu\" content/",
-            // A lone `echo` writing prose to a file runs nothing; a bare
-            // `echo` of the call denies, since `echo … | sh` would run it.
-            "echo trusty-memory import kuzu is denied > notes.md",
         ]),
     );
 }
@@ -767,5 +771,128 @@ fn denies_an_import_kuzu_split_by_a_redirection() {
             "cat <(trusty-memory import kuzu --discover)",
         ]),
         "kuzu-store-read",
+    );
+}
+
+// #8625 D5b (owner ruling 2026-10-12): one normalised-text rule — a Bash call
+// naming both `trusty-memory` and `kuzu` outside a quoted text slot denies.
+
+#[test]
+fn the_text_rule_denies_the_block_evasions() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            // A redirection glued to a word.
+            "trusty-memory import kuzu>/tmp/o",
+            "trusty-memory import kuzu&>/dev/null",
+            "trusty-memory>/dev/null import kuzu",
+            "trusty-memory import>/dev/null kuzu",
+            "bash -c 'trusty-memory import kuzu>/tmp/o'",
+            // Here-strings.
+            "bash <<< 'trusty-memory import kuzu'",
+            "sh<<<'trusty-memory import kuzu'",
+            // An argument feeder with any placeholder.
+            "echo kuzu | xargs -I % trusty-memory import %",
+            "echo kuzu | xargs -J % trusty-memory import %",
+            "parallel trusty-memory import ::: kuzu",
+            // A `$`-quoted or `$`-prefixed program word.
+            "$'trusty-memory' import kuzu",
+            "$\"trusty-memory\" import kuzu",
+            "${X}trusty-memory import kuzu",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn the_text_rule_folds_case() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "TRUSTY-MEMORY IMPORT KUZU",
+            "TRUSTY-MEMORY IMPORT KUZU>/tmp/o",
+            "Trusty-Memory import KuZu&>/dev/null",
+            "echo KUZU | xargs -I % TRUSTY-MEMORY import %",
+            "TRUSTY-memory MIGRATE KUZU-DATA",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn the_text_rule_strips_quotes_dollars_and_backslashes() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "$'trusty'-memory import kuzu",
+            "t$'r'usty-memory import kuzu",
+            "trusty-'memory' import k\"uz\"u",
+            "tr\\usty-mem\\ory import ku\\zu",
+            "trusty-memory import ku$''zu",
+            "trusty-memory import $'kuzu'>/dev/null",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn the_text_rule_exempts_quoted_text_slots() {
+    let fx = Fx::new(true);
+    assert_allowed(
+        &fx,
+        &s(&[
+            "gh issue comment 8625 --body \"the guard denies trusty-memory import kuzu\"",
+            "gh issue comment 8625 --body 'trusty-memory import kuzu runs outside the guard'",
+            "gh issue comment 8625 --body=\"trusty-memory import kuzu\"",
+            "gh pr create --title \"fix(trusty-memory): kuzu deny\" --body \"Refs #8625\"",
+            "git commit -m \"docs: trusty-memory import kuzu is denied\"",
+            "git commit -m \"fix(trusty-memory): guard\" -m \"the kuzu import\"",
+            "git commit -m'trusty-memory kuzu'",
+        ]),
+    );
+    // A slot that runs code, an unclosed slot, an unquoted value, or a call
+    // beside a slot still denies.
+    assert_denied(
+        &fx,
+        &s(&[
+            "gh issue comment 1 --body \"$(trusty-memory import kuzu)\"",
+            "gh issue comment 1 --body \"`trusty-memory import kuzu`\"",
+            "gh issue comment 1 --body \"x\"; trusty-memory import kuzu",
+            "git commit -m \"trusty-memory\" && trusty-memory import kuzu",
+            "gh issue comment 1 --body \"trusty-memory import kuzu",
+            "git commit -m trusty-memory-kuzu",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn the_text_rule_denies_a_call_naming_both_outside_a_slot() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "trusty-memory recall kuzu",
+            "trusty-memory -v recall kuzu",
+            "cargo test -p trusty-memory kuzu",
+            "grep -rn \"trusty-memory import kuzu\" content/",
+            "echo trusty-memory import kuzu is denied > notes.md",
+            "cat crates/trusty-memory/src/commands/kuzu_import/mod.rs",
+            "gh issue comment 1 --body-file - <<'EOF'\ntrusty-memory import kuzu\nEOF",
+        ]),
+        "kuzu-store-read",
+    );
+    // A call naming only one of the two words is not this rule's business.
+    assert_allowed(
+        &fx,
+        &s(&[
+            "trusty-memory import other",
+            "trusty-memory doctor",
+            "cargo test -p trusty-memory",
+            "rg kuzu crates/trusty-search",
+        ]),
     );
 }
