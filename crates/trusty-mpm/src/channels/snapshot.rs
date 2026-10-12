@@ -13,7 +13,7 @@
 //! Test: `snapshot_tests.rs`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -156,7 +156,8 @@ struct State<S> {
     attempted: Option<Duration>,
     /// The report of the last refresh that returned.
     report: Option<Arc<LoadReport>>,
-    /// Clock time of the last refresh that returned with no I/O fault.
+    /// Clock time of the last refresh that returned with every refusal a
+    /// content verdict.
     fresh_at: Option<Duration>,
 }
 
@@ -165,8 +166,8 @@ struct State<S> {
 ///
 /// Why: see the module doc. Held by the daemon in `DaemonState`.
 /// What: every check calls [`Self::current`]. A refresh that panics, or
-/// whose report keeps a project's last-good routes because the file or git
-/// could not be read, does not advance the fresh time; the last report is
+/// whose report keeps a project's last-good routes for any reason but a
+/// content verdict, does not advance the fresh time; the last report is
 /// served until it is older than [`MAX_AGE`], then every check denies. The
 /// lock is held across a refresh, so a check may block on git; call it from
 /// a blocking context.
@@ -218,15 +219,17 @@ impl<S: PolicySource, C: Clock> PolicySnapshot<S, C> {
     /// `refresh_error_keeps_last_good_only_until_max_age`,
     /// `poisoned_snapshot_lock_denies`.
     pub fn current(&self) -> Result<Arc<LoadReport>, SnapshotDeny> {
-        let now = self.clock.now();
         // #8454: a poisoned lock denies; nothing vouches for its state.
         let mut state = self.state.lock().map_err(|_| SnapshotDeny::Poisoned)?;
+        let started = self.clock.now();
         let due = state
             .attempted
-            .is_none_or(|at| now.saturating_sub(at) >= REFRESH_INTERVAL);
+            .is_none_or(|at| started.saturating_sub(at) >= REFRESH_INTERVAL);
         if due {
-            state.refresh(now);
+            state.refresh(started);
         }
+        // #8454 r-078 H1: judge age after the lock wait and the refresh.
+        let now = self.clock.now();
         let (Some(report), Some(fresh_at)) = (&state.report, state.fresh_at) else {
             return Err(SnapshotDeny::NeverLoaded);
         };
@@ -296,9 +299,9 @@ impl<S: PolicySource> State<S> {
                 return;
             }
         };
-        if io_faulted(&report) {
-            // #8454: last-good routes kept over an I/O fault count toward max age.
-            tracing::error!("channel policy refresh hit an I/O fault; not fresh");
+        if unverified(&report) {
+            // #8454 r-078 H2: last-good routes kept over a fault count toward max age.
+            tracing::error!("channel policy refresh kept last-good routes over a fault; not fresh");
         } else {
             self.fresh_at = Some(now);
         }
@@ -306,39 +309,72 @@ impl<S: PolicySource> State<S> {
     }
 }
 
-/// True when a project file keeps its last-good routes (`Stale`) because it
-/// or its git state could not be read.
+/// True when a project file keeps its last-good routes (`Stale`) for any
+/// reason but a known content verdict.
 ///
-/// Why: trusty-channels keeps last-good routes over any reload fault with no
-/// time limit (Architect Q3). An unreviewed edit is a verdict and stays
-/// fresh; a read or git fault is not a verdict, so it ages (#8433 P1).
-/// What: a `Stale` file whose `FileRefused` finding is a read error or a
-/// git step that could not run, failed or timed out.
+/// Why: trusty-channels keeps last-good routes over any reload refusal with
+/// no time limit (Architect Q3). An unreviewed edit or a bad file is a
+/// verdict and stays fresh. Any other refusal ages (#8433 P1): a read or git
+/// fault, including the git faults the gate names `NotARepository`,
+/// `NotTopLevel`, `NoDefaultCommit` or `NotCommitted`, and any variant added
+/// later (r-078 H2).
+/// What: a `Stale` file with no refusal finding, or with one refusal that
+/// [`is_verdict`] does not accept.
 /// Test: `refresh_error_keeps_last_good_only_until_max_age`,
+/// `git_fault_reported_as_a_verdict_ages_to_deny`,
 /// `routes_edit_outside_config_yaml_has_no_effect_in_daemon`.
-fn io_faulted(report: &LoadReport) -> bool {
-    let stale = |file: &PathBuf| {
-        report
-            .per_file
-            .iter()
-            .any(|s| s.state == FileState::Stale && s.file == *file)
-    };
-    report.findings.iter().any(|f| match f {
-        Finding::FileRefused { file, error } => stale(file) && is_io(error),
-        _ => false,
-    })
+fn unverified(report: &LoadReport) -> bool {
+    report
+        .per_file
+        .iter()
+        .filter(|s| s.state == FileState::Stale)
+        .any(|s| {
+            let refusals: Vec<bool> = report
+                .findings
+                .iter()
+                .filter_map(|f| refusal_is_verdict(f, &s.file))
+                .collect();
+            refusals.is_empty() || refusals.contains(&false)
+        })
 }
 
-fn is_io(error: &ProjectFileError) -> bool {
-    matches!(
-        error,
-        ProjectFileError::Read { .. }
-            | ProjectFileError::Gate {
-                error: GateError::GitUnavailable { .. }
-                    | GateError::GitFailed { .. }
-                    | GateError::GitTimedOut { .. }
-            }
-    )
+/// `Some(true)` when `f` refuses `file` with a content verdict,
+/// `Some(false)` when it refuses `file` for another reason, `None` when it
+/// does not refuse `file`. The route-level findings are rules over the
+/// parsed file and the host ceiling, so they are verdicts.
+fn refusal_is_verdict(f: &Finding, file: &Path) -> Option<bool> {
+    match f {
+        Finding::FileRefused { file: of, error } => (of == file).then(|| is_verdict(error)),
+        Finding::RouteRejected { origin, .. } | Finding::Widening { origin, .. } => {
+            (origin.file == file).then_some(true)
+        }
+        Finding::Overlap { first, .. } => (first.file == file).then_some(true),
+        Finding::NoGchatConnection { file: of } => (of == file).then_some(true),
+        _ => None,
+    }
+}
+
+/// True for a refusal that is a verdict on reviewed content or repo state.
+///
+/// `NotCommitted` is not one: `rev-parse --verify` fails the same way for a
+/// missing path and for a missing tree object.
+fn is_verdict(error: &ProjectFileError) -> bool {
+    match error {
+        ProjectFileError::Parse { .. }
+        | ProjectFileError::Version { .. }
+        | ProjectFileError::Invalid { .. }
+        | ProjectFileError::NotUtf8
+        | ProjectFileError::TooLarge { .. }
+        | ProjectFileError::NotRegular { .. } => true,
+        ProjectFileError::Gate { error } => matches!(
+            error,
+            GateError::ContentDiffers { .. }
+                | GateError::NotOnDefaultBranch { .. }
+                | GateError::DetachedHead
+        ),
+        // #8454 r-078 H2: every other refusal, and any later variant, ages.
+        _ => false,
+    }
 }
 
 #[cfg(test)]
