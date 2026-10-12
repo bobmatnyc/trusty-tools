@@ -6,17 +6,20 @@
 //! mocks (window 12: ten words per chunk).
 //! Test: this file IS the tests.
 
-use super::chunk_backfill::{SliceBounds, SliceStop};
+use super::chunk_backfill::{SliceBounds, SliceStop, write_ledger};
 use super::chunk_health::{ChunkCheck, Sightings, first_sighting};
 use super::chunk_progress::{CHUNK_MARKER_FILE, ChunkMarker, ChunkState};
 use super::embed_store_tests::{Counting, DIM, NoTokenizer, handle, shape, words};
 use super::handle::PalaceHandle;
 use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::embed_ledger;
+use crate::memory_core::palace::{Drawer, PalaceId};
+use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
+use crate::memory_core::store::hnsw_store::HnswStore;
+use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -885,4 +888,179 @@ async fn backfill_upsert_failure_is_retried_without_holding_the_lock_between_att
     );
     let ledger = embed_ledger::load(dir.path());
     assert_eq!((ledger[0].drawer_id, ledger[0].attempts), (id, 3));
+}
+
+// #9735 fix round: one error-arm test per failure branch of the slice.
+
+fn failure(drawer_id: Uuid) -> EmbedFailure {
+    EmbedFailure {
+        drawer_id,
+        failed_at: chrono::Utc::now(),
+        attempts: 1,
+        reason: "earlier failure".into(),
+    }
+}
+
+#[test]
+fn a_ledger_fault_on_one_row_still_records_the_rest_and_clears() {
+    let rows: Vec<EmbedFailure> = (0..3).map(|_| failure(Uuid::new_v4())).collect();
+    let bad = rows[0].drawer_id;
+    let (mut recorded, mut cleared) = (Vec::new(), false);
+    let err = write_ledger(
+        rows.clone(),
+        &HashSet::from([Uuid::new_v4()]),
+        |row| {
+            anyhow::ensure!(row.drawer_id != bad, "injected record fault");
+            recorded.push(row.drawer_id);
+            Ok(())
+        },
+        |_| {
+            cleared = true;
+            Ok(())
+        },
+    );
+    let rest: Vec<Uuid> = rows[1..].iter().map(|r| r.drawer_id).collect();
+    assert_eq!(recorded, rest, "the other rows are still recorded");
+    assert!(cleared, "the clear still runs after a record fault");
+    assert!(err.is_some_and(|e| e.contains("injected record fault")));
+}
+
+#[tokio::test]
+async fn a_malformed_ledger_is_reported_on_the_slice() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    legacy(&h, &format!("BAD {}", words(100)), 0.9).await;
+    let good = legacy(&h, &words(100), 0.5).await;
+    std::fs::write(dir.path().join("embed_failures.json"), b"{not json").unwrap();
+    let report = h.reembed_slice(&picky(false), &bounds()).await;
+    assert_eq!((report.repaired, report.failed), (1, 1), "{report:?}");
+    assert!(full(&h, good));
+    assert!(report.ledger_error.is_some(), "{report:?}");
+}
+
+#[tokio::test]
+async fn slice_on_a_read_only_handle_is_a_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = legacy(&handle(dir.path()), &words(100), 0.5).await;
+    // Hold the vector redb's lock so the open falls back to a snapshot.
+    let _live = redb::Database::create(dir.path().join("idx.usearch.redb")).unwrap();
+    let vs = UsearchStore::new(dir.path().join("idx.usearch"), DIM).unwrap();
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
+    let mut h = PalaceHandle::new(PalaceId::new("chunk-store"), String::new(), vs, kg);
+    h.data_dir = Some(dir.path().to_path_buf());
+    assert!(h.is_read_only(), "precondition: a snapshot handle");
+    let mut d = Drawer::new(Uuid::new_v4(), &words(100));
+    d.id = id;
+    d.created_at -= chrono::Duration::hours(1);
+    h.add_drawer(d);
+    let report = h.reembed_slice(&chunking(), &bounds()).await;
+    assert_eq!(report.stop, SliceStop::ReadOnly, "{report:?}");
+    assert_eq!(report.attempted, 0);
+    assert_eq!(shape(&h, id), Some((1, 0)));
+    assert!(ledger_ids(dir.path()).is_empty());
+}
+
+/// Blocks the `nth` multi-chunk `embed_batch` (from 1) until `release`.
+struct NthGate {
+    inner: MockEmbedder,
+    nth: u32,
+    calls: std::sync::atomic::AtomicU32,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Embedder for NthGate {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let seq = std::sync::atomic::Ordering::SeqCst;
+        if texts.len() > 1 && self.calls.fetch_add(1, seq) + 1 == self.nth {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.embed_batch(texts).await
+    }
+    delegate!();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
+async fn backfill_lock_timeout_clears_the_repaired_rows_first() {
+    let _env = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let ids = [
+        legacy(&h, &words(100), 0.5).await,
+        legacy(&h, &words(100), 0.5).await,
+    ];
+    for id in ids {
+        embed_ledger::record(dir.path(), failure(id)).unwrap();
+    }
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let e: Emb = Arc::new(NthGate {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        nth: 2,
+        calls: Default::default(),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let m = h.write_mutex_for_test();
+    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    unsafe { std::env::set_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", "1") };
+    let (result, _held) = tokio::join!(
+        h.backfill_with(backfill_opts(1, Duration::ZERO), &e),
+        async {
+            entered.notified().await;
+            let held = m.clone().lock_owned().await;
+            release.notify_one();
+            held
+        }
+    );
+    unsafe { std::env::remove_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS") };
+    result.expect_err("the second commit's lock wait ends the run");
+    let (done, busy): (Vec<Uuid>, Vec<Uuid>) = ids.iter().copied().partition(|id| full(&h, *id));
+    assert_eq!(
+        (done.len(), busy.len()),
+        (1, 1),
+        "one drawer repaired first"
+    );
+    assert_eq!(
+        ledger_ids(dir.path()),
+        busy,
+        "the repaired drawer's row is cleared before the error"
+    );
+}
+
+#[tokio::test]
+async fn a_redb_fault_in_the_upsert_loses_no_update_and_leaves_no_orphan_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let done = legacy(&h, &words(100), 0.9).await;
+    let faulted = legacy(&h, &words(100), 0.5).await;
+    let untouched = legacy(&h, &words(100), 0.1).await;
+    HnswStore::fail_next_group_commit_for_test(&faulted.to_string());
+    let report = h.reembed_slice(&chunking(), &bounds()).await;
+    assert!(
+        matches!(report.stop, SliceStop::StoreError(_)),
+        "{report:?}"
+    );
+    assert_eq!((report.repaired, report.failed), (1, 1), "{report:?}");
+    assert!(full(&h, done), "the earlier commit is kept");
+    assert_eq!(
+        shape(&h, faulted),
+        Some((1, 0)),
+        "rolled back: no chunk row"
+    );
+    assert_eq!(shape(&h, untouched), Some((1, 0)), "the slice stopped");
+    let groups = h.vector_store.chunk_shapes().unwrap();
+    assert_eq!(groups.len(), 3, "no orphan group: {groups:?}");
+    assert_eq!(ledger_ids(dir.path()), vec![faulted]);
+    let retry = SliceBounds {
+        ledger_backoff: Duration::ZERO,
+        ..bounds()
+    };
+    h.reembed_slice(&chunking(), &retry).await;
+    assert!(
+        full(&h, faulted),
+        "the store is writable after the rollback"
+    );
 }

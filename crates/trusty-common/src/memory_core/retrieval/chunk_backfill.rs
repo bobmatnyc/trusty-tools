@@ -155,6 +155,9 @@ pub struct SliceReport {
     /// `host_failures` or more embed errors and no success: the fault is
     /// the host's, so no ledger row was written for those errors.
     pub host_failure: bool,
+    /// The ledger write or clear that failed at slice end, if any. Every
+    /// other row was still attempted, and the clear still ran.
+    pub ledger_error: Option<String>,
     /// Why the slice ended.
     pub stop: SliceStop,
 }
@@ -298,7 +301,8 @@ impl PalaceHandle {
         }
         report.repaired = repaired.len();
         report.host_failure = repaired.is_empty() && embed_failures >= bounds.host_failures.max(1);
-        self.settle_slice_ledger(rows, repaired, report.host_failure)
+        report.ledger_error = self
+            .settle_slice_ledger(rows, repaired, report.host_failure)
             .await;
         report
     }
@@ -404,20 +408,20 @@ impl PalaceHandle {
     ///
     /// Why (#9735 gap 12): an embedder that is down fails every drawer, and a
     /// row per drawer would back healthy drawers off for a day.
-    /// What: in a host-level slice only drawer-specific rows (split, upsert)
-    /// are written; otherwise every row is. One `spawn_blocking`, because
-    /// `json_rmw` blocks on an flock. A ledger error is logged, not returned.
+    /// What: in a host-level slice only drawer-specific rows (split, upsert,
+    /// timeout) are written; otherwise every row is. One `spawn_blocking`,
+    /// because `json_rmw` blocks on an flock. Each row and the clear run
+    /// through [`write_ledger`]; a failure is logged and returned.
     /// Test: `host_level_slice_failure_writes_no_ledger_rows`,
-    /// `one_bad_drawer_among_good_ones_is_ledgered_and_the_rest_repair`.
+    /// `one_bad_drawer_among_good_ones_is_ledgered_and_the_rest_repair`,
+    /// `a_malformed_ledger_is_reported_on_the_slice`.
     async fn settle_slice_ledger(
         &self,
         rows: Vec<PendingRow>,
         repaired: HashSet<Uuid>,
         host_failure: bool,
-    ) {
-        let Some(dir) = self.data_dir.clone() else {
-            return;
-        };
+    ) -> Option<String> {
+        let dir = self.data_dir.clone()?;
         let now = Utc::now();
         let entries: Vec<EmbedFailure> = rows
             .into_iter()
@@ -430,23 +434,46 @@ impl PalaceHandle {
             })
             .collect();
         if entries.is_empty() && repaired.is_empty() {
-            return;
+            return None;
         }
-        let written = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            for entry in entries {
-                embed_ledger::record(&dir, entry)?;
-            }
-            embed_ledger::clear(&dir, &repaired)
+        let written = tokio::task::spawn_blocking(move || {
+            write_ledger(
+                entries,
+                &repaired,
+                |entry| embed_ledger::record(&dir, entry),
+                |ids| embed_ledger::clear(&dir, ids),
+            )
         })
-        .await;
-        match written {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(palace = %self.id, "#9735: slice ledger write failed: {e:#}")
-            }
-            Err(e) => tracing::warn!(palace = %self.id, "#9735: slice ledger task failed: {e}"),
+        .await
+        .unwrap_or_else(|e| Some(format!("slice ledger task failed: {e}")));
+        if let Some(e) = &written {
+            tracing::warn!(palace = %self.id, "#9735: slice ledger write failed: {e}");
         }
+        written
     }
+}
+
+/// Record each row on its own, then clear `repaired` whatever happened.
+///
+/// Why (#9735): stopping at the first failed `record` dropped the other rows
+/// and skipped the clear, so every failing drawer lost its backoff.
+/// What: calls `record` once per entry and `clear` once; returns the joined
+/// errors, or `None` when every call succeeded.
+/// Test: `a_ledger_fault_on_one_row_still_records_the_rest_and_clears`.
+pub(super) fn write_ledger(
+    entries: Vec<EmbedFailure>,
+    repaired: &HashSet<Uuid>,
+    mut record: impl FnMut(EmbedFailure) -> anyhow::Result<()>,
+    clear: impl FnOnce(&HashSet<Uuid>) -> anyhow::Result<()>,
+) -> Option<String> {
+    let mut errors: Vec<String> = entries
+        .into_iter()
+        .filter_map(|entry| record(entry).err().map(|e| format!("{e:#}")))
+        .collect();
+    if let Err(e) = clear(repaired) {
+        errors.push(format!("{e:#}"));
+    }
+    (!errors.is_empty()).then(|| errors.join("; "))
 }
 
 impl PendingRow {
