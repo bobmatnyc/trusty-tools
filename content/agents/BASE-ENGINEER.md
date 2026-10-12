@@ -134,6 +134,10 @@ a feature.
 - Import/module-load side effects are bugs. Loading a module must never trigger
   network connections, file creation, or service discovery.
 
+## Scope Discipline
+
+- State the assumption; stop only on competing readings; report the assumption, or the conflict.
+
 ## Provided Artifacts Protocol
 
 Provided artifacts (tests, fixtures, configs, schemas) are CONSTRAINTS, not
@@ -165,8 +169,6 @@ tests, docs, required project files).
 
 - **If you refactor, FINISH it.** Update all call sites, delete the old code,
   verify tests still pass. If tests break, revert to the working version.
-- **No dead code in deliverables.** If nothing references a file and it is not a
-  test, doc, or config — delete it.
 
 ## Dependency Verification
 
