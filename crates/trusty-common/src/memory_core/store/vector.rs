@@ -504,10 +504,15 @@ impl UsearchStore {
     /// repair) has fewer rows than its text needs; the health check compares
     /// this shape with the expected chunk count.
     /// What: one `VECTOR_KEYS` scan, no embedding. Keys that do not parse are
-    /// skipped, as in [`Self::all_ids`]. A read failure is an error.
+    /// skipped, as in [`Self::all_ids`]. A read failure is an error, and so
+    /// is a tripped op breaker (#9728).
     /// Test: `health_flags_a_gapped_group`,
-    /// `chunk_shapes_counts_rows_and_the_highest_index`.
+    /// `chunk_shapes_counts_rows_and_the_highest_index`,
+    /// `a_stalled_group_trips_for_good_and_is_never_counted_complete`.
     pub fn chunk_shapes(&self) -> Result<HashMap<Uuid, ChunkShape>> {
+        // #9728: a tripped store may hold a committed group whose tail never
+        // reached the graph; its rows must not read as a complete group.
+        self.inner.refuse_if_tripped()?;
         let mut shapes: HashMap<Uuid, ChunkShape> = HashMap::new();
         for key in self.inner.all_keys()? {
             let Ok((id, n)) = vector_key::parse(&key) else {
@@ -544,20 +549,30 @@ impl UsearchStore {
     /// Validates the count (1..=4096) and every dimension first, so a bad
     /// input returns `Err` and leaves the drawer's previous rows unchanged.
     /// No production writer calls this yet (PR C wires the embed pipeline).
+    /// #9728: runs under a stall watchdog, not a wall clock: the op budget
+    /// restarts at each indexed point, so a legal group of any length
+    /// completes and only a group that stops advancing trips the breaker.
     /// Test: `upsert_chunks_replaces_the_group_and_shrinks`,
     /// `upsert_chunks_with_one_bad_dimension_changes_nothing`,
-    /// `upsert_chunks_rejects_empty_and_over_cap`.
+    /// `upsert_chunks_rejects_empty_and_over_cap`,
+    /// `a_legal_group_slower_than_the_budget_completes_without_tripping`.
     pub async fn upsert_chunks(&self, id: Uuid, chunks: Vec<Vec<f32>>) -> Result<()> {
         if self.is_read_only() {
             anyhow::bail!(READ_ONLY_ERROR_MSG);
         }
         let inner = self.inner.clone();
         let key = id.to_string();
-        // #9487: joined within the op budget; a tripped store spawns nothing.
+        // #9487: a tripped store spawns nothing. #9728: the budget restarts
+        // at each indexed point, so only a stalled group trips the breaker.
         self.inner
-            .run_bounded("upsert", move || -> Result<()> {
+            .run_bounded_progress("upsert", move |progress| -> Result<()> {
                 inner
-                    .replace_group(&key, &chunks)
+                    .replace_group_capped(
+                        &key,
+                        &chunks,
+                        vector_key::MAX_CHUNKS_PER_DRAWER,
+                        &progress,
+                    )
                     .with_context(|| format!("upsert {} chunk vectors for {key}", chunks.len()))?;
                 Ok(())
             })

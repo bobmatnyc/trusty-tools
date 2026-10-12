@@ -67,6 +67,29 @@ impl Drop for OpGuard<'_> {
     }
 }
 
+impl OpGuard<'_> {
+    /// Restart this op's age at now, after it made progress (#9728).
+    ///
+    /// Why: a group write ticks its stall watchdog once per indexed point and
+    /// may legally run past the budget; a fixed start time made health read
+    /// that progressing op as a wedged `hnsw` lock.
+    /// What: re-registers the op under a fresh id stamped now, so the smallest
+    /// live id is still the oldest op. A stalled op is never touched, so its
+    /// age grows exactly as before.
+    /// Test: `a_progressing_group_keeps_its_op_age_under_one_budget`,
+    /// `a_stalled_group_op_age_keeps_growing_past_the_budget`.
+    pub(super) fn touch(&mut self) {
+        let mut live = self.watch.live.lock();
+        if let Some(mut op) = live.ops.remove(&self.id) {
+            let id = live.next;
+            live.next = live.next.wrapping_add(1);
+            op.since = Instant::now();
+            live.ops.insert(id, op);
+            self.id = id;
+        }
+    }
+}
+
 impl OpWatch {
     /// Register an op of `kind` starting now; the guard unregisters it.
     ///
