@@ -302,15 +302,31 @@ impl PalaceHandle {
     }
 }
 
-/// Part `k` of `n` of `head`: the head's room, importance, type, times, tags
-/// and source; no Tier C slot.
+/// Part `k` of `n` of `head`: the head's room, importance, type, times, access
+/// history, tags and source; no Tier C slot.
+///
+/// Why (#9735, ADR-0028 D6 "demoted, never deleted"): a Tier C head's
+/// `expires_at` is a retirement condition, and the sweeps skip it only because
+/// it has a `fact_key`. A tail has none, so a copied expiry would let the sweep
+/// hard-delete the tails while the head survives. The access count and time
+/// carry over so a tail keeps the prune boost the head earned.
+/// What: copies the head's fields; `expires_at` is `None` for a Tier C head.
+/// Test: `tier_c_head_tails_survive_its_expiry_and_keep_access_history`,
+/// `head_keeps_id_fact_key_and_kg_triples`.
 fn tail_of(head: &Drawer, text: &str, k: usize, n: usize) -> Drawer {
     let mut d = Drawer::new(head.room_id, text);
     d.id = part_id(head.id, k);
     d.importance = head.importance;
     d.drawer_type = head.drawer_type;
     d.created_at = head.created_at;
-    d.expires_at = head.expires_at;
+    // #9735: no expiry on a Tier C head's tail (D6); see above.
+    d.expires_at = if head.is_tier_c() {
+        None
+    } else {
+        head.expires_at
+    };
+    d.access_count = head.access_count;
+    d.last_accessed_at = head.last_accessed_at;
     d.source_file = head.source_file.clone();
     d.tags = head.tags.clone();
     tag_part(&mut d, head.id, k, n);
