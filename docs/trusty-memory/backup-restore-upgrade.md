@@ -69,12 +69,23 @@ ones yourself.
 
 ## Restore a backup
 
-Restore is offline only. Stop the daemon first:
+Restore is offline only. Stop the daemon that serves this data root first.
+
+`trusty-memory stop` has no flag to pick a daemon. Without
+`TRUSTY_DATA_DIR_OVERRIDE`, it stops every trusty-memory daemon you run,
+including the one launchd supervises on macOS. Every MCP client that uses
+trusty-memory loses its memory tools until the daemon is back. It spares the
+per-session stdio bridges. With `TRUSTY_DATA_DIR_OVERRIDE` set, it stops only
+the daemon serving that data root's socket.
 
 ```bash
 trusty-memory stop
 trusty-memory palace restore <SNAPSHOT> [--palace <ID>]
 ```
+
+After the restore, run `trusty-memory start`. Under launchd on macOS, run
+`trusty-memory service start` instead. The hint that `palace restore` prints
+names `trusty-memory start` in every case.
 
 `<SNAPSHOT>` is a backup directory written by `palace backup`. It holds
 `manifest.json`. `--palace` names the palace to restore. It defaults to the id
@@ -97,7 +108,10 @@ honoured.
 ### Re-embed after a restore
 
 The backup has no vector index. Start the daemon, then call the MCP tool
-`palace_reembed` with `dry_run=false` until it reports `missing: 0`. Recall
+`palace_reembed` with `dry_run=false`. In that call, `missing` is the count
+before the repair, so it can still be above zero next to a matching `repaired`.
+Read `repaired`. Then call `palace_reembed` again, with `dry_run=true` or
+`false`, and confirm it reports `missing: 0`. Repeat until it does. Recall
 finds the restored drawers only after that.
 
 ## Recover from a crash during restore
