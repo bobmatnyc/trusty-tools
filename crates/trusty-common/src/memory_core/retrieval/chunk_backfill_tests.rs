@@ -949,7 +949,7 @@ async fn slice_on_a_read_only_handle_is_a_noop() {
     let mut h = PalaceHandle::new(PalaceId::new("chunk-store"), String::new(), vs, kg);
     h.data_dir = Some(dir.path().to_path_buf());
     assert!(h.is_read_only(), "precondition: a snapshot handle");
-    let mut d = Drawer::new(Uuid::new_v4(), &words(100));
+    let mut d = Drawer::new(Uuid::new_v4(), words(100));
     d.id = id;
     d.created_at -= chrono::Duration::hours(1);
     h.add_drawer(d);
