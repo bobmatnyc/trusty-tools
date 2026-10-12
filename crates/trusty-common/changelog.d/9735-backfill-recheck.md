@@ -1,2 +1,0 @@
-Fixed
-- The vector backfill (`palace_reembed`) no longer leaves an orphan vector row when a drawer is forgotten during its embed, and no longer commits a group for text that was rewritten meanwhile. The embed and its retry sleeps run with no lock; `write_mutex` is held only to recheck the drawer text and run one upsert, and an upsert retry sleeps outside it. A drawer skipped this way is not counted attempted or failing and gets no ledger row. A write-lock wait past `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` now ends the run with an error naming the palace (#9735).

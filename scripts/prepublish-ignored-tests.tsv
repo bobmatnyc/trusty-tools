@@ -144,5 +144,20 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # It stays unselected: a timing probe run by hand with `--nocapture`, not a gate
 # test. 124 -> 125.
 #
+# #9766 added trusty-common
+# `memory_core::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured`
+# (`chunk_backfill_measure_tests.rs`). It stays unselected: it is an ONNX
+# measurement run by hand, not a gate test. 125 -> 126.
+#
+# This gate runs on Linux CI, and 126 is the Linux count. Four
+# `#[cfg(target_os = "macos")]` ignored tests are not compiled there:
+# trusty-mpm `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`
+# (PR #3314) and `claude_pid_resolves_from_inside_its_own_pane` (PR #8944),
+# trusty-mpm `tm_secrets_exec_live::live_keychain_flag_on_write_proof`
+# (PR #9653), and trusty-secrets `ancestry::tests::macos_live_ancestor_walk_probe`
+# (PR #9629). `--list-only` on a Mac therefore reads 130 and fails locally
+# against 126; that is expected, not a regression. No per-platform baseline.
+# Architect ruling 12:58Z (option A): baseline 126.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 125
+# UNSELECTED-BASELINE: 126

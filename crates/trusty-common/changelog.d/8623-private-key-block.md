@@ -1,2 +1,0 @@
-Security
-- `check_secret` now refuses a PEM private key (`-----BEGIN …PRIVATE KEY`) as one hit, including an unterminated block and the armor line alone. Before, a key was refused only when a body line tripped a token rule, so the armor line by itself, or a short body, was stored. A JWT is labelled `jwt` rather than `mixed_case_alnum`; which strings are refused is otherwise unchanged ([#8623](https://github.com/bobmatnyc/trusty-tools/issues/8623))

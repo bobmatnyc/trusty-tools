@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.63.0] — 2026-10-12
+
+### Breaking
+
+- memory_core: `PalaceHandle::l1_drawers` changed type from `Vec<Drawer>` to `Arc<RwLock<Vec<Drawer>>>`, and `PalaceHandle::refresh_l1` now takes `&self` (#9719). Read it with `handle.l1_drawers.read()`.
+
+### Added
+
+- `memory_core::filter::find_secret_spans` returns every secret hit in a string as a byte range with the rule that flagged it (`SecretSpan { range, rule }`). The list is empty exactly when `check_secret` accepts the string, and its first span is the hit `find_secret_token` previews. `SecretRule` (`provider_prefix`, `aws_key_id`, `private_key_block`, `jwt`, `base64_blob`, `mixed_case_alnum`) and `SECRET_FILTER_VERSION` (1) are public; a fingerprint test fails when a prefix list, length or label changes without a version bump ([#8623](https://github.com/bobmatnyc/trusty-tools/issues/8623))
+- `memory_core::filter::classify_secret` returns a `SecretShape` for a string: its length in chars, its character classes (`cls`, a fixed-order subset of `u`, `l`, `d`, `s`) and its Shannon entropy in tenths of a bit per char. `mask_content(content, spans)` replaces each `SecretSpan` with the marker `⟦S{i}:rule:len:cls:ent⟧` (0-based `i`) and copies all other text byte for byte; a span list that is out of bounds, off a char boundary, empty, overlapping or out of order is a `MaskError`, never a panic. `SecretRule`, `SecretSpan`, `SecretShape` and `MaskError` are `#[non_exhaustive]`. `SECRET_FILTER_VERSION` stays 1 ([#8624](https://github.com/bobmatnyc/trusty-tools/issues/8624))
+- `PalaceHandle::reembed_slice` re-embeds one bounded slice of missing-vector and short (pre-chunking) drawers: the embed runs outside `write_mutex`, and the commit takes the mutex only to recheck the drawer text and upsert once, so a forget or rewrite during the embed writes nothing. `SliceBounds` (env `TRUSTY_CHUNK_BACKFILL_*`) caps wall time, drawers and chunks between drawers, and one drawer's embed and lock wait; none of the between-drawer limits bounds one drawer. Nothing calls it yet (#9735).
+- `EmbedHealth::chunk_progress` derives `ChunkProgress { total, done, pending, failed, state }` from the index; `state` is `unknown` when the chunk check did not run. `ChunkMarker` reads and writes the advisory `chunk_backfill.json`, which is never proof of completeness (#9735).
+- A slice whose embeds return `TRUSTY_CHUNK_BACKFILL_HOST_FAILURES` (default 2) consecutive errors with no success is host-level and writes no embed ledger rows. A split failure, an upsert failure and an embed timeout are always ledgered against their drawer. A timeout also ends the slice, because the embedder may still be running that drawer, so the next slice moves past it. Each ledger row is written on its own, the repaired drawers' rows are cleared even after a failed row, and a failed write is reported in `SliceReport.ledger_error`. The health check warns once per unsplittable drawer per process, then logs at debug (#9735).
+
+### Fixed
+
+- memory_core: L1 now follows the drawer table on a live palace handle; a drawer remembered, forgotten or imported after open reaches `retrieve_l0_l1` without a reopen (#9719).
+- memory_core: L1 serves each drawer from its live drawer-table row, so an expiry, backdate or retired `fact_key` reaches L1 as it reaches L2; a wing-scoped recall (`recall_scoped`, `recall_deep_scoped`) no longer returns another wing's drawer from L1; and a drawer found by the L2/L3 lane is reported at that layer instead of as its L1 copy (#9719). New: `retrieval::retrieve_l0_l1_scoped`.
+- memory_core: a stale second palace handle can no longer revive a forgotten drawer at the next open. The first maintainer open persists any snapshot-only drawers and stamps a `drawers_authoritative` marker in `kg_schema`; a stamped palace no longer gap-fills its drawer table from `l1_cache.json` (#9722).
+- memory_core: an open-time adoption of snapshot drawers that overruns its write budget is cancelled instead of committing later, so a `forget` issued after that open can no longer be undone by it; `KgStoreRedb::adopt_snapshot_drawers` takes a `may_commit` gate checked once the write lock is held (#9722). `retrieval::dedup_extend` is now public.
+- The vector backfill (`palace_reembed`) no longer leaves an orphan vector row when a drawer is forgotten during its embed, and no longer commits a group for text that was rewritten meanwhile. The embed and its retry sleeps run with no lock; `write_mutex` is held only to recheck the drawer text and run one upsert, and an upsert retry sleeps outside it. A drawer skipped this way is not counted attempted or failing and gets no ledger row. A write-lock wait past `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` now ends the run with an error naming the palace (#9735).
+- A chunked embed's timeout is now `min(per_chunk × chunks, max(per_chunk, cap))`, where `cap` is `TRUSTY_EMBED_CHUNKED_CAP_SECS` (default 600 s). Before, a 4096-chunk drawer at the default 30 s per chunk waited about 34 hours, including under `write_mutex` in the dream merge. When `per_chunk` (`TRUSTY_EMBED_BATCH_TIMEOUT_SECS`) is above the cap and a drawer has more than one chunk, the ceiling drops to `per_chunk`, one chunk's worth; raising `TRUSTY_EMBED_CHUNKED_CAP_SECS` raises it. Below the cap nothing changes (#9735).
+
+### Security
+
+- `check_secret` now refuses a PEM private key (`-----BEGIN …PRIVATE KEY`) as one hit, including an unterminated block and the armor line alone. Before, a key was refused only when a body line tripped a token rule, so the armor line by itself, or a short body, was stored. A JWT is labelled `jwt` rather than `mixed_case_alnum`; which strings are refused is otherwise unchanged ([#8623](https://github.com/bobmatnyc/trusty-tools/issues/8623))
+
 ## [0.61.0] — 2026-10-12
 
 ### Breaking

@@ -1,2 +1,0 @@
-Fixed
-- A chunked embed's timeout is now `min(per_chunk × chunks, max(per_chunk, cap))`, where `cap` is `TRUSTY_EMBED_CHUNKED_CAP_SECS` (default 600 s). Before, a 4096-chunk drawer at the default 30 s per chunk waited about 34 hours, including under `write_mutex` in the dream merge. When `per_chunk` (`TRUSTY_EMBED_BATCH_TIMEOUT_SECS`) is above the cap and a drawer has more than one chunk, the ceiling drops to `per_chunk`, one chunk's worth; raising `TRUSTY_EMBED_CHUNKED_CAP_SECS` raises it. Below the cap nothing changes (#9735).
