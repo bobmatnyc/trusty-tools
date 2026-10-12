@@ -9,8 +9,8 @@
 //! Test: this is the test module.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use trusty_channels::policy::{
@@ -710,6 +710,197 @@ fn poisoned_snapshot_lock_denies() {
     });
     assert!(poisoner.join().is_err());
     assert_snapshot_denies(&snap, |d| *d == SnapshotDeny::Poisoned, "poisoned lock");
+}
+
+/// The longest a test waits on another thread. A hang guard only: a check
+/// that deadlocks fails the test here instead of hanging the suite.
+const HANG_GUARD: Duration = Duration::from_secs(10);
+
+/// Start the refresh a check at the clock's time would start, then wait
+/// until no refresh is in flight.
+fn settle<S: PolicySource, C: Clock>(snap: &PolicySnapshot<S, C>) {
+    let _ = snap.current();
+    snap.wait_idle();
+}
+
+/// The test's end of a gate that holds one refresh inside the source.
+struct Gate {
+    entered: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+/// The source's end. Dropping the [`Gate`] releases it, so a failed test
+/// never leaves a refresh held.
+struct Held {
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+fn gate() -> (Gate, Held) {
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let gate = Gate {
+        entered: entered_rx,
+        release: release_tx,
+    };
+    let held = Held {
+        entered: entered_tx,
+        release: release_rx,
+    };
+    (gate, held)
+}
+
+impl Held {
+    /// Signal that the refresh is inside the source, then wait for release.
+    fn hold(&self) {
+        let _ = self.entered.send(());
+        let _ = self.release.recv();
+    }
+}
+
+impl Gate {
+    /// True once the gated refresh is inside the source.
+    fn entered(&self) -> bool {
+        self.entered.recv_timeout(HANG_GUARD).is_ok()
+    }
+
+    /// Let the gated refresh return.
+    fn open(&self) {
+        let _ = self.release.send(());
+    }
+}
+
+type Snap = PolicySnapshot<Scripted, TestClock>;
+type Checked = Result<Arc<LoadReport>, SnapshotDeny>;
+
+/// `snap.current()` on its own thread; the result arrives on the receiver.
+fn check_on_thread(snap: &Arc<Snap>) -> mpsc::Receiver<Checked> {
+    let (tx, rx) = mpsc::channel();
+    let snap = Arc::clone(snap);
+    std::thread::spawn(move || {
+        let _ = tx.send(snap.current());
+    });
+    rx
+}
+
+#[test]
+fn reader_not_blocked_by_slow_refresh() {
+    // #9777: a check during a refresh gets the published report at once.
+    let (gate, held) = gate();
+    let (snap, clock, calls) = scripted(move |n| {
+        if n == 1 {
+            held.hold();
+        }
+        bob_report()
+    });
+    settle(&snap);
+    let snap = Arc::new(snap);
+    clock.set(secs(5.0));
+    let first = check_on_thread(&snap);
+    assert!(gate.entered(), "the due refresh never reached the source");
+    let reader = check_on_thread(&snap).recv_timeout(HANG_GUARD);
+    gate.open();
+    let reader = reader.map(|r| r.map(|report| report.policy.routes().len()));
+    assert_eq!(reader, Ok(Ok(1)), "a reader waited on the refresh");
+    let first = first.recv_timeout(HANG_GUARD).map(|r| r.is_ok());
+    assert_eq!(first, Ok(true), "the check that found the refresh due");
+    snap.wait_idle();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn slow_refresh_does_not_start_a_second_refresh() {
+    // #9777: a refresh that takes 7 s, longer than REFRESH_INTERVAL.
+    let (gate, held) = gate();
+    let clock = TestClock::default();
+    let during = clock.clone();
+    let (snap, clock, calls) = scripted_on(clock, move |n| {
+        if n == 1 {
+            during.set(secs(12.0));
+            held.hold();
+        }
+        bob_report()
+    });
+    settle(&snap);
+    let snap = Arc::new(snap);
+    clock.set(secs(5.0));
+    let first = check_on_thread(&snap);
+    assert!(gate.entered(), "the due refresh never reached the source");
+    let readers: Vec<_> = (0..4).map(|_| check_on_thread(&snap)).collect();
+    gate.open();
+    for rx in std::iter::once(first).chain(readers) {
+        let checked = rx.recv_timeout(HANG_GUARD);
+        assert!(matches!(checked, Ok(Ok(_))), "{checked:?}");
+    }
+    snap.wait_idle();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "a refresh slower than 5 s started another"
+    );
+}
+
+#[test]
+fn hung_refresh_past_max_age_denies_without_blocking() {
+    // #9777: a refresh that never returns cannot keep the snapshot fresh.
+    let (gate, held) = gate();
+    let (snap, clock, _) = scripted(move |n| {
+        if n == 1 {
+            held.hold();
+        }
+        bob_report()
+    });
+    settle(&snap);
+    let snap = Arc::new(snap);
+    clock.set(secs(5.0));
+    let first = check_on_thread(&snap);
+    assert!(gate.entered(), "the due refresh never reached the source");
+    clock.set(secs(66.0));
+    let reader = check_on_thread(&snap).recv_timeout(HANG_GUARD);
+    gate.open();
+    match reader {
+        Ok(Err(SnapshotDeny::Stale { age, max })) => {
+            assert_eq!((age, max), (secs(66.0), MAX_AGE));
+        }
+        other => panic!("a check during a hung refresh at 66 s: {other:?}"),
+    }
+    let _ = first.recv_timeout(HANG_GUARD);
+    snap.wait_idle();
+    // The refresh started at 5 s, so its report is 61 s old at 66 s.
+    match snap.current() {
+        Err(SnapshotDeny::Stale { age, .. }) => assert_eq!(age, secs(61.0)),
+        other => panic!("a refresh that started at 5 s, judged at 66 s: {other:?}"),
+    }
+}
+
+#[test]
+fn never_loaded_denies_while_first_refresh_in_flight() {
+    // #9777 Q1: a cold check denies while the first load runs.
+    let (gate, held) = gate();
+    let (snap, _, calls) = scripted(move |n| {
+        if n == 0 {
+            held.hold();
+        }
+        bob_report()
+    });
+    let snap = Arc::new(snap);
+    let first = check_on_thread(&snap);
+    assert!(gate.entered(), "the first load never reached the source");
+    let first = first.recv_timeout(HANG_GUARD).map(|r| r.err());
+    let second = check_on_thread(&snap)
+        .recv_timeout(HANG_GUARD)
+        .map(|r| r.err());
+    gate.open();
+    let never = Ok(Some(SnapshotDeny::NeverLoaded));
+    assert_eq!(first, never, "the cold check waited on the first load");
+    assert_eq!(second, never, "a check during the first load");
+    snap.wait_idle();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a check during the first load started another"
+    );
+    assert!(snap.current().is_ok(), "the first load was not published");
 }
 
 #[cfg(feature = "daemon")]

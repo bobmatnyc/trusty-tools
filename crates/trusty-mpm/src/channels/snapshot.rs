@@ -243,6 +243,11 @@ impl<S: PolicySource, C: Clock> PolicySnapshot<S, C> {
         Ok(Arc::clone(report))
     }
 
+    /// Wait until no refresh is in flight. #9777: a stub until the refresh
+    /// leaves the lock; today `current` returns only once its refresh has.
+    #[cfg(test)]
+    pub(crate) fn wait_idle(&self) {}
+
     /// May a `kind` message go to `recipient` on `channel`?
     ///
     /// Why: every daemon send passes this before any network call.
