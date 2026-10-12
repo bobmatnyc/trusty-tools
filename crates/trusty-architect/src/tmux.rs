@@ -53,22 +53,29 @@ impl fmt::Display for PaneId {
 /// Why: three copies of "shell out to tmux" exist today (Python `fleet-poll.py`,
 /// trusty-mpm's `fleet/launch.rs` and `fleet/poller.rs`); the port needs one
 /// seam that tests can replace without a tmux server.
-/// What: [`Tmux::run`] runs one tmux command and returns its stdout; the
-/// provided methods build the argv for the verbs the Architect uses.
-/// Test: `send_keys_builds_exact_target_argv` (via [`crate::FakeTmux`]).
+/// What: [`Tmux::run`] runs one tmux command and returns its stdout.
+/// Test: `system_run_rejects_empty_args`, `send_keys_builds_exact_target_argv`
+/// (via [`crate::FakeTmux`]).
 pub trait Tmux {
     /// Runs `tmux <args>` and returns stdout. `args[0]` is the verb.
     fn run(&self, args: &[&str]) -> Result<String, TmuxError>;
+}
 
-    /// Sends `keys` to `pane` with `send-keys`, unguarded.
-    ///
-    /// Callers that type into a Claude Code input box use
-    /// [`crate::send_guarded`] instead, which checks the box first.
-    fn send_keys(&self, pane: &PaneId, keys: &[&str]) -> Result<(), TmuxError> {
-        let mut args = vec!["send-keys", "-t", pane.as_target()];
-        args.extend_from_slice(keys);
-        self.run(&args).map(drop)
-    }
+/// Sends `keys` to `pane` with `send-keys`, unguarded.
+///
+/// Crate-private so [`crate::send_guarded`], which checks the input box first,
+/// is the only public way to send. The `--` ends tmux option parsing, so a key
+/// that starts with `-` (`-t foo`, `-l`) is sent as text, never read as a flag.
+/// Test: `send_keys_builds_exact_target_argv`,
+/// `send_keys_ends_options_before_dash_leading_keys`.
+pub(crate) fn send_keys<T: Tmux + ?Sized>(
+    tmux: &T,
+    pane: &PaneId,
+    keys: &[&str],
+) -> Result<(), TmuxError> {
+    let mut args = vec!["send-keys", "-t", pane.as_target(), "--"];
+    args.extend_from_slice(keys);
+    tmux.run(&args).map(drop)
 }
 
 /// The real [`Tmux`]: spawns the `tmux` binary on `PATH`.
@@ -195,8 +202,22 @@ mod tests {
     #[test]
     fn send_keys_builds_exact_target_argv() -> Result<(), TmuxError> {
         let fake = FakeTmux::new();
-        fake.send_keys(&PaneId::parse("%3")?, &["hello", "Enter"])?;
-        assert_eq!(fake.calls(), [["send-keys", "-t", "%3", "hello", "Enter"]]);
+        send_keys(&fake, &PaneId::parse("%3")?, &["hello", "Enter"])?;
+        assert_eq!(
+            fake.calls(),
+            [["send-keys", "-t", "%3", "--", "hello", "Enter"]]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn send_keys_ends_options_before_dash_leading_keys() -> Result<(), TmuxError> {
+        let fake = FakeTmux::new();
+        send_keys(&fake, &PaneId::parse("%3")?, &["-t foo", "-l"])?;
+        assert_eq!(
+            fake.calls(),
+            [["send-keys", "-t", "%3", "--", "-t foo", "-l"]]
+        );
         Ok(())
     }
 }

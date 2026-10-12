@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::error::SendError;
-use crate::tmux::{PaneId, Tmux};
+use crate::tmux::{PaneId, Tmux, send_keys};
 
 /// What a Claude Code pane's input box (the last `❯` line) holds.
 ///
@@ -77,9 +77,16 @@ impl FromStr for InputState {
 /// check belongs on the one path that sends, so no caller can skip it.
 /// What: when `observed.accepts_input()` is false, returns
 /// [`SendError::Refused`] and makes no tmux call; otherwise runs one
-/// `send-keys -t <pane> <keys…>`. `observed` must be read from the pane just
+/// `send-keys -t <pane> -- <keys…>`. `observed` must be read from the pane just
 /// before the call.
-/// Test: `send_guarded_refuses_typed_and_sends_on_empty`.
+/// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctest below
+/// proves the unguarded `send_keys` is not part of the public API.
+///
+/// ```compile_fail,E0599
+/// use trusty_architect::{FakeTmux, PaneId, Tmux};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let _ = FakeTmux::new().send_keys(&pane, &["x"]);
+/// ```
 pub fn send_guarded<T: Tmux + ?Sized>(
     tmux: &T,
     pane: &PaneId,
@@ -92,7 +99,7 @@ pub fn send_guarded<T: Tmux + ?Sized>(
             state: observed,
         });
     }
-    tmux.send_keys(pane, keys)?;
+    send_keys(tmux, pane, keys)?;
     Ok(())
 }
 
@@ -116,7 +123,7 @@ mod tests {
     #[test]
     fn send_guarded_refuses_typed_and_sends_on_empty() -> Result<(), crate::TmuxError> {
         let pane = PaneId::parse("%261")?;
-        let sent = [["send-keys", "-t", "%261", "/tm-fleet-check", "Enter"]];
+        let sent = [["send-keys", "-t", "%261", "--", "/tm-fleet-check", "Enter"]];
         let cases = [
             (InputState::Typed, false),
             (InputState::NoPrompt, false),
