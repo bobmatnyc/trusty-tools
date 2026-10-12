@@ -148,4 +148,3 @@ pub fn band_alerts(
     let fingerprint = format!("{}->{}", old.as_deref().unwrap_or("None"), band.as_str());
     vec![alert("band", &fingerprint, &detail, "", "", now)]
 }
-

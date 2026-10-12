@@ -10,8 +10,8 @@
 //! `test_dedup_reemits_idle_every_30_minutes_but_not_dialog`,
 //! `dedup_matches_python_goldens`.
 
-use serde::{Deserialize, Serialize};
 use serde::ser::{SerializeMap, Serializer};
+use serde::{Deserialize, Serialize};
 
 use super::Alert;
 

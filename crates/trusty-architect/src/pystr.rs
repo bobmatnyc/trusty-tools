@@ -174,9 +174,10 @@ mod tests {
     /// Python's `re` `\d` matches, scanned by `regen_a3.py` independently of
     /// the table `is_digit` reads.
     #[test]
-    fn is_digit_matches_python_re_digit_for_every_code_point() -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/a3/digits.jsonl");
+    fn is_digit_matches_python_re_digit_for_every_code_point()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/a3/digits.jsonl");
         let mut ranges = Vec::new();
         for line in std::fs::read_to_string(path)?.lines() {
             let r: [u32; 2] = serde_json::from_str(line)?;

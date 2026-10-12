@@ -206,7 +206,8 @@ pub(crate) fn usage_tokens(usage: &Value) -> Result<i64, SelfCtxError> {
         "cache_read_input_tokens",
         "cache_creation_input_tokens",
     ];
-    keys.iter().try_fold(0i64, |sum, k| {
-        Ok(sum.saturating_add(usage_field(usage, k)?))
-    })
+    keys.iter().try_fold(
+        0i64,
+        |sum, k| Ok(sum.saturating_add(usage_field(usage, k)?)),
+    )
 }

@@ -5,8 +5,8 @@
 //! text, so both must match the prototype byte for byte (#9171 A2).
 //! What: pure functions over [`PaneInfo`]; `now` (seconds since the epoch) is
 //! always passed in, never read from the clock.
-//! Test: `test_no_agents_still_idle`, `idle_prompt_alerts_after_ten_minutes_at_live_bar`,
-//! `ctx_crossing_22_and_25_at_live_bar`, `test_ctx_thresholds_follow_ruling_b7`,
+//! Test: `test_no_agents_still_idle`, `test_idle_prompt_alerts_after_ten_minutes_only`,
+//! `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`, `test_ctx_thresholds_follow_ruling_b7`,
 //! `test_alert_display_and_redaction`, `evaluate_matches_python_goldens`.
 
 use serde::{Deserialize, Serialize};
@@ -186,8 +186,8 @@ pub fn alert(
 /// suggestion box, no dialog, not busy), `ctx` (at [`CTX_WARN`]%, fingerprint
 /// `22`/`25`), `plan-limit`, and `error` for error lines new since last cycle
 /// (the first sight only seeds the baseline).
-/// Test: `idle_prompt_alerts_after_ten_minutes_at_live_bar`,
-/// `error_alerts_only_for_lines_new_since_last_cycle_at_live_bar`,
+/// Test: `test_idle_prompt_alerts_after_ten_minutes_only`,
+/// `test_error_alerts_only_for_lines_new_since_last_cycle`,
 /// `evaluate_matches_python_goldens`.
 pub fn evaluate(
     info: &PaneInfo,
@@ -252,7 +252,7 @@ pub fn evaluate(
 
 /// Plan usage is account-wide: one alert for the fleet, not one per pane.
 ///
-/// Test: `plan_limit_text_and_status_line_at_live_bar`, `plan_alerts_match_python_goldens`.
+/// Test: `test_plan_limit_text_and_status_line`, `plan_alerts_match_python_goldens`.
 pub fn fleet_plan_alerts(infos: &[(String, PaneInfo)], now: f64) -> Vec<Alert> {
     type PlanField = (&'static str, &'static str, fn(&PaneInfo) -> Option<u64>);
     let keys: [PlanField; 2] = [

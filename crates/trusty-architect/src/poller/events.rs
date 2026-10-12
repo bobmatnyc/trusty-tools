@@ -18,8 +18,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::SKIP_SESSIONS;
-use crate::classify::{Alert, alert};
 use crate::classify::alerts::fingerprint;
+use crate::classify::{Alert, alert};
 use crate::pystr::splitlines;
 
 /// Event types that raise an alert; `idle_prompt` is not one.

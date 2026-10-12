@@ -50,9 +50,7 @@ fn drop_digit_underscores(s: &str) -> String {
 
 /// Python `float(s)` for an environment value; `None` where Python raises.
 pub(crate) fn py_float(s: &str) -> Option<f64> {
-    drop_digit_underscores(&ascii_digits(strip(s)))
-        .parse()
-        .ok()
+    drop_digit_underscores(&ascii_digits(strip(s))).parse().ok()
 }
 
 /// Python `int(s)` for an environment value; `None` where Python raises (or

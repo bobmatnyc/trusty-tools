@@ -39,7 +39,12 @@ fn assert_golden(name: &str, rows: &[String]) -> TestResult {
     let golden = fs::read_to_string(fixture_dir().join(name))?;
     let got: String = rows.iter().map(|r| format!("{r}\n")).collect();
     for (i, (g, r)) in golden.lines().zip(got.lines()).enumerate() {
-        assert_eq!(r, g, "{name} line {}: Rust (left) differs from Python (right)", i + 1);
+        assert_eq!(
+            r,
+            g,
+            "{name} line {}: Rust (left) differs from Python (right)",
+            i + 1
+        );
     }
     assert_eq!(got, golden, "{name}: row count or trailing bytes differ");
     Ok(())
@@ -66,10 +71,20 @@ fn config(dir: &Path, vars: &[(&str, String)]) -> Result<Config, trusty_architec
         ("SELF_CTX_DIR", "self"),
     ]
     .iter()
-    .map(|(k, sub)| ((*k).to_owned(), dir.join(sub).to_string_lossy().into_owned()))
+    .map(|(k, sub)| {
+        (
+            (*k).to_owned(),
+            dir.join(sub).to_string_lossy().into_owned(),
+        )
+    })
     .chain(vars.iter().map(|(k, v)| ((*k).to_owned(), v.clone())))
     .collect();
-    let get = move |k: &str| base.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let get = move |k: &str| {
+        base.iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    };
     Config::from_env(dir, dir, &get)
 }
 
@@ -104,10 +119,15 @@ fn list_panes_matches_python_goldens() -> TestResult {
             continue;
         }
         // Python keeps every row; the port moves non-%N pane ids to `skipped`.
-        let (kept, dropped): (Vec<PyPane>, Vec<PyPane>) =
-            python.into_iter().partition(|p| PaneId::parse(&p.pane).is_ok());
+        let (kept, dropped): (Vec<PyPane>, Vec<PyPane>) = python
+            .into_iter()
+            .partition(|p| PaneId::parse(&p.pane).is_ok());
         assert_eq!(listing.skipped.len(), dropped.len(), "{name}");
-        assert_eq!(got, to_python_json(&(&name, &kept), true)?, "list_panes case {name}");
+        assert_eq!(
+            got,
+            to_python_json(&(&name, &kept), true)?,
+            "list_panes case {name}"
+        );
     }
     assert_eq!(arr(&c["list_panes"]).len(), golden.lines().count());
     Ok(())
@@ -162,7 +182,12 @@ fn band_alerts_match_python_goldens() -> TestResult {
                 a[5].as_f64(),
             );
             let state = stored.iter().map(|b| ("band", b.clone())).collect();
-            let row = BandRow { case: s(&sc["case"]), step, alerts, state };
+            let row = BandRow {
+                case: s(&sc["case"]),
+                step,
+                alerts,
+                state,
+            };
             rows.push(to_python_json(&row, false)?);
         }
     }
@@ -186,7 +211,11 @@ impl HostProbe for FakeProbe<'_> {
     fn disk_usage(&self, _: &Path) -> io::Result<DiskUsage> {
         let d = arr(&self.0["disk"]);
         let n = |i: usize| d[i].as_u64().unwrap_or_default();
-        Ok(DiskUsage { total: n(0), used: n(1), free: n(2) })
+        Ok(DiskUsage {
+            total: n(0),
+            used: n(1),
+            free: n(2),
+        })
     }
     fn swap_used_mb(&self) -> io::Result<Option<f64>> {
         match &self.0["swap"] {
@@ -224,7 +253,11 @@ fn host_alerts_match_python_goldens() -> TestResult {
         let mut stored = case["state"]["band"].as_str().map(str::to_owned);
         let alerts = host_alerts(&probe, &cfg, now, has_state.then_some(&mut stored))?;
         let state = has_state.then(|| stored.iter().map(|b| ("band", b.clone())).collect());
-        let row = HostRow { case: s(&case["case"]), alerts, state };
+        let row = HostRow {
+            case: s(&case["case"]),
+            alerts,
+            state,
+        };
         rows.push(to_python_json(&row, false)?);
     }
     assert_golden("host.jsonl", &rows)
@@ -255,13 +288,21 @@ fn read_events_matches_python_goldens() -> TestResult {
                 }
                 "a" => {
                     use std::io::Write;
-                    let mut f = fs::OpenOptions::new().append(true).create(true).open(&path)?;
+                    let mut f = fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&path)?;
                     f.write_all(s(&st["text"]).as_bytes())?;
                 }
                 _ => fs::write(&path, s(&st["text"]))?,
             }
             let alerts = read_events(&path, &mut offset, now)?;
-            let row = EventRow { case: s(&case["case"]), step, alerts, events_offset: offset };
+            let row = EventRow {
+                case: s(&case["case"]),
+                step,
+                alerts,
+                events_offset: offset,
+            };
             rows.push(to_python_json(&row, false)?);
         }
     }
@@ -272,7 +313,10 @@ fn materialize(dir: &Path, files: &[Value]) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     for spec in files {
         let path = dir.join(s(&spec["name"]));
-        let body: String = arr(&spec["lines"]).iter().map(|l| format!("{}\n", s(l))).collect();
+        let body: String = arr(&spec["lines"])
+            .iter()
+            .map(|l| format!("{}\n", s(l)))
+            .collect();
         fs::write(&path, body)?;
         set_mtime(&path, f(&spec["mtime"]))?;
     }
@@ -300,7 +344,10 @@ fn self_ctx_alerts_match_python_goldens() -> TestResult {
             dir.path().to_owned()
         };
         let mut vars = vec![("SELF_CTX_DIR", ctx_dir.to_string_lossy().into_owned())];
-        for (var, key) in [("SELF_CTX_WINDOW", "window"), ("SELF_CTX_THRESHOLD", "threshold")] {
+        for (var, key) in [
+            ("SELF_CTX_WINDOW", "window"),
+            ("SELF_CTX_THRESHOLD", "threshold"),
+        ] {
             if let Some(v) = case[key].as_str() {
                 vars.push((var, v.to_owned()));
             }
@@ -314,7 +361,14 @@ fn self_ctx_alerts_match_python_goldens() -> TestResult {
                 Err(_) => (Vec::new(), true),
             },
         };
-        rows.push(to_python_json(&SelfCtxRow { case: s(&case["case"]), alerts, logged }, false)?);
+        rows.push(to_python_json(
+            &SelfCtxRow {
+                case: s(&case["case"]),
+                alerts,
+                logged,
+            },
+            false,
+        )?);
     }
     assert_golden("self_ctx_alerts.jsonl", &rows)
 }
@@ -375,7 +429,13 @@ fn transcript_ctx_matches_python_goldens() -> TestResult {
             .iter()
             .map(|q| Ok((s(q).to_owned(), ctx.pct(&cfg, s(q))?)))
             .collect::<Result<Vec<_>, trusty_architect::SelfCtxError>>()?;
-        rows.push(to_python_json(&CtxRow { case: s(&case["case"]), results }, true)?);
+        rows.push(to_python_json(
+            &CtxRow {
+                case: s(&case["case"]),
+                results,
+            },
+            true,
+        )?);
     }
     assert_golden("transcript_ctx.jsonl", &rows)
 }
@@ -392,6 +452,9 @@ fn alerts_jsonl_lines_match_python_bytes() -> TestResult {
     append_alerts(&path, &alerts[..2])?;
     append_alerts(&path, &alerts[2..])?;
     append_alerts(&path, &[])?;
-    assert_eq!(fs::read(&path)?, fs::read(fixture_dir().join("alerts_lines.jsonl"))?);
+    assert_eq!(
+        fs::read(&path)?,
+        fs::read(fixture_dir().join("alerts_lines.jsonl"))?
+    );
     Ok(())
 }

@@ -160,7 +160,8 @@ pub(crate) fn parse_memory_pressure(out: &str) -> Option<f64> {
 fn run_text(program: &str, args: &[&str], timeout: Duration) -> io::Result<String> {
     let mut cmd = Command::new(program);
     cmd.args(args);
-    let done = run_bounded(cmd, timeout).map_err(|f| io::Error::other(format!("{program}: {f:?}")))?;
+    let done =
+        run_bounded(cmd, timeout).map_err(|f| io::Error::other(format!("{program}: {f:?}")))?;
     Ok(String::from_utf8_lossy(&done.stdout).into_owned())
 }
 
@@ -169,7 +170,11 @@ impl HostProbe for SystemHostProbe {
         let mut l = [0.0f64; 3];
         // SAFETY: `l` holds three doubles, the count passed.
         let n = unsafe { libc::getloadavg(l.as_mut_ptr(), 3) };
-        if n == 3 { Ok(l) } else { Err(io::Error::other("getloadavg failed")) }
+        if n == 3 {
+            Ok(l)
+        } else {
+            Err(io::Error::other("getloadavg failed"))
+        }
     }
 
     fn cores(&self) -> usize {
@@ -240,9 +245,13 @@ mod tests {
         assert_eq!(parse_swapusage("total = 0.00M  used = 0.00M")?, Some(0.0));
         assert_eq!(parse_swapusage("nothing here")?, None);
         assert!(parse_swapusage("used = 1.2.3M").is_err());
-        let mp = "The system has 17179869184 (1048576 pages)\nSystem-wide memory free percentage: 63%\n";
+        let mp =
+            "The system has 17179869184 (1048576 pages)\nSystem-wide memory free percentage: 63%\n";
         assert_eq!(parse_memory_pressure(mp), Some(63.0));
-        assert_eq!(parse_memory_pressure("System-wide memory free percentage: n/a"), None);
+        assert_eq!(
+            parse_memory_pressure("System-wide memory free percentage: n/a"),
+            None
+        );
         Ok(())
     }
 

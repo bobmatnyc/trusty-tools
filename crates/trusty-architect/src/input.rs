@@ -228,7 +228,10 @@ mod tests {
             let typed = send_guarded(&fake, &pane, reading, Keys::Literal("/tm-fleet-check"));
             let entered = send_guarded(&fake, &pane, reading, Keys::Named(&[NamedKey::Enter]));
             if sends {
-                assert!(typed.is_ok() && entered.is_ok(), "{state}: {typed:?} {entered:?}");
+                assert!(
+                    typed.is_ok() && entered.is_ok(),
+                    "{state}: {typed:?} {entered:?}"
+                );
                 assert_eq!(fake.calls(), sent, "{state} must send exactly once each");
             } else {
                 assert!(

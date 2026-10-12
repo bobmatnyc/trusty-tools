@@ -8,9 +8,7 @@
 //! Test: `ansi_strip_matches_python_alternatives`, `box_top_rule_accepts_a_short_label`,
 //! `timers_sub_removes_each_shape` (in `classify/tests.rs`).
 
-use crate::pystr::{
-    contains_ci, is_digit, is_space, is_word, lstrip, parse_digits, rstrip, strip,
-};
+use crate::pystr::{contains_ci, is_digit, is_space, is_word, lstrip, parse_digits, rstrip, strip};
 
 const ESC: char = '\u{1b}';
 const RULE_CHARS: [char; 2] = ['─', '━'];

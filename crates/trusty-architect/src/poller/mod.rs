@@ -29,7 +29,9 @@ pub use band::{
     BAND_STOP_FREE_GIB, BAND_STOP_LOAD_FACTOR, BAND_STOP_MEM_FREE_PCT, Band, BandConfig,
     band_alerts, builder_band,
 };
-pub use config::{Config, LOAD_FACTOR_DEFAULT, SELF_CTX_THRESHOLD_DEFAULT, SELF_CTX_WINDOW_DEFAULT};
+pub use config::{
+    Config, LOAD_FACTOR_DEFAULT, SELF_CTX_THRESHOLD_DEFAULT, SELF_CTX_WINDOW_DEFAULT,
+};
 pub use ctx::{TranscriptCtx, pane_session_id};
 pub use events::{EVENT_TYPES, read_events};
 pub use host::{DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts};
@@ -42,4 +44,8 @@ pub use state::{PollState, SaveStep, load_state, save_state, save_state_with};
 pub const SUPERVISOR: &str = "tm-architect";
 
 /// Sessions the poller never watches, and whose events it drops.
-pub const SKIP_SESSIONS: [&str; 3] = ["tm-architect", "tm-supervisor-collector", "tm-architect-poll"];
+pub const SKIP_SESSIONS: [&str; 3] = [
+    "tm-architect",
+    "tm-supervisor-collector",
+    "tm-architect-poll",
+];

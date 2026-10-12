@@ -5,6 +5,7 @@
 //! Q6) from Python 3.14.8, Unicode 16.0.0. Do not edit by hand.
 
 /// Digit-zero code points, ascending; each starts a run of ten digits.
+#[rustfmt::skip]
 pub(crate) const DIGIT_ZEROS: [u32; 76] = [
     0x00030, 0x00660, 0x006F0, 0x007C0, 0x00966, 0x009E6,
     0x00A66, 0x00AE6, 0x00B66, 0x00BE6, 0x00C66, 0x00CE6,

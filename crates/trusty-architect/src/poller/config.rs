@@ -85,14 +85,17 @@ impl Config {
         };
         let config = home.join(".trusty-tools/trusty-mpm/claude-config");
         let band_default = BandConfig::default();
-        let lenient = |name: &str, default: f64| get(name).and_then(|v| py_float(&v)).unwrap_or(default);
+        let lenient =
+            |name: &str, default: f64| get(name).and_then(|v| py_float(&v)).unwrap_or(default);
         let root_text = root.to_string_lossy();
         Ok(Self {
             inbox: path("SUPERVISOR_INBOX_DIR", root.join("inbox")),
             sessions_dir: path("SESSIONS_DIR", config.join("sessions")),
             transcript_base: path("TRANSCRIPT_BASE", projects_dir(home)),
             self_ctx_dir: path("SELF_CTX_DIR", default_dir(home, &root_text)),
-            tmux_socket: get("TMUX_SOCKET").filter(|v| !v.is_empty()).map(PathBuf::from),
+            tmux_socket: get("TMUX_SOCKET")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
             load_factor: float("LOAD_FACTOR", LOAD_FACTOR_DEFAULT)?,
             pane_ctx_window: int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT)?,
             self_ctx_window: int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT)?,
@@ -107,7 +110,10 @@ impl Config {
                 ),
                 stop_free_gib: lenient("BAND_STOP_FREE_GIB", band_default.stop_free_gib),
                 hold_free_gib: lenient("BAND_HOLD_FREE_GIB", band_default.hold_free_gib),
-                stop_mem_free_pct: lenient("BAND_STOP_MEM_FREE_PCT", band_default.stop_mem_free_pct),
+                stop_mem_free_pct: lenient(
+                    "BAND_STOP_MEM_FREE_PCT",
+                    band_default.stop_mem_free_pct,
+                ),
             },
         })
     }
@@ -156,15 +162,15 @@ mod tests {
         assert_eq!(c.tmux_socket, None);
 
         let set = |k: &str| {
-            Some(match k {
+            let v = match k {
                 "SUPERVISOR_INBOX_DIR" => "",
                 "TMUX_SOCKET" => "/s",
                 "LOAD_FACTOR" => " 2 ",
                 "BAND_STOP_FREE_GIB" => "junk",
                 "BAND_HOLD_FREE_GIB" => "150",
                 _ => return None,
-            })
-            .map(str::to_owned)
+            };
+            Some(v.to_owned())
         };
         let c = Config::from_env(Path::new("/arch"), Path::new("/h"), &set)?;
         assert_eq!(c.inbox, Path::new("/arch/inbox"), "empty falls back");

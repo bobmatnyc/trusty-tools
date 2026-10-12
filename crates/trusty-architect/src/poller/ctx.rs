@@ -76,7 +76,11 @@ pub fn pane_session_id(sessions_dir: &Path, pane: &str) -> Option<String> {
         let Ok(Value::Object(d)) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
-        if !d.get("tmux").and_then(Value::as_str).is_some_and(|t| t.ends_with(&suffix)) {
+        if !d
+            .get("tmux")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.ends_with(&suffix))
+        {
             continue;
         }
         let Some(pid) = d.get("pid").and_then(pid_of) else {
@@ -89,7 +93,10 @@ pub fn pane_session_id(sessions_dir: &Path, pane: &str) -> Option<String> {
             continue;
         }
         if best.as_ref().is_none_or(|(b, _)| updated >= *b) {
-            let sid = d.get("sessionId").and_then(Value::as_str).map(str::to_owned);
+            let sid = d
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             best = Some((updated, sid));
         }
     }
@@ -173,7 +180,8 @@ impl TranscriptCtx {
             }
         };
         // Python's int(100 * tokens / window) truncates toward zero.
-        Ok(tokens.and_then(|t| u64::try_from((100.0 * t as f64 / window as f64).trunc() as i64).ok()))
+        Ok(tokens
+            .and_then(|t| u64::try_from((100.0 * t as f64 / window as f64).trunc() as i64).ok()))
     }
 
     /// The prototype's fallback in `cycle`: when the status line had no

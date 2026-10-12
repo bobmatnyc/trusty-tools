@@ -86,7 +86,15 @@ pub fn list_panes<T: Tmux + ?Sized>(tmux: &T) -> Result<Listing, TmuxError> {
 /// # Errors
 /// The `capture-pane` call failed; the prototype skips that pane.
 pub fn capture<T: Tmux + ?Sized>(tmux: &T, pane: &PaneId) -> Result<String, TmuxError> {
-    tmux.run(&["capture-pane", "-e", "-p", "-S", "-80", "-t", pane.as_target()])
+    tmux.run(&[
+        "capture-pane",
+        "-e",
+        "-p",
+        "-S",
+        "-80",
+        "-t",
+        pane.as_target(),
+    ])
 }
 
 #[cfg(test)]
