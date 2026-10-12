@@ -77,8 +77,10 @@ pub const SCAFFOLD_IGNORED_PATHS: &[&str] = &[
     ".claude/output-styles/trusty-mpm.md",
     ".claude/output-styles/trusty-mpm-teacher.md",
     ".claude/output-styles/trusty-mpm-research.md",
-    // #8453: the supervisor profile's style.
+    // #8453: the Architect profile's style, under its legacy id and (#9755) its
+    // Architect id, which a later release deploys.
     ".claude/output-styles/trusty-mpm-supervisor.md",
+    ".claude/output-styles/trusty-mpm-architect.md",
     ".claude/output-styles/*.tm-floor.md",
     ".claude/settings.json.lock",
     ".claude/settings.local.json.lock",
