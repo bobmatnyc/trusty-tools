@@ -638,6 +638,8 @@ where
 /// [`DaemonError::InvalidRequest`] for a malformed session id, and
 /// [`DaemonError::OverseerBlocked`] when the overseer vetoes the event (HTTP 403
 /// / `CODE_FORBIDDEN`) — a refusal, never a warning-and-continue.
+/// [`DaemonError::Internal`] when a `SessionStart`'s channel-taint re-apply
+/// fails (#8433 D09), after the event is otherwise ingested.
 ///
 /// #8984: an in-session event for an id with no recorded announcement
 /// settles it as unproven, unless a socket `SessionStart` bind of it is in
@@ -707,8 +709,10 @@ pub async fn ingest_hook(
 
     // #1744: correlate Claude session id → managed session on SessionStart;
     // immediately mark the managed session Stopped on SessionEnd.
+    // #8433 (D09): a failed channel-taint re-apply fails this call below.
+    let mut taint = Ok(());
     if post.event == HookEvent::SessionStart {
-        correlate_session_start(state, &post.session_id, &post.payload).await;
+        taint = correlate_session_start(state, &post.session_id, &post.payload).await;
     }
     if post.event == HookEvent::SessionEnd {
         handle_session_end(state, &post.session_id).await;
@@ -716,7 +720,9 @@ pub async fn ingest_hook(
 
     // #2621 (code-critic MEDIUM): the idle-park surface+auto-nudge dispatch
     // lives inside `HookService::process` (daemon/services/hook_service.rs).
-    match HookService::new(Arc::clone(state)).process(session, post.event, post.payload) {
+    let decision = HookService::new(Arc::clone(state)).process(session, post.event, post.payload);
+    taint.map_err(DaemonError::Internal)?;
+    match decision {
         HookDecision::Block { reason } => Err(DaemonError::OverseerBlocked { reason }),
         _ => Ok(HookAcceptedResponse {
             accepted: post.event,

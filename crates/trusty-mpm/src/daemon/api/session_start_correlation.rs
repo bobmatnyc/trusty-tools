@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use crate::core::channels_taint;
 use crate::daemon::state::DaemonState;
 
 /// Link a `SessionStart` Claude session UUID to the right managed session record.
@@ -34,6 +35,9 @@ use crate::daemon::state::DaemonState;
 /// correlation is skipped with a warning to avoid mis-attribution. Single match →
 /// `SessionManager::set_claude_session_id`. Best-effort — failures are logged and
 /// silently swallowed so a missing correlation never blocks the hook response.
+/// #8433: the one exception is the channel-taint re-apply
+/// ([`reapply_channel_taint`]) over every non-terminal record at the cwd,
+/// whose failure is the `Err` returned whatever the correlation does.
 ///
 /// # Subagent overwrite guard + re-sync (#4337)
 ///
@@ -67,15 +71,16 @@ use crate::daemon::state::DaemonState;
 /// Test: `session_start_hook_correlates_claude_id`,
 /// `session_start_hook_still_refuses_a_live_subagent_id`,
 /// `session_start_hook_reasserting_same_id_is_a_noop`,
-/// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`.
+/// `session_start_hook_re_correlates_a_stale_id` in `api_tests.rs`;
+/// `session_start_same_id_reapply_failure_still_fails`.
 pub(crate) async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
     payload: &serde_json::Value,
-) {
+) -> Result<(), String> {
     let cwd_str = match payload["cwd"].as_str() {
         Some(s) if !s.is_empty() => s,
-        _ => return,
+        _ => return Ok(()),
     };
     // Canonicalize hook cwd (resolves /tmp ↔ /private/tmp on macOS).
     let hook_cwd =
@@ -84,22 +89,46 @@ pub(crate) async fn correlate_session_start(
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
 
-    // Collect ALL matching Active sessions to detect ambiguous cwd.
-    let matched: Vec<_> = records
+    // Every non-terminal managed session working in this cwd.
+    let at_cwd: Vec<_> = records
         .iter()
-        .filter(|r| {
-            if !matches!(r.state, crate::session_manager::ManagedSessionState::Active) {
-                return false;
-            }
-            let ws_canon = r
-                .workspace_path
-                .as_ref()
-                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
-            let cwd_canon = std::fs::canonicalize(&r.cwd).unwrap_or_else(|_| r.cwd.clone());
-            ws_canon.as_deref() == Some(hook_cwd.as_path()) || cwd_canon == hook_cwd
-        })
+        .filter(|r| !r.state.is_terminal() && works_in(r, &hook_cwd))
         .collect();
+    // #8433 (Dfc, D09): taint the new id before the event is acknowledged;
+    // a failure is returned so the hook call fails, never logged and dropped.
+    // Critic HIGH 1: a `Stopped` record keeps its mark (only a deliberate
+    // stop retires it), so it is re-applied too, not only an `Active` one.
+    let taint = reapply_channel_taint(state.user_home().as_deref(), &at_cwd, claude_session_id);
+    // Collect ALL matching Active sessions to detect ambiguous cwd.
+    let matched: Vec<_> = at_cwd
+        .into_iter()
+        .filter(|r| matches!(r.state, crate::session_manager::ManagedSessionState::Active))
+        .collect();
+    link_claude_session(state, &mgr, &matched, &hook_cwd, cwd_str, claude_session_id).await;
+    taint
+}
 
+/// Whether `record` works in the canonical `hook_cwd`: its workspace or its
+/// cwd, each canonicalized (falling back to the raw path).
+fn works_in(record: &crate::session_manager::SessionRecord, hook_cwd: &std::path::Path) -> bool {
+    let ws_canon = record
+        .workspace_path
+        .as_ref()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+    let cwd_canon = std::fs::canonicalize(&record.cwd).unwrap_or_else(|_| record.cwd.clone());
+    ws_canon.as_deref() == Some(hook_cwd) || cwd_canon == hook_cwd
+}
+
+/// Persist `claude_session_id` on the one Active record in `matched` (#1744),
+/// under the #4337 subagent-overwrite guard; best-effort, so it returns nothing.
+async fn link_claude_session(
+    state: &DaemonState,
+    mgr: &crate::session_manager::SessionManager,
+    matched: &[&crate::session_manager::SessionRecord],
+    hook_cwd: &std::path::Path,
+    cwd_str: &str,
+    claude_session_id: &str,
+) {
     match matched.len() {
         0 => {} // no Active managed session at this cwd — silent, not an error
         1 => {
@@ -110,7 +139,7 @@ pub(crate) async fn correlate_session_start(
                 if existing == claude_session_id {
                     return; // no-op: already correlated to this id
                 }
-                if stored_id_still_live(&hook_cwd, existing) {
+                if stored_id_still_live(hook_cwd, existing) {
                     tracing::warn!(
                         managed_id = %id,
                         existing_claude_session_id = %existing,
@@ -179,6 +208,59 @@ pub(crate) async fn correlate_session_start(
             );
         }
     }
+}
+
+/// Re-apply a tainted managed session's channel taint to a new Claude id.
+///
+/// Why (#8433, Dfc and D09): a tainted managed session keeps its taint across
+/// a resume, `/clear` or compaction, so the id SessionStart reports must read
+/// tainted before its first tool call. A failed write must fail the hook call,
+/// so it is returned, never logged and dropped. A `SessionStart` refused as a
+/// subagent's (#4337) is still re-applied: a `claude` started from a tainted
+/// session's directory is tainted too.
+/// What: `Ok` when no record matched. Otherwise, for each cwd-matched
+/// non-terminal record (`Stopped` included, critic HIGH 1),
+/// [`channels_taint::reapply`] under `home`; an unknown home, an unreadable
+/// mark or a failed write is an `Err` naming the record.
+/// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`,
+/// `session_start_for_untainted_managed_session_writes_nothing`,
+/// `reapply_failure_fails_session_start_hook_and_egress_denies`,
+/// `session_start_in_stopped_tainted_session_reapplies`,
+/// `reapply_with_an_unknown_home_fails`.
+fn reapply_channel_taint(
+    home: Option<&std::path::Path>,
+    matched: &[&crate::session_manager::SessionRecord],
+    claude_session_id: &str,
+) -> Result<(), String> {
+    if matched.is_empty() {
+        return Ok(());
+    }
+    let Some(home) = home else {
+        return Err("the daemon's home is unknown, so it cannot re-apply a channel taint".into());
+    };
+    let dir = channels_taint::taint_dir(home);
+    for record in matched {
+        let managed = record.id.to_string();
+        match channels_taint::reapply(&dir, &managed, claude_session_id) {
+            Ok(true) => tracing::info!(
+                managed_id = %managed,
+                claude_session_id,
+                "SessionStart: channel taint re-applied to the new Claude session (#8433)"
+            ),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(
+                    managed_id = %managed,
+                    claude_session_id,
+                    "SessionStart: channel taint re-apply failed (#8433): {e}"
+                );
+                return Err(format!(
+                    "channel taint re-apply failed for managed session {managed} (#8433): {e}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether a previously-stored `claude_session_id` still resolves to a live
@@ -378,3 +460,7 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
         }
     }
 }
+
+#[cfg(test)]
+#[path = "session_start_taint_tests.rs"]
+mod taint_tests;

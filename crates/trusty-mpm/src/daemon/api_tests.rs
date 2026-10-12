@@ -1450,6 +1450,9 @@ async fn doctor_endpoint_returns_report() {
         // #9238: a record whose pane is live under another tmux name. Added by
         // `run_doctor_for_manager`, so it is last.
         "session_names",
+        // #8433: orphaned channel taint files; also added by
+        // `run_doctor_for_manager`.
+        "channel_taint",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

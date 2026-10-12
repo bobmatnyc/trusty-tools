@@ -484,7 +484,8 @@ fn pretooluse_bash_rewrite(
 /// spike — would never fire (trusty-review finding, PR #1968). POSTs to
 /// `<url>/hooks` with a 500 ms connect timeout and a 2-second total timeout.
 /// Every failure path returns `Ok(())` — failing the hook would block the
-/// user's prompt.
+/// user's prompt. #8433 (D09): the exception is a `SessionStart` the daemon
+/// did not confirm while a channel taint exists; see `hook_session_taint`.
 /// Issue #7245 adds one more read of the same stdin `session_id`: on
 /// `SessionStart` it emits the instruction-compression savings row the compiling
 /// `tm` process staged, which that process could not key because Claude Code
@@ -636,9 +637,10 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     // #8531: SessionStart over the socket, so the daemon can bind its claude.
     // #8980: SessionEnd too — only a socket SessionEnd from that claude stales
     // the session's live delegations.
+    // #8433 (D09): a SessionStart the daemon does not confirm may fail the hook.
     if event == "SessionStart" || event == "SessionEnd" {
-        super::hook_notify::post_lifecycle_via_socket(client, url, &body).await;
-        return Ok(());
+        return super::hook_session_taint::post_lifecycle(client, url, &event, &session_id, &body)
+            .await;
     }
     super::hook_notify::post_best_effort(client, url, &body).await;
     Ok(())

@@ -331,6 +331,9 @@ use doctor_session_claudes::check_session_claudes;
 // #9238: a record whose pane is live under another tmux session name.
 #[path = "doctor_session_names.rs"]
 pub(crate) mod doctor_session_names;
+// #8433 P0: orphaned channel taint files and failed re-applies.
+#[path = "doctor_channel_taint.rs"]
+pub(crate) mod doctor_channel_taint;
 // Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
 // written above real projects configures every session beneath it with nothing
 // in the project to point at. Read-only; the quarantine is opt-in.
@@ -854,6 +857,7 @@ pub async fn run_doctor_for_manager(
     // #9238: needs the manager's records and tmux driver, so it is added here.
     let mut checks = report.checks;
     checks.push(doctor_session_names::check_session_names(mgr).await);
+    checks.push(doctor_channel_taint::check_channel_taint(mgr).await);
     DoctorReport::from_checks(checks)
 }
 

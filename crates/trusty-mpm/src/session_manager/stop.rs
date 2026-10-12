@@ -174,6 +174,11 @@ impl SessionManager {
         self.store.write().await.upsert(record.clone()).await?;
         // #7087: a stopped session leaves the active-project set.
         self.bump_residency_generation();
+        // #8433 (Dfc): a requested stop ends the managed session, so its
+        // channel taint retires; an observed one (auto-resumable) keeps it.
+        if cause == StopCause::Deliberate {
+            self.retire_channel_taint(id);
+        }
         match runtime.left_running() {
             None => {
                 info!(id = %id, name = %record.tmux_name, cause = ?cause, "managed session stopped (workspace intact)")

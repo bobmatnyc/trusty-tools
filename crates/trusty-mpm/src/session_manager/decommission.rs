@@ -1243,11 +1243,10 @@ impl SessionManager {
         // starts here, not at `created_at`.
         record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
-        // #7087: a full teardown leaves the active-project set.
-        self.bump_residency_generation();
-        // #7087: and a tombstone is terminal — drop its derivation entry so the
-        // cache tracks live records, not every session the daemon has served.
-        self.residency_cache_evict(id).await;
+        // #7087: a full teardown leaves the active-project set, and a tombstone
+        // is terminal — drop its derivation entry so the cache tracks live
+        // records. #8433 (Dfc): the managed session ended; retire its taint.
+        self.after_full_teardown(id).await;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok(DecommissionReport {
             record,
