@@ -243,6 +243,25 @@ fn retire_keeps_a_shared_id_when_another_mark_cannot_be_read() {
     );
 }
 
+/// 🔴 #8433 (B1, r-078): a hand-off that cannot be written fails the retire
+/// and keeps the file and the retiring mark.
+#[test]
+fn retire_hand_off_write_failure_keeps_the_mark() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    mark_managed(&dir, "m-a", &in_workspace(ws.path())).expect("mark a");
+    taint_managed_session(&dir, "m-b", "x", &in_workspace(ws.path())).expect("b");
+    chmod(&dir, 0o500);
+    let result = retire(&dir, "m-b");
+    chmod(&dir, 0o700);
+    assert!(matches!(result, Err(TaintError::Io { .. })), "{result:?}");
+    assert_eq!(record_of(&dir, "x").managed_session, "m-b");
+    assert!(
+        managed_mark(&dir, "m-b").expect("read").is_some(),
+        "the mark stays"
+    );
+}
+
 /// 🔴 #8433 (fails closed): a retire that cannot read a file keeps the mark.
 #[test]
 fn retire_failure_keeps_the_mark_and_the_files() {
