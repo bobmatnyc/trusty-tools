@@ -4,7 +4,7 @@
 //! that judgement. The ledger line is its own type, never an export row, so
 //! nothing an export carries (masked text, ids) can be read back as a verdict.
 //! What: [`LedgerEntry`] binds a [`Verdict`] to the row's ledger key and to
-//! [`SECRET_FILTER_VERSION`], plus a [`verdict_digest`] over all three. The
+//! `SECRET_FILTER_VERSION`, plus a [`verdict_digest`] over all three. The
 //! redaction ops are a closed enum that takes a span index and nothing else.
 //! Test: `review::ledger_tests`, `review::admit_tests`.
 

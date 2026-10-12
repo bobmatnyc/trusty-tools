@@ -6,7 +6,7 @@
 //! What: each command names a run under the fixed review root; [`run_dir`]
 //! checks the name, the guard and the directory's owner-only mode. [`record`]
 //! validates a verdict against the row's exported shapes and appends it;
-//! [`status`] counts reviewed and pending rows; [`finish`] seals the ledger.
+//! [`status`] counts reviewed and pending rows; `finish` seals the ledger.
 //! Output carries counts, verdict labels and key prefixes, never row text.
 //! Test: `review::ledger_tests`.
 
