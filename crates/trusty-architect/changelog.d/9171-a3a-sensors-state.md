@@ -1,0 +1,5 @@
+Added
+
+- `poller`: the sensors and state half of the `fleet-poll.py` port, held to byte-identical goldens from the frozen prototype — `Config` (environment read once), `list_panes`/`capture`, `read_events`, `host_alerts` and the builder band behind a `HostProbe` seam, `TranscriptCtx` (a pane's ctx from its own transcript via the live session registry, cached by mtime and size), `self_ctx_alerts`, and the `alerts.jsonl` / `poll.log` appends ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
+- `PollState` with `save_state`, which writes `poll-state.json` atomically (tmp, fsync, rename, directory fsync) and keeps every key it does not know, and `load_state`, which reports a corrupt file instead of hiding it ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
+- `Keys` / `NamedKey`: `send-keys` in literal mode (`-l --`, so a dash-leading text reaches the pane as text) or named-key mode (`Enter`, `BSpace`) ([#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171))
