@@ -359,6 +359,12 @@ async fn palace_backup_refuses_a_symlinked_dest_component() {
     std::fs::create_dir_all(&manual).expect("root");
     let elsewhere = tempfile::tempdir().expect("elsewhere");
     std::os::unix::fs::symlink(elsewhere.path(), manual.join("out")).expect("symlink");
+    // The tool opens the daemon's chat store before the snapshot checks the
+    // name's components; any chat call creates that palace file, so open it
+    // first and measure only what the backup writes.
+    fx.tool("chat_session_list", json!({"palace": "bk-link"}))
+        .await
+        .expect("chat_session_list");
     let before = tree(&root);
     let res = raw(
         &fx.state,
