@@ -331,3 +331,40 @@ fn dispatch_wake_clears_only_on_sent() {
     assert_eq!(state.other.get("wake_pending"), Some(&Value::from(0)));
     assert!(!state.other.contains_key("wake_sent_at"));
 }
+
+/// #9171 AC7: a stored `wake_pending` that is not a non-negative integer is
+/// still a wake owed. It reads as at least 1, so the wake runs and a refusal
+/// leaves the count non-zero; only `sent` zeroes it.
+#[test]
+fn dispatch_wake_unreadable_pending_reads_as_owed() {
+    let bad = [
+        ("string \"3\"", Value::from("3")),
+        ("float 2.5", Value::from(2.5)),
+        ("negative -1", Value::from(-1)),
+    ];
+    for (name, stored) in bad {
+        // Refused: the wake is attempted and the count stays non-zero.
+        let clock = FakeClock::new(NOW);
+        let mut state = PollState::default();
+        state
+            .other
+            .insert("wake_pending".to_owned(), stored.clone());
+        let mut called = false;
+        let result = dispatch_wake(&mut state, 0, None, false, &clock, |n, _| {
+            called = true;
+            assert!(n >= 1, "{name}: wake asked to send {n}");
+            Ok("skipped: input typed".to_owned())
+        });
+        assert!(called, "{name}: no wake attempted, result {result}");
+        let left = state.other.get("wake_pending").and_then(Value::as_u64);
+        assert!(left.is_some_and(|c| c >= 1), "{name}: left {left:?}");
+
+        // Sent: the count clears.
+        let mut state = PollState::default();
+        state.other.insert("wake_pending".to_owned(), stored);
+        dispatch_wake(&mut state, 0, None, false, &clock, |_, _| {
+            Ok("sent to %1".to_owned())
+        });
+        assert_eq!(state.other.get("wake_pending"), Some(&Value::from(0)));
+    }
+}
