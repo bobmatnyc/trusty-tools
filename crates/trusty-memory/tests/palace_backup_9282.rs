@@ -201,7 +201,7 @@ async fn palace_backup_lends_the_cached_chat_store() {
             .expect("a chat call during the backup must succeed");
     }
     let out = backup.await.expect("join").expect("palace_backup");
-    assert_eq!(out["chat_tables"]["sessions"], 1, "{out}");
+    assert_eq!(out["chat_tables"]["chat_sessions"], 1, "{out}");
     assert_eq!(out["drawer_count"], 3000, "{out}");
     let dir = PathBuf::from(out["dir"].as_str().expect("dir"));
     assert!(dir.join("chat_sessions.redb").is_file());
