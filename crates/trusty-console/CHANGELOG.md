@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.6] — 2026-10-12
+
+### Added
+
+- `POST /api/secrets/{session,list,set,delete,copy,agents_may_use}`: the console's bridge to the trusty-secrets socket. Each verb is one `secrets.bridge.*` call carrying the console's verdict on the HTTP client (`mapped`, `unmappable` or `unreadable`); the console starts the server on demand, writes no audit of its own, and relays only the server's result or its error kind, under fixed texts. `resolve` answers 501 and any other `/api/secrets/*` path 404, so none reaches the generic proxy (#9066).
+- The secrets routes serve only the console's own loopback page: `Host` must be the console's bound loopback address, `Origin` must be present and equal `http://<that address>` on every method, every route but `session` needs the per-launch CSRF token `session` returns, any method but `POST` answers 405, request bodies are capped at 64 KiB, no `access-control-allow-origin` is sent, and every request on the tailnet listener is refused with 403 (#9066).
+- The console starts reading the pid of each loopback client, and that pid's start time, when it accepts the connection (Linux: `/proc/net/tcp{,6}` and `/proc/*/fd`; macOS: libproc). The read runs on a background thread, so accepting a connection and every non-secrets route never wait for it; a secrets request waits at most 2 seconds. A request is judged against that pid: no pid found is `unmappable`; a pid that has exited or restarted since, a read that does not finish within 2 seconds or fails, and a connection with no read at all are `unreadable`. The tailnet listener does no lookup. On targets other than Unix every `/api/secrets/*` path answers 501 (#9066).
+- The Secrets page at `/tools/secrets/`: pick a registered project and a project or owner scope, list key names with their length and last update, set a value (the input is cleared after submit and only the server's masked text is shown), delete a key, copy keys between backends inside the project (from the selected backend by default), and turn "agents may use" on or off per key (off by default). Delete and copy each run only after a separate confirm step that a double-click cannot trigger and that Cancel or Escape closes; the copy confirm names both backends and the number of keys it overwrites. Every call after the session fetch carries the CSRF header; every refusal renders fixed text. `/tools/secrets` redirects to `/tools/secrets/` (#9067).
+- `POST /api/secrets/backends`: the backends the copy dialog offers, from the bridged `secrets.bridge.backends`, never a hard-coded list (#9067).
+- `POST /api/secrets/scopes`: the Secrets page's scope picker, one `secrets.bridge.scopes` call carrying the console's verdict, behind the same guard and CSRF header as the other secrets routes. A result is relayed only when every scope is a project or owner scope; anything else answers 502 (#9067).
+- `POST /api/secrets/projects`: the projects the page can pick, read from the tm project registry (`$TRUSTY_MPM_ROOT/project-paths.json`, else `~/.trusty-mpm/project-paths.json`). Each row whose path is an existing absolute directory is listed by alias and path; an absent or empty registry is an empty list, and an unreadable or malformed one answers 503 with fixed text. The route never dials the secrets socket (#9067).
+
+### Fixed
+
+- The Secrets page copy confirm now names the project it counted and sends that project. A key count that answers after a project switch, a scope switch, Escape or another action no longer opens a confirm, so one confirm can no longer copy a project whose count it never showed (#9712).
+
+### Changed
+
+- Every bridged secrets call (`scopes`, `list`, `set`, `delete`, `copy`, `agents_may_use`) now names a project the tm project registry lists, matched byte for byte against a row's path, or it is refused 400 with the existing bad-body text and the secrets socket is never dialled. The registry is read fresh on every call; one that is missing, unreadable or malformed, or has no known location, answers 503 and dials nothing (#9067).
+- A secrets client whose pid the console cannot find, which includes every client on platforms other than macOS and Linux, is now asserted an agent (`agent_parent: true`), so turning a key's "agents may use" flag on is refused for it; turning it off is still allowed (#9067).
+
+### Security
+
+- Every `/tools/secrets/` response carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so no other site can frame the Secrets page (#9067).
+- A client that is not on loopback (a tailnet peer) gets a fixed 403 page for `/tools/secrets/` and never the page itself, until S3b lifts it (#9067).
+- The secrets routes accept `localhost:PORT` on the console's bound port as the console's own Host and Origin, so the page works when opened at `http://localhost:PORT/tools/secrets/`; every other host name is still refused (#9067).
+
 ## [0.12.5] — 2026-10-10
 
 ### Fixed

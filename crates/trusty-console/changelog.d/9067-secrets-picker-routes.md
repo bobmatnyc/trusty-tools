@@ -1,3 +1,0 @@
-Added
-- `POST /api/secrets/scopes`: the Secrets page's scope picker, one `secrets.bridge.scopes` call carrying the console's verdict, behind the same guard and CSRF header as the other secrets routes. A result is relayed only when every scope is a project or owner scope; anything else answers 502 (#9067).
-- `POST /api/secrets/projects`: the projects the page can pick, read from the tm project registry (`$TRUSTY_MPM_ROOT/project-paths.json`, else `~/.trusty-mpm/project-paths.json`). Each row whose path is an existing absolute directory is listed by alias and path; an absent or empty registry is an empty list, and an unreadable or malformed one answers 503 with fixed text. The route never dials the secrets socket (#9067).
