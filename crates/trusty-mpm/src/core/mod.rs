@@ -80,6 +80,8 @@ pub mod agent_orphans;
 pub mod bundled_roster;
 // DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod catchup;
+// #8433 P0: the channel taint contract the daemon and the egress hook share.
+pub mod channels_taint;
 pub mod circuit;
 pub mod claude_config;
 // Issue #4467: the shared set of Claude Code process-local session markers every

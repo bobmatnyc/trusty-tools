@@ -15,7 +15,8 @@
 //! the sources of `ln`, `mv`, `cp -l`/`-s` and `install -l`
 //! ([`AnchorWrite::Source`]), each `sed -i` file operand, `install -d`
 //! directories, each `rm`/`rmdir`/`unlink` operand ([`AnchorWrite::Delete`],
-//! #8454), and a `cd`/`pushd`/`popd` ([`AnchorWrite::DirChange`]), after
+//! #8454), each `truncate` operand ([`AnchorWrite::File`], #8433), and a
+//! `cd`/`pushd`/`popd` ([`AnchorWrite::DirChange`]), after
 //! which the caller cannot place a relative path. A verb segment that will not
 //! tokenize, and a Q2 write run by `xargs` (which appends operands the guard
 //! never sees), is an [`UnplaceableWrite`]; the one exception is `xargs cp -t
@@ -88,6 +89,8 @@ pub(super) enum Verb {
     Sed,
     Cd,
     Rm,
+    /// #8433: `truncate` empties each operand in place.
+    Truncate,
 }
 
 /// Every write `command` makes that the trust-anchor rule judges.
@@ -120,6 +123,8 @@ fn segment_anchor_writes(segment: &str) -> Result<Vec<AnchorWrite>, UnplaceableW
     match verb {
         Verb::Cd => out.push(AnchorWrite::DirChange),
         Verb::Rm => out.extend(delete_operands(&args).map(AnchorWrite::Delete)),
+        // #8433: each operand is written; `-s`'s value is read as one too.
+        Verb::Truncate => out.extend(delete_operands(&args).map(AnchorWrite::File)),
         Verb::Sed => out.extend(
             sed_edits(&args)
                 .unwrap_or_default()
@@ -173,6 +178,7 @@ fn verb_of(word: &str) -> Option<Verb> {
         "sed" | "gsed" => Some(Verb::Sed),
         "cd" | "pushd" | "popd" => Some(Verb::Cd),
         "rm" | "grm" | "rmdir" | "grmdir" | "unlink" | "gunlink" => Some(Verb::Rm),
+        "truncate" | "gtruncate" => Some(Verb::Truncate),
         _ => None,
     }
 }

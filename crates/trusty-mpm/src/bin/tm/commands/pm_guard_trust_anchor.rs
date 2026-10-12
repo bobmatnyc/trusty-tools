@@ -191,6 +191,10 @@ pub(crate) fn evaluate(
     ) {
         return Some(reason);
     }
+    // #8433: a live channel taint binds every session, the Architect included.
+    if let Some(reason) = taint::taint_verdict(&writes, cwd, env.home.as_deref()) {
+        return Some(reason);
+    }
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
@@ -276,6 +280,17 @@ fn decide(
         Ok(anchors) => anchors,
         Err(path) => return Some(unlocatable_anchor_reason(&path)),
     };
+    judge_writes(&anchors, &writes, cwd, home)
+}
+
+/// The first of `writes` that `anchors` denies; a `cd` anywhere in the
+/// command makes every relative path unplaceable.
+fn judge_writes(
+    anchors: &Anchors,
+    writes: &[AnchorWrite],
+    cwd: Option<&Path>,
+    home: &Path,
+) -> Option<String> {
     let base = if writes.contains(&AnchorWrite::DirChange) {
         None
     } else {
@@ -284,6 +299,19 @@ fn decide(
     writes
         .iter()
         .find_map(|write| anchors.judge(write, base, home))
+}
+
+/// Every normal path component of `paths`: the names an unplaceable
+/// target's file name is compared against.
+fn component_names(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|path| path.components())
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Where the anchors are, resolved once per evaluation.
@@ -377,19 +405,17 @@ impl Anchors {
                 fence.push(launch);
             }
         }
-        let mut names = Vec::new();
-        for path in &paths {
-            names.extend(path.components().filter_map(|c| match c {
-                Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
-                _ => None,
-            }));
-        }
+        // #8433: the channel taint directory is sealed the same way, and while
+        // a taint is live a `*.json` in an unknown directory could be one.
+        let taint = taint::TaintAnchor::locate(home);
+        taint.extend(&mut guarded, &mut fence, &mut paths);
+        let mut names = component_names(&paths);
         // #8939: the `tm env` grant directory under the launch-record anchor.
         names.push(GRANT_DIR.to_owned());
         Ok(Self {
             guarded,
             ids: file_id(&config).into_iter().chain(extra.ids).collect(),
-            records_live,
+            records_live: records_live || taint.live,
             armed,
             fence,
             names,
@@ -596,7 +622,8 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `claude-config/settings.json` and `settings.local.json` (#8454), and, while any exist, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
-     do not lift this rule. Ask the operator, or make the change from the Architect session.";
+     do not lift this rule. Ask the operator, or make the change from the Architect session. \
+     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433).";
 
 /// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {
@@ -670,6 +697,10 @@ fn unplaceable_reason(what: UnplaceableWrite) -> String {
 // #8454 S2: the egress-guard anchors, delete verbs and project-settings rule.
 #[path = "pm_guard_trust_anchor_egress.rs"]
 mod egress;
+
+// #8433 P0: the channel taint directory as a trust anchor.
+#[path = "pm_guard_trust_anchor_taint.rs"]
+mod taint;
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]

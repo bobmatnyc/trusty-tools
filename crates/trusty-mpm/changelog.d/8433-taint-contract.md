@@ -1,0 +1,3 @@
+Added
+- A channel taint contract: one module (`core::channels_taint`) writes, reads and retires the taint file a session gets when it receives an answer through an outbound channel, at `~/.trusty-tools/trusty-mpm/channels/taint/<session_id>.json` (mode 0600, written atomically). An unreadable or malformed file, and a session id that is not a plain id, read as tainted; only a missing file reads untainted. No timer retires a taint (#8433).
+- The taint directory is a trust anchor: no session, the Architect included, may write, move, truncate or delete a taint file while a taint exists. The trust-anchor floor also reads `truncate` operands as writes (#8433).
