@@ -45,6 +45,8 @@ pub const SECRET_FILTER_VERSION: u32 = 1;
 /// them. [`SecretRule::label`] is the stable report string.
 /// Test: `each_rule_is_labelled_by_the_branch_that_fired`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+// #8624: a new rule or field is not a breaking change for other crates.
+#[non_exhaustive]
 pub enum SecretRule {
     /// A provider key prefix (`sk-`, `ghp_`, …) at a token or delimiter start.
     ProviderPrefix,
@@ -92,6 +94,8 @@ impl SecretRule {
 /// span covers the whole block, widened to whole whitespace-separated chunks.
 /// Test: `spans_are_ascending_char_boundary_ranges`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// #8624: see `SecretRule`.
+#[non_exhaustive]
 pub struct SecretSpan {
     pub range: Range<usize>,
     pub rule: SecretRule,

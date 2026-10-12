@@ -24,6 +24,9 @@ mod private_key;
 mod spans;
 pub use spans::{SECRET_FILTER_VERSION, SecretRule, SecretSpan, find_secret_spans};
 pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block};
+// #8624: secret shape and the one marker builder, for the kuzu review export.
+mod mask;
+pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
 
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly
