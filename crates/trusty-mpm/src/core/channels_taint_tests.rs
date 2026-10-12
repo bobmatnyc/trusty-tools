@@ -147,9 +147,15 @@ fn session_id_with_slash_or_dotdot_is_refused() {
 #[test]
 fn retire_removes_only_that_managed_sessions_files() {
     let (_tmp, dir) = dir();
-    taint_managed_session(&dir, "m1", "a1", &mark()).expect("m1");
-    write_taint(&dir, &mark().record_for("a2", "m1")).expect("m1 second id");
-    taint_managed_session(&dir, "m2", "b1", &mark()).expect("m2");
+    // #8433 B1: disjoint workspaces, so m2 cannot cover m1's ids.
+    let (ws1, ws2) = (
+        tempfile::tempdir().expect("ws1"),
+        tempfile::tempdir().expect("ws2"),
+    );
+    let m1 = in_workspace(ws1.path());
+    taint_managed_session(&dir, "m1", "a1", &m1).expect("m1");
+    write_taint(&dir, &m1.record_for("a2", "m1")).expect("m1 second id");
+    taint_managed_session(&dir, "m2", "b1", &in_workspace(ws2.path())).expect("m2");
     assert_eq!(retire(&dir, "m1").expect("retire"), 2);
     assert_eq!(read_state(&dir, "a1"), TaintState::Untainted);
     assert_eq!(read_state(&dir, "a2"), TaintState::Untainted);
@@ -161,6 +167,79 @@ fn retire_removes_only_that_managed_sessions_files() {
     assert!(
         managed_mark(&dir, "m2").expect("read").is_some(),
         "m2's mark survived"
+    );
+}
+
+/// [`mark`] in workspace `ws`.
+fn in_workspace(ws: &Path) -> TaintMark {
+    TaintMark {
+        workspace: ws.to_path_buf(),
+        ..mark()
+    }
+}
+
+/// The record in `id`'s taint file.
+fn record_of(dir: &Path, id: &str) -> TaintRecord {
+    let path = taint_path(dir, id).expect("path");
+    serde_json::from_slice(&std::fs::read(path).expect("read")).expect("record")
+}
+
+/// 🔴 #8433 (B1, Dfc): two tainted sessions in one workspace share a new id.
+/// Retiring one hands the file to the other; only the last retire untaints.
+#[test]
+fn retire_hands_a_shared_id_to_the_other_tainted_session_in_its_workspace() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    mark_managed(&dir, "m-a", &in_workspace(ws.path())).expect("mark a");
+    mark_managed(&dir, "m-b", &in_workspace(ws.path())).expect("mark b");
+    assert!(reapply(&dir, "m-a", "x").expect("a"));
+    assert!(reapply(&dir, "m-b", "x").expect("b"));
+    retire(&dir, "m-b").expect("retire b");
+    assert!(read_state(&dir, "x").is_tainted(), "m-a still covers x");
+    assert_eq!(record_of(&dir, "x").managed_session, "m-a");
+    retire(&dir, "m-a").expect("retire a");
+    assert_eq!(read_state(&dir, "x"), TaintState::Untainted);
+}
+
+/// 🔴 #8433 (B1): a mark nested in the retiring workspace may cover its ids
+/// too, so the file goes to it.
+#[test]
+fn retire_hands_an_id_to_a_mark_nested_in_its_workspace() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    std::fs::create_dir_all(ws.path().join("sub")).expect("sub");
+    taint_managed_session(&dir, "m-a", "x", &in_workspace(ws.path())).expect("a");
+    mark_managed(&dir, "m-b", &in_workspace(&ws.path().join("sub"))).expect("b");
+    retire(&dir, "m-a").expect("retire a");
+    assert_eq!(record_of(&dir, "x").managed_session, "m-b");
+}
+
+/// 🔴 #8433 (B1, r-078): another mark that cannot be read may cover the id,
+/// so retire keeps the file for it; marks that cannot be listed fail the
+/// retire and keep both the file and the retiring mark.
+#[test]
+fn retire_keeps_a_shared_id_when_another_mark_cannot_be_read() {
+    let (_tmp, dir) = dir();
+    taint_managed_session(&dir, "m-b", "x", &mark()).expect("b");
+    std::fs::write(dir.join("managed").join("m-a.json"), "garbage").expect("bad mark");
+    retire(&dir, "m-b").expect("retire b");
+    assert!(read_state(&dir, "x").is_tainted(), "the file is kept");
+    assert_eq!(record_of(&dir, "x").managed_session, "m-a");
+
+    let (_tmp, dir) = self::dir();
+    taint_managed_session(&dir, "m-b", "x", &mark()).expect("b");
+    chmod(&dir.join("managed"), 0o000);
+    let result = retire(&dir, "m-b");
+    chmod(&dir.join("managed"), 0o700);
+    assert!(matches!(result, Err(TaintError::Io { .. })), "{result:?}");
+    assert_eq!(
+        record_of(&dir, "x").managed_session,
+        "m-b",
+        "the file is kept"
+    );
+    assert!(
+        managed_mark(&dir, "m-b").expect("read").is_some(),
+        "the mark stays"
     );
 }
 
