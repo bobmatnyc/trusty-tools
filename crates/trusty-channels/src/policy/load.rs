@@ -90,6 +90,10 @@ pub fn load_effective_until(req: &LoadRequest, deadline: Instant) -> LoadReport 
     assemble(prepared, &req.channels)
 }
 
+/// A project file read: its bytes, `None` when missing, or the fault's
+/// message. The form the reload fingerprint records (#9808).
+pub(crate) type FileRead = Result<Option<Vec<u8>>, String>;
+
 /// One listed project's route file after the read and the gate.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProject {
@@ -97,14 +101,43 @@ pub(crate) struct PreparedProject {
     pub(crate) file: PathBuf,
     /// `None` for a missing file.
     pub(crate) parsed: Option<Result<ProjectFile, ProjectFileError>>,
+    /// #9808: the bytes the gate and the parse saw; `None` when never read.
+    pub(crate) read: Option<FileRead>,
 }
 
 /// Everything a load read, before the merge.
+///
+/// Why: #9808: the reloader keeps a fingerprint only when it describes what
+/// this load read, so the load records that, in the fingerprint's terms.
+/// What: `host_read` is the host text or the read fault's message;
+/// `canonical` is the canonical-path verdict, `None` when the host did not
+/// parse; each project carries its `read`.
+/// Test: `host_file_change_and_revert_during_load_reloads`,
+/// `canonical_fault_cleared_and_restored_during_load_reloads`.
 #[derive(Debug, Clone)]
 pub(crate) struct Prepared {
     pub(crate) host: Result<HostCeiling, HostError>,
     pub(crate) projects: Vec<PreparedProject>,
     pub(crate) findings: Vec<Finding>,
+    pub(crate) host_read: Result<String, String>,
+    pub(crate) canonical: Option<Result<(), String>>,
+}
+
+impl Prepared {
+    /// A load denied by `e` before any project was read.
+    fn denied(
+        e: HostError,
+        host_read: Result<String, String>,
+        canonical: Option<Result<(), String>>,
+    ) -> Self {
+        Self {
+            host: Err(e),
+            projects: Vec::new(),
+            findings: Vec::new(),
+            host_read,
+            canonical,
+        }
+    }
 }
 
 /// Read and gate everything a load needs. No fault is skipped: each one is
@@ -115,21 +148,23 @@ pub(crate) fn prepare(req: &LoadRequest) -> Prepared {
 
 /// [`prepare`], with every git step ending by `deadline` when one is set.
 fn prepare_until(req: &LoadRequest, deadline: Option<Instant>) -> Prepared {
-    let denied = |e: HostError| Prepared {
-        host: Err(e),
-        projects: Vec::new(),
-        findings: Vec::new(),
-    };
     let Some(home) = req.home.as_deref() else {
         // #8454 S2b: no HOME, no cwd fallback.
-        return denied(HostError::HomeUnknown);
+        let e = HostError::HomeUnknown;
+        return Prepared::denied(e.clone(), Err(e.to_string()), None);
     };
-    let host = match read_host(&req.host_path, home).and_then(|t| parse_host(&t, Some(home))) {
+    let text = read_host(&req.host_path, home);
+    // #9808: record the read as the reload fingerprint does.
+    let host_read = text.clone().map_err(|e| e.to_string());
+    let host = match text.and_then(|t| parse_host(&t, Some(home))) {
         Ok(h) => h,
-        Err(e) => return denied(e),
+        Err(e) => return Prepared::denied(e, host_read, None),
     };
-    if let Err(e) = check_canonical(&host) {
-        return denied(e);
+    let checked = check_canonical(&host);
+    // #9808: the verdict this load saw, which a later sample may not.
+    let canonical = Some(checked.clone().map_err(|e| e.to_string()));
+    if let Err(e) = checked {
+        return Prepared::denied(e, host_read, canonical);
     }
     let mut findings = Vec::new();
     let dirs = listed_dirs(&host, &req.channels, req.project.as_deref());
@@ -140,20 +175,32 @@ fn prepare_until(req: &LoadRequest, deadline: Option<Instant>) -> Prepared {
         .into_iter()
         .map(|dir| {
             let file = routes_path(&dir);
-            let parsed = match deadline {
+            let (read, parsed) = match deadline {
                 // #8454: past the deadline, a project not yet loaded is refused.
-                Some(d) if Instant::now() >= d => {
-                    Some(Err(gate_error(GateError::GitTimedOut { step: "load" })))
+                // #9808: it was never read, so `read` is `None`.
+                Some(d) if Instant::now() >= d => (
+                    None,
+                    Some(Err(gate_error(GateError::GitTimedOut { step: "load" }))),
+                ),
+                _ => {
+                    let (read, parsed) = with_deadline(deadline, || read_gated(&dir, home));
+                    (Some(read), parsed)
                 }
-                _ => with_deadline(deadline, || read_gated(&dir, home)),
             };
-            PreparedProject { dir, file, parsed }
+            PreparedProject {
+                dir,
+                file,
+                parsed,
+                read,
+            }
         })
         .collect();
     Prepared {
         host: Ok(host),
         projects,
         findings,
+        host_read,
+        canonical,
     }
 }
 
@@ -201,21 +248,25 @@ pub(crate) fn check_canonical(host: &HostCeiling) -> Result<(), HostError> {
 }
 
 /// Read one project's file, run the Db1 gate on the bytes read, then parse
-/// those bytes. `None` when the file is missing.
-fn read_gated(dir: &Path, home: &Path) -> Option<Result<ProjectFile, ProjectFileError>> {
+/// those bytes. Returns the read (#9808) and the parse, `None` when the
+/// file is missing.
+fn read_gated(
+    dir: &Path,
+    home: &Path,
+) -> (FileRead, Option<Result<ProjectFile, ProjectFileError>>) {
     let bytes = match read_project(dir) {
-        Ok(ProjectRead::Missing) => return None,
+        Ok(ProjectRead::Missing) => return (Ok(None), None),
         Ok(ProjectRead::Bytes(b)) => b,
-        Err(e) => return Some(Err(e)),
+        Err(e) => return (Err(e.to_string()), Some(Err(e))),
     };
     // #8454 Db1: gate and parse see the same bytes.
-    if let Err(error) = check_default_branch(dir, &bytes) {
-        return Some(Err(gate_error(error)));
-    }
-    let parsed = String::from_utf8(bytes)
-        .map_err(|_| ProjectFileError::NotUtf8)
-        .and_then(|text| parse_project_file(&text, Some(home)));
-    Some(parsed)
+    let parsed = match check_default_branch(dir, &bytes) {
+        Err(error) => Err(gate_error(error)),
+        Ok(_) => std::str::from_utf8(&bytes)
+            .map_err(|_| ProjectFileError::NotUtf8)
+            .and_then(|text| parse_project_file(text, Some(home))),
+    };
+    (Ok(Some(bytes)), Some(parsed))
 }
 
 fn gate_error(error: GateError) -> ProjectFileError {
@@ -229,6 +280,7 @@ pub(crate) fn assemble(prepared: Prepared, channels: &[Channel]) -> LoadReport {
         host,
         projects,
         findings,
+        ..
     } = prepared;
     let order: Vec<(PathBuf, PathBuf, bool)> = projects
         .iter()
