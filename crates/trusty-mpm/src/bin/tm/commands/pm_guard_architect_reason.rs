@@ -14,12 +14,10 @@
 //! denies on each arm, including a process-table or record read error.
 //! Test: `pm_guard_architect_reason_tests.rs`.
 
-use std::ffi::OsStr;
-
 use serde_json::Value;
 use trusty_mpm::core::architect_launch::{self, LaunchRefusal};
 use trusty_mpm::core::config::MpmConfig;
-use trusty_mpm::core::session_profile::{self, NOT_ALLOW_LISTED, SUPERVISOR_PROFILE_ID};
+use trusty_mpm::core::session_profile::{self, NOT_ALLOW_LISTED};
 use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
 
 use crate::commands::pm_guard_trust_anchor::{ANCHOR_ROOT, HookEnv};
@@ -37,7 +35,7 @@ pub(crate) enum NotArchitect {
     /// The call comes from a subagent.
     Subagent,
     /// `TRUSTY_MPM_SESSION_PROFILE` is not `supervisor`.
-    NoSupervisorStamp,
+    NoArchitectStamp,
     /// `CLAUDE_PROJECT_DIR` is unset or empty.
     NoProjectDir,
     /// The launch directory's `.trusty-mpm.toml` does not ask for the supervisor.
@@ -58,7 +56,7 @@ impl std::fmt::Display for NotArchitect {
                  a malformed `agent_id`)"
             }
             Self::Subagent => "the call comes from a subagent",
-            Self::NoSupervisorStamp => {
+            Self::NoArchitectStamp => {
                 "the session has no `supervisor` launch stamp (`TRUSTY_MPM_SESSION_PROFILE`)"
             }
             Self::NoProjectDir => "`CLAUDE_PROJECT_DIR` is unset or empty",
@@ -134,16 +132,17 @@ fn session_binding_checks(
     env: &HookEnv,
     config: impl FnOnce() -> MpmConfig,
 ) -> Result<(), NotArchitect> {
-    if env.stamp.as_deref() != Some(OsStr::new(SUPERVISOR_PROFILE_ID)) {
-        return Err(NotArchitect::NoSupervisorStamp);
+    // #9755: either stamp value is the Architect.
+    if !trusty_mpm::core::architect_compat::is_architect_stamp(env.stamp.as_deref()) {
+        return Err(NotArchitect::NoArchitectStamp);
     }
     let project = session_profile::hook_project_dir(env.project_dir.clone())
         .ok_or(NotArchitect::NoProjectDir)?;
     let config = config();
-    if !session_profile::requested(&project).is_supervisor() {
+    if !session_profile::requested(&project).is_architect() {
         return Err(NotArchitect::ProfileNotRequested);
     }
-    if !session_profile::is_allow_listed(&project, &config.supervisor) {
+    if !session_profile::is_allow_listed(&project, config.architect_grant()) {
         tracing::warn!(project = %project.display(), "{NOT_ALLOW_LISTED}");
         return Err(NotArchitect::NotAllowListed);
     }

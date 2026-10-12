@@ -1,7 +1,7 @@
 //! Tests for `tm fleet init`'s #8942 registration and sidecar prune. No
 //! daemon, no tmux: answers are built by hand, tmux is the stub probe.
 
-use trusty_mpm::client::http_client::supervisor::RegisterCallError;
+use trusty_mpm::client::http_client::architect::RegisterCallError;
 use trusty_mpm::session_manager::{RegisteredSession, RegistrationReport, SessionKind};
 
 use super::super::session_name::SessionNames;
@@ -9,7 +9,7 @@ use super::super::tests::NO_TMUX;
 use super::super::{Probe, Step};
 use super::{prune_step, register_step, registration};
 
-fn reg() -> trusty_mpm::session_manager::SupervisorRegistration {
+fn reg() -> trusty_mpm::session_manager::ArchitectRegistration {
     registration(
         std::path::Path::new("/arch"),
         &SessionNames::default_names(),
@@ -45,8 +45,8 @@ fn a_registration_answer_maps_to_its_step() {
     let reg = reg();
     let ok = RegistrationReport {
         registered: vec![
-            record("tm-architect", SessionKind::Supervisor),
-            record("tm-architect-poll", SessionKind::SupervisorAux),
+            record("tm-architect", SessionKind::Architect),
+            record("tm-architect-poll", SessionKind::ArchitectAux),
         ],
         ..Default::default()
     };
@@ -70,7 +70,7 @@ fn a_registration_answer_maps_to_its_step() {
         Err(RegisterCallError::Failed("predates the route".into())),
         Ok(RegistrationReport::default()),
         Ok(RegistrationReport {
-            registered: vec![record("tm-architect-poll", SessionKind::SupervisorAux)],
+            registered: vec![record("tm-architect-poll", SessionKind::ArchitectAux)],
             ..Default::default()
         }),
     ];

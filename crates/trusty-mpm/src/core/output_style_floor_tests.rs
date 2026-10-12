@@ -61,7 +61,7 @@ fn the_bundled_styles_get_no_appended_floor() {
         assert!(!delivered.contains(STYLE_FLOOR_HEADING), "{}", bundled.id);
         // #8453: the supervisor style is bundled but is no PM style; it carries
         // the Write Plainly section and no delegation directive.
-        if bundled.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID {
+        if bundled.id == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID {
             assert_eq!(delivered.matches(FLOOR_SECTIONS[0]).count(), 0);
             assert_eq!(delivered.matches(FLOOR_SECTIONS[1]).count(), 1);
             continue;

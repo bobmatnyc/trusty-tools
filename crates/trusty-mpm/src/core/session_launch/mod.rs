@@ -82,7 +82,7 @@ pub use system_prompt::{
     build_system_prompt_for_with_style_and_native, cli_launch,
 };
 // #8453: the supervisor model key, written and removed by ownership.
-mod supervisor_model;
+mod architect_model;
 #[cfg(test)]
 mod tests;
 mod workstream_label;
@@ -146,8 +146,8 @@ mod tests_settings_lock_7762;
 mod tests_style_selection_8533;
 // #8453: a supervisor launch writes the supervisor prompt, style and model.
 #[cfg(test)]
-#[path = "tests_supervisor_profile_8453.rs"]
-mod tests_supervisor_profile_8453;
+#[path = "tests_architect_profile_8453.rs"]
+mod tests_architect_profile_8453;
 // #9018: `[pm_guard] enabled` wired into the launch and resume writers.
 #[cfg(test)]
 #[path = "tests_pm_guard_9018.rs"]
@@ -923,7 +923,7 @@ pub(super) fn prepare_session_inner(
     }
     // #8453: every launch path reads the project settings' `model`, including
     // those that pass no `--model`; a supervisor runs on the Opus tier alias.
-    if let Err(err) = supervisor_model::write_supervisor_model(project_dir, profile) {
+    if let Err(err) = architect_model::write_architect_model(project_dir, profile) {
         tracing::warn!("failed to update the supervisor model: {err}");
     }
 

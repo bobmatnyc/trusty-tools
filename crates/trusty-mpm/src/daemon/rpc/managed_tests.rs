@@ -197,6 +197,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.reconcile_worktrees",
         "mpm.managed.fleet",
         "mpm.managed.register_supervisor",
+        "mpm.managed.register_architect",
         "mpm.residency.active",
         "mpm.managed.get",
         "mpm.managed.stop",
@@ -229,6 +230,55 @@ async fn every_scoped_route_has_a_method() {
             "{expected} is not registered; the listener serves {registered:?}"
         );
     }
+}
+
+/// A registration with a relative `dir`: the handler refuses it with 400
+/// before any binding check, so a served name answers 400, never 404.
+fn relative_registration() -> Value {
+    json!({ "dir": "rel", "session": "tm-arch" })
+}
+
+/// POST the relative registration to `uri` on the daemon's real router.
+async fn register_over_http(uri: &str) -> HttpAnswer {
+    let (state, _dir) = test_state().await;
+    let body = Some(relative_registration());
+    http_call(http_router(state), Method::POST, uri, body).await
+}
+
+/// Call `method` with the relative registration on the real RPC router.
+async fn register_over_rpc(method: &str) -> i64 {
+    let (state, _dir) = test_state().await;
+    let response = rpc_call(&rpc_router(&state), method, relative_registration()).await;
+    response.error.expect("a relative dir refuses").code
+}
+
+/// #9755: the client still posts the Architect registration to the legacy
+/// path, so the daemon keeps serving it.
+#[tokio::test]
+async fn legacy_register_route_still_served() {
+    let answer = register_over_http("/api/v1/sessions/managed/supervisor").await;
+    assert_eq!(answer.status, 400, "{}", answer.text);
+}
+
+/// #9755: the D07 path reaches the same handler.
+#[tokio::test]
+async fn architect_register_route_served() {
+    let answer = register_over_http("/api/v1/sessions/managed/architect").await;
+    assert_eq!(answer.status, 400, "{}", answer.text);
+}
+
+/// #9755: the client still calls the legacy method name.
+#[tokio::test]
+async fn legacy_rpc_register_supervisor_still_served() {
+    let code = register_over_rpc("mpm.managed.register_supervisor").await;
+    assert_eq!(code, status_to_rpc_code(400));
+}
+
+/// #9755: the D07 method name reaches the same handler.
+#[tokio::test]
+async fn rpc_register_architect_served() {
+    let code = register_over_rpc("mpm.managed.register_architect").await;
+    assert_eq!(code, status_to_rpc_code(400));
 }
 
 /// An unregistered name still refuses in the shape slice 1 established.

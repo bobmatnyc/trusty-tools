@@ -1,4 +1,48 @@
 crate   trusty-mpm
 version 1.9.0
-reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version. Refs #9390.
+reason  The #9390 expiring-slot stack adds the pub field verify to the non-#[non_exhaustive] FactSlot struct (break vs 1.8.2), and the #9755 D07 rename moves the fleet role's public Rust names from supervisor to Architect with no re-export shims (Architect answer Q5); under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version. Refs #9390, #9755.
 accept  constructible_struct_adds_field  FactSlot.verify
+# #9755 D07: the fleet role's Rust names, supervisor -> Architect. Serialized values keep their legacy spelling.
+accept  module_missing                   mod trusty_mpm::session_manager::supervisor
+accept  module_missing                   mod trusty_mpm::session_manager::supervisor_floor
+accept  module_missing                   mod trusty_mpm::session_manager::supervisor_register
+accept  module_missing                   mod trusty_mpm::daemon::managed_routes::supervisor
+accept  module_missing                   mod trusty_mpm::client::http_client::supervisor
+accept  struct_missing                   SupervisorFloor
+accept  struct_missing                   SupervisorRegistration
+accept  struct_missing                   SupervisorConfig
+accept  struct_missing                   trusty_mpm::session_manager::supervisor_floor::SidecarRole
+accept  struct_missing                   trusty_mpm::session_manager::supervisor_register::RegisteredSession
+accept  struct_missing                   trusty_mpm::session_manager::supervisor_register::RegistrationReport
+accept  struct_missing                   trusty_mpm::daemon::managed_routes::supervisor::LaunchRecordBinding
+accept  enum_missing                     trusty_mpm::session_manager::supervisor::ProtectedVerb
+accept  enum_missing                     trusty_mpm::session_manager::supervisor_floor::KillVerdict
+accept  enum_missing                     trusty_mpm::session_manager::supervisor_register::RegisterError
+accept  enum_missing                     trusty_mpm::client::http_client::supervisor::RegisterCallError
+accept  trait_missing                    trusty_mpm::session_manager::supervisor_register::BindingVerifier
+accept  function_missing                 supervisor_prompt
+accept  function_missing                 supervisor_routes
+accept  function_missing                 register_supervisor_route
+accept  function_missing                 trusty_mpm::session_manager::supervisor_register::collector_session_name
+accept  inherent_method_missing          SessionManager register_supervisor
+accept  inherent_method_missing          DaemonClient register_supervisor
+accept  inherent_method_missing          ManagedSessionId for_supervisor
+accept  inherent_method_missing          TmuxDriver supervisor_floor
+accept  inherent_method_missing          SessionProfile is_supervisor
+accept  trait_method_missing             ManagedTmuxDriver supervisor_floor
+accept  enum_variant_missing             SessionKind Supervisor
+accept  enum_variant_missing             SessionKind SupervisorAux
+accept  enum_variant_missing             SessionProfile Supervisor
+accept  enum_variant_missing             TwinRefusal NotSupervisor
+accept  enum_variant_added               SessionKind Architect
+accept  enum_variant_added               SessionKind ArchitectAux
+accept  enum_variant_added               SessionProfile Architect
+accept  enum_variant_added               TwinRefusal NotArchitectProfile
+accept  struct_pub_field_missing         MpmConfig supervisor
+accept  constructible_struct_adds_field  MpmConfig.architect
+accept  pub_module_level_const_missing   SUPERVISOR_PROFILE_ID
+accept  pub_module_level_const_missing   SUPERVISOR_OUTPUT_STYLE_ID
+accept  pub_module_level_const_missing   SUPERVISOR_MODEL
+accept  pub_module_level_const_missing   SUPERVISOR_SECTIONS
+accept  pub_module_level_const_missing   SUPERVISOR_ROLE
+accept  pub_module_level_const_missing   COLLECTOR_ROLE

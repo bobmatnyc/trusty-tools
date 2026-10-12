@@ -15,7 +15,7 @@
 //! [`crate::core::twin_arming::nearest_claude_ancestor`] does, has a record
 //! with the same PID, start time and project. Every error is `false`.
 //! Test: `pm_guard_trust_anchor_tests.rs` in the `tm` binary
-//! (`a_supervisor_stamp_without_a_launch_record_is_denied`,
+//! (`an_architect_stamp_without_a_launch_record_is_denied`,
 //! `a_launch_record_binds_one_process`); `tests/tm_fleet.rs`
 //! (`fleet_init_launches_the_architect_and_status_is_complete`).
 
@@ -104,7 +104,7 @@ impl std::fmt::Display for LaunchRefusal {
 /// adds the thread and profile checks.
 /// What: [`check_launched_architect`] is `Ok`.
 /// Test: `a_launch_record_binds_one_process`,
-/// `a_supervisor_stamp_without_a_launch_record_is_denied`.
+/// `an_architect_stamp_without_a_launch_record_is_denied`.
 pub fn is_launched_architect(
     root: &Path,
     project_dir: &Path,

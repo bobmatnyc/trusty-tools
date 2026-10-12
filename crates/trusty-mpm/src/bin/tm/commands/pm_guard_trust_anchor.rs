@@ -213,7 +213,7 @@ pub(crate) fn evaluate(
 /// and project. Any missing or unreadable input is `false`. #8878 PR-I: a
 /// wrapper over [`architect_main_thread`], which names the check that failed.
 /// Test: `the_architect_main_thread_may_write_the_anchor`,
-/// `a_supervisor_stamp_without_a_launch_record_is_denied`,
+/// `an_architect_stamp_without_a_launch_record_is_denied`,
 /// `a_launch_record_binds_one_process`, `an_architect_subagent_is_denied`,
 /// `an_unestablished_identity_is_denied`,
 /// `the_reason_verdict_equals_the_bool_verdict`.

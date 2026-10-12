@@ -230,7 +230,7 @@ fn golden_pm_launch_prompt_with_output_style() {
 }
 
 #[test]
-fn golden_supervisor_prompt() {
+fn golden_architect_prompt() {
     // #8453: the supervisor profile's composed instructions — what a
     // `profile = "supervisor"` project receives in place of the PM prompt.
     let tmp = TempDir::new().expect("tempdir");
@@ -242,13 +242,10 @@ fn golden_supervisor_prompt() {
     let (prompt, _) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
         rc(),
         tmp.path(),
-        crate::core::session_profile::SessionProfile::Supervisor,
+        crate::core::session_profile::SessionProfile::Architect,
         || Some(FIXED_ROSTER.to_string()),
     );
-    assert_eq!(
-        prompt,
-        crate::core::session_profile::supervisor_prompt(rc())
-    );
+    assert_eq!(prompt, crate::core::session_profile::architect_prompt(rc()));
     assert_golden("supervisor-prompt.md", &prompt);
 }
 

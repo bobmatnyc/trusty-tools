@@ -18,7 +18,7 @@
 //! `twin_placement_must_be_the_checked_directory`,
 //! `twin_refusals_apply_only_to_twin_launches`; the record and grant logic in
 //! `core/twin_identity_tests.rs` (`an_arming_record_round_trips`,
-//! `a_supervisor_without_the_twin_grant_is_not_twin`).
+//! `an_architect_without_the_twin_grant_is_not_twin`).
 
 use std::path::{Path, PathBuf};
 
@@ -74,7 +74,7 @@ pub(crate) fn confirm_placement(checked: &Path, placed: &Path) -> anyhow::Result
 /// [`twin_identity::check_grant`] — the check the hook runs. Returns the
 /// `~/.trusty-mpm` root the record will be written under. `tm launch` calls it
 /// on the managed checkout before provisioning anything (#8878 review).
-/// Test: the grant rule is `a_supervisor_without_the_twin_grant_is_not_twin`.
+/// Test: the grant rule is `an_architect_without_the_twin_grant_is_not_twin`.
 pub(crate) fn precheck(project_dir: &Path) -> anyhow::Result<PathBuf> {
     let root = dirs::home_dir()
         .map(|home| home.join(".trusty-mpm"))

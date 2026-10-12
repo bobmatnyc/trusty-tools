@@ -94,9 +94,9 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
         content_path: "output-styles/trusty-mpm-research.md",
     },
     BundledStyle {
-        id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
+        id: crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID,
         file_name: "trusty-mpm-supervisor.md",
-        content_path: "output-styles/trusty-mpm-supervisor.md",
+        content_path: "output-styles/trusty-mpm-architect.md",
     },
 ];
 
@@ -105,11 +105,11 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
 /// Why (#8453): the PM invariants — the mandatory-delegation floor, the
 /// identity protocol, the TodoWrite section — hold for every style a PM session
 /// can select, and the supervisor style deliberately carries none of them.
-/// Test: `the_pm_styles_are_every_style_but_the_supervisor_style`.
+/// Test: `the_pm_styles_are_every_style_but_the_architect_style`.
 pub fn pm_output_styles() -> impl Iterator<Item = &'static BundledStyle> {
     OUTPUT_STYLES
         .iter()
-        .filter(|s| s.id != crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .filter(|s| !crate::core::architect_compat::is_architect_output_style_id(s.id))
 }
 
 // BundledArtifact, InstallPolicy, and ALL are defined in bundle_all.rs.

@@ -93,11 +93,11 @@ fn a_recorded_session_name_reads_back() {
         architect_session_name(&s.root(), me),
         Err(LaunchRefusal::NoLaunchRecord)
     );
-    let record = record_launch(&s.root(), me, &s.project(), "tm-supervisor").expect("record");
+    let record = record_launch(&s.root(), me, &s.project(), "tm-arch-ops").expect("record");
     assert_eq!(record.pid, me);
     assert_eq!(
         architect_session_name(&s.root(), me).as_deref(),
-        Ok("tm-supervisor")
+        Ok("tm-arch-ops")
     );
     // A record from a tm without session names has no sidecar: `tm-architect`.
     let mut child = std::process::Command::new("sleep")
@@ -121,7 +121,7 @@ fn a_recorded_session_name_reads_back() {
 fn a_bad_session_sidecar_is_unreadable_never_the_default() {
     let s = Scratch::new();
     let me = std::process::id();
-    record_launch(&s.root(), me, &s.project(), "tm-supervisor").expect("record");
+    record_launch(&s.root(), me, &s.project(), "tm-arch-ops").expect("record");
     let good = std::fs::read_to_string(s.sidecar(me)).expect("sidecar");
     let parsed: serde_json::Value = serde_json::from_str(&good).expect("json");
     let start = parsed["start_time"].as_u64().expect("start_time");
@@ -174,35 +174,35 @@ fn a_session_binding_needs_the_record_and_the_same_name() {
     let bind =
         |session: &str, project: &Path| check_session_binding(&s.root(), project, session, me);
     assert_eq!(
-        bind("tm-supervisor", &s.project()),
+        bind("tm-arch-ops", &s.project()),
         Err(BindingRefusal::Launch(LaunchRefusal::NoLaunchRecord))
     );
-    record_launch(&s.root(), me, &s.project(), "tm-supervisor").expect("record");
-    assert_eq!(bind("tm-supervisor", &s.project()), Ok(()));
+    record_launch(&s.root(), me, &s.project(), "tm-arch-ops").expect("record");
+    assert_eq!(bind("tm-arch-ops", &s.project()), Ok(()));
     assert_eq!(
         bind(DEFAULT_ARCHITECT_SESSION, &s.project()),
         Err(BindingRefusal::OtherSession {
-            recorded: "tm-supervisor".to_owned()
+            recorded: "tm-arch-ops".to_owned()
         })
     );
     assert_eq!(
-        bind("tm-supervisor", s.dir.path()),
+        bind("tm-arch-ops", s.dir.path()),
         Err(BindingRefusal::Launch(LaunchRefusal::OtherProject))
     );
     write_mode(&s.sidecar(me), "{}", 0o600);
     assert_eq!(
-        bind("tm-supervisor", &s.project()),
+        bind("tm-arch-ops", &s.project()),
         Err(BindingRefusal::Launch(LaunchRefusal::UnreadableRecord))
     );
     assert_eq!(
-        check_session_binding(&s.root(), &s.project(), "tm-supervisor", dead_pid()),
+        check_session_binding(&s.root(), &s.project(), "tm-arch-ops", dead_pid()),
         Err(BindingRefusal::Launch(LaunchRefusal::ProcessLookup))
     );
     let text = BindingRefusal::OtherSession {
-        recorded: "tm-supervisor".to_owned(),
+        recorded: "tm-arch-ops".to_owned(),
     }
     .to_string();
-    assert!(text.contains("names tmux session tm-supervisor"), "{text}");
+    assert!(text.contains("names tmux session tm-arch-ops"), "{text}");
 }
 
 /// #8878 R1 round 2, Fail-Open Check: the pane guard's fallback lists every
@@ -217,13 +217,13 @@ fn recorded_session_names_list_every_sidecar_and_fail_closed() {
         "no directory"
     );
     let me = std::process::id();
-    record_launch(&s.root(), me, &s.project(), "tm-supervisor").expect("record");
+    record_launch(&s.root(), me, &s.project(), "tm-arch-ops").expect("record");
     let stale = dead_pid();
     let body = format!(r#"{{"pid":{stale},"start_time":1,"session":"old-arch"}}"#);
     write_mode(&s.sidecar(stale), &body, 0o666);
     let mut names = recorded_session_names(&s.root()).expect("names");
     names.sort();
-    assert_eq!(names, ["old-arch", "tm-supervisor"]);
+    assert_eq!(names, ["old-arch", "tm-arch-ops"]);
     for (case, body) in [
         ("garbage", "not json".to_owned()),
         (

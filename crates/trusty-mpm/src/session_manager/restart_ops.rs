@@ -54,7 +54,7 @@ impl SessionManager {
     /// the `$N` id it read. A session gone by then counts as stopped. Fails
     /// open per session; logs a summary.
     /// Test: `shutdown_stops_an_owned_active_session` in tests.rs;
-    /// `shutdown_skips_a_supervisor_session`;
+    /// `shutdown_skips_an_architect_session`;
     /// `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`,
     /// `shutdown_skips_a_record_whose_pane_identity_is_unreadable`.
     pub async fn shutdown(&self) {
@@ -68,7 +68,7 @@ impl SessionManager {
                 matches!(
                     r.state,
                     ManagedSessionState::Active | ManagedSessionState::Provisioning
-                ) && !super::supervisor::skip_protected(r, "shutdown")
+                ) && !super::architect::skip_protected(r, "shutdown")
                     && self
                         .kill_gate(&r.tmux_name, "SessionManager::shutdown")
                         .is_ok()
@@ -177,7 +177,7 @@ impl SessionManager {
         self.kill_gate(tmux_name, caller)?;
         // #8935: the driver's own floor answers here too, before the ownership
         // verdict can turn a protected name into a quiet record-only stop.
-        if let Some(why) = self.tmux.supervisor_floor().refuse(tmux_name, caller) {
+        if let Some(why) = self.tmux.architect_floor().refuse(tmux_name, caller) {
             return Err(ManagedError::KillRefused(why));
         }
         let (pane_id, _) = match owned_pane(record, caller, ownership, liveness_known, false) {

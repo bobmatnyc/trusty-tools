@@ -1,4 +1,4 @@
-//! #8942 critic MEDIUM: the production `SupervisorFloor::host()` line.
+//! #8942 critic MEDIUM: the production `ArchitectFloor::host()` line.
 //!
 //! Why: in the lib's own `cfg(test)` build `host()` is unguarded, so no unit
 //! test runs `from_home(dirs::home_dir())`. This target links the lib without
@@ -8,9 +8,9 @@
 //! is installed. `env_serial` runs one test at a time, so the `$HOME` change
 //! is invisible to every other test.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test env_serial supervisor_floor_host::`.
+//! `cargo test -p trusty-mpm --test env_serial architect_floor_host::`.
 
-use trusty_mpm::session_manager::{KillVerdict, SupervisorFloor};
+use trusty_mpm::session_manager::{ArchitectFloor, KillVerdict};
 
 /// Restores `$HOME` on drop, so a failed assertion cannot leak the override.
 struct HomeOverride(Option<std::ffi::OsString>);
@@ -36,7 +36,7 @@ fn the_host_floor_reads_the_sidecars_under_home() {
     // SAFETY: `env_serial` runs one test at a time.
     unsafe { std::env::set_var("HOME", home.path()) };
 
-    let floor = SupervisorFloor::host();
+    let floor = ArchitectFloor::host();
     assert!(matches!(
         floor.verdict("tm-arch"),
         KillVerdict::Protected(_)
@@ -50,7 +50,7 @@ fn the_host_floor_reads_the_sidecars_under_home() {
     // The `discover()` wiring hands the same floor to the kill primitive.
     #[cfg(feature = "daemon")]
     if let Ok(driver) = trusty_mpm::daemon::tmux::TmuxDriver::discover() {
-        let verdict = driver.supervisor_floor().verdict("tm-arch");
+        let verdict = driver.architect_floor().verdict("tm-arch");
         assert!(matches!(verdict, KillVerdict::Protected(_)), "{verdict:?}");
     }
 }

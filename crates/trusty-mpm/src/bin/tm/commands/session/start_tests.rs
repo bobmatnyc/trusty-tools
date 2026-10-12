@@ -697,7 +697,7 @@ fn inplace_pm_session_spec_trims_the_unused_tools() {
     );
 
     let mut prompt = probe_prompt("/p.txt");
-    prompt.stamp = launch_env(SessionProfile::Supervisor);
+    prompt.stamp = launch_env(SessionProfile::Architect);
     let sup = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
     assert!(!sup.env_set.contains(&artifact_off));
     assert!(!sup.args.iter().any(|a| a == "--disallowedTools"));
@@ -757,7 +757,7 @@ fn inplace_session_spec_carries_the_profile_stamp() {
     let root = tempfile::TempDir::new().expect("tmp config root");
     let mut prompt = probe_prompt("/probe/p.txt");
     prompt.stamp = trusty_mpm::core::session_profile::launch_env(
-        trusty_mpm::core::session_profile::SessionProfile::Supervisor,
+        trusty_mpm::core::session_profile::SessionProfile::Architect,
     );
     let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
     assert!(

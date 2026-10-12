@@ -108,7 +108,7 @@ pub(crate) fn cases() -> Vec<(Fixture, Case)> {
             };
             (main(fx), env, true)
         },
-        Err(N::NoSupervisorStamp),
+        Err(N::NoArchitectStamp),
     );
     add(
         "no project dir",
@@ -221,7 +221,7 @@ fn pre_change_bool(payload: &Value, env: &HookEnv, config: impl FnOnce() -> MpmC
     use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
     if thread_kind(payload, env.sub_agent) != ThreadKind::Main
         || !session_profile::hook_profile(env.stamp.clone(), env.project_dir.clone(), config)
-            .is_supervisor()
+            .is_architect()
     {
         return false;
     }

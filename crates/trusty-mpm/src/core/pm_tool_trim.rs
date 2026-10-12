@@ -11,7 +11,7 @@
 //! profile.
 //! Test: `crates/trusty-mpm/src/core/pm_tool_trim_tests.rs`.
 
-use crate::core::session_profile::{SESSION_PROFILE_ENV, SUPERVISOR_PROFILE_ID, SessionProfile};
+use crate::core::session_profile::{SESSION_PROFILE_ENV, SessionProfile};
 
 /// The variable that turns Claude Code's Artifact tools off.
 ///
@@ -39,11 +39,11 @@ pub const DISALLOWED_TOOLS: [&str; 2] = ["Workflow", "DesignSync"];
 ///
 /// What: `CLAUDE_CODE_DISABLE_ARTIFACT=1` for a PM; nothing for a supervisor.
 /// Test: `a_pm_launch_disables_the_artifact_tools`,
-/// `a_supervisor_launch_keeps_every_tool`.
+/// `an_architect_launch_keeps_every_tool`.
 pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
     match profile {
         SessionProfile::Pm => vec![(DISABLE_ARTIFACT_ENV.to_owned(), "1".to_owned())],
-        SessionProfile::Supervisor => Vec::new(),
+        SessionProfile::Architect => Vec::new(),
     }
 }
 
@@ -54,11 +54,11 @@ pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
 /// What: `["--disallowedTools", "Workflow,DesignSync"]`
 /// for a PM; empty for a supervisor.
 /// Test: `a_pm_launch_denies_the_optional_built_ins`,
-/// `a_supervisor_launch_keeps_every_tool`.
+/// `an_architect_launch_keeps_every_tool`.
 pub fn trim_args(profile: SessionProfile) -> Vec<String> {
     match profile {
         SessionProfile::Pm => vec![DISALLOWED_TOOLS_FLAG.to_owned(), DISALLOWED_TOOLS.join(",")],
-        SessionProfile::Supervisor => Vec::new(),
+        SessionProfile::Architect => Vec::new(),
     }
 }
 
@@ -68,7 +68,7 @@ pub fn trim_args(profile: SessionProfile) -> Vec<String> {
 /// and the stamp is what `tm hook --pm-guard` reads in the session, so keying
 /// the trim on it keeps the tool set and the guard on one profile.
 /// What: the LAST `TRUSTY_MPM_SESSION_PROFILE` assignment; `supervisor` gives
-/// [`SessionProfile::Supervisor`], anything else or no stamp gives the default
+/// [`SessionProfile::Architect`], anything else or no stamp gives the default
 /// [`SessionProfile::Pm`].
 /// Test: `the_stamp_decides_the_profile`.
 pub fn stamped_profile(env: &[(String, String)]) -> SessionProfile {
@@ -77,7 +77,10 @@ pub fn stamped_profile(env: &[(String, String)]) -> SessionProfile {
         .rev()
         .find(|(name, _)| name == SESSION_PROFILE_ENV)
     {
-        Some((_, id)) if id == SUPERVISOR_PROFILE_ID => SessionProfile::Supervisor,
+        // #9755: either stamp value is the Architect.
+        Some((_, id)) if crate::core::architect_compat::is_architect_stamp(Some(id.as_ref())) => {
+            SessionProfile::Architect
+        }
         _ => SessionProfile::Pm,
     }
 }

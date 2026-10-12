@@ -388,7 +388,7 @@ fn the_default_and_a_fresh_directory_pass() {
 }
 
 /// `<home>/code/supervisor`, holding a remote-less repository at `local/`.
-fn supervisor_with_local(s: &Scratch) -> PathBuf {
+fn architect_with_local(s: &Scratch) -> PathBuf {
     let dir = s.home().join("code/supervisor");
     s.repo(&dir.join("local"), false);
     dir
@@ -399,7 +399,7 @@ fn supervisor_with_local(s: &Scratch) -> PathBuf {
 #[test]
 fn a_private_local_repository_without_a_remote_passes() {
     let s = Scratch::new();
-    let dir = supervisor_with_local(&s);
+    let dir = architect_with_local(&s);
     assert_eq!(check(&dir, &s.home()), Ok(dir.clone()));
     init(&dir, &s.home(), false, NO_TMUX).unwrap_or_else(|e| panic!("{e:#}"));
     assert!(dir.join(".git").is_dir(), "init made no repository");
@@ -417,7 +417,7 @@ fn a_private_local_repository_with_a_remote_is_refused() {
 #[test]
 fn a_repository_nested_in_the_private_local_repository_is_refused() {
     let s = Scratch::new();
-    let dir = supervisor_with_local(&s);
+    let dir = architect_with_local(&s);
     let nested = s.repo(&dir.join("local/vendor-app/app"), false);
     assert_workspace_parent(
         s.refused(&dir),
@@ -431,7 +431,7 @@ fn a_repository_nested_in_the_private_local_repository_is_refused() {
 #[test]
 fn an_unstatable_private_repository_refuses() {
     let s = Scratch::new();
-    let dir = supervisor_with_local(&s);
+    let dir = architect_with_local(&s);
     let local = dir.join("local");
     // Read, no search: `local` lists, but `local/.git` cannot be stat'ed.
     std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -486,7 +486,7 @@ fn a_symlinked_local_repository_is_refused() {
 #[test]
 fn every_other_child_repository_is_still_refused() {
     let s = Scratch::new();
-    let beside = supervisor_with_local(&s);
+    let beside = architect_with_local(&s);
     let notes = s.repo(&beside.join("notes"), false);
     assert_workspace_parent(
         s.refused(&beside),

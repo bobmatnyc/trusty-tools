@@ -20,12 +20,16 @@ use std::path::Path;
 
 use anyhow::{Context, bail};
 use toml_edit::DocumentMut;
+use trusty_mpm::core::architect_compat::{
+    ARCHITECT_TABLE, LEGACY_SUPERVISOR_TABLE, grant_table_to_write,
+};
 use trusty_mpm::core::architect_session::{poll_session_name, validate_session_name};
 
 use super::config::{Edit, parse_user_config};
 use super::{ARCHITECT_SESSION, user_config_path};
 
-/// The `[supervisor]` key holding the chosen Architect session name.
+/// The `[architect]` (or legacy `[supervisor]`) key holding the chosen
+/// Architect session name.
 pub(crate) const SESSION_KEY: &str = "session";
 
 /// A validated Architect session name and its poller session.
@@ -67,28 +71,30 @@ impl SessionNames {
     }
 }
 
-/// The session name `[supervisor] session` records in the parsed user config.
+/// The session name `[architect] session`, else the legacy `[supervisor]
+/// session`, records in the parsed user config (#9755).
 ///
-/// What: `None` when the table or key is absent. A key that is not a string,
+/// What: `None` when neither table holds the key. A key that is not a string,
 /// or not a valid name, is an error naming `path`, so a caller never falls
 /// back to `tm-architect` over a value it could not read.
-/// Test: `a_malformed_recorded_name_refuses_init_and_fails_status`.
+/// Test: `a_malformed_recorded_name_refuses_init_and_fails_status`,
+/// `an_architect_session_key_wins_over_the_legacy_one`.
 pub(crate) fn recorded(doc: &DocumentMut, path: &Path) -> anyhow::Result<Option<String>> {
-    let Some(table) = doc.get("supervisor").and_then(|t| t.as_table_like()) else {
-        return Ok(None);
-    };
-    let Some(item) = table.get(SESSION_KEY) else {
+    // DEPRECATED(D07): the legacy table is the second source.
+    let found = [ARCHITECT_TABLE, LEGACY_SUPERVISOR_TABLE]
+        .into_iter()
+        .find_map(|t| Some((t, doc.get(t)?.as_table_like()?.get(SESSION_KEY)?)));
+    let Some((table, item)) = found else {
         return Ok(None);
     };
     let name = item.as_str().with_context(|| {
         format!(
-            "`supervisor.{SESSION_KEY}` in {} is not a string",
+            "`{table}.{SESSION_KEY}` in {} is not a string",
             path.display()
         )
     })?;
-    validate_session_name(name).map_err(|why| {
-        anyhow::anyhow!("`supervisor.{SESSION_KEY}` in {}: {why}", path.display())
-    })?;
+    validate_session_name(name)
+        .map_err(|why| anyhow::anyhow!("`{table}.{SESSION_KEY}` in {}: {why}", path.display()))?;
     Ok(Some(name.to_owned()))
 }
 
@@ -120,7 +126,8 @@ pub(crate) fn recorded_names(home: &Path) -> Result<SessionNames, String> {
     names.map_err(|e| format!("cannot read the recorded session name: {e:#}"))
 }
 
-/// Record `name` as `[supervisor] session` in the user config text `raw`.
+/// Record `name` as `session` in the user config text `raw`: in
+/// `[architect]` when the file has it, else in the legacy `[supervisor]`.
 ///
 /// What: [`Edit::Unchanged`] when the file already resolves to `name` — also
 /// when it records nothing and `name` is `tm-architect`, so a default run
@@ -135,11 +142,13 @@ pub(crate) fn record_name(raw: &str, name: &SessionNames, path: &Path) -> anyhow
     if effective == name.architect() {
         return Ok(Edit::Unchanged);
     }
+    // #9755: write where `recorded` reads first.
+    let table_name = grant_table_to_write(doc.contains_key(ARCHITECT_TABLE));
     let table = doc
-        .entry("supervisor")
+        .entry(table_name)
         .or_insert_with(toml_edit::table)
         .as_table_like_mut()
-        .with_context(|| format!("`supervisor` in {} is not a table", path.display()))?;
+        .with_context(|| format!("`{table_name}` in {} is not a table", path.display()))?;
     table.insert(SESSION_KEY, toml_edit::value(name.architect()));
     let text = doc.to_string();
     let (check, _) = parse_user_config(&text, path)?;

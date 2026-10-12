@@ -156,7 +156,7 @@ pub fn build_launch_command_with_prompt(
 /// the #8992 tool trim for that profile.
 /// Test: `run_launch_command_follows_the_configured_renderer`,
 /// `run_launch_command_carries_the_prompt_file`,
-/// `run_launch_command_trims_a_pm_and_not_a_supervisor`.
+/// `run_launch_command_trims_a_pm_and_not_an_architect`.
 fn run_launch_command(
     config_root: Option<&Path>,
     repo_path: &Path,

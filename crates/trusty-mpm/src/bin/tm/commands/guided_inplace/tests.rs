@@ -1218,7 +1218,7 @@ fn inplace_pm_relaunch_trims_the_unused_tools() {
     let cwd = std::path::Path::new("/fake/cwd");
     let pm = build_inplace_exec_command(&resume, cwd, &no_gh(), false);
     assert!(env_of(&pm).contains(&artifact_off), "{:?}", env_of(&pm));
-    resume.profile = SessionProfile::Supervisor;
+    resume.profile = SessionProfile::Architect;
     let sup = build_inplace_exec_command(&resume, cwd, &no_gh(), false);
     assert!(
         !env_of(&sup)

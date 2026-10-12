@@ -19,8 +19,8 @@
 use crate::core::tmux::TmuxTarget;
 use crate::daemon::tmux::{ExclusiveCreate, TmuxDriver};
 
+use super::architect_floor::ArchitectFloor;
 use super::manager::{ManagedError, ManagedTmuxDriver};
-use super::supervisor_floor::SupervisorFloor;
 
 /// Adapter exposing the daemon's [`TmuxDriver`] as a [`ManagedTmuxDriver`].
 ///
@@ -57,8 +57,8 @@ impl RealTmuxDriver {
 
 impl ManagedTmuxDriver for RealTmuxDriver {
     /// #8942: signal under the same floor the wrapped driver kills under.
-    fn supervisor_floor(&self) -> SupervisorFloor {
-        self.driver.supervisor_floor().clone()
+    fn architect_floor(&self) -> ArchitectFloor {
+        self.driver.architect_floor().clone()
     }
 
     /// Overrides the trait's no-op default so the production path actually
@@ -107,7 +107,7 @@ impl ManagedTmuxDriver for RealTmuxDriver {
     /// #8942: the floor's refusal comes back typed, as
     /// [`ManagedError::KillRefused`], so a teardown aborts on it.
     fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
-        let floor = self.driver.supervisor_floor();
+        let floor = self.driver.architect_floor();
         if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session") {
             return Err(ManagedError::KillRefused(why));
         }
@@ -316,7 +316,7 @@ impl ManagedTmuxDriver for RealTmuxDriver {
 
     /// #9004: `kill-session -t $N`, after the floor answers for `name`.
     fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
-        let floor = self.driver.supervisor_floor();
+        let floor = self.driver.architect_floor();
         if let Some(why) = floor.refuse(name, "RealTmuxDriver::kill_session_id") {
             return Err(ManagedError::KillRefused(why));
         }

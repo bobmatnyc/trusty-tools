@@ -92,7 +92,7 @@ pub(crate) fn relaunch_command() -> String {
 /// shell re-splits the line.
 /// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
 /// `pm_launch_builders_carry_the_prompt_file`,
-/// `gui_spawn_command_trims_a_pm_and_not_a_supervisor`.
+/// `gui_spawn_command_trims_a_pm_and_not_an_architect`.
 pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, String)) -> String {
     use crate::core::pm_tool_trim::{stamped_profile, trim_args, trim_env};
     use crate::core::spawn_disclaim::pane::shell_single_quote;
@@ -171,7 +171,7 @@ mod tests {
     /// flag; a supervisor stamp keeps every tool. Before the fix the line
     /// ended at the prompt file for both.
     #[test]
-    fn gui_spawn_command_trims_a_pm_and_not_a_supervisor() {
+    fn gui_spawn_command_trims_a_pm_and_not_an_architect() {
         let file = std::path::Path::new("/t/p.txt");
         let pm = gui_spawn_command(file, &("TRUSTY_MPM_SESSION_PROFILE".into(), "pm".into()));
         assert!(

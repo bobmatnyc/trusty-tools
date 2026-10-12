@@ -3,12 +3,12 @@
 //! Why: `tm fleet init` must tell "no daemon to register with" (a warning;
 //! init still succeeds) apart from "the daemon refused" (a failed step), so
 //! the answer is typed instead of an `anyhow` string.
-//! What: [`DaemonClient::register_supervisor`] posts the registration and
+//! What: [`DaemonClient::register_architect`] posts the registration and
 //! returns the report or a [`RegisterCallError`].
 //! Test: `a_registration_call_to_an_absent_socket_is_unreachable`.
 
 use super::DaemonClient;
-use crate::session_manager::{RegistrationReport, SupervisorRegistration};
+use crate::session_manager::{ArchitectRegistration, RegistrationReport};
 
 /// Why a registration call produced no report.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -34,9 +34,9 @@ impl DaemonClient {
     /// `POST /api/v1/sessions/managed/supervisor` (#8942); see the module doc.
     ///
     /// Test: `a_registration_call_to_an_absent_socket_is_unreachable`.
-    pub async fn register_supervisor(
+    pub async fn register_architect(
         &self,
-        reg: &SupervisorRegistration,
+        reg: &ArchitectRegistration,
     ) -> Result<RegistrationReport, RegisterCallError> {
         let resp = match self
             .post("/api/v1/sessions/managed/supervisor")
@@ -72,14 +72,14 @@ mod tests {
     async fn a_registration_call_to_an_absent_socket_is_unreachable() {
         let dir = crate::test_support::hermetic_temp_dir();
         let client = DaemonClient::over_socket(dir.path().join("absent.sock"));
-        let reg = SupervisorRegistration {
+        let reg = ArchitectRegistration {
             dir: dir.path().to_path_buf(),
             session: "tm-arch".into(),
             poll_session: None,
             collector_session: None,
         };
         let err = client
-            .register_supervisor(&reg)
+            .register_architect(&reg)
             .await
             .expect_err("no daemon");
         assert!(matches!(err, RegisterCallError::Unreachable(_)), "{err:?}");

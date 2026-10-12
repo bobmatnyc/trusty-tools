@@ -369,7 +369,9 @@ fn in_scope(path: &Path, env: &HookEnv, config: impl FnOnce() -> MpmConfig) -> b
         .and_then(|h| std::fs::canonicalize(h).ok());
     let project = env.project_dir.as_ref().map(PathBuf::from);
     // #8939 Q2 addendum: the trust anchor is the only source of listed roots.
-    let listed = config().supervisor.projects.into_iter();
+    // #9755: `[architect]` or the legacy `[supervisor]`, through one reader.
+    let config = config();
+    let listed = config.architect_grant().projects.iter().cloned();
     let listed = listed.filter(|root| root.is_absolute());
     project.into_iter().chain(listed).any(|root| {
         let Ok(root) = std::fs::canonicalize(&root) else {

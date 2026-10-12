@@ -260,7 +260,7 @@ fn a_subagent_of_the_architect_may_not_use_the_envfile_exemption() {
 fn a_pm_may_not_use_the_envfile_exemption() {
     let fx = fixture();
     let p = envfile(&fx, ".env.local", "A=1\n");
-    let suffix = NotArchitect::NoSupervisorStamp.to_string();
+    let suffix = NotArchitect::NoArchitectStamp.to_string();
     for command in exempt_commands(&p) {
         let env = HookEnv {
             project_dir: Some(fx.project.clone().into_os_string()),

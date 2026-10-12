@@ -138,10 +138,10 @@ pub fn is_local_only_root(path: &Path) -> Result<bool, String> {
 /// decides that — a project's own `.trusty-mpm.toml` alone cannot (#8453).
 /// What: `true` unless [`crate::core::session_profile::resolve`] says
 /// supervisor for `root` under `config`.
-/// Test: `an_allow_listed_supervisor_keeps_gh`,
-/// `a_self_declared_supervisor_does_not_keep_gh`.
+/// Test: `an_allow_listed_architect_keeps_gh`,
+/// `a_self_declared_architect_does_not_keep_gh`.
 pub fn gh_disabled_for(root: &Path, config: &MpmConfig) -> bool {
-    !crate::core::session_profile::resolve(root, config).is_supervisor()
+    !crate::core::session_profile::resolve(root, config).is_architect()
 }
 
 /// The spawn-env pin for a session in a local-only repository (#8934).
@@ -179,8 +179,8 @@ pub fn local_only_gh_vars() -> Vec<(String, String)> {
 /// exemption is decided once.
 /// What: [`local_only_gh_vars`] when [`gh_disabled_for`]; otherwise no vars —
 /// the allow-listed supervisor keeps the machine's gh. Logs which at `info`.
-/// Test: `an_allow_listed_supervisor_keeps_gh`,
-/// `a_self_declared_supervisor_does_not_keep_gh`.
+/// Test: `an_allow_listed_architect_keeps_gh`,
+/// `a_self_declared_architect_does_not_keep_gh`.
 pub fn local_only_spawn_vars(root: &Path, config: &MpmConfig) -> Vec<(String, String)> {
     if gh_disabled_for(root, config) {
         tracing::info!(root = %root.display(), "{LOCAL_ONLY_SKIP}; gh is disabled for this session");

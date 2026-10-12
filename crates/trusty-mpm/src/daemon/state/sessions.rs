@@ -1260,7 +1260,7 @@ impl DaemonState {
     /// #8942 — a protected-kind record goes `Stopped` record-only
     /// ([`crate::session_manager::SessionManager::mark_stopped_record_only`]).
     ///
-    /// Test: `the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown`,
+    /// Test: `the_tmux_gone_reaper_marks_an_architect_record_stopped_without_teardown`,
     /// `reap_dead_managed_sessions_marks_stopped`,
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,

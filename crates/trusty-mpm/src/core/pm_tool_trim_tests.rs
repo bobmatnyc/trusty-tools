@@ -39,9 +39,9 @@ fn the_chrome_tools_are_never_denied() {
 }
 
 #[test]
-fn a_supervisor_launch_keeps_every_tool() {
-    assert!(trim_env(SessionProfile::Supervisor).is_empty());
-    assert!(trim_args(SessionProfile::Supervisor).is_empty());
+fn an_architect_launch_keeps_every_tool() {
+    assert!(trim_env(SessionProfile::Architect).is_empty());
+    assert!(trim_args(SessionProfile::Architect).is_empty());
 }
 
 #[test]
@@ -53,13 +53,13 @@ fn the_stamp_decides_the_profile() {
         SessionProfile::Pm
     );
     assert_eq!(
-        stamped_profile(&[pin, launch_env(SessionProfile::Supervisor)]),
-        SessionProfile::Supervisor
+        stamped_profile(&[pin, launch_env(SessionProfile::Architect)]),
+        SessionProfile::Architect
     );
     // The last stamp wins, as it does for the spawned process.
     assert_eq!(
         stamped_profile(&[
-            launch_env(SessionProfile::Supervisor),
+            launch_env(SessionProfile::Architect),
             launch_env(SessionProfile::Pm)
         ]),
         SessionProfile::Pm

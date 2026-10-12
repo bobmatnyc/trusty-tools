@@ -716,7 +716,7 @@ fn managed_session_summary_carries_the_kind() {
     let summary = crate::daemon::managed_routes::summary::record_to_summary(&record);
     let wire = serde_json::to_value(summary).unwrap();
     let s: ManagedSessionSummary = serde_json::from_value(wire).unwrap();
-    assert_eq!(s.kind, Some(SessionKind::Supervisor));
+    assert_eq!(s.kind, Some(SessionKind::Architect));
 
     let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
     let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();

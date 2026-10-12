@@ -343,27 +343,39 @@ fn staleness_ok_when_in_sync() {
 }
 
 #[test]
-fn doctor_recognises_the_supervisor_style() {
-    // #8453: the supervisor style is a bundled style — its deployed file is no
+fn doctor_recognises_the_architect_style() {
+    // #8453: the Architect style is a bundled style — its deployed file is no
     // orphan, and a project naming it passes the resolution check.
     let home = tempfile::tempdir().unwrap();
     deploy_all_styles(home.path());
-    let supervisor = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
+    let style = crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID;
     assert!(
         home.path()
             .join(".claude/output-styles")
-            .join(format!("{supervisor}.md"))
+            .join(format!("{style}.md"))
             .is_file()
     );
     let stale = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
     assert_eq!(stale.status, CheckStatus::Ok, "message: {}", stale.message);
 
-    write_settings(
-        home.path(),
-        &format!(r#"{{"outputStyle": "{supervisor}"}}"#),
-    );
+    write_settings(home.path(), &format!(r#"{{"outputStyle": "{style}"}}"#));
     let check = check_output_style(None, home.path());
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+}
+
+/// #9755 (R4): a project still selecting the pre-D07 Architect style id is
+/// "ok, deprecated", never a failure, and its deployed file is no orphan.
+#[test]
+fn legacy_output_style_id_is_recognised_by_doctor() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_all_styles(home.path());
+    let legacy = crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID;
+    write_settings(home.path(), &format!(r#"{{"outputStyle": "{legacy}"}}"#));
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+    assert!(check.message.contains("deprecated"), "{}", check.message);
+    let stale = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
+    assert_eq!(stale.status, CheckStatus::Ok, "message: {}", stale.message);
 }
 
 #[test]

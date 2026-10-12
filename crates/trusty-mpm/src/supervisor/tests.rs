@@ -601,8 +601,8 @@ async fn tick_never_resumes_a_deliberately_stopped_session() {
 async fn tick_never_resumes_a_supervisor_record() {
     use crate::session_manager::SessionKind;
     for kind in [
-        SessionKind::Supervisor,
-        SessionKind::SupervisorAux,
+        SessionKind::Architect,
+        SessionKind::ArchitectAux,
         SessionKind::Unknown,
     ] {
         let dir = TempDir::new().unwrap();

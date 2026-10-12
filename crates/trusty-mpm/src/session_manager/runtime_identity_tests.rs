@@ -13,8 +13,8 @@ use std::sync::Arc;
 use super::runtime_identity::RuntimeTeardown;
 use crate::daemon::tmux::TmuxDriver;
 use crate::session_manager::{
-    ManagedError, ManagedSessionId, ManagedSessionState, RealTmuxDriver, SessionManager,
-    SessionRecord, StopCause, SupervisorFloor,
+    ArchitectFloor, ManagedError, ManagedSessionId, ManagedSessionState, RealTmuxDriver,
+    SessionManager, SessionRecord, StopCause,
 };
 use crate::test_support::tmux_session::{
     PrivateTmuxServer, ScratchTmuxSession, reserved_session_name,
@@ -194,7 +194,7 @@ impl Fixture {
         let data = dir.path().join(".trusty-mpm").join("session-manager");
         std::fs::create_dir_all(&data).expect("data dir");
         let driver = TmuxDriver::with_tmux_path_for_test(bin.to_string_lossy().into_owned())
-            .with_floor(SupervisorFloor::for_data_dir(&data));
+            .with_floor(ArchitectFloor::for_data_dir(&data));
         let mgr = SessionManager::new(
             &data,
             Arc::new(RealTmuxDriver::from_driver_for_test(driver)),

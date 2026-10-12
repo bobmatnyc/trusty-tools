@@ -396,6 +396,7 @@ pub mod trusty_tools_config;
 // #8878: the supervisor-twin identity (D1) and its arming record.
 pub mod twin_arming;
 // #8878 ruling A: the Architect is bound to the `claude` tm launched for it.
+pub mod architect_compat;
 pub mod architect_launch;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;

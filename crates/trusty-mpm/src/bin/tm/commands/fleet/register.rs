@@ -18,10 +18,10 @@
 use std::path::Path;
 
 use trusty_mpm::client::DaemonClient;
-use trusty_mpm::client::http_client::supervisor::RegisterCallError;
+use trusty_mpm::client::http_client::architect::RegisterCallError;
 use trusty_mpm::core::architect_sidecar_prune::{self as prune, SidecarProbes};
-use trusty_mpm::session_manager::supervisor_register::collector_session_name;
-use trusty_mpm::session_manager::{RegistrationReport, SessionKind, SupervisorRegistration};
+use trusty_mpm::session_manager::architect_register::collector_session_name;
+use trusty_mpm::session_manager::{ArchitectRegistration, RegistrationReport, SessionKind};
 
 use super::launch::PaneState;
 use super::session_name::SessionNames;
@@ -30,8 +30,8 @@ use super::{Probe, Step};
 /// The registration for the Architect in `dir` under `names`.
 ///
 /// Test: `the_registration_names_the_real_helper_sessions`.
-pub(crate) fn registration(dir: &Path, names: &SessionNames) -> SupervisorRegistration {
-    SupervisorRegistration {
+pub(crate) fn registration(dir: &Path, names: &SessionNames) -> ArchitectRegistration {
+    ArchitectRegistration {
         dir: dir.to_path_buf(),
         session: names.architect().to_owned(),
         // #8942: `<session>-poll`, the only poller name the daemon accepts.
@@ -41,9 +41,9 @@ pub(crate) fn registration(dir: &Path, names: &SessionNames) -> SupervisorRegist
 }
 
 /// Register `reg` with the local daemon over its socket; see the module doc.
-pub(crate) async fn register(reg: &SupervisorRegistration) -> Step {
+pub(crate) async fn register(reg: &ArchitectRegistration) -> Step {
     let outcome = match DaemonClient::from_resolved_socket() {
-        Ok(client) => client.register_supervisor(reg).await,
+        Ok(client) => client.register_architect(reg).await,
         Err(e) => Err(RegisterCallError::Unreachable(format!("{e:#}"))),
     };
     register_step(reg, outcome)
@@ -55,13 +55,13 @@ pub(crate) async fn register(reg: &SupervisorRegistration) -> Step {
 /// "registered"; only "no daemon" is a warning.
 /// Test: `a_registration_answer_maps_to_its_step`.
 pub(crate) fn register_step(
-    reg: &SupervisorRegistration,
+    reg: &ArchitectRegistration,
     outcome: Result<RegistrationReport, RegisterCallError>,
 ) -> Step {
     match outcome {
         Ok(report) => match report.registered.first() {
             Some(first)
-                if first.kind == SessionKind::Supervisor && first.tmux_name == reg.session =>
+                if first.kind == SessionKind::Architect && first.tmux_name == reg.session =>
             {
                 let helpers: Vec<&str> = report.registered[1..]
                     .iter()

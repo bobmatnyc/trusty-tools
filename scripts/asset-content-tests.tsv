@@ -63,6 +63,7 @@ trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_managed_workspac
 trusty-mpm	lib	core::agent_orphans::tests	reads test_support::repo_roster and the checkout roster files (#8992)
 trusty-mpm	lib	core::agent_skill_codeploy::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::agent_source::tests	reads test_support::repo_roster
+trusty-mpm	lib	core::architect_compat::tests::a_source_with_only_legacy_supervisor_sections_still_loads	reads the checkout's content through the architect/ then supervisor/ section fallback (#9755)
 trusty-mpm	lib	core::bundle::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::bundled_pm_package::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::claude_md_sections::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
@@ -109,7 +110,7 @@ trusty-mpm	lib	core::session_launch::tests::prepare_session_stash_reflects_overr
 trusty-mpm	lib	core::session_launch::tests_quarantine_4448::every_bundled_agent_roots_at_base_agent	reads test_support::repo_agents_dir
 trusty-mpm	lib	core::session_launch::tests_quarantine_4448::the_bundled_base_agent_carries_the_composition_marker	reads test_support::repo_roster
 trusty-mpm	lib	core::session_launch::tests_style_selection_8533::a_bare_claude_launch_loads_the_project_prose_then_the_floor	reads test_support::rc (#9012)
-trusty-mpm	lib	core::session_launch::tests_supervisor_profile_8453::a_supervisor_launch_gets_the_supervisor_prompt_style_and_model	reads test_support::rc (#9012)
+trusty-mpm	lib	core::session_launch::tests_architect_profile_8453::an_architect_launch_gets_the_architect_prompt_style_and_model	reads test_support::rc (#9012)
 trusty-mpm	lib	core::session_profile::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::skill_drift::tests	reads test_support::rc — the skill reference (#9012)
 trusty-mpm	lib	core::skill_drift::tests::a_pristine_bundled_deploy_is_entirely_fresh	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
