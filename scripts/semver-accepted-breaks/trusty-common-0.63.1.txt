@@ -1,0 +1,4 @@
+crate   trusty-common
+version 0.63.1
+reason  Architect ruling 2026-10-12 18:21Z, under Bob's 2026-09-26 versioning ruling (a public-API break never forces a major version): #9735 PR 1b adds DeletionReason::SplitOversized to the pub enum trusty_common::memory_core::maintenance_log::DeletionReason, which is not #[non_exhaustive]. Refs #9735.
+accept  enum_variant_added   DeletionReason
