@@ -32,25 +32,6 @@ use crate::daemon::optimizer::OptimizerConfig;
 use super::overseer::{build_overseer, load_optimizer_config, load_overseer, make_audit_logger};
 use super::sm::{PalaceAccess, build_session_manager_agent};
 
-/// Build the control-plane [`SessionRegistry`] from the operator's config.
-///
-/// Why: WI-5 (§9) makes the concurrency cap, launch stagger, auth timeout, and
-/// classifier gate operator-configurable via the `[control_plane]` section of
-/// `~/.trusty-mpm/config.toml`. The daemon must read that section at startup and
-/// inject it into the registry so the cost guardrails reflect the operator's
-/// settings; an absent section falls back to spec defaults (cap 5, stagger 2 s).
-/// What: loads [`MpmConfig`](crate::core::config::MpmConfig) from `root`
-/// (silently defaulting on absence/malformed input, exactly as the loader
-/// documents) and constructs a [`SessionRegistry`] with its `control_plane`
-/// config.
-/// Test: exercised by every `DaemonState` constructor; control-plane defaults
-/// are pinned by `control::config::tests` and the cap behavior by
-/// `control::registry::tests`.
-fn build_session_registry(root: &std::path::Path) -> SessionRegistry {
-    let cfg = crate::core::config::MpmConfig::load(root);
-    SessionRegistry::with_config(cfg.control_plane)
-}
-
 /// Outcome of a reap sweep over the session registry.
 ///
 /// Why: the reaper now does two distinct things — it *removes* tmux sessions
@@ -467,18 +448,16 @@ pub struct DaemonState {
     /// [`crate::daemon::state::pending_stops`] for the whole rationale.
     /// Test: `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`.
     pub(super) pending_stops: super::pending_stops::PendingStops,
+    /// #8454: the channel route-policy snapshot, built on first use; see
+    /// [`Self::channel_policy`].
+    #[cfg(feature = "channels")]
+    pub(super) channel_policy: std::sync::OnceLock<crate::channels::snapshot::DaemonPolicySnapshot>,
 }
 
 impl Default for DaemonState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// An empty `/health` catalog-report cache with the production max age (#7968).
-fn new_catalog_report_cache() -> Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
-    use crate::daemon::rpc::health_catalog::{CatalogReportCache, MAX_AGE};
-    Arc::new(CatalogReportCache::new(MAX_AGE))
 }
 
 impl DaemonState {
@@ -535,7 +514,7 @@ impl DaemonState {
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         // §9 (WI-5): build the control-plane registry with the operator's
         // [control_plane] auth+cost config (cap, stagger, classifier gate).
-        let session_registry = Arc::new(build_session_registry(&root));
+        let session_registry = Arc::new(super::overseer::build_session_registry(&root));
         // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
         // failure degrades inside `provision` and never fails daemon startup.
         let manager = Arc::new(ManagerState::provision(&root, access));
@@ -576,13 +555,15 @@ impl DaemonState {
             launchd_supervision: std::sync::RwLock::new(String::new()),
             build_identity: std::sync::RwLock::new(String::new()),
             // #7968: empty until the first `/health` starts a walk.
-            catalog_report: new_catalog_report_cache(),
+            catalog_report: super::overseer::new_catalog_report_cache(),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
+            #[cfg(feature = "channels")]
+            channel_policy: std::sync::OnceLock::new(),
         }
     }
 
@@ -615,7 +596,7 @@ impl DaemonState {
         // §9 (WI-5): build the control-plane registry from [control_plane] under
         // this (possibly temp-dir) framework root, so e2e tests can inject a
         // hermetic auth+cost config and the real daemon reads the operator's.
-        let session_registry = Arc::new(build_session_registry(&framework_root));
+        let session_registry = Arc::new(super::overseer::build_session_registry(&framework_root));
         // §7 Q3: auto-provision the portfolio manager palace at startup; a palace
         // failure degrades inside `provision` and never fails daemon startup.
         // #9274: a daemon built over its own paths opens the palaces as writer.
@@ -660,13 +641,15 @@ impl DaemonState {
             launchd_supervision: std::sync::RwLock::new(String::new()),
             build_identity: std::sync::RwLock::new(String::new()),
             // #7968: empty until the first `/health` starts a walk.
-            catalog_report: new_catalog_report_cache(),
+            catalog_report: super::overseer::new_catalog_report_cache(),
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
             shared_tree_claim: parking_lot::Mutex::new(()),
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
+            #[cfg(feature = "channels")]
+            channel_policy: std::sync::OnceLock::new(),
         }
     }
 
