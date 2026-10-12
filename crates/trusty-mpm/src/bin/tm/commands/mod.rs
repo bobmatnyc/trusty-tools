@@ -182,6 +182,8 @@ pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
 // #8625: no tool call reads a kuzu-memory store, the import venv or its temp export.
+// #9794: the narrowed `trusty-memory import kuzu` exception to the D5b rule.
+pub(crate) mod pm_guard_kuzu_exception;
 pub(crate) mod pm_guard_kuzu_import;
 pub(crate) mod pm_guard_kuzu_names;
 pub(crate) mod pm_guard_kuzu_store;

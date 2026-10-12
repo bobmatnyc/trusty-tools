@@ -3,8 +3,8 @@
 //!
 //! Why: issue #8625 closure condition 2 — "pm-guard rule denies model reads of
 //! kuzu stores, the bridge temp export, and the import venv". Architect ruling
-//! 2026-10-12 15:42Z removed the `trusty-memory import kuzu` exception: every
-//! such call denies too (the narrowed exception is #9794). The reviewer reads
+//! 2026-10-12 15:42Z removed the `trusty-memory import kuzu` exception; #9794
+//! restored a narrowed one (`pm_guard_kuzu_exception`). The reviewer reads
 //! only the masked `~/.trusty-tools/kuzu-review/<run>/masked.jsonl`, which
 //! this rule leaves alone. Ruling B10: the deny "holds under `TRUSTY_MPM_UNRESTRICTED` and
 //! `DISABLE_HOOKS`, and for the Architect" — so it runs in step 1 of
@@ -14,7 +14,9 @@
 //! [`KUZU_STORE_RULE`].
 //! What: a Bash command naming both `trusty-memory` and `kuzu` outside a
 //! quoted text slot denies first (owner ruling D5b,
-//! `pm_guard_kuzu_import::trusty_memory_kuzu_text`). Then, like the #7266
+//! `pm_guard_kuzu_import::trusty_memory_kuzu_text`), unless it is one of the
+//! #9794 dry-run or review forms; a `--python` there denies on its own
+//! (label `kuzu-import-python`). Then, like the #7266
 //! rule, the NAME decides, not the verb: a Bash segment denies when any word
 //! names a deny item (`pm_guard_kuzu_names`) or when it runs `kuzu-memory`
 //! (`pm_guard_kuzu_import`). The only exemptions are a metadata verb
@@ -43,6 +45,7 @@ use crate::commands::pm_guard_bash::{
     MAX_SUBSTITUTION_DEPTH, command_substitutions, git_argv_at_subcommand, prose_write_indices,
     split_heredoc_bodies, split_shell_segments, tokenize,
 };
+use crate::commands::pm_guard_kuzu_exception::{ImportException, kuzu_import_exception};
 use crate::commands::pm_guard_kuzu_import::{runs_kuzu_memory, trusty_memory_kuzu_text};
 use crate::commands::pm_guard_kuzu_names::{kuzu_words_in, program_text_words, word_names_kuzu};
 use crate::commands::pm_guard_secret_handling::body_written_to_a_file;
@@ -64,11 +67,13 @@ const KUZU_SAFE_VERBS: &[&str] = &["ls", "stat", "test", "["];
 /// The kuzu-store decision for one tool call: `Some(reason)` denies.
 ///
 /// Why: see the module doc; one entry for every tool shape.
-/// What: Bash is judged by its cwd, then by the D5b text rule, then by
-/// [`evaluate_command`]; the file tools by their path fields.
+/// What: Bash is judged by its cwd, then by the #9794 exception or the D5b
+/// text rule, then by [`evaluate_command`]; the file tools by their path
+/// fields.
 /// Test: `denies_every_tool_shape_naming_a_store`,
 /// `denies_bash_reads_of_a_store`, `denies_the_formerly_sanctioned_import`,
-/// `denies_a_bash_call_from_inside_a_store_directory`.
+/// `denies_a_bash_call_from_inside_a_store_directory`,
+/// `the_allow_keeps_the_by_name_store_deny`.
 pub(crate) fn evaluate_kuzu_store_access(
     tool_name: &str,
     tool_input: Option<&Value>,
@@ -79,8 +84,14 @@ pub(crate) fn evaluate_kuzu_store_access(
     match tool_name {
         "Bash" => {
             let command = field("command").unwrap_or_default();
+            // #9794: the narrowed exception lifts the D5b text rule only.
+            let text_rule = || match kuzu_import_exception(command, dirs::home_dir().as_deref()) {
+                ImportException::Allow => None,
+                ImportException::DenyPython(reason) => Some(reason),
+                ImportException::NoMatch => trusty_memory_kuzu_text(command),
+            };
             cwd_verdict(cwd)
-                .or_else(|| trusty_memory_kuzu_text(command))
+                .or_else(text_rule)
                 .or_else(|| evaluate_command(command, 0))
         }
         "Read" | "Edit" | "MultiEdit" | "Write" => path_verdict(field("file_path")?, cwd, &how),

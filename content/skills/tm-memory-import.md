@@ -50,8 +50,14 @@ is missing from the installed binary, stop and report it.
 6. Never stop the trusty-memory daemon before GO. Every step up to the ledger
    preview is a dry run and runs beside a live daemon.
 
-A pm-guard deny for the store paths is planned under #8625. Until it ships,
-these rules are the only barrier.
+The pm-guard enforces these rules (#8625, #9794). It allows only these
+`trusty-memory import kuzu` forms: the dry runs of steps 1, 2 and 4 (each
+with `--dry-run`), and `review record`, `review status` and `review finish`.
+Write each one on a single line of plain words, with no quotes, `$`, `\`,
+`;`, `&&` or redirection. The only allowed tail is `2>&1 | tee <path>` into
+`~/.trusty-tools/kuzu-review/` or the session scratchpad. Any `--python` is
+denied, so omit it. Every other form stays denied, `--help` and the step-5
+import (no `--dry-run`) included; the operator runs those outside the guard.
 
 ## 1. The Runbook Dry Run
 

@@ -7,7 +7,7 @@
 //! 2026-10-12 15:42Z: every `trusty-memory import kuzu` denies under the
 //! guard; ruling Q8 keeps the `migrate kuzu-data` and `migrate kuzu-memory`
 //! aliases denied. Owner ruling D5b replaced the argv parser for those calls
-//! with one text rule. The narrowed exception is #9794.
+//! with one text rule. #9794 narrows it: `pm_guard_kuzu_exception`.
 //! What: [`runs_kuzu_memory`] reads one argv. [`trusty_memory_kuzu_text`]
 //! reads the whole Bash command as text.
 //! Test: `pm_guard_kuzu_store_tests.rs` — `denies_running_kuzu_memory`,
