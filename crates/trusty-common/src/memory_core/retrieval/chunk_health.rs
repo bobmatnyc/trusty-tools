@@ -8,7 +8,7 @@
 //! lists the drawers whose rows are not exactly chunks `0..expected`.
 //! Test: `chunk_health_tests.rs`.
 
-use super::embed_store::{ChunkPlanner, expected_chunk_count};
+use super::embed_store::{ChunkPlanner, TooManyChunks, expected_chunk_count};
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::vector::ChunkShape;
@@ -49,7 +49,8 @@ impl ChunkCheck {
 /// the index scan failed. A drawer whose text fits one chunk is checked under
 /// the drawer read lock; the rest are cloned and split outside it with
 /// [`expected_chunk_count`], so the check and the writers share one split. A
-/// drawer whose text will not split counts as short (its repair reports why).
+/// drawer whose text will not split counts as short (its repair reports why);
+/// one over the chunk cap is logged once at `info` as needing a split (#9735).
 /// Test: `health_flags_a_drawer_with_fewer_chunk_rows_than_expected`,
 /// `health_flags_a_gapped_group`,
 /// `health_reports_chunk_check_unavailable_when_no_embedder_is_ready`.
@@ -98,6 +99,13 @@ pub(super) fn short_chunk_ids(
         match expected_chunk_count(embedder, &text) {
             Ok(expected) if shape.is_complete(expected) => {}
             Ok(_) => short.push(id),
+            // #9735 PR 1b: over the chunk cap is work for the backfill split.
+            Err(e) if e.downcast_ref::<TooManyChunks>().is_some() => {
+                if first_sighting(id) {
+                    tracing::info!(drawer = %id, "#9735: drawer needs a split: {e:#}");
+                }
+                short.push(id);
+            }
             Err(e) => {
                 // #9735 gap 13: health runs every tick; warn once per drawer.
                 if first_sighting(id) {

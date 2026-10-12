@@ -16,6 +16,8 @@
 mod chunk_backfill;
 mod chunk_health;
 mod chunk_progress;
+// #9735: `pub(crate)` so the dream merge can refuse a split part.
+pub(crate) mod chunk_split;
 mod deferred_embed;
 mod embed_repair;
 mod embed_store;
