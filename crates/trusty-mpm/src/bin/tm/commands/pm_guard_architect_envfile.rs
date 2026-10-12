@@ -159,8 +159,7 @@ pub(crate) fn evaluate_secret_file_read_gated(
     // Architect, so no step below lifts it; a #7266 deny of the same call
     // keeps its own label.
     let kuzu = || {
-        let home = gate.env().home.as_deref();
-        let reason = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd, home)?;
+        let reason = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd)?;
         Some(FloorDeny {
             rule: KUZU_STORE_RULE,
             reason,

@@ -2,8 +2,10 @@
 //! import venv, or the import bridge's temp export (#8625 PR-2).
 //!
 //! Why: issue #8625 closure condition 2 — "pm-guard rule denies model reads of
-//! kuzu stores, the bridge temp export, and the import venv, except through
-//! `trusty-memory import kuzu`." The reviewer reads only the masked
+//! kuzu stores, the bridge temp export, and the import venv". Architect ruling
+//! 2026-10-12 15:42Z removed the `trusty-memory import kuzu` exception: every
+//! such call denies too, and a narrowed exception is follow-up work ranked
+//! before the #277 import window. The reviewer reads only the masked
 //! `~/.trusty-tools/kuzu-review/<run>/masked.jsonl`, which this rule leaves
 //! alone. Ruling B10: the deny "holds under `TRUSTY_MPM_UNRESTRICTED` and
 //! `DISABLE_HOOKS`, and for the Architect" — so it runs in step 1 of
@@ -13,10 +15,10 @@
 //! [`KUZU_STORE_RULE`].
 //! What: like the #7266 rule, the NAME decides, not the verb. A Bash segment
 //! denies when any word names a deny item (`pm_guard_kuzu_names`), when it
-//! runs `kuzu-memory`, or when a `trusty-memory` call fails ruling Q8 or Q9
-//! (`pm_guard_kuzu_import`). The only exemptions are the arguments of a
-//! sanctioned `trusty-memory import kuzu` call, a metadata verb
-//! ([`KUZU_SAFE_VERBS`]), and the words the #7266 rule also reads as text (a
+//! runs `kuzu-memory`, or when it carries a `trusty-memory import kuzu` or
+//! `migrate` alias call (`pm_guard_kuzu_import`). The only exemptions are a
+//! metadata verb ([`KUZU_SAFE_VERBS`]) and the words the #7266 rule also
+//! reads as text (a
 //! search pattern, a `--body` payload, prose a lone `echo` writes, a
 //! `git commit -m` message). A `Read`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`
 //! path, a `Grep` path or glob, a `Glob` path or pattern, and the hook's cwd
@@ -28,7 +30,8 @@
 //! command only through a variable (`cat "$F"`) or a computed name; a Bash
 //! word that is a symlink into a store (only tool paths and the cwd are
 //! resolved); a script file whose body opens a store; a Python program that
-//! builds the path from pieces.
+//! builds the path from pieces; a `trusty-memory` reached through a variable,
+//! an alias, a function or a symlink of another name.
 //! Test: `pm_guard_kuzu_store_tests.rs`; end to end under each bypass and for
 //! the Architect in `tests/tm_hook_pm_guard_kuzu_store_8625.rs`.
 
@@ -40,9 +43,7 @@ use crate::commands::pm_guard_bash::{
     MAX_SUBSTITUTION_DEPTH, command_substitutions, git_argv_at_subcommand, prose_write_indices,
     split_heredoc_bodies, split_shell_segments, tokenize,
 };
-use crate::commands::pm_guard_kuzu_import::{
-    runs_kuzu_memory, sanctioned_argument_indices, trusty_memory_verdict,
-};
+use crate::commands::pm_guard_kuzu_import::{kuzu_import_call, runs_kuzu_memory};
 use crate::commands::pm_guard_kuzu_names::{kuzu_words_in, program_text_words, word_names_kuzu};
 use crate::commands::pm_guard_secret_handling::body_written_to_a_file;
 use crate::commands::pm_guard_secret_positions::text_payload_indices;
@@ -64,21 +65,21 @@ const KUZU_SAFE_VERBS: &[&str] = &["ls", "stat", "test", "["];
 ///
 /// Why: see the module doc; one entry for every tool shape.
 /// What: Bash is judged by its cwd, then by [`evaluate_command`]; the file
-/// tools by their path fields. `home` places `~` and the import venv.
+/// tools by their path fields.
 /// Test: `denies_every_tool_shape_naming_a_store`,
-/// `denies_bash_reads_of_a_store`, `allows_the_sanctioned_import`,
+/// `denies_bash_reads_of_a_store`, `denies_the_formerly_sanctioned_import`,
 /// `denies_a_bash_call_from_inside_a_store_directory`.
 pub(crate) fn evaluate_kuzu_store_access(
     tool_name: &str,
     tool_input: Option<&Value>,
     cwd: &Path,
-    home: Option<&Path>,
 ) -> Option<String> {
     let field = |key| tool_input.and_then(|v| v.get(key)).and_then(Value::as_str);
     let how = format!("the `{tool_name}` tool");
     match tool_name {
-        "Bash" => cwd_verdict(cwd)
-            .or_else(|| evaluate_command(field("command").unwrap_or_default(), home, 0)),
+        "Bash" => {
+            cwd_verdict(cwd).or_else(|| evaluate_command(field("command").unwrap_or_default(), 0))
+        }
         "Read" | "Edit" | "MultiEdit" | "Write" => path_verdict(field("file_path")?, cwd, &how),
         "NotebookEdit" => path_verdict(field("notebook_path")?, cwd, &how),
         "Grep" | "Glob" => {
@@ -168,8 +169,9 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 /// here-document body as program text unless a lone `cat` only writes it to
 /// a file, then each command-substitution body, recursively.
 /// Test: `denies_bash_reads_of_a_store`, `denies_running_kuzu_memory`,
-/// `the_exception_cannot_be_widened`.
-fn evaluate_command(command: &str, home: Option<&Path>, depth: usize) -> Option<String> {
+/// `the_exception_cannot_be_widened`,
+/// `denies_an_import_kuzu_inside_a_substitution_or_a_shell_string`.
+fn evaluate_command(command: &str, depth: usize) -> Option<String> {
     if depth > MAX_SUBSTITUTION_DEPTH {
         let lower = command.to_ascii_lowercase();
         return (lower.contains("kuzu") || lower.contains("memories.db"))
@@ -183,10 +185,8 @@ fn evaluate_command(command: &str, home: Option<&Path>, depth: usize) -> Option<
         .filter(|s| !s.is_empty())
         .collect();
     let lone = live.len() == 1;
-    // #8625: the import exemption needs the whole command, bar a trailing `| tee`.
-    let whole = lone || (live.len() == 2 && runs_tee(live[1]));
-    for (i, segment) in live.iter().enumerate() {
-        if let Some(reason) = segment_verdict(segment, lone, whole && i == 0, home) {
+    for segment in &live {
+        if let Some(reason) = segment_verdict(segment, lone) {
             return Some(reason);
         }
     }
@@ -195,31 +195,34 @@ fn evaluate_command(command: &str, home: Option<&Path>, depth: usize) -> Option<
             if let Some(word) = program_text_words(body).first() {
                 return Some(deny_reason(word, "a here-document body"));
             }
+            // #8625: a body a shell runs may call `trusty-memory import kuzu`.
+            if let Some(reason) = kuzu_import_call(body) {
+                return Some(reason);
+            }
         }
     }
     command_substitutions(command)
         .iter()
-        .find_map(|sub| evaluate_command(sub.text(), home, depth + 1))
-}
-
-/// Whether `segment` is a `tee` call (the only tail the import exemption allows).
-fn runs_tee(segment: &str) -> bool {
-    tokenize(segment)
-        .ok()
-        .and_then(|argv| argv.first().map(|p| command_basename(p) == "tee"))
-        .unwrap_or(false)
+        .find_map(|sub| evaluate_command(sub.text(), depth + 1))
 }
 
 /// The kuzu-store decision for one segment.
 ///
-/// What: an unlexable segment is scanned raw. Otherwise the `trusty-memory`
-/// rulings, the `kuzu-memory` program rule, then every token's deny words
-/// minus the exempt positions (module doc); a segment whose deny words are
-/// all arguments of a [`KUZU_SAFE_VERBS`] program allows.
+/// What: an unlexable segment is scanned raw. Otherwise the `kuzu-memory`
+/// program rule, then the `trusty-memory import kuzu` rule over every token
+/// but the text positions, then every token's deny words minus the exempt
+/// positions (module doc); a segment whose deny words are all arguments of a
+/// [`KUZU_SAFE_VERBS`] program allows.
 /// Test: `denies_an_unlexable_segment_naming_a_store`,
-/// `keeps_ordinary_commands_allowed`, `the_exception_cannot_be_widened`.
-fn segment_verdict(segment: &str, lone: bool, whole: bool, home: Option<&Path>) -> Option<String> {
+/// `keeps_ordinary_commands_allowed`, `the_exception_cannot_be_widened`,
+/// `denies_an_import_kuzu_after_an_environment_prefix`,
+/// `keeps_unrelated_trusty_memory_commands_allowed`.
+fn segment_verdict(segment: &str, lone: bool) -> Option<String> {
     let Ok(argv) = tokenize(segment) else {
+        // #8625: fail closed — the raw text may carry the import call.
+        if let Some(reason) = kuzu_import_call(segment) {
+            return Some(reason);
+        }
         let word = kuzu_words_in(segment, false)
             .into_iter()
             .next()
@@ -231,21 +234,25 @@ fn segment_verdict(segment: &str, lone: bool, whole: bool, home: Option<&Path>) 
             })?;
         return Some(deny_reason(&word, "a command the guard cannot lex"));
     };
-    if let Some(reason) = trusty_memory_verdict(&argv, segment, home) {
-        return Some(reason);
-    }
     if runs_kuzu_memory(&argv) {
         return Some(format!(
-            "{KUZU_STORE_RULE}: running `kuzu-memory` reads its store directly (#8625). Use \
-             `trusty-memory import kuzu` as the tm-memory-import skill describes."
+            "{KUZU_STORE_RULE}: running `kuzu-memory` reads its store directly (#8625). The \
+             operator runs `trusty-memory import kuzu` outside the guard."
         ));
     }
-    let mut skip = sanctioned_argument_indices(segment, &argv, home, whole);
-    skip.extend(pattern_argument_index(segment, &argv));
+    let mut skip: Vec<usize> = pattern_argument_index(segment, &argv).into_iter().collect();
     skip.extend(text_payload_indices(segment, &argv));
     skip.extend(commit_message_indices(segment, &argv));
     if lone {
         skip.extend(prose_write_indices(segment, &argv));
+    }
+    // #8625: every token outside a text position, so a `bash -c` string counts.
+    let live: Vec<&str> = (0..argv.len())
+        .filter(|i| !skip.contains(i))
+        .map(|i| argv[i].as_str())
+        .collect();
+    if let Some(reason) = kuzu_import_call(&live.join(" ")) {
+        return Some(reason);
     }
     let program_at = inline_program_indices(&argv);
     let mut named: Vec<(usize, String)> = Vec::new();
@@ -314,8 +321,8 @@ fn only_handles(segment: &str, argv: &[String], named: &[(usize, String)]) -> bo
 fn deny_reason(target: &str, how: &str) -> String {
     format!(
         "{KUZU_STORE_RULE}: {how} names `{target}`, a kuzu-memory store, the kuzu import venv \
-         or the import bridge's temp export (#8625). Use `trusty-memory import kuzu` as the \
-         tm-memory-import skill describes; the reviewer reads only the masked \
+         or the import bridge's temp export (#8625). The operator runs `trusty-memory import \
+         kuzu` outside the guard; the reviewer reads only the masked \
          ~/.trusty-tools/kuzu-review/<run>/masked.jsonl."
     )
 }

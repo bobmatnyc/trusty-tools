@@ -1,36 +1,37 @@
-//! The program side of the #8625 kuzu-store rule: running `kuzu-memory`, the
-//! one sanctioned route (`trusty-memory import kuzu`), its `--python` check,
-//! and the deprecated aliases.
+//! The program side of the #8625 kuzu-store rule: running `kuzu-memory`, any
+//! `trusty-memory import kuzu`, and the deprecated `migrate` aliases.
 //!
 //! Why: `kuzu-memory memory export` dumps raw rows without naming a store
-//! path, so the path-word test alone cannot see it. Ruling Q8: "the exception
-//! covers `trusty-memory import kuzu` only. The deprecated `migrate
-//! kuzu-data` and `migrate kuzu-memory` aliases stay denied." Ruling Q9, as
-//! accepted 14:09Z: "allow when --python absent, or lexical normalised path
-//! (no symlink follow) is
-//! <home>/.trusty-tools/kuzu-import-venv/bin/python|python3|python3.N AND
-//! canonical(arg)==canonical(<venv>/bin/python); else deny with its own slug".
-//! What: [`runs_kuzu_memory`], [`trusty_memory_verdict`] and
-//! [`sanctioned_argument_indices`]; every failure to resolve a program word,
-//! a path or an interpreter answers on the deny side.
+//! path, and `trusty-memory import kuzu --discover` finds stores without
+//! naming one, so the path-word test alone sees neither. Architect ruling
+//! 2026-10-12 15:42Z: "Deny every trusty-memory import kuzu under the guard;
+//! remove the exception code." Ruling Q8: the deprecated `migrate kuzu-data`
+//! and `migrate kuzu-memory` aliases stay denied. A narrowed exception is
+//! follow-up work, ranked before the #277 import window.
+//! What: [`runs_kuzu_memory`] reads one argv. [`kuzu_import_call`] reads any
+//! command text — a segment's argv, an unlexable segment, a here-document
+//! body, a `bash -c` string — as statements of words, so no environment
+//! prefix, wrapper, flag, case or quoting decides the answer.
 //! Test: `pm_guard_kuzu_store_tests.rs` — `denies_running_kuzu_memory`,
-//! `allows_the_venv_interpreter`, `denies_a_non_venv_python_program`,
-//! `denies_a_planted_symlink_to_the_same_cpython`,
-//! `denies_when_the_venv_interpreter_cannot_be_resolved`,
-//! `denies_the_deprecated_migrate_aliases`, `the_exception_cannot_be_widened`.
+//! `denies_the_deprecated_migrate_aliases`,
+//! `denies_an_import_kuzu_after_an_environment_prefix`,
+//! `denies_an_import_kuzu_inside_a_substitution_or_a_shell_string`,
+//! `denies_an_import_kuzu_in_another_spelling`,
+//! `keeps_unrelated_trusty_memory_commands_allowed`.
 
-use std::path::{Component, Path, PathBuf};
-
-use crate::commands::pm_guard_kuzu_names::names_kuzu_module;
-use crate::commands::pm_guard_secret_read::{NESTED_COMMAND_MARKERS, command_basename};
+use crate::commands::pm_guard_kuzu_names::{names_kuzu_module, word_may_expand_to};
+use crate::commands::pm_guard_secret_read::command_basename;
 use crate::commands::program_word::resolve_program_word;
 
 /// The program `kuzu-memory` installs.
 const KUZU_PROGRAM: &str = "kuzu-memory";
 
-/// The sanctioned program, and its deprecated `migrate` targets (ruling Q8).
+/// The program whose `import kuzu` and `migrate` aliases deny (ruling Q8).
 const TRUSTY_MEMORY: &str = "trusty-memory";
 const MIGRATE_ALIASES: &[&str] = &["kuzu-data", "kuzu-memory"];
+
+/// Programs that append their input to a command line (`xargs trusty-memory import`).
+const ARGUMENT_FEEDERS: &[&str] = &["xargs", "gxargs", "parallel"];
 
 /// Package runners that run a later argument as a program (`uvx kuzu-memory`).
 const LAUNCHERS: &[&str] = &[
@@ -49,12 +50,6 @@ const LAUNCHERS: &[&str] = &[
     "micromamba",
     "pixi",
 ];
-
-/// The import venv's `bin` directory under the home (ruling Q1, Q9).
-const VENV_BIN: &str = ".trusty-tools/kuzu-import-venv/bin";
-
-/// The reason slug of a `--python` deny (ruling Q9: "its own slug").
-pub(crate) const PYTHON_SLUG: &str = "kuzu-import-python";
 
 /// Whether `argv` runs the `kuzu-memory` program or its Python module.
 ///
@@ -116,227 +111,153 @@ fn python_runs_kuzu_module(args: &[String]) -> bool {
     })
 }
 
-/// The deny a `trusty-memory` call earns on its own, whatever it names.
+/// The deny for a `trusty-memory import kuzu` or `migrate` alias call
+/// anywhere in `text`; `None` when there is none.
 ///
-/// What: `migrate kuzu-data|kuzu-memory` denies outright (ruling Q8); an
-/// `import kuzu` call denies when any `--python` value fails
-/// [`venv_python_verdict`] (ruling Q9). Every `trusty-memory` word in `argv`
-/// is checked, so a wrapper the resolver cannot read hides none.
-/// Test: `denies_the_deprecated_migrate_aliases`,
-/// `denies_a_non_venv_python_program`, `allows_the_venv_interpreter`.
-pub(crate) fn trusty_memory_verdict(
-    argv: &[String],
-    segment: &str,
-    home: Option<&Path>,
-) -> Option<String> {
-    let calls = argv
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| command_basename(t) == TRUSTY_MEMORY);
-    for (at, _) in calls {
-        let Some(sub) = argv[at + 1..].iter().position(|t| !t.starts_with('-')) else {
-            continue;
+/// Why: see the module doc — the call denies whatever surrounds it.
+/// What: `text` loses its quotes and backslashes (a `\<newline>` joins) and
+/// the `&` or `|` of a redirection operator, is cut into statements at `;`,
+/// `&`, `|` and newlines, and each statement into words twice: at blanks,
+/// parentheses and backticks, and again at `,`, `[`, `]`, `{` and `}` too (a
+/// Python argv list). Redirections drop out ([`without_redirections`]), as
+/// bash removes them before the program sees its argv; [`call_in`] judges
+/// each word list.
+/// Test: `denies_an_import_kuzu_after_an_environment_prefix`,
+/// `denies_an_import_kuzu_inside_a_substitution_or_a_shell_string`,
+/// `denies_an_import_kuzu_in_another_spelling`,
+/// `denies_an_import_kuzu_split_by_a_redirection`,
+/// `keeps_unrelated_trusty_memory_commands_allowed`.
+pub(crate) fn kuzu_import_call(text: &str) -> Option<String> {
+    let mut clean: String = text
+        .replace("\\\n", " ")
+        .chars()
+        .filter(|c| !matches!(c, '\\' | '\'' | '"'))
+        .collect();
+    for (from, to) in REDIRECTION_SPELLINGS {
+        clean = clean.replace(from, to);
+    }
+    let narrow = |c: char| c.is_whitespace() || "()`".contains(c);
+    let wide = |c: char| narrow(c) || ",[]{}".contains(c);
+    clean.split([';', '&', '|', '\n']).find_map(|statement| {
+        let words = |cut: &dyn Fn(char) -> bool| -> Vec<String> {
+            let words: Vec<String> = statement
+                .split(cut)
+                .filter(|w| !w.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect();
+            without_redirections(words)
         };
-        let sub = at + 1 + sub;
-        let after = &argv[sub + 1..];
-        if argv[sub] == "migrate"
-            && let Some(alias) = after.iter().find(|t| is_migrate_alias(t))
-        {
-            return Some(format!(
-                "kuzu-store-read: `trusty-memory migrate {alias}` is a deprecated alias that \
-                 reads kuzu-memory stores outside the sanctioned route (#8625, ruling Q8). \
-                 Use `trusty-memory import kuzu` as the tm-memory-import skill describes."
-            ));
+        call_in(&words(&narrow)).or_else(|| call_in(&words(&wide)))
+    })
+}
+
+/// Redirection spellings rewritten before the statement cut, so `&>`, `>&`,
+/// `>|` and `<&` stay one operator and a process substitution's `<(` opens a
+/// body rather than a redirection.
+const REDIRECTION_SPELLINGS: [(&str, &str); 6] = [
+    ("<(", " ("),
+    (">(", " ("),
+    ("&>", ">"),
+    (">&", ">"),
+    (">|", ">"),
+    ("<&", "<"),
+];
+
+/// `words` minus each redirection: a word holding `<` or `>` goes, and so
+/// does the next word when the operator stands alone (`2> /dev/null`): an fd
+/// number, then only `<` and `>` (`2>1`, from `2>&1`, carries its target).
+fn without_redirections(words: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    let mut target_next = false;
+    for word in words {
+        if std::mem::take(&mut target_next) {
+            continue;
         }
-        if argv[sub] == "import" && after.first().is_some_and(|t| t == "kuzu") {
-            let quoted_tilde = ["\"~", "'~"].iter().any(|q| segment.contains(q));
-            for (value, tilde_ok) in python_values(&after[1..]) {
-                let tilde_ok = tilde_ok && !quoted_tilde;
-                if let Err(why) = venv_python_verdict(value, tilde_ok, home) {
-                    return Some(python_reason(value.unwrap_or_default(), why));
+        if word.contains(['<', '>']) {
+            target_next = word
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .chars()
+                .all(|c| c == '<' || c == '>');
+            continue;
+        }
+        out.push(word);
+    }
+    out
+}
+
+/// The deny for the first `trusty-memory` call in one statement's `words`.
+///
+/// What: a word whose basename may be `trusty-memory`, then — skipping every
+/// `-` word, so `-v`, `--verbose` and `--` hide nothing — a sub-command that
+/// may be `import` followed by one that may be `kuzu`, or `migrate` followed
+/// by an alias. Under an argument feeder (`xargs`) a missing word is supplied
+/// at run time, so it denies (fail closed).
+fn call_in(words: &[String]) -> Option<String> {
+    let fed = words
+        .iter()
+        .any(|w| ARGUMENT_FEEDERS.contains(&command_basename(w).as_str()));
+    for (at, word) in words.iter().enumerate() {
+        if !word_may_expand_to(&command_basename(word), TRUSTY_MEMORY) {
+            continue;
+        }
+        let rest: Vec<&String> = words[at + 1..]
+            .iter()
+            .filter(|w| !w.starts_with('-'))
+            .collect();
+        let deny = match rest.first() {
+            None => fed,
+            Some(sub) if may_be(sub, "import") => rest.get(1).map_or(fed, |t| names_kuzu(t)),
+            Some(sub) if may_be(sub, "migrate") => {
+                let in_slot = rest.get(1).filter(|t| is_migrate_alias(t, true));
+                let anywhere = || rest[1..].iter().find(|t| is_migrate_alias(t, false));
+                if let Some(alias) = in_slot.or_else(anywhere) {
+                    return Some(migrate_reason(alias));
                 }
+                rest.len() == 1 && fed
             }
+            Some(_) => false,
+        };
+        if deny {
+            return Some(import_reason());
         }
     }
     None
 }
 
-/// Whether `token` is a deprecated `migrate` target, in either spelling.
-fn is_migrate_alias(token: &str) -> bool {
+/// Whether a sub-command word may be `literal`: a glob or brace reading of
+/// it, or a `$` expansion the guard cannot read (fail closed).
+fn may_be(word: &str, literal: &str) -> bool {
+    word.contains('$') || word.contains("{}") || word_may_expand_to(word, literal)
+}
+
+/// Whether the word after `import` may be `kuzu` (`${X:-kuzu}` included).
+fn names_kuzu(word: &str) -> bool {
+    word.contains("kuzu") || may_be(word, "kuzu")
+}
+
+/// Whether `token` may be a deprecated `migrate` target, in any case or
+/// spelling; `slot` (the word right after `migrate`) also takes a `$` word.
+fn is_migrate_alias(token: &str, slot: bool) -> bool {
     let normal = token.to_ascii_lowercase().replace('_', "-");
-    MIGRATE_ALIASES.contains(&normal.as_str())
+    MIGRATE_ALIASES
+        .iter()
+        .any(|alias| word_may_expand_to(&normal, alias) || (slot && may_be(&normal, alias)))
 }
 
-/// Every `--python` value in `args`; `None` for a flag with no value. The
-/// flag says whether bash would expand a leading `~` in that spelling: it does
-/// for a separate unquoted word, never after `--python=`.
-fn python_values(args: &[String]) -> Vec<(Option<&str>, bool)> {
-    let mut out = Vec::new();
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--python" {
-            out.push((args.get(i + 1).map(String::as_str), true));
-        } else if let Some(value) = arg.strip_prefix("--python=") {
-            out.push((Some(value), false));
-        }
-    }
-    out
+/// The deny text for an `import kuzu` call.
+fn import_reason() -> String {
+    "kuzu-store-read: `trusty-memory import kuzu` is denied under the guard (#8625, \
+     Architect ruling 2026-10-12): it opens kuzu-memory stores, and no exception is in \
+     force. The operator runs the import outside the guard; the reviewer reads only the \
+     masked ~/.trusty-tools/kuzu-review/<run>/masked.jsonl."
+        .to_string()
 }
 
-/// Ruling Q9 for one `--python` value: `Ok` only for the venv interpreter.
-///
-/// What: the value must be absolute, or an unquoted separate `~/...` word
-/// (`tilde_ok`); a relative value, `--python=~/...` and a quoted `~` deny,
-/// because trusty-memory opens the file the shell hands it, not the one the
-/// guard guesses. The path is normalised LEXICALLY (no symlink is followed)
-/// and must be `<home>/.trusty-tools/kuzu-import-venv/bin/` plus `python`,
-/// `python3` or `python3.N`; then the canonical path of the UN-normalised
-/// value must equal the canonical `<venv>/bin/python`, so a `..` after a
-/// symlink resolves as it will at run time. No home, no value, and either
-/// canonicalisation error deny (#8625 Fail-Open Check).
-/// Test: `allows_the_venv_interpreter`, `denies_a_non_venv_python_program`,
-/// `denies_a_planted_symlink_to_the_same_cpython`,
-/// `denies_when_the_venv_interpreter_cannot_be_resolved`,
-/// `denies_dot_dot_after_a_symlink_in_the_python_path`,
-/// `denies_a_tilde_bash_does_not_expand_and_a_relative_python`.
-pub(crate) fn venv_python_verdict(
-    value: Option<&str>,
-    tilde_ok: bool,
-    home: Option<&Path>,
-) -> Result<(), &'static str> {
-    let value = value.ok_or("the flag has no value")?;
-    let home = home.ok_or("the home directory is unknown")?;
-    let venv_bin = lexical(&home.join(VENV_BIN));
-    // #8625: a path the guard cannot know bash resolves the same way is refused.
-    let path = if let Some(rest) = value.strip_prefix("~/") {
-        if !tilde_ok {
-            return Err("bash does not expand this `~`, so the path is not the venv's");
-        }
-        home.join(rest)
-    } else if Path::new(value).is_absolute() {
-        PathBuf::from(value)
-    } else {
-        return Err("it is not an absolute path");
-    };
-    let normal = lexical(&path);
-    let named = normal.parent() == Some(venv_bin.as_path())
-        && normal
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(is_venv_python_name);
-    if !named {
-        return Err("it is not the import venv's bin/python, python3 or python3.N");
-    }
-    let arg = std::fs::canonicalize(&path).map_err(|_| "it cannot be resolved")?;
-    let reference = std::fs::canonicalize(venv_bin.join("python"))
-        .map_err(|_| "the venv's bin/python cannot be resolved")?;
-    if arg == reference {
-        Ok(())
-    } else {
-        Err("it does not resolve to the venv's bin/python")
-    }
-}
-
-/// Whether `name` is `python`, `python3` or `python3.N` (N one or more digits).
-fn is_venv_python_name(name: &str) -> bool {
-    match name.strip_prefix("python3.") {
-        Some(minor) => !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()),
-        None => name == "python" || name == "python3",
-    }
-}
-
-/// `path` with `.` dropped and `..` applied, touching no file system.
-fn lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// The `--python` refusal, carrying [`PYTHON_SLUG`].
-fn python_reason(value: &str, why: &str) -> String {
+/// The deny text for a deprecated `migrate` alias (ruling Q8).
+fn migrate_reason(alias: &str) -> String {
     format!(
-        "{PYTHON_SLUG}: `trusty-memory import kuzu --python {value}` is refused because {why} \
-         (#8625, ruling Q9). Omit --python, or pass \
-         ~/.trusty-tools/kuzu-import-venv/bin/python."
+        "kuzu-store-read: `trusty-memory migrate {alias}` is a deprecated alias that reads \
+         kuzu-memory stores (#8625, ruling Q8). It is denied under the guard, as is \
+         `trusty-memory import kuzu`; the operator runs the import outside the guard."
     )
-}
-
-/// The argv indices of a sanctioned `trusty-memory import kuzu` call that
-/// may name a store, a venv path or a temp export (ruling Q8).
-///
-/// What: empty unless `whole` (the segment is the entire command, bar a
-/// trailing `| tee`), it runs no nested command, its program word resolves
-/// (not through `xargs`, not a lookup) to the bare `trusty-memory` or
-/// `<home>/.cargo/bin/trusty-memory`, nothing precedes it but `env -u NAME`
-/// pairs, and the next two words are exactly `import kuzu`. Then every later
-/// argument, minus a redirection operator and its target. A function body, a
-/// `PATH=`/`PYTHONPATH=` assignment or a path-qualified program is never
-/// exempt: the bridge inherits the environment and imports `kuzu` unisolated.
-/// Test: `allows_the_sanctioned_import`, `the_exception_cannot_be_widened`,
-/// `denies_a_shell_function_shadowing_trusty_memory`,
-/// `denies_an_environment_assignment_before_trusty_memory`,
-/// `denies_a_path_assignment_before_trusty_memory`,
-/// `denies_a_path_qualified_trusty_memory`, `allows_the_cargo_bin_trusty_memory`.
-pub(crate) fn sanctioned_argument_indices(
-    segment: &str,
-    argv: &[String],
-    home: Option<&Path>,
-    whole: bool,
-) -> Vec<usize> {
-    if !whole || NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
-        return Vec::new();
-    }
-    let Ok(word) = resolve_program_word(argv) else {
-        return Vec::new();
-    };
-    let at = word.index;
-    let sanctioned = !word.lookup
-        && word.xargs_at.is_none()
-        && clean_prefix(&argv[..at])
-        && argv.get(at).is_some_and(|p| is_real_trusty_memory(p, home))
-        && argv.get(at + 1).is_some_and(|t| t == "import")
-        && argv.get(at + 2).is_some_and(|t| t == "kuzu");
-    if !sanctioned {
-        return Vec::new();
-    }
-    (at + 3..argv.len())
-        .filter(|&i| !redirect_related(argv, i))
-        .collect()
-}
-
-/// Whether `prefix` is empty or `env` followed only by `-u NAME` pairs.
-fn clean_prefix(prefix: &[String]) -> bool {
-    match prefix.split_first() {
-        None => true,
-        Some((env, rest)) => {
-            env == "env"
-                && rest.len().is_multiple_of(2)
-                && rest
-                    .chunks(2)
-                    .all(|pair| pair[0] == "-u" && !pair[1].contains('='))
-        }
-    }
-}
-
-/// Whether `program` is the bare name or the home's cargo-bin install.
-fn is_real_trusty_memory(program: &str, home: Option<&Path>) -> bool {
-    program == TRUSTY_MEMORY
-        || home.is_some_and(|h| Path::new(program) == h.join(".cargo/bin").join(TRUSTY_MEMORY))
-}
-
-/// Whether token `i` is a redirection, or the target of one.
-fn redirect_related(argv: &[String], i: usize) -> bool {
-    let is_operator = |t: &str| {
-        !t.is_empty()
-            && t.contains(['<', '>'])
-            && t.chars().all(|c| c.is_ascii_digit() || "&<>|".contains(c))
-    };
-    argv[i].contains(['<', '>']) || i.checked_sub(1).is_some_and(|p| is_operator(&argv[p]))
 }

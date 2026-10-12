@@ -66,18 +66,18 @@ impl Fx {
 
 /// The verdict on a Bash `command` run from the project.
 fn bash(fx: &Fx, command: &str) -> Option<String> {
-    bash_in(fx, &fx.project, command)
+    bash_in(&fx.project, command)
 }
 
 /// The verdict on a Bash `command` run from `cwd`.
-fn bash_in(fx: &Fx, cwd: &Path, command: &str) -> Option<String> {
+fn bash_in(cwd: &Path, command: &str) -> Option<String> {
     let input = json!({ "command": command });
-    evaluate_kuzu_store_access("Bash", Some(&input), cwd, Some(&fx.home))
+    evaluate_kuzu_store_access("Bash", Some(&input), cwd)
 }
 
 /// The verdict on a `tool` call with `input`.
 fn tool(fx: &Fx, tool: &str, input: Value) -> Option<String> {
-    evaluate_kuzu_store_access(tool, Some(&input), &fx.project, Some(&fx.home))
+    evaluate_kuzu_store_access(tool, Some(&input), &fx.project)
 }
 
 /// Asserts every command denies with `slug`, listing every one that does not.
@@ -254,11 +254,12 @@ fn denies_a_glob_that_can_match_a_deny_name() {
     }
 }
 
+// #8625 re-scope: the inputs the removed exception allowed now deny.
 #[test]
-fn allows_the_sanctioned_import() {
+fn denies_the_formerly_sanctioned_import() {
     let fx = Fx::new(true);
     let p = fx.project.display();
-    assert_allowed(
+    assert_denied(
         &fx,
         &[
             "trusty-memory import kuzu --discover --dry-run".into(),
@@ -274,13 +275,15 @@ fn allows_the_sanctioned_import() {
             ),
             "trusty-memory import kuzu --dry-run 2>&1 | tee /tmp/report.txt".into(),
         ],
+        "kuzu-store-read",
     );
+    // The reviewer's masked file stays readable.
     let masked = fx.home.join(".trusty-tools/kuzu-review/R/masked.jsonl");
     assert_eq!(tool(&fx, "Read", json!({ "file_path": masked })), None);
 }
 
 #[test]
-fn allows_the_venv_interpreter() {
+fn denies_an_import_naming_the_venv_interpreter() {
     let fx = Fx::new(true);
     let store = fx.store();
     let mut commands = Vec::new();
@@ -296,7 +299,7 @@ fn allows_the_venv_interpreter() {
     commands.push(
         "trusty-memory import kuzu --python ~/.trusty-tools/kuzu-import-venv/bin/python3".into(),
     );
-    assert_allowed(&fx, &commands);
+    assert_denied(&fx, &commands, "kuzu-store-read");
 }
 
 #[test]
@@ -324,7 +327,7 @@ fn denies_a_non_venv_python_program() {
         ));
     }
     commands.push("trusty-memory import kuzu --discover --python".into());
-    assert_denied(&fx, &commands, "kuzu-import-python");
+    assert_denied(&fx, &commands, "kuzu-store-read");
 }
 
 #[test]
@@ -337,24 +340,18 @@ fn denies_a_planted_symlink_to_the_same_cpython() {
             "trusty-memory import kuzu --discover --python {py}"
         ));
     }
-    assert_denied(&fx, &commands, "kuzu-import-python");
+    assert_denied(&fx, &commands, "kuzu-store-read");
 }
 
 #[test]
 fn denies_when_the_venv_interpreter_cannot_be_resolved() {
-    // Fail-Open Check: the lexical path is right, canonicalisation errors.
+    // The venv is absent; the call denies all the same.
     let fx = Fx::new(false);
     let command = format!(
         "trusty-memory import kuzu --discover --python {}",
         fx.venv("python")
     );
-    assert_denied(&fx, std::slice::from_ref(&command), "kuzu-import-python");
-    let input = json!({ "command": command });
-    let deny = evaluate_kuzu_store_access("Bash", Some(&input), &fx.project, None);
-    assert!(
-        deny.is_some_and(|r| r.contains("kuzu-import-python")),
-        "no home"
-    );
+    assert_denied(&fx, std::slice::from_ref(&command), "kuzu-store-read");
 }
 
 #[test]
@@ -457,7 +454,7 @@ fn denies_a_bash_call_from_inside_a_store_directory() {
     let fx = Fx::new(true);
     let store_dir = fx.project.join(".kuzu-memory");
     for command in ["cat *", "head -c 100 *"] {
-        let deny = bash_in(&fx, &store_dir, command);
+        let deny = bash_in(&store_dir, command);
         assert!(
             deny.is_some_and(|r| r.contains("kuzu-store-read")),
             "{command}"
@@ -527,7 +524,7 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
     assert_eq!(deny, None, "the exemption applies outside a store");
 }
 
-// #8625 fix round: the exception covers the real `trusty-memory` program only.
+// #8625 fix round: each bypass of the former exception still denies.
 
 #[test]
 fn denies_a_shell_function_shadowing_trusty_memory() {
@@ -586,7 +583,7 @@ fn denies_a_path_qualified_trusty_memory() {
 }
 
 #[test]
-fn allows_the_cargo_bin_trusty_memory() {
+fn denies_the_cargo_bin_trusty_memory() {
     let fx = Fx::new(true);
     let store = fx.store();
     let cargo = fx
@@ -594,9 +591,10 @@ fn allows_the_cargo_bin_trusty_memory() {
         .join(".cargo/bin/trusty-memory")
         .display()
         .to_string();
-    assert_allowed(
+    assert_denied(
         &fx,
         &[format!("{cargo} import kuzu --from {store} --dry-run")],
+        "kuzu-store-read",
     );
 }
 
@@ -626,7 +624,7 @@ fn denies_dot_dot_after_a_symlink_in_the_python_path() {
         &[format!(
             "trusty-memory import kuzu --discover --python {py}"
         )],
-        "kuzu-import-python",
+        "kuzu-store-read",
     );
 }
 
@@ -639,15 +637,14 @@ fn denies_a_tilde_bash_does_not_expand_and_a_relative_python() {
             "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python".into(),
             "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\"".into(),
         ],
-        "kuzu-import-python",
+        "kuzu-store-read",
     );
     let deny = bash_in(
-        &fx,
         &fx.home,
         "trusty-memory import kuzu --discover --python .trusty-tools/kuzu-import-venv/bin/python",
     );
     assert!(
-        deny.is_some_and(|r| r.contains("kuzu-import-python")),
+        deny.is_some_and(|r| r.contains("kuzu-store-read")),
         "relative --python"
     );
 }
@@ -749,7 +746,9 @@ fn keeps_unrelated_trusty_memory_commands_allowed() {
             "git commit -m \"docs: trusty-memory import kuzu is denied under the guard\"",
             "gh issue comment 1 --body \"run trusty-memory import kuzu from your shell\"",
             "grep -rn \"trusty-memory import kuzu\" content/",
-            "echo trusty-memory import kuzu is denied",
+            // A lone `echo` writing prose to a file runs nothing; a bare
+            // `echo` of the call denies, since `echo … | sh` would run it.
+            "echo trusty-memory import kuzu is denied > notes.md",
         ]),
     );
 }

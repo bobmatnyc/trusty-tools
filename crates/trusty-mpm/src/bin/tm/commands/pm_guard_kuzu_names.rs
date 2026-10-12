@@ -146,6 +146,23 @@ pub(crate) fn names_kuzu_module(module: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(KUZU_MODULE))
 }
 
+/// Whether the shell word `word` can expand to `literal`: equal to it, or a
+/// glob or brace reading that can match it, ASCII case-insensitively.
+///
+/// Why: #8625 — `~/.cargo/bin/trusty-m*` and `ku{zu,}` reach the program and
+/// sub-command words the import rule denies.
+/// What: [`word_names_kuzu`]'s readings (bracket classes as `?`, braces
+/// expanded or widened), each compared exactly or by [`overlaps`].
+/// Test: `denies_an_import_kuzu_in_another_spelling`.
+pub(crate) fn word_may_expand_to(word: &str, literal: &str) -> bool {
+    let word = normalize_bracket_classes(&word.to_ascii_lowercase());
+    let readings = expand_brace_alternatives(&word).unwrap_or_else(|| vec![widen_braces(&word)]);
+    let atoms: Vec<Atom> = literal.bytes().map(Atom::Lit).collect();
+    readings.iter().any(|reading| {
+        reading == literal || (reading.contains(['*', '?']) && overlaps(reading.as_bytes(), &atoms))
+    })
+}
+
 /// Whether `text` carries a deny name as a literal substring.
 fn contains_deny_literal(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();

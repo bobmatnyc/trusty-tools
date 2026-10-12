@@ -6,8 +6,8 @@
 //! What: the #8878 harness — `tm hook --pm-guard` with a scratch `$HOME`,
 //! run as a PM, as a subagent, under each bypass, and as the recorded
 //! Architect's main thread. The scratch home carries an import venv shaped
-//! like the host one, so the sanctioned `--python` passes and a planted
-//! symlink to the same CPython does not.
+//! like the host one; since the Architect's 2026-10-12 re-scope every
+//! `trusty-memory import kuzu` denies, the venv's own `--python` included.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_kuzu_store_8625::`.
 
 use std::os::unix::fs::symlink;
@@ -83,7 +83,7 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
         ),
         (
             bash_payload(fx, "trusty-memory import kuzu --discover --python /bin/cat"),
-            "kuzu-import-python",
+            "kuzu-store-read",
         ),
         (
             bash_payload(
@@ -93,7 +93,7 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
                     planted.display()
                 ),
             ),
-            "kuzu-import-python",
+            "kuzu-store-read",
         ),
     ]
 }
@@ -132,8 +132,9 @@ fn the_architect_is_bound_by_the_kuzu_store_deny() {
     }
 }
 
+// #8625 re-scope: the inputs the removed exception allowed now deny.
 #[test]
-fn the_sanctioned_import_passes_end_to_end() {
+fn the_formerly_sanctioned_import_denies_end_to_end() {
     let (fx, _root) = fixture();
     let store = fx.project.join(".kuzu-memory/memories.db");
     let venv = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
@@ -156,7 +157,10 @@ fn the_sanctioned_import_passes_end_to_end() {
         for bypass in BYPASSES {
             let env: Vec<(&str, &str)> = bypass.into_iter().collect();
             let out = run(&fx, &payload, &env, None);
-            assert_eq!(out.trim(), "", "{bypass:?} {command}");
+            assert!(
+                out.contains("\"deny\"") && out.contains("kuzu-store-read"),
+                "{bypass:?} {command}: {out}"
+            );
         }
     }
 }
