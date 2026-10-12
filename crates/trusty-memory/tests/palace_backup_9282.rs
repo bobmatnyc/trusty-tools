@@ -361,6 +361,71 @@ async fn palace_backup_refuses_a_flat_layout_dest_under_palaces() {
     assert!(!root.join("palaces").exists(), "palaces/ was created");
 }
 
+/// The missing first components of the `..` rows (#9282, round-3 delta
+/// critic CRITICAL): `<root>/palaces/../l/bk` and its case variant.
+const DOTDOT_ROWS: [&str; 2] = ["palaces", "Palaces"];
+
+/// `<root>/<missing>/../l/bk`.
+fn dotdot_dest(root: &Path, missing: &str) -> PathBuf {
+    root.join(missing).join("..").join("l").join("bk")
+}
+
+/// What one `..` row got wrong, empty when it was refused and wrote nothing.
+/// `outcome` is the call's error text, or `Ok` when the backup went through.
+fn dotdot_row_problems(
+    root: &Path,
+    before: &[PathBuf],
+    dest: &Path,
+    outcome: Result<String, String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match outcome {
+        Ok(ok) => out.push(format!("{}: not refused: {ok}", dest.display())),
+        Err(e) if !e.contains("which does not exist") => {
+            out.push(format!("{}: wrong error: {e}", dest.display()));
+        }
+        Err(_) => {}
+    }
+    if tree(root) != before {
+        out.push(format!("{} wrote something", dest.display()));
+    }
+    for made in ["palaces", "Palaces", "l"] {
+        if root.join(made).exists() {
+            out.push(format!("{}: {made} was created", dest.display()));
+        }
+    }
+    out
+}
+
+/// Why (#9282, round-3 delta critic CRITICAL): the resolver popped `..`
+/// textually after a missing component, so `<root>/palaces/../l/bk` passed
+/// the guard as `<root>/l/bk`, and the create then made `<root>/palaces`:
+/// in the flat layout the next start switches the registry to it.
+/// What: each row in a fresh flat data root, through the tool. Each is an
+/// error naming the missing component, and the data root is unchanged: no
+/// `palaces`, `Palaces`, `l`. Every row is checked before the assert.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_backup_refuses_dotdot_after_a_missing_component() {
+    let mut problems = Vec::new();
+    for missing in DOTDOT_ROWS {
+        let fx = Fixture::new();
+        fx.palace("bk-dotdot");
+        let root = fx.tmp.path().to_path_buf();
+        let before = tree(&root);
+        let dest = dotdot_dest(&root, missing);
+        let res = raw(
+            &fx.state,
+            "palace_backup",
+            json!({"palace": "bk-dotdot", "dest": dest}),
+        )
+        .await;
+        let outcome = res.map(|v| v.to_string());
+        problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
 // --------------------------------------------------------------------- CLI
 
 fn bin() -> PathBuf {
@@ -617,4 +682,54 @@ fn cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing() {
         text(&out)
     );
     assert!(!dest.exists() && !registry.join("bk.tmp").exists());
+}
+
+/// Seed a flat-layout palace at `<override>/trusty-memory/<id>` (no
+/// `palaces/` dir, so the data dir is the registry) and close its handle.
+fn seed_flat_on_disk(override_dir: &Path, id: &str) {
+    seed_shared_embedder_with_mock();
+    let palace = Palace {
+        id: PalaceId::new(id),
+        name: id.into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: data_dir(override_dir).join(id),
+    };
+    PalaceStore::save_palace(&palace).expect("palace.json");
+    drop(PalaceHandle::open(&palace).expect("open palace"));
+}
+
+/// Why (#9282, round-3 delta critic CRITICAL): the CLI's direct path runs
+/// the same guard; `<root>/palaces/../l/bk` must not create `<root>/palaces`.
+/// What: each row in a fresh flat-layout data dir, no daemon. Each exits
+/// non-zero naming the missing component, and the data dir is unchanged: no
+/// `palaces`, `Palaces`, `l`. Every row is checked before the assert.
+/// Test: itself.
+#[test]
+fn cli_backup_refuses_dotdot_after_a_missing_component_and_writes_nothing() {
+    let mut problems = Vec::new();
+    for missing in DOTDOT_ROWS {
+        let src = tempfile::tempdir().expect("src");
+        seed_flat_on_disk(src.path(), "cli-dotdot");
+        let root = data_dir(src.path());
+        let before = tree(&root);
+        let dest = dotdot_dest(&root, missing);
+        let out = run(
+            src.path(),
+            &[
+                "palace",
+                "backup",
+                "cli-dotdot",
+                "--dest",
+                dest.to_str().expect("utf8"),
+            ],
+        );
+        let outcome = if out.status.success() {
+            Ok(text(&out))
+        } else {
+            Err(text(&out))
+        };
+        problems.extend(dotdot_row_problems(&root, &before, &dest, outcome));
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }
