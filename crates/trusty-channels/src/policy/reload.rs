@@ -5,9 +5,12 @@
 //! a narrowing must apply at once.
 //! What: [`PolicyLoader`] holds the current [`LoadReport`], the last-good
 //! parse of each project file and a content fingerprint. [`PolicyLoader::refresh`]
-//! recomputes the fingerprint and reloads only when it changed. The
-//! `RateLimiter` lives with the consumer and is never rebuilt here, so a
-//! reload cannot reset a flood's window.
+//! recomputes the fingerprint and reloads only when it changed. A load keeps
+//! the fingerprint sampled after its read only when it equals the one
+//! sampled before and describes the bytes read; otherwise it keeps none, so
+//! the next refresh reloads (#9808). The `RateLimiter` lives with the
+//! consumer and is never rebuilt here, so a reload cannot reset a flood's
+//! window.
 //! Test: `src/policy/tests/reload.rs`.
 
 use std::collections::{HashMap, HashSet};
@@ -16,7 +19,9 @@ use std::path::{Path, PathBuf};
 use crate::policy::fs::{read_host, read_project, ProjectRead};
 use crate::policy::gate::{branch_state, BranchState};
 use crate::policy::host::{parse_host, HostError};
-use crate::policy::load::{assemble, check_canonical, listed_dirs, prepare, LoadRequest, Prepared};
+use crate::policy::load::{
+    assemble, check_canonical, listed_dirs, prepare, FileRead, LoadRequest, Prepared,
+};
 use crate::policy::project_file::ProjectFile;
 use crate::policy::report::{FileState, Finding, LoadReport};
 use crate::policy::table::ChannelPolicy;
@@ -49,7 +54,7 @@ struct Fingerprint {
 struct ProjectPrint {
     dir: PathBuf,
     real: Result<PathBuf, String>,
-    file: Result<Option<Vec<u8>>, String>,
+    file: FileRead,
     branch: Option<Result<BranchState, String>>,
 }
 
@@ -79,6 +84,56 @@ impl Fingerprint {
             projects,
         }
     }
+
+    /// True when `read` saw exactly the sources this fingerprint records.
+    ///
+    /// Why: #9808: a load must not keep a fingerprint that describes other
+    /// bytes than the ones it parsed.
+    /// What: the host text or fault and the canonical verdict must match;
+    /// after a host fault no project file enters the report, so none is
+    /// compared; otherwise every listed project must have been read, with
+    /// these bytes.
+    /// Test: `host_file_change_and_revert_during_load_reloads`,
+    /// `canonical_fault_cleared_and_restored_during_load_reloads`,
+    /// `reload_after_change_and_revert_during_load_reloads`,
+    /// `project_not_read_by_the_load_never_settles`,
+    /// `stable_load_settles_and_next_refresh_is_false`.
+    fn describes(&self, read: &Prepared) -> bool {
+        if read.host_read != self.host || read.canonical != self.canonical {
+            return false;
+        }
+        // #9808: a host fault denies all; the project files are not read.
+        if read.host.is_err() {
+            return true;
+        }
+        // #9808: a project not read, or read with other bytes, is a mismatch.
+        self.projects.iter().all(|p| {
+            read.projects
+                .iter()
+                .any(|r| r.dir == p.dir && r.read.as_ref() == Some(&p.file))
+        })
+    }
+}
+
+/// The fingerprint a load keeps: `Some` only when it describes the load.
+///
+/// Why: #9808: a fingerprint taken before the read misses a change that is
+/// reverted before the next refresh (S1 to S2 and back to S1), so the S2
+/// policy would stay published.
+/// What: samples the sources after the read; keeps that sample only when it
+/// equals `pre` and [`Fingerprint::describes`] the read, else `None`. A git
+/// state that flips inside the read and back before this sample is not seen
+/// (the gate runs its own git).
+/// Test: `persistent_change_during_load_reloads_once_then_settles`,
+/// `refresh_after_change_and_revert_during_load_reloads`,
+/// `stable_load_settles_and_next_refresh_is_false`.
+fn settle(req: &LoadRequest, pre: Fingerprint, read: &Prepared) -> Option<Fingerprint> {
+    let post = Fingerprint::of(req);
+    // #9808: a change during the load, kept or not, matches nothing.
+    if post != pre {
+        return None;
+    }
+    post.describes(read).then_some(post)
 }
 
 impl ProjectPrint {
@@ -111,7 +166,8 @@ impl ProjectPrint {
 #[derive(Debug, Clone)]
 pub struct PolicyLoader {
     req: LoadRequest,
-    fingerprint: Fingerprint,
+    /// #9808: `None` when the last load did not settle; matches nothing.
+    fingerprint: Option<Fingerprint>,
     report: LoadReport,
     last_good: HashMap<PathBuf, ProjectFile>,
 }
@@ -131,14 +187,14 @@ impl PolicyLoader {
         req: LoadRequest,
         prepare_fn: impl FnOnce(&LoadRequest) -> Prepared,
     ) -> Self {
-        let fingerprint = Fingerprint::of(&req);
+        let pre = Fingerprint::of(&req);
         let mut loader = Self {
             req,
-            fingerprint,
+            fingerprint: None,
             report: LoadReport::empty(),
             last_good: HashMap::new(),
         };
-        loader.apply(prepare_fn(&loader.req));
+        loader.load_with(pre, prepare_fn);
         loader
     }
 
@@ -155,9 +211,11 @@ impl PolicyLoader {
     /// Reload when the fingerprint changed; true when it reloaded.
     ///
     /// Why: one call per batch or dispatch; git runs only on a change.
-    /// What: compares [`Fingerprint`]s; on a difference, reloads.
+    /// What: compares [`Fingerprint`]s; on a difference, or when the last
+    /// load kept none, reloads.
     /// Test: `same_size_same_mtime_edit_is_seen_on_reload`,
-    /// `branch_switch_with_identical_bytes_regates`.
+    /// `branch_switch_with_identical_bytes_regates`,
+    /// `refresh_after_change_and_revert_during_load_reloads`.
     pub fn refresh(&mut self) -> bool {
         self.refresh_with(prepare)
     }
@@ -168,13 +226,10 @@ impl PolicyLoader {
         prepare_fn: impl FnOnce(&LoadRequest) -> Prepared,
     ) -> bool {
         let now = Fingerprint::of(&self.req);
-        if now == self.fingerprint {
+        if self.fingerprint.as_ref() == Some(&now) {
             return false;
         }
-        // Recorded before the load reads: a change in between only causes
-        // one more reload, never a missed one.
-        self.fingerprint = now;
-        self.apply(prepare_fn(&self.req));
+        self.load_with(now, prepare_fn);
         true
     }
 
@@ -197,8 +252,24 @@ impl PolicyLoader {
 
     /// [`PolicyLoader::reload`], reading through `prepare_fn` (#9808).
     pub(crate) fn reload_with(&mut self, prepare_fn: impl FnOnce(&LoadRequest) -> Prepared) {
-        self.fingerprint = Fingerprint::of(&self.req);
-        self.apply(prepare_fn(&self.req));
+        let pre = Fingerprint::of(&self.req);
+        self.load_with(pre, prepare_fn);
+    }
+
+    /// Read through `prepare_fn`, keep the settled fingerprint, then apply.
+    ///
+    /// Why: #9808: one sequence for `new`, `refresh` and `reload`, so none
+    /// keeps a fingerprint taken before its read.
+    /// What: the fingerprint is written only after `prepare_fn` returns, so
+    /// a panic there leaves the previous fingerprint and report, which
+    /// agree. It is written before `apply`, so a stamp inside `apply` sees
+    /// the settled value (#9807).
+    /// Test: `panic_during_load_leaves_a_loader_that_reloads`,
+    /// `new_after_change_and_revert_during_load_reloads`.
+    fn load_with(&mut self, pre: Fingerprint, prepare_fn: impl FnOnce(&LoadRequest) -> Prepared) {
+        let prepared = prepare_fn(&self.req);
+        self.fingerprint = settle(&self.req, pre, &prepared);
+        self.apply(prepared);
     }
 
     fn apply(&mut self, prepared: Prepared) {
