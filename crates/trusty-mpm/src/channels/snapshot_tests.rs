@@ -65,8 +65,19 @@ fn scripted(
     TestClock,
     Arc<AtomicUsize>,
 ) {
+    scripted_on(TestClock::default(), script)
+}
+
+/// `scripted` over `clock`, so a script can move the clock it runs under.
+fn scripted_on(
+    clock: TestClock,
+    script: impl FnMut(usize) -> LoadReport + Send + 'static,
+) -> (
+    PolicySnapshot<Scripted, TestClock>,
+    TestClock,
+    Arc<AtomicUsize>,
+) {
     let calls = Arc::new(AtomicUsize::new(0));
-    let clock = TestClock::default();
     let source = Scripted {
         calls: Arc::clone(&calls),
         script: Box::new(script),
@@ -455,6 +466,21 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
         ProjectFileError::Gate {
             error: GateError::GitTimedOut { step: "show" },
         },
+        // r-078 H2: gate.rs reports a git fault under these names too.
+        ProjectFileError::Gate {
+            error: GateError::NotARepository,
+        },
+        ProjectFileError::Gate {
+            error: GateError::NotTopLevel,
+        },
+        ProjectFileError::Gate {
+            error: GateError::NoDefaultCommit {
+                branch: "main".into(),
+            },
+        },
+        ProjectFileError::Gate {
+            error: GateError::NotCommitted { at: "main".into() },
+        },
     ];
     let mut cases: Vec<(String, Script)> = vec![(
         "panic".into(),
@@ -547,6 +573,88 @@ fn refresh_error_keeps_last_good_only_until_max_age() {
     match denied {
         Err((Some(Refusal::Snapshot(SnapshotDeny::Stale { .. })), Some(_))) => {}
         other => panic!("real: unreadable routes file past max age: {other:?}"),
+    }
+}
+
+#[test]
+fn refresh_that_outlasts_max_age_denies() {
+    // r-078 H1: a refresh that starts at 5 s and returns at 61 s with a git
+    // timeout must be judged at 61 s, not at 5 s.
+    let clock = TestClock::default();
+    let during = clock.clone();
+    let (snap, clock, _) = scripted_on(clock, move |n| match n {
+        0 => bob_report(),
+        _ => {
+            during.set(secs(61.0));
+            stale_bob_report(ProjectFileError::Gate {
+                error: GateError::GitTimedOut { step: "show" },
+            })
+        }
+    });
+    assert_eq!(bob_verdicts(&snap), Ok(()));
+    clock.set(secs(5.0));
+    match snap.current() {
+        Err(SnapshotDeny::Stale { age, max }) => {
+            assert_eq!(max, MAX_AGE);
+            assert!(age > MAX_AGE, "{age:?}");
+        }
+        other => panic!("a refresh that returned at 61 s: {other:?}"),
+    }
+}
+
+#[test]
+fn git_fault_reported_as_a_verdict_ages_to_deny() {
+    // r-078 H2: a broken `.git/config` makes `rev-parse --show-toplevel`
+    // exit 128, which the gate reports as NotARepository.
+    let home = Home::new();
+    let dir = repo(&home, "proj");
+    commit_routes(&dir, &routes(&[("bob-dm", BOB)]));
+    home.write_host(&host(&[&dir]));
+    let clock = TestClock::default();
+    let snap = PolicySnapshot::new(LoaderSource::new(home.request()), clock.clone());
+    assert_eq!(bob_verdicts(&snap), Ok(()), "first load");
+    std::fs::write(dir.join(".git/config"), "[core\nbroken").expect("corrupt config");
+    clock.set(secs(5.0));
+    assert_eq!(bob_verdicts(&snap), Ok(()), "last good inside max age");
+    clock.set(secs(61.0));
+    assert_snapshot_denies(
+        &snap,
+        |d| matches!(d, SnapshotDeny::Stale { .. }),
+        "broken .git/config past max age",
+    );
+
+    // Control: a refusal that is a content verdict keeps the snapshot fresh.
+    let verdicts = [
+        ProjectFileError::Gate {
+            error: GateError::ContentDiffers { at: "main".into() },
+        },
+        ProjectFileError::Gate {
+            error: GateError::NotOnDefaultBranch {
+                head: "feature".into(),
+                default: "main".into(),
+            },
+        },
+        ProjectFileError::Gate {
+            error: GateError::DetachedHead,
+        },
+        ProjectFileError::Parse {
+            reason: "bad toml".into(),
+        },
+        ProjectFileError::Version { found: 9 },
+        ProjectFileError::NotUtf8,
+        ProjectFileError::TooLarge { limit: 1 },
+    ];
+    for verdict in verdicts {
+        let what = format!("{verdict:?}");
+        let (snap, clock, _) = scripted(move |n| match n {
+            0 => bob_report(),
+            _ => stale_bob_report(verdict.clone()),
+        });
+        assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: first load");
+        for at in [5.0, 61.0, 120.0] {
+            clock.set(secs(at));
+            assert_eq!(bob_verdicts(&snap), Ok(()), "{what}: at {at} s");
+        }
     }
 }
 
