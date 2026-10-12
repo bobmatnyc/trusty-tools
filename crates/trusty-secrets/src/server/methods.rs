@@ -316,7 +316,7 @@ fn other_backends(
         if id == *configured {
             continue;
         }
-        match (state.backends)(&id) {
+        match state.open(&id) {
             Ok(backend) => others.push(backend),
             Err(SecretsError::UnknownBackend { .. }) => {}
             Err(e) => return Err(ErrorKind::from(e)),
@@ -399,7 +399,7 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             // #7524 H1: the destination's posture check runs before any backend
             // opens; `tm secrets copy --to file` moved Keychain values to files.
             let destination = project.open_for_write(state, &request.to_backend)?;
-            let source = (state.backends)(&request.from_backend)?;
+            let source = state.open(&request.from_backend)?;
             if !source.capabilities().contains(Capabilities::READ)
                 || !destination.capabilities().contains(Capabilities::WRITE)
             {
