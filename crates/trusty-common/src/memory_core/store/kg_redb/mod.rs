@@ -14,6 +14,8 @@
 
 // #4884 slot-index maintenance; split out of `write_ops` for the SLOC cap.
 mod drawer_ops;
+// #9722: the marker that retires the L1 snapshot gap-fill.
+mod drawer_authority;
 mod import;
 // #4810: at-open rewrite of the TRIPLES key to include the object.
 pub(crate) mod migrate;
@@ -40,6 +42,7 @@ mod write_ops;
 pub use copy_swap::{
     CompactFaultHook, CompactOutcome, CompactPlan, CompactStep, PreparedCompaction,
 };
+pub use drawer_authority::KG_SCHEMA_DRAWERS_AUTHORITATIVE;
 pub use stats::{KgRedbStats, KgTableStats};
 #[cfg(test)]
 pub(crate) use store::AFTER_PRE_OPEN;

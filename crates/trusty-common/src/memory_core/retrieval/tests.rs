@@ -25,7 +25,7 @@ fn init_embedder() {
     seed_shared_embedder_with_mock();
 }
 
-fn make_handle(dir: &std::path::Path) -> PalaceHandle {
+pub(super) fn make_handle(dir: &std::path::Path) -> PalaceHandle {
     let vs = UsearchStore::new(dir.join("idx.usearch"), 384).unwrap();
     let kg = KnowledgeGraph::open(&dir.join("kg.db")).unwrap();
     PalaceHandle::new(PalaceId::new("test"), "Test palace".to_string(), vs, kg)
@@ -34,7 +34,7 @@ fn make_handle(dir: &std::path::Path) -> PalaceHandle {
 #[test]
 fn l0_l1_always_present() {
     let dir = tempdir().unwrap();
-    let mut handle = make_handle(dir.path());
+    let handle = make_handle(dir.path());
     let room_id = uuid::Uuid::new_v4();
     let mut d = Drawer::new(room_id, "important fact");
     d.importance = 0.9;
@@ -355,7 +355,7 @@ async fn forget_reports_deleted_and_the_drawer_stays_gone_after_reopen() {
 async fn forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle() {
     init_embedder();
     let dir = tempdir().unwrap();
-    let (_palace, mut handle) = open_disk_palace(dir.path(), "forget-l1-live");
+    let (_palace, handle) = open_disk_palace(dir.path(), "forget-l1-live");
 
     let gone = handle
         .remember(
@@ -375,11 +375,9 @@ async fn forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle() {
         )
         .await
         .unwrap();
-    Arc::get_mut(&mut handle)
-        .expect("sole owner of the handle")
-        .refresh_l1();
+    handle.refresh_l1();
     assert!(
-        handle.l1_drawers.iter().any(|d| d.id == gone),
+        handle.l1_drawers.read().iter().any(|d| d.id == gone),
         "precondition: the drawer is cached in L1"
     );
 
@@ -420,7 +418,7 @@ async fn forgotten_drawer_is_not_served_by_l0_l1_after_reopen() {
     drop(handle);
 
     let reopened = PalaceHandle::open(&palace).unwrap();
-    assert!(!reopened.l1_drawers.iter().any(|d| d.id == id));
+    assert!(!reopened.l1_drawers.read().iter().any(|d| d.id == id));
     assert!(!retrieve_l0_l1(&reopened).iter().any(|r| r.drawer.id == id));
 }
 
@@ -723,7 +721,7 @@ async fn recall_logs_events_when_log_present() {
     init_embedder();
     let dir = tempdir().unwrap();
     let log = Arc::new(RecallLog::open(&dir.path().join("recall.db")).unwrap());
-    let mut handle = make_handle(dir.path()).with_recall_log(log.clone());
+    let handle = make_handle(dir.path()).with_recall_log(log.clone());
     let embedder = shared_embedder().await.unwrap();
 
     let room_id = uuid::Uuid::new_v4();
@@ -1487,7 +1485,7 @@ async fn purge_expired_drops_only_past_ttl() {
 #[test]
 fn expired_l1_drawer_is_excluded_without_reopen() {
     let dir = tempdir().unwrap();
-    let mut handle = make_handle(dir.path());
+    let handle = make_handle(dir.path());
     let room_id = uuid::Uuid::new_v4();
 
     let mut expired = Drawer::new(room_id, "PR #4818 is in flight at head d3963848");
@@ -1505,7 +1503,7 @@ fn expired_l1_drawer_is_excluded_without_reopen() {
 
     // Both are in L1 — the filter has to run at read time, not at load time.
     assert!(
-        handle.l1_drawers.iter().any(|d| d.id == expired_id),
+        handle.l1_drawers.read().iter().any(|d| d.id == expired_id),
         "precondition: the expired drawer is cached in L1"
     );
 
@@ -1621,7 +1619,7 @@ async fn l2_and_l3_refill_past_expired_drawers() {
 #[test]
 fn read_time_expiry_filters_without_deleting() {
     let dir = tempdir().unwrap();
-    let mut handle = make_handle(dir.path());
+    let handle = make_handle(dir.path());
     let room_id = uuid::Uuid::new_v4();
 
     let mut expired = Drawer::new(room_id, "stale point-in-time fact");
@@ -2081,7 +2079,7 @@ use crate::memory_core::store::wings::{ensure_default_wing, resolve_or_create_wi
 
 /// Seed the default wing plus a named one, and return `(wing_id, room_id)`
 /// for a room called `label` inside it.
-fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
+pub(super) fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
     ensure_default_wing(&handle.kg).expect("seed default wing");
     let store = handle.kg.store();
     let (wing_id, _) = resolve_or_create_wing_sync(&store, wing).expect("create wing");
@@ -2256,25 +2254,34 @@ fn list_drawers_ranks_importance_above_recency() {
 #[test]
 fn refresh_l1_keeps_the_newest_drawers_within_an_importance_tie() {
     let dir = tempdir().unwrap();
-    let mut handle = make_handle(dir.path());
+    let handle = make_handle(dir.path());
     let newest = seed_importance_tie(&handle, Uuid::nil(), "pre-authorized", 20);
 
     handle.refresh_l1();
 
-    assert_eq!(handle.l1_drawers.len(), L1_CAP, "L1 is capped at L1_CAP");
     assert_eq!(
-        handle.l1_drawers[0].id,
+        handle.l1_drawers.read().len(),
+        L1_CAP,
+        "L1 is capped at L1_CAP"
+    );
+    assert_eq!(
+        handle.l1_drawers.read()[0].id,
         newest,
         "an importance tie must be broken by recency, so the newest drawer leads L1; got {:?}",
         handle
             .l1_drawers
+            .read()
             .iter()
             .map(|d| d.content())
             .collect::<Vec<_>>()
     );
     // Ids are 1..=20 ascending with age, so the newest 15 are ids 6..=20.
     assert!(
-        handle.l1_drawers.iter().all(|d| d.id >= Uuid::from_u128(6)),
+        handle
+            .l1_drawers
+            .read()
+            .iter()
+            .all(|d| d.id >= Uuid::from_u128(6)),
         "L1 must hold the newest 15 of the tie, not the oldest 15"
     );
 }

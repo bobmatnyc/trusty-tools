@@ -54,7 +54,6 @@ use super::types::RememberOptions;
 use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
 use crate::memory_core::room_identity::DEFAULT_WING_ID;
-use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -376,10 +375,8 @@ async fn run_pipeline(
     }
 
     // L1 snapshot: re-sort the in-memory table and persist top-15.
-    if let Some(data_dir) = handle.data_dir.as_ref() {
-        let snap = handle.drawers.read().clone();
-        L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot")?;
-    }
+    // #9719: the live L1 is refreshed in the same step.
+    handle.save_and_refresh_l1().context("save L1 snapshot")?;
 
     // Refresh the closet keyword index so L2 tag-boosting picks up the
     // new drawer without waiting for a dream cycle.

@@ -85,11 +85,12 @@ impl L1Cache {
     /// hazards (issue #154): two concurrent writers must not stomp on each
     /// other's tmp file, and the parent directory must exist at rename time
     /// even if a prior op transiently removed it (e.g. the dream subprocess).
-    /// #4836: the snapshot is a SELECTION that outlives the process —
-    /// `PalaceHandle::open_with_intent` hydrates `l1_drawers` verbatim from it,
-    /// so whichever entries land here are the ones `retrieve_l0_l1` serves
-    /// until the next write. Sorting on importance alone picked them by the
-    /// caller's input order (v4 UUIDs, uncorrelated with age).
+    /// #4836: the snapshot is a SELECTION that outlives the process. Sorting
+    /// on importance alone picked it by the caller's input order (v4 UUIDs,
+    /// uncorrelated with age). #9719/#9722: open no longer hydrates
+    /// `l1_drawers` from it; L1 is selected from the merged drawer table, and
+    /// the snapshot only gap-fills that table until it is stamped
+    /// authoritative. The selection rule is the same (`drawer_listing_order`).
     /// What: Sorts a clone of `drawers` by `drawer_listing_order`, takes the
     /// first `L1_SNAPSHOT_CAP`, writes JSON to a per-call unique tmp path
     /// (PID + monotonic counter so concurrent writers don't share the tmp),
@@ -241,10 +242,10 @@ mod tests {
     /// #4836: the persisted snapshot must break an importance tie by recency.
     ///
     /// Why: this is the selection that survives a restart. `save_l1_cache`
-    /// truncates to `L1_SNAPSHOT_CAP` and `open_with_intent` hydrates
-    /// `handle.l1_drawers` verbatim from the result, so whichever 15 drawers
-    /// this picks are the ones `retrieve_l0_l1` — and through it the
-    /// prompt-injection hook — serves until the next write.
+    /// truncates to `L1_SNAPSHOT_CAP`, and the live L1 (#9719) applies the
+    /// same `drawer_listing_order` cut to the drawer table, so the two agree
+    /// on which 15 drawers `retrieve_l0_l1` — and through it the
+    /// prompt-injection hook — serves.
     /// What: 20 drawers tied at importance 0.5, oldest first, ids ascending
     /// with age. Pre-fix the importance-only sort is stable, so it keeps the
     /// input order and persists the 15 OLDEST.

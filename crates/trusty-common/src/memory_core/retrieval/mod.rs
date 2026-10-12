@@ -24,6 +24,8 @@ mod handle;
 // #9279: L2/L3 candidate scoring and the exact short-id token boost.
 mod candidates;
 mod id_tokens;
+// #9719/#9722: the live L1 cache and the open-time snapshot gap-fill.
+mod l1;
 mod layers;
 pub(crate) mod open_sweep;
 // #9390: the bounded refill past expired slots every recall lane shares.
@@ -59,6 +61,8 @@ mod chunk_health_tests;
 mod chunk_key_tests;
 #[cfg(test)]
 mod embed_store_tests;
+#[cfg(test)]
+mod l1_live_tests;
 #[cfg(test)]
 mod op_budget_remember_tests;
 #[cfg(test)]
@@ -113,6 +117,8 @@ pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_wi
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+// #9719: L0 + L1 under a recall scope; trusty-memory's warming lane uses it.
+pub use l1::retrieve_l0_l1_scoped;
 
 // #9390: the expired-slot refill bound. Public because trusty-memory's BM25
 // warming lane applies the same stop rule.
@@ -132,7 +138,7 @@ pub use tier_c::{
 
 // Layer functions
 pub use layers::{
-    expand_query, recall, recall_across_palaces, recall_across_palaces_reporting,
+    dedup_extend, expand_query, recall, recall_across_palaces, recall_across_palaces_reporting,
     recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
     recall_deep_scoped, recall_deep_with_default_embedder, recall_in_room, recall_scoped,
     recall_with_default_embedder, rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2,

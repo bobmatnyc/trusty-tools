@@ -390,3 +390,61 @@ async fn recall_returns_the_live_slot_past_twenty_expired_ones_while_warming() {
         );
     }
 }
+
+/// Why (#9719 critic): the warming path kept a drawer's L1 copy when the BM25
+/// lane also hit it, so the hit reported layer 1 with its raw importance and
+/// escaped the `min_score` floor, the opposite of the ready path.
+/// What: a cold, `Warming` state with the in-process BM25 lane and one drawer
+/// that is both in L1 and a BM25 hit. On both single-palace recall tools the
+/// drawer appears once, at the lexical lane's layer (4), not layer 1.
+#[tokio::test]
+async fn a_warming_lane_hit_replaces_its_l1_copy() {
+    use trusty_common::memory_core::palace::{Drawer, PalaceId};
+    use trusty_memory::bm25_lane::Bm25Lane;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = Bm25Lane::new(tmp.path().join("bm25"));
+    let state = cold_warming_state(&tmp).with_bm25_lane(lane.clone());
+    let palace = "warmtest-l1-dedup";
+    let cwd = tmp.path().to_string_lossy().to_string();
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": palace, "force": true, "cwd": cwd}),
+    )
+    .await
+    .expect("palace_create");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+    let text = "the ingest retry budget is three";
+    let mut d = Drawer::new(uuid::Uuid::new_v4(), text);
+    d.importance = 0.9;
+    let id = d.id.to_string();
+    handle.add_drawer(d);
+    handle.refresh_l1();
+    lane.index(palace, &id, text).await.expect("index");
+
+    for tool in ["memory_recall", "memory_recall_deep"] {
+        let result = dispatch_tool(
+            &state,
+            tool,
+            json!({"palace": palace, "query": "ingest retry budget", "top_k": 5}),
+        )
+        .await
+        .expect("recall while warming");
+        let rows: Vec<&serde_json::Value> = result["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter(|r| r["drawer_id"].as_str() == Some(id.as_str()))
+            .collect();
+        assert_eq!(rows.len(), 1, "{tool}: one row per drawer: {result:#}");
+        assert_eq!(
+            rows[0]["layer"],
+            json!(4),
+            "{tool}: the lane hit must replace its L1 copy: {result:#}"
+        );
+    }
+}

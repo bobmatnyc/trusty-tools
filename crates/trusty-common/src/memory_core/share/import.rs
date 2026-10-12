@@ -26,7 +26,6 @@ use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
 use crate::memory_core::room_identity::DEFAULT_WING_ID;
-use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::timeouts;
 
@@ -247,10 +246,10 @@ pub(crate) async fn import_palace_records_with_embedder(
     }
 
     if changed {
-        if let Some(data_dir) = handle.data_dir.as_ref() {
-            let snap = handle.drawers.read().clone();
-            L1Cache::save_l1_cache(&snap, data_dir).context("save the L1 snapshot after import")?;
-        }
+        // #9719: the live L1 follows the import.
+        handle
+            .save_and_refresh_l1()
+            .context("save the L1 snapshot after import")?;
         handle.rebuild_closets();
     }
     Ok(summary)

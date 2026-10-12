@@ -44,13 +44,13 @@ use super::candidates::search_live_candidates;
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
 use super::id_tokens::query_id_tokens;
-use super::scope::RecallScope;
+use super::scope::{RecallScope, scope_admits};
 use super::types::{CrossPalaceRecall, CrossPalaceResult, RecallResult};
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -190,18 +190,33 @@ pub(super) fn uuid_prefix_eq(a: Uuid, b: Uuid) -> bool {
 /// relevance, not importance (issue #633).
 ///
 /// #4885: L1 entries past their `expires_at` are dropped (see the module
-/// header). This layer is where read-time expiry matters most: `l1_drawers` is
-/// filled from the L1 cache snapshot at open and the open-time sweep only
-/// retains over the full drawer table, so an expired drawer in that snapshot
-/// survived even a reopen. The L0 identity row is synthetic and never expires.
+/// header). `l1_drawers` is a selection refreshed on writes (#9719), not on
+/// expiry, so a drawer can expire while it sits in L1. The L0 identity row is
+/// synthetic and never expires.
 ///
 /// #9706: L1 entries whose id is no longer in the drawer table (a forgotten
 /// drawer on a live handle) are dropped too.
+///
+/// #9719: unscoped. A scoped recall uses [`super::l1::retrieve_l0_l1_scoped`].
 /// Test: `l0_l1_always_present` asserts both layers appear;
 /// `expired_l1_drawer_is_excluded_without_reopen` covers the filter;
-/// `forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle` covers forget.
+/// `forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle` covers forget;
+/// `l1_serves_the_live_row_not_its_cached_copy` covers the live-row join.
 pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
-    let mut out: Vec<RecallResult> = Vec::with_capacity(1 + handle.l1_drawers.len());
+    l0_l1_admitted(handle, &None)
+}
+
+/// [`retrieve_l0_l1`] with L1 limited to the rooms `allowed` admits.
+///
+/// What: `None` admits every room. Each L1 entry is served from its LIVE
+/// drawer-table row, never from the copy `l1_drawers` holds (#9719).
+pub(super) fn l0_l1_admitted(
+    handle: &PalaceHandle,
+    allowed: &Option<HashSet<Uuid>>,
+) -> Vec<RecallResult> {
+    // #9719: a clone, so no lock is held while results are built.
+    let l1 = handle.l1_drawers.read().clone();
+    let mut out: Vec<RecallResult> = Vec::with_capacity(1 + l1.len());
     let now = chrono::Utc::now();
 
     if !handle.identity.is_empty() {
@@ -220,21 +235,33 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
         });
     }
 
-    // #9706: `l1_drawers` is a snapshot taken at open and `forget` does not
-    // edit it, so a forgotten drawer would still be served here. The drawer
-    // table is the source of truth: an L1 entry whose id is absent from it is
-    // dropped. Fails closed, and does not depend on `l1_saved` succeeding.
-    let live_ids: std::collections::HashSet<Uuid> =
-        handle.drawers.read().iter().map(|d| d.id).collect();
+    // #9706: the drawer table is the source of truth: an L1 entry whose id is
+    // absent from it is dropped. Fails closed, and does not depend on
+    // `l1_saved` succeeding.
+    // #9719: the entry is served from its live row, so an in-place change to
+    // `expires_at`, `created_at` or `fact_key` reaches L1 the way it reaches
+    // L2, which reads the same table.
+    let wanted: HashSet<Uuid> = l1.iter().map(|d| d.id).collect();
+    let live: HashMap<Uuid, Drawer> = handle
+        .drawers
+        .read()
+        .iter()
+        .filter(|d| wanted.contains(&d.id))
+        .map(|d| (d.id, d.clone()))
+        .collect();
 
-    for d in &handle.l1_drawers {
-        if !live_ids.contains(&d.id) {
+    for cached in &l1 {
+        let Some(d) = live.get(&cached.id) else {
             continue;
-        }
+        };
         // #4885: an expired drawer is a false fact, not a low-ranked one —
         // skip it rather than let `rescore_l1_by_similarity` demote it, which
         // would still leave it eligible for the injection budget.
         if d.is_expired_at(now) {
+            continue;
+        }
+        // #9719: the scope rule L2 applies (`candidates::score_candidates`).
+        if !scope_admits(allowed, d.room_id) {
             continue;
         }
         out.push(RecallResult {
@@ -573,14 +600,16 @@ pub async fn recall_in_room(
 /// pattern a Wing exists to enable (ADR-0027 D2, pattern 1) — one query, with
 /// no requirement that the caller already know that scope's complete topic set.
 /// This is the one implementation [`recall`] and [`recall_in_room`] both run.
-/// What: L0 + L1 (never scoped) merged with an L2 leg run under `scope`.
+/// What: L0 + L1 merged with an L2 leg run under `scope`.
 ///
-/// L0/L1 are deliberately NOT scoped: they are the palace's identity and
-/// essential drawers — the always-on grounding every recall carries — and
-/// dropping them for a scoped query would silently change what "recall" means
-/// rather than narrowing it.
+/// L0 and a room-scoped L1 stay unscoped: they are the palace's identity and
+/// essential drawers. #9719: a WING scope bounds L1 too, because the live L1
+/// holds the newest drawers of every wing (see
+/// [`super::l1::retrieve_l0_l1_scoped`]). A lane hit replaces its L1 copy
+/// ([`dedup_extend`]).
 /// Test: `wing_scoped_recall_returns_only_that_wing`,
-/// `recall_in_room_scopes_l2_hits`.
+/// `recall_in_room_scopes_l2_hits`,
+/// `a_wing_scoped_recall_drops_another_wings_l1_drawer`.
 pub async fn recall_scoped(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
@@ -592,7 +621,8 @@ pub async fn recall_scoped(
     // so the idle-evict ticker does not drop an actively-queried palace.
     handle.touch();
     let expanded = expand_query(query);
-    let mut combined = retrieve_l0_l1(handle);
+    // #9719: L1 follows the wing scope L2 applies.
+    let mut combined = super::l1::retrieve_l0_l1_scoped(handle, scope);
     let l2 = retrieve_l2_scoped(handle, embedder, &expanded, scope, top_k).await?;
 
     // Build similarity-score map from L2 results (drawer_id -> score) before
@@ -673,8 +703,7 @@ pub async fn recall_deep_in_room(
 /// Deep recall restricted to a [`RecallScope`] (ADR-0027 T9).
 ///
 /// Why/What: the L3 counterpart of [`recall_scoped`], so `memory_recall_deep`
-/// honours a wing exactly as `memory_recall` does. L0/L1 stay unscoped for the
-/// same reason given there.
+/// honours a wing exactly as `memory_recall` does, L1 included (#9719).
 /// Test: `wing_scoped_deep_recall_returns_only_that_wing`.
 pub async fn recall_deep_scoped(
     handle: &PalaceHandle,
@@ -686,7 +715,8 @@ pub async fn recall_deep_scoped(
     // Idle-to-disk: deep recall is also a genuine user access.
     handle.touch();
     let expanded = expand_query(query);
-    let mut combined = retrieve_l0_l1(handle);
+    // #9719: L1 follows the wing scope L3 applies.
+    let mut combined = super::l1::retrieve_l0_l1_scoped(handle, scope);
     let l3 = retrieve_l3_scoped(handle, embedder, &expanded, scope, top_k).await?;
 
     // Build similarity-score map from L3 results, then re-score L1 entries
@@ -882,12 +912,24 @@ pub async fn recall_across_palaces_with_default_embedder(
     recall_across_palaces(handles, &embedder, query, top_k, deep).await
 }
 
-/// Extend `base` with entries from `extra` whose drawer id isn't already in
-/// `base`. L0/L1 priority is implied by call ordering: pass L0/L1 first.
-pub(super) fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
+/// Merge a query lane's results (`extra`) into L0 + L1 (`base`).
+///
+/// Why: #9719 — the live L1 holds every recent drawer, so most lane hits also
+/// sit in L1. Kept as the L1 copy, a hit would carry layer 1: it would escape
+/// the `min_score` floor, which spares layers 0 and 1, and stop reading as a
+/// query match.
+/// What: a lane hit whose drawer is an L1 entry replaces that entry; any other
+/// id already in `base` is kept; the rest are appended. Pass L0/L1 first.
+/// trusty-memory's warming path merges its BM25 lane through this too.
+/// Test: `a_lane_hit_replaces_its_l1_copy`; trusty-memory's
+/// `a_warming_lane_hit_replaces_its_l1_copy`.
+pub fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
     for r in extra {
-        if !base.iter().any(|b| b.drawer.id == r.drawer.id) {
-            base.push(r);
+        match base.iter().position(|b| b.drawer.id == r.drawer.id) {
+            // #9719: the lane's query-scored row wins over the L1 copy.
+            Some(i) if base[i].layer == 1 => base[i] = r,
+            Some(_) => {}
+            None => base.push(r),
         }
     }
 }
