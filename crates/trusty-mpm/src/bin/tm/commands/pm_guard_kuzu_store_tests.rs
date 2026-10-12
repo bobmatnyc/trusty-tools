@@ -883,7 +883,7 @@ fn the_exception_cannot_widen() {
         format!("{ok} <<< x"),
         format!(" {ok}"),
         format!("{ok} "),
-        format!("trusty-memory  import kuzu --dry-run"),
+        "trusty-memory  import kuzu --dry-run".into(),
         // A wrapper, a path or an uppercase program.
         "TRUSTY-MEMORY import kuzu --dry-run".into(),
         "trusty-memory IMPORT kuzu --dry-run".into(),
