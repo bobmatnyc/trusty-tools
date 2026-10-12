@@ -103,6 +103,20 @@ pub fn format_report(r: &StoreReport, update: bool) -> String {
     if let Some(line) = unsupported_line(&c.unsupported_edges, c.unsupported_error.as_deref()) {
         note(line);
     }
+    // #8624: what the review ledger admitted and refused, by reason.
+    if c.review_admitted + c.review_overrides > 0 || !c.review_refusals.is_empty() {
+        note(format!(
+            "review ledger: admitted {} redacted and {} verbatim (kuzu-review:override); \
+             left refused: {}",
+            c.review_admitted,
+            c.review_overrides,
+            if c.review_refusals.is_empty() {
+                "none".to_string()
+            } else {
+                tally_line(&c.review_refusals)
+            }
+        ));
+    }
     // #277 MEDIUM-2: every retraction, with its memory id, unabridged.
     for x in &c.retracted {
         note(format!(

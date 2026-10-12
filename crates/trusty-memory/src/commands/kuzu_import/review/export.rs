@@ -21,7 +21,7 @@ use trusty_common::memory_core::filter::{
 };
 
 use super::super::bridge::KuzuMemoryRow;
-use super::super::mapping::map_memory;
+use super::super::mapping::{map_memory, MappedMemory};
 use super::super::screen::screen;
 use super::ReviewError;
 
@@ -132,6 +132,29 @@ pub(crate) fn classify_row_with(
     let Some(m) = map_memory(row, store) else {
         return RowVerdict::Clean;
     };
+    classify_mapped_with(&m, find, mask)
+}
+
+/// Decide one mapped memory with the live detector and masker.
+///
+/// Why (#8624, PR-C): the import re-derives a row's verdict and key from the
+/// row itself before it reads the ledger, so a ledger line can never admit a
+/// row this function auto-refuses.
+/// Test: `auto_refuse_row_is_never_admitted_even_with_a_forged_verdict`.
+pub(crate) fn classify_mapped(m: &MappedMemory) -> RowVerdict {
+    classify_mapped_with(m, find_secret_spans, mask_content)
+}
+
+/// [`classify_row_with`] after mapping: the id is screened again, then the
+/// trimmed content.
+fn classify_mapped_with(
+    m: &MappedMemory,
+    find: fn(&str) -> Vec<SecretSpan>,
+    mask: fn(&str, &[SecretSpan]) -> Result<String, MaskError>,
+) -> RowVerdict {
+    if screen(&m.memory_id).is_some() {
+        return RowVerdict::AutoRefuse(SECRET_SHAPED_ID);
+    }
     // #8624 (PR-A critic): one binding for the verdict, the spans and the mask.
     let text = m.content.trim();
     if screen(text).is_none() {
@@ -164,9 +187,9 @@ pub(crate) fn classify_row_with(
     RowVerdict::Export(MaskedRecord {
         schema: RECORD_SCHEMA,
         filter_version: SECRET_FILTER_VERSION,
-        store: store.to_string(),
-        key: ledger_key(store, &m.memory_id, &m.content),
-        id: m.memory_id,
+        store: m.store.clone(),
+        key: ledger_key(&m.store, &m.memory_id, &m.content),
+        id: m.memory_id.clone(),
         masked,
         spans: shapes,
     })
