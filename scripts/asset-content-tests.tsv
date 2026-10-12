@@ -63,6 +63,7 @@ trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_managed_workspac
 trusty-mpm	lib	core::agent_orphans::tests	reads test_support::repo_roster and the checkout roster files (#8992)
 trusty-mpm	lib	core::agent_skill_codeploy::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::agent_source::tests	reads test_support::repo_roster
+trusty-mpm	lib	core::architect_compat::tests::a_source_with_only_legacy_supervisor_sections_still_loads	reads the checkout's content through the architect/ then supervisor/ section fallback (#9755)
 trusty-mpm	lib	core::bundle::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::bundled_pm_package::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::claude_md_sections::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
