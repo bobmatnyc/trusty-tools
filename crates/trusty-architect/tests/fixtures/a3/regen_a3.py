@@ -1,15 +1,17 @@
-"""Regenerate the A3a parity corpus and goldens from the frozen prototype.
+"""Regenerate the A3 parity corpus and goldens from the frozen prototype.
 
-Why: #9171 A3a holds the poller's sensors and state helpers to the bytes the
-Architect's live prototype produces. The goldens must come from running that
-Python (fleet-poll.py at 988152c), never from the Rust.
+Why: #9171 A3a holds the poller's sensors and state helpers, and A3b-1 its
+wake() send path, to the bytes the Architect's live prototype produces. The
+goldens must come from running that Python (fleet-poll.py at 988152c), never
+from the Rust.
 What: loads fleet-poll.py by path from the prototype directory given as the one
 argument (read-only: -B -I, sys.dont_write_bytecode), points every path it
 could write (inbox, log, events) at a system tempdir, injects the clock and the
-host probe values, and writes corpus_a3.json plus one golden per surface into
-this directory. It also writes ../../../src/decimal_table.rs, the table of
-Python `re` `\\d` code points the Rust `is_digit` reads (Architect ruling Q6).
-Test: tests/parity_a3.rs reads every file written here.
+host probe values, scripts tmux for wake(), and writes corpus_a3.json plus one
+golden per surface into this directory. It also writes
+../../../src/decimal_table.rs, the table of Python `re` `\\d` code points the
+Rust `is_digit` reads (Architect ruling Q6).
+Test: tests/parity_a3.rs and tests/parity_wake.rs read every file written here.
 
 Regenerate (from the repository root):
     python3 -B -I crates/trusty-architect/tests/fixtures/a3/regen_a3.py <prototype-dir>
@@ -23,6 +25,7 @@ import sys
 import tempfile
 import types
 import unicodedata
+from datetime import datetime
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -393,6 +396,208 @@ def write_digit_table(zeros):
         out.write(text)
 
 
+# --- wake() and dispatch_wake() (#9171 A3b-1) ---------------------------------------------
+#
+# Each wake scenario scripts tmux per verb (a FIFO of stdout strings, or
+# {"err": text}; a verb with an empty FIFO answers its fallback, else raises)
+# and records every argv the prototype passes to tmux plus the return phrase.
+# The captures are the shapes tests/test_fleet_poll.py builds (screen(),
+# _wrapped_box_screen(), PERMISSION). "{msg}" in a capture is replaced by the
+# pointer the prototype itself would type, read off a dry-run wake().
+# A scenario with a "ruling" diverges from the prototype by an Architect
+# ruling: wake.jsonl records the ruled argv and phrase, and
+# wake_rulings.jsonl records what the prototype does instead.
+
+WAKE_ALERTS = "/w/ïnbox/alerts.jsonl"  # non-ASCII: BSpace counts characters, not bytes
+TEST_RULE = "─" * 80
+DIM, RESET = "\x1b[2m", "\x1b[0m"
+PM_TURN = ["⏺ Merged #12 and the CI run is green.", "", "  Next: the release notes."]
+
+
+def screen(body, box="", dim=False):
+    """tests/test_fleet_poll.py screen(): transcript, input box, footer."""
+    box_line = "❯\xa0" + (f"{DIM}{box}{RESET}" if dim else box)
+    footer = ["  TM 1.7.4 ● | org/proj ⎇ tm-x | @me | Opus 5.5 | ctx 30% | $1.00 | "
+              "⏳30% 📅40% | 💸1%/1%",
+              "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 9 agents",
+              " " * 70 + "/rc", "", "  ⏺ main"]
+    return "\n".join(list(body) + [TEST_RULE, box_line, TEST_RULE] + footer) + "\n\n"
+
+
+def wrapped(text):
+    """tests/test_fleet_poll.py _wrapped_box_screen(PM_TURN, text)."""
+    half = len(text) // 2
+    return "\n".join(PM_TURN + [TEST_RULE, f"❯\xa0{text[:half]}", text[half:], TEST_RULE]) + "\n"
+
+
+PERMISSION = "\n".join(["⏺ Bash(rm -rf build/)", "", TEST_RULE, " Bash command · from the local-ops agent",
+                        "", "   rm -rf build/", "   Remove the build dir", "", " Do you want to proceed?",
+                        " ❯ 1. Yes", "   2. Yes, and don't ask again for rm commands in this project",
+                        "   3. No, and tell Claude what to do differently (esc)", "", " Esc to cancel"]) + "\n"
+EMPTY, NO_BOX = screen(PM_TURN), "❯\n\n  ✻ Doing work… (2m 14s · esc to interrupt)\n"
+STALE = "[poll 11:15Z] 4 new alerts -> /Users/x/inbox/alerts.jsonl"
+SUP = ["tm-architect", "%1", "11"]
+OWNER = {"display-message": "tm-architect\n", "send-keys": ""}
+BOX_CHANGED = "failed: text not confirmed in the input box; box changed, nothing erased"
+DM = ["display-message", "-p", "-t", "%1", "#{session_name}"]
+CAP = ["capture-pane", "-e", "-p", "-S", "-80", "-t", "%1"]
+
+
+def sc(case, captures, panes=(SUP,), n=3, logged=None, dry_run=False, fallback=OWNER, script=None, ruling=None):
+    return {"case": case, "panes": [list(p) for p in panes], "n": n, "logged": logged, "dry_run": dry_run,
+            "script": dict(script or {}, **{"capture-pane": captures}), "fallback": dict(fallback),
+            "ruling": ruling}
+
+
+Q1 = "A3b Q1: an empty box after typing sends nothing"
+Q3 = "A3 Q3 / rule 4: Enter only on equality; BSpace only when the box ends with our own text"
+WAKE = [
+    sc("no_tm_architect_pane", [], panes=(["tm-x", "%4", "11"],)),
+    sc("no_input_box_found", [NO_BOX]),
+    sc("typed_draft", [screen(PM_TURN, box="half-typed reply")]),
+    sc("dialog_open", [PERMISSION]),
+    sc("own_stale_pointer_wrapped", [wrapped(STALE)]),
+    sc("human_draft_starting_with_poll", [screen(PM_TURN, box="poll the team about the release date")]),
+    sc("dry_run", [EMPTY], dry_run=True),
+    sc("wrapped_confirm_then_enter", [EMPTY, "{wrapped}", EMPTY]),
+    sc("suggestion_box_sends", [screen(PM_TURN, box="try /tm-fleet-check", dim=True), "{wrapped}", EMPTY]),
+    sc("need_you_form_one_alert", [EMPTY, "{wrapped}", EMPTY], n=1, logged=0),
+    sc("need_you_form_many", [EMPTY, "{wrapped}", EMPTY], n=4, logged=7),
+    sc("still_in_box_after_enter", [EMPTY, "{wrapped}", "{boxed}"]),
+    sc("active_pane_is_chosen", [EMPTY, "{wrapped}", EMPTY],
+       panes=(["tm-architect", "%1", "10"], ["tm-architect", "%2", "11"], ["tm-x", "%3", "11"])),
+    sc("wrong_session_refused", [EMPTY], fallback={"display-message": "tm-api\n", "send-keys": ""}),
+    sc("empty_box_after_typing", [EMPTY], fallback=dict(OWNER, **{"capture-pane": EMPTY}),
+       ruling={"name": Q1, "keep": 4, "erase": False, "result": BOX_CHANGED}),
+    sc("message_plus_extra_text", [EMPTY, "{msg_extra}", EMPTY],
+       ruling={"name": Q3, "keep": 4, "erase": False, "result": BOX_CHANGED}),
+    sc("draft_then_message_left_draft", [EMPTY, "{draft_msg}", screen(PM_TURN, box="draft")],
+       ruling={"name": Q3, "keep": 4, "erase": True,
+               "result": "failed: text not confirmed in the input box; cleanup left box non-empty"}),
+    sc("draft_then_message_box_emptied", [EMPTY, "{draft_msg}", EMPTY],
+       ruling={"name": Q3, "keep": 4, "erase": True,
+               "result": "failed: text not confirmed in the input box; cleaned up, box empty"}),
+]
+
+
+def _pane_dicts(panes):
+    return [{"session": s, "pane": p, "cmd": "claude", "active": a, "path": "", "dead": "0"} for s, p, a in panes]
+
+
+def _resolve(text, msg):
+    return {"{wrapped}": wrapped(msg) if msg else text,
+            "{boxed}": screen(PM_TURN, box=msg) if msg else text,
+            "{msg_extra}": screen(PM_TURN, box=f"{msg} and more") if msg else text,
+            "{draft_msg}": screen(PM_TURN, box=f"draft {msg}") if msg else text}.get(text, text)
+
+
+def run_wake(case):
+    calls = []
+    fifo = {verb: list(outs) for verb, outs in case["script"].items()}
+
+    def tmux(*args):
+        calls.append(list(args))
+        queue = fifo.get(args[0])
+        if queue:
+            out = queue.pop(0)
+        elif args[0] in case["fallback"]:
+            out = case["fallback"][args[0]]
+        else:
+            raise fc.TmuxError(f"{args[0]}: unscripted")
+        if isinstance(out, dict):
+            raise fc.TmuxError(f"{args[0]}: {out['err']}")
+        return out
+
+    fc.tmux = tmux
+    panes = _pane_dicts(case["panes"])
+    try:
+        return calls, fc.wake(case["n"], panes, case["dry_run"], case["logged"]), None
+    except fc.TmuxError as e:
+        return calls, None, str(e)
+
+
+def pointer_for(case):
+    """The pointer the prototype types for this scenario: a dry-run wake()
+    over an empty box on the scenario's panes."""
+    probe_case = dict(case, dry_run=True, script={"capture-pane": [EMPTY]}, fallback=OWNER)
+    _, result, _ = run_wake(probe_case)
+    return result.split(": ", 2)[2] if result and result.startswith("dry-run:") else None
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.fromtimestamp(NOW, tz)
+
+
+def wake_rows():
+    saved = fc.ALERTS, fc.datetime, fc.tmux
+    fc.ALERTS, fc.datetime = WAKE_ALERTS, _FixedDateTime
+    rows, rulings = [], []
+    try:
+        for case in WAKE:
+            msg = pointer_for(case)
+            case["script"]["capture-pane"] = [_resolve(c, msg) for c in case["script"]["capture-pane"]]
+            calls, result, raises = run_wake(case)
+            got = {"argv": calls, "result": result, "raises": raises}
+            if case["ruling"]:
+                r = case["ruling"]
+                argv = calls[:r["keep"]]
+                if r["erase"]:
+                    argv += [DM, ["send-keys", "-t", "%1"] + ["BSpace"] * len(msg), CAP]
+                rulings.append(json.dumps({"case": case["case"], "ruling": r["name"], "python": got},
+                                          ensure_ascii=False))
+                got = {"argv": argv, "result": r["result"], "raises": None}
+            rows.append(json.dumps(dict({"case": case["case"]}, **got), ensure_ascii=False))
+    finally:
+        fc.ALERTS, fc.datetime, fc.tmux = saved
+    return rows, rulings
+
+
+# dispatch_wake(): the fake wake takes the live four arguments (the frozen
+# tests' three-argument fake raises TypeError against the live call).
+DISPATCH = [
+    {"case": "skip_then_send_carries_total", "steps": [
+        [3, None, False, "skipped: no input box found"], [2, None, False, "sent to %1"]]},
+    {"case": "failed_confirm_keeps_pending", "steps": [
+        [4, None, False, "failed: text not confirmed in the input box; box changed, nothing erased"],
+        [0, None, False, "failed: text not confirmed in the input box; box changed, nothing erased"]]},
+    {"case": "nothing_pending", "steps": [[0, None, False, None], [0, 2, False, None]]},
+    {"case": "logged_carried_then_cleared", "steps": [
+        [2, 3, False, "skipped: input typed"], [0, 1, False, "sent to %1 (still in box after Enter)"],
+        [0, 0, False, None]]},
+    {"case": "dry_run_sets_no_sent_at", "steps": [
+        [5, None, True, "dry-run: would send to %1: x"], [0, None, True, "sent to %1"]]},
+    {"case": "raise_is_failed", "steps": [
+        [1, None, False, {"raise": "refusing to send to %1 (session 'tm-api')"}]]},
+]
+
+
+def dispatch_rows():
+    saved = fc.wake, fc.time
+    rows = []
+    try:
+        fc.time = types.SimpleNamespace(time=lambda: NOW, sleep=lambda s: None)
+        for case in DISPATCH:
+            state = {}
+            for step, (new, logged, dry_run, result) in enumerate(case["steps"]):
+                calls = []
+
+                def fake_wake(n, panes, dry, lg, _r=result, _calls=calls):
+                    _calls.append([n, lg])
+                    if isinstance(_r, dict):
+                        raise fc.TmuxError(_r["raise"])
+                    return _r
+
+                fc.wake = fake_wake
+                got = fc.dispatch_wake(state, [], new, dry_run, logged)
+                rows.append(json.dumps({"case": case["case"], "step": step, "result": got, "calls": calls,
+                                        "state": state}, sort_keys=True))
+    finally:
+        fc.wake, fc.time = saved
+    return rows
+
+
 # --- write ------------------------------------------------------------------------------
 
 
@@ -410,9 +615,11 @@ def list_panes_rows():
 
 
 def main():
+    wake, rulings = wake_rows()  # resolves the "{msg}" captures in WAKE first
     corpus = {"list_panes": LIST_PANES, "band": BAND, "band_alerts": BAND_ALERTS, "host": HOST,
               "events": EVENTS, "self_ctx_alerts": SELF_CTX_ALERTS, "transcript": TRANSCRIPT,
-              "alert_rows": ALERT_ROWS, "now": NOW, "dead_pid": DEAD_PID}
+              "alert_rows": ALERT_ROWS, "now": NOW, "dead_pid": DEAD_PID,
+              "wake": WAKE, "wake_alerts": WAKE_ALERTS, "dispatch": DISPATCH}
     with open(os.path.join(HERE, "corpus_a3.json"), "w", encoding="ascii", newline="\n") as out:
         json.dump(corpus, out, indent=1)
         out.write("\n")
@@ -433,6 +640,9 @@ def main():
     with open(os.path.join(HERE, "alerts_lines.jsonl"), "w", encoding="utf-8", newline="\n") as f_:
         for a in [fc.alert(*row) for row in ALERT_ROWS]:
             f_.write(json.dumps(a, ensure_ascii=False) + "\n")
+    write("wake.jsonl", wake)
+    write("wake_rulings.jsonl", rulings)
+    write("dispatch_wake.jsonl", dispatch_rows())
     ranges = digit_ranges()
     write("digits.jsonl", [json.dumps(r) for r in ranges])
     write_digit_table(digit_zeros(ranges))

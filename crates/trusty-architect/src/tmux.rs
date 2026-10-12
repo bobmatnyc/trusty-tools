@@ -142,9 +142,11 @@ pub enum Keys<'a> {
 /// Sends `keys` to `pane` with `send-keys`, unguarded.
 ///
 /// Crate-private, and the only caller of [`Tmux::execute`] with `send-keys`, so
-/// [`crate::send_guarded`], which checks the input box first, is the only way
-/// to send through a [`Tmux`] (a caller that bypasses the trait and spawns
-/// `tmux` itself is outside what this crate can stop). In literal mode `-l` precedes `--`, so a
+/// [`crate::send_guarded`], which checks the input box first, and the wake
+/// pointer's typed steps (`crate::pointer`, #9171 A3b-1), which check the
+/// owner before each send, are the only ways to send through a [`Tmux`] (a
+/// caller that bypasses the trait and spawns `tmux` itself is outside what
+/// this crate can stop). In literal mode `-l` precedes `--`, so a
 /// text that starts with `-` (`-t foo`, `-l`) reaches the pane as text.
 /// Test: `send_keys_types_a_dash_leading_literal_as_text`,
 /// `send_keys_presses_named_keys`.

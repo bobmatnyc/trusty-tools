@@ -133,8 +133,10 @@ fn create_tmp(path: &Path) -> io::Result<(File, PathBuf)> {
 /// Writes `state` to `path` atomically (unique tmp + fsync + rename + dir fsync).
 ///
 /// # Errors
-/// [`StateError::Io`] when any step fails; `path` then still holds the old
-/// state.
+/// [`StateError::Io`] when any step fails. A failure before the rename
+/// leaves the old state at `path`; a failure of the directory sync after it
+/// leaves the new state there, possibly not yet durable (#9171 A3b-1, #9803
+/// critic carry-over).
 pub fn save_state(path: &Path, state: &PollState) -> Result<(), StateError> {
     save_state_with(path, state, &mut |_| Ok(()))
 }

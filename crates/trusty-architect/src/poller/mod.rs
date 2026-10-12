@@ -9,11 +9,15 @@
 //! [`read_events`] (`events.jsonl`), [`host_alerts`] and [`band_alerts`]
 //! behind [`HostProbe`], [`TranscriptCtx`] (a pane's context from its own
 //! transcript), [`self_ctx_alerts`], and the `alerts.jsonl` / `poll.log`
-//! appends. Every function takes `now` and paths from its caller.
-//! Test: `tests/poller_ported.rs` (the prototype's tests, by name),
-//! `tests/parity_a3.rs` (goldens from `regen_a3.py`), `tests/state_atomic.rs`.
+//! appends. Every function takes `now` and paths from its caller. A3b-1 adds
+//! the send path: [`Waker::wake`] types the wake pointer into the Architect's
+//! box and [`dispatch_wake`] carries the pending count (#9171).
+//! Test: `tests/poller_ported.rs` and `tests/wake_ported.rs` (the prototype's
+//! tests, by name), `tests/parity_a3.rs` and `tests/parity_wake.rs` (goldens
+//! from `regen_a3.py`), `tests/state_atomic.rs`, `tests/wake_send_path.rs`.
 
 mod band;
+pub(crate) mod box_text;
 mod config;
 mod ctx;
 mod events;
@@ -23,6 +27,7 @@ mod pyfmt;
 mod self_ctx_alerts;
 mod sink;
 mod state;
+mod wake;
 
 pub use band::{
     BAND_HOLD_FREE_GIB, BAND_HOLD_LOAD_FACTOR, BAND_OPEN_LOAD_FACTOR, BAND_REHOLD_LOAD_FACTOR,
@@ -39,6 +44,7 @@ pub use listing::{Listing, Pane, capture, list_panes, parse_list_panes};
 pub use self_ctx_alerts::self_ctx_alerts;
 pub use sink::{append_alerts, append_log};
 pub use state::{PollState, SaveStep, load_state, save_state, save_state_with};
+pub use wake::{BOX_CHANGED, Waker, dispatch_wake};
 
 /// The Architect's own tmux session: the only pane the poller may wake.
 pub const SUPERVISOR: &str = "tm-architect";

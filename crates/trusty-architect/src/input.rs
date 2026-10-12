@@ -114,8 +114,29 @@ pub fn classify_input(capture: &str) -> (InputState, String) {
 /// What: wraps the state in a private field; outside this crate's tests the
 /// only constructor is [`crate::input_state_for_send`].
 /// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctest on
-/// [`send_guarded`] proves `classify_input`'s state does not type-check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`send_guarded`] proves `classify_input`'s state does not type-check, and
+/// the two below (`send_reading_is_single_use`) prove one reading cannot feed
+/// two sends, by move or by clone.
+///
+/// ```compile_fail,E0382
+/// // send_reading_is_single_use: a reading moves into its one send.
+/// use trusty_architect::{FakeTmux, Keys, NamedKey, PaneId, input_state_for_send, send_guarded};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let tmux = FakeTmux::new();
+/// let reading = input_state_for_send("x");
+/// let _ = send_guarded(&tmux, &pane, reading, Keys::Literal("x"));
+/// let _ = send_guarded(&tmux, &pane, reading, Keys::Named(&[NamedKey::Enter]));
+/// ```
+///
+/// ```compile_fail,E0599
+/// // send_reading_is_single_use: a reading cannot be copied by clone.
+/// use trusty_architect::{FakeTmux, Keys, PaneId, input_state_for_send, send_guarded};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let reading = input_state_for_send("x");
+/// let _ = send_guarded(&FakeTmux::new(), &pane, reading.clone(), Keys::Literal("x"));
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+// #9171 A3b-1: neither Copy nor Clone, so one reading authorises one send.
 pub struct SendReading(InputState);
 
 impl SendReading {
@@ -130,12 +151,12 @@ impl SendReading {
     }
 
     /// The input-box state this reading carries.
-    pub fn state(self) -> InputState {
+    pub fn state(&self) -> InputState {
         self.0
     }
 
     /// True when keys may be sent: the box is `empty` or holds a `suggestion`.
-    pub fn accepts_input(self) -> bool {
+    pub fn accepts_input(&self) -> bool {
         self.0.accepts_input()
     }
 }
@@ -224,9 +245,11 @@ mod tests {
         ];
         for (state, sends) in cases {
             let fake = FakeTmux::new();
-            let reading = SendReading::for_test(state);
-            let typed = send_guarded(&fake, &pane, reading, Keys::Literal("/tm-fleet-check"));
-            let entered = send_guarded(&fake, &pane, reading, Keys::Named(&[NamedKey::Enter]));
+            // #9171 A3b-1: a reading is spent by its send, so each send gets
+            // its own (the A3a version reused one Copy reading for both).
+            let read = || SendReading::for_test(state);
+            let typed = send_guarded(&fake, &pane, read(), Keys::Literal("/tm-fleet-check"));
+            let entered = send_guarded(&fake, &pane, read(), Keys::Named(&[NamedKey::Enter]));
             if sends {
                 assert!(
                     typed.is_ok() && entered.is_ok(),

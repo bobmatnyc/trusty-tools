@@ -72,6 +72,50 @@ pub enum SendError {
     Tmux(#[from] TmuxError),
 }
 
+/// Why the poller's wake did not complete (#9171 A3b-1).
+///
+/// The prototype raises `TmuxError` for each of these and `dispatch_wake`
+/// reports `failed: <message>`; the messages match the prototype's where it
+/// has one.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum WakeError {
+    /// The pane's live session is not `tm-architect`; nothing was sent.
+    #[error(
+        "refusing to send to {pane} (session {})",
+        crate::pystr::py_repr(session)
+    )]
+    NotOwner {
+        /// The pane the keys were meant for.
+        pane: String,
+        /// The session `display-message` reported, stripped.
+        session: String,
+    },
+    /// The send reading did not accept input; nothing was typed.
+    #[error("refusing to type into {pane}: input box reads {state}")]
+    Refused {
+        /// The pane the pointer was meant for.
+        pane: String,
+        /// The reading that blocked the send.
+        state: InputState,
+    },
+    /// The text to type was empty after whitespace is removed, so a later
+    /// cleanup could not tell it from any box.
+    #[error("refusing to type an empty pointer into {0}")]
+    EmptyMessage(String),
+    /// An owner check made for one pane was offered for another.
+    #[error("owner check for {checked} cannot authorise a send to {pane}")]
+    WrongPane {
+        /// The pane the owner check read.
+        checked: String,
+        /// The pane the send was for.
+        pane: String,
+    },
+    /// A tmux call failed.
+    #[error(transparent)]
+    Tmux(#[from] TmuxError),
+}
+
 /// Why [`crate::self_ctx::self_ctx_tokens`] could not measure a transcript.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
