@@ -77,6 +77,16 @@ const RUN_VALUED: &[&str] = &["--run"];
 /// The review root under the home, a tee target (answer Q4).
 const REVIEW_ROOT: &str = ".trusty-tools/kuzu-review";
 
+/// File names the review code writes into a run directory (`ledger.rs`,
+/// `export.rs`); a tee onto one would truncate the run's sealed verdicts or
+/// masked rows (#9794).
+const RUN_ARTIFACTS: [&str; 4] = [
+    "ledger.jsonl",
+    "ledger.seal",
+    "masked.jsonl",
+    ".masked.jsonl.partial",
+];
+
 /// The directories a session scratchpad lives under (`/tmp` on macOS is
 /// `/private/tmp`).
 const SCRATCH_ROOTS: [&str; 2] = ["/private/tmp/claude-", "/tmp/claude-"];
@@ -163,10 +173,18 @@ fn flags_match(args: &[&str], switches: &[&str], valued: &[&str]) -> bool {
 /// `~/.trusty-tools/kuzu-review/<file>` or `<home>/.trusty-tools/kuzu-review/<file>`,
 /// or `{/private,}/tmp/claude-<uid digits>/<project>/<session>/scratchpad/<file>`.
 /// Every component after the fixed prefix is non-empty and neither `.` nor
-/// `..`, and `<file>` has at least one component.
+/// `..`, and `<file>` has at least one component. A last component named in
+/// [`RUN_ARTIFACTS`] is refused.
 /// Test: `the_exception_cannot_widen`, `allows_the_dry_run_export_and_review_forms`.
 fn tee_path_allowed(path: &str, home: Option<&Path>) -> bool {
     if path.contains(BANNED) || path.contains(' ') {
+        return false;
+    }
+    if path
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| RUN_ARTIFACTS.contains(&name))
+    {
         return false;
     }
     if let Some(rest) = path.strip_prefix(format!("~/{REVIEW_ROOT}/").as_str()) {
