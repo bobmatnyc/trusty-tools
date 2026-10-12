@@ -519,3 +519,128 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
     let deny = evaluate_secret_file_read_gated("Bash", call.get("tool_input"), &fx.project, &gate);
     assert_eq!(deny, None, "the exemption applies outside a store");
 }
+
+// #8625 fix round: the exception covers the real `trusty-memory` program only.
+
+#[test]
+fn denies_a_shell_function_shadowing_trusty_memory() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    assert_denied(
+        &fx,
+        &[format!(
+            "trusty-memory(){{ strings \"$4\"; }}; trusty-memory import kuzu --from {store}"
+        )],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_an_environment_assignment_before_trusty_memory() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    let py = fx.venv("python");
+    assert_denied(
+        &fx,
+        &[
+            format!("PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store} --dry-run"),
+            format!("PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store} --python {py}"),
+            format!("env PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store}"),
+        ],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_a_path_assignment_before_trusty_memory() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    assert_denied(
+        &fx,
+        &[format!(
+            "PATH=/tmp/x:$PATH trusty-memory import kuzu --from {store}"
+        )],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_a_path_qualified_trusty_memory() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    assert_denied(
+        &fx,
+        &[
+            format!("/tmp/x/trusty-memory import kuzu --from {store}"),
+            format!("./trusty-memory import kuzu --from {store}"),
+        ],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn allows_the_cargo_bin_trusty_memory() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    let cargo = fx
+        .home
+        .join(".cargo/bin/trusty-memory")
+        .display()
+        .to_string();
+    assert_allowed(
+        &fx,
+        &[format!("{cargo} import kuzu --from {store} --dry-run")],
+    );
+}
+
+#[test]
+fn denies_file_dash_f_on_a_store_path() {
+    let fx = Fx::new(true);
+    let store = fx.store();
+    assert_denied(
+        &fx,
+        &[
+            format!("file -f {store}"),
+            "file -f $TMPDIR/trusty-kuzu-import-ab12/export.json".into(),
+            "file -f ~/p/.kuzu-memory/memories.db".into(),
+        ],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_dot_dot_after_a_symlink_in_the_python_path() {
+    let fx = Fx::new(true);
+    let bin = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
+    symlink(fx.root.join("uv/cpython/bin"), bin.join("link")).expect("link");
+    let py = format!("{}/link/../python", bin.display());
+    assert_denied(
+        &fx,
+        &[format!(
+            "trusty-memory import kuzu --discover --python {py}"
+        )],
+        "kuzu-import-python",
+    );
+}
+
+#[test]
+fn denies_a_tilde_bash_does_not_expand_and_a_relative_python() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &[
+            "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python".into(),
+            "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\"".into(),
+        ],
+        "kuzu-import-python",
+    );
+    let deny = bash_in(
+        &fx,
+        &fx.home,
+        "trusty-memory import kuzu --discover --python .trusty-tools/kuzu-import-venv/bin/python",
+    );
+    assert!(
+        deny.is_some_and(|r| r.contains("kuzu-import-python")),
+        "relative --python"
+    );
+}
