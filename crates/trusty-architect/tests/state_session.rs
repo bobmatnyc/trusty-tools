@@ -63,6 +63,29 @@ fn load_state_corrupt_keeps_copy() -> TestResult {
     Ok(())
 }
 
+/// #9171: a state file that is not valid UTF-8 is corrupt, not an I/O error.
+/// It is copied to `poll-state.json.corrupt.<unix>` byte for byte, then the
+/// loop resets and saves again. Red against a loader that files it as `Io`
+/// and blocks every save for the life of the process.
+#[test]
+fn non_utf8_state_is_copied_then_reset() -> TestResult {
+    let env = Env::new(&[])?;
+    let bytes = [0xff_u8, 0xfe, b'{', b'}'];
+    fs::write(env.state_path(), bytes)?;
+    let (mut session, log) = PollSession::load(&env.config, false, NOW);
+    let copy = env.config.inbox.join("poll-state.json.corrupt.1000");
+    assert_eq!(fs::read(&copy)?, bytes, "{log:?}");
+    assert!(log.iter().any(|l| l.contains("state CORRUPT")), "{log:?}");
+    assert!(!session.save_blocked(), "{log:?}");
+    let tmux = fleet(&[], "");
+    let clock = FakeClock::new(NOW);
+    env.runner(&tmux, &clock, &QuietHost)
+        .run_once(&mut session)?;
+    let (_, err) = load_state(&env.state_path());
+    assert!(err.is_none(), "the reset state was saved: {err:?}");
+    Ok(())
+}
+
 /// When the corrupt copy cannot be made, the original is the only record:
 /// the loop must not save over it.
 #[test]
