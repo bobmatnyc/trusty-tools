@@ -60,6 +60,8 @@ pub mod palace_io;
 mod r5_critic_tests;
 pub mod report;
 pub mod retract;
+// #8624: `--export-refusals`, the masked export of refused rows.
+mod review;
 #[cfg(test)]
 mod safety_tests;
 pub mod screen;
@@ -194,6 +196,10 @@ pub struct KuzuImportArgs {
     /// Kill one store's export bridge after this many seconds.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_BRIDGE_TIMEOUT_SECS)]
     pub bridge_timeout_secs: u64,
+    /// With --dry-run: write refused rows, masked, to
+    /// ~/.trusty-tools/kuzu-review/<run>/masked.jsonl for review.
+    #[arg(long, requires = "dry_run")]
+    pub export_refusals: bool,
 }
 
 impl Default for KuzuImportArgs {
@@ -208,6 +214,7 @@ impl Default for KuzuImportArgs {
             max_depth: DEFAULT_MAX_DEPTH,
             python: None,
             bridge_timeout_secs: DEFAULT_BRIDGE_TIMEOUT_SECS,
+            export_refusals: false,
         }
     }
 }
@@ -313,12 +320,30 @@ pub async fn handle_import_kuzu(args: KuzuImportArgs) -> anyhow::Result<()> {
 ///
 /// What: refuses a walk while `TRUSTY_MEMORY_PALACE` is set (#277 H2), and a
 /// real run while a daemon is live (#277), both before any store is read.
+/// With `--export-refusals` (#8624) it also guards the review destination
+/// before any store is read and writes the masked export after the last one.
 /// Test: `walk_refuses_an_env_palace_and_from_reports_its_source`,
-/// `live_daemon_is_refused_before_any_store_is_read`.
+/// `live_daemon_is_refused_before_any_store_is_read`,
+/// `umask_000_end_to_end_export_is_owner_only_and_leaks_nothing`.
 pub async fn run_import(
     args: &KuzuImportArgs,
     stores: &[DiscoveredStore],
     env: &ImportEnv<'_>,
+) -> Result<Vec<StoreReport>, KuzuImportError> {
+    // #8624: ruling Q4 fixes the review root; only tests pass another.
+    let root = args
+        .export_refusals
+        .then(review::default_root)
+        .transpose()?;
+    run_import_in(args, stores, env, root.as_deref()).await
+}
+
+/// [`run_import`] with the review root passed in (#8624).
+pub(crate) async fn run_import_in(
+    args: &KuzuImportArgs,
+    stores: &[DiscoveredStore],
+    env: &ImportEnv<'_>,
+    review_root: Option<&Path>,
 ) -> Result<Vec<StoreReport>, KuzuImportError> {
     check_env_override(args.from.is_none(), env.env_palace.as_deref())?;
     if args.dry_run {
@@ -326,11 +351,21 @@ pub async fn run_import(
     } else if let Some(daemon) = env.daemon.live_daemon().await {
         return Err(KuzuImportError::DaemonRunning(daemon));
     }
+    // #8624: the destination is guarded before any store is read.
+    let mut batch = review::prepare(
+        args.export_refusals,
+        args.dry_run,
+        review_root,
+        env.data_root,
+    )?;
     let mut reports = Vec::new();
     for store in stores {
-        let report = import_one(env, store, args).await;
+        let report = import_one(env, store, args, batch.as_mut()).await;
         print_report(&report, args.update);
         reports.push(report);
+    }
+    if let Some(batch) = batch {
+        batch.finish(&review::OsFs, &mut std::io::stdout())?;
     }
     Ok(reports)
 }
@@ -367,6 +402,7 @@ async fn import_one(
     env: &ImportEnv<'_>,
     store: &DiscoveredStore,
     args: &KuzuImportArgs,
+    batch: Option<&mut review::ReviewBatch>,
 ) -> StoreReport {
     let mut report = StoreReport {
         store: store.dir.clone(),
@@ -397,6 +433,10 @@ async fn import_one(
         return report;
     }
     let store_tag = store.dir.to_string_lossy();
+    // #8624: refused rows are classified from the export, not the plan.
+    if let Some(batch) = batch {
+        batch.add_store(&export, &store_tag);
+    }
     let counts = if args.dry_run {
         match open_snapshot_view(env.data_root, &target.palace) {
             Ok(view) => run_plan(&export, &store_tag, Target::DryRun(&view), args.update).await,

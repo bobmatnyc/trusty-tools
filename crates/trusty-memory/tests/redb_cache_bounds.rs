@@ -112,11 +112,41 @@ fn bypasses_in(rel: &str, text: &str) -> Vec<String> {
         if trimmed.starts_with("//") {
             continue;
         }
-        if BYPASS_PATTERNS.iter().any(|p| line.contains(p)) {
+        if BYPASS_PATTERNS.iter().any(|p| names_segment(line, p)) {
             hits.push(format!("{rel}:{}: {}", idx + 1, line.trim()));
         }
     }
     hits
+}
+
+/// True when `pattern` occurs in `line` with no identifier char just before it.
+///
+/// Why (#8624): `std::fs::DirBuilder::new(` contains `Builder::new(` and is not
+/// a redb open; `redb::Builder::new(` and a bare `Builder::new(` still match.
+/// Test: `patterns_match_whole_path_segments_only`.
+fn names_segment(line: &str, pattern: &str) -> bool {
+    line.match_indices(pattern).any(|(at, _)| {
+        !line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// Why (#8624): the scan must not flag a std builder that shares a suffix.
+/// Test: itself.
+#[test]
+fn patterns_match_whole_path_segments_only() {
+    assert!(!names_segment(
+        "std::fs::DirBuilder::new().mode(0o700)",
+        "Builder::new("
+    ));
+    assert!(names_segment(
+        "let b = redb::Builder::new();",
+        "Builder::new("
+    ));
+    assert!(names_segment("Builder::new()", "Builder::new("));
+    assert!(names_segment("x(Database::open(p))", "Database::open("));
 }
 
 /// Why (#7106): one unbounded palace open is enough to bring redb's 1 GiB

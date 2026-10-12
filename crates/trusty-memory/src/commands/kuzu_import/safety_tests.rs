@@ -251,6 +251,7 @@ async fn corrupt_palace_json_fails_the_store_and_is_left_untouched() {
         &env(&runner, &daemon, &data_root),
         &store,
         &args_for(&store, "kuzu-h1", false),
+        None,
     )
     .await;
     assert!(
@@ -389,13 +390,13 @@ async fn degraded_drawer_load_refuses_the_write_and_the_dry_run() {
     let runner = FakeRunner::writing(&fixture());
     let daemon = FakeDaemon(None);
     let e = env(&runner, &daemon, &data_root);
-    let write = import_one(&e, &store, &args_for(&store, "kuzu-h3", false)).await;
+    let write = import_one(&e, &store, &args_for(&store, "kuzu-h3", false), None).await;
     assert!(
         matches!(write.status, StoreStatus::Failed(KuzuImportError::DrawersUnreadable(ref p)) if p == "kuzu-h3"),
         "write: {:?}",
         write.status
     );
-    let dry = import_one(&e, &store, &args_for(&store, "kuzu-h3", true)).await;
+    let dry = import_one(&e, &store, &args_for(&store, "kuzu-h3", true), None).await;
     assert!(
         matches!(dry.status, StoreStatus::Failed(KuzuImportError::DrawersUnreadable(ref p)) if p == "kuzu-h3"),
         "dry run: {:?}",
@@ -548,6 +549,7 @@ async fn dry_run_through_import_one_leaves_the_palace_byte_identical() {
         &env(&runner, &daemon, &data_root),
         &store,
         &args_for(&store, "kuzu-m1", true),
+        None,
     )
     .await;
     assert!(
