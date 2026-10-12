@@ -118,7 +118,7 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
     tokio::spawn(async move {
         let ws = std::time::Instant::now();
         tracing::info!("starting background embedder warm-up (issues #906/#910)");
-        match trusty_common::memory_core::retrieval::shared_embedder().await {
+        match trusty_memory::engine::retrieval::shared_embedder().await {
             Ok(_) => {
                 let elapsed_ms = ws.elapsed().as_millis() as u64;
                 tracing::info!(

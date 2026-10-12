@@ -25,7 +25,7 @@
 //! that gap in both directions: palace `trusty-tools` read a gap of 4 with 0
 //! drawers missing (id aliasing, nothing absent), and orphan vectors can mask a
 //! real hole the other way. What is reported instead is
-//! [`trusty_common::memory_core::retrieval::EmbedHealth::missing_vector_ids`]
+//! [`crate::engine::retrieval::EmbedHealth::missing_vector_ids`]
 //! plus the alias audit's `key_rows` versus
 //! `distinct_vector_ids` — the pair that catches both classes. An audit that
 //! could not RUN is never a pass: it reports `unavailable`, and a caller gating
@@ -54,7 +54,7 @@ use crate::AppState;
 /// distinct_ids)`, plus the #9275 `short` count and `chunk_check` state. `key_rows`/`distinct_ids` are `None` — never `0` — when the
 /// audit could not run, because a zero standing in for "I could not tell" is the
 /// false all-clear #5005 documents.
-fn coverage(handle: &trusty_common::memory_core::PalaceHandle) -> Value {
+fn coverage(handle: &crate::engine::PalaceHandle) -> Value {
     let health = handle.embed_health();
     json!({
         "palace": health.palace_id,
@@ -79,9 +79,7 @@ fn coverage(handle: &trusty_common::memory_core::PalaceHandle) -> Value {
 /// The chunk-count check as `ran` or `unavailable` (#9275).
 ///
 /// `unavailable` means `short` is unknown, not zero.
-pub(crate) fn chunk_state(
-    check: &trusty_common::memory_core::retrieval::ChunkCheck,
-) -> &'static str {
+pub(crate) fn chunk_state(check: &crate::engine::retrieval::ChunkCheck) -> &'static str {
     match check.unavailable_reason() {
         Some(_) => "unavailable",
         None => "ran",
@@ -92,7 +90,7 @@ pub(crate) fn chunk_state(
 ///
 /// `unavailable` is deliberately not `false`: the scan failed and nothing is
 /// known, which is a block for a deletion workflow, not a soft warning.
-fn audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'static str {
+fn audit_state(audit: &crate::engine::retrieval::AliasAudit) -> &'static str {
     if audit.unavailable_reason().is_some() {
         "unavailable"
     } else if audit.is_clean() {
@@ -262,12 +260,11 @@ pub(crate) async fn handle_palace_embed_sweep(state: &AppState, _args: Value) ->
     // #4786: from disk, not `state.registry.list()`. The cache holds only what
     // this process has already opened, which is the blind spot that let three
     // active palaces report zero drawers with nothing raising it.
-    let palaces = tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .map_err(|e| anyhow!("join list_palaces: {e}"))?
-    .map_err(|e| anyhow!("list palaces: {e:#}"))?;
+    let palaces =
+        tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+            .await
+            .map_err(|e| anyhow!("join list_palaces: {e}"))?
+            .map_err(|e| anyhow!("list palaces: {e:#}"))?;
 
     let mut rows = Vec::with_capacity(palaces.len());
     let (mut unhealthy, mut unreadable) = (0usize, 0usize);

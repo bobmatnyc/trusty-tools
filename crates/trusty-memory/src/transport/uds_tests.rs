@@ -77,7 +77,7 @@ fn test_state_with_chat_provider(provider: Option<Arc<dyn ChatProvider>>) -> App
     // otherwise reach for the real ONNX model and fail on the HuggingFace
     // download — the #4413 defect class. Idempotent, so calling it from the one
     // fixture every test uses is free and order-independent.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -1533,7 +1533,7 @@ fn remove_if_present_deletes_a_stale_file_and_tolerates_an_absent_one() {
 
 /// Create a real palace on disk and return its id.
 fn seed_palace(state: &AppState, name: &str) -> String {
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    use crate::engine::palace::{Palace, PalaceId};
     let id = PalaceId::new(name);
     let palace = Palace {
         id: id.clone(),
@@ -1605,8 +1605,8 @@ async fn a_prompt_exit_flush_is_not_cut_short() {
 /// instance writes the same bytes and leaves `state.registry` cold, which is
 /// the only way to exercise an open that fails.
 fn seed_palace_off_registry(state: &AppState, name: &str) -> String {
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
-    use trusty_common::memory_core::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::PalaceRegistry;
     let id = PalaceId::new(name);
     let palace = Palace {
         id: id.clone(),

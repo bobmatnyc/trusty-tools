@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 
-use trusty_common::memory_core::retrieval::RecallResult;
+use crate::engine::retrieval::RecallResult;
 use uuid::Uuid;
 
 /// Zero-based rank the best answering ruling is lifted to: rank 3.

@@ -17,9 +17,9 @@
 //! already filters with. [`serialize_recall`] applies both.
 //! Test: `tools::tests::recall_projection_tests`.
 
+use crate::engine::retrieval::RecallResult;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::retrieval::RecallResult;
 
 use super::recall_rulings::RulingsDegraded;
 

@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::commands::doctor::CheckStatus;
-use trusty_common::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     encode_value, KgSchemaMarker, DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY,
 };
-use trusty_common::memory_core::store::palace_format::KG_SCHEMA_PALACE_FORMAT;
+use crate::engine::store::palace_format::KG_SCHEMA_PALACE_FORMAT;
 
 /// A palace directory with a `palace.json` carrying `mirror`, if any.
 fn palace(root: &Path, id: &str, mirror: Option<u32>) -> std::path::PathBuf {
@@ -100,20 +100,15 @@ fn palace_format_check_warns_on_a_palace_it_cannot_verify() {
 
 /// Copy the checked-in 0.33.0 palace (`testdata/palace-format/v1/`) to
 /// `<root>/palaces/personal`, returning the palace and the blob directory.
-fn copy_v1_blob(
-    root: &Path,
-) -> (
-    trusty_common::memory_core::palace::Palace,
-    std::path::PathBuf,
-) {
+fn copy_v1_blob(root: &Path) -> (crate::engine::palace::Palace, std::path::PathBuf) {
     let blob = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/palace-format/v1/personal");
     let dir = root.join("palaces").join("personal");
     std::fs::create_dir_all(&dir).expect("dir");
     for name in ["palace.json", "kg.redb", "index.usearch.redb"] {
         std::fs::copy(blob.join(name), dir.join(name)).expect("copy blob file");
     }
-    let palace = trusty_common::memory_core::palace::Palace {
-        id: trusty_common::memory_core::palace::PalaceId::new("personal"),
+    let palace = crate::engine::palace::Palace {
+        id: crate::engine::palace::PalaceId::new("personal"),
         name: "personal".into(),
         description: None,
         created_at: chrono::Utc::now(),
@@ -128,10 +123,10 @@ fn copy_v1_blob(
 /// drawers and triples survive; the backup is byte-identical to the blob.
 #[test]
 fn the_0_33_0_v1_palace_migrates_to_2_and_its_backup_matches_the_blob() {
-    use trusty_common::memory_core::retrieval::PalaceHandle;
-    use trusty_common::memory_core::store::format_backup::{backup_root, verify_backup, MANIFEST};
-    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-    use trusty_common::memory_core::store::OpenIntent;
+    use crate::engine::retrieval::PalaceHandle;
+    use crate::engine::store::format_backup::{backup_root, verify_backup, MANIFEST};
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::OpenIntent;
 
     let root = tempfile::tempdir().expect("tempdir");
     let (palace, blob) = copy_v1_blob(root.path());

@@ -3,9 +3,9 @@
 //! writes nothing under the palace root.
 
 use super::*;
+use crate::engine::{Palace, PalaceId, PalaceRegistry};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
-use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
 
 pub(crate) const DAY: i64 = 86_400;
 

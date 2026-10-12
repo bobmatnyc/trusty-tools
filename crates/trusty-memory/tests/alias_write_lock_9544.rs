@@ -33,7 +33,7 @@ const TEXT: &str =
 /// Test: this test itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_remember_through_alias_and_target_stores_one_drawer() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
     for attempt in 0..ATTEMPTS {
         let fx = alias_lane::Aliased::new(&format!("l{attempt}"));
         fx.state.set_ready();

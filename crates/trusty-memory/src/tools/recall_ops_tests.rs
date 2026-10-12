@@ -1,7 +1,7 @@
 //! Unit tests for the single-palace recall tail in `tools::recall_ops`.
 
 use super::*;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 fn hit(content: &str, tags: &[&str], score: f32, layer: u8) -> RecallResult {

@@ -14,7 +14,7 @@ use super::*;
 /// Read the stamp file a palace should have, without going through the
 /// dispatcher, so a broken read path cannot mask a broken write path.
 fn stamp_on_disk(state: &AppState, palace: &str) -> Option<u64> {
-    let id = trusty_common::memory_core::PalaceId::new(palace);
+    let id = crate::engine::PalaceId::new(palace);
     let data_dir = state.registry.peek(&id)?.data_dir.clone()?;
     crate::palace_last_used::read(&data_dir)
 }

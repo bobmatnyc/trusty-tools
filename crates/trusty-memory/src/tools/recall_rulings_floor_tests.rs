@@ -2,7 +2,7 @@
 //! condition and the reserved slots it grants inside `top_k`.
 
 use super::*;
-use trusty_common::memory_core::Drawer;
+use crate::engine::Drawer;
 
 fn hit(content: &str, score: f32, layer: u8) -> RecallResult {
     RecallResult {

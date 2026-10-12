@@ -7,15 +7,15 @@
 //! verbatim from the original single impl.
 //! Test: covered by the corresponding `web::tests` / `service::tests`.
 
+use crate::engine::dream::{DreamConfig, Dreamer, PersistedDreamStats};
+use crate::engine::palace::PalaceId;
 use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
-use trusty_common::memory_core::palace::PalaceId;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
-use trusty_common::memory_core::store::kg::{ExpandDirection, Triple};
-use trusty_common::memory_core::store::palace_format::is_format_refusal;
-use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
+use crate::engine::store::kg::{ExpandDirection, Triple};
+use crate::engine::store::palace_format::is_format_refusal;
+use crate::engine::{PalaceHandle, PalaceRegistry};
 
 use super::core::KG_GRAPH_MAX_TRIPLES;
 use super::helpers::{list_palaces_blocking, refresh_gaps_cache};
@@ -148,7 +148,7 @@ impl MemoryService {
     /// — `close_active_row` copies the row to a `hist:` key first — so the
     /// damage was recoverable, not silent data loss.
     /// What: Opens the palace handle and calls
-    /// [`trusty_common::memory_core::store::kg::KnowledgeGraph::retract_triple`],
+    /// [`crate::engine::store::kg::KnowledgeGraph::retract_triple`],
     /// which keys on all three fields. Returns the closed count so the caller
     /// can tell a retraction (`1`) from a miss (`0`); a miss is a genuine
     /// no-op, which makes the call idempotent. Rebuilds the prompt cache when

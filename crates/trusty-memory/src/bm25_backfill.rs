@@ -75,8 +75,8 @@
 
 use std::time::{Duration, Instant};
 
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::retrieval::PalaceHandle;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::PalaceHandle;
 
 use crate::bm25_lane::Bm25Lane;
 use crate::AppState;
@@ -654,9 +654,9 @@ fn palace_ids_on_disk(data_root: &std::path::Path) -> anyhow::Result<Vec<String>
 /// implementation there would be the bug this exists to prevent.
 pub(crate) fn release_swept_palace(
     state: &AppState,
-    id: &trusty_common::memory_core::palace::PalaceId,
+    id: &crate::engine::palace::PalaceId,
     was_resident_before: bool,
-    handle: std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    handle: std::sync::Arc<crate::engine::PalaceHandle>,
     permit: crate::startup_budget::StartupOpenPermit,
 ) {
     drop(handle);
@@ -723,7 +723,7 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
     };
 
     for palace in palaces {
-        let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
+        let id = crate::engine::palace::PalaceId::new(palace.clone());
         // #7106: the sweep draws on the same startup budget hydration does, so
         // the two running together cannot hold more than one limit's worth of
         // palaces open between them.

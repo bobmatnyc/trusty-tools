@@ -7,9 +7,9 @@
 
 use std::path::PathBuf;
 
+use crate::engine::filter::check_secret;
+use crate::engine::store::Triple;
 use serde_json::json;
-use trusty_common::memory_core::filter::check_secret;
-use trusty_common::memory_core::store::Triple;
 
 use super::apply::HandleSink;
 use super::palace_io::open_palace_for_write;

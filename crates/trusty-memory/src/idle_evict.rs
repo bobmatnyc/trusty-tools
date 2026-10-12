@@ -25,9 +25,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::engine::PalaceRegistry;
 use tokio::sync::watch;
 use tracing::info;
-use trusty_common::memory_core::PalaceRegistry;
 
 /// Serialises the idle-evict sweep against the drawer-count snapshot (#9283).
 ///
@@ -179,10 +179,10 @@ pub fn spawn_idle_evict_ticker_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::PalaceRegistry;
     use serial_test::serial;
     use std::sync::atomic::Ordering;
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
-    use trusty_common::memory_core::PalaceRegistry;
 
     /// Why: the env parse is the single source of truth for the TTL, including
     /// the `0`-disables contract and the default fallback.

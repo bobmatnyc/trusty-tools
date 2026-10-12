@@ -14,9 +14,9 @@
 use chrono::Utc;
 use serde_json::json;
 use tempfile::TempDir;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer};
-use trusty_common::memory_core::palace::{DrawerType, Palace, PalaceId};
-use trusty_common::memory_core::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
+use trusty_memory::engine::dream::{DreamConfig, Dreamer};
+use trusty_memory::engine::palace::{DrawerType, Palace, PalaceId};
+use trusty_memory::engine::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 

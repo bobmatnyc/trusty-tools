@@ -26,13 +26,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::engine::embed::Embedder;
+use crate::engine::palace::PalaceId;
+use crate::engine::registry::PalaceRegistry;
+use crate::engine::retrieval::{expand_query, retrieve_l2_scoped, RecallResult, RecallScope};
 use serde::Serialize;
-use trusty_common::memory_core::embed::Embedder;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::registry::PalaceRegistry;
-use trusty_common::memory_core::retrieval::{
-    expand_query, retrieve_l2_scoped, RecallResult, RecallScope,
-};
 use uuid::Uuid;
 
 use super::bm25::{bm25_search_optional, fuse_bm25_into_recall};

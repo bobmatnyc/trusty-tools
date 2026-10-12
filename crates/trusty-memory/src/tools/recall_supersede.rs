@@ -26,7 +26,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use trusty_common::memory_core::retrieval::{CrossPalaceResult, PalaceHandle, RecallResult};
+use crate::engine::retrieval::{CrossPalaceResult, PalaceHandle, RecallResult};
 use uuid::Uuid;
 
 /// `superseded drawer id -> replacement drawer id` for one recall.

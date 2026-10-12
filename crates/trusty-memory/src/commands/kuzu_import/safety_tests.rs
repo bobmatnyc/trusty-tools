@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::engine::filter::check_secret;
+use crate::engine::palace::Drawer;
+use crate::engine::store::Triple;
+use crate::engine::PalaceHandle;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use trusty_common::memory_core::filter::check_secret;
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::Triple;
-use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
 use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
@@ -343,7 +343,7 @@ async fn walk_refuses_an_env_palace_and_from_reports_its_source() {
 /// The dropped handle's KG writer task is aborted, not joined, so its lock
 /// can outlive the drop briefly; the open is retried for up to 5 s.
 fn corrupt_one_drawer_row(data_root: &Path, palace: &str) {
-    use trusty_common::memory_core::store::kg_store::DRAWERS;
+    use crate::engine::store::kg_store::DRAWERS;
     let path = data_root.join(palace).join("kg.redb");
     let deadline = Instant::now() + Duration::from_secs(5);
     let db = loop {

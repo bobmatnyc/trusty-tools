@@ -93,7 +93,7 @@ impl Daemon {
     async fn start() -> Self {
         // Seed the process-wide embedder cell with the mock so no test reaches
         // for the real ONNX model (#4413).
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
         let data = tempfile::tempdir().expect("tempdir");
         let root = data.path().to_path_buf();

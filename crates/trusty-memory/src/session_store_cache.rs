@@ -41,13 +41,13 @@
 //! `tests::concurrent_callers_share_one_store`,
 //! `tests::remove_drops_cached_handle`.
 
+use crate::engine::store::ChatSessionStore;
 use anyhow::Result;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use trusty_common::memory_core::store::ChatSessionStore;
 
 /// Environment variable overriding the resident chat-session-store cap.
 ///

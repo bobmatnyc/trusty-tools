@@ -30,15 +30,15 @@
 //! `recall_streamed_visits_every_palace_in_bounded_batches` in
 //! `recall_stream_tests`; the ADR-0071 criteria in `recall_scope_tests`.
 
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult};
+use crate::engine::PalaceHandle;
 use crate::AppState;
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::{CrossPalaceRecall, CrossPalaceResult};
-use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
 use super::helpers::{list_palaces_blocking, open_palaces_blocking};
@@ -479,7 +479,7 @@ fn is_empty_on_disk(palace: &Palace) -> bool {
     let empty_store = crate::console_metrics::disk_stats::read(&palace.data_dir)
         .is_ok_and(|s| s.drawer_count == 0 && s.vector_count == 0);
     empty_store
-        && trusty_common::memory_core::store::L1Cache::load_l1_cache(&palace.data_dir)
+        && crate::engine::store::L1Cache::load_l1_cache(&palace.data_dir)
             .is_ok_and(|l1| l1.is_empty())
 }
 

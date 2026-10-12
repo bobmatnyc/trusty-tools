@@ -17,12 +17,12 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
-use trusty_common::memory_core::store::chat_sessions::ChatSessionStore;
-use trusty_common::memory_core::store::kg_redb::{BatchWriteOp, KgStoreRedb};
-use trusty_common::memory_core::store::rooms::resolve_or_create_room_sync;
-use trusty_common::memory_core::store::PalaceStore;
+use trusty_memory::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use trusty_memory::engine::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
+use trusty_memory::engine::store::chat_sessions::ChatSessionStore;
+use trusty_memory::engine::store::kg_redb::{BatchWriteOp, KgStoreRedb};
+use trusty_memory::engine::store::rooms::resolve_or_create_room_sync;
+use trusty_memory::engine::store::PalaceStore;
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::transport::{dispatch, JsonRpcRequest};
 use trusty_memory::AppState;
