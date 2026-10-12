@@ -59,7 +59,11 @@ pub(crate) async fn post_lifecycle(
         .and_then(Result::ok);
     let delivery = deliver_session_start(socket.as_deref(), url, body).await;
     let home = dirs::home_dir().filter(|home| home.is_absolute());
-    settle_session_start(home.as_deref(), session_id, &delivery).map_err(anyhow::Error::msg)
+    let cwd = body["payload"]["cwd"]
+        .as_str()
+        .filter(|cwd| !cwd.is_empty())
+        .map(Path::new);
+    settle_session_start(home.as_deref(), session_id, cwd, &delivery).map_err(anyhow::Error::msg)
 }
 
 /// Deliver a `SessionStart` over the socket, else HTTP, and report the answer.
@@ -122,8 +126,10 @@ pub(crate) async fn deliver_session_start(
 pub(crate) fn settle_session_start(
     home: Option<&Path>,
     session_id: &str,
+    cwd: Option<&Path>,
     delivery: &Delivery,
 ) -> Result<(), String> {
+    let _ = cwd;
     let why = match delivery {
         Delivery::Accepted => return Ok(()),
         Delivery::Refused(why) | Delivery::NoAnswer(why) => why,

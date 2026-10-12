@@ -23,6 +23,7 @@ fn tainted_home() -> tempfile::TempDir {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     };
     taint_managed_session(&taint_dir(home.path()), "m-1", "s-tainted", &mark).expect("taint");
     home
@@ -39,6 +40,15 @@ fn tainted_session_gated_call_denies() {
             "{tool}"
         );
     }
+}
+
+/// 🔴 #8433 (critic MEDIUM): `MultiEdit` writes a path like `Edit`, so a
+/// tainted session's `MultiEdit` is denied.
+#[test]
+fn tainted_session_multiedit_denies() {
+    let home = tainted_home();
+    let reason = taint_verdict(&call("MultiEdit", Some("s-tainted")), Some(home.path()));
+    assert!(reason.is_some_and(|r| r.contains("channel-tainted")));
 }
 
 /// 🔴 #8433: an untainted session's gated call is not judged here.

@@ -27,6 +27,11 @@ pub(crate) async fn check_channel_taint(mgr: &SessionManager) -> DoctorCheck {
     let Some(home) = dirs::home_dir() else {
         return DoctorCheck::new(NAME, CheckStatus::Unknown, "the home directory is unknown");
     };
+    check_channel_taint_in(mgr, &channels_taint::taint_dir(&home)).await
+}
+
+/// [`check_channel_taint`] for the taint directory `dir`.
+pub(crate) async fn check_channel_taint_in(mgr: &SessionManager, dir: &Path) -> DoctorCheck {
     let live: HashSet<String> = mgr
         .list()
         .await
@@ -34,7 +39,7 @@ pub(crate) async fn check_channel_taint(mgr: &SessionManager) -> DoctorCheck {
         .filter(|r| !r.state.is_terminal())
         .map(|r| r.id.to_string())
         .collect();
-    channel_taint_row(&channels_taint::taint_dir(&home), &live)
+    channel_taint_row(dir, &live)
 }
 
 /// The row for the taint directory `dir`, given the non-terminal managed ids.

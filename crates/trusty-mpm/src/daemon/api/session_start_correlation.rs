@@ -104,7 +104,7 @@ pub(crate) async fn correlate_session_start(
         .collect();
     // #8433 (Dfc, D09): taint the new id before the event is acknowledged;
     // a failure is returned so the hook call fails, never logged and dropped.
-    let taint = reapply_channel_taint(state, &matched, claude_session_id);
+    let taint = reapply_channel_taint(state.user_home().as_deref(), &matched, claude_session_id);
 
     match matched.len() {
         0 => {} // no Active managed session at this cwd — silent, not an error
@@ -203,17 +203,17 @@ pub(crate) async fn correlate_session_start(
 /// `session_start_for_untainted_managed_session_writes_nothing`,
 /// `reapply_failure_fails_session_start_hook_and_egress_denies`.
 fn reapply_channel_taint(
-    state: &DaemonState,
+    home: Option<&std::path::Path>,
     matched: &[&crate::session_manager::SessionRecord],
     claude_session_id: &str,
 ) -> Result<(), String> {
     if matched.is_empty() {
         return Ok(());
     }
-    let Some(home) = state.user_home() else {
+    let Some(home) = home else {
         return Err("the daemon's home is unknown, so it cannot re-apply a channel taint".into());
     };
-    let dir = channels_taint::taint_dir(&home);
+    let dir = channels_taint::taint_dir(home);
     for record in matched {
         let managed = record.id.to_string();
         match channels_taint::reapply(&dir, &managed, claude_session_id) {

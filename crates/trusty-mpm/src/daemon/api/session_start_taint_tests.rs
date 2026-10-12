@@ -51,6 +51,7 @@ fn mark() -> TaintMark {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     }
 }
 
@@ -116,6 +117,72 @@ async fn session_start_reapply_failure_fails_the_ingest() {
         "garbage",
     )
     .expect("corrupt");
+
+    let err = ingest_hook(&state, start(NEW, ws.path()))
+        .await
+        .expect_err("must fail");
+    assert!(err.to_string().contains("re-apply"), "{err}");
+}
+
+fn managed_id(managed: &str) -> crate::session_manager::ManagedSessionId {
+    crate::session_manager::ManagedSessionId(uuid::Uuid::parse_str(managed).expect("uuid"))
+}
+
+/// 🔴 #8433 (critic HIGH 1): `claude` exiting leaves the record `Stopped`
+/// and its mark in place; a later `claude` in that workspace is re-tainted.
+#[tokio::test]
+async fn session_start_in_stopped_tainted_session_reapplies() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let ws = crate::test_support::hermetic_temp_dir();
+    let (state, managed) = state_with_active(root.path(), ws.path()).await;
+    let dir = taint_dir(&state);
+    channels_taint::taint_managed_session(&dir, &managed, OLD, &mark()).expect("taint");
+    let mgr = state.session_manager().await;
+    mgr.mark_runtime_exited_stopped(&managed_id(&managed))
+        .await
+        .expect("runtime exit");
+
+    ingest_hook(&state, start(NEW, ws.path()))
+        .await
+        .expect("SessionStart accepted");
+
+    assert!(
+        channels_taint::read_state(&dir, NEW).is_tainted(),
+        "the new id in a Stopped tainted session is tainted"
+    );
+}
+
+/// 🔴 #8433 (r-078): a re-apply with no home to write under fails; with no
+/// record matched there is nothing to re-apply.
+#[tokio::test]
+async fn reapply_with_an_unknown_home_fails() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let ws = crate::test_support::hermetic_temp_dir();
+    let (state, _managed) = state_with_active(root.path(), ws.path()).await;
+    let records = state.session_manager().await.list().await;
+    let matched: Vec<_> = records.iter().collect();
+    let err = super::reapply_channel_taint(None, &matched, NEW).expect_err("no home");
+    assert!(err.contains("home is unknown"), "{err}");
+    assert_eq!(super::reapply_channel_taint(None, &[], NEW), Ok(()));
+}
+
+/// 🔴 #8433 (r-078): a `SessionStart` re-asserting the id the record already
+/// holds still fails when the re-apply fails.
+#[tokio::test]
+async fn session_start_same_id_reapply_failure_still_fails() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let ws = crate::test_support::hermetic_temp_dir();
+    let (state, managed) = state_with_active(root.path(), ws.path()).await;
+    ingest_hook(&state, start(NEW, ws.path()))
+        .await
+        .expect("first SessionStart correlates NEW");
+    let dir = taint_dir(&state);
+    std::fs::create_dir_all(dir.join("managed")).expect("mkdir");
+    std::fs::write(
+        dir.join("managed").join(format!("{managed}.json")),
+        "garbage",
+    )
+    .expect("corrupt mark");
 
     let err = ingest_hook(&state, start(NEW, ws.path()))
         .await

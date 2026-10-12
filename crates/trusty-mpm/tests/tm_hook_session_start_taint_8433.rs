@@ -53,6 +53,7 @@ async fn tainted_daemon(root: &Path, ws: &Path) -> (Arc<DaemonState>, PathBuf) {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     };
     let dir = channels_taint::taint_dir(&home);
     channels_taint::taint_managed_session(&dir, &rec.id.to_string(), OLD, &mark).expect("taint");

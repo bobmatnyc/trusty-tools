@@ -9,6 +9,7 @@ fn mark() -> TaintMark {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     }
 }
 
@@ -76,10 +77,31 @@ fn doctor_lists_orphan_taint_files_and_deletes_none() {
     );
     assert_eq!(files(&dir), before, "the row deleted something");
 
-    let failures = dir
-        .parent()
-        .expect("channels")
-        .join(channels_taint::REAPPLY_FAILURES_FILE);
+    // #8433 fix round: the record sits in the anchored taint dir.
+    let failures = dir.join(channels_taint::REAPPLY_FAILURES_FILE);
     std::fs::write(&failures, "{\"session_id\":\"e\"}\n").expect("double failure");
     assert_eq!(channel_taint_row(&dir, &live).status, CheckStatus::Fail);
+}
+
+/// 🔴 #8433 (r-078): a taint dir or a managed dir that cannot be listed
+/// grades `Unknown`, never `Ok`.
+#[test]
+fn doctor_row_is_unknown_when_taint_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = channels_taint::taint_dir(home.path());
+    let live: HashSet<String> = ["live-1".to_owned()].into();
+    taint_managed_session(&dir, "live-1", "a", &mark()).expect("live");
+    for blocked in [dir.clone(), dir.join("managed")] {
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).expect("ro");
+        let row = channel_taint_row(&dir, &live);
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).expect("rw");
+        assert_eq!(
+            row.status,
+            CheckStatus::Unknown,
+            "{}: {}",
+            blocked.display(),
+            row.message
+        );
+    }
 }
