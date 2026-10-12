@@ -7,9 +7,7 @@ use serde_json::{Value, json};
 
 use super::*;
 
-/// A scratch tree: a home with the import venv shaped like the host one
-/// (`bin/python3` and `bin/python3.13` → `python` → a CPython outside the
-/// venv), a project holding a store, and a CPython symlink planted elsewhere.
+/// A scratch tree: a home and a project holding a store.
 struct Fx {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -18,31 +16,13 @@ struct Fx {
 }
 
 impl Fx {
-    fn new(with_venv: bool) -> Self {
+    fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = std::fs::canonicalize(dir.path()).expect("canonical tempdir");
         let home = root.join("home");
         let project = root.join("p");
         std::fs::create_dir_all(project.join(".kuzu-memory")).expect("mkdir store");
         std::fs::write(project.join(".kuzu-memory/memories.db"), "kuzu").expect("store");
-        let cpython = root.join("uv/cpython/bin");
-        std::fs::create_dir_all(&cpython).expect("mkdir cpython");
-        std::fs::write(cpython.join("python3.13"), "#!").expect("cpython");
-        let bin = home.join(".trusty-tools/kuzu-import-venv/bin");
-        std::fs::create_dir_all(&bin).expect("mkdir venv");
-        if with_venv {
-            symlink(cpython.join("python3.13"), bin.join("python")).expect("python");
-            symlink("python", bin.join("python3")).expect("python3");
-            symlink("python", bin.join("python3.13")).expect("python3.13");
-        }
-        for planted in ["elsewhere", "elsewhere/kuzu-import-venv/bin"] {
-            std::fs::create_dir_all(root.join(planted)).expect("mkdir planted");
-            symlink(
-                cpython.join("python3.13"),
-                root.join(planted).join("python"),
-            )
-            .expect("planted python");
-        }
         Self {
             _dir: dir,
             root,
@@ -51,6 +31,7 @@ impl Fx {
         }
     }
 
+    /// A path inside the import venv's `bin/`, which need not exist.
     fn venv(&self, name: &str) -> String {
         let bin = self.home.join(".trusty-tools/kuzu-import-venv/bin");
         bin.join(name).display().to_string()
@@ -109,7 +90,7 @@ fn s(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn denies_every_tool_shape_naming_a_store() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let store = fx.store();
     let venv = fx.venv("");
     for name in ["Read", "Edit", "Write", "MultiEdit"] {
@@ -141,7 +122,7 @@ fn denies_every_tool_shape_naming_a_store() {
 
 #[test]
 fn denies_bash_reads_of_a_store() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let store = fx.store();
     let venv = fx.venv("");
     assert_denied(
@@ -179,7 +160,7 @@ fn denies_bash_reads_of_a_store() {
 
 #[test]
 fn denies_running_kuzu_memory() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -201,7 +182,7 @@ fn denies_running_kuzu_memory() {
 
 #[test]
 fn denies_an_unlexable_segment_naming_a_store() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&["cat \"memories.db", "cat '.kuzu-memory/x"]),
@@ -211,7 +192,7 @@ fn denies_an_unlexable_segment_naming_a_store() {
 
 #[test]
 fn denies_a_glob_that_can_match_a_deny_name() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -254,70 +235,48 @@ fn denies_a_glob_that_can_match_a_deny_name() {
     }
 }
 
-// #8625 re-scope: the inputs the removed exception allowed now deny.
+// #8625 re-scope: every input the removed exception, or a bypass of it, once
+// allowed now denies. Under D5b each one holds both words, whatever `--python`,
+// prefix, wrapper or path-qualified program surrounds them.
 #[test]
 fn denies_the_formerly_sanctioned_import() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let p = fx.project.display();
-    assert_denied(
-        &fx,
-        &[
-            "trusty-memory import kuzu --discover --dry-run".into(),
-            format!(
-                "trusty-memory import kuzu --from {p}/.kuzu-memory --dry-run --export-refusals"
-            ),
-            format!(
-                "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {p}/.kuzu-memory/memories.db --palace x"
-            ),
-            "trusty-memory import kuzu review record --run R --key K --verdict keep-refused".into(),
-            format!(
-                "trusty-memory import kuzu --from {p}/.kuzu-memory --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"
-            ),
-            "trusty-memory import kuzu --dry-run 2>&1 | tee /tmp/report.txt".into(),
-        ],
-        "kuzu-store-read",
-    );
-    // The reviewer's masked file stays readable.
-    let masked = fx.home.join(".trusty-tools/kuzu-review/R/masked.jsonl");
-    assert_eq!(tool(&fx, "Read", json!({ "file_path": masked })), None);
-}
-
-#[test]
-fn denies_an_import_naming_the_venv_interpreter() {
-    let fx = Fx::new(true);
     let store = fx.store();
-    let mut commands = Vec::new();
-    for name in ["python", "python3", "python3.13"] {
-        let py = fx.venv(name);
-        commands.push(format!(
-            "trusty-memory import kuzu --from {store} --python {py}"
-        ));
-        commands.push(format!(
-            "trusty-memory import kuzu --discover --python={py}"
-        ));
-    }
-    commands.push(
-        "trusty-memory import kuzu --python ~/.trusty-tools/kuzu-import-venv/bin/python3".into(),
-    );
-    assert_denied(&fx, &commands, "kuzu-store-read");
-}
-
-#[test]
-fn denies_a_non_venv_python_program() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    let cpython = fx.root.join("uv/cpython/bin/python3.13");
-    let mut commands = Vec::new();
+    let cargo = fx.home.join(".cargo/bin/trusty-memory");
+    let mut commands: Vec<String> = vec![
+        "trusty-memory import kuzu --discover --dry-run".into(),
+        format!("trusty-memory import kuzu --from {p}/.kuzu-memory --dry-run --export-refusals"),
+        format!(
+            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {p}/.kuzu-memory/memories.db --palace x"
+        ),
+        "trusty-memory import kuzu review record --run R --key K --verdict keep-refused".into(),
+        format!(
+            "trusty-memory import kuzu --from {p}/.kuzu-memory --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"
+        ),
+        "trusty-memory import kuzu --dry-run 2>&1 | tee /tmp/report.txt".into(),
+        "trusty-memory import kuzu --discover --python".into(),
+        format!("trusty-memory(){{ strings \"$4\"; }}; trusty-memory import kuzu --from {store}"),
+        format!("PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store} --dry-run"),
+        format!("env PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store}"),
+        format!("PATH=/tmp/x:$PATH trusty-memory import kuzu --from {store}"),
+        format!("/tmp/x/trusty-memory import kuzu --from {store}"),
+        format!("./trusty-memory import kuzu --from {store}"),
+        format!("{} import kuzu --from {store} --dry-run", cargo.display()),
+        "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python"
+            .into(),
+        "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\""
+            .into(),
+    ];
     for py in [
-        "/bin/cat".to_string(),
+        fx.venv("python"),
+        fx.venv("python3"),
+        fx.venv("python3.13"),
+        format!("{}link/../python", fx.venv("")),
+        "/Users/x/.trusty-tools/kuzu-import-venv/bin/python3".into(),
+        "/bin/cat".into(),
         "/usr/bin/python3".into(),
-        cpython.display().to_string(),
-        fx.venv("pip"),
-        fx.venv("python3.x"),
-        fx.home
-            .join(".trusty-tools/kuzu-import-venv/lib/python")
-            .display()
-            .to_string(),
+        fx.root.join("elsewhere/python").display().to_string(),
     ] {
         commands.push(format!(
             "trusty-memory import kuzu --from {store} --python {py}"
@@ -326,37 +285,23 @@ fn denies_a_non_venv_python_program() {
             "trusty-memory import kuzu --discover --python={py}"
         ));
     }
-    commands.push("trusty-memory import kuzu --discover --python".into());
     assert_denied(&fx, &commands, "kuzu-store-read");
-}
-
-#[test]
-fn denies_a_planted_symlink_to_the_same_cpython() {
-    let fx = Fx::new(true);
-    let mut commands = Vec::new();
-    for planted in ["elsewhere/python", "elsewhere/kuzu-import-venv/bin/python"] {
-        let py = fx.root.join(planted).display().to_string();
-        commands.push(format!(
-            "trusty-memory import kuzu --discover --python {py}"
-        ));
-    }
-    assert_denied(&fx, &commands, "kuzu-store-read");
-}
-
-#[test]
-fn denies_when_the_venv_interpreter_cannot_be_resolved() {
-    // The venv is absent; the call denies all the same.
-    let fx = Fx::new(false);
-    let command = format!(
-        "trusty-memory import kuzu --discover --python {}",
-        fx.venv("python")
+    let relative = bash_in(
+        &fx.home,
+        "trusty-memory import kuzu --discover --python .trusty-tools/kuzu-import-venv/bin/python",
     );
-    assert_denied(&fx, std::slice::from_ref(&command), "kuzu-store-read");
+    assert!(
+        relative.is_some_and(|r| r.contains("kuzu-store-read")),
+        "relative --python"
+    );
+    // The reviewer's masked file stays readable.
+    let masked = fx.home.join(".trusty-tools/kuzu-review/R/masked.jsonl");
+    assert_eq!(tool(&fx, "Read", json!({ "file_path": masked })), None);
 }
 
 #[test]
 fn denies_the_deprecated_migrate_aliases() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let p = fx.project.display();
     assert_denied(
         &fx,
@@ -371,8 +316,8 @@ fn denies_the_deprecated_migrate_aliases() {
 }
 
 #[test]
-fn the_exception_cannot_be_widened() {
-    let fx = Fx::new(true);
+fn denies_a_store_read_beside_an_import_call() {
+    let fx = Fx::new();
     let venv_lib = fx
         .home
         .join(".trusty-tools/kuzu-import-venv/lib")
@@ -395,7 +340,7 @@ fn the_exception_cannot_be_widened() {
 
 #[test]
 fn keeps_ordinary_commands_allowed() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_allowed(
         &fx,
         &[
@@ -427,7 +372,7 @@ fn keeps_ordinary_commands_allowed() {
 
 #[test]
 fn denies_a_read_through_a_symlink_into_a_store() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let link = fx.root.join("innocent.txt");
     symlink(fx.store(), &link).expect("link");
     let deny = tool(&fx, "Read", json!({ "file_path": link }));
@@ -437,7 +382,7 @@ fn denies_a_read_through_a_symlink_into_a_store() {
 #[test]
 fn denies_when_a_tool_path_cannot_be_resolved() {
     // Fail-Open Check: a symlink loop makes resolution error; the call denies.
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     symlink(fx.root.join("loop-b"), fx.root.join("loop-a")).expect("loop-a");
     symlink(fx.root.join("loop-a"), fx.root.join("loop-b")).expect("loop-b");
     for target in [fx.root.join("loop-a"), fx.root.join("loop-a/notes.md")] {
@@ -451,7 +396,7 @@ fn denies_when_a_tool_path_cannot_be_resolved() {
 
 #[test]
 fn denies_a_bash_call_from_inside_a_store_directory() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let store_dir = fx.project.join(".kuzu-memory");
     for command in ["cat *", "head -c 100 *"] {
         let deny = bash_in(&store_dir, command);
@@ -533,83 +478,11 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
     assert_eq!(deny, None, "the exemption applies outside a store");
 }
 
-// #8625 fix round: each bypass of the former exception still denies.
-
-#[test]
-fn denies_a_shell_function_shadowing_trusty_memory() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    assert_denied(
-        &fx,
-        &[format!(
-            "trusty-memory(){{ strings \"$4\"; }}; trusty-memory import kuzu --from {store}"
-        )],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
-fn denies_an_environment_assignment_before_trusty_memory() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    let py = fx.venv("python");
-    assert_denied(
-        &fx,
-        &[
-            format!("PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store} --dry-run"),
-            format!("PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store} --python {py}"),
-            format!("env PYTHONPATH=/tmp/x trusty-memory import kuzu --from {store}"),
-        ],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
-fn denies_a_path_assignment_before_trusty_memory() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    assert_denied(
-        &fx,
-        &[format!(
-            "PATH=/tmp/x:$PATH trusty-memory import kuzu --from {store}"
-        )],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
-fn denies_a_path_qualified_trusty_memory() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    assert_denied(
-        &fx,
-        &[
-            format!("/tmp/x/trusty-memory import kuzu --from {store}"),
-            format!("./trusty-memory import kuzu --from {store}"),
-        ],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
-fn denies_the_cargo_bin_trusty_memory() {
-    let fx = Fx::new(true);
-    let store = fx.store();
-    let cargo = fx
-        .home
-        .join(".cargo/bin/trusty-memory")
-        .display()
-        .to_string();
-    assert_denied(
-        &fx,
-        &[format!("{cargo} import kuzu --from {store} --dry-run")],
-        "kuzu-store-read",
-    );
-}
+// #8625 fix round: `file -f` prints each line of its path, so it is off the safe verbs.
 
 #[test]
 fn denies_file_dash_f_on_a_store_path() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     let store = fx.store();
     assert_denied(
         &fx,
@@ -622,48 +495,12 @@ fn denies_file_dash_f_on_a_store_path() {
     );
 }
 
-#[test]
-fn denies_dot_dot_after_a_symlink_in_the_python_path() {
-    let fx = Fx::new(true);
-    let bin = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
-    symlink(fx.root.join("uv/cpython/bin"), bin.join("link")).expect("link");
-    let py = format!("{}/link/../python", bin.display());
-    assert_denied(
-        &fx,
-        &[format!(
-            "trusty-memory import kuzu --discover --python {py}"
-        )],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
-fn denies_a_tilde_bash_does_not_expand_and_a_relative_python() {
-    let fx = Fx::new(true);
-    assert_denied(
-        &fx,
-        &[
-            "trusty-memory import kuzu --discover --python=~/.trusty-tools/kuzu-import-venv/bin/python".into(),
-            "trusty-memory import kuzu --discover --python \"~/.trusty-tools/kuzu-import-venv/bin/python\"".into(),
-        ],
-        "kuzu-store-read",
-    );
-    let deny = bash_in(
-        &fx.home,
-        "trusty-memory import kuzu --discover --python .trusty-tools/kuzu-import-venv/bin/python",
-    );
-    assert!(
-        deny.is_some_and(|r| r.contains("kuzu-store-read")),
-        "relative --python"
-    );
-}
-
 // #8625 re-scope (Architect ruling 2026-10-12): every `trusty-memory import
 // kuzu` denies under the guard, whatever surrounds it.
 
 #[test]
 fn denies_an_import_kuzu_after_an_environment_prefix() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -680,7 +517,7 @@ fn denies_an_import_kuzu_after_an_environment_prefix() {
 
 #[test]
 fn denies_an_import_kuzu_inside_a_substitution_or_a_shell_string() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -700,7 +537,7 @@ fn denies_an_import_kuzu_inside_a_substitution_or_a_shell_string() {
 
 #[test]
 fn denies_an_import_kuzu_in_another_spelling() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -708,7 +545,6 @@ fn denies_an_import_kuzu_in_another_spelling() {
             "Trusty-Memory import kuzu --discover",
             "/usr/local/bin/TRUSTY-MEMORY import kuzu --discover",
             "~/.cargo/bin/trusty-memory import kuzu --discover",
-            "~/.cargo/bin/trusty-m* import kuzu --discover",
             "\\trusty-memory import kuzu --discover",
             "trusty-memory import -v kuzu --discover",
             "trusty-memory import --verbose kuzu --discover",
@@ -723,27 +559,8 @@ fn denies_an_import_kuzu_in_another_spelling() {
 }
 
 #[test]
-fn denies_the_plain_import_and_the_exact_sanctioned_form() {
-    let fx = Fx::new(true);
-    assert_denied(
-        &fx,
-        &[
-            "trusty-memory import kuzu --discover --dry-run".into(),
-            "trusty-memory import kuzu --discover --dry-run --python \
-             /Users/x/.trusty-tools/kuzu-import-venv/bin/python3"
-                .into(),
-            format!(
-                "trusty-memory import kuzu --discover --dry-run --python {}",
-                fx.venv("python3")
-            ),
-        ],
-        "kuzu-store-read",
-    );
-}
-
-#[test]
 fn keeps_unrelated_trusty_memory_commands_allowed() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_allowed(
         &fx,
         &s(&[
@@ -759,7 +576,7 @@ fn keeps_unrelated_trusty_memory_commands_allowed() {
 
 #[test]
 fn denies_an_import_kuzu_split_by_a_redirection() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -779,7 +596,7 @@ fn denies_an_import_kuzu_split_by_a_redirection() {
 
 #[test]
 fn the_text_rule_denies_the_block_evasions() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -807,7 +624,7 @@ fn the_text_rule_denies_the_block_evasions() {
 
 #[test]
 fn the_text_rule_folds_case() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -823,7 +640,7 @@ fn the_text_rule_folds_case() {
 
 #[test]
 fn the_text_rule_strips_quotes_dollars_and_backslashes() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[
@@ -840,7 +657,7 @@ fn the_text_rule_strips_quotes_dollars_and_backslashes() {
 
 #[test]
 fn the_text_rule_exempts_quoted_text_slots() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_allowed(
         &fx,
         &s(&[
@@ -871,7 +688,7 @@ fn the_text_rule_exempts_quoted_text_slots() {
 
 #[test]
 fn the_text_rule_denies_a_call_naming_both_outside_a_slot() {
-    let fx = Fx::new(true);
+    let fx = Fx::new();
     assert_denied(
         &fx,
         &s(&[

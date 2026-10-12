@@ -2,8 +2,7 @@
 //! matched against them.
 //!
 //! Why: issue #8625 — the model must never read a kuzu-memory store, the raw
-//! export the import bridge writes, or the import venv, except through
-//! `trusty-memory import kuzu`. Architect ruling Q2: "fixed deny constants. No
+//! export the import bridge writes, or the import venv. Architect ruling Q2: "fixed deny constants. No
 //! configuration." Q1: "deny the `kuzu-import-venv` component as the issue
 //! says." Q3: "deny any glob that can match a deny name, except words that are
 //! wildcards only."
@@ -144,23 +143,6 @@ pub(crate) fn names_kuzu_module(module: &str) -> bool {
         .split('.')
         .next()
         .is_some_and(|head| head.eq_ignore_ascii_case(KUZU_MODULE))
-}
-
-/// Whether the shell word `word` can expand to `literal`: equal to it, or a
-/// glob or brace reading that can match it, ASCII case-insensitively.
-///
-/// Why: #8625 — `~/.cargo/bin/trusty-m*` and `ku{zu,}` reach the program and
-/// sub-command words the import rule denies.
-/// What: [`word_names_kuzu`]'s readings (bracket classes as `?`, braces
-/// expanded or widened), each compared exactly or by [`overlaps`].
-/// Test: `denies_an_import_kuzu_in_another_spelling`.
-pub(crate) fn word_may_expand_to(word: &str, literal: &str) -> bool {
-    let word = normalize_bracket_classes(&word.to_ascii_lowercase());
-    let readings = expand_brace_alternatives(&word).unwrap_or_else(|| vec![widen_braces(&word)]);
-    let atoms: Vec<Atom> = literal.bytes().map(Atom::Lit).collect();
-    readings.iter().any(|reading| {
-        reading == literal || (reading.contains(['*', '?']) && overlaps(reading.as_bytes(), &atoms))
-    })
 }
 
 /// Whether `text` carries a deny name as a literal substring.

@@ -1,37 +1,32 @@
-//! The program side of the #8625 kuzu-store rule: running `kuzu-memory`, any
-//! `trusty-memory import kuzu`, and the deprecated `migrate` aliases.
+//! The program side of the #8625 kuzu-store rule: running `kuzu-memory`, and
+//! the one normalised-text rule on `trusty-memory` + `kuzu`.
 //!
 //! Why: `kuzu-memory memory export` dumps raw rows without naming a store
 //! path, and `trusty-memory import kuzu --discover` finds stores without
 //! naming one, so the path-word test alone sees neither. Architect ruling
-//! 2026-10-12 15:42Z: "Deny every trusty-memory import kuzu under the guard;
-//! remove the exception code." Ruling Q8: the deprecated `migrate kuzu-data`
-//! and `migrate kuzu-memory` aliases stay denied. A narrowed exception is
-//! follow-up work, ranked before the #277 import window.
-//! What: [`runs_kuzu_memory`] reads one argv. [`kuzu_import_call`] reads any
-//! command text — a segment's argv, an unlexable segment, a here-document
-//! body, a `bash -c` string — as statements of words, so no environment
-//! prefix, wrapper, flag, case or quoting decides the answer.
+//! 2026-10-12 15:42Z: every `trusty-memory import kuzu` denies under the
+//! guard; ruling Q8 keeps the `migrate kuzu-data` and `migrate kuzu-memory`
+//! aliases denied. Owner ruling D5b replaced the argv parser for those calls
+//! with one text rule. The narrowed exception is #9794.
+//! What: [`runs_kuzu_memory`] reads one argv. [`trusty_memory_kuzu_text`]
+//! reads the whole Bash command as text.
 //! Test: `pm_guard_kuzu_store_tests.rs` — `denies_running_kuzu_memory`,
-//! `denies_the_deprecated_migrate_aliases`,
-//! `denies_an_import_kuzu_after_an_environment_prefix`,
-//! `denies_an_import_kuzu_inside_a_substitution_or_a_shell_string`,
-//! `denies_an_import_kuzu_in_another_spelling`,
-//! `keeps_unrelated_trusty_memory_commands_allowed`.
+//! `the_text_rule_denies_the_block_evasions`,
+//! `the_text_rule_exempts_quoted_text_slots`.
 
-use crate::commands::pm_guard_kuzu_names::{names_kuzu_module, word_may_expand_to};
+use crate::commands::pm_guard_kuzu_names::names_kuzu_module;
+use crate::commands::pm_guard_secret_positions::TEXT_PAYLOAD_FLAGS;
 use crate::commands::pm_guard_secret_read::command_basename;
 use crate::commands::program_word::resolve_program_word;
 
 /// The program `kuzu-memory` installs.
 const KUZU_PROGRAM: &str = "kuzu-memory";
 
-/// The program whose `import kuzu` and `migrate` aliases deny (ruling Q8).
-const TRUSTY_MEMORY: &str = "trusty-memory";
-const MIGRATE_ALIASES: &[&str] = &["kuzu-data", "kuzu-memory"];
+/// The words whose joint presence in a normalised Bash command denies (D5b).
+const CALL_WORDS: [&str; 2] = ["trusty-memory", "kuzu"];
 
-/// Programs that append their input to a command line (`xargs trusty-memory import`).
-const ARGUMENT_FEEDERS: &[&str] = &["xargs", "gxargs", "parallel"];
+/// Short text-slot flags beside [`TEXT_PAYLOAD_FLAGS`]: `git commit -m`.
+const SHORT_SLOT_FLAGS: &[&str] = &["-m"];
 
 /// Package runners that run a later argument as a program (`uvx kuzu-memory`).
 const LAUNCHERS: &[&str] = &[
@@ -111,153 +106,107 @@ fn python_runs_kuzu_module(args: &[String]) -> bool {
     })
 }
 
-/// The deny for a `trusty-memory import kuzu` or `migrate` alias call
-/// anywhere in `text`; `None` when there is none.
+/// The D5b deny for a Bash `command` that names both `trusty-memory` and
+/// `kuzu`; `None` when it does not.
 ///
-/// Why: see the module doc — the call denies whatever surrounds it.
-/// What: `text` loses its quotes and backslashes (a `\<newline>` joins) and
-/// the `&` or `|` of a redirection operator, is cut into statements at `;`,
-/// `&`, `|` and newlines, and each statement into words twice: at blanks,
-/// parentheses and backticks, and again at `,`, `[`, `]`, `{` and `}` too (a
-/// Python argv list). Redirections drop out ([`without_redirections`]), as
-/// bash removes them before the program sees its argv; [`call_in`] judges
-/// each word list.
-/// Test: `denies_an_import_kuzu_after_an_environment_prefix`,
-/// `denies_an_import_kuzu_inside_a_substitution_or_a_shell_string`,
-/// `denies_an_import_kuzu_in_another_spelling`,
-/// `denies_an_import_kuzu_split_by_a_redirection`,
-/// `keeps_unrelated_trusty_memory_commands_allowed`.
-pub(crate) fn kuzu_import_call(text: &str) -> Option<String> {
-    let mut clean: String = text
-        .replace("\\\n", " ")
+/// Why: owner ruling D5b, "Mistakes only; switch to a text rule". It catches
+/// `trusty-memory import kuzu` and the `migrate kuzu-*` aliases however they
+/// are wrapped, redirected, fed or quoted.
+/// What: [`without_text_slots`] removes each quoted prose value, then the
+/// text loses every `'`, `"`, `$` and `\` and is case-folded; the call denies
+/// when the result holds every [`CALL_WORDS`] entry.
+/// Test: `the_text_rule_denies_the_block_evasions`, `the_text_rule_folds_case`,
+/// `the_text_rule_strips_quotes_dollars_and_backslashes`,
+/// `the_text_rule_exempts_quoted_text_slots`,
+/// `the_text_rule_denies_a_call_naming_both_outside_a_slot`.
+pub(crate) fn trusty_memory_kuzu_text(command: &str) -> Option<String> {
+    // See #8625 (D5b): the threat model is mistakes only, not deliberate evasion.
+    let normal: String = without_text_slots(command)
         .chars()
-        .filter(|c| !matches!(c, '\\' | '\'' | '"'))
+        .filter(|c| !matches!(c, '\'' | '"' | '$' | '\\'))
+        .flat_map(char::to_lowercase)
         .collect();
-    for (from, to) in REDIRECTION_SPELLINGS {
-        clean = clean.replace(from, to);
-    }
-    let narrow = |c: char| c.is_whitespace() || "()`".contains(c);
-    let wide = |c: char| narrow(c) || ",[]{}".contains(c);
-    clean.split([';', '&', '|', '\n']).find_map(|statement| {
-        let words = |cut: &dyn Fn(char) -> bool| -> Vec<String> {
-            let words: Vec<String> = statement
-                .split(cut)
-                .filter(|w| !w.is_empty())
-                .map(str::to_ascii_lowercase)
-                .collect();
-            without_redirections(words)
-        };
-        call_in(&words(&narrow)).or_else(|| call_in(&words(&wide)))
-    })
+    CALL_WORDS
+        .iter()
+        .all(|word| normal.contains(word))
+        .then(text_rule_reason)
 }
 
-/// Redirection spellings rewritten before the statement cut, so `&>`, `>&`,
-/// `>|` and `<&` stay one operator and a process substitution's `<(` opens a
-/// body rather than a redirection.
-const REDIRECTION_SPELLINGS: [(&str, &str); 6] = [
-    ("<(", " ("),
-    (">(", " ("),
-    ("&>", ">"),
-    (">&", ">"),
-    (">|", ">"),
-    ("<&", "<"),
-];
-
-/// `words` minus each redirection: a word holding `<` or `>` goes, and so
-/// does the next word when the operator stands alone (`2> /dev/null`): an fd
-/// number, then only `<` and `>` (`2>1`, from `2>&1`, carries its target).
-fn without_redirections(words: Vec<String>) -> Vec<String> {
-    let mut out = Vec::with_capacity(words.len());
-    let mut target_next = false;
-    for word in words {
-        if std::mem::take(&mut target_next) {
-            continue;
-        }
-        if word.contains(['<', '>']) {
-            target_next = word
-                .trim_start_matches(|c: char| c.is_ascii_digit())
-                .chars()
-                .all(|c| c == '<' || c == '>');
-            continue;
-        }
-        out.push(word);
+/// `command` with the quoted value of each text-slot flag replaced by a blank.
+///
+/// What: a slot is a [`TEXT_PAYLOAD_FLAGS`] or [`SHORT_SLOT_FLAGS`] spelling
+/// that starts a word, then `=`, blanks or nothing, then a quoted string
+/// ([`closing_quote`]). An unquoted value is not a slot.
+fn without_text_slots(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut copied = 0;
+    while let Some((open, close)) = next_text_slot(command, copied) {
+        out.push_str(&command[copied..open]);
+        out.push(' ');
+        copied = close + 1;
     }
+    out.push_str(&command[copied..]);
     out
 }
 
-/// The deny for the first `trusty-memory` call in one statement's `words`.
+/// The byte offsets of the opening and closing quote of the first text slot
+/// at or after `from`.
+fn next_text_slot(command: &str, from: usize) -> Option<(usize, usize)> {
+    let flags = || TEXT_PAYLOAD_FLAGS.iter().chain(SHORT_SLOT_FLAGS);
+    command[from..].char_indices().find_map(|(offset, _)| {
+        let at = from + offset;
+        if !command[..at]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace)
+        {
+            return None;
+        }
+        flags().find_map(|flag| {
+            let rest = command[at..].strip_prefix(flag)?;
+            let value = rest
+                .strip_prefix('=')
+                .unwrap_or_else(|| rest.trim_start_matches([' ', '\t']));
+            let open = command.len() - value.len();
+            closing_quote(command, open).map(|close| (open, close))
+        })
+    })
+}
+
+/// The byte offset of the quote closing the string that opens at `open`.
 ///
-/// What: a word whose basename may be `trusty-memory`, then — skipping every
-/// `-` word, so `-v`, `--verbose` and `--` hide nothing — a sub-command that
-/// may be `import` followed by one that may be `kuzu`, or `migrate` followed
-/// by an alias. Under an argument feeder (`xargs`) a missing word is supplied
-/// at run time, so it denies (fail closed).
-fn call_in(words: &[String]) -> Option<String> {
-    let fed = words
-        .iter()
-        .any(|w| ARGUMENT_FEEDERS.contains(&command_basename(w).as_str()));
-    for (at, word) in words.iter().enumerate() {
-        if !word_may_expand_to(&command_basename(word), TRUSTY_MEMORY) {
+/// What: `None` when `open` holds no quote, when the string never closes, or
+/// when a double-quoted string runs a `$(…)` or backtick substitution, since
+/// that is code, not text. Inside double quotes a backslash escapes one char.
+fn closing_quote(command: &str, open: usize) -> Option<usize> {
+    let quote = command[open..]
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"'))?;
+    let start = open + 1;
+    let mut escaped = false;
+    for (offset, c) in command[start..].char_indices() {
+        if quote == '"' && std::mem::take(&mut escaped) {
             continue;
         }
-        let rest: Vec<&String> = words[at + 1..]
-            .iter()
-            .filter(|w| !w.starts_with('-'))
-            .collect();
-        let deny = match rest.first() {
-            None => fed,
-            Some(sub) if may_be(sub, "import") => rest.get(1).map_or(fed, |t| names_kuzu(t)),
-            Some(sub) if may_be(sub, "migrate") => {
-                let in_slot = rest.get(1).filter(|t| is_migrate_alias(t, true));
-                let anywhere = || rest[1..].iter().find(|t| is_migrate_alias(t, false));
-                if let Some(alias) = in_slot.or_else(anywhere) {
-                    return Some(migrate_reason(alias));
-                }
-                rest.len() == 1 && fed
-            }
-            Some(_) => false,
-        };
-        if deny {
-            return Some(import_reason());
+        if quote == '"' && c == '\\' {
+            escaped = true;
+        } else if c == quote {
+            let close = start + offset;
+            let body = &command[start..close];
+            let runs = quote == '"' && (body.contains("$(") || body.contains('`'));
+            return (!runs).then_some(close);
         }
     }
     None
 }
 
-/// Whether a sub-command word may be `literal`: a glob or brace reading of
-/// it, or a `$` expansion the guard cannot read (fail closed).
-fn may_be(word: &str, literal: &str) -> bool {
-    word.contains('$') || word.contains("{}") || word_may_expand_to(word, literal)
-}
-
-/// Whether the word after `import` may be `kuzu` (`${X:-kuzu}` included).
-fn names_kuzu(word: &str) -> bool {
-    word.contains("kuzu") || may_be(word, "kuzu")
-}
-
-/// Whether `token` may be a deprecated `migrate` target, in any case or
-/// spelling; `slot` (the word right after `migrate`) also takes a `$` word.
-fn is_migrate_alias(token: &str, slot: bool) -> bool {
-    let normal = token.to_ascii_lowercase().replace('_', "-");
-    MIGRATE_ALIASES
-        .iter()
-        .any(|alias| word_may_expand_to(&normal, alias) || (slot && may_be(&normal, alias)))
-}
-
-/// The deny text for an `import kuzu` call.
-fn import_reason() -> String {
-    "kuzu-store-read: `trusty-memory import kuzu` is denied under the guard (#8625, \
-     Architect ruling 2026-10-12): it opens kuzu-memory stores, and no exception is in \
-     force. The operator runs the import outside the guard; the reviewer reads only the \
-     masked ~/.trusty-tools/kuzu-review/<run>/masked.jsonl."
+/// The deny text for the D5b rule.
+fn text_rule_reason() -> String {
+    "kuzu-store-read: this Bash call names both `trusty-memory` and `kuzu` outside a quoted \
+     `--body`, `--title`, `--message`, `--note` or `-m` value (#8625, D5b). `trusty-memory \
+     import kuzu` and its `migrate kuzu-*` aliases open kuzu-memory stores; the operator runs \
+     them outside the guard. To write about the call, quote it in one of those flags, or use \
+     `--body-file` with a file the Write tool made."
         .to_string()
-}
-
-/// The deny text for a deprecated `migrate` alias (ruling Q8).
-fn migrate_reason(alias: &str) -> String {
-    format!(
-        "kuzu-store-read: `trusty-memory migrate {alias}` is a deprecated alias that reads \
-         kuzu-memory stores (#8625, ruling Q8). It is denied under the guard, as is \
-         `trusty-memory import kuzu`; the operator runs the import outside the guard."
-    )
 }
