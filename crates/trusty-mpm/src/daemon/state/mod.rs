@@ -12,6 +12,9 @@
 //! Test: `cargo test -p trusty-mpm-daemon` exercises registration, the hook
 //! ring-buffer bound, and memory-pressure classification.
 
+// #8454: the channel route-policy snapshot the daemon holds.
+#[cfg(feature = "channels")]
+mod channel_policy;
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;
