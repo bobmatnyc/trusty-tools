@@ -6,7 +6,8 @@
 //! What: [`OverseerBuild`] bundles the composed `dyn Overseer`, its handler
 //! name, and the optional standalone LLM chat handler; [`build_overseer`]
 //! assembles it from a loaded [`OverseerConfig`]; helper fns load optimizer
-//! and overseer configs from the framework root.
+//! and overseer configs from the framework root and build the session
+//! registry and the `/health` catalog cache.
 //! Test: `overseer_is_deterministic_without_llm`, `overseer_falls_back_when_llm_key_missing`.
 
 use std::path::PathBuf;
@@ -17,6 +18,7 @@ use crate::core::overseer::Overseer;
 use crate::core::overseer_config::OverseerConfig;
 use crate::core::paths::FrameworkPaths;
 
+use crate::control::SessionRegistry;
 use crate::daemon::audit::AuditLogger;
 use crate::daemon::optimizer::OptimizerConfig;
 
@@ -167,4 +169,30 @@ pub(super) fn default_framework_root() -> PathBuf {
 pub(super) fn make_audit_logger(root: &std::path::Path) -> Arc<AuditLogger> {
     let _ = logs_dir(); // keep logs_dir in use so path resolution is consistent
     Arc::new(AuditLogger::new(&root.join("logs")))
+}
+
+/// Build the control-plane [`SessionRegistry`] from the operator's config.
+///
+/// Why: WI-5 (§9) makes the concurrency cap, launch stagger, auth timeout, and
+/// classifier gate operator-configurable via the `[control_plane]` section of
+/// `~/.trusty-mpm/config.toml`. The daemon must read that section at startup and
+/// inject it into the registry so the cost guardrails reflect the operator's
+/// settings; an absent section falls back to spec defaults (cap 5, stagger 2 s).
+/// What: loads [`MpmConfig`](crate::core::config::MpmConfig) from `root`
+/// (silently defaulting on absence/malformed input, exactly as the loader
+/// documents) and constructs a [`SessionRegistry`] with its `control_plane`
+/// config.
+/// Test: exercised by every `DaemonState` constructor; control-plane defaults
+/// are pinned by `control::config::tests` and the cap behavior by
+/// `control::registry::tests`.
+pub(super) fn build_session_registry(root: &std::path::Path) -> SessionRegistry {
+    let cfg = crate::core::config::MpmConfig::load(root);
+    SessionRegistry::with_config(cfg.control_plane)
+}
+
+/// An empty `/health` catalog-report cache with the production max age (#7968).
+pub(super) fn new_catalog_report_cache()
+-> Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
+    use crate::daemon::rpc::health_catalog::{CatalogReportCache, MAX_AGE};
+    Arc::new(CatalogReportCache::new(MAX_AGE))
 }

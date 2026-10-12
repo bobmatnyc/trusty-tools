@@ -255,6 +255,16 @@ pub mod telegram;
 #[cfg(feature = "slack")]
 pub mod slack;
 
+/// The daemon's view of the chat-channel route policy (#8433, #8454).
+///
+/// Why: every channel denies by default; the daemon must enforce the
+/// reviewed routes without a restart, and deny when it cannot vouch for them.
+/// What: [`channels::snapshot`] holds a `trusty_channels` `PolicyLoader`
+/// behind a 5 s refresh / 60 s max-age snapshot.
+/// Test: `channels/snapshot_tests.rs`; enabled by the `channels` feature.
+#[cfg(feature = "channels")]
+pub mod channels;
+
 /// The daemon's one credential read (#8236).
 ///
 /// Why: three readers each walked `.env.local` → `.env` → `std::env::var` by

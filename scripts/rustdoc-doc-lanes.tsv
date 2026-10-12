@@ -81,7 +81,7 @@ LANE	features	trusty-common/memory-core-test-support
 LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server
-LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
+LANE	features	trusty-mpm/bedrock,trusty-mpm/channels,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
 LANE	features	trusty-secrets/ancestry,trusty-secrets/api,trusty-secrets/cli-backends,trusty-secrets/server,trusty-secrets/store,trusty-secrets/test-support
@@ -99,7 +99,6 @@ NO-CFG	trusty-common	embedder-load-dynamic
 NO-CFG	trusty-common	unconditional-only
 NO-CFG	trusty-embedderd	coreml
 NO-CFG	trusty-embedderd	http-server
-NO-CFG	trusty-mpm	channels
 NO-CFG	trusty-mpm	cli
 NO-CFG	trusty-search	bundled-ort
 NO-CFG	trusty-search	coreml

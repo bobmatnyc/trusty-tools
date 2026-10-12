@@ -182,8 +182,8 @@ default = ["cli", "daemon"]
 # `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram + slack).
 cli = ["daemon", "tui", "telegram", "slack", "channels"]
 
-# `channels` gates the trusty-channels route policy, read only by the
-# `tm doctor` channel rows (#8454 S2c). No enforcement and no sending.
+# `channels` gates the trusty-channels route policy: the `tm doctor` channel
+# rows (#8454 S2c) and the daemon's policy snapshot (#8433 P1). No sending.
 channels = ["dep:trusty-channels"]
 
 # `daemon` gates the daemon library module and the `daemon` subcommand.
