@@ -213,11 +213,8 @@ mod tests {
     #[test]
     fn send_keys_ends_options_before_dash_leading_keys() -> Result<(), TmuxError> {
         let fake = FakeTmux::new();
-        send_keys(&fake, &PaneId::parse("%3")?, &["-t foo", "-l"])?;
-        assert_eq!(
-            fake.calls(),
-            [["send-keys", "-t", "%3", "--", "-t foo", "-l"]]
-        );
+        send_keys(&fake, &PaneId::parse("%3")?, &["-X", "-l"])?;
+        assert_eq!(fake.calls(), [["send-keys", "-t", "%3", "--", "-X", "-l"]]);
         Ok(())
     }
 }
