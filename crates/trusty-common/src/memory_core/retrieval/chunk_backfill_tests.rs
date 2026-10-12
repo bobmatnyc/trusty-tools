@@ -500,8 +500,8 @@ async fn one_bad_drawer_among_good_ones_is_ledgered_and_the_rest_repair() {
     assert_eq!(ledger_ids(dir.path()), vec![bad]);
 }
 
-/// Two failing drawers around an unsplittable one, then a good one.
-async fn unsplittable_fixture(h: &PalaceHandle) -> (Uuid, Uuid) {
+/// A failing drawer after an oversized one, then a good one.
+async fn oversized_fixture(h: &PalaceHandle) -> (Uuid, Uuid) {
     // Over the 4096-chunk cap at ten words per chunk.
     let huge = legacy(h, &words(41_000), 0.9).await;
     legacy(h, &format!("BAD {}", words(100)), 0.8).await;
@@ -509,30 +509,45 @@ async fn unsplittable_fixture(h: &PalaceHandle) -> (Uuid, Uuid) {
     (huge, good)
 }
 
+/// #9735 PR 1b: an oversized drawer is split, not ledgered as a failure.
 #[tokio::test]
-async fn an_unsplittable_drawer_does_not_count_as_a_host_failure() {
+async fn an_oversized_drawer_does_not_count_as_a_host_failure() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
-    let (huge, good) = unsplittable_fixture(&h).await;
+    let (huge, good) = oversized_fixture(&h).await;
     let report = h.reembed_slice(&picky(false), &bounds()).await;
     assert_ne!(report.stop, SliceStop::HostFailure, "{report:?}");
     assert!(full(&h, good));
-    assert!(ledger_ids(dir.path()).contains(&huge));
+    assert!(
+        !ledger_ids(dir.path()).contains(&huge),
+        "an oversized drawer is split, not ledgered"
+    );
 }
 
+/// #9735 PR 1b: the split takes one slice; the next embeds every part.
 #[tokio::test]
-async fn an_unsplittable_drawer_is_backed_off_and_does_not_stall_the_queue() {
+async fn an_oversized_drawer_is_split_and_does_not_stall_the_queue() {
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
-    let (huge, good) = unsplittable_fixture(&h).await;
+    let (huge, good) = oversized_fixture(&h).await;
     h.reembed_slice(&picky(false), &bounds()).await;
     assert!(full(&h, good));
-    let again = h.reembed_slice(&chunking(), &bounds()).await;
-    assert_eq!(
-        again.attempted, 0,
-        "both failed drawers are backed off: {again:?}"
-    );
-    assert_eq!(shape(&h, huge), Some((1, 0)));
+    let tag = format!("split-of:{huge}");
+    let parts: Vec<Uuid> = h
+        .drawers
+        .read()
+        .iter()
+        .filter(|d| d.id == huge || d.tags.contains(&tag))
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(parts.len(), 5, "41 000 words split into five parts");
+    let uncapped = SliceBounds {
+        max_chunks: usize::MAX,
+        ..bounds()
+    };
+    let again = h.reembed_slice(&chunking(), &uncapped).await;
+    assert_eq!(again.repaired, 5, "every part embeds: {again:?}");
+    assert!(parts.iter().all(|id| full(&h, *id)));
 }
 
 #[test]

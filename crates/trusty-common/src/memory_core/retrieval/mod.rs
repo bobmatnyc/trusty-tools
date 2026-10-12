@@ -59,6 +59,9 @@ mod chunk_backfill_tests;
 mod chunk_health_tests;
 #[cfg(test)]
 mod chunk_key_tests;
+// #9735 PR 1b: the oversized-drawer split.
+#[cfg(test)]
+mod chunk_split_tests;
 #[cfg(test)]
 mod embed_store_tests;
 #[cfg(test)]
