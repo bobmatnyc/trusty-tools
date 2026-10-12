@@ -25,6 +25,8 @@ use crate::control::actor::{
 };
 use crate::control::admission::{AdmissionDecision, AdmissionError, check_admission};
 use crate::control::backend::stream_json::StreamJsonBackend;
+// #9776: the tmux backend is compiled only with `daemon`.
+#[cfg(feature = "daemon")]
 use crate::control::backend::tmux::TmuxBackend;
 use crate::control::classifier::{ActivityClassifier, ClassifierGate, OpenRouterClassifier};
 use crate::control::config::ControlPlaneConfig;
@@ -380,6 +382,14 @@ impl SessionRegistry {
                     self.actor_config(),
                 )
             }
+            // #9776: without `daemon` there is no tmux driver; refuse, never fall back.
+            #[cfg(not(feature = "daemon"))]
+            BackendKind::Tmux => {
+                anyhow::bail!(
+                    "session {session_id}: the tmux backend requires the `daemon` feature"
+                )
+            }
+            #[cfg(feature = "daemon")]
             BackendKind::Tmux => {
                 let claude_cmd = params.claude_cmd.unwrap_or_else(|| "claude".into());
                 let backend = TmuxBackend::new(

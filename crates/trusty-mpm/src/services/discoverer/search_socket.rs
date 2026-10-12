@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{Discoverer, HEALTH_PROBE_TIMEOUT, HealthState, ServiceStatus};
-use crate::daemon::search_rpc;
 use crate::services::manifest::{HealthProbe, ServiceDecl};
+// #9776: the client lives in trusty-common; `crate::daemon` is gated on `daemon`.
+use trusty_common::search_rpc;
 
 /// Trait for trusty-search socket-health probing.
 ///

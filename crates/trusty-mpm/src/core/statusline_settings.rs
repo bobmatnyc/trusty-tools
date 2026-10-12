@@ -294,6 +294,53 @@ fn statusline_entry(command: &str) -> serde_json::Value {
     })
 }
 
+// #9776: `TierState`, `tier_state` and `read_settings` moved here from
+// `daemon::doctor_statusline` / `daemon::doctor_hooks_hygiene`, which the
+// `daemon` feature gates; `core::doctor_repair` reads them on every build.
+
+/// What one settings tier says about `statusLine`.
+///
+/// Why: "absent" and "present but pointing at a binary that is gone" need
+/// different remediation, and #7262's build-tree damage is the second kind.
+/// Test: `a_tier_with_no_entry_is_reported_missing`,
+/// `a_tier_with_a_stale_command_is_reported_stale`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TierState {
+    /// No `statusLine` key at all.
+    Missing,
+    /// Present, but the command's binary is ephemeral or no longer on disk.
+    Stale,
+    /// Present and pointing at a binary that exists.
+    Wired,
+}
+
+/// Read one settings file's `statusLine` verdict.
+///
+/// What: [`TierState::Missing`] for an absent key, an unreadable file, or one
+/// that is not a JSON object — none of those can carry a working entry.
+/// Test: `a_tier_with_no_entry_is_reported_missing`,
+/// `a_tier_with_a_stale_command_is_reported_stale`,
+/// `a_tier_with_a_live_command_is_reported_wired`.
+pub(crate) fn tier_state(settings_path: &Path) -> TierState {
+    let Some(value) = read_settings(settings_path) else {
+        return TierState::Missing;
+    };
+    match value.get("statusLine") {
+        None => TierState::Missing,
+        Some(entry) if crate::core::session_launch::is_stale_statusline_command(entry) => {
+            TierState::Stale
+        }
+        Some(_) => TierState::Wired,
+    }
+}
+
+/// Read and parse one settings file, tolerating a missing or malformed file.
+pub(crate) fn read_settings(path: &Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&text).ok()?;
+    val.is_object().then_some(val)
+}
+
 #[cfg(test)]
 #[path = "statusline_settings_tests.rs"]
 mod tests;
