@@ -28,18 +28,18 @@
 //! `ChatBody`) come from the sibling `tools` submodule.
 //! Test: `crate::transport::uds::tests` — `rpc_chat_*`.
 
-use crate::engine::palace::PalaceId;
-use crate::engine::PalaceRegistry;
-use crate::service::{load_user_config, MemoryService};
 use crate::AppState;
-use serde_json::{json, Value};
+use crate::engine::PalaceRegistry;
+use crate::engine::palace::PalaceId;
+use crate::service::{MemoryService, load_user_config};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use trusty_common::uds::server::{RpcError, RpcStreamItems};
 use trusty_common::{ChatEvent, ChatMessage};
 
 // ---------------------------------------------------------------------------
 
-use super::tools::{all_tools, execute_get_dream_status, execute_tool, ChatBody, MAX_TOOL_ROUNDS};
+use super::tools::{ChatBody, MAX_TOOL_ROUNDS, all_tools, execute_get_dream_status, execute_tool};
 
 /// The "relevant memories" lines chat context injection adds to the prompt.
 ///

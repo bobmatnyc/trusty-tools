@@ -14,18 +14,18 @@
 //! `kg_rebuild_processes_named_palace_only`.
 
 use crate::engine::palace::PalaceId;
-use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use crate::engine::store::OpenIntent;
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
 use super::kg_twin_merge::report_merge;
 use super::maintenance_gate::require_state_lease;
 use crate::kg_extract::{
-    extract_triples, is_stop_token, ExtractInput, AUTO_PROVENANCE, DRAWER_SUBJECT_PREFIX,
-    ROOM_SUBJECT_PREFIX, TAG_SUBJECT_PREFIX, TOPIC_SUBJECT_PREFIX,
+    AUTO_PROVENANCE, DRAWER_SUBJECT_PREFIX, ExtractInput, ROOM_SUBJECT_PREFIX, TAG_SUBJECT_PREFIX,
+    TOPIC_SUBJECT_PREFIX, extract_triples, is_stop_token,
 };
-use crate::{resolve_palace_registry_dir, AppState};
+use crate::{AppState, resolve_palace_registry_dir};
 
 /// Subject namespaces the extractor owns and the purge must never touch.
 ///
@@ -145,7 +145,9 @@ async fn kg_rebuild_at(data_root: std::path::PathBuf, opts: KgRebuildOptions) ->
     // whose issue-#61 reclamation sweep hard-deletes expired non-Tier-C
     // drawers — a write, and precisely the thing --dry-run promises not to do.
     if opts.dry_run {
-        println!("kg-rebuild: DRY RUN — nothing is written: no palace is hydrated, no triple is asserted, no subject is deleted");
+        println!(
+            "kg-rebuild: DRY RUN — nothing is written: no palace is hydrated, no triple is asserted, no subject is deleted"
+        );
         let mut failures = 0usize;
         if opts.purge_stale_subjects {
             failures += report_purge(&state, palace.as_deref(), false).await?;

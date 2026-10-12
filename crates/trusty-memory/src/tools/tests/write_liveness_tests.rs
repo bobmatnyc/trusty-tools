@@ -14,7 +14,7 @@
 //! host lengthens the run but cannot flip the verdict.
 
 use super::*;
-use crate::transport::methods::health::{health, HealthQuery};
+use crate::transport::methods::health::{HealthQuery, health};
 use std::time::Duration;
 
 /// Hang guard on any single condition wait in this module. It only stops a

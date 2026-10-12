@@ -1,10 +1,10 @@
 //! Explicit asset capability and session-owned image RPCs (#7370).
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 // #9269: the handler is `server`-only; `definitions` also builds under `mcp-schema`.
 #[cfg(feature = "server")]
 use {
-    crate::engine::store::chat_sessions::ChatImageAsset,
     crate::AppState,
+    crate::engine::store::chat_sessions::ChatImageAsset,
     anyhow::{Context, Result},
 };
 

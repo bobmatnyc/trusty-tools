@@ -11,14 +11,14 @@
 
 use crate::engine::palace::{Palace, PalaceId};
 use crate::{ActivitySource, AppState, DaemonEvent};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
 // #6318: `palace_info` reads, so it falls back to a palace index; `palace_compact`,
 // `palace_reembed` and `palace_unalias` can write, so they keep the error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 
 /// Validate that a palace slug is a safe, well-formed filesystem name.
 ///
@@ -37,7 +37,7 @@ use super::palace_index::{resolve_palace_or_index, PalaceScope};
 /// Test: `force_flag_rejects_unsafe_slugs`, `a_derived_palace_id_is_accepted`
 /// (both in `tests/palace_force.rs`).
 fn validate_slug_format(slug: &str) -> Result<()> {
-    use trusty_common::palace_id::{palace_id_is_valid, PALACE_ID_MAX_LEN};
+    use trusty_common::palace_id::{PALACE_ID_MAX_LEN, palace_id_is_valid};
 
     if palace_id_is_valid(slug) {
         return Ok(());

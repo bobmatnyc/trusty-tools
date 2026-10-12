@@ -10,23 +10,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::engine::PalaceHandle;
 use crate::engine::filter::check_secret;
 use crate::engine::palace::Drawer;
 use crate::engine::store::Triple;
-use crate::engine::PalaceHandle;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
-use super::bridge::{export_store, resolve_python, CommandRunner, RunOutput, SystemRunner};
-use super::discovery::{resolve_from, DiscoveredStore};
+use super::bridge::{CommandRunner, RunOutput, SystemRunner, export_store, resolve_python};
+use super::discovery::{DiscoveredStore, resolve_from};
 use super::mapping::MappedMemory;
 use super::palace_io::open_palace_for_write;
 use super::report::format_report;
 use super::tests::{
-    args_for, env, export_of, fixture, memory_row, palace, palace_state, store_on_disk, FakeDaemon,
-    FakeRunner, FIXTURE_TRIPLES,
+    FIXTURE_TRIPLES, FakeDaemon, FakeRunner, args_for, env, export_of, fixture, memory_row, palace,
+    palace_state, store_on_disk,
 };
 use super::*;
 
@@ -719,12 +719,13 @@ async fn secret_shaped_memory_is_refused_without_failing_the_store() {
     );
     assert!(matches!(status_for(&c, false), StoreStatus::Imported));
     assert_eq!(palace_state(&sink.handle).0, 2);
-    assert!(sink
-        .handle
-        .drawers
-        .read()
-        .iter()
-        .all(|d| !d.content().contains(&token)));
+    assert!(
+        sink.handle
+            .drawers
+            .read()
+            .iter()
+            .all(|d| !d.content().contains(&token))
+    );
     let line = format_report(&report(StoreStatus::Imported, c, None), false);
     assert!(
         line.contains("refused 1 secret-shaped memory(ies): m-2"),

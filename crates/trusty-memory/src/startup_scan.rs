@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::project_root::{read_project_pin, PIN_FILE_REL};
+use crate::project_root::{PIN_FILE_REL, read_project_pin};
 
 /// Return the canonical search roots used for startup pin discovery.
 ///
@@ -148,7 +148,7 @@ fn scan_one_root(search_dir: &Path, map: &mut HashMap<String, PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_root::{write_project_pin, ProjectPin};
+    use crate::project_root::{ProjectPin, write_project_pin};
     use std::fs;
 
     /// Helper: write a minimal pin file claiming `palace_id` under

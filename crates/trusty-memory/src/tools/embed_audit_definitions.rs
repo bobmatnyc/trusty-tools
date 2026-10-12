@@ -13,7 +13,7 @@
 //! `tool_definitions_lists_all_tools` in `tools::tests` and
 //! `read_tool_schemas_never_require_palace` in `tools::tests::palace_index_tests`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build the two embed-audit tool schemas.
 ///

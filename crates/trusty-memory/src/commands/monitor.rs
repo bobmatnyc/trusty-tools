@@ -13,7 +13,7 @@
 
 use anyhow::{Context, Result};
 use trusty_common::monitor::dashboard::{MemoryData, PalaceRow, UNKNOWN_COUNT};
-use trusty_common::monitor::memory_client::{resolve_memory_socket, MemoryClient};
+use trusty_common::monitor::memory_client::{MemoryClient, resolve_memory_socket};
 
 /// Format a count with comma thousands separators (`8400` → `"8,400"`).
 ///

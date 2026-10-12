@@ -13,22 +13,22 @@
 
 use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
 use crate::engine::palace::RoomType;
-use crate::engine::retrieval::{list_drawers_in_wing, RecallScope, RememberOptions};
+use crate::engine::retrieval::{RecallScope, RememberOptions, list_drawers_in_wing};
 use crate::{ActivitySource, AppState, DaemonEvent, DaemonReadiness};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::bm25::bm25_delete_document;
 use super::helpers::{
-    apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate, content_gate,
-    dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within, parse_tags,
-    resolve_aliased_str_arg, resolve_palace, resolve_tier_c, resolve_type_arg, resolve_verify_arg,
-    room_label, skipped_envelope, write_drawer, WriteDrawerParams,
+    WriteDrawerParams, apply_tier_c, attach_mcp_attribution, begin_budgeted_write, blocklist_gate,
+    content_gate, dedup_gate, mcp_remember_opts, open_palace_handle, open_palace_handle_within,
+    parse_tags, resolve_aliased_str_arg, resolve_palace, resolve_tier_c, resolve_type_arg,
+    resolve_verify_arg, room_label, skipped_envelope, write_drawer,
 };
 // #6318: the read tools below fall back to a palace index; the write tools in
 // this file keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // `memory_list` takes the same `room`/`wing` scope the recall tools do
 // (ADR-0027 D4.1), so it borrows the resolver rather than re-spelling it.
 use super::recall_ops::recall_scope;

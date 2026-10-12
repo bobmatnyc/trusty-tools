@@ -176,7 +176,7 @@ pub async fn check_daemon_health() -> CheckResult {
             return CheckResult::fail(
                 label,
                 format!("could not resolve the trusty-memory data directory: {e:#}"),
-            )
+            );
         }
     };
     check_daemon_health_at(label, &socket, PROBE_TIMEOUT).await

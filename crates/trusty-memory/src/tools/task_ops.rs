@@ -11,18 +11,18 @@
 use crate::engine::palace::{DrawerType, RoomType};
 use crate::engine::retrieval::RememberOptions;
 use crate::{AppState, DaemonReadiness};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::helpers::{
-    begin_budgeted_write, open_palace_handle, parse_tags, resolve_palace, room_label, write_drawer,
-    WriteDrawerParams,
+    WriteDrawerParams, begin_budgeted_write, open_palace_handle, parse_tags, resolve_palace,
+    room_label, write_drawer,
 };
 // #6318: `task_list` reads, so it falls back to a palace index; `task_add` and
 // `task_complete` write, so they keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 
 /// Create a Task drawer in a palace via the MCP surface.
 ///

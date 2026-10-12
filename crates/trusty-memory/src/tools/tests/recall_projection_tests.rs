@@ -14,8 +14,8 @@
 use crate::engine::palace::Drawer;
 use crate::engine::retrieval::RecallResult;
 use crate::tools::recall_projection::{
-    apply_score_floor, candidate_window, include_creator_tags_arg, min_score_arg, serialize_recall,
-    RecallProjection, MAX_CANDIDATE_WINDOW,
+    MAX_CANDIDATE_WINDOW, RecallProjection, apply_score_floor, candidate_window,
+    include_creator_tags_arg, min_score_arg, serialize_recall,
 };
 use serde_json::json;
 use uuid::Uuid;

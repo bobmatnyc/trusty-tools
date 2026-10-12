@@ -33,7 +33,7 @@
 //! `lib_tests`.
 
 use crate::AppState;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// Gate `palace_create force=true` behind an explicit authorization signal.
 ///

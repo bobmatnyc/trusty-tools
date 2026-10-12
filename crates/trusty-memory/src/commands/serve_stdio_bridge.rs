@@ -61,7 +61,7 @@
 //!
 //! Test: unit tests below; `tests/serve_stdio_e2e.rs` for the full e2e path.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 use std::time::Duration;
 use trusty_mcp::{DaemonBridgeJsonRpc, UdsBridgeConfig};

@@ -11,16 +11,16 @@
 
 use std::sync::Arc;
 
+use crate::engine::MaintenanceLease;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::{KnowledgeGraph, Triple};
-use crate::engine::MaintenanceLease;
 use anyhow::Result;
 use serde_json::json;
 
-use super::{kg_rebuild_at, purge_palaces, scan_active_triples, KgRebuildOptions};
+use super::{KgRebuildOptions, kg_rebuild_at, purge_palaces, scan_active_triples};
+use crate::AppState;
 use crate::commands::kg_twin_merge::merge_palaces;
 use crate::kg_extract::AUTO_PROVENANCE;
-use crate::AppState;
 
 /// An active auto-extracted triple.
 fn auto_triple(subject: &str, predicate: &str, object: &str) -> Triple {

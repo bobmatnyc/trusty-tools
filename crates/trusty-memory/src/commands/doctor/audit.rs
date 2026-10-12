@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::project_root::{project_slug_at, read_project_pin, PERSONAL_PALACE, PIN_FILE_REL};
+use crate::project_root::{PERSONAL_PALACE, PIN_FILE_REL, project_slug_at, read_project_pin};
 
 /// Outcome of a single palace audit entry for `doctor --fix-palaces`.
 ///

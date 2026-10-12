@@ -38,14 +38,14 @@
 #[cfg(feature = "server")]
 use {
     crate::engine::embed::Embedder,
-    crate::engine::{store::ChatSessionStore, PalaceRegistry},
+    crate::engine::{PalaceRegistry, store::ChatSessionStore},
     crate::session_store_cache::SessionStoreCache,
     anyhow::Result,
     std::net::SocketAddr,
     std::path::PathBuf,
     std::sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     std::sync::{Arc, OnceLock},
-    tokio::sync::{broadcast, OnceCell, RwLock},
+    tokio::sync::{OnceCell, RwLock, broadcast},
     trusty_common::ChatProvider,
 };
 
@@ -97,11 +97,7 @@ impl DaemonReadiness {
     /// `1` is ever written).
     /// Test: `daemon_readiness_from_u8` in this module.
     pub fn from_u8(v: u8) -> Self {
-        if v == 0 {
-            Self::Warming
-        } else {
-            Self::Ready
-        }
+        if v == 0 { Self::Warming } else { Self::Ready }
     }
 }
 

@@ -15,20 +15,20 @@
 //! `recall_all_never_opens_an_empty_palace` (#9141).
 
 use crate::engine::retrieval::{
-    recall_across_palaces_reporting, recall_deep_with_default_embedder,
-    recall_with_default_embedder, shared_embedder, RecallResult,
+    RecallResult, recall_across_palaces_reporting, recall_deep_with_default_embedder,
+    recall_with_default_embedder, shared_embedder,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::core::MemoryService;
 use super::helpers::recall_entry_json;
-use super::recall_stream::{recall_all_scoped, RecallAllScope};
+use super::recall_stream::{RecallAllScope, recall_all_scoped};
 use super::types::{ServiceError, ServiceResult};
 use crate::tools::recall_rank::{
     demote_stale_snapshots, demote_stale_snapshots_across, ranking_window,
 };
 // #9421: superseded drawers rank below their replacements here too.
-use crate::tools::recall_supersede::{supersessions_across, supersessions_for, Supersessions};
+use crate::tools::recall_supersede::{Supersessions, supersessions_across, supersessions_for};
 
 impl MemoryService {
     /// Per-palace recall, ranked: the hits every non-MCP recall surface shows.

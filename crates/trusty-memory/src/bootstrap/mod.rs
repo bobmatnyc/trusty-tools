@@ -22,8 +22,8 @@ mod types;
 
 pub use scan::scan_project;
 pub use types::{
-    result_to_json, BootstrapResult, BootstrapTriple, KgMiss, ScannedFile, KG_EMPTY_HINT,
-    KG_SUBJECT_NOT_FOUND_HINT,
+    BootstrapResult, BootstrapTriple, KG_EMPTY_HINT, KG_SUBJECT_NOT_FOUND_HINT, KgMiss,
+    ScannedFile, result_to_json,
 };
 
 use crate::engine::store::kg::Triple;

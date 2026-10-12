@@ -22,20 +22,20 @@ use std::sync::Arc;
 
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, DrawerType, RoomType};
-use crate::engine::retrieval::{embed_chunks, shared_embedder, PalaceHandle, RememberOptions};
+use crate::engine::retrieval::{PalaceHandle, RememberOptions, embed_chunks, shared_embedder};
 use crate::engine::store::Triple;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use super::KuzuImportError;
 use super::bridge::KuzuExport;
 use super::ledger::{Ledger, MemoryPlan};
 use super::mapping::{
-    drawer_subject, entity_subject, entity_triples, map_memory, merge_tags, relates_to_predicate,
-    source_key, triple, MappedMemory,
+    MappedMemory, drawer_subject, entity_subject, entity_triples, map_memory, merge_tags,
+    relates_to_predicate, source_key, triple,
 };
-use super::retract::{retract_stale, Retraction};
-use super::screen::{screen, tally, RuleTally, SecretRule};
-use super::KuzuImportError;
+use super::retract::{Retraction, retract_stale};
+use super::screen::{RuleTally, SecretRule, screen, tally};
 
 /// What the report lists for a memory refused because its id is itself
 /// secret-shaped, in place of the id.

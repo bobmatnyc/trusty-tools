@@ -22,9 +22,9 @@ use crate::engine::{PalaceHandle, PalaceRegistry};
 use async_trait::async_trait;
 use trusty_common::palace_resolve::PalaceSource;
 
+use super::KuzuImportError;
 use super::apply::SnapshotView;
 use super::discovery::{DiscoveredStore, STORE_DB_NAME};
-use super::KuzuImportError;
 
 /// A resolved target palace and the rule that chose it.
 #[derive(Debug, Clone, PartialEq, Eq)]

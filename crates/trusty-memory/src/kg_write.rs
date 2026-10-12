@@ -30,8 +30,8 @@
 
 use std::sync::Arc;
 
-use crate::engine::store::kg::Triple;
 use crate::engine::PalaceHandle;
+use crate::engine::store::kg::Triple;
 
 use crate::AppState;
 

@@ -22,11 +22,11 @@
 pub(crate) mod disk_stats;
 mod usage;
 
-use crate::engine::store::rooms::list_room_summaries;
 use crate::engine::PalaceRegistry;
+use crate::engine::store::rooms::list_room_summaries;
 use anyhow::Result;
-use serde_json::{json, Value};
-use trusty_common::console_metrics::{make_report, ServiceHealth};
+use serde_json::{Value, json};
+use trusty_common::console_metrics::{ServiceHealth, make_report};
 
 use crate::AppState;
 

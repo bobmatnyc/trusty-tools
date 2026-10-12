@@ -15,7 +15,7 @@
 
 mod recall_support;
 
-use recall_support::{rank_of, recall, recall_on, remember, state_with, supersede, Surface};
+use recall_support::{Surface, rank_of, recall, recall_on, remember, state_with, supersede};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -367,7 +367,7 @@ async fn profile_recall(state: &trusty_memory::AppState) -> (u128, u128) {
 #[tokio::test(flavor = "multi_thread")]
 async fn recall_supersession_latency_profile() {
     use trusty_memory::engine::palace::{Drawer, PalaceId};
-    use trusty_memory::engine::share::{import_palace_records, SharedMemoryRecord};
+    use trusty_memory::engine::share::{SharedMemoryRecord, import_palace_records};
     use trusty_memory::engine::store::kg::Triple;
 
     if std::env::var_os(PROFILE_ENV).is_none() {

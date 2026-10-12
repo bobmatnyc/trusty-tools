@@ -18,8 +18,8 @@
 //! Test: `tools::tests::recall_projection_tests`.
 
 use crate::engine::retrieval::RecallResult;
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
 use super::recall_rulings::RulingsDegraded;
 

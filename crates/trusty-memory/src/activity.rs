@@ -19,8 +19,8 @@ use anyhow::{Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard upper bound on rows retained in the activity log.
 ///
@@ -742,9 +742,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(alpha.len(), 2);
-        assert!(alpha
-            .iter()
-            .all(|e| e.palace_id.as_deref() == Some("alpha")));
+        assert!(
+            alpha
+                .iter()
+                .all(|e| e.palace_id.as_deref() == Some("alpha"))
+        );
 
         // Time filter: until in the past must filter everything out.
         let none = log

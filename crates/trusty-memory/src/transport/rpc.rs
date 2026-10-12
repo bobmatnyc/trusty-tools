@@ -37,7 +37,7 @@
 
 use crate::{ActivitySource, AppState, DaemonEvent, HookType, InjectionKind};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use trusty_mcp::initialize_response;
 
 /// JSON-RPC 2.0 standard error codes used by [`dispatch`].

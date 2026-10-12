@@ -29,13 +29,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::palace_reclaim::{mtime_unix, scan, tree_bytes, ReclaimClass, ReclaimItem};
+use super::palace_reclaim::{ReclaimClass, ReclaimItem, mtime_unix, scan, tree_bytes};
 use super::palace_reclaim_trash::{
-    check_root, lock_stores, prepare_trash_dir, purge_trash, read_manifest, write_manifest,
-    EntryStatus, StoreLocks, TrashEntry,
+    EntryStatus, StoreLocks, TrashEntry, check_root, lock_stores, prepare_trash_dir, purge_trash,
+    read_manifest, write_manifest,
 };
 use super::store_snapshot::with_store_copy;
 
@@ -469,7 +469,9 @@ fn daemon_remover(rt: tokio::runtime::Handle) -> impl FnMut(&str, &str) -> Resul
     let serving = rt.block_on(crate::client::is_running());
     move |palace, id| {
         if !serving {
-            bail!("the trusty-memory daemon is not serving; drawers are removed only through its memory.drawer_delete");
+            bail!(
+                "the trusty-memory daemon is not serving; drawers are removed only through its memory.drawer_delete"
+            );
         }
         let socket = socket.as_ref().map_err(|e| anyhow!("{e:#}"))?;
         let params = serde_json::json!({ "palace_id": palace, "drawer_id": id });
@@ -511,7 +513,9 @@ pub fn handle_apply(manifest: &Path, json: bool, rt: tokio::runtime::Handle) -> 
     }
     let left = report.not_applied();
     if left > 0 {
-        bail!("palace reclaim --apply left {left} reviewed item(s) in place; see the report above (#9140)");
+        bail!(
+            "palace reclaim --apply left {left} reviewed item(s) in place; see the report above (#9140)"
+        );
     }
     Ok(())
 }

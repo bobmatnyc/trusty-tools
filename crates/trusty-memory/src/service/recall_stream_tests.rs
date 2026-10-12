@@ -10,11 +10,11 @@
 //! wide each was).
 //! Test: this IS the test module.
 
-use super::recall_stream::{recall_streamed, RECALL_PALACE_BATCH};
+use super::recall_stream::{RECALL_PALACE_BATCH, recall_streamed};
+use crate::AppState;
+use crate::engine::PalaceRegistry;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::retrieval::CrossPalaceRecall;
-use crate::engine::PalaceRegistry;
-use crate::AppState;
 use anyhow::anyhow;
 use chrono::Utc;
 use std::cell::RefCell;

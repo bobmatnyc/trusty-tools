@@ -51,9 +51,9 @@ use anyhow::Result;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-use crate::hook_emit::{post_hook_event, HookEventPayload};
+use crate::hook_emit::{HookEventPayload, post_hook_event};
 use crate::prompt_log::{PromptLogEntry, PromptLogger, RecallQueryShape};
-use crate::{hook_prompt_excerpt, HookType, InjectionKind};
+use crate::{HookType, InjectionKind, hook_prompt_excerpt};
 
 use crate::engine::retrieval::DEFAULT_RELEVANCE_FLOOR;
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};

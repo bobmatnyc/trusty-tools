@@ -9,11 +9,11 @@
 //! Test: this file is the test.
 
 use serde_json::json;
+use trusty_memory::AppState;
 use trusty_memory::engine::palace::{Drawer, PalaceId};
 use trusty_memory::engine::retrieval::shared_embedder_initialized;
 use trusty_memory::engine::store::vector::VectorStore;
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 
 /// Why (#9275): see the module doc.
 /// What: a short drawer with its vector row, asked about before any embedder

@@ -30,14 +30,14 @@ use clap::{Parser, Subcommand};
 // stays under the 500-SLOC production cap.
 use std::net::SocketAddr;
 use trusty_memory::commands::inbox_check::handle_inbox_check;
-use trusty_memory::commands::kuzu_import::{handle_import, ImportSource};
+use trusty_memory::commands::kuzu_import::{ImportSource, handle_import};
 use trusty_memory::commands::link::handle_link;
-use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
+use trusty_memory::commands::migrate::{MigrateTarget, handle_migrate};
 use trusty_memory::commands::note::handle_note;
 use trusty_memory::commands::palace::PalaceAction;
 use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
-use trusty_memory::commands::service::{handle_service, ServiceAction};
+use trusty_memory::commands::service::{ServiceAction, handle_service};
 use trusty_memory::commands::upgrade::handle_upgrade;
 use trusty_memory::commands::{
     setup::{handle_setup, handle_setup_gui_client},

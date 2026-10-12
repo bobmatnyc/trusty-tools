@@ -10,19 +10,19 @@
 //! [`resolve_wing_arg`] — the shared parser the wing-scoped read tools use.
 //! Test: `crates/trusty-memory/tests/wing_mcp.rs`.
 
-use crate::engine::store::wings::{
-    list_wings, rename_wing, resolve_or_create_wing, resolve_wing_selector, WingSummary,
-};
-use crate::engine::PalaceHandle;
 use crate::AppState;
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use crate::engine::PalaceHandle;
+use crate::engine::store::wings::{
+    WingSummary, list_wings, rename_wing, resolve_or_create_wing, resolve_wing_selector,
+};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
 // #6318: `wing_list` reads, so it falls back to a palace index; `wing_create`
 // and `wing_rename` write, so they keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 
 /// Render a `WingSummary` as the MCP wire shape.
 ///

@@ -25,7 +25,7 @@
 //!
 //! Test: this *is* the test file.
 
-use trusty_memory::bm25_backfill::{backfill_palace, BackfillStatus, PalaceDocs};
+use trusty_memory::bm25_backfill::{BackfillStatus, PalaceDocs, backfill_palace};
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::tools::BM25_INDEX_QUEUE_CAPACITY;
 

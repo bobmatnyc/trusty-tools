@@ -14,11 +14,11 @@
 use chrono::Utc;
 use serde_json::json;
 use tempfile::TempDir;
+use trusty_memory::AppState;
 use trusty_memory::engine::dream::{DreamConfig, Dreamer};
 use trusty_memory::engine::palace::{DrawerType, Palace, PalaceId};
-use trusty_memory::engine::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
+use trusty_memory::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 
 /// Build a ready `AppState` rooted at `root`.
 ///

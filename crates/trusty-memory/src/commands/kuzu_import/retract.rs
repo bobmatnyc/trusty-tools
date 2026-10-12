@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use crate::engine::store::Triple;
 use uuid::Uuid;
 
-use super::apply::{fail, PalaceSink, PalaceView, StoreCounts};
-use super::mapping::{drawer_subject, ORIGIN_TAG};
+use super::apply::{PalaceSink, PalaceView, StoreCounts, fail};
+use super::mapping::{ORIGIN_TAG, drawer_subject};
 
 /// One closed edge: the memory whose drawer it hung from, and its predicate
 /// family (`mentions` or `relates_to`) — never the object.

@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use crate::engine::store::palace_format::{
-    palace_format_status, PalaceFormatStatus, PALACE_FORMAT_SUPPORTED,
+    PALACE_FORMAT_SUPPORTED, PalaceFormatStatus, palace_format_status,
 };
 
 use super::CheckResult;

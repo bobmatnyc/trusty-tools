@@ -42,7 +42,7 @@ fn parse_user_prompt_prefers_prompt_field() {
 /// Test: itself.
 #[test]
 fn filter_drawers_by_deny_tags_handles_edge_cases() {
-    use filter::{filter_drawers_by_deny_tags, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_deny_tags};
     let make = |tags: &[&str]| RecalledDrawer {
         content: "irrelevant".into(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
@@ -92,7 +92,7 @@ fn filter_drawers_by_deny_tags_handles_edge_cases() {
 /// Test: itself.
 #[test]
 fn select_relevant_triples_filters_by_prompt_overlap() {
-    use filter::{select_relevant_triples, RawTriple};
+    use filter::{RawTriple, select_relevant_triples};
     let triples = vec![
         RawTriple {
             subject: "tga".into(),
@@ -129,7 +129,7 @@ fn select_relevant_triples_filters_by_prompt_overlap() {
 /// Test: itself. Fails against the pre-#5819 selector, which returns all four.
 #[test]
 fn select_relevant_triples_drops_structural_predicates() {
-    use filter::{select_relevant_triples, RawTriple};
+    use filter::{RawTriple, select_relevant_triples};
     let triples = vec![
         RawTriple {
             subject: "tag:worktree".into(),
@@ -174,7 +174,7 @@ fn select_relevant_triples_drops_structural_predicates() {
 /// Test: itself. Fails against the pre-#5819 selector.
 #[test]
 fn select_relevant_triples_drops_creator_provenance_triples() {
-    use filter::{select_relevant_triples, RawTriple};
+    use filter::{RawTriple, select_relevant_triples};
     let drawer = "drawer:58141829-0918-4198-a274-307c49b5a671";
     let triples: Vec<RawTriple> = [
         "tag:creator:client=trusty-memory-mcp",
@@ -282,7 +282,7 @@ fn injection_byte_cap_is_eight_kib() {
 /// Test: itself.
 #[test]
 fn relevance_floor_drops_all_noise_drawers() {
-    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_relevance_floor};
     let noise: Vec<RecalledDrawer> = (0..5)
         .map(|i| RecalledDrawer {
             content: format!("off-topic session drawer {i}"),
@@ -310,7 +310,7 @@ fn relevance_floor_drops_all_noise_drawers() {
 /// Test: itself.
 #[test]
 fn relevance_floor_keeps_high_scoring_drawer() {
-    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_relevance_floor};
     let make = |content: &str, score: f32| RecalledDrawer {
         content: content.into(),
         tags: Vec::new(),
@@ -337,7 +337,7 @@ fn relevance_floor_keeps_high_scoring_drawer() {
 /// Test: itself.
 #[test]
 fn relevance_floor_keeps_drawer_without_score() {
-    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_relevance_floor};
     let drawers = vec![RecalledDrawer {
         content: "daemon predates the score field".into(),
         tags: Vec::new(),
@@ -428,7 +428,7 @@ fn compose_injection_is_silent_when_everything_was_withheld() {
 #[test]
 fn compose_injection_caps_kg_section_bytes() {
     use filter::RawTriple;
-    use format::{compose_injection, KG_SECTION_BYTE_CAP};
+    use format::{KG_SECTION_BYTE_CAP, compose_injection};
     let triples: Vec<RawTriple> = (0..10)
         .map(|i| RawTriple {
             subject: format!("subject-with-a-long-name-{i}"),
@@ -459,7 +459,7 @@ fn compose_injection_caps_kg_section_bytes() {
 /// filter and returns all three.
 #[test]
 fn project_scope_drops_foreign_cwd_drawer() {
-    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_project_scope};
     let mk = |name: &str, tags: Vec<String>| RecalledDrawer {
         content: name.to_string(),
         tags,
@@ -601,7 +601,7 @@ fn session_project_root_resolves_a_worktree_to_its_main_checkout() {
 /// dropped.
 #[test]
 fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
-    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_project_scope};
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("trusty-tools");
     init_test_repo(&repo);
@@ -655,7 +655,7 @@ fn project_scope_keeps_a_repo_root_writer_when_the_session_is_in_a_crate() {
 /// `session_project_root_resolves_a_worktree_to_its_main_checkout`.
 #[test]
 fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
-    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_project_scope};
     let root = "/users/bob/proj/trusty-tools";
     let mk = |cwd: &str| RecalledDrawer {
         content: cwd.to_string(),
@@ -718,7 +718,7 @@ fn project_scope_keeps_in_tree_writers_and_drops_prefix_siblings() {
 /// `Vec` and no count exists to assert.
 #[test]
 fn project_scope_counts_what_it_drops() {
-    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_project_scope};
     let root = "/users/bob/proj/trusty-tools";
     let mk = |cwd: &str| RecalledDrawer {
         content: cwd.to_string(),
@@ -754,7 +754,7 @@ fn project_scope_counts_what_it_drops() {
 /// `<outer>/.git/modules` and the drawer is dropped.
 #[test]
 fn session_project_root_is_none_inside_a_separate_git_dir_child() {
-    use filter::{filter_drawers_by_project_scope, RecalledDrawer};
+    use filter::{RecalledDrawer, filter_drawers_by_project_scope};
     let tmp = tempfile::tempdir().expect("tempdir");
     let outer = tmp.path().join("outer");
     let child = outer.join("sub");
@@ -1861,7 +1861,7 @@ fn injection_drops_provenance_tags() {
 /// Test: itself.
 #[test]
 fn injection_caps_rendered_tag_count() {
-    use format::{render_tags, MAX_RENDERED_TAGS};
+    use format::{MAX_RENDERED_TAGS, render_tags};
     // Realistic tag lengths, not `topic-N`. These are the shapes the live
     // palace actually stores — the 7-character fixture this test used to carry
     // could not have caught the byte-budget hole the #5038 review found.
@@ -1910,7 +1910,7 @@ fn injection_caps_rendered_tag_count() {
 /// Test: itself.
 #[test]
 fn injection_caps_rendered_tag_bytes() {
-    use format::{render_tags, MAX_RENDERED_TAGS, MAX_RENDERED_TAG_CHARS};
+    use format::{MAX_RENDERED_TAG_CHARS, MAX_RENDERED_TAGS, render_tags};
     const TAG_CHARS: usize = 55;
     let long: Vec<String> = (0..4)
         .map(|i| {

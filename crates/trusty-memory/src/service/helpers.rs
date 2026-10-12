@@ -11,12 +11,12 @@
 //! service-layer unit tests live here too (1500-SLOC test cap applies).
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
+use crate::AppState;
+use crate::engine::PalaceHandle;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::retrieval::RecallResult;
-use crate::engine::PalaceHandle;
-use crate::AppState;
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;

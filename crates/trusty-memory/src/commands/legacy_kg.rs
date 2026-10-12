@@ -38,22 +38,22 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::palace::{Drawer, Palace};
 use crate::engine::retrieval::VectorBackfillOptions;
-use crate::engine::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
-use crate::engine::{memory_content_hash, ContentHash, MaintenanceLease};
-use anyhow::{bail, Context, Result};
+use crate::engine::store::{INCOMPATIBLE_SUFFIX, OpenIntent};
+use crate::engine::{ContentHash, MaintenanceLease, memory_content_hash};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
 use uuid::Uuid;
 
 use super::maintenance_gate::open_purging_under_lease;
 
-use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
+use super::store_snapshot::{SCRATCH_PREFIX, with_store_copy};
 
 #[path = "legacy_kg_dedup.rs"]
 pub mod dedup;
 #[path = "legacy_kg_guard.rs"]
 pub mod guard;
-use guard::{backup_stores, probe_stores, screen_drawers, Backup, CopyFn, Rejected};
+use guard::{Backup, CopyFn, Rejected, backup_stores, probe_stores, screen_drawers};
 
 /// Filename of the pre-redb SQLite knowledge graph inside a palace directory.
 pub(crate) const LEGACY_KG_FILE: &str = "kg.db";

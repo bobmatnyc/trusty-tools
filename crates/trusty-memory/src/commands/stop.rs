@@ -16,7 +16,7 @@
 //! `find_daemon_pids_finds_a_live_serve_foreground_process`,
 //! `stop_terminates_the_daemon_and_spares_a_stdio_bridge`.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use colored::Colorize;
 use std::time::{Duration, Instant};
 

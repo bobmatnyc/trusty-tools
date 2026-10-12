@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::commands::palace_reclaim::tests::{backdate, drawer, seed_palace};
-use crate::commands::palace_reclaim_trash::{purge_trash, TrashManifest, MANIFEST_FILE};
+use crate::commands::palace_reclaim_trash::{MANIFEST_FILE, TrashManifest, purge_trash};
 use crate::engine::palace::Drawer;
 use chrono::NaiveDate;
 
@@ -116,9 +116,10 @@ fn apply_moves_the_reviewed_items_and_writes_the_manifest() {
         assert!(!s.root.join(rel).exists(), "{rel} must have moved");
         assert!(t.join(rel).exists(), "{rel} must be in the trash");
     }
-    assert!(t
-        .join("old-empty/index.usearch.redb.v2-incompatible")
-        .is_file());
+    assert!(
+        t.join("old-empty/index.usearch.redb.v2-incompatible")
+            .is_file()
+    );
     assert_eq!(
         status_of(
             &report,
@@ -139,10 +140,12 @@ fn apply_moves_the_reviewed_items_and_writes_the_manifest() {
         serde_json::from_slice(&std::fs::read(t.join(MANIFEST_FILE)).expect("manifest"))
             .expect("parse manifest");
     assert_eq!(manifest.entries.len(), list.items.len());
-    assert!(manifest
-        .entries
-        .iter()
-        .all(|e| e.status != EntryStatus::Pending));
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .all(|e| e.status != EntryStatus::Pending)
+    );
     let after = scan(&s.root, s.now).expect("rescan");
     assert!(
         after
