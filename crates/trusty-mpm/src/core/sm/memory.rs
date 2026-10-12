@@ -20,20 +20,20 @@
 //! "never writes to a non-SM palace" guard.
 //!
 //! [`SmMemory`]: crate::core::sm::memory::SmMemory
-//! [`PalaceRegistry`]: trusty_common::memory_core::registry::PalaceRegistry
-//! [`PalaceId`]: trusty_common::memory_core::palace::PalaceId
+//! [`PalaceRegistry`]: trusty_memory::engine::registry::PalaceRegistry
+//! [`PalaceId`]: trusty_memory::engine::palace::PalaceId
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::registry::PalaceRegistry;
-use trusty_common::memory_core::retrieval::{
+use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
+use trusty_memory::engine::registry::PalaceRegistry;
+use trusty_memory::engine::retrieval::{
     PalaceHandle, RecallResult, RememberOptions, recall_deep_with_default_embedder,
     recall_with_default_embedder,
 };
-use trusty_common::memory_core::store::{OpenIntent, PalaceStore};
+use trusty_memory::engine::store::{OpenIntent, PalaceStore};
 
 use super::config::SmMemoryConfig;
 

@@ -437,7 +437,7 @@ async fn different_conv_ids_do_not_serialize() {
 async fn chat_includes_recall_when_memory_present() {
     use crate::core::sm::config::SmMemoryConfig;
     use crate::core::sm::memory::SmMemory;
-    use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+    use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 
     seed_shared_embedder_with_mock();
     let tmp = TempDir::new().unwrap();

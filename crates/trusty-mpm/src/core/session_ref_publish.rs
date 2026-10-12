@@ -242,7 +242,7 @@ pub fn session_ref_for(repo: &Path, session_id: &str) -> Option<String> {
 
 /// Credential prefixes a snapshot may not carry to `origin` (ADR-0062 #9).
 ///
-/// Why: this mirrors `trusty_common::memory_core::filter::secret`'s
+/// Why: this mirrors `trusty_memory::engine::filter::secret`'s
 /// `find_secret_token`, which is the workspace's real credential detector — but
 /// that module sits behind trusty-common's heavy `memory-core` feature (HNSW,
 /// redb, bundled ONNX), and trusty-mpm's default build deliberately does not
