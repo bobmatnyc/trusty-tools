@@ -50,6 +50,8 @@ pub(crate) mod embed_repair_tests;
 // #9433: `pub(crate)` so `tier_c_tests` can reuse its log `Capture`.
 // #9275: `{uuid}#n` chunk rows through `PalaceHandle`.
 #[cfg(test)]
+mod chunk_backfill_measure_tests;
+#[cfg(test)]
 mod chunk_backfill_tests;
 #[cfg(test)]
 mod chunk_health_tests;

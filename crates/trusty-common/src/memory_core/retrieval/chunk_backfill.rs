@@ -25,13 +25,17 @@ use uuid::Uuid;
 
 /// Limits on one [`PalaceHandle::reembed_slice`] call.
 ///
-/// Why: a background slice must yield to writers and to shutdown, and the
-/// defaults are starting values to be measured, not proven (ruling 8).
+/// Why: a background slice must yield to writers and to shutdown (ruling 8).
+/// Measured on EVO (x86_64, CPU ONNX, 256-token window): 64 chunks embed in
+/// about 1.5 s and a 64-chunk slice ends in about 2.4 s, so the chunk cap,
+/// not the 20 s budget, ends a slice; 120 s fits about 5 000 chunks, above
+/// the 4096-chunk drawer cap.
 /// What: every limit except `embed_timeout` and `lock_wait` is checked
 /// between drawers only, so none of them bounds one drawer; `embed_timeout`
 /// bounds one drawer's embed and `lock_wait` one commit's lock wait.
 /// Test: `slice_stops_starting_drawers_past_the_chunk_cap`,
-/// `slice_embed_is_bounded_by_the_slice_timeout`.
+/// `slice_embed_is_bounded_by_the_slice_timeout`,
+/// `slice_defaults_and_recall_contention_measured` (the numbers above).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceBounds {
     /// Wall-clock budget, checked between drawers. Env
