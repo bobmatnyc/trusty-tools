@@ -259,10 +259,8 @@ fn universal_floor(
     }
     // No secret value reaches the transcript; #8939: the same gated decision
     // as the guarded path, so the Architect's `tm env` exemption holds here.
-    if let Some(reason) = evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate) {
-        return deny("secret-file-read", reason);
-    }
-    None
+    // #8625: the deny carries its own label (`kuzu-store-read`, ruling Q7).
+    evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate)
 }
 
 #[cfg(test)]

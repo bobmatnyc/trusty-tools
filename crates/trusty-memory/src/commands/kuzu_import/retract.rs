@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use trusty_common::memory_core::store::Triple;
+use crate::engine::store::Triple;
 use uuid::Uuid;
 
 use super::apply::{fail, PalaceSink, PalaceView, StoreCounts};

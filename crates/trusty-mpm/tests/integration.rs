@@ -79,6 +79,8 @@ mod tm_hook_pm_guard_false_positives;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
+// #8625: the kuzu-store deny under each bypass and for the Architect.
+mod tm_hook_pm_guard_kuzu_store_8625;
 // #9720: a `<<`-dense command is judged inside the hook timeout.
 mod tm_hook_pm_guard_architect_8453;
 mod tm_hook_pm_guard_heredoc_density_9720;
@@ -86,6 +88,8 @@ mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
 mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
+// #9791: `file -f`/`-m` on a secret file under each bypass and for the Architect.
+mod tm_hook_pm_guard_secret_file_list_9791;
 mod tm_hook_pm_guard_stdin_7975;
 mod tm_hook_pm_guard_tmux_target_9001;
 mod tm_hook_pm_guard_trust_anchor_8878;

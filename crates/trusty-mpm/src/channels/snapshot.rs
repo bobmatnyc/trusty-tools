@@ -98,9 +98,12 @@ pub trait PolicySource: Send {
 
 /// The daemon's source: a trusty-channels `PolicyLoader`.
 ///
-/// Why: `PolicyLoader::refresh` records its new fingerprint before it
-/// reloads, so a panic mid-reload would leave a loader that never reloads
-/// that change again.
+/// Why: `PolicyLoader` writes its settled fingerprint before it applies the
+/// new report, so a panic while applying would leave a loader whose
+/// fingerprint does not describe its report, and that change would never
+/// reload. #9808: on a normal return the fingerprint describes the bytes
+/// the load read, or is unset so the next refresh reloads; keeping the
+/// clone then keeps no stale report.
 /// What: loads lazily on the first refresh, then refreshes a clone and
 /// keeps it only once the refresh returned.
 /// Test: `routes_edit_outside_config_yaml_has_no_effect_in_daemon`,

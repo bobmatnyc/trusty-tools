@@ -106,8 +106,8 @@ async fn tools_list_returns_all_tools() {
     // #5000 / #4786 add `palace_verify_embedded` and `palace_embed_sweep`.
     // #7370 adds `chat_asset_capabilities`, `chat_asset_put`, `chat_asset_get`
     // — #7654: the count was left at 49 when they landed.
-    // #9544 adds `palace_rename`.
-    assert_eq!(tools.len(), 53);
+    // #9544 adds `palace_rename`; #9282 adds `palace_backup`.
+    assert_eq!(tools.len(), 54);
 }
 
 #[tokio::test]
@@ -252,14 +252,14 @@ async fn default_palace_used_when_arg_omitted() {
     // test, while under per-test process isolation (`cargo nextest run`) it got
     // a virgin cell and reached for the real ONNX model (HTTP 429 in CI).
     // Same defect class as #4413. Idempotent, so order does not matter.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
 
     // Pre-create the default palace so remember has somewhere to land.
-    let registry = trusty_common::memory_core::PalaceRegistry::new();
-    let palace = trusty_common::memory_core::Palace {
-        id: trusty_common::memory_core::PalaceId::new("default-pal"),
+    let registry = crate::engine::PalaceRegistry::new();
+    let palace = crate::engine::Palace {
+        id: crate::engine::PalaceId::new("default-pal"),
         name: "default-pal".to_string(),
         description: None,
         created_at: chrono::Utc::now(),
@@ -407,7 +407,7 @@ async fn missing_palace_without_default_errors_for_a_write() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_rehydrates_registry() {
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -470,7 +470,7 @@ async fn load_palaces_from_disk_rehydrates_registry() {
 /// Test: this test itself.
 #[tokio::test]
 async fn restart_burst_hydration_is_immediately_idle_evictable() {
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -531,7 +531,7 @@ async fn restart_burst_hydration_is_immediately_idle_evictable() {
 /// Test: this test itself.
 #[tokio::test]
 async fn with_writer_intent_marks_registry_writer() {
-    use trusty_common::memory_core::store::OpenIntent;
+    use crate::engine::store::OpenIntent;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -563,7 +563,7 @@ async fn with_writer_intent_marks_registry_writer() {
 #[tokio::test]
 #[should_panic(expected = "is_empty()")]
 async fn with_writer_intent_panics_on_hydrated_registry() {
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -617,11 +617,11 @@ async fn with_writer_intent_panics_on_hydrated_registry() {
 fn incompatible_palace_fixture() -> (
     tempfile::TempDir,
     std::path::PathBuf,
-    trusty_common::memory_core::PalaceId,
+    crate::engine::PalaceId,
     std::path::PathBuf,
 ) {
-    use trusty_common::memory_core::store::PalaceStore;
-    use trusty_common::memory_core::{Palace, PalaceId};
+    use crate::engine::store::PalaceStore;
+    use crate::engine::{Palace, PalaceId};
 
     const GARBAGE: [u8; 4096] = [0xABu8; 4096];
 
@@ -665,8 +665,8 @@ fn incompatible_palace_fixture() -> (
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_honours_registry_open_intent() {
-    use trusty_common::memory_core::store::redb_open::INCOMPATIBLE_SUFFIX;
-    use trusty_common::memory_core::store::OpenIntent;
+    use crate::engine::store::redb_open::INCOMPATIBLE_SUFFIX;
+    use crate::engine::store::OpenIntent;
 
     // Phase 1 — a read-only client must refuse and leave the store where it is.
     let (_ro_tmp, ro_root, ro_pid, ro_store) = incompatible_palace_fixture();
@@ -746,8 +746,8 @@ async fn load_palaces_from_disk_honours_registry_open_intent() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_records_an_unopenable_palace() {
-    use trusty_common::memory_core::store::PalaceStore;
-    use trusty_common::memory_core::{Palace, PalaceId};
+    use crate::engine::store::PalaceStore;
+    use crate::engine::{Palace, PalaceId};
 
     let (_tmp, root, pid, _store) = incompatible_palace_fixture();
 
@@ -873,7 +873,7 @@ fn resolve_palace_registry_dir_root_input_stays_root() {
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_handles_palaces_subdir() {
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -937,7 +937,7 @@ async fn load_palaces_from_disk_empty_root_returns_zero() {
 /// Test: this test itself.
 #[tokio::test]
 async fn palace_name_cache_populated_after_hydration() {
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1448,8 +1448,8 @@ fn daemon_readiness_from_u8() {
 async fn open_palace_lazy_reopens_hydration_skipped_palace() {
     let (state, _tmp) = test_state();
     // Create a palace on disk.
-    let pid = trusty_common::memory_core::palace::PalaceId::new("hydration-skip");
-    let palace = trusty_common::memory_core::Palace {
+    let pid = crate::engine::palace::PalaceId::new("hydration-skip");
+    let palace = crate::engine::Palace {
         id: pid.clone(),
         name: "hydration-skip".to_string(),
         description: None,
@@ -1496,8 +1496,8 @@ async fn open_palace_lazy_reopens_hydration_skipped_palace() {
 /// `session_store_flags_a_chat_store_stranded_in_a_live_alias_dir` and
 /// `session_store_fails_open_when_the_alias_dir_store_cannot_be_read`.
 fn live_alias(state: &AppState, canonical: &str, alias: &str) {
-    let palace = trusty_common::memory_core::Palace {
-        id: trusty_common::memory_core::palace::PalaceId::new(canonical),
+    let palace = crate::engine::Palace {
+        id: crate::engine::palace::PalaceId::new(canonical),
         name: canonical.to_string(),
         description: None,
         created_at: chrono::Utc::now(),

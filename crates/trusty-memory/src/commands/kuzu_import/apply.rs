@@ -20,13 +20,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, DrawerType, RoomType};
+use crate::engine::retrieval::{embed_chunks, shared_embedder, PalaceHandle, RememberOptions};
+use crate::engine::store::Triple;
 use async_trait::async_trait;
-use trusty_common::memory_core::embed::Embedder;
-use trusty_common::memory_core::palace::{Drawer, DrawerType, RoomType};
-use trusty_common::memory_core::retrieval::{
-    embed_chunks, shared_embedder, PalaceHandle, RememberOptions,
-};
-use trusty_common::memory_core::store::Triple;
 use uuid::Uuid;
 
 use super::bridge::KuzuExport;
@@ -604,7 +602,7 @@ impl HandleSink {
 /// directory and is declared last so the KG closes before it is removed.
 pub struct SnapshotView {
     pub drawers: Vec<Drawer>,
-    pub kg: Option<trusty_common::memory_core::store::KnowledgeGraph>,
+    pub kg: Option<crate::engine::store::KnowledgeGraph>,
     pub snapshot_dir: Option<tempfile::TempDir>,
 }
 

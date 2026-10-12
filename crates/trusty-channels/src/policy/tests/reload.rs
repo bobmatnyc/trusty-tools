@@ -1,16 +1,19 @@
 //! Reload (#8454 S2b §3, Architect Q3): an unreviewed edit never widens the
 //! policy, a narrowing applies at once, the fingerprint is content plus
-//! branch, and the rate-limit logs survive.
+//! branch, and the rate-limit logs survive. #9808: the fingerprint a load
+//! keeps describes the bytes that load read, or matches nothing.
 
 use std::fs::File;
 use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 
 use super::repo::{host_yaml, slack_routes, tempdir, Home, Repo};
 use super::{names, TestClock};
+use crate::policy::load::{prepare, Prepared};
 use crate::policy::{
     load_effective, BucketDecision, Channel, FileState, Finding, GateError, HostError, LoadReport,
-    PolicyLoader, ProjectFileError, RateLimit, RateLimiter,
+    LoadRequest, PolicyLoader, ProjectFileError, RateLimit, RateLimiter,
 };
 
 fn state(report: &LoadReport, dir: &Path) -> FileState {
@@ -380,4 +383,224 @@ fn one_shot_load_has_no_fingerprint() {
     let report = load_effective(&home.request());
     assert_eq!(names(&report), ["bob-dm"]);
     assert_eq!(report.fingerprint, 0);
+}
+
+// ── #9808: the fingerprint describes the bytes the load read ──
+
+/// A read that sees a change the sources drop again before the next
+/// refresh: `change` runs, the real [`prepare`] reads, `revert` runs.
+fn flip_during_load<'a>(
+    change: impl FnOnce() + 'a,
+    revert: impl FnOnce() + 'a,
+) -> impl FnOnce(&LoadRequest) -> Prepared + 'a {
+    move |req| {
+        change();
+        let read = prepare(req);
+        revert();
+        read
+    }
+}
+
+/// Commit eve's route, then `git reset --hard` back to the same `HEAD`.
+fn eve_then_back(repo: &Repo) -> impl FnOnce(&LoadRequest) -> Prepared + '_ {
+    flip_during_load(
+        || repo.commit_routes(&bob_and_eve()),
+        || {
+            repo.git(&["reset", "--hard", "-q", "HEAD~1"]);
+        },
+    )
+}
+
+/// The reverted change is reloaded on the next refresh.
+fn assert_reverted_reloads(loader: &mut PolicyLoader) {
+    assert_eq!(
+        names(loader.report()),
+        ["bob-dm", "eve-dm"],
+        "the load did not read the change"
+    );
+    assert!(
+        loader.refresh(),
+        "#9808: the change reverted after the read was never reloaded"
+    );
+    assert_eq!(names(loader.report()), ["bob-dm"]);
+}
+
+/// A home listing `repo` on Slack and dir `g` on gchat only: an entry the
+/// daemon does not serve, whose canonical check still denies all.
+struct Unserved {
+    _tmp: tempfile::TempDir,
+    g: PathBuf,
+    real: PathBuf,
+}
+
+impl Unserved {
+    fn listed(home: &Home, repo: &Repo) -> Self {
+        let (tmp, root) = tempdir();
+        let g = root.join("g");
+        std::fs::create_dir(&g).expect("mkdir");
+        home.write_host(&format!(
+            "channels:\n  version: 1\n  gchat:\n    enabled: true\n    projects: [\"{g}\"]\n  \
+             slack:\n    enabled: true\n    projects: [\"{r}\"]\n",
+            g = g.display(),
+            r = repo.dir().display(),
+        ));
+        let real = root.join("g-real");
+        Self { _tmp: tmp, g, real }
+    }
+
+    /// `g` becomes a symlink: the canonical check fails.
+    fn symlink(&self) {
+        std::fs::rename(&self.g, &self.real).expect("move");
+        symlink(&self.real, &self.g).expect("symlink");
+    }
+
+    /// `g` is a real directory again.
+    fn restore(&self) {
+        std::fs::remove_file(&self.g).expect("unlink");
+        std::fs::rename(&self.real, &self.g).expect("move back");
+    }
+}
+
+#[test]
+fn refresh_after_change_and_revert_during_load_reloads() {
+    let (repo, _home, mut loader) = loaded();
+    // A new commit the refresh must load; the load then sees eve's route.
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "unrelated"]);
+    assert!(loader.refresh_with(eve_then_back(&repo)));
+    assert_reverted_reloads(&mut loader);
+}
+
+#[test]
+fn new_after_change_and_revert_during_load_reloads() {
+    let repo = Repo::init("main");
+    repo.commit_routes(&bob());
+    let home = Home::listing(&[repo.dir()]);
+    let mut loader = PolicyLoader::new_with(home.request(), eve_then_back(&repo));
+    assert_reverted_reloads(&mut loader);
+}
+
+#[test]
+fn reload_after_change_and_revert_during_load_reloads() {
+    let (repo, _home, mut loader) = loaded();
+    loader.reload_with(eve_then_back(&repo));
+    assert_reverted_reloads(&mut loader);
+}
+
+#[test]
+fn host_file_change_and_revert_during_load_reloads() {
+    let repo = Repo::init("main");
+    repo.commit_routes(&bob());
+    let home = Home::listing(&[repo.dir()]);
+    let on = host_yaml(&[repo.dir()]);
+    let off = on.replace("slack:\n    enabled: true", "slack:\n    enabled: false");
+    home.write_host(&off);
+    let mut loader = PolicyLoader::new(home.request());
+    assert!(loader.policy().is_empty(), "Slack is off");
+    // Only the host file moves; the project bytes read match the post sample.
+    loader.reload_with(flip_during_load(
+        || home.write_host(&on),
+        || home.write_host(&off),
+    ));
+    assert_eq!(names(loader.report()), ["bob-dm"], "the load read Slack on");
+    assert!(
+        loader.refresh(),
+        "#9808: the host file reverted after the read was never reloaded"
+    );
+    assert!(
+        loader.policy().is_empty(),
+        "the disabled channel kept its route"
+    );
+}
+
+#[test]
+fn canonical_fault_cleared_and_restored_during_load_reloads() {
+    let (repo, home, mut loader) = loaded();
+    let g = Unserved::listed(&home, &repo);
+    g.symlink();
+    assert!(loader.refresh());
+    assert!(
+        loader.report().denied,
+        "the non-canonical entry did not deny"
+    );
+    // The host text and the project bytes stay the same; only the
+    // canonical verdict the load saw differs from the post sample.
+    loader.reload_with(flip_during_load(|| g.restore(), || g.symlink()));
+    assert_eq!(names(loader.report()), ["bob-dm"], "the load saw no fault");
+    assert!(
+        loader.refresh(),
+        "#9808: the fault restored after the check was never reloaded"
+    );
+    assert!(loader.report().denied);
+    assert!(loader.policy().is_empty(), "a host fault kept routes");
+}
+
+#[test]
+fn project_not_read_by_the_load_never_settles() {
+    // The shape of a load whose deadline passed before a project's read.
+    let (_repo, _home, mut loader) = loaded();
+    loader.reload_with(|req| {
+        let mut read = prepare(req);
+        read.projects.clear();
+        read
+    });
+    assert!(
+        loader.policy().is_empty(),
+        "the skipped project kept routes"
+    );
+    assert!(
+        loader.refresh(),
+        "#9808: a load that skipped a listed project settled"
+    );
+    assert_eq!(names(loader.report()), ["bob-dm"]);
+}
+
+#[test]
+fn panic_during_load_leaves_a_loader_that_reloads() {
+    let (repo, _home, loader) = loaded();
+    repo.commit_routes(&bob_and_eve());
+    let mut kept = loader.clone();
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        kept.refresh_with(|_: &LoadRequest| -> Prepared { panic!("load fault") })
+    }));
+    assert!(panicked.is_err(), "the load did not panic");
+    assert_eq!(names(kept.report()), ["bob-dm"], "the report moved");
+    assert!(
+        kept.refresh(),
+        "#9808: the change behind the panicked load was never reloaded"
+    );
+    assert_eq!(names(kept.report()), ["bob-dm", "eve-dm"]);
+}
+
+#[test]
+fn stable_load_settles_and_next_refresh_is_false() {
+    let (repo, home, mut loader) = loaded();
+    assert!(!loader.refresh(), "new did not settle");
+    repo.commit_routes(&bob_and_eve());
+    assert!(loader.refresh());
+    assert!(!loader.refresh(), "refresh did not settle");
+    loader.reload();
+    assert!(!loader.refresh(), "reload did not settle");
+    // A stable host fault settles too: its load reads no project file.
+    let g = Unserved::listed(&home, &repo);
+    g.symlink();
+    assert!(loader.refresh());
+    assert!(loader.report().denied);
+    assert!(!loader.refresh(), "a stable host fault did not settle");
+}
+
+#[test]
+fn persistent_change_during_load_reloads_once_then_settles() {
+    let (repo, _home, mut loader) = loaded();
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "unrelated"]);
+    assert!(loader.refresh_with(|req: &LoadRequest| {
+        repo.commit_routes(&bob_and_eve());
+        prepare(req)
+    }));
+    assert_eq!(names(loader.report()), ["bob-dm", "eve-dm"]);
+    assert!(
+        loader.refresh(),
+        "#9808: a change during the load did not reload"
+    );
+    assert_eq!(names(loader.report()), ["bob-dm", "eve-dm"]);
+    assert!(!loader.refresh(), "the kept change never settled");
 }

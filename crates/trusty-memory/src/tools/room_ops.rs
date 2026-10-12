@@ -14,15 +14,13 @@
 //! `dispatch_room_rename_leaves_drawers_in_place`,
 //! `dispatch_room_rename_rejects_a_taken_name` in `tools::tests`.
 
+use crate::engine::room_identity::{parse_room_preserving_case, room_type_tag, DEFAULT_WING_ID};
+use crate::engine::store::rooms::{
+    create_room, list_room_summaries, rename_room, resolve_room_selector, RoomSummary,
+};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use trusty_common::memory_core::room_identity::{
-    parse_room_preserving_case, room_type_tag, DEFAULT_WING_ID,
-};
-use trusty_common::memory_core::store::rooms::{
-    create_room, list_room_summaries, rename_room, resolve_room_selector, RoomSummary,
-};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};

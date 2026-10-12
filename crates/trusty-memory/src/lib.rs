@@ -37,6 +37,8 @@
 // `mcp_service` is the serving surface, compiled only under `server`.
 #[cfg(feature = "server")]
 use {
+    crate::engine::embed::Embedder,
+    crate::engine::{store::ChatSessionStore, PalaceRegistry},
     crate::session_store_cache::SessionStoreCache,
     anyhow::Result,
     std::net::SocketAddr,
@@ -44,8 +46,6 @@ use {
     std::sync::atomic::{AtomicU8, AtomicUsize, Ordering},
     std::sync::{Arc, OnceLock},
     tokio::sync::{broadcast, OnceCell, RwLock},
-    trusty_common::memory_core::embed::Embedder,
-    trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry},
     trusty_common::ChatProvider,
 };
 
@@ -733,11 +733,11 @@ pub struct AppState {
     /// to enter the per-palace open queue. Each leg was bounded by its own
     /// timeout, so the effective ceiling was their sum (60 s + ~63 s), not
     /// either configured bound. The handlers stamp one
-    /// [`trusty_common::memory_core::timeouts::OpBudget`] from this value and
+    /// [`crate::engine::timeouts::OpBudget`] from this value and
     /// clamp every leg through it, so the later leg spends what the earlier
     /// leg left.
     /// What: defaults to
-    /// [`trusty_common::memory_core::timeouts::write_op_budget`]
+    /// [`crate::engine::timeouts::write_op_budget`]
     /// (`TRUSTY_WRITE_OP_BUDGET_SECS`, 60 s). Stored per-instance rather than
     /// re-read from the environment so
     /// [`AppState::with_write_op_budget`] can inject a short deadline in tests
@@ -764,7 +764,7 @@ pub struct AppState {
     /// writer on that palace queued behind it — three `memory_note` calls were
     /// aborted client-side after 1800 s while the daemon stayed healthy.
     /// What: defaults to
-    /// [`trusty_common::memory_core::timeouts::write_pipeline_timeout`]
+    /// [`crate::engine::timeouts::write_pipeline_timeout`]
     /// (`TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`, 240 s), and is threaded into
     /// `PalaceHandle::remember_with_options_within`. Stored per-instance for
     /// the same reason as `write_op_budget`: a test can inject a short ceiling
@@ -866,12 +866,12 @@ impl AppState {
             daemon_readiness: Arc::new(AtomicU8::new(DaemonReadiness::Warming as u8)),
             embedder_warm_failure: Arc::new(std::sync::OnceLock::new()),
             // #4002: one ceiling for the whole write, read once at construction.
-            write_op_budget: trusty_common::memory_core::timeouts::write_op_budget(),
+            write_op_budget: crate::engine::timeouts::write_op_budget(),
             // #6424: empty at boot, so the first use of each palace after a
             // restart always persists a stamp.
             palace_last_used: Arc::new(dashmap::DashMap::new()),
             // #6366: the ceiling on the critical section #4002's budget stops at.
-            write_pipeline_budget: trusty_common::memory_core::timeouts::write_pipeline_timeout(),
+            write_pipeline_budget: crate::engine::timeouts::write_pipeline_timeout(),
         }
     }
 
@@ -1215,7 +1215,7 @@ impl AppState {
         // (TRUSTY_MEMORY_MAX_OPEN_PALACES) while marking the registry a writer.
         // #8733: a writer may run maintenance only while it holds this data
         // root's lease; hydration's first open takes it or logs the holder.
-        let lease = trusty_common::memory_core::MaintenanceLease::new(&self.data_root);
+        let lease = crate::engine::MaintenanceLease::new(&self.data_root);
         self.registry = Arc::new(
             PalaceRegistry::from_env()
                 .with_writer_intent()
@@ -1541,7 +1541,7 @@ impl AppState {
         // startup warm-up latches readiness off. `shared_embedder` already
         // applies the bounded `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` init timeout
         // and the CoreML auto-fallback, so no wrapper timeout is needed here.
-        let embedder = trusty_common::memory_core::retrieval::shared_embedder().await?;
+        let embedder = crate::engine::retrieval::shared_embedder().await?;
         // #4836: a resolved embedder is proof a vector search can run, so it is
         // the authoritative readiness signal — not the startup task's one-shot
         // attempt. Without this the daemon stays `Warming` forever whenever that

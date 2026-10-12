@@ -11,14 +11,14 @@
 //! service-layer unit tests live here too (1500-SLOC test cap applies).
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::RecallResult;
+use crate::engine::PalaceHandle;
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::RecallResult;
-use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
 use super::types::{PalaceInfo, ServiceResult};
@@ -215,12 +215,10 @@ where
 /// Test: exercised by every `list_palaces`/`status` service test.
 pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace>> {
     let root = state.data_root.clone();
-    tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
-    })
-    .await
-    .map_err(|e| anyhow!("join list_palaces: {e}"))?
-    .map_err(|e| anyhow!("list palaces: {e:#}"))
+    tokio::task::spawn_blocking(move || crate::engine::PalaceRegistry::list_palaces(&root))
+        .await
+        .map_err(|e| anyhow!("join list_palaces: {e}"))?
+        .map_err(|e| anyhow!("list palaces: {e:#}"))
 }
 
 /// How many palaces a recall-all fan-out opens at once (#9141).
@@ -560,7 +558,7 @@ pub async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
 /// Test: network-dependent — not unit-tested.
 pub async fn enrich_gap_exploration(
     api_key: &str,
-    gap: &trusty_common::memory_core::community::KnowledgeGap,
+    gap: &crate::engine::community::KnowledgeGap,
 ) -> Option<String> {
     let preview: Vec<&str> = gap.entities.iter().take(5).map(String::as_str).collect();
     if preview.is_empty() {
@@ -626,8 +624,8 @@ pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::palace::{Drawer, Palace};
     use chrono::{Duration as ChronoDuration, Utc};
-    use trusty_common::memory_core::palace::{Drawer, Palace};
 
     fn test_state() -> AppState {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -875,7 +873,7 @@ mod tests {
         let data_root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
 
-        let registry = trusty_common::memory_core::PalaceRegistry::with_max_open(2);
+        let registry = crate::engine::PalaceRegistry::with_max_open(2);
         for name in ["a", "b", "c"] {
             let palace = Palace {
                 id: PalaceId::new(name),

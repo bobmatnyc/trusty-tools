@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::PalaceRegistry;
 
 /// A ticker heartbeat older than this many intervals reads as stopped.
 const TICKER_GRACE_INTERVALS: u32 = 3;

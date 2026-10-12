@@ -218,7 +218,7 @@ impl ActivityLog {
         std::fs::create_dir_all(data_root)
             .with_context(|| format!("create activity dir {}", data_root.display()))?;
         let path = data_root.join(ACTIVITY_DB_FILENAME);
-        let db = trusty_common::memory_core::store::open_or_recreate(&path) // #702: recreate if incompat
+        let db = crate::engine::store::open_or_recreate(&path) // #702: recreate if incompat
             .with_context(|| format!("open activity db {}", path.display()))?;
 
         // Initialise the table (idempotent) and read the current max key.

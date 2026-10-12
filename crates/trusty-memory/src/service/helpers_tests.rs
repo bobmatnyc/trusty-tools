@@ -7,7 +7,7 @@
 //!
 //! Test: run with `cargo test -p trusty-memory service::helpers_tests`.
 
-use trusty_common::memory_core::retrieval::RecallResult;
+use crate::engine::retrieval::RecallResult;
 use uuid::Uuid;
 
 use crate::service::{drawer_content_preview, recall_entry_json, DRAWER_PREVIEW_MAX_CHARS};
@@ -54,7 +54,7 @@ fn drawer_preview_collapses_whitespace_and_truncates() {
 /// Test: itself.
 #[test]
 fn recall_entry_json_hoists_drawer_fields() {
-    use trusty_common::memory_core::Drawer;
+    use crate::engine::Drawer;
 
     let room = Uuid::new_v4();
     let mut drawer = Drawer::new(room, "the answer is 42");

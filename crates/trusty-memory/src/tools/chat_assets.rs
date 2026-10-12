@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 // #9269: the handler is `server`-only; `definitions` also builds under `mcp-schema`.
 #[cfg(feature = "server")]
 use {
+    crate::engine::store::chat_sessions::ChatImageAsset,
     crate::AppState,
     anyhow::{Context, Result},
-    trusty_common::memory_core::store::chat_sessions::ChatImageAsset,
 };
 
 /// Why: durable image bytes belong to trusty-memory rather than an assistant-local store.

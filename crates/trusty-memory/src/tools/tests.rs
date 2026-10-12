@@ -8,9 +8,9 @@
 //! Test: this IS the test module.
 
 use super::*;
+use crate::engine::palace::PalaceId;
 use crate::AppState;
 use serde_json::json;
-use trusty_common::memory_core::palace::PalaceId;
 use uuid::Uuid;
 
 /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests
@@ -76,7 +76,7 @@ fn skip_palace_enforcement() {
 /// free and order-independent.
 /// Test: every test in this module that constructs state.
 fn seed_embedder() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
 }
 
 // #7493: `byte_cap_tests` needs the same fixture for its router-consistency
@@ -202,6 +202,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_delete",
         "palace_update",
         "palace_rename",
+        "palace_backup",
         "palace_list",
         "palace_info",
         "palace_compact",
@@ -788,7 +789,7 @@ async fn dispatch_kg_list_subjects_exact_limit_is_not_truncated() {
 /// Test: This test itself.
 #[tokio::test]
 async fn dispatch_kg_gaps_returns_cached() {
-    use trusty_common::memory_core::community::KnowledgeGap;
+    use crate::engine::community::KnowledgeGap;
 
     let (state, _tmp) = test_state();
     let _ = dispatch_tool(&state, "palace_create", json!({"name": "delta"}))
@@ -1245,7 +1246,7 @@ async fn kg_query_reports_subject_not_found_when_graph_has_other_subjects() {
 /// `palace_create` auto-bootstraps, and there is no way to ask it not to.
 #[tokio::test]
 async fn kg_query_reports_graph_empty_when_graph_has_no_triples() {
-    use trusty_common::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
 
     let (state, _tmp) = test_state();
     let palace = Palace {
@@ -2241,7 +2242,7 @@ async fn bm25_index_queue_drops_when_full() {
 /// Test: this test.
 #[tokio::test]
 async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {
-    use trusty_common::memory_core::store::VectorStore;
+    use crate::engine::store::VectorStore;
 
     let (state, _tmp) = test_state_warming();
     let _ = dispatch_tool(
@@ -2286,7 +2287,7 @@ async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {
 
     // Poll (bounded) until the background embed task backfills the vector.
     let handle = open_palace_handle(&state, "warmtest").expect("open palace");
-    let embedder = trusty_common::memory_core::retrieval::shared_embedder()
+    let embedder = crate::engine::retrieval::shared_embedder()
         .await
         .expect("shared embedder must initialise");
     // Generous bound: a cold ONNX/CoreML compile can take up to ~120s per
@@ -2365,14 +2366,14 @@ async fn note_succeeds_while_state_is_warming() {
 #[test]
 fn bm25_hits_hydrate_from_handle_during_warmup() {
     use crate::bm25_lane::BM25Hit;
-    use trusty_common::memory_core::palace::Drawer;
-    use trusty_common::memory_core::store::kg::KnowledgeGraph;
-    use trusty_common::memory_core::store::vector::UsearchStore;
+    use crate::engine::palace::Drawer;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::vector::UsearchStore;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let vs = UsearchStore::new(dir.path().join("idx.usearch"), 384).expect("vector store");
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).expect("kg");
-    let handle = trusty_common::memory_core::retrieval::PalaceHandle::new(
+    let handle = crate::engine::retrieval::PalaceHandle::new(
         PalaceId::new("bm25hydrate"),
         String::new(),
         vs,
@@ -2453,7 +2454,7 @@ fn attach_mcp_attribution_dedupes_hand_written_ws_claim_tag() {
 /// Test: itself.
 #[tokio::test]
 async fn mcp_room_parse_matches_http() {
-    use trusty_common::memory_core::palace::RoomType;
+    use crate::engine::palace::RoomType;
 
     // The parser contract itself, shared by both transports.
     assert_eq!(RoomType::parse("backend"), RoomType::Backend);
@@ -2646,7 +2647,7 @@ async fn dispatch_room_list_rejects_an_unknown_wing() {
         "room_list",
         json!({
             "palace": "wingcheck",
-            "wing": trusty_common::memory_core::room_identity::DEFAULT_WING_ID.to_string(),
+            "wing": crate::engine::room_identity::DEFAULT_WING_ID.to_string(),
         }),
     )
     .await

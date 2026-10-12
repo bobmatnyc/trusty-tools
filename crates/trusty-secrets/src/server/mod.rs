@@ -24,6 +24,8 @@
 //! - [`grant`] and [`ancestry`] — the in-memory exec-grant registry and the
 //!   process-ancestry checks `secrets.grant` and `secrets.resolve` use (S8,
 //!   #9070).
+//! - `sandbox` — under `TRUSTY_SANDBOX=1`, `file` consent from the sandbox
+//!   home's machine config, and no Keychain or CLI backend (#9793).
 //! - `bridge` — `secrets.bridge.*`, the console bridge's entries: the
 //!   console's verdict on its HTTP client, taken only from the verified
 //!   `trusty-console` peer (S3a, #9066).
@@ -62,6 +64,8 @@ mod grant_fakes;
 mod methods;
 pub mod project;
 mod router;
+// #9793: the sandbox consent override and backend refusal.
+mod sandbox;
 pub mod settings;
 mod tools;
 
@@ -88,6 +92,7 @@ pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
     default_backends, run_to_exit, serve, serve_with,
 };
+pub use sandbox::SandboxEnv;
 pub use settings::{
     AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
     DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,

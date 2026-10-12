@@ -12,16 +12,14 @@
 
 use super::bm25::bm25_index_enqueue;
 use crate::attribution::{session_tag_from_tags, CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
+use crate::engine::filter::{FilterConfig, MCP_MIN_TOKENS};
+use crate::engine::palace::{DrawerType, PalaceId, RoomType};
+use crate::engine::retrieval::{admit_tier_c, RememberOptions, TierCAdmission, VerifyNotStored};
+use crate::engine::timeouts::{self, OpBudget};
 use crate::kg_extract::{extract_triples, ExtractInput};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
-use trusty_common::memory_core::palace::{DrawerType, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
-    admit_tier_c, RememberOptions, TierCAdmission, VerifyNotStored,
-};
-use trusty_common::memory_core::timeouts::{self, OpBudget};
 use uuid::Uuid;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,
@@ -155,7 +153,7 @@ pub(crate) const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 /// `bool`) so the caller can name the trigger in the skip envelope rather than
 /// emitting an opaque "blocked pattern" — callers need to know what to remove.
 /// Why (issue #2442): delegates to
-/// [`trusty_common::memory_core::filter::blocklist_match`], the single
+/// [`crate::engine::filter::blocklist_match`], the single
 /// prefix-anchored source of truth shared with the dream-cycle retroactive
 /// prune pass. The old local copy matched via `str::contains`
 /// (substring-anywhere), which fired on legitimate content that merely
@@ -169,7 +167,7 @@ pub(crate) const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 /// `blocklist_gate_passes_normal_content`,
 /// `blocklist_gate_names_matched_pattern`.
 pub(crate) fn blocklist_gate(content: &str) -> Option<&'static str> {
-    trusty_common::memory_core::filter::blocklist_match(content)
+    crate::engine::filter::blocklist_match(content)
 }
 
 /// Dedup gate: returns true when the new content is a near-duplicate of a
@@ -188,7 +186,7 @@ pub(crate) fn blocklist_gate(content: &str) -> Option<&'static str> {
 /// empty after trimming (the content gate handles that case separately)
 /// or if the palace has no recent drawers.
 /// Test: `dedup_skips_near_duplicate`, `dedup_allows_different_content`.
-pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, content: &str) -> bool {
+pub(crate) fn dedup_gate(handle: &crate::engine::PalaceHandle, content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return false;
@@ -222,7 +220,7 @@ pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, cont
 /// `tools::tests`) cover `allow_secret_like` end-to-end through MCP dispatch;
 /// `remember_force_still_blocks_secret` and
 /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`
-/// (`trusty_common::memory_core::retrieval::tests`) cover the same split at
+/// (`crate::engine::retrieval::tests`) cover the same split at
 /// the library layer.
 pub(crate) fn mcp_remember_opts(
     force: bool,
@@ -409,7 +407,7 @@ pub(crate) fn apply_tier_c(
 /// Test: Indirect — `auto_kg_extraction_hooks_into_memory_remember`
 /// round-trips a known room label.
 pub(crate) fn room_label(room: &RoomType) -> Option<String> {
-    Some(trusty_common::memory_core::room_identity::room_label(room))
+    Some(crate::engine::room_identity::room_label(room))
 }
 
 /// Refuse a maintenance tool call unless this process holds the data root's
@@ -446,7 +444,7 @@ pub(crate) fn require_maintenance_lease(state: &AppState) -> Result<()> {
 pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
-) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
+) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
     let _tracked = state.worker_liveness.track();
     open_palace_handle_within(state, palace_id, OpBudget::start(state.write_op_budget))
 }
@@ -455,7 +453,7 @@ pub(crate) fn open_palace_handle(
 /// budget (issue #4002).
 ///
 /// Why: [`open_palace_handle`] starts a fresh
-/// [`trusty_common::memory_core::timeouts::open_queue_timeout`] window every
+/// [`crate::engine::timeouts::open_queue_timeout`] window every
 /// time it is called. On the write path the caller has already waited up to
 /// `write_lock_timeout` for the per-palace write mutex, so the two waits
 /// composed into their sum — 60 s + ~63 s before any error surfaced. Write
@@ -471,7 +469,7 @@ pub(crate) fn open_palace_handle_within(
     state: &AppState,
     palace_id: &str,
     budget: OpBudget,
-) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>> {
+) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
     // #4001: untracked here so one write is not counted twice in `in_flight`.
     let pid = PalaceId::new(palace_id);
     state
@@ -584,7 +582,7 @@ pub(crate) struct WriteGuard<'a> {
 /// `auto_kg_extraction_no_op_does_not_fail_remember`,
 /// `web::tests::http_create_drawer_runs_auto_kg_extraction`.
 pub(crate) async fn auto_extract_and_assert(
-    handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    handle: &std::sync::Arc<crate::engine::PalaceHandle>,
     drawer_id: Uuid,
     content: &str,
     tags: &[String],

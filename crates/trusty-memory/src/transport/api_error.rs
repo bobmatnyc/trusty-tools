@@ -16,9 +16,9 @@
 //! Test: `api_error_kind_maps_to_its_rpc_code`,
 //! `api_error_message_survives_the_conversion`.
 
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::palace_format::is_format_refusal;
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::palace::PalaceId;
+use crate::engine::store::palace_format::is_format_refusal;
+use crate::engine::PalaceRegistry;
 #[cfg_attr(not(test), allow(unused_imports))]
 use trusty_common::uds::server::{
     RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND,
@@ -190,7 +190,7 @@ impl From<crate::service::ServiceError> for ApiError {
 pub fn open_handle(
     state: &AppState,
     id: &str,
-) -> Result<std::sync::Arc<trusty_common::memory_core::PalaceHandle>, ApiError> {
+) -> Result<std::sync::Arc<crate::engine::PalaceHandle>, ApiError> {
     state
         .registry
         .open_palace(&state.data_root, &PalaceId::new(id))
@@ -307,8 +307,8 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn format_too_new_maps_to_refused_error_naming_variant() {
-        use trusty_common::memory_core::palace::Palace;
-        use trusty_common::memory_core::store::PalaceStore;
+        use crate::engine::palace::Palace;
+        use crate::engine::store::PalaceStore;
         let tmp = tempfile::tempdir().expect("tempdir");
         let state = AppState::new(tmp.path().to_path_buf());
         let dir = tmp.path().join("newer");

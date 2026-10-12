@@ -301,13 +301,16 @@ test = false
 # holds the modules that rewrite `$HOME`, `$PATH`, other env vars or the cwd,
 # and runs one test at a time. Select one file's tests with a module filter:
 # `cargo test -p trusty-mpm --test integration tm_hook_pm_guard::`.
+# #9798: both spawn `CARGO_BIN_EXE_tm`, which is built only under `cli`.
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+required-features = ["cli"]
 
 [[test]]
 name = "env_serial"
 path = "tests/env_serial.rs"
+required-features = ["cli"]
 
 # #9121: sets the one-way, process-wide sandbox credential latch, so it is a
 # binary of its own — in a shared target the latch would leak into siblings.

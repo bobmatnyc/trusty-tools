@@ -11,8 +11,10 @@
 #   asserts the exit status and, where it matters, the message. Source-scan
 #   cases pin the defect (a `use` line, an inline type path, an attribute), the
 #   accepted forms (comment lines in Rust and TOML, a `changelog.d/` fragment,
-#   the two owning crates, a path outside `crates/`) and the fail-closed scan
-#   floor. `--dep-graph` cases drive the gate over captured `cargo tree` text:
+#   trusty-common, the trusty-memory re-export, a path outside `crates/`) and
+#   the fail-closed scan floor. trusty-memory cases (#9271) pin a hit there,
+#   a non-exempt line beside the re-export, and its exempt lines, comments,
+#   fragment and CHANGELOG.md. `--dep-graph` cases drive the gate over captured `cargo tree` text:
 #   a clean pair, the engine leaking into the default graph, the feature graph
 #   missing it, and an empty tree.
 #
@@ -162,6 +164,50 @@ printf 'pub use crate::memory_core;\nuse trusty_common::memory_core::store;\n' \
   > "$d/crates/trusty-common/src/lib.rs"
 printf 'pub use trusty_common::memory_core as engine;\n' > "$d/crates/trusty-memory/src/lib.rs"
 run_scan owning_crates 0 'OK:' "$d"
+
+# ── Source scan: trusty-memory (#9271) ────────────────────────────────────────
+d="$(new_fixture memory_hit)"
+mkdir -p "$d/crates/trusty-memory/src"
+printf 'use trusty_common::memory_core::store::OpenIntent;\n' \
+  > "$d/crates/trusty-memory/src/service.rs"
+run_scan memory_hit 1 'crates/trusty-memory/src/service.rs:1:' "$d"
+
+d="$(new_fixture memory_test_hit)"
+mkdir -p "$d/crates/trusty-memory/tests"
+printf 'fn f(_: trusty_common::memory_core::palace::PalaceId) {}\n' \
+  > "$d/crates/trusty-memory/tests/t.rs"
+run_scan memory_test_hit 1 'crates/trusty-memory/tests/t.rs:1:' "$d"
+
+# The exemption is the exact line, not the file: a second line in lib.rs fails.
+d="$(new_fixture memory_lib_second_line)"
+mkdir -p "$d/crates/trusty-memory/src"
+printf 'pub use trusty_common::memory_core as engine;\nuse trusty_common::memory_core::store;\n' \
+  > "$d/crates/trusty-memory/src/lib.rs"
+run_scan memory_lib_second_line 1 'crates/trusty-memory/src/lib.rs:2:' "$d"
+
+# The exempt text in another file is still a hit.
+d="$(new_fixture memory_reexport_elsewhere)"
+mkdir -p "$d/crates/trusty-memory/src"
+printf 'pub use trusty_common::memory_core as engine;\n' > "$d/crates/trusty-memory/src/other.rs"
+run_scan memory_reexport_elsewhere 1 'crates/trusty-memory/src/other.rs:1:' "$d"
+
+d="$(new_fixture memory_exempt_lines)"
+mkdir -p "$d/crates/trusty-memory/src" "$d/crates/trusty-memory/tests"
+printf 'mod x;\n    pub use trusty_common::memory_core as engine;\n' \
+  > "$d/crates/trusty-memory/src/lib.rs"
+printf 'use trusty_common::memory_core as core_path;\nuse trusty_memory::engine as engine_path;\n' \
+  > "$d/crates/trusty-memory/tests/engine_reexport.rs"
+run_scan memory_exempt_lines 0 'OK:' "$d"
+
+d="$(new_fixture memory_comments_and_history)"
+mkdir -p "$d/crates/trusty-memory/src" "$d/crates/trusty-memory/changelog.d"
+printf '/// Calls `trusty_common::memory_core::timeouts`.\n// memory_core::retrieval was the path.\nfn f() {}\n' \
+  > "$d/crates/trusty-memory/src/a.rs"
+printf 'Changed\n\n- `trusty_common::memory_core` is now `crate::engine`\n' \
+  > "$d/crates/trusty-memory/changelog.d/9271-engine-local-path.md"
+printf '## 0.35.0\n\n- re-exports `trusty_common::memory_core`\n' \
+  > "$d/crates/trusty-memory/CHANGELOG.md"
+run_scan memory_comments_and_history 0 'OK:' "$d"
 
 d="$(new_fixture outside_crates)"
 mkdir -p "$d/docs"

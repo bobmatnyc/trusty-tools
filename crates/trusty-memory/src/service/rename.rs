@@ -14,14 +14,14 @@
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
-use tokio::sync::{Mutex, OwnedMutexGuard};
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::registry::{
+use crate::engine::palace::PalaceId;
+use crate::engine::registry::{
     PalaceRenameError, RenameOptions, RenameOutcome, DEFAULT_RENAME_BUSY_WAIT,
 };
-use trusty_common::memory_core::store::{PalaceStore, PalaceStoreError};
-use trusty_common::memory_core::timeouts;
+use crate::engine::store::{PalaceStore, PalaceStoreError};
+use crate::engine::timeouts;
+use serde_json::{json, Value};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use trusty_common::palace_alias::canonical_palace_id;
 
 use super::core::MemoryService;
@@ -380,7 +380,7 @@ pub(crate) fn count_refusal(old: &str, e: anyhow::Error) -> RenameError {
             "palace {old:?} is in a newer on-disk format ({e:#}); upgrade trusty-memory \
              to rename this palace"
         ))
-    } else if trusty_common::memory_core::store::palace_format::is_format_refusal(&e) {
+    } else if crate::engine::store::palace_format::is_format_refusal(&e) {
         RenameError::Refused(format!(
             "palace {old:?} cannot be opened in its on-disk format ({e:#}); nothing was renamed"
         ))

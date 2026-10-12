@@ -13,7 +13,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use trusty_common::memory_core::maintenance_lease::MAINTENANCE_LOCK_FILE;
+use crate::engine::maintenance_lease::MAINTENANCE_LOCK_FILE;
 
 use super::checks::find_lock_files;
 use super::CheckResult;

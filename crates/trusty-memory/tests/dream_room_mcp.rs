@@ -11,7 +11,7 @@
 //! empty snapshot and never invokes any inference backend — keeping the test
 //! deterministic and offline regardless of ambient OpenRouter configuration.
 //! Behavioural coverage (room filtering, Task skip, eviction) lives in
-//! `trusty_common::memory_core::dream::tests::consolidate_scoped_*`.
+//! `trusty_memory::engine::dream::tests::consolidate_scoped_*`.
 //! Test: this IS the test module.
 
 use serde_json::json;
@@ -113,7 +113,7 @@ async fn palace_dream_no_inference_returns_gracefully() {
 /// act on fading high-value memories. This asserts the response carries a
 /// `fading` array. It is empty here (a freshly-created palace has no aged,
 /// decayed drawers — created_at is "now"); the detection/ranking math is
-/// exhaustively covered by `trusty_common::memory_core::dream::fading::tests`.
+/// exhaustively covered by `trusty_memory::engine::dream::fading::tests`.
 /// What: creates an empty palace, calls `palace_dream`, and asserts the
 /// `fading` field is present and is an (empty) array.
 #[tokio::test]

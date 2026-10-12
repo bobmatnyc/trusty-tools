@@ -183,6 +183,10 @@ pub(crate) mod pm_guard_enter_worktree;
 pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
+// #8625: no tool call reads a kuzu-memory store, the import venv or its temp export.
+pub(crate) mod pm_guard_kuzu_import;
+pub(crate) mod pm_guard_kuzu_names;
+pub(crate) mod pm_guard_kuzu_store;
 // #8453: the PM delegation rules apply by session profile.
 pub(crate) mod pm_guard_profile;
 pub(crate) mod pm_guard_response;
@@ -193,6 +197,8 @@ pub(crate) mod pm_guard_routing;
 // every caller — the sibling `pm_guard_bash::secret_file_copy` screens only a
 // `cp`/`mv` of one, so nothing stopped `sed -n '38,46p' terraform.tfvars`.
 pub(crate) mod pm_guard_secret_read;
+// #9791: `file -f`/`-m` echoes each line of a secret-bearing file.
+pub(crate) mod pm_guard_secret_file_list;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;

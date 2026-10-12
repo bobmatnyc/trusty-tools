@@ -28,6 +28,7 @@
 {"name":"memory_recall_deep","required":["query"],"params":{"full":"boolean","include_creator_tags":"boolean","max_bytes":"integer","min_score":"number","palace":"string","query":"string","room":"string","top_k":"integer"}}
 {"name":"memory_remember","required":["palace"],"params":{"allow_secret_like":"boolean","content":"string","context":"string","cwd":"string","expires_at":"string","fact_key":"string","force":"boolean","palace":"string","room":"string","tags":"array<string>","text":"string","type":"string","verify":"string","wing":"string","workstream":"string"}}
 {"name":"memory_send_message","required":["content","purpose","to_palace"],"params":{"content":"string","cwd":"string","from_palace":"string","purpose":"string","to_palace":"string","workstream":"string"}}
+{"name":"palace_backup","params":{"dest":"string","palace":"string"}}
 {"name":"palace_compact","required":["palace"],"params":{"palace":"string"}}
 {"name":"palace_create","required":["name"],"params":{"cwd":"string","description":"string","force":"boolean","name":"string"}}
 {"name":"palace_delete","required":["palace_id"],"params":{"force":"boolean","palace_id":"string"}}

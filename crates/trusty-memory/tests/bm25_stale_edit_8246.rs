@@ -25,11 +25,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_memory::bm25_backfill::{backfill_state_palace, BackfillStatus};
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::bm25_repair::{dirty_palaces, dream_repair_hook, run_repair_pass};
+use trusty_memory::engine::dream::{DreamConfig, Dreamer};
+use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 
@@ -71,7 +71,7 @@ async fn corpus_hits(lane: &Bm25Lane, palace: &str, token: &str, expect_hits: bo
 #[tokio::test(flavor = "multi_thread")]
 async fn an_in_place_edit_is_re_indexed_by_the_next_backfill() {
     // The write path embeds; the mock keeps that off the ONNX download path.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_root = tmp.path().to_path_buf();
@@ -210,7 +210,7 @@ fn near_duplicate(tail: &str) -> String {
 /// Test: this test itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dream_merge_is_re_indexed_by_the_next_repair_pass() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_root = tmp.path().to_path_buf();
     let palace = "dreamlane";

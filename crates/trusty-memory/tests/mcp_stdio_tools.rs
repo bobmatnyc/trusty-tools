@@ -53,7 +53,7 @@ use trusty_memory::AppState;
 /// free and safe regardless of order.
 /// Test: every test in this file, via `Fixture::new` or `seed_palace`.
 fn seed_embedder() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 }
 
 /// Hold an `AppState` together with the tempdir that backs it so cleanup

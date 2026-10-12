@@ -445,9 +445,11 @@ pub(crate) enum Scan {
 /// What: matched against the BASENAME of the segment's resolved program, after
 /// `strip_wrapper_prefix` removes leading env assignments and `sudo`/`nice`
 /// noise. Anything not on this list, and not a [`SAFE_GIT_SUBCOMMANDS`] git
-/// call, denies.
+/// call, denies. #9791: `file -f`/`-m` on such a file is refused first by
+/// `pm_guard_secret_file_list::file_list_flag_text`.
 /// Test: `allows_only_the_safe_handling_verbs`,
-/// `denies_every_bypass_the_earlier_rounds_missed`.
+/// `denies_every_bypass_the_earlier_rounds_missed`,
+/// `denies_file_reading_a_secret_file_as_a_list`.
 pub(crate) const SAFE_HANDLING_VERBS: &[&str] =
     &["ls", "stat", "rm", "test", "[", "file", "cd", "pushd"];
 
@@ -659,6 +661,10 @@ pub(crate) fn evaluate_secret_file_read(
 
 /// [`evaluate_secret_file_read_command`] run from `cwd` (#8093).
 fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Option<String> {
+    // #9791: `file -f`/`-m` echoes a secret file's lines; D5b text rule.
+    if let Some(reason) = super::pm_guard_secret_file_list::file_list_flag_text(command) {
+        return Some(reason);
+    }
     let (argv_text, bodies) = split_heredoc_bodies(command);
     let segments = split_shell_segments(&argv_text);
     // #8723: prose is read as prose only in a one-segment command; a pipe or a
@@ -2444,6 +2450,17 @@ mod tests {
         // A neighbour of each allowlisted verb, which prints bytes.
         for command in ["lsof .env", "statx .env", "rmdir-cat .env", "filecat .env"] {
             assert!(eval(command).is_some(), "`{command}` must deny");
+        }
+    }
+
+    /// 🔴 REGRESSION (#9791): `file -f`/`-m` echoes each line of its operand,
+    /// so the `file` grant above does not cover them. Rows in
+    /// `pm_guard_secret_file_list_tests.rs`.
+    #[test]
+    fn denies_file_reading_a_secret_file_as_a_list() {
+        for command in ["file -f .env", "file --files-from .env", "file -m .env"] {
+            let reason = eval(command).unwrap_or_default();
+            assert!(reason.contains("#9791"), "`{command}` must deny: {reason}");
         }
     }
 

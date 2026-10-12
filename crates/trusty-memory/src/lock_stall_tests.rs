@@ -8,9 +8,9 @@
 //! Test: this IS the test module.
 
 use super::*;
+use crate::engine::palace::{Palace, PalaceId};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
 
 /// Upper bound on any single condition wait in this module.
 const SETTLE: Duration = Duration::from_secs(10);
@@ -29,7 +29,7 @@ fn registry_with(
     id: &str,
 ) -> (
     Arc<PalaceRegistry>,
-    Arc<trusty_common::memory_core::PalaceHandle>,
+    Arc<crate::engine::PalaceHandle>,
     tempfile::TempDir,
 ) {
     let tmp = tempfile::tempdir().expect("tempdir");

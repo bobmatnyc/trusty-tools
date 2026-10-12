@@ -12,11 +12,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::hnsw_store::op_budget::{op_budget_error, OpBudgetError};
-use trusty_common::memory_core::store::kg::KnowledgeGraph;
-use trusty_common::memory_core::store::vector::UsearchStore;
+use trusty_memory::engine::palace::PalaceId;
+use trusty_memory::engine::retrieval::PalaceHandle;
+use trusty_memory::engine::store::hnsw_store::op_budget::{op_budget_error, OpBudgetError};
+use trusty_memory::engine::store::kg::KnowledgeGraph;
+use trusty_memory::engine::store::vector::UsearchStore;
 use trusty_memory::transport::methods::health::{health, HealthQuery};
 use trusty_memory::AppState;
 
@@ -30,7 +30,7 @@ async fn health_body(state: &AppState) -> Value {
 }
 
 fn test_state(root: std::path::PathBuf) -> AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
     // #88: bypass the project-slug gate — this palace has no project root.
     // SAFETY: the only test in this process, and it wants the idempotent "1".
     unsafe {

@@ -13,8 +13,8 @@
 
 use std::collections::BTreeMap;
 
-pub use trusty_common::memory_core::filter::SecretRule;
-use trusty_common::memory_core::filter::{check_secret, find_secret_spans};
+pub use crate::engine::filter::SecretRule;
+use crate::engine::filter::{check_secret, find_secret_spans};
 
 /// Refusal counts by rule label.
 pub type RuleTally = BTreeMap<&'static str, usize>;

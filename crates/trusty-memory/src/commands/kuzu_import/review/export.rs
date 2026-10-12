@@ -13,12 +13,12 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use trusty_common::memory_core::filter::{
+use crate::engine::filter::{
     classify_secret, find_secret_spans, mask_content, MaskError, SecretRule, SecretSpan,
     SECRET_FILTER_VERSION,
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use super::super::bridge::KuzuMemoryRow;
 use super::super::mapping::{map_memory, MappedMemory};

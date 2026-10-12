@@ -253,6 +253,16 @@ that sets one is refused. `program` must be an absolute path; otherwise `op` is
 looked up in a fixed list of system directories (§6.2), never on a `PATH`
 (#7524 P2-M2).
 
+**Sandbox ([#9793](https://github.com/bobmatnyc/trusty-tools/issues/9793),
+Architect rulings 2026-10-12).** `file` consent and CLI enablement come from
+the account's own machine config, which ignores `$HOME` (ruling 74). One
+exception: when `TRUSTY_SANDBOX` is exactly `1`, `TRUSTY_DATA_DIR_OVERRIDE`
+is an absolute, existing directory, and `$HOME` is not the account's home,
+the file at `$HOME/.trusty-tools/trusty-common/config.yaml` stands in for it.
+Under the flag, with any `$HOME`, only `file` opens: the Keychain and every
+CLI backend answer `backend_not_enabled`. `scripts/sandbox_secrets_console.sh`
+sets these variables.
+
 This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
 2026-10-01).

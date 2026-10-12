@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_memory::bm25_lane::Bm25Lane;
+use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 
@@ -160,7 +160,7 @@ async fn writes_through_the_tool_surface_survive_eviction() {
     const CAP: usize = 2;
     const PALACES: usize = 6;
 
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
     let (state, _tmp) = state_with_lane(CAP);
 
     let mut expected = Vec::new();

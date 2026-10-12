@@ -20,14 +20,14 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::engine::dream::{kg_compact_pass, DreamConfig};
+use crate::engine::palace::Palace;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::kg_redb::KgRedbStats;
+use crate::engine::store::OpenIntent;
+use crate::engine::{MaintenanceLease, PalaceRegistry};
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use trusty_common::memory_core::dream::{kg_compact_pass, DreamConfig};
-use trusty_common::memory_core::palace::Palace;
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::kg_redb::KgRedbStats;
-use trusty_common::memory_core::store::OpenIntent;
-use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
 
 use super::maintenance_gate::{open_purging_under_lease, require_lease};
 
@@ -40,7 +40,8 @@ use super::maintenance_gate::{open_purging_under_lease, require_lease};
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
 /// `LegacyKg` writes only with `--apply` (#8434). `Deletions` is read-only (#8732).
 /// `Reclaim` is a dry run unless `--apply` (a reviewed list, to trash) or
-/// `--purge-trash` (#9140 ruling f0).
+/// `--purge-trash` (#9140 ruling f0). `Backup` writes only a new backup
+/// directory; `Restore` writes only into an empty palace root (#9282).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -170,6 +171,53 @@ pub enum PalaceAction {
         #[arg(long)]
         purge_trash: bool,
     },
+    /// Write a consistent backup of one palace (#9282).
+    ///
+    /// Goes through the running daemon when one serves this data root: the
+    /// palace stays live and writers are not paused. With no daemon it opens
+    /// the palace directly. That open is not read-only: it takes the
+    /// exclusive redb lock on kg.redb until the backup ends, so a daemon
+    /// started meanwhile cannot open the palace. It never migrates; a palace
+    /// in an older format is refused (start the daemon, which migrates it,
+    /// and back up through it).
+    /// Copies kg.redb, chat_sessions.redb, palace.json, identity.txt, the
+    /// deletion journals and this palace's drawer_counts.jsonl lines, then
+    /// writes manifest.json with row counts and a SHA-256 per file. The vector
+    /// index is not backed up; a restored palace is re-embedded. Backups are
+    /// never pruned.
+    Backup {
+        /// Palace id.
+        name: String,
+        /// Relative path of the backup directory to create under this
+        /// palace's backup root, <data root>/.trusty-memory/backups/manual/
+        /// (or <data root>/backups/manual/ when palaces live under
+        /// <data root>/palaces). Plain names only: an absolute path, '..',
+        /// '.', an empty segment or a symlinked segment is refused, and no
+        /// backup is written. It must not exist. Default:
+        /// <palace>/<UTC timestamp>.
+        #[arg(long, value_name = "NAME")]
+        dest: Option<PathBuf>,
+    },
+    /// Restore a palace backup into this data root (#9282).
+    ///
+    /// OFFLINE: refuses while a trusty-memory daemon serves this data root;
+    /// run `trusty-memory stop` first. Refuses a backup of another palace than
+    /// `--palace`. Verifies every checksum and row count before it writes, and
+    /// writes only into an empty palace directory, so it never replaces a
+    /// palace: <data root>/palaces/<palace> when <data root>/palaces exists,
+    /// else <data root>/<palace>. Honours TRUSTY_DATA_DIR_OVERRIDE.
+    ///
+    /// The vector index is not in a backup. After the restore, start the
+    /// daemon and call the MCP tool palace_reembed with dry_run=false until it
+    /// reports missing: 0; recall finds the restored drawers only after that.
+    Restore {
+        /// A backup directory written by `palace backup` (holds manifest.json).
+        snapshot: PathBuf,
+        /// The palace id to restore; refused when the backup is of another
+        /// palace. Default: the id in the backup's manifest.
+        #[arg(long, value_name = "ID")]
+        palace: Option<String>,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -255,6 +303,13 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
             })
             .await
             .context("join palace reclaim")?
+        }
+        // #9282: backup through the daemon when it serves; restore offline.
+        PalaceAction::Backup { name, dest } => {
+            super::palace_backup::handle_backup(name, dest).await
+        }
+        PalaceAction::Restore { snapshot, palace } => {
+            super::palace_backup::handle_restore(snapshot, palace).await
         }
     }
 }
@@ -365,7 +420,7 @@ pub(crate) async fn compact_report(
 
 /// Look up one palace by id under the configured data root, returning that
 /// root (the registry dir, where `maintenance.lock` lives) with it.
-fn resolve(name: &str) -> Result<(PathBuf, Palace)> {
+pub(crate) fn resolve(name: &str) -> Result<(PathBuf, Palace)> {
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")
         .context("resolve trusty-memory data dir")?;
     let root = crate::resolve_palace_registry_dir(data_dir);
@@ -476,19 +531,17 @@ fn percent(part: u64, whole: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::memory_core::palace::PalaceId;
+    use crate::engine::palace::PalaceId;
 
     /// A palace directory on disk with `n` live triples in its `kg.redb`.
     fn fixture(name: &str, n: usize) -> (tempfile::TempDir, Palace) {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join(name);
         std::fs::create_dir_all(&data_dir).expect("mkdir");
-        let kg = trusty_common::memory_core::store::kg_redb::KgStoreRedb::open(
-            &data_dir.join("kg.redb"),
-        )
-        .expect("open kg");
+        let kg = crate::engine::store::kg_redb::KgStoreRedb::open(&data_dir.join("kg.redb"))
+            .expect("open kg");
         for i in 0..n {
-            kg.assert(&trusty_common::memory_core::store::Triple {
+            kg.assert(&crate::engine::store::Triple {
                 subject: format!("s{i}"),
                 predicate: "knows".into(),
                 object: format!("o{i}"),
@@ -566,8 +619,8 @@ mod tests {
     /// expired row. Pre-fix the real run compacted and its Writer open purged.
     #[tokio::test]
     async fn compact_under_a_lease_held_elsewhere_refuses_and_deletes_nothing() {
-        use trusty_common::memory_core::palace::Drawer;
-        use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+        use crate::engine::palace::Drawer;
+        use crate::engine::store::kg_redb::KgStoreRedb;
         let (dir, palace) = fixture("lease-fixture", 2);
         let kg_path = palace.data_dir.join("kg.redb");
         let mut expired = Drawer::new(uuid::Uuid::new_v4(), "an expired drawer");
