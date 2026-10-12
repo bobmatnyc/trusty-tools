@@ -55,6 +55,8 @@ pub(crate) mod build_lease_status;
 pub(crate) mod doctor_builder_cap;
 // #8454 S2c: the read-only channel route policy rows.
 pub(crate) mod doctor_channels;
+// #9741: the egress guard's policy readiness row.
+pub(crate) mod doctor_channels_egress;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
