@@ -439,7 +439,11 @@ async fn daemon_closing_without_a_reply_denies() {
 #[tokio::test]
 async fn daemon_cutting_the_body_short_denies() {
     let short = format!("{}{{\"answer\":", head_of_100());
-    assert_eq!(short.len() - head_of_100().len(), 10, "fixture: 10 body bytes");
+    assert_eq!(
+        short.len() - head_of_100().len(),
+        10,
+        "fixture: 10 body bytes"
+    );
     let (result, runs) = ready_against_raw(short.clone(), false).await;
     assert!(
         matches!(result, Err(NotReady::Unanswered { .. })),
@@ -447,7 +451,10 @@ async fn daemon_cutting_the_body_short_denies() {
     );
     assert_eq!(runs, 0);
     let (url, server) = serve_raw(short, false).await;
-    assert_eq!(verdict_query(&url, &home()).await, Err(QueryError::Malformed));
+    assert_eq!(
+        verdict_query(&url, &home()).await,
+        Err(QueryError::Malformed)
+    );
     server.abort();
 }
 

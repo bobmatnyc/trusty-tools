@@ -183,7 +183,10 @@ fn is_denied_for(reply: &VerdictReply, want: u64) -> bool {
 fn cached_verdict_reused_while_fingerprint_unchanged() {
     let (snap, _clock, calls) = scripted(|_| ready_report(11));
     let first = ask_loaded(&snap);
-    assert!(is_ready_for(&first, 11), "the first loaded query: {first:?}");
+    assert!(
+        is_ready_for(&first, 11),
+        "the first loaded query: {first:?}"
+    );
     let before = calls.load(Ordering::SeqCst);
     for _ in 0..3 {
         match ask(&snap) {
@@ -221,7 +224,10 @@ fn fingerprint_change_invalidates_cached_verdict() {
     let _ = snap.current_aged();
     wait_for_fingerprint(&snap, 22);
     let reply = ask(&snap);
-    assert!(is_denied_for(&reply, 22), "the old verdict was served: {reply:?}");
+    assert!(
+        is_denied_for(&reply, 22),
+        "the old verdict was served: {reply:?}"
+    );
 }
 
 /// 🔴 #8454 VC (critic, item 4): a verdict is judged on the report the
@@ -276,7 +282,10 @@ fn snapshot_older_than_max_age_is_not_served() {
 fn denied_policy_report_is_cached_as_deny_not_allow() {
     let (snap, _clock, _calls) = scripted(|_| denied_report(41));
     let first = ask_loaded(&snap);
-    assert!(is_denied_for(&first, 41), "the first loaded query: {first:?}");
+    assert!(
+        is_denied_for(&first, 41),
+        "the first loaded query: {first:?}"
+    );
     for _ in 0..2 {
         match ask(&snap) {
             VerdictReply::NotReady {
