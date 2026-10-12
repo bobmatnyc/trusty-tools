@@ -43,7 +43,7 @@ pub const DISALLOWED_TOOLS: [&str; 2] = ["Workflow", "DesignSync"];
 pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
     match profile {
         SessionProfile::Pm => vec![(DISABLE_ARTIFACT_ENV.to_owned(), "1".to_owned())],
-        SessionProfile::Supervisor => Vec::new(),
+        SessionProfile::Architect => Vec::new(),
     }
 }
 
@@ -58,7 +58,7 @@ pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
 pub fn trim_args(profile: SessionProfile) -> Vec<String> {
     match profile {
         SessionProfile::Pm => vec![DISALLOWED_TOOLS_FLAG.to_owned(), DISALLOWED_TOOLS.join(",")],
-        SessionProfile::Supervisor => Vec::new(),
+        SessionProfile::Architect => Vec::new(),
     }
 }
 
@@ -68,7 +68,7 @@ pub fn trim_args(profile: SessionProfile) -> Vec<String> {
 /// and the stamp is what `tm hook --pm-guard` reads in the session, so keying
 /// the trim on it keeps the tool set and the guard on one profile.
 /// What: the LAST `TRUSTY_MPM_SESSION_PROFILE` assignment; `supervisor` gives
-/// [`SessionProfile::Supervisor`], anything else or no stamp gives the default
+/// [`SessionProfile::Architect`], anything else or no stamp gives the default
 /// [`SessionProfile::Pm`].
 /// Test: `the_stamp_decides_the_profile`.
 pub fn stamped_profile(env: &[(String, String)]) -> SessionProfile {
@@ -79,7 +79,7 @@ pub fn stamped_profile(env: &[(String, String)]) -> SessionProfile {
     {
         // #9755: either stamp value is the Architect.
         Some((_, id)) if crate::core::architect_compat::is_architect_stamp(Some(id.as_ref())) => {
-            SessionProfile::Supervisor
+            SessionProfile::Architect
         }
         _ => SessionProfile::Pm,
     }

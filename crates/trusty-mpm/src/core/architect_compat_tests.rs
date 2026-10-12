@@ -62,7 +62,7 @@ fn a_stored_architect_kind_reads_as_the_architect() {
 #[test]
 fn a_source_with_only_legacy_supervisor_sections_still_loads() {
     let content = crate::core::content_source::test_support::rc();
-    for (_, path) in crate::core::session_profile::SUPERVISOR_SECTIONS {
+    for (_, path) in crate::core::session_profile::ARCHITECT_SECTIONS {
         let legacy = legacy_instruction_path(path).expect("an Architect section");
         assert!(content.instruction(path).is_some(), "{path} must resolve");
         assert_eq!(content.instruction(path), content.instruction(&legacy));
@@ -116,7 +116,7 @@ fn legacy_supervisor_table_still_grants_architect() {
         config.architect_grant().projects,
         [dir.path().to_path_buf()]
     );
-    assert_eq!(resolve(dir.path(), &config), SessionProfile::Supervisor);
+    assert_eq!(resolve(dir.path(), &config), SessionProfile::Architect);
 }
 
 /// Fail-closed (Q7): both tables in one file parse — no duplicate-field error,

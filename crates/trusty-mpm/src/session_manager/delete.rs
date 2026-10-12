@@ -110,7 +110,7 @@ impl SessionManager {
         let record = self.get(id).await?;
         // #8942 critic MEDIUM: a live Architect record is never tombstoned,
         // `--force` or not; the kind is what keeps the floor protecting it.
-        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Delete)?;
+        super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Delete)?;
         // #5859: `?` — a probe that could not reach tmux refuses the delete
         // instead of answering "not running" and dropping a live session.
         // #8935: the guard asks whose the live session is, not only whether

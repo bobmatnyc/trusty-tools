@@ -533,7 +533,7 @@ fn the_pm_styles_are_every_style_but_the_supervisor_style() {
         ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
     );
     assert!(OUTPUT_STYLES.iter().any(|s| s.id
-        == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
+        == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID
         && s.content(rc()) == instruction_text("output-styles/trusty-mpm-supervisor.md")));
 }
 
@@ -1845,7 +1845,7 @@ fn output_styles_keep_claude_code_coding_instructions() {
     // as the reference supervisor's style did.
     let supervisor = OUTPUT_STYLES
         .iter()
-        .find(|s| s.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .find(|s| s.id == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID)
         .expect("the supervisor style is bundled");
     assert!(frontmatter(supervisor).contains("keep-coding-instructions: false"));
 }

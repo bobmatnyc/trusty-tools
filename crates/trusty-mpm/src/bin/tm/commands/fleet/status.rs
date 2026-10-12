@@ -19,7 +19,7 @@ use serde::Serialize;
 use trusty_mpm::core::architect_session::check_session_binding;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
-use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
+use trusty_mpm::core::session_profile::{self, ARCHITECT_WRITTEN_PROFILE_ID};
 use trusty_mpm::core::twin_arming;
 
 use super::launch::PaneState;
@@ -257,16 +257,16 @@ fn allowlist_check(dir: &Path, home: &Path) -> Check {
 
 /// Does the project request the supervisor profile?
 fn profile_check(dir: &Path) -> Check {
-    let ok = session_profile::requested(dir).is_supervisor();
+    let ok = session_profile::requested(dir).is_architect();
     let file = dir.join(PROJECT_CONFIG_FILE);
     let detail = if ok {
         format!(
-            "`profile = \"{SUPERVISOR_PROFILE_ID}\"` in {}",
+            "`profile = \"{ARCHITECT_WRITTEN_PROFILE_ID}\"` in {}",
             file.display()
         )
     } else {
         format!(
-            "{} does not request `profile = \"{SUPERVISOR_PROFILE_ID}\"`",
+            "{} does not request `profile = \"{ARCHITECT_WRITTEN_PROFILE_ID}\"`",
             file.display()
         )
     };
@@ -326,7 +326,7 @@ fn stamp_check(probe: Probe, names: &Result<SessionNames, String>) -> Check {
         }
         Some(v) => (
             false,
-            format!("launched as `{v}`, not `{SUPERVISOR_PROFILE_ID}`"),
+            format!("launched as `{v}`, not `{ARCHITECT_WRITTEN_PROFILE_ID}`"),
         ),
         None => (
             false,

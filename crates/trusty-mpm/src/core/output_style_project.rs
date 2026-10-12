@@ -281,8 +281,8 @@ fn style_chain(
     profile: SessionProfile,
 ) -> Option<String> {
     // #8453: a supervisor session's style is its profile's, above every tier.
-    if profile.is_supervisor() {
-        return Some(crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID.to_string());
+    if profile.is_architect() {
+        return Some(crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID.to_string());
     }
     explicit
         .map(str::to_string)
@@ -354,12 +354,12 @@ pub fn select_style(
     profile: SessionProfile,
 ) -> SelectedStyle {
     let id = style_chain(project_dir, explicit, config, manifest, profile);
-    let supervisor_id = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
+    let supervisor_id = crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID;
     // #9755: the Architect style is refused to a PM under either id.
     if id
         .as_deref()
         .is_some_and(crate::core::architect_compat::is_architect_output_style_id)
-        && !profile.is_supervisor()
+        && !profile.is_architect()
     {
         let warning = format!(
             "output style '{supervisor_id}' is for the supervisor profile only (set \

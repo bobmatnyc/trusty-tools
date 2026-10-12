@@ -80,7 +80,7 @@ fn a_supervisor_config_selects_the_supervisor_profile() {
     let tmp = supervisor_project();
     assert_eq!(
         resolve(tmp.path(), &allowing(&[tmp.path()])),
-        SessionProfile::Supervisor
+        SessionProfile::Architect
     );
     let pm = project_with("profile = \"pm\"\n");
     assert_eq!(
@@ -135,12 +135,12 @@ fn a_symlinked_allowlist_entry_is_canonicalized() {
     // The entry names the link; the session runs in the real directory.
     assert_eq!(
         resolve(tmp.path(), &allowing(&[&link])),
-        SessionProfile::Supervisor
+        SessionProfile::Architect
     );
     // The entry names the real directory; the session runs through the link.
     assert_eq!(
         resolve(&link, &allowing(&[tmp.path()])),
-        SessionProfile::Supervisor
+        SessionProfile::Architect
     );
 }
 
@@ -166,7 +166,7 @@ fn an_unknown_profile_value_falls_back_to_the_pm_profile() {
     assert_eq!(profile_from_config(None), SessionProfile::Pm);
     assert_eq!(
         profile_from_config(Some(&cfg("  Supervisor "))),
-        SessionProfile::Supervisor
+        SessionProfile::Architect
     );
     for raw in ["", "pm", "supervisr", "overseer"] {
         assert_eq!(
@@ -205,9 +205,9 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
 
 #[test]
 fn the_supervisor_prompt_is_never_empty() {
-    let prompt = supervisor_prompt(rc());
+    let prompt = architect_prompt(rc());
     assert!(prompt.starts_with("# Trusty Fleet Supervisor"), "{prompt}");
-    for (name, body) in SUPERVISOR_SECTIONS {
+    for (name, body) in ARCHITECT_SECTIONS {
         assert!(!body.trim().is_empty(), "{name}");
     }
     // Authoring comments are folded out, as in the PM composer.
@@ -217,7 +217,7 @@ fn the_supervisor_prompt_is_never_empty() {
 #[test]
 fn every_kept_item_reaches_the_supervisor_prompt() {
     // The Keep list of #8453, one marker per item.
-    let prompt = supervisor_prompt(rc());
+    let prompt = architect_prompt(rc());
     for (item, marker) in [
         ("identity", "You are a direct-action supervisor"),
         ("hard limits", "## Hard Limits"),
@@ -251,7 +251,7 @@ fn no_pm_delegation_text_reaches_a_supervisor_session() {
             tmp.path(),
             None,
             native,
-            SessionProfile::Supervisor,
+            SessionProfile::Architect,
         );
         assert!(
             delivered.contains("# Trusty Fleet Supervisor"),
@@ -291,10 +291,10 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
         "# Fleet\n\nWatch set: tm-api.\n",
     )
     .unwrap();
-    let supervisor = SessionProfile::Supervisor;
+    let supervisor = SessionProfile::Architect;
     let (plain, source) = resolve_pm_prompt_with_roster_for(rc(), tmp.path(), supervisor, || None);
-    assert_eq!(source, PromptSource::Supervisor);
-    assert_eq!(plain, supervisor_prompt(rc()));
+    assert_eq!(source, PromptSource::Architect);
+    assert_eq!(plain, architect_prompt(rc()));
 
     std::fs::write(
         tmp.path().join("CLAUDE.md"),
@@ -303,7 +303,7 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
     )
     .unwrap();
     let (with_block, _) = resolve_pm_prompt_with_roster_for(rc(), tmp.path(), supervisor, || None);
-    assert_eq!(with_block, supervisor_prompt(rc()));
+    assert_eq!(with_block, architect_prompt(rc()));
 }
 
 #[test]
@@ -315,9 +315,9 @@ fn a_supervisor_project_selects_the_supervisor_style_over_every_tier() {
         Some("trusty-mpm-teacher"),
         &config,
         || Some("trusty-mpm-research".into()),
-        SessionProfile::Supervisor,
+        SessionProfile::Architect,
     );
-    assert_eq!(selected.style.id(), SUPERVISOR_OUTPUT_STYLE_ID);
+    assert_eq!(selected.style.id(), ARCHITECT_WRITTEN_OUTPUT_STYLE_ID);
     assert!(selected.warning.is_none());
 }
 
@@ -326,7 +326,7 @@ fn a_pm_project_cannot_select_the_supervisor_style() {
     let tmp = TempDir::new().expect("tempdir");
     let selected = crate::core::output_style::select_style(
         tmp.path(),
-        Some(SUPERVISOR_OUTPUT_STYLE_ID),
+        Some(ARCHITECT_WRITTEN_OUTPUT_STYLE_ID),
         &MpmConfig::default(),
         || None,
         SessionProfile::Pm,
@@ -352,7 +352,7 @@ fn the_supervisor_style_carries_write_plainly_verbatim() {
     );
     assert!(
         rc().required("output-styles/trusty-mpm-architect.md")
-            .contains(&format!("\nname: {SUPERVISOR_OUTPUT_STYLE_ID}\n"))
+            .contains(&format!("\nname: {ARCHITECT_WRITTEN_OUTPUT_STYLE_ID}\n"))
     );
 }
 
@@ -360,17 +360,17 @@ fn the_supervisor_style_carries_write_plainly_verbatim() {
 fn the_supervisor_model_is_the_opus_tier_alias() {
     // A pinned id (`claude-opus-4-5`, a dated id, any id with a version
     // number) fails here.
-    assert_eq!(SUPERVISOR_MODEL, "opus");
-    assert!(!SUPERVISOR_MODEL.starts_with("claude-"));
-    assert!(!SUPERVISOR_MODEL.chars().any(|c| c.is_ascii_digit()));
+    assert_eq!(ARCHITECT_MODEL, "opus");
+    assert!(!ARCHITECT_MODEL.starts_with("claude-"));
+    assert!(!ARCHITECT_MODEL.chars().any(|c| c.is_ascii_digit()));
 
     // Operator pins on the PM chain do not reach the supervisor.
     let mut config = MpmConfig::default();
     config.models.default = Some("claude-sonnet-4-5".into());
     config.models.tiers.opus = Some("claude-opus-4-1".into());
     assert_eq!(
-        launch_model(SessionProfile::Supervisor, &config),
-        SUPERVISOR_MODEL
+        launch_model(SessionProfile::Architect, &config),
+        ARCHITECT_MODEL
     );
     assert_eq!(
         launch_model(SessionProfile::Pm, &config),
@@ -395,7 +395,7 @@ fn the_hook_needs_the_stamp_the_allowlist_and_the_file() {
     let supervisor = supervisor_project();
     let pm = project_with("profile = \"pm\"\n");
     let missing = TempDir::new().expect("tempdir");
-    let stamp = || Some(OsString::from(SUPERVISOR_PROFILE_ID));
+    let stamp = || Some(OsString::from(ARCHITECT_WRITTEN_PROFILE_ID));
     let dir = |d: &TempDir| Some(d.path().as_os_str().to_owned());
     let all = |d: &TempDir| allowing(&[d.path()]);
     let cases = [
@@ -427,7 +427,7 @@ fn the_hook_needs_the_stamp_the_allowlist_and_the_file() {
     ];
     for (label, stamp, dir, config, supervisor) in cases {
         let got = hook_profile(stamp, dir, || config);
-        assert_eq!(got.is_supervisor(), supervisor, "{label}");
+        assert_eq!(got.is_architect(), supervisor, "{label}");
     }
     // A PM stamp never reads the config.
     let got = hook_profile(None, dir(&supervisor), || panic!("config read for a PM"));
@@ -437,7 +437,7 @@ fn the_hook_needs_the_stamp_the_allowlist_and_the_file() {
 #[test]
 fn the_launch_stamp_names_the_profile() {
     assert_eq!(
-        launch_env(SessionProfile::Supervisor),
+        launch_env(SessionProfile::Architect),
         (SESSION_PROFILE_ENV.to_owned(), "supervisor".to_owned())
     );
     assert_eq!(launch_env(SessionProfile::Pm).1, "pm");

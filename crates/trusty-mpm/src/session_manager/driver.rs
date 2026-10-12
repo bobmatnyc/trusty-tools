@@ -11,8 +11,8 @@
 //! Test: exercised via [`crate::session_manager::real_tmux::RealTmuxDriver`]
 //! and the `FakeTmuxDriver` test double in `tests.rs`.
 
+use super::architect_floor::ArchitectFloor;
 use super::manager::ManagedError;
-use super::supervisor_floor::SupervisorFloor;
 
 /// Trait seam over tmux operations used by the session manager.
 ///
@@ -506,7 +506,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     }
 
     /// Kill the session whose `$N` id is `session_id`, which carries `name`,
-    /// unless the [`Self::supervisor_floor`] refuses `name` (#9004).
+    /// unless the [`Self::architect_floor`] refuses `name` (#9004).
     ///
     /// Why: a kill by name reaches whichever session holds the name at that
     /// instant; a session id is never reused within one server instance.
@@ -627,8 +627,8 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// What: the host floor; [`super::real_tmux::RealTmuxDriver`] returns
     /// the one its `TmuxDriver` kills under.
     /// Test: `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
-    fn supervisor_floor(&self) -> SupervisorFloor {
-        SupervisorFloor::host()
+    fn architect_floor(&self) -> ArchitectFloor {
+        ArchitectFloor::host()
     }
 
     /// Signal a session's process to stop, then kill the tmux session.
@@ -677,14 +677,14 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// when the pid is unknown, falls back to a single `send_interrupt` (Ctrl-C).
     /// Signal errors are logged and swallowed — the process may already be gone —
     /// so this method is infallible (the fallible reclaim lives in `kill_session`).
-    /// #8942: a name the [`Self::supervisor_floor`] refuses gets no signal
+    /// #8942: a name the [`Self::architect_floor`] refuses gets no signal
     /// at all — neither the SIGTERM nor the Ctrl-C.
     /// Test: `fake_driver_graceful_stop_with_pid` / `_without_pid` cover the
     /// composed `graceful_stop`; the CLI drain is covered by
     /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`; the
     /// floor by `stopping_a_stale_record_never_kills_a_session_named_by_an_architect_sidecar`.
     fn signal_terminate(&self, name: &str, claude_pid: Option<u32>) {
-        let floor = self.supervisor_floor();
+        let floor = self.architect_floor();
         if floor
             .refuse(name, "ManagedTmuxDriver::signal_terminate")
             .is_some()
@@ -715,7 +715,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Why: with no `claude` pid, `signal_terminate`'s Ctrl-C goes to the
     /// session's ACTIVE pane, which need not be the pane the record owns.
     /// What: a known pid gets `signal_terminate`'s SIGTERM; otherwise, unless
-    /// the [`Self::supervisor_floor`] refuses `name`, one
+    /// the [`Self::architect_floor`] refuses `name`, one
     /// [`Self::send_interrupt_to_pane`] to `pane_id`. Errors are swallowed,
     /// as in `signal_terminate`.
     /// Test: `stopping_a_record_whose_pane_is_live_still_kills_it`.
@@ -723,7 +723,7 @@ pub trait ManagedTmuxDriver: Send + Sync {
         if claude_pid.is_some() {
             return self.signal_terminate(name, claude_pid);
         }
-        let floor = self.supervisor_floor();
+        let floor = self.architect_floor();
         if floor
             .refuse(name, "ManagedTmuxDriver::signal_terminate_pane")
             .is_some()

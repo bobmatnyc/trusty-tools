@@ -96,7 +96,7 @@ pub enum TwinRefusal {
     /// The payload does not establish the main thread (condition d).
     UnknownThread,
     /// The #8453 supervisor profile does not resolve.
-    NotSupervisor,
+    NotArchitectProfile,
     /// The user-level config could not be read or parsed (condition a).
     ConfigUnreadable(String),
     /// The project has no `[supervisor.twin]` grant (condition a).
@@ -120,7 +120,7 @@ impl std::fmt::Display for TwinRefusal {
         match self {
             Self::Subagent => f.write_str("the call came from a subagent"),
             Self::UnknownThread => f.write_str("the payload does not establish the main thread"),
-            Self::NotSupervisor => f.write_str("the session is not a supervisor session"),
+            Self::NotArchitectProfile => f.write_str("the session is not a supervisor session"),
             Self::ConfigUnreadable(e) => write!(f, "the user config could not be read: {e}"),
             Self::NoGrant => f.write_str("the project has no `[supervisor.twin]` grant"),
             Self::ProcessTable(e) => write!(f, "the process table could not be read: {e}"),
@@ -208,14 +208,14 @@ pub fn thread_kind(payload: &Value, sub_agent_env: bool) -> ThreadKind {
 ///
 /// Why: shared by the hook ([`resolve`]) and `tm launch --twin`, so the launch
 /// refuses exactly what the hook would refuse.
-/// What: `Err(NotSupervisor)` unless [`session_profile::resolve`] says
+/// What: `Err(NotArchitectProfile)` unless [`session_profile::resolve`] says
 /// supervisor; `Err(NoGrant)` unless `[supervisor.twin] projects` lists the
 /// project ([`session_profile::path_is_listed`]).
 /// Test: `a_supervisor_without_the_twin_grant_is_not_twin`,
 /// `a_twin_grant_without_the_supervisor_allowlist_is_not_twin`.
 pub fn check_grant(project_dir: &Path, config: &MpmConfig) -> Result<(), TwinRefusal> {
-    if !session_profile::resolve(project_dir, config).is_supervisor() {
-        return Err(TwinRefusal::NotSupervisor);
+    if !session_profile::resolve(project_dir, config).is_architect() {
+        return Err(TwinRefusal::NotArchitectProfile);
     }
     if !session_profile::path_is_listed(project_dir, &config.architect_grant().twin.projects) {
         return Err(TwinRefusal::NoGrant);
@@ -255,10 +255,10 @@ fn armed_claude(
     }
     // #9755: either stamp value is the Architect.
     if !crate::core::architect_compat::is_architect_stamp(ctx.profile_stamp) {
-        return Err(TwinRefusal::NotSupervisor);
+        return Err(TwinRefusal::NotArchitectProfile);
     }
     let project = session_profile::hook_project_dir(ctx.project_dir.map(OsString::from))
-        .ok_or(TwinRefusal::NotSupervisor)?;
+        .ok_or(TwinRefusal::NotArchitectProfile)?;
     let config = probe.user_config().map_err(TwinRefusal::ConfigUnreadable)?;
     check_grant(&project, &config)?;
     let claude = probe

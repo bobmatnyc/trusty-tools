@@ -40,7 +40,7 @@ pub(crate) fn verdict(
         std::env::var_os(session_profile::PROJECT_DIR_ENV),
         MpmConfig::load_default,
     );
-    if profile.is_supervisor() {
+    if profile.is_architect() {
         return None;
     }
     crate::commands::pm_guard::evaluate_tool(tool_name, tool_input)

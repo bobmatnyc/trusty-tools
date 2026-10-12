@@ -133,7 +133,7 @@ pub async fn run_nudge(
     let Some(record) = records.iter().find(|r| {
         matches!(r.state, ManagedSessionState::Active)
             && r.claude_session_id.as_deref() == Some(claude_session_id)
-            && !crate::session_manager::supervisor::skip_protected(r, "idle nudge")
+            && !crate::session_manager::architect::skip_protected(r, "idle nudge")
     }) else {
         return NudgeOutcome::NoManagedSession;
     };
@@ -409,7 +409,7 @@ mod tests {
         let claude_id = uuid::Uuid::new_v4().to_string();
         let (mgr, id) = manager_with_active_correlated(&dir, &claude_id).await;
         let mut record = mgr.get(&id).await.expect("record");
-        record.kind = crate::session_manager::SessionKind::Supervisor;
+        record.kind = crate::session_manager::SessionKind::Architect;
         mgr.store.write().await.upsert(record).await.expect("seed");
         let ledger = parking_lot::Mutex::new(NudgeLedger::new());
         let outcome = run_nudge(

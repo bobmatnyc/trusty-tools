@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::{KillVerdict, SupervisorFloor};
+use super::{ArchitectFloor, KillVerdict};
 use crate::daemon::tmux::TmuxDriver;
 use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, RealTmuxDriver, SessionKind,
@@ -30,8 +30,8 @@ impl Scratch {
         self.dir.path().join(".trusty-mpm")
     }
 
-    fn floor(&self) -> SupervisorFloor {
-        SupervisorFloor::at_root(&self.root())
+    fn floor(&self) -> ArchitectFloor {
+        ArchitectFloor::at_root(&self.root())
     }
 
     /// Record Architect session `session` in a launch sidecar for `pid`.
@@ -216,7 +216,7 @@ fn an_unreadable_store_is_undeterminable() {
 #[test]
 fn a_missing_or_relative_home_is_undeterminable() {
     for home in [None, Some(PathBuf::from("relative/home"))] {
-        let v = SupervisorFloor::from_home(home.clone()).verdict("tm-any");
+        let v = ArchitectFloor::from_home(home.clone()).verdict("tm-any");
         assert!(
             matches!(v, KillVerdict::Undeterminable(_)),
             "{home:?}: {v:?}"
@@ -300,12 +300,12 @@ fn for_data_dir_reads_the_framework_root_above_the_store() {
     let s = Scratch::new();
     s.sidecar(111, "tm-arch");
     s.store(&[("tm-sup", "active", "supervisor")]);
-    let floor = SupervisorFloor::for_data_dir(&s.root().join("session-manager"));
+    let floor = ArchitectFloor::for_data_dir(&s.root().join("session-manager"));
     for name in ["tm-arch", "tm-sup"] {
         let v = floor.verdict(name);
         assert!(is_protected(&v), "{name}: {v:?}");
     }
-    let elsewhere = SupervisorFloor::for_data_dir(&s.dir.path().join("data"));
+    let elsewhere = ArchitectFloor::for_data_dir(&s.dir.path().join("data"));
     assert_eq!(elsewhere.verdict("tm-arch"), KillVerdict::Permit);
 }
 
@@ -316,19 +316,19 @@ fn a_sidecar_names_the_architect_and_its_helpers() {
     let s = Scratch::new();
     s.sidecar(111, "tm-arch");
     let names = s.floor().sidecar_names().expect("sidecars read");
-    let role = |name| SupervisorFloor::sidecar_role(&names, name);
+    let role = |name| ArchitectFloor::sidecar_role(&names, name);
     let expect = |kind, role| Some(SidecarRole { kind, role });
     assert_eq!(
         role("tm-arch"),
-        expect(SessionKind::Supervisor, "supervisor")
+        expect(SessionKind::Architect, "supervisor")
     );
     assert_eq!(
         role("tm-arch-poll"),
-        expect(SessionKind::SupervisorAux, "-poll")
+        expect(SessionKind::ArchitectAux, "-poll")
     );
     assert_eq!(
         role("tm-arch-collector"),
-        expect(SessionKind::SupervisorAux, "-collector")
+        expect(SessionKind::ArchitectAux, "-collector")
     );
     assert_eq!(role("tm-arch-other"), None);
     assert_eq!(role("tm-work"), None);

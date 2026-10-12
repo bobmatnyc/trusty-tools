@@ -27,10 +27,12 @@ pub enum SessionKind {
     #[default]
     Ordinary,
     /// The Architect, the one fleet supervisor session per user.
-    Supervisor,
+    #[serde(rename = "supervisor")]
+    Architect,
     /// A helper session of the Architect (`<name>-poll`, `<name>-collector`).
-    SupervisorAux,
-    /// A kind this build does not recognise. Protected like `Supervisor`.
+    #[serde(rename = "supervisor_aux")]
+    ArchitectAux,
+    /// A kind this build does not recognise. Protected like `Architect`.
     Unknown,
 }
 
@@ -46,8 +48,8 @@ impl<'de> Deserialize<'de> for SessionKind {
         Ok(
             match crate::core::architect_compat::canonical_kind_wire(&wire) {
                 "ordinary" => Self::Ordinary,
-                "supervisor" => Self::Supervisor,
-                "supervisor_aux" => Self::SupervisorAux,
+                "supervisor" => Self::Architect,
+                "supervisor_aux" => Self::ArchitectAux,
                 _ => Self::Unknown,
             },
         )

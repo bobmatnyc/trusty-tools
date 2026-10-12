@@ -346,7 +346,7 @@ impl SessionManager {
         }
         for name in live_names.iter().flatten() {
             let Ok(sidecars) = &sidecars else { break };
-            let role = super::SupervisorFloor::sidecar_role(sidecars, name);
+            let role = super::ArchitectFloor::sidecar_role(sidecars, name);
             if known_names.contains(name) {
                 continue;
             }
@@ -418,7 +418,7 @@ impl SessionManager {
             // stale copy would otherwise write a SECOND record for this pane
             // under a fresh id. Same name, same store key, one record.
             let id = match role {
-                Some(r) => ManagedSessionId::for_supervisor(&canon, r.role),
+                Some(r) => ManagedSessionId::for_architect(&canon, r.role),
                 None => ManagedSessionId::for_adopted_tmux_name(name),
             };
             // #9004: the pane id with the server it was read on.

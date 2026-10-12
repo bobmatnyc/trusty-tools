@@ -315,7 +315,7 @@ impl SessionManager {
                 continue;
             }
             // #8942: a live Architect record is never a target, on any filter.
-            if super::supervisor::skip_protected(&record, "prune") {
+            if super::architect::skip_protected(&record, "prune") {
                 continue;
             }
             if ignore_liveness || !is_running(&record, tmux)? {

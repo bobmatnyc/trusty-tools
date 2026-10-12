@@ -5,7 +5,7 @@
 //! is removed or made to pass on error.
 
 use super::*;
-use crate::core::session_profile::SUPERVISOR_PROFILE_ID;
+use crate::core::session_profile::ARCHITECT_WRITTEN_PROFILE_ID;
 use crate::core::twin_arming::{
     self, OsProbe, load_user_config_strict, read_record, record_path, write_record,
 };
@@ -99,7 +99,7 @@ fn status(twin: &Twin, probe: &Fake) -> TwinStatus {
 fn status_of(payload: &Value, twin: &Twin, probe: &Fake, sub_agent_env: bool) -> TwinStatus {
     let ctx = HookContext {
         payload,
-        profile_stamp: Some(OsStr::new(SUPERVISOR_PROFILE_ID)),
+        profile_stamp: Some(OsStr::new(ARCHITECT_WRITTEN_PROFILE_ID)),
         project_dir: Some(twin.dir().as_os_str()),
         sub_agent_env,
     };
@@ -133,7 +133,7 @@ fn a_subagent_call_is_not_twin() {
     let dir = twin.dir().as_os_str().to_owned();
     let env = |name: &str| -> Option<OsString> {
         match name {
-            "TRUSTY_MPM_SESSION_PROFILE" => Some(SUPERVISOR_PROFILE_ID.into()),
+            "TRUSTY_MPM_SESSION_PROFILE" => Some(ARCHITECT_WRITTEN_PROFILE_ID.into()),
             "CLAUDE_PROJECT_DIR" => Some(dir.clone()),
             "CLAUDE_MPM_SUB_AGENT" => Some("1".into()),
             _ => None,
@@ -171,9 +171,9 @@ fn a_session_without_the_supervisor_stamp_is_not_twin() {
     for (stamp, dir) in [
         (None, Some(twin.dir().as_os_str())),
         (Some(OsStr::new("pm")), Some(twin.dir().as_os_str())),
-        (Some(OsStr::new(SUPERVISOR_PROFILE_ID)), None),
+        (Some(OsStr::new(ARCHITECT_WRITTEN_PROFILE_ID)), None),
         (
-            Some(OsStr::new(SUPERVISOR_PROFILE_ID)),
+            Some(OsStr::new(ARCHITECT_WRITTEN_PROFILE_ID)),
             Some(OsStr::new("")),
         ),
     ] {
@@ -185,7 +185,7 @@ fn a_session_without_the_supervisor_stamp_is_not_twin() {
         };
         assert_eq!(
             resolve(&ctx, &twin.probe()),
-            refused(TwinRefusal::NotSupervisor),
+            refused(TwinRefusal::NotArchitectProfile),
             "stamp {stamp:?}, dir {dir:?}"
         );
     }
@@ -228,12 +228,15 @@ fn a_twin_grant_without_the_supervisor_allowlist_is_not_twin() {
         config: Ok(config),
         ..twin.probe()
     };
-    assert_eq!(status(&twin, &probe), refused(TwinRefusal::NotSupervisor));
+    assert_eq!(
+        status(&twin, &probe),
+        refused(TwinRefusal::NotArchitectProfile)
+    );
     // The project file must still ask for the supervisor profile.
     std::fs::write(twin.dir().join(".trusty-mpm.toml"), "profile = \"pm\"\n").expect("write");
     assert_eq!(
         status(&twin, &twin.probe()),
-        refused(TwinRefusal::NotSupervisor)
+        refused(TwinRefusal::NotArchitectProfile)
     );
 }
 
@@ -337,14 +340,14 @@ fn unrestricted_and_disable_hooks_do_not_imply_twin_mode() {
     };
     assert_eq!(
         twin_arming::resolve_hook(&main_payload(), env, &twin.probe()),
-        refused(TwinRefusal::NotSupervisor)
+        refused(TwinRefusal::NotArchitectProfile)
     );
     // With the stamp and launch directory added, the bypass variables change
     // nothing: the identity is the one the D1 conditions give.
     let dir = twin.dir().as_os_str().to_owned();
     let full = |name: &str| -> Option<OsString> {
         match name {
-            "TRUSTY_MPM_SESSION_PROFILE" => Some(SUPERVISOR_PROFILE_ID.into()),
+            "TRUSTY_MPM_SESSION_PROFILE" => Some(ARCHITECT_WRITTEN_PROFILE_ID.into()),
             "CLAUDE_PROJECT_DIR" => Some(dir.clone()),
             other => env(other),
         }
@@ -367,7 +370,7 @@ fn a_malformed_user_config_is_an_error_not_a_default() {
     let absent = load_user_config_strict(root.path()).expect("absent is not an error");
     assert_eq!(
         absent.architect_grant(),
-        &crate::core::session_profile::SupervisorConfig::default()
+        &crate::core::session_profile::ArchitectConfig::default()
     );
     let grant = format!(
         "[supervisor]\nprojects = [{p:?}]\n\n[supervisor.twin]\nprojects = [{p:?}]\n",

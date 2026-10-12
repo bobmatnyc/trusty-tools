@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 
+use super::architect::{ProtectedVerb, refuse_protected};
 use super::decommission_force::{
     DecommissionReport, ProvisioningDirt, remove_in_project_worktree, unowned_kept_reason,
 };
@@ -28,7 +29,6 @@ use super::git_ceiling::bounded_git_output;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::search_gc;
-use super::supervisor::{ProtectedVerb, refuse_protected};
 use super::workspace_guard::{foreign_active_claim, is_safe_to_remove};
 use super::worktree_ignored_output::ignored_output_blocks_removal;
 use super::worktree_protection;

@@ -53,8 +53,8 @@ use trusty_common::uds::server::RpcRouter;
 use crate::daemon::managed_routes::prune::{PruneRequest, PruneWorktreesRequest};
 use crate::daemon::managed_routes::{
     AdoptExistingRequest, AnswerRequest, ReactivateQuery, RenameRequest, SendInputRequest,
-    SpawnRequest, activity, cores, delete, fleet, provision_status, prune, reactivate, rebind,
-    reconcile, rename, residency, supervisor, sync_assets,
+    SpawnRequest, activity, architect, cores, delete, fleet, provision_status, prune, reactivate,
+    rebind, reconcile, rename, residency, sync_assets,
 };
 use crate::daemon::state::DaemonState;
 
@@ -221,13 +221,13 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
             let sup_s = st!();
             router.typed(
                 method,
-                move |req: crate::session_manager::SupervisorRegistration| {
+                move |req: crate::session_manager::ArchitectRegistration| {
                     let state = Arc::clone(&sup_s);
                     async move {
-                        let verifier = supervisor::LaunchRecordBinding {
+                        let verifier = architect::LaunchRecordBinding {
                             root: state.framework_root().to_path_buf(),
                         };
-                        supervisor::register_supervisor_core(&state, &req, &verifier)
+                        architect::register_architect_core(&state, &req, &verifier)
                             .await
                             .into_rpc()
                     }

@@ -94,7 +94,7 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
         content_path: "output-styles/trusty-mpm-research.md",
     },
     BundledStyle {
-        id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
+        id: crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID,
         file_name: "trusty-mpm-supervisor.md",
         content_path: "output-styles/trusty-mpm-architect.md",
     },

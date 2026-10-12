@@ -88,7 +88,7 @@ async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr.stop(&id).await.expect_err("stop must be refused");
@@ -110,7 +110,7 @@ async fn shutdown_skips_a_supervisor_session() {
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let work = seed(
@@ -152,7 +152,7 @@ async fn prune_include_active_never_decommissions_a_supervisor_record() {
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     for dry_run in [true, false] {
@@ -178,7 +178,7 @@ async fn resume_refuses_a_supervisor_record() {
         &mgr,
         &dir,
         ManagedSessionState::Stopped,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr.resume(&id).await.expect_err("resume must be refused");
@@ -200,7 +200,7 @@ async fn delete_refuses_a_live_supervisor_record() {
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr
@@ -219,7 +219,7 @@ async fn task_injection_never_types_into_a_supervisor_pane() {
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let sent = mgr
@@ -253,10 +253,10 @@ async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
         .into_iter()
         .find(|r| r.tmux_name == "tm-arch")
         .expect("adopted");
-    assert_eq!(record.kind, SessionKind::Supervisor);
+    assert_eq!(record.kind, SessionKind::Architect);
     assert_eq!(
         record.id,
-        ManagedSessionId::for_supervisor(&arch_dir, "supervisor")
+        ManagedSessionId::for_architect(&arch_dir, "supervisor")
     );
     assert!(!record.is_auto_resumable());
 }
@@ -267,15 +267,15 @@ async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
 fn the_supervisor_id_is_stable_per_dir_and_role() {
     let dir = crate::test_support::hermetic_temp_dir();
     let other = crate::test_support::hermetic_temp_dir();
-    let id = ManagedSessionId::for_supervisor(dir.path(), "supervisor");
+    let id = ManagedSessionId::for_architect(dir.path(), "supervisor");
     assert_eq!(
         id,
-        ManagedSessionId::for_supervisor(dir.path(), "supervisor")
+        ManagedSessionId::for_architect(dir.path(), "supervisor")
     );
-    assert_ne!(id, ManagedSessionId::for_supervisor(dir.path(), "-poll"));
+    assert_ne!(id, ManagedSessionId::for_architect(dir.path(), "-poll"));
     assert_ne!(
         id,
-        ManagedSessionId::for_supervisor(other.path(), "supervisor")
+        ManagedSessionId::for_architect(other.path(), "supervisor")
     );
 }
 
@@ -285,7 +285,7 @@ fn the_supervisor_id_is_stable_per_dir_and_role() {
 #[test]
 fn the_architect_id_is_stable_across_the_rename() {
     let root = std::path::Path::new("/");
-    let id = |role: &str| ManagedSessionId::for_supervisor(root, role).to_string();
+    let id = |role: &str| ManagedSessionId::for_architect(root, role).to_string();
     assert_eq!(id("supervisor"), "0708af71-2b5e-5dab-8c92-739ebdb04941");
     assert_eq!(id("-poll"), "f75797ca-cc1e-5fdf-a528-5e24a3c627b5");
     assert_eq!(id("-collector"), "46358247-da91-5895-a720-10b693332f6e");

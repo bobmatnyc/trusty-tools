@@ -40,8 +40,8 @@ fn an_unrecognised_kind_reads_as_unknown_and_is_protected() {
 fn session_kind_wire_tokens_round_trip() {
     for (kind, token) in [
         (SessionKind::Ordinary, "\"ordinary\""),
-        (SessionKind::Supervisor, "\"supervisor\""),
-        (SessionKind::SupervisorAux, "\"supervisor_aux\""),
+        (SessionKind::Architect, "\"supervisor\""),
+        (SessionKind::ArchitectAux, "\"supervisor_aux\""),
     ] {
         assert_eq!(serde_json::to_string(&kind).expect("serialize"), token);
         let back: SessionKind = serde_json::from_str(token).expect("deserialize");
@@ -53,8 +53,8 @@ fn session_kind_wire_tokens_round_trip() {
 fn only_ordinary_is_unprotected() {
     assert!(!SessionKind::Ordinary.is_protected());
     for kind in [
-        SessionKind::Supervisor,
-        SessionKind::SupervisorAux,
+        SessionKind::Architect,
+        SessionKind::ArchitectAux,
         SessionKind::Unknown,
     ] {
         assert!(kind.is_protected(), "{kind:?}");

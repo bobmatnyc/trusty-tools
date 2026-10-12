@@ -5,10 +5,10 @@
 //! enough to kill the live Architect. The two primitives that act on a name —
 //! `TmuxDriver::kill_session` and `ManagedTmuxDriver::signal_terminate` — ask
 //! this floor first, so no caller can reach a protected pane.
-//! What: [`SupervisorFloor`] answers a [`KillVerdict`] for a tmux name from two
+//! What: [`ArchitectFloor`] answers a [`KillVerdict`] for a tmux name from two
 //! sources: the Architect launch sidecars (`recorded_session_names`) and the
 //! session store's protected-kind records. Anything it cannot read refuses.
-//! Test: `supervisor_floor_tests.rs`.
+//! Test: `architect_floor_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -18,20 +18,20 @@ use super::session_kind::SessionKind;
 use super::store_integrity;
 
 /// The suffixes of the Architect's helper sessions (`<name>-poll`, …).
-const AUX_SUFFIXES: [&str; 2] = [POLL_SUFFIX, super::supervisor_register::COLLECTOR_ROLE];
+const AUX_SUFFIXES: [&str; 2] = [POLL_SUFFIX, super::architect_register::COLLECTOR_ROLE];
 
 /// The role string [`SidecarRole`] gives the Architect's own session.
-pub const SUPERVISOR_ROLE: &str = "supervisor";
+pub const ARCHITECT_ROLE: &str = "supervisor";
 
 /// What an Architect launch sidecar makes of one tmux name (#8942).
 ///
-/// What: the record kind, and the role [`super::ManagedSessionId::for_supervisor`]
-/// keys the stable id on — [`SUPERVISOR_ROLE`] for the Architect, the helper
+/// What: the record kind, and the role [`super::ManagedSessionId::for_architect`]
+/// keys the stable id on — [`ARCHITECT_ROLE`] for the Architect, the helper
 /// suffix (`-poll`, `-collector`) for a helper.
 /// Test: `a_sidecar_names_the_architect_and_its_helpers`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidecarRole {
-    /// `Supervisor` or `SupervisorAux`.
+    /// `Architect` or `ArchitectAux`.
     pub kind: SessionKind,
     /// The id role; see the type doc.
     pub role: &'static str,
@@ -42,7 +42,7 @@ pub struct SidecarRole {
 /// Why: "protected" and "cannot tell" are both refusals, but the log must say
 /// which one happened.
 /// What: `Permit`, `Protected(why)`, or `Undeterminable(why)`.
-/// Test: `supervisor_floor_tests.rs`.
+/// Test: `architect_floor_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KillVerdict {
     /// No source names this session as the Architect's.
@@ -60,9 +60,9 @@ enum FloorSource {
     Root { root: PathBuf, store: PathBuf },
     /// No absolute home directory: nothing can be cleared.
     NoHome,
-    /// Unit-test builds only: [`SupervisorFloor::host`] must not read the
+    /// Unit-test builds only: [`ArchitectFloor::host`] must not read the
     /// operator's real `~/.trusty-mpm` from a test. Tests of the floor itself
-    /// build one with [`SupervisorFloor::at_root`].
+    /// build one with [`ArchitectFloor::at_root`].
     #[cfg(test)]
     Unguarded,
 }
@@ -74,13 +74,13 @@ enum FloorSource {
 /// What: holds where to read the sidecars and the store; [`Self::verdict`]
 /// reads both on every call, so a sidecar written after the daemon started
 /// still counts.
-/// Test: `supervisor_floor_tests.rs`.
+/// Test: `architect_floor_tests.rs`.
 #[derive(Debug, Clone)]
-pub struct SupervisorFloor {
+pub struct ArchitectFloor {
     source: FloorSource,
 }
 
-impl SupervisorFloor {
+impl ArchitectFloor {
     /// The floor over the operator's `~/.trusty-mpm`.
     ///
     /// Why: `tm fleet init` writes the sidecars under the home root, and the
@@ -125,7 +125,7 @@ impl SupervisorFloor {
     ///
     /// What: sidecars under `root/architect-launch/`, the store at
     /// `root/session-manager/sessions.json`.
-    /// Test: every test in `supervisor_floor_tests.rs`.
+    /// Test: every test in `architect_floor_tests.rs`.
     pub fn at_root(root: &Path) -> Self {
         Self {
             source: FloorSource::Root {
@@ -177,21 +177,21 @@ impl SupervisorFloor {
 
     /// The role `sidecars` give tmux session `name`, if any.
     ///
-    /// What: `Supervisor` when a sidecar records `name`; `SupervisorAux` when
+    /// What: `Architect` when a sidecar records `name`; `ArchitectAux` when
     /// `name` is a recorded name plus `-poll` or `-collector`; else `None`.
     /// Test: `a_sidecar_names_the_architect_and_its_helpers`.
     pub fn sidecar_role(sidecars: &[String], name: &str) -> Option<SidecarRole> {
         for recorded in sidecars {
             if name == recorded {
                 return Some(SidecarRole {
-                    kind: SessionKind::Supervisor,
-                    role: SUPERVISOR_ROLE,
+                    kind: SessionKind::Architect,
+                    role: ARCHITECT_ROLE,
                 });
             }
             let suffix = name.strip_prefix(recorded.as_str());
             if let Some(aux) = AUX_SUFFIXES.iter().find(|s| suffix == Some(**s)) {
                 return Some(SidecarRole {
-                    kind: SessionKind::SupervisorAux,
+                    kind: SessionKind::ArchitectAux,
                     role: aux,
                 });
             }
@@ -276,5 +276,5 @@ fn protected_record(store: &Path, name: &str) -> Result<Option<String>, String> 
 }
 
 #[cfg(test)]
-#[path = "supervisor_floor_tests.rs"]
+#[path = "architect_floor_tests.rs"]
 mod tests;

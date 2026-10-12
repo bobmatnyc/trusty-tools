@@ -49,7 +49,7 @@ fn run_launch_command_trims_a_pm_and_not_a_supervisor() {
         Some("pm".to_owned())
     )));
 
-    let (args, env) = launched(SessionProfile::Supervisor);
+    let (args, env) = launched(SessionProfile::Architect);
     assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
     assert!(!env.iter().any(|(k, _)| k == "CLAUDE_CODE_DISABLE_ARTIFACT"));
     assert!(env.contains(&(

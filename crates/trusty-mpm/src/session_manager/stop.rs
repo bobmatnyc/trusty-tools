@@ -144,7 +144,7 @@ impl SessionManager {
                 ),
             ));
         }
-        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Stop)?;
+        super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Stop)?;
         // #8935: classify before the snapshot. A capture by name would write
         // whichever session holds the name now — possibly another session's,
         // even the Architect's — into this record's workspace. Only a session

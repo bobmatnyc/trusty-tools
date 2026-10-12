@@ -8,17 +8,17 @@
 //! What: [`refuse_protected`] and [`skip_protected`] for the record kind;
 //! [`SessionManager::kill_gate`] for the name floor; the record-only
 //! [`SessionManager::mark_stopped_record_only`] for the tmux-gone reaper; and
-//! the stable Architect id [`ManagedSessionId::for_supervisor`].
-//! Test: `supervisor_tests.rs`.
+//! the stable Architect id [`ManagedSessionId::for_architect`].
+//! Test: `architect_tests.rs`.
 
 use std::path::Path;
 
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use super::architect_floor::ArchitectFloor;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
-use super::supervisor_floor::SupervisorFloor;
 
 /// An operator verb the daemon refuses on a protected session (#8942).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,8 +85,8 @@ pub(crate) fn skip_protected(record: &SessionRecord, path: &str) -> bool {
 
 impl SessionManager {
     /// The #8942 floor this manager's teardowns ask, over its own store.
-    pub(crate) fn kill_floor(&self) -> SupervisorFloor {
-        SupervisorFloor::for_data_dir(self.data_dir())
+    pub(crate) fn kill_floor(&self) -> ArchitectFloor {
+        ArchitectFloor::for_data_dir(self.data_dir())
     }
 
     /// Refuse a signal or kill of tmux session `name` the floor cannot clear.
@@ -140,18 +140,18 @@ impl ManagedSessionId {
     /// What: UUIDv5, under a fixed namespace, of the canonical `dir`, a NUL,
     /// and `role` (`supervisor`, or a helper suffix such as `-poll`).
     /// Test: `the_supervisor_id_is_stable_per_dir_and_role`.
-    pub fn for_supervisor(dir: &Path, role: &str) -> Self {
+    pub fn for_architect(dir: &Path, role: &str) -> Self {
         /// Never change it: the value IS the identity of every Architect record.
-        const SUPERVISOR_NAMESPACE: Uuid =
+        const ARCHITECT_NAMESPACE: Uuid =
             Uuid::from_u128(0x5269_9d4e_d450_4bfc_84ab_e660_9efa_f288);
         let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let mut key = dir.to_string_lossy().into_owned().into_bytes();
         key.push(0);
         key.extend_from_slice(role.as_bytes());
-        Self(Uuid::new_v5(&SUPERVISOR_NAMESPACE, &key))
+        Self(Uuid::new_v5(&ARCHITECT_NAMESPACE, &key))
     }
 }
 
 #[cfg(test)]
-#[path = "supervisor_tests.rs"]
+#[path = "architect_tests.rs"]
 mod tests;

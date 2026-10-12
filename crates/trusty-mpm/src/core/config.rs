@@ -517,7 +517,7 @@ pub struct MpmConfig {
     /// [`Self::architect_grant`], never directly: the grant may still sit in
     /// the legacy `[supervisor]` table (D07, #9755).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub architect: Option<crate::core::session_profile::SupervisorConfig>,
+    pub architect: Option<crate::core::session_profile::ArchitectConfig>,
 
     /// `[supervisor]` — the pre-D07 name of `[architect]` (#9755, Q7).
     ///
@@ -526,7 +526,7 @@ pub struct MpmConfig {
     /// resetting the whole config to defaults.
     // DEPRECATED(D07): see `core::architect_compat`.
     #[serde(rename = "supervisor", skip_serializing_if = "Option::is_none")]
-    pub legacy_supervisor: Option<crate::core::session_profile::SupervisorConfig>,
+    pub legacy_supervisor: Option<crate::core::session_profile::ArchitectConfig>,
 
     /// `[notification_hook]` — opt-in `Notification` hook and push target (#8392).
     ///
@@ -548,8 +548,8 @@ impl MpmConfig {
     /// #9755). `[architect]` wins whole when both exist (Q7); doctor warns.
     /// Test: `legacy_supervisor_table_still_grants_architect`,
     /// `both_architect_tables_keep_architect_and_the_rest_of_the_config`.
-    pub fn architect_grant(&self) -> &crate::core::session_profile::SupervisorConfig {
-        static EMPTY: std::sync::LazyLock<crate::core::session_profile::SupervisorConfig> =
+    pub fn architect_grant(&self) -> &crate::core::session_profile::ArchitectConfig {
+        static EMPTY: std::sync::LazyLock<crate::core::session_profile::ArchitectConfig> =
             std::sync::LazyLock::new(Default::default);
         // DEPRECATED(D07): the legacy arm.
         self.architect

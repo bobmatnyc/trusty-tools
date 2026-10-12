@@ -5,7 +5,7 @@
 //! A rewrite through `MpmConfig` would drop comments and unknown keys, and a
 //! write over a file tm could not parse would reset it. `toml_edit` changes
 //! one array and leaves every other byte alone.
-//! What: [`add_allowlist_entry`] and [`request_supervisor_profile`] each take
+//! What: [`add_allowlist_entry`] and [`request_architect_profile`] each take
 //! a file's text and return [`Edit::Unchanged`] or the new text. Both refuse
 //! text that does not parse, both as TOML and as the typed config tm reads,
 //! so a caller never writes over a file it could not read.
@@ -18,7 +18,7 @@ use toml_edit::{Array, DocumentMut, Item, Value};
 use trusty_mpm::core::architect_compat::grant_table_to_write;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::ProjectLevelConfig;
-use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
+use trusty_mpm::core::session_profile::{self, ARCHITECT_WRITTEN_PROFILE_ID};
 
 /// The result of one edit.
 #[derive(Debug, PartialEq, Eq)]
@@ -119,15 +119,15 @@ pub(crate) fn add_allowlist_entry(raw: &str, dir: &Path, path: &Path) -> anyhow:
 /// project-config schema (`deny_unknown_fields`).
 /// Test: `a_second_run_changes_nothing`,
 /// `a_malformed_project_config_fails_and_is_left_byte_identical`.
-pub(crate) fn request_supervisor_profile(raw: &str, path: &Path) -> anyhow::Result<Edit> {
+pub(crate) fn request_architect_profile(raw: &str, path: &Path) -> anyhow::Result<Edit> {
     let typed = ProjectLevelConfig::from_toml(raw, path).with_context(|| malformed(path))?;
-    if session_profile::profile_from_config(Some(&typed)).is_supervisor() {
+    if session_profile::profile_from_config(Some(&typed)).is_architect() {
         return Ok(Edit::Unchanged);
     }
     let mut doc = raw
         .parse::<DocumentMut>()
         .with_context(|| malformed(path))?;
-    doc["profile"] = toml_edit::value(SUPERVISOR_PROFILE_ID);
+    doc["profile"] = toml_edit::value(ARCHITECT_WRITTEN_PROFILE_ID);
     Ok(Edit::Changed(doc.to_string()))
 }
 
@@ -156,7 +156,7 @@ pub(crate) fn architects(config: &MpmConfig) -> Vec<PathBuf> {
         .architect_grant()
         .projects
         .iter()
-        .filter(|entry| entry.is_absolute() && session_profile::requested(entry).is_supervisor())
+        .filter(|entry| entry.is_absolute() && session_profile::requested(entry).is_architect())
         .cloned()
         .collect()
 }

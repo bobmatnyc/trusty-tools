@@ -123,7 +123,7 @@ fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     assert!(!fx.config().contains("twin"), "{}", fx.config());
     // With these files, a launch in the directory resolves to the supervisor.
     let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(".trusty-mpm"));
-    assert!(trusty_mpm::core::session_profile::resolve(&dir, &cfg).is_supervisor());
+    assert!(trusty_mpm::core::session_profile::resolve(&dir, &cfg).is_architect());
 }
 
 #[test]
@@ -392,7 +392,7 @@ fn fleet_status_names_why_this_session_is_not_bound() {
     let pm = status::this_session_check(&fx.project, HookEnv::default(), granted);
     assert!(
         pm.detail
-            .ends_with(&NotArchitect::NoSupervisorStamp.to_string())
+            .ends_with(&NotArchitect::NoArchitectStamp.to_string())
     );
 
     let home = Fixture::new();

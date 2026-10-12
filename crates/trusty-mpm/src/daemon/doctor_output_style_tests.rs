@@ -348,7 +348,7 @@ fn doctor_recognises_the_supervisor_style() {
     // orphan, and a project naming it passes the resolution check.
     let home = tempfile::tempdir().unwrap();
     deploy_all_styles(home.path());
-    let supervisor = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
+    let supervisor = crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID;
     assert!(
         home.path()
             .join(".claude/output-styles")

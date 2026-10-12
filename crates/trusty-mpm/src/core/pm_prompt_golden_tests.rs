@@ -242,13 +242,10 @@ fn golden_supervisor_prompt() {
     let (prompt, _) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
         rc(),
         tmp.path(),
-        crate::core::session_profile::SessionProfile::Supervisor,
+        crate::core::session_profile::SessionProfile::Architect,
         || Some(FIXED_ROSTER.to_string()),
     );
-    assert_eq!(
-        prompt,
-        crate::core::session_profile::supervisor_prompt(rc())
-    );
+    assert_eq!(prompt, crate::core::session_profile::architect_prompt(rc()));
     assert_golden("supervisor-prompt.md", &prompt);
 }
 

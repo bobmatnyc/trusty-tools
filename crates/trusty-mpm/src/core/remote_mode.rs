@@ -141,7 +141,7 @@ pub fn is_local_only_root(path: &Path) -> Result<bool, String> {
 /// Test: `an_allow_listed_supervisor_keeps_gh`,
 /// `a_self_declared_supervisor_does_not_keep_gh`.
 pub fn gh_disabled_for(root: &Path, config: &MpmConfig) -> bool {
-    !crate::core::session_profile::resolve(root, config).is_supervisor()
+    !crate::core::session_profile::resolve(root, config).is_architect()
 }
 
 /// The spawn-env pin for a session in a local-only repository (#8934).

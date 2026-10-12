@@ -35,7 +35,7 @@ pub(crate) enum NotArchitect {
     /// The call comes from a subagent.
     Subagent,
     /// `TRUSTY_MPM_SESSION_PROFILE` is not `supervisor`.
-    NoSupervisorStamp,
+    NoArchitectStamp,
     /// `CLAUDE_PROJECT_DIR` is unset or empty.
     NoProjectDir,
     /// The launch directory's `.trusty-mpm.toml` does not ask for the supervisor.
@@ -56,7 +56,7 @@ impl std::fmt::Display for NotArchitect {
                  a malformed `agent_id`)"
             }
             Self::Subagent => "the call comes from a subagent",
-            Self::NoSupervisorStamp => {
+            Self::NoArchitectStamp => {
                 "the session has no `supervisor` launch stamp (`TRUSTY_MPM_SESSION_PROFILE`)"
             }
             Self::NoProjectDir => "`CLAUDE_PROJECT_DIR` is unset or empty",
@@ -134,12 +134,12 @@ fn session_binding_checks(
 ) -> Result<(), NotArchitect> {
     // #9755: either stamp value is the Architect.
     if !trusty_mpm::core::architect_compat::is_architect_stamp(env.stamp.as_deref()) {
-        return Err(NotArchitect::NoSupervisorStamp);
+        return Err(NotArchitect::NoArchitectStamp);
     }
     let project = session_profile::hook_project_dir(env.project_dir.clone())
         .ok_or(NotArchitect::NoProjectDir)?;
     let config = config();
-    if !session_profile::requested(&project).is_supervisor() {
+    if !session_profile::requested(&project).is_architect() {
         return Err(NotArchitect::ProfileNotRequested);
     }
     if !session_profile::is_allow_listed(&project, config.architect_grant()) {

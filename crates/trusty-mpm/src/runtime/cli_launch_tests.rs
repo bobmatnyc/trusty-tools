@@ -167,7 +167,7 @@ fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
 #[test]
 fn a_supervisor_isolated_spec_keeps_every_tool() {
     use crate::core::session_profile::{SessionProfile, launch_env};
-    let env = vec![launch_env(SessionProfile::Supervisor)];
+    let env = vec![launch_env(SessionProfile::Architect)];
     let launch = CliLaunch {
         model: Some("opus"),
         prompt_file: None,
@@ -252,7 +252,7 @@ fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .chain([launch_env(SessionProfile::Supervisor)])
+    .chain([launch_env(SessionProfile::Architect)])
     .collect();
     let launch = CliLaunch {
         model: Some("claude-opus-4-1-20250805"),

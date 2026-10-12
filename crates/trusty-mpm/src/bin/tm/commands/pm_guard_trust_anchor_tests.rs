@@ -2,7 +2,7 @@
 
 use super::*;
 use serde_json::json;
-use trusty_mpm::core::session_profile::SupervisorConfig;
+use trusty_mpm::core::session_profile::ArchitectConfig;
 
 /// A scratch home holding the config anchor, and a working directory.
 pub(crate) struct Fixture {
@@ -121,9 +121,9 @@ pub(crate) fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path)
 
 pub(crate) fn allowlist(fx: &Fixture) -> MpmConfig {
     MpmConfig {
-        architect: Some(SupervisorConfig {
+        architect: Some(ArchitectConfig {
             projects: vec![fx.project.clone()],
-            ..SupervisorConfig::default()
+            ..ArchitectConfig::default()
         }),
         ..MpmConfig::default()
     }
@@ -292,7 +292,7 @@ fn trust_anchor_protects_both_tables() {
     };
     assert_eq!(evaluate(&write, &env, || legacy), None, "legacy-only grant");
     let shadowed = MpmConfig {
-        architect: Some(SupervisorConfig::default()),
+        architect: Some(ArchitectConfig::default()),
         legacy_supervisor: grant,
         ..MpmConfig::default()
     };

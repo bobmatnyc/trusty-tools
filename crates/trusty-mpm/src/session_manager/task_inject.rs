@@ -246,7 +246,7 @@ impl SessionManager {
         }
         let initial = self.get(id).await?;
         // #8942 ruling 4: nothing is ever typed into the Architect's pane.
-        if super::supervisor::skip_protected(&initial, "task injection") {
+        if super::architect::skip_protected(&initial, "task injection") {
             return Ok(false);
         }
         let name = initial.tmux_name;

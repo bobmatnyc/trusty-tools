@@ -9,11 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::super::real_tmux::RealTmuxDriver;
 use super::super::tests::{FakeTmuxDriver, seed_record};
-use super::{BindingVerifier, RegisterError, SupervisorRegistration};
+use super::{ArchitectRegistration, BindingVerifier, RegisterError};
 use crate::core::process::PaneClaude;
 use crate::session_manager::{
-    KillVerdict, ManagedSessionId, ManagedSessionState, SessionKind, SessionManager,
-    SupervisorFloor,
+    ArchitectFloor, KillVerdict, ManagedSessionId, ManagedSessionState, SessionKind, SessionManager,
 };
 use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
 
@@ -56,10 +55,10 @@ async fn manager() -> (tempfile::TempDir, Arc<FakeTmuxDriver>, SessionManager) {
 }
 
 /// A registration for an Architect directory inside `root`.
-fn registration(root: &tempfile::TempDir, poll: Option<&str>) -> SupervisorRegistration {
+fn registration(root: &tempfile::TempDir, poll: Option<&str>) -> ArchitectRegistration {
     let dir = root.path().join("architect");
     std::fs::create_dir_all(&dir).expect("architect dir");
-    SupervisorRegistration {
+    ArchitectRegistration {
         dir,
         session: "tm-arch".into(),
         poll_session: poll.map(str::to_owned),
@@ -106,7 +105,7 @@ async fn register_supervisor_refuses_an_unbound_session() {
     let (root, _fake, mgr) = manager().await;
     let reg = registration(&root, None);
     let err = mgr
-        .register_supervisor(&reg, &Verifier::unbound("no launch record"))
+        .register_architect(&reg, &Verifier::unbound("no launch record"))
         .await
         .expect_err("an unbound session is refused");
     assert!(
@@ -127,27 +126,27 @@ async fn relaunching_the_architect_replaces_its_record() {
     let stopped = seed_named(&mgr, &root, ManagedSessionState::Stopped, "tm-arch").await;
 
     let first = mgr
-        .register_supervisor(&reg, &Verifier::bound())
+        .register_architect(&reg, &Verifier::bound())
         .await
         .expect("registers");
     let second = mgr
-        .register_supervisor(&reg, &Verifier::bound())
+        .register_architect(&reg, &Verifier::bound())
         .await
         .expect("registers again");
 
-    let id = ManagedSessionId::for_supervisor(&reg.dir, "supervisor");
+    let id = ManagedSessionId::for_architect(&reg.dir, "supervisor");
     assert_eq!(first.registered[0].id, id.to_string());
     assert_eq!(second.registered, first.registered);
     assert_eq!(first.replaced, vec![live.to_string()]);
     assert!(second.replaced.is_empty(), "{second:?}");
     let record = mgr.get(&id).await.expect("the Architect's record");
-    assert_eq!(record.kind, SessionKind::Supervisor);
+    assert_eq!(record.kind, SessionKind::Architect);
     assert_eq!(record.state, ManagedSessionState::Active);
     assert!(!record.workspace_owned);
     let supervisors = mgr.list().await;
     let supervisors = supervisors
         .iter()
-        .filter(|r| r.kind == SessionKind::Supervisor);
+        .filter(|r| r.kind == SessionKind::Architect);
     assert_eq!(supervisors.count(), 1, "one live row, never two");
     let live_state = mgr.get(&live).await.expect("record").state;
     assert_eq!(live_state, ManagedSessionState::Deleted);
@@ -155,7 +154,7 @@ async fn relaunching_the_architect_replaces_its_record() {
     assert_eq!(stopped_state, ManagedSessionState::Stopped);
     assert!(fake.kill_calls.lock().unwrap().is_empty(), "record-only");
     assert!(matches!(
-        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("tm-arch"),
+        ArchitectFloor::for_data_dir(mgr.data_dir()).verdict("tm-arch"),
         KillVerdict::Protected(_)
     ));
 }
@@ -173,7 +172,7 @@ async fn a_helper_not_named_after_the_architect_is_refused() {
     foreign_collector.collector_session = Some("tm-pm-session-collector".into());
     for reg in [renamed_poller, foreign_collector] {
         let err = mgr
-            .register_supervisor(&reg, &verifier)
+            .register_architect(&reg, &verifier)
             .await
             .expect_err("a helper not named after the Architect is refused");
         assert!(
@@ -184,7 +183,7 @@ async fn a_helper_not_named_after_the_architect_is_refused() {
     assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
     assert!(mgr.list().await.is_empty(), "nothing is written");
     assert_eq!(
-        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("tm-pm-session"),
+        ArchitectFloor::for_data_dir(mgr.data_dir()).verdict("tm-pm-session"),
         KillVerdict::Permit
     );
 }
@@ -195,7 +194,7 @@ async fn a_helper_not_named_after_the_architect_is_refused() {
 async fn a_helper_whose_pane_runs_claude_is_not_registered() {
     let (root, fake, mgr) = manager().await;
     let reg = registration(&root, Some("tm-arch-poll"));
-    let poll_id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
+    let poll_id = ManagedSessionId::for_architect(&reg.dir, "-poll");
     *fake.pane_cwd_override.lock().unwrap() = Some(reg.dir.clone());
     for (answer, registered) in [
         (PaneClaude::Present, false),
@@ -204,7 +203,7 @@ async fn a_helper_whose_pane_runs_claude_is_not_registered() {
     ] {
         *fake.pane_claude_override.lock().unwrap() = Some(answer);
         let report = mgr
-            .register_supervisor(&reg, &Verifier::bound())
+            .register_architect(&reg, &Verifier::bound())
             .await
             .expect("the Architect registers");
         assert_eq!(
@@ -271,7 +270,7 @@ async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
 
     let report = crate::core::tmux::with_tmux_binary(
         server.shim_bin().into(),
-        mgr.register_supervisor(&reg, &Verifier::bound()),
+        mgr.register_architect(&reg, &Verifier::bound()),
     )
     .await
     .expect("the Architect registers");
@@ -301,7 +300,7 @@ async fn a_helper_whose_pane_pid_cannot_be_read_is_not_registered() {
 
     let report = crate::core::tmux::with_tmux_binary(
         failing,
-        mgr.register_supervisor(&reg, &Verifier::bound()),
+        mgr.register_architect(&reg, &Verifier::bound()),
     )
     .await
     .expect("the Architect registers");
@@ -334,7 +333,7 @@ async fn real_tmux_manager(
 
 /// A registration under the reserved test prefix, so a leaked pane is never
 /// adopted.
-fn tmux_registration(root: &tempfile::TempDir) -> SupervisorRegistration {
+fn tmux_registration(root: &tempfile::TempDir) -> ArchitectRegistration {
     let mut reg = registration(root, None);
     reg.session = "tm-xtest-arch8942".into();
     reg.poll_session = Some("tm-xtest-arch8942-poll".into());
@@ -345,7 +344,7 @@ fn tmux_registration(root: &tempfile::TempDir) -> SupervisorRegistration {
 /// #9524: returned once tmux reports the pane there, not its stale first cwd.
 fn helper_pane(
     server: &PrivateTmuxServer,
-    reg: &SupervisorRegistration,
+    reg: &ArchitectRegistration,
     cmd: &str,
 ) -> ScratchTmuxSession {
     let name = reg.poll_session.as_deref().expect("a poller");
@@ -363,17 +362,17 @@ async fn registration_deletes_every_stale_architect_record() {
     let stale = [
         (
             ManagedSessionState::Stopped,
-            SessionKind::Supervisor,
+            SessionKind::Architect,
             "old-arch",
         ),
         (
             ManagedSessionState::Errored,
-            SessionKind::SupervisorAux,
+            SessionKind::ArchitectAux,
             "old-arch-poll",
         ),
         (
             ManagedSessionState::Active,
-            SessionKind::Supervisor,
+            SessionKind::Architect,
             "other-arch",
         ),
     ];
@@ -384,7 +383,7 @@ async fn registration_deletes_every_stale_architect_record() {
     let kept = [
         (
             ManagedSessionState::Deleted,
-            SessionKind::Supervisor,
+            SessionKind::Architect,
             "gone-arch",
         ),
         (
@@ -400,7 +399,7 @@ async fn registration_deletes_every_stale_architect_record() {
     }
 
     let report = mgr
-        .register_supervisor(&reg, &Verifier::bound())
+        .register_architect(&reg, &Verifier::bound())
         .await
         .expect("registers");
 
@@ -418,7 +417,7 @@ async fn registration_deletes_every_stale_architect_record() {
     }
     assert!(fake.kill_calls.lock().unwrap().is_empty(), "record-only");
     assert_eq!(
-        SupervisorFloor::for_data_dir(mgr.data_dir()).verdict("old-arch"),
+        ArchitectFloor::for_data_dir(mgr.data_dir()).verdict("old-arch"),
         KillVerdict::Permit,
         "a stale Architect record no longer pins its name"
     );
@@ -431,10 +430,10 @@ async fn registration_deletes_every_stale_architect_record() {
 async fn a_helper_whose_pane_cannot_be_placed_is_not_registered() {
     let (root, fake, mgr) = manager().await;
     let reg = registration(&root, Some("tm-arch-poll"));
-    let poll_id = ManagedSessionId::for_supervisor(&reg.dir, "-poll");
+    let poll_id = ManagedSessionId::for_architect(&reg.dir, "-poll");
 
     let report = mgr
-        .register_supervisor(&reg, &Verifier::bound())
+        .register_architect(&reg, &Verifier::bound())
         .await
         .expect("the Architect registers");
     assert_eq!(report.registered.len(), 1, "{report:?}");
@@ -442,7 +441,7 @@ async fn a_helper_whose_pane_cannot_be_placed_is_not_registered() {
 
     *fake.pane_cwd_override.lock().unwrap() = Some(root.path().to_path_buf());
     let report = mgr
-        .register_supervisor(&reg, &Verifier::bound())
+        .register_architect(&reg, &Verifier::bound())
         .await
         .expect("the Architect registers");
     assert_eq!(report.registered.len(), 1, "{report:?}");
@@ -462,7 +461,7 @@ async fn register_supervisor_refuses_a_relative_dir_or_a_bad_name() {
     bad_name.session = "tm-arch".into();
     for reg in [relative, bad_name] {
         let err = mgr
-            .register_supervisor(&reg, &verifier)
+            .register_architect(&reg, &verifier)
             .await
             .expect_err("refused");
         assert!(matches!(err, RegisterError::Invalid(_)), "{err:?}");
@@ -485,7 +484,7 @@ async fn a_relaunch_registers_the_architect_and_both_helpers() {
 
     for launch in ["first launch", "relaunch"] {
         let report = mgr
-            .register_supervisor(&reg, &Verifier::bound())
+            .register_architect(&reg, &Verifier::bound())
             .await
             .expect("the Architect registers");
         assert_eq!(report.registered.len(), 3, "{launch}: {report:?}");
@@ -500,9 +499,9 @@ async fn a_relaunch_registers_the_architect_and_both_helpers() {
         assert_eq!(
             live,
             [
-                ("tm-arch".to_owned(), SessionKind::Supervisor),
-                ("tm-arch-collector".to_owned(), SessionKind::SupervisorAux),
-                ("tm-arch-poll".to_owned(), SessionKind::SupervisorAux),
+                ("tm-arch".to_owned(), SessionKind::Architect),
+                ("tm-arch-collector".to_owned(), SessionKind::ArchitectAux),
+                ("tm-arch-poll".to_owned(), SessionKind::ArchitectAux),
             ],
             "{launch}"
         );

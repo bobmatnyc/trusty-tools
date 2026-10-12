@@ -183,7 +183,7 @@ pub(crate) struct InitReport {
     pub(crate) unbound: bool,
     /// The daemon registration to send, set only when the Architect's
     /// session runs bound (#8942); [`run`] sends it.
-    pub(crate) registration: Option<trusty_mpm::session_manager::SupervisorRegistration>,
+    pub(crate) registration: Option<trusty_mpm::session_manager::ArchitectRegistration>,
 }
 
 impl InitReport {
@@ -285,7 +285,7 @@ pub(crate) fn init_with_session(
     let (config_doc, user_config) = config::parse_user_config(&config_raw, &config_path)?;
     let project_path = dir.join(PROJECT_CONFIG_FILE);
     let project_raw = read_or_empty(&project_path)?;
-    config::request_supervisor_profile(&project_raw, &project_path)?;
+    config::request_architect_profile(&project_raw, &project_path)?;
     // #8878 R1: the recorded names, then the chosen ones, before any write.
     let current = match session_name::recorded(&config_doc, &config_path)? {
         Some(name) => SessionNames::new(&name)?,
@@ -306,7 +306,7 @@ pub(crate) fn init_with_session(
     });
     report.steps.push(git_init(dir)?);
 
-    let edit = config::request_supervisor_profile(&project_raw, &project_path)?;
+    let edit = config::request_architect_profile(&project_raw, &project_path)?;
     report.steps.push(write_edit(
         &project_path,
         edit,

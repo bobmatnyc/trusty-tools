@@ -1218,7 +1218,7 @@ async fn the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown
     let mgr = std::sync::Arc::new(mgr);
     let id = active_session_in_state(&mgr, "architect", "/tmp/test-reap-architect").await;
     let mut record = mgr.get(&id).await.expect("record");
-    record.kind = crate::session_manager::SessionKind::Supervisor;
+    record.kind = crate::session_manager::SessionKind::Architect;
     let name = record.tmux_name.clone();
     mgr.store.write().await.upsert(record).await.expect("seed");
     let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));

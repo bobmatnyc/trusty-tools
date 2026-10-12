@@ -37,10 +37,11 @@ use crate::core::project_config::ProjectLevelConfig;
 pub const PM_PROFILE_ID: &str = "pm";
 
 /// `profile` value selecting the fleet supervisor.
-pub const SUPERVISOR_PROFILE_ID: &str = crate::core::architect_compat::LEGACY_SUPERVISOR_PROFILE_ID;
+pub const ARCHITECT_WRITTEN_PROFILE_ID: &str =
+    crate::core::architect_compat::LEGACY_SUPERVISOR_PROFILE_ID;
 
 /// Output-style id a supervisor session runs on.
-pub const SUPERVISOR_OUTPUT_STYLE_ID: &str =
+pub const ARCHITECT_WRITTEN_OUTPUT_STYLE_ID: &str =
     crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID;
 
 /// The launch stamp: the profile a session was launched as (#8453).
@@ -69,7 +70,7 @@ pub const NOT_ALLOW_LISTED: &str = "project requests the supervisor profile but 
 /// verbatim. It never goes through `MpmConfig::expand_model_alias`, which maps
 /// `opus` to a pinned id.
 /// Test: `the_supervisor_model_is_the_opus_tier_alias`.
-pub const SUPERVISOR_MODEL: &str = "opus";
+pub const ARCHITECT_MODEL: &str = "opus";
 
 /// Which instruction profile a session runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,20 +79,20 @@ pub enum SessionProfile {
     #[default]
     Pm,
     /// The fleet supervisor: supervisor instructions and style, direct action.
-    Supervisor,
+    Architect,
 }
 
 impl SessionProfile {
     /// Whether this is the supervisor profile.
-    pub fn is_supervisor(self) -> bool {
-        self == SessionProfile::Supervisor
+    pub fn is_architect(self) -> bool {
+        self == SessionProfile::Architect
     }
 
     /// The profile id, as written in `.trusty-mpm.toml` and the launch stamp.
     pub fn id(self) -> &'static str {
         match self {
             SessionProfile::Pm => PM_PROFILE_ID,
-            SessionProfile::Supervisor => SUPERVISOR_PROFILE_ID,
+            SessionProfile::Architect => ARCHITECT_WRITTEN_PROFILE_ID,
         }
     }
 }
@@ -105,7 +106,7 @@ impl SessionProfile {
 /// Test: `an_allowlist_entry_for_another_path_does_not_match`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct SupervisorConfig {
+pub struct ArchitectConfig {
     /// Absolute paths of the projects allowed to run the supervisor profile.
     pub projects: Vec<PathBuf>,
     /// `[supervisor.twin]` — projects granted supervisor-twin mode.
@@ -121,7 +122,7 @@ pub struct SupervisorConfig {
 /// `content/instructions/supervisor/`, and the path is relative to the content
 /// bundle's `instructions/` (#9012: runtime content, no longer compiled in).
 /// Test: `golden_supervisor_prompt`, `every_kept_item_reaches_the_supervisor_prompt`.
-pub const SUPERVISOR_SECTIONS: [(&str, &str); 8] = [
+pub const ARCHITECT_SECTIONS: [(&str, &str); 8] = [
     ("identity", "architect/identity.md"),
     ("hard-limits", "architect/hard-limits.md"),
     ("relay-protocol", "architect/relay-protocol.md"),
@@ -135,12 +136,12 @@ pub const SUPERVISOR_SECTIONS: [(&str, &str); 8] = [
 /// The composed supervisor instructions.
 ///
 /// Why: the text a supervisor session receives in place of the PM prompt.
-/// What: each [`SUPERVISOR_SECTIONS`] body, read from `content`, folded on its
+/// What: each [`ARCHITECT_SECTIONS`] body, read from `content`, folded on its
 /// own (authoring comments removed, as the PM composer does), trimmed, and
 /// joined with a blank line. Pure and deterministic for one content source.
 /// Test: `golden_supervisor_prompt`, `the_supervisor_prompt_is_never_empty`.
-pub fn supervisor_prompt(content: &crate::core::framework_content::FrameworkContent) -> String {
-    SUPERVISOR_SECTIONS
+pub fn architect_prompt(content: &crate::core::framework_content::FrameworkContent) -> String {
+    ARCHITECT_SECTIONS
         .iter()
         .map(|(_, path)| crate::core::instruction_fold::fold_block(content.required(path).trim()))
         .filter(|body| !body.is_empty())
@@ -153,7 +154,7 @@ pub fn supervisor_prompt(content: &crate::core::framework_content::FrameworkCont
 /// Why: separates the decision from the file read so the fail-closed rule is
 /// testable without a filesystem.
 /// What: `Some(cfg)` with `profile = "supervisor"` (case and surrounding
-/// whitespace ignored) → [`SessionProfile::Supervisor`]. Everything else →
+/// whitespace ignored) → [`SessionProfile::Architect`]. Everything else →
 /// [`SessionProfile::Pm`]; an unknown value is logged at `warn`.
 /// Test: `an_unknown_profile_value_falls_back_to_the_pm_profile`.
 pub fn profile_from_config(config: Option<&ProjectLevelConfig>) -> SessionProfile {
@@ -163,15 +164,13 @@ pub fn profile_from_config(config: Option<&ProjectLevelConfig>) -> SessionProfil
     let value = raw.trim().to_ascii_lowercase();
     match value.as_str() {
         // #9755: both the legacy and the new value name the Architect.
-        v if crate::core::architect_compat::is_architect_profile_id(v) => {
-            SessionProfile::Supervisor
-        }
+        v if crate::core::architect_compat::is_architect_profile_id(v) => SessionProfile::Architect,
         PM_PROFILE_ID | "" => SessionProfile::Pm,
         _ => {
             tracing::warn!(
                 profile = raw,
                 "unknown `.trusty-mpm.toml` profile; using the `{PM_PROFILE_ID}` profile \
-                 (valid: `{PM_PROFILE_ID}`, `{SUPERVISOR_PROFILE_ID}`, `architect`)"
+                 (valid: `{PM_PROFILE_ID}`, `{ARCHITECT_WRITTEN_PROFILE_ID}`, `architect`)"
             );
             SessionProfile::Pm
         }
@@ -198,7 +197,7 @@ pub fn requested(project_dir: &Path) -> SessionProfile {
 /// nothing.
 /// Test: `an_allowlist_entry_for_another_path_does_not_match`,
 /// `a_symlinked_allowlist_entry_is_canonicalized`.
-pub fn is_allow_listed(project_dir: &Path, allowed: &SupervisorConfig) -> bool {
+pub fn is_allow_listed(project_dir: &Path, allowed: &ArchitectConfig) -> bool {
     path_is_listed(project_dir, &allowed.projects)
 }
 
@@ -228,7 +227,7 @@ pub fn path_is_listed(project_dir: &Path, entries: &[PathBuf]) -> bool {
 /// What: [`NOT_ALLOW_LISTED`] when (b) holds and (a) does not.
 /// Test: `the_doctor_reason_names_the_missing_allowlist_entry`.
 pub fn refusal(project_dir: &Path, config: &MpmConfig) -> Option<&'static str> {
-    (requested(project_dir).is_supervisor()
+    (requested(project_dir).is_architect()
         && !is_allow_listed(project_dir, config.architect_grant()))
     .then_some(NOT_ALLOW_LISTED)
 }
@@ -236,18 +235,18 @@ pub fn refusal(project_dir: &Path, config: &MpmConfig) -> Option<&'static str> {
 /// The profile a session launched in `project_dir` runs.
 ///
 /// Why: the one launch-time selector, so a project cannot promote itself.
-/// What: [`SessionProfile::Supervisor`] only when `project_dir` is
+/// What: [`SessionProfile::Architect`] only when `project_dir` is
 /// allow-listed in `config` (the user-level config) AND [`requested`] says
 /// supervisor. Otherwise [`SessionProfile::Pm`]; a refused request is logged
 /// at `warn` with [`NOT_ALLOW_LISTED`].
 /// Test: `a_supervisor_config_selects_the_supervisor_profile`,
 /// `a_project_only_switch_stays_pm`.
 pub fn resolve(project_dir: &Path, config: &MpmConfig) -> SessionProfile {
-    if !requested(project_dir).is_supervisor() {
+    if !requested(project_dir).is_architect() {
         return SessionProfile::Pm;
     }
     if is_allow_listed(project_dir, config.architect_grant()) {
-        return SessionProfile::Supervisor;
+        return SessionProfile::Architect;
     }
     tracing::warn!(project = %project_dir.display(), "{NOT_ALLOW_LISTED}");
     SessionProfile::Pm
@@ -275,12 +274,12 @@ pub fn launch_env(profile: SessionProfile) -> (String, String) {
 ///
 /// Why: `tm launch` passes `--model`, which outranks the project settings, so
 /// it must name the supervisor's model too.
-/// What: [`SUPERVISOR_MODEL`] for a supervisor; otherwise the PM model from
+/// What: [`ARCHITECT_MODEL`] for a supervisor; otherwise the PM model from
 /// [`crate::core::model_inject::resolve_pm_model`], unchanged.
 /// Test: `the_supervisor_model_is_the_opus_tier_alias`.
 pub fn launch_model(profile: SessionProfile, config: &MpmConfig) -> String {
     match profile {
-        SessionProfile::Supervisor => SUPERVISOR_MODEL.to_string(),
+        SessionProfile::Architect => ARCHITECT_MODEL.to_string(),
         SessionProfile::Pm => crate::core::model_inject::resolve_pm_model(config, None),
     }
 }
@@ -305,7 +304,7 @@ pub fn hook_project_dir(project_dir_env: Option<OsString>) -> Option<PathBuf> {
 /// Why: a stamp alone could come from an older file state, and the files
 /// alone can be edited by the session; only all three together are the
 /// operator's current grant.
-/// What: [`SessionProfile::Supervisor`] only when `stamp` is an Architect
+/// What: [`SessionProfile::Architect`] only when `stamp` is an Architect
 /// stamp ([`crate::core::architect_compat::is_architect_stamp`]), `project_dir_env` names a directory, and
 /// [`resolve`] over `config()` says supervisor. `config` is called only after
 /// the stamp matches, so a PM session reads no file.
