@@ -180,6 +180,32 @@ fn a_hook_written_taint_retires_with_its_managed_session() {
     );
 }
 
+/// 🔴 #8433 (C1, r-078): a record the hook writes with no cwd is scoped to
+/// every cwd, so retiring its owner hands it to a live mark in a disjoint
+/// workspace instead of untainting it.
+#[test]
+fn an_unknown_cwd_record_hands_off_to_a_disjoint_live_mark() {
+    let (ws1, ws2) = (
+        tempfile::tempdir().expect("ws1"),
+        tempfile::tempdir().expect("ws2"),
+    );
+    let home = tainted_workspace(ws1.path());
+    let dir = taint_dir(home.path());
+    let m2 = TaintMark {
+        workspace: ws2.path().to_path_buf(),
+        ..mark()
+    };
+    channels_taint::mark_managed(&dir, "m-2", &m2).expect("mark m-2");
+    let _ = settle_session_start(Some(home.path()), "new", None, &no_answer());
+    let owner = |dir: &std::path::Path| -> channels_taint::TaintRecord {
+        serde_json::from_slice(&std::fs::read(dir.join("new.json")).expect("read")).expect("json")
+    };
+    assert_eq!(owner(&dir).managed_session, "m-1", "owned by m-1 first");
+    channels_taint::retire(&dir, "m-1").expect("retire m-1");
+    assert!(read_state(&dir, "new").is_tainted(), "m-2 may cover it");
+    assert_eq!(owner(&dir).managed_session, "m-2");
+}
+
 /// 🔴 #8433 (B2, r-078): marks that cannot be listed may cover any cwd, so an
 /// outage even at an unrelated cwd taints the new id with no owner and fails.
 #[test]
