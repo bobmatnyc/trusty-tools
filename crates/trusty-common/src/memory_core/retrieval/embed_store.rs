@@ -9,11 +9,12 @@
 //! drawer has.
 //! Test: `embed_store_tests.rs`.
 
-use crate::embedder::{ChunkTokenizer, chunk_text};
+use crate::embedder::{ChunkTokenizer, TextChunk, chunk_text};
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,19 +58,50 @@ impl ChunkPlanner {
     /// `text` split at this planner's window, in order.
     /// Test: `chunk_count_above_the_cap_is_a_hard_error_before_any_embed`.
     pub(crate) fn split<'a>(&self, text: &'a str) -> Result<Vec<&'a str>> {
-        if self.fits_one_chunk(text) {
-            return Ok(vec![text]);
-        }
-        let chunks = chunk_text(&self.tokenizer, text, self.window)
-            .context("split drawer text at the embed window")?;
+        let chunks = self.chunks(text)?;
         // Architect ruling (PR B Q4): a hard error, never truncation.
-        anyhow::ensure!(
-            chunks.len() <= MAX_CHUNKS_PER_DRAWER,
-            "drawer text needs {} chunks; at most {MAX_CHUNKS_PER_DRAWER} are stored per drawer",
-            chunks.len()
-        );
+        // #9735: typed, so the backfill can split the drawer instead.
+        if chunks.len() > MAX_CHUNKS_PER_DRAWER {
+            return Err(TooManyChunks { n: chunks.len() }.into());
+        }
         Ok(chunks.into_iter().map(|c| c.text).collect())
     }
+
+    /// Byte ranges of `text`'s chunks with no chunk cap (#9735).
+    /// Test: `every_part_replans_within_the_cap_and_completes`.
+    pub(crate) fn chunk_ranges(&self, text: &str) -> Result<Vec<Range<usize>>> {
+        Ok(self
+            .chunks(text)?
+            .into_iter()
+            .map(|c| c.byte_range)
+            .collect())
+    }
+
+    /// Every chunk of `text`, uncapped; one whole chunk when it fits.
+    fn chunks<'a>(&self, text: &'a str) -> Result<Vec<TextChunk<'a>>> {
+        if self.fits_one_chunk(text) {
+            return Ok(vec![TextChunk {
+                byte_range: 0..text.len(),
+                text,
+            }]);
+        }
+        chunk_text(&self.tokenizer, text, self.window)
+            .context("split drawer text at the embed window")
+    }
+}
+
+/// Drawer text that needs more than `MAX_CHUNKS_PER_DRAWER` chunks.
+///
+/// Why (#9735): the write paths refuse such text, but the backfill splits a
+/// stored drawer instead; it needs to tell this error from a tokenizer fault.
+/// What: the message text the untyped error had; downcast it from `anyhow`.
+/// Test: `chunk_count_above_the_cap_is_a_hard_error_before_any_embed`,
+/// `an_oversized_drawer_does_not_count_as_a_host_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("drawer text needs {n} chunks; at most {MAX_CHUNKS_PER_DRAWER} are stored per drawer")]
+pub(crate) struct TooManyChunks {
+    /// Chunks the text needs.
+    pub(crate) n: usize,
 }
 
 /// The chunk texts drawer `text` is embedded as, in order.

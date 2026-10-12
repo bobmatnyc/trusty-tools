@@ -101,6 +101,12 @@
 {"kind":"arg","command":"trusty-memory palace reclaim","key":"--apply","action":"SetTrue","min_values":0,"max_values":0}
 {"kind":"arg","command":"trusty-memory palace reclaim","key":"--manifest","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
 {"kind":"arg","command":"trusty-memory palace reclaim","key":"--purge-trash","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory palace backup"}
+{"kind":"arg","command":"trusty-memory palace backup","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory palace backup","key":"--dest","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"command","path":"trusty-memory palace restore"}
+{"kind":"arg","command":"trusty-memory palace restore","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory palace restore","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
 {"kind":"command","path":"trusty-memory audit","subcommand_required":true}
 {"kind":"command","path":"trusty-memory audit secrets"}
 {"kind":"arg","command":"trusty-memory audit secrets","key":"--count-only","required":true,"action":"SetTrue","min_values":0,"max_values":0}

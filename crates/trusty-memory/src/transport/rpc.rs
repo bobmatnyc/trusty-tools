@@ -253,6 +253,8 @@ const TOOL_METHODS: &[&str] = &[
     "memory_recall_deep",
     "memory_remember",
     "memory_send_message",
+    // #9282: `trusty-memory palace backup` calls it by raw name.
+    "palace_backup",
     "palace_compact",
     "palace_create",
     "palace_dream",
