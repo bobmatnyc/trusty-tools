@@ -132,6 +132,15 @@ impl TaintMark {
         cwd.starts_with(&workspace)
     }
 
+    /// Whether a cwd this mark covers may also be covered by `other` (B1).
+    ///
+    /// What: true when either workspace is relative or empty, or one is at
+    /// or under the other, each canonicalized; disjoint workspaces are false.
+    fn may_share_a_cwd_with(&self, other: &TaintMark) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        self.covers(Some(&canon(&other.workspace))) || other.covers(Some(&canon(&self.workspace)))
+    }
+
     /// The taint record this mark writes for one Claude session id.
     pub fn record_for(&self, session_id: &str, managed_session: &str) -> TaintRecord {
         TaintRecord {
@@ -479,31 +488,78 @@ pub fn marked_managed(dir: &Path) -> Result<Vec<String>, TaintError> {
         .collect())
 }
 
-/// Retire managed session `managed`: remove its taint files, then its mark.
+/// The other marked session that may cover an id `managed` covers (B1).
+///
+/// What: the first other mark, in id order, that cannot be read or whose
+/// workspace may share a cwd with `managed`'s. A missing or unreadable own
+/// mark has an unknown workspace, so any other mark qualifies. Marks that
+/// cannot be listed are an `Err`.
+fn heir(dir: &Path, managed: &str) -> Result<Option<String>, TaintError> {
+    let own = managed_mark(dir, managed).ok().flatten();
+    for other in marked_managed(dir)? {
+        if other == managed {
+            continue;
+        }
+        let shares = match (managed_mark(dir, &other), &own) {
+            // Retired between the listing and the read.
+            (Ok(None), _) => false,
+            (Ok(Some(theirs)), Some(own)) => own.may_share_a_cwd_with(&theirs),
+            (Err(_), _) | (Ok(Some(_)), None) => true,
+        };
+        if shares {
+            return Ok(Some(other));
+        }
+    }
+    Ok(None)
+}
+
+/// Retire managed session `managed`: hand off or remove its taint files,
+/// then remove its mark.
 ///
 /// Why (Dfc): a taint ends only when the managed session ends. A partial
 /// retire must leave the session tainted, so the mark goes last and only
-/// when every file is gone.
-/// What: removes each `*.json` in `dir` whose `managed_session` is
-/// `managed`. A file that cannot be read or parsed is left in place and
-/// makes the retire an `Err`, as does a failed removal; the mark is then
-/// kept. Returns how many taint files were removed.
+/// when every file is gone. Two marked sessions can share one Claude id, so
+/// a file another mark may cover outlives this retire (#8433 B1).
+/// What: for each `*.json` in `dir` whose `managed_session` is `managed`,
+/// rewrites it for another mark that may cover it (`heir`), else removes it.
+/// Marks that cannot be listed, a file that cannot be read or parsed, and a
+/// failed rewrite or removal each leave the file in place and make the
+/// retire an `Err`; the mark is then kept. Returns how many files were
+/// removed.
 /// Test: `retire_removes_only_that_managed_sessions_files`,
+/// `retire_hands_a_shared_id_to_the_other_tainted_session_in_its_workspace`,
+/// `retire_hands_an_id_to_a_mark_nested_in_its_workspace`,
+/// `retire_keeps_a_shared_id_when_another_mark_cannot_be_read`,
+/// `retire_hand_off_write_failure_keeps_the_mark`,
 /// `stop_and_decommission_retire_taint`.
 pub fn retire(dir: &Path, managed: &str) -> Result<usize, TaintError> {
     let marker = managed_path(dir, managed)?;
+    let taints = list_taints(dir)?;
+    let owns_one = taints
+        .iter()
+        .any(|(_, parsed)| matches!(parsed, Ok(r) if r.managed_session == managed));
+    let heir_id = if owns_one { heir(dir, managed)? } else { None };
     let mut removed = 0;
     let mut first_err = None;
-    for (path, parsed) in list_taints(dir)? {
-        match parsed {
-            Ok(record) if record.managed_session != managed => {}
-            Ok(_) => match std::fs::remove_file(&path) {
+    for (path, parsed) in taints {
+        match (parsed, &heir_id) {
+            (Ok(record), _) if record.managed_session != managed => {}
+            (Ok(record), Some(heir_id)) => {
+                let handed = TaintRecord {
+                    managed_session: heir_id.clone(),
+                    ..record
+                };
+                if let Err(e) = write_taint(dir, &handed) {
+                    first_err.get_or_insert(e);
+                }
+            }
+            (Ok(_), None) => match std::fs::remove_file(&path) {
                 Ok(()) => removed += 1,
                 Err(source) => {
                     first_err.get_or_insert(TaintError::Io { path, source });
                 }
             },
-            Err(reason) => {
+            (Err(reason), _) => {
                 first_err.get_or_insert(TaintError::Malformed { path, reason });
             }
         }
