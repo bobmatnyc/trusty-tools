@@ -19,6 +19,11 @@ pub(crate) use shapes::*;
 // #8589: a bare Google document id, admitted only when the prose names one.
 mod google_bare_id;
 pub(crate) use google_bare_id::*;
+// #8623: span-level detection and the rule set, shared with trusty-memory.
+mod private_key;
+mod spans;
+pub use spans::{SECRET_FILTER_VERSION, SecretRule, SecretSpan, find_secret_spans};
+pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block};
 
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly
@@ -61,29 +66,37 @@ pub(crate) use google_bare_id::*;
 /// echoed back verbatim.
 /// A bare Google document id is the one refused shape let through, and only
 /// when the same content names a Google document (issue #8589).
+/// A PEM private-key block, terminated or not, is a hit as a whole, and the
+/// tokens inside it are not judged on their own (issue #8623); the preview is
+/// of the earliest hit, block or token, which is the first
+/// [`find_secret_spans`] span.
 /// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
 /// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`,
 /// `backtick_joined_spans_are_not_flagged`,
 /// `real_secrets_still_blocked_after_4312_backtick_split`,
-/// `bare_google_doc_ids_named_by_context_after_8589`.
+/// `bare_google_doc_ids_named_by_context_after_8589`,
+/// `unterminated_private_key_is_flagged`.
 pub fn find_secret_token(content: &str) -> Option<String> {
+    // #8623: a key block is one hit; it can only add refusals, never remove one.
+    let blocks = private_key::private_key_blocks(content);
     // #8589: computed once, and only when a token would otherwise be refused.
     let mut names_doc: Option<bool> = None;
     // #4312: backticks delimit Markdown inline-code spans and occur in no
     // machine-generated credential, so split on them alongside whitespace.
-    for raw in content.split(|c: char| c.is_whitespace() || c == '`') {
-        let tok =
-            raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
-        if looks_like_secret(tok) {
-            if is_bare_google_doc_id(tok)
-                && *names_doc.get_or_insert_with(|| names_google_document(content))
-            {
-                continue;
-            }
-            return Some(redact_token(tok));
-        }
-    }
-    None
+    // #8623: the verdict is `looks_like_secret`, not the span API's
+    // `classify_token`, so the parity test compares two separate paths.
+    let token = candidate_tokens(content)
+        .filter(|(range, _)| !inside_block(&blocks, range))
+        .find(|(_, tok)| {
+            looks_like_secret(tok) && !admitted_as_doc_id(content, tok, &mut names_doc)
+        })
+        .map(|(range, _)| range);
+    let first = match (blocks.first(), token) {
+        (Some(block), Some(tok)) if tok.start < block.start => tok,
+        (Some(block), _) => block.clone(),
+        (None, tok) => tok?,
+    };
+    Some(redact_token(&content[first]))
 }
 
 /// Standalone secret gate: `Ok(())` when `content` carries no
