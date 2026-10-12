@@ -58,7 +58,8 @@ pub trait HostProbe {
 /// Alerts on host load, disk and swap; with `band` set, the band alert too.
 ///
 /// A swap read that fails counts as unknown (no `swap` alert, no swap input to
-/// the band), as in the prototype.
+/// the band), as in the prototype. With no usable `LOAD_FACTOR`
+/// ([`Config::load_factor`] is `None`) it returns no alerts and reads nothing.
 ///
 /// # Errors
 /// The load-average or disk read failing (the prototype fails the cycle).
@@ -68,10 +69,14 @@ pub fn host_alerts(
     now: f64,
     band: Option<&mut Option<String>>,
 ) -> io::Result<Vec<Alert>> {
+    // #9171 A3b-2 ruling Q4: a bad LOAD_FACTOR turns off every host alert,
+    // the band included; the prototype aborts the whole cycle instead.
+    let Some(factor) = cfg.load_factor else {
+        return Ok(Vec::new());
+    };
     let mut out = Vec::new();
     let [load1, load5, load15] = probe.loadavg()?;
     let cores = probe.cores().max(1);
-    let factor = cfg.load_factor;
     if load15 > factor * cores as f64 {
         let detail = format!(
             "load {load1:.1}/{load5:.1}/{load15:.1} (15m > {}x{cores} cores)",

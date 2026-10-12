@@ -69,3 +69,34 @@ raises `TypeError` on. `dispatch_wake.jsonl` uses a four-argument fake.
 The Python `re` `\d` set depends on the Unicode version of the Python that
 runs the live poller (`/opt/homebrew/bin/python3`, 3.14 / Unicode 16.0 at
 generation); `src/decimal_table.rs` records both.
+
+## Cycle and loop divergences (#9171 A3b-2)
+
+- Ruling Q2: `read_events` holds its offset at the last newline. Case
+  `truncated_last_line_then_completed` in `events.jsonl` keeps the
+  prototype's rows (offset 115, the fragment lost); `tests/parity_a3.rs`
+  compares every other row byte for byte and checks the ruled rows (offset
+  95, then both events) on their own.
+- Ruling Q4: a bad `LOAD_FACTOR` turns off host alerts only; the prototype's
+  `host_alerts` raises and the whole cycle is lost. No golden covers it.
+- `test_quiet_sessions_file_missing_means_nothing_is_quiet` is stale: its
+  default `screen(PM_TURN)` carries `ctx 30%`, over the live 22% bar, so
+  the live script writes `idle` and `ctx`, not `["idle"]`. The port keeps
+  the input and asserts the live kinds.
+
+## Prototype tests stale against the live script
+
+Run 2026-10-12 against `fleet-poll.py` at 988152c (`pytest -k` over the A3a
+list, inbox in a scratch dir): 17 of the A3a cases fail. Eight are in the
+A3a reconcile list (the seven classify cases on the old 45/50 ctx bar, and
+`test_events_become_alerts_except_idle_prompt`). The other six, each ported
+with its input kept and the live result asserted:
+
+| Test | Why it fails live |
+|---|---|
+| `test_status_line_ctx_wins_over_the_transcript` | status `ctx 30%` now alerts (22% bar); the test expects none |
+| `test_status_line_without_a_plain_ctx_percent_uses_the_transcript` (2 params) | picks the transcript by cwd; the live script resolves it by the pane's session id |
+| `test_transcript_ctx_is_cached_until_the_file_changes` | calls `transcript_ctx_pct('/w/proj')` with a cwd; live takes a pane id and returns `None` |
+| `test_a_sustained_5min_average_above_1_5x_cores_alerts` | the load alert reads the 15-minute average, not the 5-minute one |
+| `test_load_factor_is_env_overridable` | same: its 15-minute 5.0 is under either line |
+| `test_band_alert_fires_only_on_change_and_first_run` | the band detail names `load15`, not `load5` |
