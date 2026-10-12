@@ -24,8 +24,8 @@ use thiserror::Error;
 // suite (`filter_tests.rs`, `use super::*`).
 mod secret;
 pub use secret::{
-    SECRET_FILTER_VERSION, SecretRule, SecretSpan, check_secret, find_secret_spans,
-    find_secret_token,
+    MaskError, SECRET_FILTER_VERSION, SecretRule, SecretShape, SecretSpan, check_secret,
+    classify_secret, find_secret_spans, find_secret_token, mask_content,
 };
 // The detector's predicate internals are re-exported only for the test suite
 // (`filter_tests.rs`, `use super::*`), which reaches into them directly.
