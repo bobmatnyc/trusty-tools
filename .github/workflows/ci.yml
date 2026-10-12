@@ -1910,6 +1910,17 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo check --workspace --exclude trusty-code-gui --exclude trusty-agents-ui
 
+      # #9776: always-on trusty-mpm modules must not reach into the `daemon`
+      # module. Lib only: tests need the daemon fixtures, so they are not built.
+      - name: cargo check -p trusty-mpm --no-default-features (#9776)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo check -p trusty-mpm --no-default-features
+
+      # #9776: the daemon-only build, every target. Compile only; no test run.
+      - name: cargo check -p trusty-mpm --no-default-features --features daemon --all-targets (#9776)
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo check -p trusty-mpm --no-default-features --features daemon --all-targets
+
       # #9270: a default trusty-mpm build must not pull in trusty-memory or the
       # engine's heavy crates (owner ruling 2026-09-27). `cargo tree` only
       # resolves; the toolchain and the fetched registry above are what it needs.

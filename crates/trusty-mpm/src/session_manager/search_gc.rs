@@ -31,7 +31,8 @@ use tracing::{debug, info, warn};
 use super::decommission::is_session_worktree;
 use super::index_delete_guard::{DeleteOutcome, DestructiveIndexDelete};
 use super::manager::SessionManager;
-use crate::daemon::search_rpc::{self, SearchRpcError};
+// #9776: the client lives in trusty-common; `crate::daemon` is gated on `daemon`.
+use trusty_common::search_rpc::{self, SearchRpcError};
 
 /// Per-request timeout for the READ-ONLY trusty-search calls in this module
 /// (the sweep's index listing and status probes).

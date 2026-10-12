@@ -71,7 +71,7 @@ impl RemoteMode {
 ///
 /// Why: the single predicate every remote-touching tm path shares.
 /// What: reads `origin` through
-/// [`crate::daemon::managed_routes::inproject::get_origin_url`] (which keeps a
+/// [`crate::core::git_origin::get_origin_url`] (which keeps a
 /// git failure apart from an absent remote, #4734, and propagates it as
 /// `Err`); with no `origin`, asks `git rev-parse --show-toplevel`. Success is
 /// `LocalOnly`; a failure whose stderr says "not a git repository" is
@@ -81,7 +81,8 @@ impl RemoteMode {
 /// `remote_mode_propagates_an_unreadable_git_dir`,
 /// `a_git_failure_that_is_not_not_a_repository_is_an_error`.
 pub fn remote_mode(path: &Path) -> Result<RemoteMode, String> {
-    if let Some(url) = crate::daemon::managed_routes::inproject::get_origin_url(path)? {
+    // #9776: `core::git_origin`, not `daemon::…::inproject` — `daemon` is optional.
+    if let Some(url) = crate::core::git_origin::get_origin_url(path)? {
         return Ok(RemoteMode::Origin(url));
     }
     let out = trusty_common::git::command()

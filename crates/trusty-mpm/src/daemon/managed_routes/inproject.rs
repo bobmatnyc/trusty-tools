@@ -46,12 +46,11 @@ mod account_clone;
 mod base_clone;
 pub use base_clone::ensure_base_clone;
 // #7166 owner ruling ("do B"): per-account gh config dir bootstrap, used by
-// `account_clone` — a sibling module (not nested under it) so both this file
-// and `account_clone` can reach it via `super`/direct path without an extra
-// re-export hop.
-mod account_config_dir;
-// #8914: the `--account` session gate builds and checks the same dir.
-pub(crate) use account_config_dir::ensure_account_config_dir;
+// `account_clone` via `super::account_config_dir`.
+// #9776: it lives in `core::account_config_dir` so `core::gh_session_account`
+// (the #8914 `--account` gate) compiles without `daemon`; this import keeps the
+// `super::` path resolving. The gate now names the `core` path directly.
+use crate::core::account_config_dir;
 
 /// Resolve (building if necessary) the per-account `gh` config directory for
 /// `login`, for callers outside this module that need to persist it (#7166
@@ -77,102 +76,11 @@ pub fn account_config_dir_for(login: &str) -> Result<PathBuf, String> {
     account_config_dir::ensure_account_config_dir_default(login)
 }
 
-/// Environment variable that overrides the managed repos root.
-///
-/// Why: operators need an escape hatch (tests, non-standard layouts) that wins
-/// over config without touching the config file.
-/// What: `"TRUSTY_MPM_REPOS_ROOT"`.
-/// Test: indirectly by integration tests that set this env var.
-pub const REPOS_ROOT_ENV: &str = "TRUSTY_MPM_REPOS_ROOT";
-
-/// Default repos root directory name under `$HOME`.
-///
-/// Why: mirrors the canonical trusty-mpm-projects directory that `workspace_root()`
-/// also resolves to, so both the guided-default path and `tm launch` converge on
-/// the same base clone location (#1803).
-/// What: `"trusty-mpm-projects"`.
-/// Test: `repos_root_default_ends_with_canonical_segment`.
-pub const DEFAULT_REPOS_DIR: &str = "trusty-mpm-projects";
-
-/// Resolve the absolute root for base clones, with an optional direct override.
-///
-/// Why: tests that control the repos root must not mutate process-wide env vars
-/// (which races other threads). Exposing the override as a parameter lets callers
-/// supply the value directly without `set_var` / `remove_var`.
-/// What: `env_override` wins over the `TRUSTY_MPM_REPOS_ROOT` env var, which
-/// wins over `workspace_root()`. Falls back to `/tmp/trusty-mpm-projects` only
-/// when the home directory is unresolvable AND nothing absolute was supplied.
-/// Test: `repos_root_default_ends_with_canonical_segment`; `base_clone_path_respects_repos_root_override` (integration).
-pub fn repos_root_from(env_override: Option<&str>) -> PathBuf {
-    let home = dirs::home_dir();
-
-    // Direct in-process override (highest priority — used by tests to avoid env mutation).
-    if let Some(raw) = env_override {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde_repos(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
-    // TRUSTY_MPM_REPOS_ROOT env override (backward compat, wins over workspace_root).
-    if let Ok(raw) = std::env::var(REPOS_ROOT_ENV) {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde_repos(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
-    // Delegate to the canonical workspace root resolver (TRUSTY_MPM_WORKSPACE_ROOT
-    // > config template > ~/trusty-mpm-projects).
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    crate::core::trusty_tools_config::workspace_root(&config)
-}
-
-/// Resolve the absolute root for base clones.
-///
-/// Why: the base-clone path needs ONE answer for "where do managed base clones
-/// live?", with precedence TRUSTY_MPM_REPOS_ROOT env > TRUSTY_MPM_WORKSPACE_ROOT
-/// env > config template > built-in `~/trusty-mpm-projects` (#1803).
-/// What: delegates to [`repos_root_from`] with no in-process override, reading
-/// `TRUSTY_MPM_REPOS_ROOT` from the environment as usual.
-/// Falls back to `/tmp/trusty-mpm-projects` only when the home directory is
-/// unresolvable AND nothing absolute was supplied.
-/// Test: `repos_root_default_ends_with_canonical_segment`.
-pub fn repos_root() -> PathBuf {
-    repos_root_from(None)
-}
-
-/// Expand a leading `~` in a path string to `home`.
-///
-/// Why: env values are often home-relative; normalizing them once here keeps
-/// caller code free of `~` handling.
-/// What: replaces a leading `~/` or bare `~` with `home`; other paths pass through.
-/// Test: covered indirectly by `repos_root` env-override tests.
-fn expand_tilde_repos(template: &str, home: &Path) -> PathBuf {
-    if let Some(rest) = template.strip_prefix("~/") {
-        home.join(rest)
-    } else if template == "~" {
-        home.to_path_buf()
-    } else {
-        PathBuf::from(template)
-    }
-}
-
-/// Compute the base clone path for a GitHub `owner/repo`.
-///
-/// Why: the base clone directory must be stable and deterministic so multiple
-/// sessions against the same repo all share one protected clone.
-/// What: returns `<repos_root>/<owner>/<repo>`.
-/// Test: `base_clone_path_resolves_to_canonical_root` (unit); wiring via integration tests.
-pub fn base_clone_path(owner: &str, repo: &str) -> PathBuf {
-    repos_root().join(owner).join(repo)
-}
+// #9776: the repos-root helpers live in `core::repo_paths` so the always-on
+// layers compile without `daemon`; re-exported so every path still resolves.
+pub use crate::core::repo_paths::{
+    DEFAULT_REPOS_DIR, REPOS_ROOT_ENV, base_clone_path, repos_root, repos_root_from,
+};
 
 /// Filename-suffix stem used when migrating a pre-#1803 old-layout dir aside.
 ///
@@ -845,129 +753,9 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
 /// `worktrees_exclude_entry_protects_against_double_force_clean`.
 pub use crate::core::worktree_naming::ensure_worktrees_gitignored;
 
-/// Confirm git reads the repository rooted at `path`, when one is rooted there.
-///
-/// Why: `git config --get` answers from whatever repository DISCOVERY finds,
-/// and discovery walks straight past a `.git` it cannot read — which hides two
-/// faults the exit code cannot express (#4734). A `.git` directory at mode 000
-/// with no repo above it exits **1 with empty stderr**, identical to "no origin
-/// remote"; the same `.git` nested inside another repo exits **0 with the
-/// PARENT repo's origin**, which would have the daemon provision a managed
-/// clone of the wrong repository. Neither shows up in the exit code or in
-/// stderr, so the exit-code split alone cannot catch them and no amount of
-/// stderr matching would either.
-/// What: `path/.git` existing means a repository is rooted at `path`, so git's
-/// own `rev-parse --show-toplevel` must name `path` back. A failure to answer,
-/// or an answer naming a different directory, is `Err`. When `path/.git` does
-/// NOT exist the check is skipped, which keeps the two legitimate cases
-/// working: `path` is not in a repo at all (the caller's read exits 1, a true
-/// `Ok(None)`), or `path` is a subdirectory of a repo, where discovering the
-/// enclosing repo is exactly what callers want. `--show-toplevel` rather than
-/// the git dir because a linked worktree's git dir lives under the main
-/// checkout while its toplevel is the worktree itself — and tm creates linked
-/// worktrees, so that case is load-bearing.
-/// Test: `get_origin_url_errors_when_the_git_dir_is_unreadable`,
-/// `get_origin_url_errors_when_discovery_escapes_to_a_parent_repo`,
-/// `get_origin_url_reads_a_linked_worktree`.
-fn ensure_repo_rooted_at(path: &Path) -> Result<(), String> {
-    if !path.join(".git").exists() {
-        return Ok(());
-    }
-
-    let out = trusty_common::git::command()
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| format!("could not run `git rev-parse` in '{}': {e}", path.display()))?;
-
-    if !out.status.success() {
-        return Err(format!(
-            "'{}' has a .git entry but git cannot read a repository there: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-
-    let toplevel = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    let rooted_here = std::fs::canonicalize(&toplevel)
-        .ok()
-        .zip(std::fs::canonicalize(path).ok())
-        .is_some_and(|(found, want)| found == want);
-    if !rooted_here {
-        return Err(format!(
-            "'{}' has a .git entry but git resolved the repository to '{}'; refusing to \
-             answer with another repository's remote",
-            path.display(),
-            toplevel.display()
-        ));
-    }
-    Ok(())
-}
-
-/// Read the `remote.origin.url` from a git repository at `path`.
-///
-/// Why: the in-project spawn path needs the remote URL to determine the
-/// `owner/repo` identity and locate the matching base clone. Before #4734 this
-/// returned a bare `Option`, so "this repo has no `origin` remote" and "git
-/// could not answer at all" were the same value, and every caller read it as
-/// the former — `tm launch` and the guided default told the operator a repo
-/// they could not read had no remote, or was not a GitHub project, and sent
-/// them to `tm connect` for a checkout that is fine.
-/// What: guards with [`ensure_repo_rooted_at`], then runs
-/// `git -C <path> config --get remote.origin.url` and keeps apart the outcomes
-/// git distinguishes by exit code. Exit 0 yields `Ok(Some(url))`, or `Ok(None)`
-/// when the configured value is empty. Exit 1 is git-config's "the key is not
-/// set" answer, so it yields `Ok(None)` — both a plain non-git directory and a
-/// repo with no `origin` land there, which is why this split changes no
-/// existing caller's behaviour on a healthy machine (a multi-valued `origin`,
-/// the one working setup that could have regressed into `Err`, exits 0).
-/// Anything else — a spawn failure, or a fatal exit such as 128 for an
-/// unreadable `.git/config`, a dangling gitdir pointer, or a `safe.directory`
-/// ownership refusal — is `Err`, for the caller to fail closed on.
-/// Test: `get_origin_url_returns_none_for_non_git`,
-/// `get_origin_url_returns_none_for_repo_without_origin`,
-/// `get_origin_url_handles_a_multi_valued_origin`,
-/// `get_origin_url_reads_a_linked_worktree`,
-/// `get_origin_url_errors_when_git_config_is_unreadable`,
-/// `get_origin_url_errors_when_the_git_dir_is_unreadable`,
-/// `get_origin_url_errors_when_discovery_escapes_to_a_parent_repo` (unit);
-/// `try_inproject_spawn_errors_when_git_cannot_read_the_remote`
-/// (`tests/inproject_git_failure.rs`).
-pub fn get_origin_url(path: &Path) -> Result<Option<String>, String> {
-    // #4734: the exit code alone cannot separate "no origin remote" from "git
-    // never read the repo rooted here" — see `ensure_repo_rooted_at`.
-    ensure_repo_rooted_at(path)?;
-
-    let out = trusty_common::git::command()
-        .arg("-C")
-        .arg(path)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .map_err(|e| {
-            format!(
-                "could not run `git config --get remote.origin.url` in '{}': {e}",
-                path.display()
-            )
-        })?;
-
-    match out.status.code() {
-        Some(0) => {
-            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            Ok(if url.is_empty() { None } else { Some(url) })
-        }
-        Some(1) => Ok(None),
-        Some(code) => Err(format!(
-            "`git config --get remote.origin.url` failed in '{}' (exit {code}): {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        None => Err(format!(
-            "`git config --get remote.origin.url` was killed by a signal in '{}'",
-            path.display()
-        )),
-    }
-}
+// #9776: lives in `core::git_origin` so `core::remote_mode` compiles without
+// `daemon`; re-exported so every path still resolves.
+pub use crate::core::git_origin::get_origin_url;
 
 /// Main entry point for the in-project spawn path's DETECTION phase (#1706, #2032).
 ///
