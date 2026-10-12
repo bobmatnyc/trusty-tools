@@ -563,6 +563,8 @@ async fn dispatch_kg_assert_then_query() {
 
 // #9544: palace_create refuses a live alias name with a typed error.
 mod alias_canon_tests;
+// #9746: `text` and `content` name one body field on the write tools.
+mod content_alias_tests;
 mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.

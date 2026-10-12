@@ -3,23 +3,29 @@
 //! Why: the main `json!` literal in `definitions.rs` is at the macro recursion
 //! limit and that file is at the 500-SLOC cap, so properties added to the
 //! write tools are built here and inserted after the literal.
-//! What: [`splice`] adds `type` to `memory_remember` and `verify` to both
-//! `memory_remember` and `memory_note`.
+//! What: [`splice`] adds `type` to `memory_remember`, `verify` to both
+//! `memory_remember` and `memory_note`, and each write tool's body alias.
 //! Test: `memory_remember_schema_advertises_the_type_enum`,
-//! `memory_remember_schema_advertises_the_verify_argument`.
+//! `memory_remember_schema_advertises_the_verify_argument`,
+//! `write_schemas_advertise_the_text_content_alias`.
 
 use serde_json::{json, Value};
 
 /// Insert the spliced write-tool properties into `tools`.
 ///
 /// Test: `memory_remember_schema_advertises_the_type_enum`,
-/// `memory_remember_schema_advertises_the_verify_argument`.
+/// `memory_remember_schema_advertises_the_verify_argument`,
+/// `write_schemas_advertise_the_text_content_alias`.
 pub(super) fn splice(tools: &mut [Value]) {
     for tool in tools.iter_mut() {
         let name = tool["name"].as_str().unwrap_or_default().to_string();
         let properties = &mut tool["inputSchema"]["properties"];
         if name == "memory_remember" {
             properties["type"] = remember_type_property();
+            properties["content"] = alias_property("text");
+        }
+        if name == "memory_note" {
+            properties["text"] = alias_property("content");
         }
         // #9390: both write tools accept a slot's re-verify command.
         if name == "memory_remember" || name == "memory_note" {
@@ -53,5 +59,21 @@ fn verify_property() -> Value {
     json!({
         "type": "string",
         "description": "#9390: optional command that re-reads this slot's fact, e.g. `gh pr view 123 --json headRefOid`. Requires `fact_key`: a command on a write with no `fact_key`, or an empty one, is an error and nothing is written. Stored only when the slot is admitted (`tier: \"C\"`); `memory_list` reports it as `verify`. A later write to the same slot retires this drawer and closes its command; the new drawer carries only its own `verify`."
+    })
+}
+
+/// An optional string property that is an alias of the documented field
+/// `name` (#9746).
+///
+/// Why: several MCP clients reject a top-level `anyOf` in a tool's input
+/// schema, so "one of the two" cannot be stated structurally. Neither name is
+/// in `required`; both descriptions state the rule instead.
+/// What: the handler resolves both names with `helpers::resolve_aliased_str_arg`
+/// and refuses a call that sends neither.
+/// Test: `write_schemas_advertise_the_text_content_alias`.
+fn alias_property(name: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": format!("#9746: alias of `{name}`. One of `text` or `content` is required. `{name}` is the documented one. Both with the same value is accepted; both with different values is an error and nothing is written.")
     })
 }

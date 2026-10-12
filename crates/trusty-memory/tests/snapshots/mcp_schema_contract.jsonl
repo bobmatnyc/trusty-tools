@@ -22,11 +22,11 @@
 {"name":"list_prompt_facts","params":{"full":"boolean","max_bytes":"integer"}}
 {"name":"memory_forget","required":["drawer_id","palace"],"params":{"drawer_id":"string","palace":"string"}}
 {"name":"memory_list","params":{"full":"boolean","limit":"integer","max_bytes":"integer","palace":"string","room":"string","tag":"string","wing":"string"}}
-{"name":"memory_note","required":["content","palace"],"params":{"content":"string","context":"string","cwd":"string","expires_at":"string","fact_key":"string","palace":"string","room":"string","tags":"array<string>","verify":"string","workstream":"string"}}
+{"name":"memory_note","required":["palace"],"params":{"content":"string","context":"string","cwd":"string","expires_at":"string","fact_key":"string","palace":"string","room":"string","tags":"array<string>","text":"string","verify":"string","workstream":"string"}}
 {"name":"memory_recall","required":["query"],"params":{"full":"boolean","include_creator_tags":"boolean","max_bytes":"integer","min_score":"number","palace":"string","query":"string","room":"string","top_k":"integer","wing":"string"}}
 {"name":"memory_recall_all","required":["q"],"params":{"deep":"boolean","full":"boolean","include_creator_tags":"boolean","max_bytes":"integer","q":"string","scope":"string","top_k":"integer"}}
 {"name":"memory_recall_deep","required":["query"],"params":{"full":"boolean","include_creator_tags":"boolean","max_bytes":"integer","min_score":"number","palace":"string","query":"string","room":"string","top_k":"integer"}}
-{"name":"memory_remember","required":["palace","text"],"params":{"allow_secret_like":"boolean","context":"string","cwd":"string","expires_at":"string","fact_key":"string","force":"boolean","palace":"string","room":"string","tags":"array<string>","text":"string","type":"string","verify":"string","wing":"string","workstream":"string"}}
+{"name":"memory_remember","required":["palace"],"params":{"allow_secret_like":"boolean","content":"string","context":"string","cwd":"string","expires_at":"string","fact_key":"string","force":"boolean","palace":"string","room":"string","tags":"array<string>","text":"string","type":"string","verify":"string","wing":"string","workstream":"string"}}
 {"name":"memory_send_message","required":["content","purpose","to_palace"],"params":{"content":"string","cwd":"string","from_palace":"string","purpose":"string","to_palace":"string","workstream":"string"}}
 {"name":"palace_compact","required":["palace"],"params":{"palace":"string"}}
 {"name":"palace_create","required":["name"],"params":{"cwd":"string","description":"string","force":"boolean","name":"string"}}
