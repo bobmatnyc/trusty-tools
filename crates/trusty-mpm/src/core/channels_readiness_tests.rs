@@ -28,6 +28,16 @@ fn build_without_channels_feature_denies() {
 fn policy_ready_slug_budget_and_missing_config() {
     assert_eq!(NOT_READY_CHECK, "egress-policy-not-ready");
     assert_eq!(HOOK_LOAD_LIMIT, std::time::Duration::from_millis(1500));
-    let home = tempfile::tempdir().expect("tempdir");
-    assert!(policy_ready(Some(home.path())).is_err());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // macOS tempdirs sit under a symlink; the host read wants the real path.
+    let home = std::fs::canonicalize(tmp.path()).expect("canonical");
+    let verdict = policy_ready(Some(&home));
+    if cfg!(feature = "channels") {
+        assert!(
+            verdict.as_ref().is_err_and(NotReady::is_not_configured),
+            "{verdict:?}"
+        );
+    } else {
+        assert_eq!(verdict, Err(NotReady::Unsupported));
+    }
 }
