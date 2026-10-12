@@ -914,6 +914,20 @@ fn pinned_units(passes: usize, subs: usize, kib: usize) -> usize {
     passes * (1 + subs + kib)
 }
 
+/// [`scan_units`] plus the bytes its slice readers walked (#9715): the
+/// arithmetic bodies and the taint readers, counted by `scan_work`.
+fn scan_units_and_reads(command: &str) -> (usize, bool, u64) {
+    use super::super::heredoc::scan_work::{Site, take};
+    take(Site::ArithRead);
+    take(Site::TaintRead);
+    let (units, refused) = scan_units(command);
+    (
+        units,
+        refused,
+        take(Site::ArithRead) + take(Site::TaintRead),
+    )
+}
+
 /// #8676 round 3: wide bracket runs scan in linear work; a nest deeper than
 /// the cap refuses.
 ///
@@ -924,25 +938,22 @@ fn pinned_units(passes: usize, subs: usize, kib: usize) -> usize {
 /// pass count (1: #8771 rescans only when a pass judged text against an older
 /// name set, and nothing here precedes the `T=` binding), the charge per KiB
 /// and linear growth; then pins that a 2 MiB bound row fits one pass's budget.
-/// The work-unit pins are the primary assertion. #8765: one wall-clock backstop runs first, on the
-/// timed form's own input (100k `${X:0:1}` runs, bound), and exists only to
-/// catch superlinear work the budget never charges; #8771 tracks the proper
-/// close, a `#[cfg(test)]` byte counter. Worst CI time today is 1.17 s, and
-/// the 5 s budget is about 4x that.
+/// #9715: the budget charges each pass by its length, not the work inside it,
+/// so the bytes the slice readers walk (`scan_work`'s `ArithRead` and
+/// `TaintRead`) are counted too: at most `READS_PER_BYTE` per command byte,
+/// and growing linearly. This replaces the 5 s wall-clock backstop, which
+/// failed on a saturated CI shard.
 #[test]
 fn wide_bracket_runs_scan_in_linear_work() {
     let bound = "T=$(gcloud auth print-access-token); echo ";
-    // #8765: wall-clock backstop for uncharged superlinear work; see #8771.
-    let command = format!("{bound}{}", "${X:0:1}".repeat(100_000));
-    let started = std::time::Instant::now();
-    let verdict = evaluate_credential_print_command(&command);
-    let spent = started.elapsed();
-    assert!(verdict.is_none(), "100k `${{X:0:1}}` runs must be allowed");
-    assert!(spent < std::time::Duration::from_secs(5), "took {spent:?}");
     // #8765: the seeds stay under 1 KiB and every run body is whole KiB, so
     // the charge per pass is exact. 4n stays under `WORK_BUDGET`.
     const KIB: usize = 1_024;
     const N_KIB: usize = 128;
+    // #9715: reader bytes per command byte; today's widest row reads 4.375.
+    // A per-opener rescan reads O(len) bytes per opener, far past this.
+    const READS_PER_BYTE: u64 = 8;
+    let within = |command: &str, reads: u64| reads <= READS_PER_BYTE * command.len() as u64;
     let unbound = "gcloud auth print-access-token >/dev/null; echo ";
     let body = |run: &str, kib: usize| run.repeat(kib * KIB / run.len());
     // #8771: every row takes one pass; the binding is the first stage.
@@ -953,12 +964,19 @@ fn wide_bracket_runs_scan_in_linear_work() {
         ("A[x]", false, 1),
         ("${X:0:1}", false, 1),
     ] {
-        let mut units = Vec::new();
+        let (mut units, mut read) = (Vec::new(), Vec::new());
         for kib in [N_KIB, 2 * N_KIB, 4 * N_KIB] {
             let text = body(run, kib);
             assert_eq!(text.len(), kib * KIB, "{run:?}");
-            let (got, refused) = scan_units(&format!("{bound}{text}"));
+            let command = format!("{bound}{text}");
+            let (got, refused, reads) = scan_units_and_reads(&command);
             assert_eq!(refused, deny, "{run:?} at {kib} KiB");
+            // #9715: counted reader work, not wall-clock time.
+            assert!(
+                within(&command, reads),
+                "{run:?} at {kib} KiB: {reads} reads"
+            );
+            read.push(reads);
             // A third pass, or a costlier byte, changes this count.
             let want = pinned_units(passes, 1, kib);
             assert_eq!(got, want, "{run:?} at {kib} KiB, bound: {passes} pass(es)");
@@ -968,15 +986,19 @@ fn wide_bracket_runs_scan_in_linear_work() {
             let want = pinned_units(1, 0, kib);
             assert_eq!(got, want, "{run:?} at {kib} KiB, unbound: pinned 1 pass");
         }
-        // Linear: doubling the run doubles the units it adds.
+        // Linear: doubling the run doubles the units and the reads it adds.
         let (n, n2, n4) = (units[0], units[1], units[2]);
         assert_eq!(n4 - n2, 2 * (n2 - n), "{run:?}: {units:?} not linear");
+        let (n, n2, n4) = (read[0], read[1], read[2]);
+        assert_eq!(n4 - n2, 2 * (n2 - n), "{run:?}: reads {read:?} not linear");
     }
     // #8771: at 2 MiB one pass fits the budget, bound or not; before the fix
     // the bound form charged a second pass and refused here.
     let text = body("${X:0:1}", 2 * KIB);
-    let (got, refused) = scan_units(&format!("{bound}{text}"));
+    let command = format!("{bound}{text}");
+    let (got, refused, reads) = scan_units_and_reads(&command);
     assert!(!refused, "2 MiB bound fits one pass");
+    assert!(within(&command, reads), "2 MiB bound: {reads} reads");
     assert_eq!(got, pinned_units(1, 1, 2 * KIB), "2 MiB bound");
     assert!(pinned_units(1, 1, 2 * KIB) <= super::WORK_BUDGET);
     let (got, refused) = scan_units(&format!("{unbound}{text}"));
@@ -1054,16 +1076,19 @@ fn a_late_binding_still_rescans_8771() {
 /// Counted, not timed.
 #[test]
 fn arithmetic_reading_stays_linear_8771() {
-    use super::credential_print_taint_forms::ARITH_BYTES;
+    use super::super::heredoc::scan_work::{Site, take};
     for run in ["${X:0:1}", "A[x]", "$((x))"] {
         let command = format!(
             "T=$(gcloud auth print-access-token); echo {}",
             run.repeat(100_000)
         );
-        ARITH_BYTES.with(|c| c.set(0));
+        take(Site::ArithRead);
         assert_eq!(evaluate_credential_print_command(&command), None, "{run}");
-        let read = ARITH_BYTES.with(std::cell::Cell::get);
-        assert!(read <= 32 * command.len(), "{run}: {read} bytes read");
+        let read = take(Site::ArithRead);
+        assert!(
+            read <= 32 * command.len() as u64,
+            "{run}: {read} bytes read"
+        );
     }
 }
 

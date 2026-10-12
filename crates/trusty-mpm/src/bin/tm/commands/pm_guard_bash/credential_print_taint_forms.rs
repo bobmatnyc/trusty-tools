@@ -17,25 +17,18 @@
 use std::collections::BTreeSet;
 
 use super::super::bash_tokens::tokenize;
+use super::super::heredoc::scan_work::{Site, charge};
 use super::super::shell_lex::QuoteScan;
 use super::credential_print_taint::{
     ANY, INTEGER, declares_integer, expands_tainted, is_identifier, is_tainted, leading_name,
 };
 use super::{Lifted, Refusal, carries};
 
-// #8771: bytes this thread handed to an arithmetic reader, so a test can
-// prove the reading stays linear in the command (no uncharged rescans).
-#[cfg(test)]
-thread_local! {
-    pub(super) static ARITH_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Count `len` bytes handed to an arithmetic reader (test builds only).
+/// Count `len` bytes handed to an arithmetic reader (#8771); a no-op outside
+/// tests.
+// #9715: one counter mechanism, `scan_work`, replaces the old thread-local.
 fn count_read(len: usize) {
-    #[cfg(test)]
-    ARITH_BYTES.with(|c| c.set(c.get() + len));
-    #[cfg(not(test))]
-    let _ = len;
+    charge(Site::ArithRead, len);
 }
 
 /// `test`/`[[` operators that evaluate both operands as arithmetic.
@@ -260,6 +253,8 @@ fn offset_operand(body: &str) -> Option<&str> {
 
 /// Whether arithmetic `text` reads a tainted name, bare or expanded.
 pub(super) fn reads_tainted(text: &str, names: &BTreeSet<String>) -> bool {
+    // #9715: the loop below walks `text` once; count it for the linear-work test.
+    charge(Site::TaintRead, text.len());
     if expands_tainted(text, names) {
         return true;
     }

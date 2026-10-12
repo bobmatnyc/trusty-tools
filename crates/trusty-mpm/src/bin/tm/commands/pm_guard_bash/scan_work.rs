@@ -1,4 +1,5 @@
-//! Inner-loop work counters for the here-document scanners (#9720).
+//! Inner-loop work counters for the here-document scanners (#9720) and the
+//! credential-print slice readers (#9715).
 //!
 //! Why: a scan whose work grows with the square of its `<<` count turns a
 //! 64 KiB command into a hook timeout, and a timed-out hook lets the command
@@ -12,9 +13,12 @@
 //! `heredoc_bodies_look_up_operators_in_log_work_9720`,
 //! `heredoc_operators_find_each_line_end_once_9720`,
 //! `heredoc_bodies_answer_span_queries_in_log_work_9720`,
-//! `heredoc_bodies_check_arithmetic_shifts_in_linear_work_9720`.
+//! `heredoc_bodies_check_arithmetic_shifts_in_linear_work_9720`,
+//! `credential_print_tests::wide_bracket_runs_scan_in_linear_work`,
+//! `credential_print_tests::arithmetic_reading_stays_linear_8771`.
 
-/// The scan loops #9720 found quadratic.
+/// The scan loops #9720 found quadratic, and the credential-print readers
+/// handed a slice of a stage (#8771, #9715).
 #[derive(Clone, Copy)]
 pub(crate) enum Site {
     /// The walk's low-water marks of the operators waiting for a body.
@@ -27,6 +31,11 @@ pub(crate) enum Site {
     SpanProbe,
     /// Lines compared while asking whether an arithmetic `<<` could end.
     AmbiguousEnd,
+    /// #8771: bytes of a stage handed to a credential-print arithmetic reader.
+    ArithRead,
+    /// #9715: bytes a credential-print taint reader walks (`reads_tainted`,
+    /// each `expands_at` level), so a per-opener rescan shows as a count.
+    TaintRead,
 }
 
 /// Count `units` of work at `site`; a no-op outside tests.
@@ -55,8 +64,6 @@ mod counters {
 
     thread_local! {
         /// One counter per [`super::Site`].
-        pub(super) static UNITS: [Cell<u64>; 5] = const {
-            [Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0)]
-        };
+        pub(super) static UNITS: [Cell<u64>; 7] = const { [const { Cell::new(0) }; 7] };
     }
 }
