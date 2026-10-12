@@ -45,7 +45,7 @@ fn verdict(
     let gate = ArchitectGate::new(call, env, config);
     let tool = call["tool_name"].as_str().unwrap_or_default();
     let deny = evaluate_secret_file_read_gated(tool, call.get("tool_input"), &fx.project, &gate);
-    (deny, gate.envfile().cloned())
+    (deny.map(|d| d.reason), gate.envfile().cloned())
 }
 
 /// The Architect's verdict for a Bash `command`.
@@ -60,6 +60,7 @@ fn architect_reading_config(fx: &Fixture, command: &str) -> Option<String> {
     let read = || MpmConfig::load(&fx.home.join(ANCHOR_ROOT));
     let gate = ArchitectGate::new(&call, architect_env(fx), read);
     evaluate_secret_file_read_gated("Bash", call.get("tool_input"), &fx.project, &gate)
+        .map(|d| d.reason)
 }
 
 /// Write the fixture's user config with `roots` as `[supervisor] projects`.
