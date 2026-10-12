@@ -938,6 +938,33 @@ async fn a_malformed_ledger_is_reported_on_the_slice() {
     assert!(report.ledger_error.is_some(), "{report:?}");
 }
 
+/// Why: the clear-error arm of `write_ledger` was unreached; `clear` returns
+/// `Ok` early on a malformed file, so only a fault inside the locked update
+/// gets there.
+/// What: ledgers the drawer with an old row, then makes the ledger's lock
+/// sidecar a directory so `clear` cannot open it; the repair succeeds and the
+/// clear failure must surface on `SliceReport.ledger_error`.
+/// Test: this test.
+#[tokio::test]
+async fn a_failed_ledger_clear_is_reported_on_the_slice() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let id = legacy(&h, &words(100), 0.5).await;
+    let mut row = failure(id);
+    row.failed_at -= chrono::Duration::days(2);
+    std::fs::write(
+        dir.path().join("embed_failures.json"),
+        serde_json::to_vec(&[row]).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("embed_failures.json.lock")).unwrap();
+    let report = h.reembed_slice(&chunking(), &bounds()).await;
+    assert_eq!((report.repaired, report.failed), (1, 0), "{report:?}");
+    assert!(full(&h, id));
+    let err = report.ledger_error.as_deref().unwrap_or_default();
+    assert!(err.contains("clear embed failures"), "{report:?}");
+}
+
 #[tokio::test]
 async fn slice_on_a_read_only_handle_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();

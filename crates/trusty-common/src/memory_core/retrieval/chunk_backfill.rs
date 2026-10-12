@@ -459,7 +459,8 @@ impl PalaceHandle {
 /// and skipped the clear, so every failing drawer lost its backoff.
 /// What: calls `record` once per entry and `clear` once; returns the joined
 /// errors, or `None` when every call succeeded.
-/// Test: `a_ledger_fault_on_one_row_still_records_the_rest_and_clears`.
+/// Test: `a_ledger_fault_on_one_row_still_records_the_rest_and_clears`,
+/// `a_failed_ledger_clear_is_reported_on_the_slice`.
 pub(super) fn write_ledger(
     entries: Vec<EmbedFailure>,
     repaired: &HashSet<Uuid>,
