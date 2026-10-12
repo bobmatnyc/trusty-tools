@@ -13,7 +13,7 @@
 //! blocked and the partial copy is removed. A blocked session re-reads the file before each cycle; once it
 //! reads, the session adopts it and adds the wakes it owed meanwhile. A dry
 //! run copies nothing.
-//! Test: `load_state_io_skips_save`, `load_state_corrupt_keeps_copy`,
+//! Test: `load_state_corrupt_keeps_copy`,
 //! `non_utf8_state_is_copied_then_reset`,
 //! `unreadable_state_path_stays_blocked`,
 //! `corrupt_state_whose_copy_fails_is_never_overwritten`,
