@@ -1,7 +1,7 @@
 //! #9274 PR3 critic HIGH 1: one format migration of a palace at a time.
 //!
 //! Why: the daemon's startup hydration and a request — or two processes — can
-//! open one format-0 palace at the same moment. Two migrations raced: one
+//! open one behind palace at the same moment. Two migrations raced: one
 //! deleted the other's record and failed it, or stranded the palace at mirror
 //! 1, marker 0 and no record.
 //! What: a seam parks the first migration after its record is written while a
@@ -9,7 +9,7 @@
 //! by a `flock` this test takes on the palace directory.
 //! Test: this file.
 
-use super::tests::{assert_migrated, build_v0, complete_backups, hash_tree};
+use super::tests::{assert_migrated, build_v1, complete_backups, hash_tree};
 use super::{MigrationRecord, Seams, Step, open_gate, open_gate_with, tmp_path, write_record};
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::palace_format::MIGRATION_RECORD;
@@ -51,14 +51,14 @@ fn park_after_record(step: Step) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Two writer opens of one format-0 palace in one process — the daemon's
+/// Two writer opens of one format-1 palace in one process — the daemon's
 /// hydration and a request — migrate it once: the second waits for the first
-/// and finds the palace at format 1. Before the fix the second resumed the
+/// and finds the palace at format 2. Before the fix the second resumed the
 /// first one's migration, removed its record, and the first failed with
 /// `NotFound` on that record.
 #[test]
 fn two_writer_opens_in_one_process_migrate_a_palace_once() {
-    let v0 = build_v0("v0-two-openers");
+    let v0 = build_v1("v1-two-openers");
     set_phase(0);
     let dir = v0.dir().to_path_buf();
     let id = v0.palace.id.as_str().to_string();
@@ -96,7 +96,7 @@ fn two_writer_opens_in_one_process_migrate_a_palace_once() {
 /// backup, no record, no palace byte changed. The next open migrates.
 #[test]
 fn a_palace_locked_by_another_process_is_refused_with_nothing_written() {
-    let v0 = build_v0("v0-locked-elsewhere");
+    let v0 = build_v1("v1-locked-elsewhere");
     let before = hash_tree(v0.dir());
     let other = std::fs::File::open(v0.dir()).expect("open the palace directory");
     other
@@ -138,13 +138,13 @@ fn temp_names_never_repeat() {
 /// A record write that fails at the rename removes its temp file.
 #[test]
 fn a_failed_record_write_leaves_no_temp_file() {
-    let v0 = build_v0("v0-tmp-cleanup");
+    let v0 = build_v1("v1-tmp-cleanup");
     std::fs::create_dir_all(v0.dir().join(MIGRATION_RECORD).join("blocker"))
         .expect("a directory where the record goes");
     let record = MigrationRecord {
         palace: v0.palace.id.as_str().to_string(),
-        from: 0,
-        to: 1,
+        from: 1,
+        to: 2,
         backup: PathBuf::from("/nowhere"),
     };
     write_record(v0.dir(), &record).expect_err("the rename onto a directory fails");

@@ -1,17 +1,13 @@
-//! End-to-end pre→post migration of the #4810 triple key.
+//! A pre-#4810 (format-0) palace under a format-2 binary (#9275).
 //!
-//! Why: the unit tests drive the format migration directly. This one goes
-//! through the surfaces a real caller uses — a writer-intent `PalaceHandle`
-//! open, which migrates a format-0 palace (#9274; the #4810 rewrite is its KG
-//! step), then `KnowledgeGraph::open`, which translates `kg.db` to `kg.redb`
-//! and hydrates the in-memory adjacency from the migrated rows — because that
-//! hydration step is where the old key's damage was still visible after
-//! storage was fixed.
+//! Why: the #4810 triple-key rewrite was the KG step of the 0 → 1 migration
+//! (#9274), which shipped in trusty-memory 0.33.x. ADR-0067 D3 rule 2 migrates
+//! N-1 only, so a format-2 binary carries no 0 → 1 step: a legacy-key palace
+//! must be refused `FormatTooOld` through the surfaces a real caller uses, and
+//! never opened un-migrated or half-rewritten.
 //! What: writes a palace in the pre-#4810 key shape with no schema marker,
-//! checks a direct `KnowledgeGraph` open refuses it un-migrated, migrates it
-//! with a writer open, and asserts the facts are queryable, the adjacency
-//! carries them, and a further multi-valued assert joins the set instead of
-//! replacing it.
+//! checks a direct `KnowledgeGraph` open and a writer-intent `PalaceHandle`
+//! open both refuse it, and that `kg.redb` and the backup root are untouched.
 //! Test: `cargo test -p trusty-common --features memory-core --test
 //! kg_triple_key_migration_tests -- --include-ignored`.
 
@@ -21,8 +17,8 @@ use tempfile::tempdir;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
 use trusty_common::memory_core::retrieval::PalaceHandle;
 use trusty_common::memory_core::store::OpenIntent;
-use trusty_common::memory_core::store::format_backup::{MANIFEST, backup_root};
-use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
+use trusty_common::memory_core::store::format_backup::backup_root;
+use trusty_common::memory_core::store::kg::KnowledgeGraph;
 use trusty_common::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, TRIPLES, TripleValue, encode_u64, encode_value,
 };
@@ -36,28 +32,11 @@ fn legacy_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
     out
 }
 
-fn triple(subject: &str, predicate: &str, object: &str) -> Triple {
-    Triple {
-        subject: subject.into(),
-        predicate: predicate.into(),
-        object: object.into(),
-        valid_from: chrono::Utc::now(),
-        valid_to: None,
-        confidence: 1.0,
-        provenance: None,
-    }
-}
-
-/// Why: proves the migration is complete end to end — storage rewrite,
-/// adjacency hydration, and the write path that follows — rather than proving
-/// each piece in isolation.
-/// What: seeds three legacy-keyed facts under two subjects, opens the palace
-/// through `KnowledgeGraph`, and checks reads, graph neighbours, and a
-/// subsequent multi-valued assert.
-/// Ignored by default: it writes a redb file and re-opens it, which is heavier
-/// than a unit test and unnecessary on every inner-loop run.
+/// Why: a format-2 binary has no 0 → 1 step (ADR-0067 D3 rule 2, #9275).
+/// What: seeds legacy-keyed facts with no schema marker; both open paths
+/// refuse the palace and nothing under it, or beside it, changes.
 #[tokio::test]
-async fn legacy_palace_migrates_on_open_and_accepts_multi_valued_writes() {
+async fn a_legacy_key_palace_is_refused_too_old_and_left_unchanged() {
     let root = tempdir().unwrap();
     let dir = root.path().join("palaces").join("legacy");
     std::fs::create_dir_all(&dir).unwrap();
@@ -99,7 +78,8 @@ async fn legacy_palace_migrates_on_open_and_accepts_multi_valued_writes() {
         drop(db);
     }
 
-    // --- #9274: never opened un-migrated; a writer open migrates ----------
+    // --- #9275: refused too old, never opened un-migrated -----------------
+    let before = std::fs::read(&redb_path).unwrap();
     assert!(
         KnowledgeGraph::open(&dir.join("kg.db")).is_err(),
         "a format-0 KG must be refused, not opened un-migrated"
@@ -111,53 +91,17 @@ async fn legacy_palace_migrates_on_open_and_accepts_multi_valued_writes() {
         created_at: chrono::Utc::now(),
         data_dir: dir.clone(),
     };
-    drop(PalaceHandle::open_with_intent(&palace, OpenIntent::Writer).unwrap());
-
-    // --- post: open through the public handle -----------------------------
-    // Callers pass the legacy `kg.db` name; `KnowledgeGraph` resolves it to the
-    // `kg.redb` file seeded above.
-    let kg = KnowledgeGraph::open(&dir.join("kg.db")).unwrap();
-
-    let room = kg.query_active("room:General").await.unwrap();
-    assert_eq!(room.len(), 1, "the migrated fact is queryable");
-    assert_eq!(room[0].object, "drawer:a");
+    let err = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
+        .err()
+        .expect("a format-0 palace is refused under writer intent");
+    assert!(format!("{err:#}").contains("FormatTooOld"), "{err:#}");
     assert_eq!(
-        kg.query_active("tga").await.unwrap()[0].object,
-        "trusty-git-analytics"
+        before,
+        std::fs::read(&redb_path).unwrap(),
+        "kg.redb changed"
     );
-    assert_eq!(kg.query_active("alice").await.unwrap()[0].object, "bob");
-
-    // Hydration ran over the migrated rows, so the graph sees all three edges.
-    assert_eq!(kg.edge_count(), 3);
-    assert_eq!(kg.count_active_triples().unwrap(), 3);
-
-    // Multi-valued predicate: the new member joins the room.
-    kg.assert(triple("room:General", "contains", "drawer:b"))
-        .await
-        .unwrap();
-    kg.assert(triple("room:General", "contains", "drawer:c"))
-        .await
-        .unwrap();
-    let room = kg.query_active("room:General").await.unwrap();
-    assert_eq!(room.len(), 3, "migrated palace accepts multi-valued writes");
-
-    // Functional predicate: the newer alias still supersedes.
-    kg.assert(triple("tga", "is_alias_for", "trusty-git-analytics-2"))
-        .await
-        .unwrap();
-    let tga = kg.query_active("tga").await.unwrap();
-    assert_eq!(tga.len(), 1);
-    assert_eq!(tga[0].object, "trusty-git-analytics-2");
-
-    // The pre-migration image is in the format-migration backup.
-    let backups: Vec<_> = std::fs::read_dir(backup_root(root.path(), "legacy"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    assert_eq!(backups.len(), 1, "{backups:?}");
-    assert!(backups[0].join(MANIFEST).is_file());
     assert!(
-        backups[0].join("kg.redb").is_file(),
-        "migration leaves a verified backup"
+        !backup_root(root.path(), "legacy").exists(),
+        "a refused palace starts no backup"
     );
 }

@@ -369,14 +369,14 @@ mod live {
         /// Open the portfolio palace with an explicit redb open intent.
         ///
         /// Why: `tm daemon run` and `tm sm serve --stdio` both provision this
-        /// palace (#9274). The daemon holds it as writer, so a format-0 palace
+        /// palace (#9274). The daemon holds it as writer, so a palace one format behind
         /// migrates; `tm sm serve` reads beside it, since a writer open there
         /// fails while the daemon holds `kg.redb`.
         /// What: opens the registry at `data_root` with `intent`, binds
         /// [`PORTFOLIO_PALACE_ID`], then eagerly materialises the palace via the
         /// race-safe open-or-create [`Self::ensure_palace`]. Any failure is
         /// wrapped in [`PortfolioMemoryError::Palace`].
-        /// Test: `an_existing_format_0_portfolio_palace_migrates_at_open`.
+        /// Test: `an_existing_format_1_portfolio_palace_migrates_at_open`.
         pub fn open_with_intent(
             data_root: impl Into<PathBuf>,
             intent: OpenIntent,

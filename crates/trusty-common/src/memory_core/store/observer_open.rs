@@ -13,7 +13,7 @@
 
 use super::concurrent_open::{OpenMode, SnapshotGuard, snapshot_path_for};
 use super::palace_format::{
-    KG_FILE, MIGRATION_RECORD, PALACE_FORMAT_SUPPORTED, check_format, read_mirror,
+    KG_FILE, PALACE_FORMAT_SUPPORTED, check_format, read_mirror, refuse_foreign_record,
 };
 use super::palace_store::PalaceStoreError;
 use crate::redb_cache::create_palace_db;
@@ -95,11 +95,8 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
     {
         check_format(palace, found, PALACE_FORMAT_SUPPORTED)?;
     }
-    if data_dir
-        .join(MIGRATION_RECORD)
-        .try_exists()
-        .unwrap_or(false)
-    {
+    // #9275: a record of a move this binary does not run is refused as such.
+    if refuse_foreign_record(data_dir, palace, PALACE_FORMAT_SUPPORTED)? {
         return Err(PalaceStoreError::FormatNeedsMigration {
             palace: palace.to_string(),
             found: PALACE_FORMAT_SUPPORTED.saturating_sub(1),
@@ -114,6 +111,7 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::memory_core::store::concurrent_open::{OpenIntent, try_open_or_snapshot};
+    use crate::memory_core::store::palace_format::MIGRATION_RECORD;
     use redb::ReadableDatabase;
 
     /// #9659: an observer open copies even when nothing holds the file, so a

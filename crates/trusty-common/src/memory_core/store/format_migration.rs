@@ -1,10 +1,12 @@
-//! The palace format 0 → 1 migration, run lazily at a writer-intent open (#9274).
+//! The palace format N-1 → N migration, run lazily at a writer-intent open
+//! (#9274; the 1 → 2 step since #9275).
 //!
-//! Why: ADR-0067 D3 rules 2–4. A format-0 palace is migrated by its first
-//! writer-intent open — the daemon's startup hydration opens every palace
+//! Why: ADR-0067 D3 rules 2–4. A palace one format behind is migrated by its
+//! first writer-intent open — the daemon's startup hydration opens every palace
 //! that way (ADR-0067 Consequences). The migration may not write
 //! until a verified backup exists, and a crash or error at any step must leave
-//! the palace either at format 0 or at format 1 — never opened half-done.
+//! the palace either at N-1 or at N — never opened half-done. N-1 only: a
+//! palace two or more behind is refused `FormatTooOld` (D3 rule 2, D7).
 //! What: [`open_gate`] classifies the palace (`palace_format::classify_with`).
 //! A current palace opens; a writer also rewrites a missing or lower mirror.
 //! A palace one behind is refused under read-only intent and migrated under
@@ -17,8 +19,9 @@
 //!    migration record, naming that backup, fsynced and renamed into place;
 //! 3. the `palace.json` mirror, written before the marker so an older binary
 //!    refuses the palace from the moment the first palace byte changes;
-//! 4. the `kg.redb` step — key rewrite plus both markers in one redb
-//!    transaction, the commit point (`kg_redb::migrate`);
+//! 4. the `kg.redb` step — for 1 → 2 a guarded stamp of both markers in one
+//!    redb transaction, the commit point (`kg_redb::migrate`); the vector
+//!    index is not touched and nothing is re-embedded;
 //! 5. the record is removed, then `kg.redb` is released.
 //!
 //! A record on disk means "resume": the next writer open re-runs steps 3–5 on
@@ -26,7 +29,7 @@
 //! that backup still verifies. Any failure leaves the palace refused, never
 //! opened un-migrated.
 //! Test: format_migration_tests.rs, starting with
-//! `a_format_0_palace_migrates_at_first_writer_open`.
+//! `a_format_1_palace_migrates_to_2_at_first_writer_open`.
 
 use super::concurrent_open::{OpenIntent, OpenMode, SnapshotGuard, try_open_primary_or_snapshot};
 use super::format_backup::{self, backup_data_root, verify_backup};
@@ -101,8 +104,8 @@ impl Default for Seams {
 /// Unverified (a held or crash-repair `kg.redb`) → a writer reads the marker
 /// on an exclusive open first, so an unreadable or newer KG is refused before
 /// the vector store writes; a read-only open relies on the KG's own gate.
-/// Test: `a_format_0_palace_migrates_at_first_writer_open`,
-/// `a_read_only_open_of_a_format_0_palace_is_refused_and_writes_nothing`,
+/// Test: `a_format_1_palace_migrates_to_2_at_first_writer_open`,
+/// `a_read_only_open_of_a_format_1_palace_is_refused_and_writes_nothing`,
 /// `n_plus_one_palace_is_refused_and_bytes_unchanged`.
 pub(crate) fn open_gate(data_dir: &Path, palace: &str, intent: OpenIntent) -> anyhow::Result<()> {
     open_gate_with(data_dir, palace, intent, Seams::default())
@@ -202,7 +205,8 @@ fn verify_kg_for_writer(kg_path: &Path, palace: &str, to: u32) -> anyhow::Result
 /// so a newer, unreadable or held KG fails the migration with no record left.
 /// Test: `a_fault_after_each_step_leaves_a_palace_the_next_writer_open_completes`,
 /// `a_blocked_backup_aborts_before_any_palace_byte_changes`,
-/// `two_writer_opens_in_one_process_migrate_a_palace_once`.
+/// `two_writer_opens_in_one_process_migrate_a_palace_once`,
+/// `a_failed_step_does_not_advance_the_stored_format_or_remove_the_record`.
 fn migrate(data_dir: &Path, palace: &str, to: u32, seams: Seams) -> Result<()> {
     let from = to.saturating_sub(1);
     let failed = |reason: String| PalaceStoreError::FormatMigrationFailed {
@@ -243,17 +247,16 @@ fn migrate(data_dir: &Path, palace: &str, to: u32, seams: Seams) -> Result<()> {
     write_mirror(data_dir, to)?;
     fault(Step::Mirror)?;
 
-    let rows = match &kg {
-        Some(held) if held.migrate => {
-            migrate_kg_to_format(&held.db, to).map_err(|e| failed(format!("{e:#}")))?
-        }
-        _ => 0,
-    };
+    if let Some(held) = &kg
+        && held.migrate
+    {
+        migrate_kg_to_format(&held.db, to).map_err(|e| failed(format!("{e:#}")))?;
+    }
     fault(Step::Kg)?;
 
     remove_record(data_dir)?;
     drop(kg);
-    tracing::info!(palace, from, to, rows, backup = %backup.display(),
+    tracing::info!(palace, from, to, backup = %backup.display(),
         "#9274: migrated palace format");
     Ok(())
 }
@@ -465,3 +468,7 @@ mod fault_tests;
 #[cfg(test)]
 #[path = "format_migration_lock_tests.rs"]
 mod lock_tests;
+
+#[cfg(test)]
+#[path = "format_migration_v2_tests.rs"]
+mod v2_tests;

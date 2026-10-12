@@ -9,7 +9,7 @@
 //! no row and no data is new and is stamped at [`PALACE_FORMAT_SUPPORTED`] when
 //! it is created; a KG with data and no row is format 0. [`classify_with`]
 //! turns the two markers, plus the migration-in-progress record, into
-//! "current" or "behind"; the 0 → 1 migration itself lives in
+//! "current" or "behind"; the N-1 migration itself (1 → 2, #9275) lives in
 //! `format_migration.rs`.
 //! Test: palace_format_tests.rs — `n_plus_one_palace_is_refused_and_bytes_unchanged`,
 //! and the other arms listed on each function below.
@@ -26,9 +26,11 @@ use std::path::Path;
 
 /// The palace format this binary reads and writes (ADR-0067 D1).
 ///
-/// #9274: 1 is the 1.0.0 layout. A format-0 palace is migrated by a
-/// writer-intent open; a palace stamped 2 or higher is refused.
-pub const PALACE_FORMAT_SUPPORTED: u32 = 1;
+/// #9275: 2 permits `{uuid}#{n}` chunk rows in `index.usearch.redb`
+/// (`vector_key.rs`); no table shape changes. A format-1 palace is migrated
+/// by a writer-intent open; format 0 is refused `FormatTooOld` (ADR-0067 D3
+/// rule 2, N-1 only); a palace stamped 3 or higher is refused.
+pub const PALACE_FORMAT_SUPPORTED: u32 = 2;
 
 /// The `kg_schema` key that holds the authoritative palace format.
 pub const KG_SCHEMA_PALACE_FORMAT: &str = "palace_format";
@@ -241,14 +243,16 @@ pub(crate) fn read_marker_without_writing(kg_path: &Path) -> Result<KgMarker> {
 /// Why: `PalaceHandle::open_with_intent_purging` opens `index.usearch.redb`
 /// before `kg.redb`, so the gate runs on the directory first.
 /// What: a mirror or marker above `supported` → `FormatTooNew`. A migration
-/// record → `Behind` (resume). A new KG → `Current`; a deferred marker read →
+/// record → `Behind` (resume), unless it names a move this binary does not
+/// run ([`refuse_foreign_record`]). A new KG → `Current`; a deferred marker read →
 /// `Unverified`. Otherwise the
 /// marker wins over a lower mirror (ADR-0067 D1); a mirror above the marker
 /// with no record is `FormatMarkerMismatch` (fail closed); the marker is then
 /// classified by [`check_format`], where one behind is `Behind`.
 /// Test: `n_plus_one_in_palace_json_mirror_is_refused_before_redb_opens`,
 /// `markers_that_disagree_refuse_the_palace`,
-/// `a_lower_mirror_is_repaired_by_a_writer_and_the_marker_wins`.
+/// `a_lower_mirror_is_repaired_by_a_writer_and_the_marker_wins`,
+/// `a_stale_0_to_1_record_is_refused_as_too_old`.
 pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Result<FormatState> {
     let mirror = read_mirror(data_dir)?;
     let m = mirror.unwrap_or(0);
@@ -261,11 +265,7 @@ pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Re
     {
         check_format(palace, v, supported)?;
     }
-    let record = data_dir.join(MIGRATION_RECORD);
-    if record.try_exists().map_err(|source| PalaceStoreError::Io {
-        path: record,
-        source,
-    })? {
+    if refuse_foreign_record(data_dir, palace, supported)? {
         // #9274: an interrupted migration is still the move from N-1.
         return Ok(FormatState::Behind {
             found: supported.saturating_sub(1),
@@ -292,6 +292,37 @@ pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Re
         }
         Err(e) => Err(e),
     }
+}
+
+/// Whether a migration record is present, refusing one of a move this binary
+/// does not run.
+///
+/// Why: ADR-0067 D3 rule 2 migrates N-1 only. A record left by an older
+/// release's interrupted move (0 → 1 under a format-2 binary) is not
+/// resumable here; without this it read as `Behind` and failed later as a
+/// generic `FormatMigrationFailed` (#9275, plan Q7).
+/// What: `Ok(false)` with no record. A record whose `to` is above `supported`
+/// → `FormatTooNew`; whose `from` is more than one behind → `FormatTooOld`.
+/// Otherwise `Ok(true)`. A record that does not parse is `Ok(true)`: the
+/// writer's resume reads it again and fails closed on it.
+/// Test: `a_stale_0_to_1_record_is_refused_as_too_old`.
+pub(crate) fn refuse_foreign_record(data_dir: &Path, palace: &str, supported: u32) -> Result<bool> {
+    let record = data_dir.join(MIGRATION_RECORD);
+    if !record.try_exists().map_err(|source| PalaceStoreError::Io {
+        path: record,
+        source,
+    })? {
+        return Ok(false);
+    }
+    if let Ok(Some(rec)) = super::format_migration::read_record(data_dir) {
+        if rec.to > supported {
+            check_format(palace, rec.to, supported)?;
+        }
+        if rec.from.saturating_add(1) < supported {
+            check_format(palace, rec.from, supported)?;
+        }
+    }
+    Ok(true)
 }
 
 /// Refuse a palace a read-only caller cannot use: newer, too old, split, or
@@ -329,7 +360,7 @@ pub(crate) fn gate_palace(data_dir: &Path, palace: &str) -> Result<()> {
 /// What: [`classify_with`] at [`PALACE_FORMAT_SUPPORTED`]. A refusal is the
 /// `Err` arm, so the caller can print its message. A deferred marker read is
 /// `Unverified`, never `Current`: the daemon may refuse that palace.
-/// Test: `status_reports_needs_migration_for_a_format_0_palace`,
+/// Test: `status_reports_needs_migration_for_a_format_1_palace`,
 /// `status_reports_a_held_kg_as_unverified`.
 pub fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus> {
     let label = data_dir.file_name().map_or_else(
@@ -390,12 +421,12 @@ pub(crate) fn gate_kg_post_open(db: &impl ReadableDatabase, kg_path: &Path) -> R
 
 /// Write the `palace_format` and triple-key markers inside `wtx`.
 ///
-/// Why: both the creation of a new KG and the last step of the 0 → 1
+/// Why: both the creation of a new KG and the last step of the 1 → 2
 /// migration commit the format in the same transaction as their KG change
 /// (ADR-0067 D3 rule 4).
 /// What: overwrites both `kg_schema` rows; format 1 implies triple key v1.
 /// Test: `a_new_palace_is_stamped_at_the_supported_format`,
-/// `a_format_0_palace_migrates_at_first_writer_open`.
+/// `a_format_1_palace_migrates_to_2_at_first_writer_open`.
 pub(crate) fn stamp_format(wtx: &redb::WriteTransaction, format: u32) -> anyhow::Result<()> {
     use anyhow::Context;
     let mut schema = wtx.open_table(KG_SCHEMA).context("open kg_schema")?;

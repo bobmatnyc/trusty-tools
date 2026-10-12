@@ -1,0 +1,9 @@
+{
+  "created_at": "2026-10-11T20:44:34.708976Z",
+  "data_dir": "/tmp/tmfx/data/trusty-memory/personal",
+  "description": null,
+  "format_version": 1,
+  "id": "personal",
+  "name": "personal",
+  "schema_version": 1
+}
