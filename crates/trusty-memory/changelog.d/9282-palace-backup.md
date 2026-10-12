@@ -1,0 +1,4 @@
+Added
+- `palace_backup` MCP tool: a consistent backup of a palace while the daemon serves it, to `<data root>/backups/manual/<palace>/<UTC>/` or an absolute `dest`. It reuses the daemon's cached chat store, returns the backup directory, the manifest counts and the file list, and leaves the vector index out (#9282).
+- `trusty-memory palace backup <id> [--dest DIR]`: backs up through the running daemon, or opens the palace directly when no daemon serves the data root. A failed daemon call is an error, never a fallback (#9282).
+- `trusty-memory palace restore <snapshot-dir> [--palace <id>]`: offline restore into an empty palace root. It refuses a backup of another palace, a daemon serving the data root, and a probe that cannot tell, before writing anything, and prints the `palace_reembed` step that rebuilds the vector index (#9282).

@@ -38,6 +38,8 @@ pub mod monitor;
 pub mod note;
 // #6652: `palace stats` / `palace compact` — kg.redb measurement and rewrite.
 pub mod palace;
+// #9282: `palace backup` and `palace restore`.
+pub mod palace_backup;
 // #8732: `palace deletions` — read the maintenance deletion journal.
 pub mod palace_deletions;
 pub mod palace_reclaim;
