@@ -49,6 +49,10 @@ fn keep_copy(path: &Path, now: f64) -> io::Result<String> {
         .write(true)
         .create_new(true)
         .open(&name)?;
+    #[cfg(test)]
+    if tests::FAIL_COPY_WRITE.get() {
+        return Err(io::Error::other("injected write failure"));
+    }
     f.write_all(&bytes)?;
     f.sync_all()?;
     Ok(name.to_string_lossy().into_owned())
@@ -143,5 +147,52 @@ impl PollSession {
         ));
         self.state = *loaded;
         self.save_blocked = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::fs;
+
+    use super::*;
+
+    thread_local! {
+        /// Makes `keep_copy` fail after it created the file, as a full disk does.
+        pub(super) static FAIL_COPY_WRITE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// #9171 A3b-2 critic MEDIUM: a copy that fails after the file was created
+    /// leaves nothing behind, so a blocked session retrying every cycle under
+    /// a new `.corrupt.<unix>` name does not pile up one file per interval.
+    /// Saves stay blocked and the original is untouched. Red against a
+    /// `keep_copy` that leaves the partial file.
+    #[test]
+    fn failed_copies_across_cycles_leave_no_corrupt_files() {
+        let dir = std::env::temp_dir().join(format!("keep-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let state = dir.join("poll-state.json");
+        fs::write(&state, "{not json").expect("write state");
+        let config = Config::from_env(&dir, &dir, &|k| {
+            (k == "SUPERVISOR_INBOX_DIR").then(|| dir.to_string_lossy().into_owned())
+        })
+        .expect("config");
+        FAIL_COPY_WRITE.set(true);
+        let (mut session, _) = PollSession::load(&config, false, 1_000.0);
+        for cycle in 1..=3 {
+            let mut log = Vec::new();
+            session.retry_load(&config, false, 1_000.0 + 60.0 * f64::from(cycle), &mut log);
+            assert!(session.save_blocked(), "cycle {cycle}: {log:?}");
+        }
+        FAIL_COPY_WRITE.set(false);
+        let copies = fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt."))
+            .count();
+        assert_eq!(copies, 0, "no partial copy is left behind");
+        assert_eq!(fs::read_to_string(&state).expect("state"), "{not json");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

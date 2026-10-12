@@ -167,6 +167,41 @@ fn bad_load_factor_disables_host_alerts_only() -> TestResult {
     Ok(())
 }
 
+/// #9171 A3b-2 critic HIGH: a bad variable is reported by every cycle, not
+/// once at loop start, and the line names the sensor that is off. Called on
+/// `run_once` alone, so it holds without `run_loop`. Red against a poller
+/// that logs `Config::problems` only when the loop starts.
+#[test]
+fn every_cycle_names_each_sensor_a_bad_variable_turned_off() -> TestResult {
+    let env = Env::new(&[("LOAD_FACTOR", "lots"), ("SELF_CTX_THRESHOLD", "x")])?;
+    let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(50));
+    let clock = FakeClock::new(0.0);
+    let runner = env.runner(&tmux, &clock, &Overloaded);
+    let mut session = PollSession::new(PollState::default());
+    let errors = |log: &str, needle: &str| {
+        log.lines()
+            .filter(|l| l.contains("config ERROR") && l.contains(needle))
+            .count()
+    };
+    for cycle in 1..=2 {
+        runner.run_once(&mut session)?;
+        let log = env.log();
+        assert_eq!(errors(&log, "LOAD_FACTOR"), cycle, "cycle {cycle}: {log}");
+        assert_eq!(
+            errors(&log, "SELF_CTX_THRESHOLD"),
+            cycle,
+            "cycle {cycle}: {log}"
+        );
+        assert_eq!(
+            errors(&log, "host alerts"),
+            cycle,
+            "names the sensor: {log}"
+        );
+        assert_eq!(errors(&log, "self_ctx"), cycle, "names the sensor: {log}");
+    }
+    Ok(())
+}
+
 /// A good `LOAD_FACTOR` keeps the host alerts on.
 #[test]
 fn good_load_factor_keeps_host_alerts() -> TestResult {
