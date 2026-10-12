@@ -114,7 +114,27 @@ pub fn classify_input(capture: &str) -> (InputState, String) {
 /// What: wraps the state in a private field; outside this crate's tests the
 /// only constructor is [`crate::input_state_for_send`].
 /// Test: `send_guarded_refuses_typed_and_sends_on_empty`; the doctest on
-/// [`send_guarded`] proves `classify_input`'s state does not type-check.
+/// [`send_guarded`] proves `classify_input`'s state does not type-check, and
+/// the two below (`send_reading_is_single_use`) prove one reading cannot feed
+/// two sends, by move or by clone.
+///
+/// ```compile_fail,E0382
+/// // send_reading_is_single_use: a reading moves into its one send.
+/// use trusty_architect::{FakeTmux, Keys, NamedKey, PaneId, input_state_for_send, send_guarded};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let tmux = FakeTmux::new();
+/// let reading = input_state_for_send("x");
+/// let _ = send_guarded(&tmux, &pane, reading, Keys::Literal("x"));
+/// let _ = send_guarded(&tmux, &pane, reading, Keys::Named(&[NamedKey::Enter]));
+/// ```
+///
+/// ```compile_fail,E0599
+/// // send_reading_is_single_use: a reading cannot be copied by clone.
+/// use trusty_architect::{FakeTmux, Keys, PaneId, input_state_for_send, send_guarded};
+/// let pane = PaneId::parse("%1").unwrap();
+/// let reading = input_state_for_send("x");
+/// let _ = send_guarded(&FakeTmux::new(), &pane, reading.clone(), Keys::Literal("x"));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendReading(InputState);
 

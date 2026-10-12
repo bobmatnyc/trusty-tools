@@ -5,7 +5,7 @@
 //! Test: this file; the guarded path is covered by
 //! `send_guarded_refuses_typed_and_sends_on_empty`.
 
-use trusty_architect::{FakeTmux, SystemTmux, Tmux, TmuxError};
+use trusty_architect::{FakeTmux, ScriptedTmux, SystemTmux, Tmux, TmuxError};
 
 fn refused(r: Result<String, TmuxError>) -> bool {
     matches!(r, Err(TmuxError::SendKeysRefused))
@@ -22,6 +22,14 @@ fn run_refuses_send_keys_on_every_implementation() {
     // /bin/echo stands in for tmux: had the verb run, it would exit 0.
     let system = SystemTmux::new().with_program("/bin/echo");
     assert!(refused(system.run(&argv)), "SystemTmux must refuse");
+
+    // #9171 A3b-1: the scripted fake refuses too, before its script sees it.
+    let scripted = ScriptedTmux::new().fallback("send-keys", "");
+    assert!(refused(scripted.run(&argv)), "ScriptedTmux must refuse");
+    assert!(
+        scripted.calls().is_empty(),
+        "a refused verb is not recorded"
+    );
 
     // Other verbs still run.
     assert!(fake.run(&["list-panes"]).is_ok());
