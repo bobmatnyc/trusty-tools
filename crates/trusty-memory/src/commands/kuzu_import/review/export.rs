@@ -241,7 +241,7 @@ impl ReviewFs for OsFs {
     }
 }
 
-fn io_err(step: &'static str, path: &Path) -> impl FnOnce(io::Error) -> ReviewError + '_ {
+fn io_err<'a>(step: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> ReviewError + 'a {
     move |source| ReviewError::Io {
         step,
         path: path.to_path_buf(),
