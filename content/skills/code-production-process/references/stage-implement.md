@@ -46,6 +46,10 @@ All four checks MUST return clean output before the engineer declares the implem
 - No bare `except:` — always catch specific exceptions or `Exception` with logging
 - Async functions: no synchronous I/O inside (no `requests.get`, `open()` in `async def`)
 - Error paths: every exception must be either re-raised, logged and re-raised, or converted to a domain error type — never silently swallowed
+- Tie each edited line to the task. Leave unrelated code, comments and
+  formatting alone, and report unrelated dead code instead of deleting it.
+- Delete imports, variables and functions that your own change left unused;
+  keep ones that were already unused.
 
 ## Dispatch Prompt Template
 
