@@ -368,3 +368,53 @@ fn dispatch_wake_unreadable_pending_reads_as_owed() {
         assert_eq!(state.other.get("wake_pending"), Some(&Value::from(0)));
     }
 }
+
+/// #9171 AC7: a failure after the pointer is typed never reports `sent` and
+/// never clears the pending count.
+#[test]
+fn dispatch_wake_failure_after_typing_stays_owed() -> TestResult {
+    let msg = pointer(ALERTS, 3, None)?;
+    let empty = screen("", false);
+    let rows = [
+        (
+            "re-read after typing fails",
+            owned_tmux()
+                .script("capture-pane", &empty)
+                .fail("capture-pane", "can't find pane: %1"),
+        ),
+        (
+            "owner flips before Enter",
+            ScriptedTmux::new()
+                .script("display-message", "tm-architect\n")
+                .script("display-message", "tm-api\n")
+                .fallback("send-keys", "")
+                .script("capture-pane", &empty)
+                .script("capture-pane", &wrapped(&msg)),
+        ),
+        (
+            "Enter itself fails",
+            ScriptedTmux::new()
+                .fallback("display-message", "tm-architect\n")
+                .script("send-keys", "")
+                .fail("send-keys", "server exited")
+                .script("capture-pane", &empty)
+                .script("capture-pane", &wrapped(&msg)),
+        ),
+    ];
+    for (name, tmux) in rows {
+        let clock = FakeClock::new(NOW);
+        let mut state = PollState::default();
+        state
+            .other
+            .insert("wake_pending".to_owned(), Value::from(2));
+        let result = waker(&tmux, &clock, ALERTS).dispatch(&mut state, &sup_pane()?, 1, None);
+        assert!(!result.starts_with("sent"), "{name}: {result}");
+        assert!(!tmux.sends().is_empty(), "{name}: nothing was typed");
+        assert_eq!(
+            state.other.get("wake_pending"),
+            Some(&Value::from(3)),
+            "{name}: {result}"
+        );
+    }
+    Ok(())
+}
