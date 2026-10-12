@@ -1,0 +1,13 @@
+{"case": "over_threshold", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-architect", "pane": "", "kind": "self_ctx", "fingerprint": "25", "detail": "self ctx 40% (405000/1000000 tokens)", "display": "[tm-architect]: self_ctx: self ctx 40% (405000/1000000 tokens)"}], "logged": false}
+{"case": "newer_under_threshold", "alerts": [], "logged": false}
+{"case": "newer_sdk_cli_ignored", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-architect", "pane": "", "kind": "self_ctx", "fingerprint": "25", "detail": "self ctx 90% (900000/1000000 tokens)", "display": "[tm-architect]: self_ctx: self ctx 90% (900000/1000000 tokens)"}], "logged": false}
+{"case": "missing_dir", "alerts": [], "logged": false}
+{"case": "empty_dir", "alerts": [], "logged": false}
+{"case": "env_window_threshold", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-architect", "pane": "", "kind": "self_ctx", "fingerprint": "5", "detail": "self ctx 10% (100/1000 tokens)", "display": "[tm-architect]: self_ctx: self ctx 10% (100/1000 tokens)"}], "logged": false}
+{"case": "env_threshold_50", "alerts": [], "logged": false}
+{"case": "exactly_at_threshold", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-architect", "pane": "", "kind": "self_ctx", "fingerprint": "25", "detail": "self ctx 25% (250000/1000000 tokens)", "display": "[tm-architect]: self_ctx: self ctx 25% (250000/1000000 tokens)"}], "logged": false}
+{"case": "just_under_threshold", "alerts": [], "logged": false}
+{"case": "rounding_tie", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-architect", "pane": "", "kind": "self_ctx", "fingerprint": "25", "detail": "self ctx 62% (625000/1000000 tokens)", "display": "[tm-architect]: self_ctx: self ctx 62% (625000/1000000 tokens)"}], "logged": false}
+{"case": "window_zero", "alerts": [], "logged": false}
+{"case": "bad_window", "alerts": [], "logged": true}
+{"case": "bad_usage_field", "alerts": [], "logged": true}

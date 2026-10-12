@@ -1,0 +1,6 @@
+["two_panes", [{"session": "tm-a", "pane": "%1", "cmd": "claude", "active": "11", "path": "/w/a", "dead": "0"}, {"session": "tm-b", "pane": "%22", "cmd": "2.1.283", "active": "01", "path": "/w/b", "dead": "0"}]]
+["short_rows", [{"session": "tm-a", "pane": "%1", "cmd": "zsh", "active": "10", "path": "", "dead": ""}]]
+["tab_in_path", [{"session": "tm-a", "pane": "%3", "cmd": "claude", "active": "11", "path": "/w/a", "dead": "b\t0"}]]
+["bad_pane_id", [{"session": "tm-a", "pane": "main", "cmd": "claude", "active": "11", "path": "/w", "dead": "0"}, {"session": "tm-b", "pane": "%00", "cmd": "claude", "active": "11", "path": "/w", "dead": "1"}]]
+["crlf_and_unicode", [{"session": "tm-\u00e9", "pane": "%4", "cmd": "claude", "active": "11", "path": "/w/\u00fc", "dead": "0"}, {"session": "tm-z", "pane": "%5", "cmd": "-zsh", "active": "00", "path": "/", "dead": "1"}]]
+["empty", []]

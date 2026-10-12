@@ -3,13 +3,14 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::error::TmuxError;
-use crate::tmux::Tmux;
+use crate::tmux::{Permit, Tmux};
 
 /// A recording [`Tmux`] for tests in this crate and its callers.
 ///
 /// Why: the send path must be proven to send, or not send, without a live tmux
 /// server; the recorded argv is the evidence.
-/// What: every [`Tmux::run`] appends its argv to a call log and returns an
+/// What: every call that reaches the fake (`run` for any verb but `send-keys`,
+/// and the guarded send path) appends its argv to a call log and returns an
 /// empty stdout. Thread-safe, so a threaded poller can share one.
 /// Test: `send_guarded_refuses_typed_and_sends_on_empty`.
 #[derive(Debug, Default)]
@@ -36,7 +37,7 @@ impl FakeTmux {
 }
 
 impl Tmux for FakeTmux {
-    fn run(&self, args: &[&str]) -> Result<String, TmuxError> {
+    fn execute(&self, args: &[&str], _permit: Permit) -> Result<String, TmuxError> {
         if args.is_empty() {
             return Err(TmuxError::EmptyCommand);
         }

@@ -18,9 +18,12 @@ readme = "README.md"
 include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 
 [dependencies]
-# #9171 A1: dependencies are limited to std, serde, thiserror and tracing.
-# A2 adds serde/serde_json for the parity JSON; regex and hashing are written
-# by hand (src/classify/matchers.rs, src/sha1.rs) to stay inside that list.
+# #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
+# libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are
+# written by hand (src/classify/matchers.rs, src/sha1.rs) to stay inside that
+# list. A3a adds libc (Architect ruling Q5) for kill(pid, 0), getloadavg,
+# statvfs and the CPU count the host sensors read.
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

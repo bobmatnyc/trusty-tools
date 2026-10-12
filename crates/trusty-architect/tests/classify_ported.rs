@@ -5,10 +5,10 @@
 //! Sources: `tests/test_fleet_poll.py`, plus the parse halves of
 //! `scripts/test_fleet_poll_idle.py`, `scripts/test_fleet_poll_rc.py` and
 //! `scripts/test_fleet_poll_ctx.py`. The live classifier is `fleet-poll.py`'s
-//! inline copy, not `fleet-classify.py`. Prototype tests that still encode
-//! `fleet-classify.py`'s ctx bar (45/50) fail against `fleet-poll.py`: they
-//! are not ported by name. Each has an `*_at_live_bar` test with the same
-//! inputs and `fleet-poll.py`'s actual result instead.
+//! inline copy, not `fleet-classify.py`. Seven prototype tests still encode
+//! `fleet-classify.py`'s ctx bar (45/50) and fail against `fleet-poll.py`;
+//! #9171 A3a ports them by name (each marked `// Python: <name>`) with the
+//! same inputs and `fleet-poll.py`'s actual result.
 //!
 //! Captures are built by `screen()`, a line-for-line port of the Python
 //! helper. Tests that exercise `fleet-poll.py`'s I/O (wake, dispatch, cycle,
@@ -18,7 +18,7 @@
 use std::path::Path;
 
 use trusty_architect::classify::{
-    Alert, BoxReading, CTX_HIGH, CTX_WARN, DedupState, PaneState, REEMIT, alert, dedup, evaluate,
+    Alert, BoxReading, CTX_HIGH, CTX_WARN, DedupState, PaneState, alert, dedup, evaluate,
     fleet_plan_alerts, parse_pane,
 };
 use trusty_architect::{InputState, classify_input, input_state_for_send};
@@ -239,11 +239,12 @@ fn test_a_dialogs_option_lines_are_never_mistaken_for_the_box() {
 // #9171: screen() writes `ctx 30%`, over fleet-poll.py's CTX_WARN of 22, so
 // every idle pane below also raises a `ctx` alert. The prototype tests these
 // replace expect none (fleet-classify.py's 45/50 bar) and fail against
-// fleet-poll.py; these `*_at_live_bar` tests keep their inputs and assert what
-// fleet-poll.py returns.
+// fleet-poll.py; the ports below keep their names and inputs and assert what
+// fleet-poll.py returns (#9171 A3a reconcile list).
 
+// Python: test_idle_prompt_alerts_after_ten_minutes_only
 #[test]
-fn idle_prompt_alerts_after_ten_minutes_at_live_bar() {
+fn test_idle_prompt_alerts_after_ten_minutes_only() {
     let cap = screen(
         &PM_TURN,
         Screen {
@@ -265,8 +266,9 @@ fn idle_prompt_alerts_after_ten_minutes_at_live_bar() {
     );
 }
 
+// Python: test_suggestion_box_counts_as_idle
 #[test]
-fn suggestion_box_counts_as_idle_at_live_bar() {
+fn test_suggestion_box_counts_as_idle() {
     let cap = screen(
         &PM_TURN,
         Screen {
@@ -280,8 +282,9 @@ fn suggestion_box_counts_as_idle_at_live_bar() {
     assert_eq!(kinds(&run(&cap, &mut ps, 600.0).1), ["ctx", "idle"]);
 }
 
+// Python: test_busy_pane_is_neither_idle_nor_question
 #[test]
-fn busy_pane_is_neither_idle_nor_question_at_live_bar() {
+fn test_busy_pane_is_neither_idle_nor_question() {
     let cases: [(&[&str], &str); 3] = [
         (
             &["python-engineer", "research"],
@@ -318,8 +321,9 @@ fn test_waiting_line_anywhere_in_the_capture_is_busy() {
     assert!(parse_pane(&screen(&body, Screen::default())).busy);
 }
 
+// Python: test_question_is_last_pm_line_ending_in_question_mark
 #[test]
-fn question_is_last_pm_line_ending_in_question_mark_at_live_bar() {
+fn test_question_is_last_pm_line_ending_in_question_mark() {
     let status = Some("✻ Cooked for 23s · done 7:36 AM");
     let (_, alerts) = run(
         &screen(
@@ -361,11 +365,11 @@ fn ctx_fingerprints(ctx: u32) -> Vec<String> {
     alerts.into_iter().map(|a| a.fingerprint).collect()
 }
 
-/// Same shape as the prototype's `test_ctx_47_alerts_and_crossing_50_changes_fingerprint`,
-/// at fleet-poll.py's 22/25 bar. Literal percentages, so a mutated
+/// At fleet-poll.py's 22/25 bar. Literal percentages, so a mutated
 /// `CTX_WARN` or `CTX_HIGH` turns it red.
+// Python: test_ctx_47_alerts_and_crossing_50_changes_fingerprint
 #[test]
-fn ctx_crossing_22_and_25_at_live_bar() {
+fn test_ctx_47_alerts_and_crossing_50_changes_fingerprint() {
     assert!(ctx_fingerprints(21).is_empty());
     assert_eq!(ctx_fingerprints(22), ["22"]);
     assert_eq!(ctx_fingerprints(24), ["22"]);
@@ -376,16 +380,16 @@ fn ctx_crossing_22_and_25_at_live_bar() {
     assert_eq!(ctx_fingerprints(44), ["25"]);
 }
 
-/// `scripts/test_fleet_poll_ctx.py`: the CTX half. The prototype also checks
-/// `SELF_CTX_THRESHOLD_DEFAULT == 25`, which belongs to `fleet-poll.py`'s
-/// `self_ctx_alerts` (A3).
+/// `scripts/test_fleet_poll_ctx.py`, both halves since #9171 A3a.
 #[test]
 fn test_ctx_thresholds_follow_ruling_b7() {
     assert_eq!((CTX_WARN, CTX_HIGH), (22, 25));
+    assert_eq!(trusty_architect::poller::SELF_CTX_THRESHOLD_DEFAULT, 25);
 }
 
+// Python: test_plan_limit_text_and_status_line
 #[test]
-fn plan_limit_text_and_status_line_at_live_bar() {
+fn test_plan_limit_text_and_status_line() {
     let body = [
         &PM_TURN[..],
         &["  ⎿  Claude usage limit reached. Your limit will reset at 5pm."],
@@ -423,8 +427,9 @@ fn plan_limit_text_and_status_line_at_live_bar() {
     assert!(!plan[0].display.starts_with('['));
 }
 
+// Python: test_error_alerts_only_for_lines_new_since_last_cycle
 #[test]
-fn error_alerts_only_for_lines_new_since_last_cycle_at_live_bar() {
+fn test_error_alerts_only_for_lines_new_since_last_cycle() {
     let old = [&PM_TURN[..], &["  ⎿  Error: Exit code 1"]].concat();
     let mut ps = PaneState::default();
     // First sight seeds the error set: only the ctx alert.
@@ -762,26 +767,4 @@ fn unrecognised_captures_never_accept_input() {
     // Dim re-set inside a combined parameter list (`0;2`), reset at the end.
     let combined = format!("⏺ done\n{r}\n❯{NBSP}{DIM}all \u{1b}[0;2mdim text{RESET}\n{r}\n");
     assert_eq!(input_state_for_send(&combined), InputState::Suggestion);
-}
-
-#[test]
-fn test_self_ctx_reemit_interval_matches_ctx() {
-    // The prototype builds the alert with fleet-poll's self_ctx_alerts (A3);
-    // the dedup half is this crate's.
-    let interval = |k: &str| REEMIT.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
-    assert_eq!(interval("self_ctx"), interval("ctx"));
-    let sc = |now| {
-        [alert(
-            "self_ctx",
-            "x",
-            "self ctx 50%",
-            "tm-architect",
-            "",
-            now,
-        )]
-    };
-    let mut st = DedupState::default();
-    assert_eq!(dedup(&mut st, &sc(0.0), 0.0).0.len(), 1);
-    assert_eq!(dedup(&mut st, &sc(1799.0), 1799.0), (vec![], 1));
-    assert_eq!(dedup(&mut st, &sc(1800.0), 1800.0).0.len(), 1);
 }
