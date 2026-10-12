@@ -163,22 +163,42 @@ pub(crate) fn hash_file(path: &Path) -> Result<(u64, String)> {
 /// land, through symlinks and `..`, including for a path not created yet.
 /// What: walks the components from the root, keeping the prefix canonical:
 /// an existing component is canonicalised (symlinks followed), a missing one
-/// is appended as is, `..` pops one level. A dangling symlink counts as
+/// is appended as is, and `..` after existing components pops one level of
+/// the real path. `..` after a missing component is an `InvalidInput` error:
+/// a create would make that component first, so the textual pop names a
+/// path other than the one the create touches. A dangling symlink counts as
 /// missing: it is never followed, since mkdir on it fails with EEXIST and the
 /// create refuses. Any error other than "not found" is returned, so the guard
 /// fails closed; a symlink loop is such an error (`ELOOP`).
 /// Test: `a_destination_in_the_registry_is_refused_and_writes_nothing`,
 /// `a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing`,
 /// `an_unresolvable_dest_prefix_is_an_error_and_writes_nothing`,
-/// `a_self_referencing_dangling_symlink_dest_is_an_error_not_a_crash`.
+/// `a_self_referencing_dangling_symlink_dest_is_an_error_not_a_crash`; the
+/// tool and CLI rows for `..` after a missing component are in
+/// trusty-memory's palace_backup_9282 tests.
 pub(crate) fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
     let abs = std::path::absolute(path)?;
     let mut base = PathBuf::new();
+    // The first component that does not exist, once one has been appended.
+    let mut missing: Option<PathBuf> = None;
     for comp in abs.components() {
         match comp {
             Component::Prefix(_) | Component::RootDir => base.push(comp.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
+                // #9282: `<root>/palaces/../l/bk` popped to `<root>/l/bk` and
+                // passed, then the create made `<root>/palaces`; refuse instead.
+                if let Some(m) = &missing {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "'..' follows {}, which does not exist; a create would make it, \
+                             so the destination cannot be checked against the palace \
+                             registry directory",
+                            m.display()
+                        ),
+                    ));
+                }
                 base.pop();
             }
             Component::Normal(name) => {
@@ -187,7 +207,10 @@ pub(crate) fn resolve_existing_prefix(path: &Path) -> io::Result<PathBuf> {
                     Ok(real) => real,
                     // #9282: a dangling link is appended, never followed; following
                     // `evil -> missing/../evil` recursed until the stack overflowed.
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => next,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        missing.get_or_insert_with(|| next.clone());
+                        next
+                    }
                     Err(e) => return Err(e),
                 };
             }

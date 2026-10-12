@@ -354,7 +354,8 @@ pub(crate) fn snapshot_palace(
 /// directory, and the next start switches the registry to it
 /// (`palace_registry_dir_from`): every real palace vanishes.
 /// What: resolves `dest` and `<registry>/palaces` through their longest
-/// existing prefix (symlinks followed, dangling ones not; `..` applied).
+/// existing prefix (symlinks followed, dangling ones not; `..` applied, and
+/// an error when it follows a missing component).
 /// Returns [`SnapshotError::DestinationInRegistry`] when the resolved
 /// `dest`'s parent is the canonical parent of `palace_dir`, and
 /// [`SnapshotError::DestinationSwitchesRegistry`] when it lies at or under
