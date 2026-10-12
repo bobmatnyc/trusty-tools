@@ -135,21 +135,36 @@ async fn missing_text_and_content_error_names_both_fields() {
     }
 }
 
-/// Why (#9746): clients learn argument names from the schema, so the alias is
-/// advertised; the documented name stays the required one.
-/// What: each in-scope tool lists its alias as an optional string property.
+/// Why (#9746): clients learn argument names from the schema, and a
+/// schema-validating client refuses a call that omits a `required` field. So
+/// an alias-only call passes only when neither body name is required; the
+/// descriptions carry the either-or rule and the handler enforces it.
+/// What: per tool, with and without a default palace, the alias is a string
+/// property, neither name is in `required`, and both descriptions state the
+/// rule.
 #[test]
 fn write_schemas_advertise_the_text_content_alias() {
-    let defs = tool_definitions();
-    let tools = defs["tools"].as_array().expect("tools array");
-    for (tool, name, alias) in TOOLS {
-        let schema = &tools
-            .iter()
-            .find(|t| t["name"] == tool)
-            .unwrap_or_else(|| panic!("{tool} listed"))["inputSchema"];
-        assert_eq!(schema["properties"][alias]["type"], "string", "{tool}");
-        let required = schema["required"].as_array().expect("required array");
-        assert!(required.contains(&json!(name)), "{tool}: {required:?}");
-        assert!(!required.contains(&json!(alias)), "{tool}: {required:?}");
+    const RULE: &str = "One of `text` or `content` is required.";
+    for has_default in [false, true] {
+        let defs = tool_definitions_with(has_default);
+        let tools = defs["tools"].as_array().expect("tools array");
+        for (tool, name, alias) in TOOLS {
+            let schema = &tools
+                .iter()
+                .find(|t| t["name"] == tool)
+                .unwrap_or_else(|| panic!("{tool} listed"))["inputSchema"];
+            assert_eq!(schema["properties"][alias]["type"], "string", "{tool}");
+            let required = schema["required"].as_array().expect("required array");
+            for field in [name, alias] {
+                assert!(
+                    !required.contains(&json!(field)),
+                    "{tool} (default={has_default}): `{field}` in {required:?}"
+                );
+                let desc = schema["properties"][field]["description"]
+                    .as_str()
+                    .unwrap_or_default();
+                assert!(desc.contains(RULE), "{tool}: `{field}` says {desc:?}");
+            }
+        }
     }
 }
