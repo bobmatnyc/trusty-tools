@@ -5,6 +5,7 @@
 //! is removed or made to pass on error.
 
 use super::*;
+use crate::core::session_profile::SUPERVISOR_PROFILE_ID;
 use crate::core::twin_arming::{
     self, OsProbe, load_user_config_strict, read_record, record_path, write_record,
 };
@@ -41,8 +42,8 @@ impl Twin {
     /// Supervisor allowlist and twin grant both name the project.
     fn config(&self) -> MpmConfig {
         let mut config = MpmConfig::default();
-        config.supervisor.projects = vec![self.dir().to_path_buf()];
-        config.supervisor.twin.projects = vec![self.dir().to_path_buf()];
+        config.architect.get_or_insert_default().projects = vec![self.dir().to_path_buf()];
+        config.architect.get_or_insert_default().twin.projects = vec![self.dir().to_path_buf()];
         config
     }
 
@@ -209,7 +210,7 @@ fn a_supervisor_without_the_twin_grant_is_not_twin() {
     let other = TempDir::new().expect("tempdir");
     for grant in [vec![], vec![other.path().to_path_buf()], vec!["rel".into()]] {
         let mut config = twin.config();
-        config.supervisor.twin.projects = grant;
+        config.architect.get_or_insert_default().twin.projects = grant;
         let probe = Fake {
             config: Ok(config),
             ..twin.probe()
@@ -222,7 +223,7 @@ fn a_supervisor_without_the_twin_grant_is_not_twin() {
 fn a_twin_grant_without_the_supervisor_allowlist_is_not_twin() {
     let twin = Twin::new();
     let mut config = twin.config();
-    config.supervisor.projects.clear();
+    config.architect.get_or_insert_default().projects.clear();
     let probe = Fake {
         config: Ok(config),
         ..twin.probe()
@@ -364,7 +365,10 @@ fn a_malformed_user_config_is_an_error_not_a_default() {
     let project = TempDir::new().expect("tempdir");
     // Absent: no grant, and no error.
     let absent = load_user_config_strict(root.path()).expect("absent is not an error");
-    assert_eq!(absent.supervisor, Default::default());
+    assert_eq!(
+        absent.architect_grant(),
+        &crate::core::session_profile::SupervisorConfig::default()
+    );
     let grant = format!(
         "[supervisor]\nprojects = [{p:?}]\n\n[supervisor.twin]\nprojects = [{p:?}]\n",
         p = project.path()
@@ -372,7 +376,7 @@ fn a_malformed_user_config_is_an_error_not_a_default() {
     std::fs::write(root.path().join("config.toml"), &grant).expect("write");
     let parsed = load_user_config_strict(root.path()).expect("a valid grant parses");
     assert_eq!(
-        parsed.supervisor.twin.projects,
+        parsed.architect_grant().twin.projects,
         vec![project.path().to_path_buf()]
     );
     // The same grant after a syntax error: an error, never the defaults.

@@ -3675,7 +3675,8 @@ fn pr_8934_an_explicit_repo_never_skips() {
     )
     .expect("toml");
     let mut supervisor = trusty_mpm::core::config::MpmConfig::default();
-    supervisor.supervisor.projects = vec![std::fs::canonicalize(local.path()).expect("canon")];
+    supervisor.architect.get_or_insert_default().projects =
+        vec![std::fs::canonicalize(local.path()).expect("canon")];
     assert_eq!(
         super::local_only_skip(local.path(), None, &supervisor),
         None

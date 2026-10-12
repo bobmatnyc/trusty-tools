@@ -355,7 +355,12 @@ pub fn select_style(
 ) -> SelectedStyle {
     let id = style_chain(project_dir, explicit, config, manifest, profile);
     let supervisor_id = crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID;
-    if id.as_deref() == Some(supervisor_id) && !profile.is_supervisor() {
+    // #9755: the Architect style is refused to a PM under either id.
+    if id
+        .as_deref()
+        .is_some_and(crate::core::architect_compat::is_architect_output_style_id)
+        && !profile.is_supervisor()
+    {
         let warning = format!(
             "output style '{supervisor_id}' is for the supervisor profile only (set \
              `profile = \"supervisor\"` in .trusty-mpm.toml and allow-list the project under \

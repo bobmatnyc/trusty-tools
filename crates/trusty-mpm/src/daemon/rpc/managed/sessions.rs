@@ -19,6 +19,7 @@
 //! | `mpm.managed.reconcile_worktrees` | `GET /api/v1/sessions/managed/reconcile-worktrees` |
 //! | `mpm.managed.fleet` | `GET /api/v1/sessions/managed/fleet` |
 //! | `mpm.managed.register_supervisor` | `POST /api/v1/sessions/managed/supervisor` |
+//! | `mpm.managed.register_architect` | `POST /api/v1/sessions/managed/architect` |
 //! | `mpm.residency.active` | none — socket-only (#7087 slice 1b) |
 //! | `mpm.managed.get` | `GET /api/v1/sessions/managed/{id}` |
 //! | `mpm.managed.stop` | `DELETE /api/v1/sessions/managed/{id}` |
@@ -192,6 +193,15 @@ fn register_rebind(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
         })
 }
 
+/// The Architect registration method, under its D07 name and the legacy name
+/// (#9755). Test: `legacy_rpc_register_supervisor_still_served`,
+/// `rpc_register_architect_served`.
+// DEPRECATED(D07): drop the legacy name once the client moves.
+const REGISTER_ARCHITECT_METHODS: [&str; 2] = [
+    "mpm.managed.register_architect",
+    "mpm.managed.register_supervisor",
+];
+
 /// The methods that address the fleet rather than one session.
 fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     macro_rules! st {
@@ -201,7 +211,29 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
     }
     let (spawn_s, list_s, adopt_s, prune_s, eph_s) = (st!(), st!(), st!(), st!(), st!());
     let (pw_s, rw_s, fleet_s, sa_s) = (st!(), st!(), st!(), st!());
-    let (residency_s, sup_s) = (st!(), st!());
+    let residency_s = st!();
+
+    // #8942: the same body as `POST .../managed/supervisor`; #9755 serves it
+    // under the D07 name and the legacy name the client still calls.
+    let router = REGISTER_ARCHITECT_METHODS
+        .into_iter()
+        .fold(router, |router, method| {
+            let sup_s = st!();
+            router.typed(
+                method,
+                move |req: crate::session_manager::SupervisorRegistration| {
+                    let state = Arc::clone(&sup_s);
+                    async move {
+                        let verifier = supervisor::LaunchRecordBinding {
+                            root: state.framework_root().to_path_buf(),
+                        };
+                        supervisor::register_supervisor_core(&state, &req, &verifier)
+                            .await
+                            .into_rpc()
+                    }
+                },
+            )
+        });
 
     router
         .typed("mpm.managed.spawn", move |req: SpawnRequest| {
@@ -250,21 +282,6 @@ fn register_fleet_wide(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter
             let state = Arc::clone(&fleet_s);
             async move { fleet::fleet_core(&state).await.into_rpc() }
         })
-        // #8942: the same body as `POST .../managed/supervisor`.
-        .typed(
-            "mpm.managed.register_supervisor",
-            move |req: crate::session_manager::SupervisorRegistration| {
-                let state = Arc::clone(&sup_s);
-                async move {
-                    let verifier = supervisor::LaunchRecordBinding {
-                        root: state.framework_root().to_path_buf(),
-                    };
-                    supervisor::register_supervisor_core(&state, &req, &verifier)
-                        .await
-                        .into_rpc()
-                }
-            },
-        )
         .typed(
             trusty_common::mpm_rpc::METHOD_RESIDENCY_ACTIVE,
             move |_: NoParams| {

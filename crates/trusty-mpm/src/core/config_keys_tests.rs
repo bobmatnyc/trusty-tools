@@ -145,8 +145,11 @@ fn build_lease_keys_are_not_reported() {
 /// must not call a key the product wrote a typo.
 #[test]
 fn a_product_written_supervisor_session_is_not_reported() {
-    let text = "[supervisor]\nprojects = [\"/p\"]\nsession = \"tm-supervisor\"\n";
-    assert!(mpm_unknown(text).is_empty(), "{:?}", mpm_unknown(text));
+    // #9755: the same key under `[architect]` is product-written too.
+    for table in ["supervisor", "architect"] {
+        let text = format!("[{table}]\nprojects = [\"/p\"]\nsession = \"tm-supervisor\"\n");
+        assert!(mpm_unknown(&text).is_empty(), "{:?}", mpm_unknown(&text));
+    }
 }
 
 /// #9097: `tm doctor` loads `config.toml` about twenty times per run, and each

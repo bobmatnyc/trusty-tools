@@ -26,7 +26,8 @@ fn supervisor_project() -> TempDir {
 /// A user-level config that allow-lists exactly `dirs`.
 fn allowing(dirs: &[&Path]) -> MpmConfig {
     let mut config = MpmConfig::default();
-    config.supervisor.projects = dirs.iter().map(|d| d.to_path_buf()).collect();
+    config.architect.get_or_insert_default().projects =
+        dirs.iter().map(|d| d.to_path_buf()).collect();
     config
 }
 
@@ -122,7 +123,7 @@ fn an_allowlist_entry_for_another_path_does_not_match() {
     );
     // A relative entry matches nothing, whatever the process cwd is.
     let relative = allowing(&[Path::new(".")]);
-    assert!(!is_allow_listed(tmp.path(), &relative.supervisor));
+    assert!(!is_allow_listed(tmp.path(), relative.architect_grant()));
 }
 
 #[test]
@@ -264,7 +265,7 @@ fn no_pm_delegation_text_reaches_a_supervisor_session() {
     }
     assert_eq!(
         leaked(
-            rc().required("output-styles/trusty-mpm-supervisor.md"),
+            rc().required("output-styles/trusty-mpm-architect.md"),
             &markers
         ),
         Vec::<&str>::new()
@@ -346,11 +347,11 @@ fn the_supervisor_style_carries_write_plainly_verbatim() {
         rest[..end].trim().to_string()
     };
     assert_eq!(
-        section(rc().required("output-styles/trusty-mpm-supervisor.md")),
+        section(rc().required("output-styles/trusty-mpm-architect.md")),
         section(rc().required("output-styles/trusty-mpm.md"))
     );
     assert!(
-        rc().required("output-styles/trusty-mpm-supervisor.md")
+        rc().required("output-styles/trusty-mpm-architect.md")
             .contains(&format!("\nname: {SUPERVISOR_OUTPUT_STYLE_ID}\n"))
     );
 }

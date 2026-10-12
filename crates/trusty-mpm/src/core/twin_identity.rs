@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::core::config::MpmConfig;
-use crate::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
+use crate::core::session_profile;
 
 /// `[supervisor.twin]` in the user-level `~/.trusty-mpm/config.toml` (#8878).
 ///
@@ -217,7 +217,7 @@ pub fn check_grant(project_dir: &Path, config: &MpmConfig) -> Result<(), TwinRef
     if !session_profile::resolve(project_dir, config).is_supervisor() {
         return Err(TwinRefusal::NotSupervisor);
     }
-    if !session_profile::path_is_listed(project_dir, &config.supervisor.twin.projects) {
+    if !session_profile::path_is_listed(project_dir, &config.architect_grant().twin.projects) {
         return Err(TwinRefusal::NoGrant);
     }
     Ok(())
@@ -253,7 +253,8 @@ fn armed_claude(
         ThreadKind::Subagent => return Err(TwinRefusal::Subagent),
         ThreadKind::Unknown => return Err(TwinRefusal::UnknownThread),
     }
-    if ctx.profile_stamp != Some(OsStr::new(SUPERVISOR_PROFILE_ID)) {
+    // #9755: either stamp value is the Architect.
+    if !crate::core::architect_compat::is_architect_stamp(ctx.profile_stamp) {
         return Err(TwinRefusal::NotSupervisor);
     }
     let project = session_profile::hook_project_dir(ctx.project_dir.map(OsString::from))

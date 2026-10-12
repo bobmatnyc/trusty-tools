@@ -238,7 +238,8 @@ pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> Doc
 /// [`evaluate_project_style`] before it is reported unknown.
 /// Test: `output_style_ok_when_style_resolves`, `output_style_fail_when_id_unknown`,
 /// `output_style_fail_when_file_missing`,
-/// `output_style_ok_for_a_project_style_and_its_composite`.
+/// `output_style_ok_for_a_project_style_and_its_composite`,
+/// `legacy_output_style_id_is_recognised_by_doctor`.
 fn evaluate_style(
     style_id: &str,
     project_dir: Option<&Path>,
@@ -269,12 +270,19 @@ fn evaluate_style(
         .join(".claude")
         .join("output-styles")
         .join(style.file_name);
+    // #9755: the pre-D07 Architect style id is ok, flagged deprecated.
+    let deprecated = if style_id == crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID
+    {
+        " (legacy Architect style id; deprecated by #9755)"
+    } else {
+        ""
+    };
     match std::fs::metadata(&style_path) {
         Ok(meta) if meta.len() > 0 => DoctorCheck::new(
             "output_style",
             CheckStatus::Ok,
             format!(
-                "{source} outputStyle {style_id:?} ({}) resolves to {}",
+                "{source} outputStyle {style_id:?} ({}) resolves to {}{deprecated}",
                 source_path.display(),
                 style_path.display()
             ),

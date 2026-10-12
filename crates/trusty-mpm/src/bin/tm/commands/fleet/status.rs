@@ -238,7 +238,7 @@ fn allowlist_check(dir: &Path, home: &Path) -> Check {
         Err(_) => (false, format!("{} is absent or unreadable", path.display())),
         Ok(raw) => match super::config::parse_user_config(&raw, &path) {
             Err(err) => (false, format!("{err:#}")),
-            Ok((_, cfg)) if session_profile::is_allow_listed(dir, &cfg.supervisor) => (
+            Ok((_, cfg)) if session_profile::is_allow_listed(dir, cfg.architect_grant()) => (
                 true,
                 format!("listed in `[supervisor] projects` of {}", path.display()),
             ),
@@ -320,7 +320,10 @@ fn stamp_check(probe: Probe, names: &Result<SessionNames, String>) -> Check {
         }
     };
     let (ok, detail) = match stamp {
-        Some(v) if v == SUPERVISOR_PROFILE_ID => (true, format!("launched as `{v}`")),
+        // #9755: either stamp value is the Architect.
+        Some(v) if trusty_mpm::core::architect_compat::is_architect_stamp(Some(v.as_ref())) => {
+            (true, format!("launched as `{v}`"))
+        }
         Some(v) => (
             false,
             format!("launched as `{v}`, not `{SUPERVISOR_PROFILE_ID}`"),

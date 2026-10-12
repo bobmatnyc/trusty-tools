@@ -43,7 +43,8 @@ use serde_json::Value;
 /// A key the product itself wrote is not a typo and must not be reported as one.
 /// Test: `a_product_written_supervisor_session_is_not_reported`,
 /// `the_recorded_session_key_is_exempt_from_the_unknown_key_report`.
-pub const KEYS_READ_ELSEWHERE: &[&str] = &["supervisor.session"];
+// #9755: `architect.session` is read before the legacy `supervisor.session`.
+pub const KEYS_READ_ELSEWHERE: &[&str] = &["architect.session", "supervisor.session"];
 
 /// Convert a TOML document to the common `serde_json::Value` tree.
 ///
@@ -91,7 +92,7 @@ pub fn unknown_key_paths<T: Serialize>(raw: &Value, parsed: &T) -> Vec<String> {
     // #8261: `[builders]` also carries the build-lease keys, read by a separate
     // struct so `BuildersConfig` keeps its published shape.
     out.retain(|path| !crate::core::build_lease::config::LEASE_KEYS.contains(&path.as_str()));
-    // #9097: `supervisor.session` is written and read by `tm fleet`, not serde.
+    // #9097: `[architect|supervisor].session` is written and read by `tm fleet`.
     out.retain(|path| !KEYS_READ_ELSEWHERE.contains(&path.as_str()));
     // #9091: `[accounts]` is read strictly by `core::gh_org_accounts`, not by
     // `MpmConfig`, so a broken table is an error there instead of a reset here.

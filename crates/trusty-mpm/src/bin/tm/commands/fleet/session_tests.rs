@@ -406,9 +406,32 @@ fn the_start_command_carries_the_chosen_session_names() {
 /// report exempts, so renaming either side cannot bring the warning back.
 #[test]
 fn the_recorded_session_key_is_exempt_from_the_unknown_key_report() {
-    let path = format!("supervisor.{}", super::SESSION_KEY);
-    assert!(
-        trusty_mpm::core::config_keys::KEYS_READ_ELSEWHERE.contains(&path.as_str()),
-        "{path} is written by `tm fleet init` but would be reported as unrecognised"
-    );
+    // #9755: either table may hold the key.
+    for table in ["architect", "supervisor"] {
+        let path = format!("{table}.{}", super::SESSION_KEY);
+        assert!(
+            trusty_mpm::core::config_keys::KEYS_READ_ELSEWHERE.contains(&path.as_str()),
+            "{path} is written by `tm fleet init` but would be reported as unrecognised"
+        );
+    }
+}
+
+/// #9755: `architect.session` is read before the legacy `supervisor.session`,
+/// and a write lands in `[architect]` once that table exists.
+#[test]
+fn an_architect_session_key_wins_over_the_legacy_one() {
+    let path = Path::new("/h/.trusty-mpm/config.toml");
+    let read = |text: &str| super::recorded(&text.parse().expect("toml"), path).expect("valid");
+    let legacy = "[supervisor]\nsession = \"tm-old\"\n";
+    assert_eq!(read(legacy).as_deref(), Some("tm-old"));
+    let both = "[architect]\nsession = \"tm-new\"\n\n[supervisor]\nsession = \"tm-old\"\n";
+    assert_eq!(read(both).as_deref(), Some("tm-new"));
+
+    let names = SessionNames::new("tm-next").expect("valid name");
+    let raw = "[architect]\nprojects = []\n";
+    let super::Edit::Changed(text) = super::record_name(raw, &names, path).expect("edit") else {
+        panic!("the name should be recorded");
+    };
+    assert!(!text.contains("[supervisor]"), "{text}");
+    assert_eq!(read(&text).as_deref(), Some("tm-next"));
 }

@@ -26,11 +26,22 @@ use crate::daemon::state::DaemonState;
 use crate::session_manager::{BindingVerifier, RegisterError, SupervisorRegistration};
 
 /// The Architect registration route, as a sub-router merged by `api.rs`.
+///
+/// What: the D07 path `.../managed/architect` and the legacy
+/// `.../managed/supervisor` mount the same handler (#9755); the client still
+/// posts to the legacy path, which every older daemon serves.
+/// Test: `legacy_register_route_still_served`, `architect_register_route_served`.
 pub fn supervisor_routes() -> Router<Arc<DaemonState>> {
-    Router::new().route(
-        "/api/v1/sessions/managed/supervisor",
-        post(register_supervisor_route),
-    )
+    Router::new()
+        .route(
+            "/api/v1/sessions/managed/architect",
+            post(register_supervisor_route),
+        )
+        // DEPRECATED(D07): the legacy path, until the client moves.
+        .route(
+            "/api/v1/sessions/managed/supervisor",
+            post(register_supervisor_route),
+        )
 }
 
 /// `POST /api/v1/sessions/managed/supervisor`; see the module doc.

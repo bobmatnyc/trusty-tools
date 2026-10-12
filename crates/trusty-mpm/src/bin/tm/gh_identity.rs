@@ -524,7 +524,7 @@ mod tests {
 
     fn allowing(dir: &std::path::Path) -> trusty_mpm::core::config::MpmConfig {
         let mut config = trusty_mpm::core::config::MpmConfig::default();
-        config.supervisor.projects = vec![dir.to_path_buf()];
+        config.architect.get_or_insert_default().projects = vec![dir.to_path_buf()];
         config
     }
 

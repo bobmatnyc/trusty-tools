@@ -96,7 +96,7 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
     BundledStyle {
         id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
         file_name: "trusty-mpm-supervisor.md",
-        content_path: "output-styles/trusty-mpm-supervisor.md",
+        content_path: "output-styles/trusty-mpm-architect.md",
     },
 ];
 
@@ -109,7 +109,7 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
 pub fn pm_output_styles() -> impl Iterator<Item = &'static BundledStyle> {
     OUTPUT_STYLES
         .iter()
-        .filter(|s| s.id != crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .filter(|s| !crate::core::architect_compat::is_architect_output_style_id(s.id))
 }
 
 // BundledArtifact, InstallPolicy, and ALL are defined in bundle_all.rs.

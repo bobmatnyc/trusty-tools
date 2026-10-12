@@ -134,7 +134,7 @@ fn local_repo_asking_for(profile: &str) -> (tempfile::TempDir, std::path::PathBu
 fn an_allow_listed_supervisor_keeps_gh() {
     let (_dir, root) = local_repo_asking_for("supervisor");
     let mut config = MpmConfig::default();
-    config.supervisor.projects = vec![root.clone()];
+    config.architect.get_or_insert_default().projects = vec![root.clone()];
     assert!(!gh_disabled_for(&root, &config));
     assert_eq!(local_only_spawn_vars(&root, &config), Vec::new());
 }

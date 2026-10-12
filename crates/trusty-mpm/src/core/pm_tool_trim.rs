@@ -11,7 +11,7 @@
 //! profile.
 //! Test: `crates/trusty-mpm/src/core/pm_tool_trim_tests.rs`.
 
-use crate::core::session_profile::{SESSION_PROFILE_ENV, SUPERVISOR_PROFILE_ID, SessionProfile};
+use crate::core::session_profile::{SESSION_PROFILE_ENV, SessionProfile};
 
 /// The variable that turns Claude Code's Artifact tools off.
 ///
@@ -77,7 +77,10 @@ pub fn stamped_profile(env: &[(String, String)]) -> SessionProfile {
         .rev()
         .find(|(name, _)| name == SESSION_PROFILE_ENV)
     {
-        Some((_, id)) if id == SUPERVISOR_PROFILE_ID => SessionProfile::Supervisor,
+        // #9755: either stamp value is the Architect.
+        Some((_, id)) if crate::core::architect_compat::is_architect_stamp(Some(id.as_ref())) => {
+            SessionProfile::Supervisor
+        }
         _ => SessionProfile::Pm,
     }
 }

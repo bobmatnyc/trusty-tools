@@ -63,18 +63,18 @@ pub const REQUIRED_INSTRUCTIONS: &[&str] = &[
     "sections/non-overridable-rules.md",
     "sections/framework-guaranteed-conventions.md",
     "sections/prompt-self-improvement.md",
-    "supervisor/identity.md",
-    "supervisor/hard-limits.md",
-    "supervisor/relay-protocol.md",
-    "supervisor/evidence-labels.md",
-    "supervisor/decisions.md",
-    "supervisor/monitoring.md",
-    "supervisor/tool-priority.md",
-    "supervisor/prose-style.md",
+    "architect/identity.md",
+    "architect/hard-limits.md",
+    "architect/relay-protocol.md",
+    "architect/evidence-labels.md",
+    "architect/decisions.md",
+    "architect/monitoring.md",
+    "architect/tool-priority.md",
+    "architect/prose-style.md",
     "output-styles/trusty-mpm.md",
     "output-styles/trusty-mpm-teacher.md",
     "output-styles/trusty-mpm-research.md",
-    "output-styles/trusty-mpm-supervisor.md",
+    "output-styles/trusty-mpm-architect.md",
     "sm_instructions/SM_INSTRUCTIONS.md",
     "sm_instructions/SM_WORKFLOW.md",
     "sm_instructions/SM_TOOLS.md",
@@ -130,7 +130,7 @@ impl FrameworkContent {
         }
         if let Some(missing) = REQUIRED_INSTRUCTIONS
             .iter()
-            .find(|rel| !instructions.contains_key(**rel))
+            .find(|rel| lookup(&instructions, rel).is_none())
         {
             return Err(AgentContentError::Missing {
                 origin,
@@ -185,7 +185,7 @@ impl FrameworkContent {
 
     /// The instruction file at `rel` (`sections/core.md`), if present.
     pub fn instruction(&self, rel: &str) -> Option<&str> {
-        self.instructions.get(rel).map(String::as_str)
+        lookup(&self.instructions, rel)
     }
 
     /// Every instruction path (relative to `instructions/`) under `prefix`
@@ -219,6 +219,22 @@ impl FrameworkContent {
         );
         self.instruction(rel).unwrap_or_default()
     }
+}
+
+/// The instruction at `rel`, else at its pre-D07 path.
+///
+/// Why: owner ruling D2d keeps `instructions/supervisor/` in the content
+/// bundle until a later content release (#9755).
+/// Test: `a_source_with_only_legacy_supervisor_sections_still_loads`.
+fn lookup<'a>(instructions: &'a BTreeMap<String, String>, rel: &str) -> Option<&'a str> {
+    instructions
+        .get(rel)
+        .or_else(|| {
+            instructions.get(&crate::core::architect_compat::legacy_instruction_path(
+                rel,
+            )?)
+        })
+        .map(String::as_str)
 }
 
 #[cfg(test)]

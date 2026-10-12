@@ -366,6 +366,21 @@ fn doctor_recognises_the_supervisor_style() {
     assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
 }
 
+/// #9755 (R4): a project still selecting the pre-D07 Architect style id is
+/// "ok, deprecated", never a failure, and its deployed file is no orphan.
+#[test]
+fn legacy_output_style_id_is_recognised_by_doctor() {
+    let home = tempfile::tempdir().unwrap();
+    deploy_all_styles(home.path());
+    let legacy = crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID;
+    write_settings(home.path(), &format!(r#"{{"outputStyle": "{legacy}"}}"#));
+    let check = check_output_style(None, home.path());
+    assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+    assert!(check.message.contains("deprecated"), "{}", check.message);
+    let stale = check_output_style_staleness(None, home.path(), &hermetic_paths(home.path()));
+    assert_eq!(stale.status, CheckStatus::Ok, "message: {}", stale.message);
+}
+
 #[test]
 fn staleness_warns_on_drift() {
     // This is the exact incident condition (issue #2333): PR #2328

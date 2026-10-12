@@ -37,10 +37,11 @@ use crate::core::project_config::ProjectLevelConfig;
 pub const PM_PROFILE_ID: &str = "pm";
 
 /// `profile` value selecting the fleet supervisor.
-pub const SUPERVISOR_PROFILE_ID: &str = "supervisor";
+pub const SUPERVISOR_PROFILE_ID: &str = crate::core::architect_compat::LEGACY_SUPERVISOR_PROFILE_ID;
 
 /// Output-style id a supervisor session runs on.
-pub const SUPERVISOR_OUTPUT_STYLE_ID: &str = "trusty-mpm-supervisor";
+pub const SUPERVISOR_OUTPUT_STYLE_ID: &str =
+    crate::core::architect_compat::LEGACY_SUPERVISOR_OUTPUT_STYLE_ID;
 
 /// The launch stamp: the profile a session was launched as (#8453).
 ///
@@ -121,14 +122,14 @@ pub struct SupervisorConfig {
 /// bundle's `instructions/` (#9012: runtime content, no longer compiled in).
 /// Test: `golden_supervisor_prompt`, `every_kept_item_reaches_the_supervisor_prompt`.
 pub const SUPERVISOR_SECTIONS: [(&str, &str); 8] = [
-    ("identity", "supervisor/identity.md"),
-    ("hard-limits", "supervisor/hard-limits.md"),
-    ("relay-protocol", "supervisor/relay-protocol.md"),
-    ("evidence-labels", "supervisor/evidence-labels.md"),
-    ("decisions", "supervisor/decisions.md"),
-    ("monitoring", "supervisor/monitoring.md"),
-    ("tool-priority", "supervisor/tool-priority.md"),
-    ("prose-style", "supervisor/prose-style.md"),
+    ("identity", "architect/identity.md"),
+    ("hard-limits", "architect/hard-limits.md"),
+    ("relay-protocol", "architect/relay-protocol.md"),
+    ("evidence-labels", "architect/evidence-labels.md"),
+    ("decisions", "architect/decisions.md"),
+    ("monitoring", "architect/monitoring.md"),
+    ("tool-priority", "architect/tool-priority.md"),
+    ("prose-style", "architect/prose-style.md"),
 ];
 
 /// The composed supervisor instructions.
@@ -161,13 +162,16 @@ pub fn profile_from_config(config: Option<&ProjectLevelConfig>) -> SessionProfil
     };
     let value = raw.trim().to_ascii_lowercase();
     match value.as_str() {
-        SUPERVISOR_PROFILE_ID => SessionProfile::Supervisor,
+        // #9755: both the legacy and the new value name the Architect.
+        v if crate::core::architect_compat::is_architect_profile_id(v) => {
+            SessionProfile::Supervisor
+        }
         PM_PROFILE_ID | "" => SessionProfile::Pm,
         _ => {
             tracing::warn!(
                 profile = raw,
                 "unknown `.trusty-mpm.toml` profile; using the `{PM_PROFILE_ID}` profile \
-                 (valid: `{PM_PROFILE_ID}`, `{SUPERVISOR_PROFILE_ID}`)"
+                 (valid: `{PM_PROFILE_ID}`, `{SUPERVISOR_PROFILE_ID}`, `architect`)"
             );
             SessionProfile::Pm
         }
@@ -224,8 +228,9 @@ pub fn path_is_listed(project_dir: &Path, entries: &[PathBuf]) -> bool {
 /// What: [`NOT_ALLOW_LISTED`] when (b) holds and (a) does not.
 /// Test: `the_doctor_reason_names_the_missing_allowlist_entry`.
 pub fn refusal(project_dir: &Path, config: &MpmConfig) -> Option<&'static str> {
-    (requested(project_dir).is_supervisor() && !is_allow_listed(project_dir, &config.supervisor))
-        .then_some(NOT_ALLOW_LISTED)
+    (requested(project_dir).is_supervisor()
+        && !is_allow_listed(project_dir, config.architect_grant()))
+    .then_some(NOT_ALLOW_LISTED)
 }
 
 /// The profile a session launched in `project_dir` runs.
@@ -241,7 +246,7 @@ pub fn resolve(project_dir: &Path, config: &MpmConfig) -> SessionProfile {
     if !requested(project_dir).is_supervisor() {
         return SessionProfile::Pm;
     }
-    if is_allow_listed(project_dir, &config.supervisor) {
+    if is_allow_listed(project_dir, config.architect_grant()) {
         return SessionProfile::Supervisor;
     }
     tracing::warn!(project = %project_dir.display(), "{NOT_ALLOW_LISTED}");
@@ -300,8 +305,8 @@ pub fn hook_project_dir(project_dir_env: Option<OsString>) -> Option<PathBuf> {
 /// Why: a stamp alone could come from an older file state, and the files
 /// alone can be edited by the session; only all three together are the
 /// operator's current grant.
-/// What: [`SessionProfile::Supervisor`] only when `stamp` is exactly
-/// [`SUPERVISOR_PROFILE_ID`], `project_dir_env` names a directory, and
+/// What: [`SessionProfile::Supervisor`] only when `stamp` is an Architect
+/// stamp ([`crate::core::architect_compat::is_architect_stamp`]), `project_dir_env` names a directory, and
 /// [`resolve`] over `config()` says supervisor. `config` is called only after
 /// the stamp matches, so a PM session reads no file.
 /// Test: `the_hook_needs_the_stamp_the_allowlist_and_the_file`.
@@ -310,7 +315,8 @@ pub fn hook_profile(
     project_dir_env: Option<OsString>,
     config: impl FnOnce() -> MpmConfig,
 ) -> SessionProfile {
-    if stamp.as_deref() != Some(std::ffi::OsStr::new(SUPERVISOR_PROFILE_ID)) {
+    // #9755: a running Architect may carry either stamp value.
+    if !crate::core::architect_compat::is_architect_stamp(stamp.as_deref()) {
         return SessionProfile::Pm;
     }
     let Some(project_dir) = hook_project_dir(project_dir_env) else {

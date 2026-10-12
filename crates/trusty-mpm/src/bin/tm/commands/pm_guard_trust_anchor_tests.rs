@@ -121,10 +121,10 @@ pub(crate) fn launch_record(fx: &Fixture, claude: ClaudeProcess, project: &Path)
 
 pub(crate) fn allowlist(fx: &Fixture) -> MpmConfig {
     MpmConfig {
-        supervisor: SupervisorConfig {
+        architect: Some(SupervisorConfig {
             projects: vec![fx.project.clone()],
             ..SupervisorConfig::default()
-        },
+        }),
         ..MpmConfig::default()
     }
 }
@@ -264,6 +264,42 @@ fn the_architect_main_thread_may_write_the_anchor() {
         json!({ "command": "cp a.txt ~/.trusty-mpm/config.toml" }),
     );
     assert_eq!(evaluate(&cp, &env, || allowlist(&fx)), None);
+}
+
+/// #9755 (Q7): the grant may sit in `[architect]` or the legacy `[supervisor]`.
+/// A PM edit of either table is denied; the Architect's main thread may write
+/// under a legacy-only grant; and with both tables `[architect]` wins, so an
+/// empty `[architect]` grants nothing whatever `[supervisor]` lists.
+#[test]
+fn trust_anchor_protects_both_tables() {
+    let fx = fixture();
+    let both = "[architect]\nprojects = []\n\n[supervisor]\nprojects = []\n";
+    std::fs::write(&fx.anchor, both).expect("write both tables");
+    for table in ["[architect]", "[supervisor]"] {
+        let edit = json!({
+            "file_path": fx.anchor.display().to_string(),
+            "old_string": table,
+            "new_string": format!("{table}\nprojects = [\"/x\"]"),
+        });
+        assert!(pm_verdict(&fx, "Edit", edit).is_some(), "{table}");
+    }
+    let env = architect_env(&fx);
+    let write = payload(&fx, "Write", write_input(&fx.anchor));
+    let grant = allowlist(&fx).architect;
+    let legacy = MpmConfig {
+        legacy_supervisor: grant.clone(),
+        ..MpmConfig::default()
+    };
+    assert_eq!(evaluate(&write, &env, || legacy), None, "legacy-only grant");
+    let shadowed = MpmConfig {
+        architect: Some(SupervisorConfig::default()),
+        legacy_supervisor: grant,
+        ..MpmConfig::default()
+    };
+    assert!(
+        evaluate(&write, &env, || shadowed).is_some(),
+        "[architect] wins"
+    );
 }
 
 #[test]

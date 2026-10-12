@@ -487,8 +487,13 @@ fn every_bundled_style_reads_from_content() {
             "{} must be a required instruction, or a load would not guarantee it",
             style.content_path
         );
+        // #9755: the Architect style is read at its new path and deployed under
+        // the legacy file name its content still carries (D2d, R4).
+        let content_file =
+            crate::core::architect_compat::legacy_instruction_path(style.content_path)
+                .unwrap_or_else(|| style.content_path.to_owned());
         assert_eq!(
-            style.content_path,
+            content_file,
             format!("output-styles/{}", style.file_name),
             "a style deploys under the file name its content carries"
         );

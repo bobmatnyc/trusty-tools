@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use toml_edit::{Array, DocumentMut, Item, Value};
+use trusty_mpm::core::architect_compat::grant_table_to_write;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::ProjectLevelConfig;
 use trusty_mpm::core::session_profile::{self, SUPERVISOR_PROFILE_ID};
@@ -62,24 +63,28 @@ fn malformed(path: &Path) -> String {
 /// `tm fleet init` write it, including when a PM runs the command.
 /// What: `dir` must be absolute and UTF-8. [`Edit::Unchanged`] when an entry
 /// already canonicalizes to `dir` ([`session_profile::path_is_listed`]).
-/// Otherwise appends `dir` to the array, creating the `[supervisor]` table or
-/// the `projects` key when absent. Refuses unparseable text and a
-/// `supervisor` or `projects` of the wrong type.
+/// Otherwise appends `dir` to the array of `[architect]` when the file has
+/// that table, else of the legacy `[supervisor]` (#9755, Q7), creating the
+/// table or the `projects` key when absent. Refuses unparseable text and a
+/// table or `projects` of the wrong type.
 /// Postcondition on [`Edit::Changed`]: the new text parses as `MpmConfig` and
 /// lists `dir`; every other key and comment is untouched.
 /// Test: `an_unrelated_key_and_comment_survive_the_allowlist_write`,
-/// `a_second_add_is_unchanged`, `an_existing_supervisor_table_gains_the_entry`.
+/// `a_second_add_is_unchanged`, `an_existing_supervisor_table_gains_the_entry`,
+/// `an_existing_architect_table_gains_the_entry`.
 pub(crate) fn add_allowlist_entry(raw: &str, dir: &Path, path: &Path) -> anyhow::Result<Edit> {
     let (mut doc, typed) = parse_user_config(raw, path)?;
-    if session_profile::is_allow_listed(dir, &typed.supervisor) {
+    if session_profile::is_allow_listed(dir, typed.architect_grant()) {
         return Ok(Edit::Unchanged);
     }
     let entry = absolute_utf8(dir)?;
+    // #9755: edit the table the reader uses — `[architect]` if present.
+    let name = grant_table_to_write(typed.architect.is_some());
     let table = doc
-        .entry("supervisor")
+        .entry(name)
         .or_insert_with(toml_edit::table)
         .as_table_like_mut()
-        .with_context(|| format!("`supervisor` in {} is not a table", path.display()))?;
+        .with_context(|| format!("`{name}` in {} is not a table", path.display()))?;
     match table.get_mut("projects") {
         None => {
             table.insert(
@@ -89,18 +94,13 @@ pub(crate) fn add_allowlist_entry(raw: &str, dir: &Path, path: &Path) -> anyhow:
         }
         Some(item) => item
             .as_array_mut()
-            .with_context(|| {
-                format!(
-                    "`supervisor.projects` in {} is not an array",
-                    path.display()
-                )
-            })?
+            .with_context(|| format!("`{name}.projects` in {} is not an array", path.display()))?
             .push(entry),
     }
     let text = doc.to_string();
     // Postcondition: the file tm will read back grants `dir`.
     let (_, check) = parse_user_config(&text, path)?;
-    if !session_profile::is_allow_listed(dir, &check.supervisor) {
+    if !session_profile::is_allow_listed(dir, check.architect_grant()) {
         bail!(
             "internal error: the edited {} does not list {}",
             path.display(),
@@ -153,7 +153,7 @@ pub(crate) fn other_architects(config: &MpmConfig, dir: &Path) -> Vec<PathBuf> {
 /// `a_second_architect_elsewhere_is_refused`.
 pub(crate) fn architects(config: &MpmConfig) -> Vec<PathBuf> {
     config
-        .supervisor
+        .architect_grant()
         .projects
         .iter()
         .filter(|entry| entry.is_absolute() && session_profile::requested(entry).is_supervisor())
