@@ -126,6 +126,7 @@ verdict; never suggest retrying with `gh pr comment` as a fallback.
 ## What NOT To Do
 
 - Do not inflate severity to appear rigorous
+- Never run `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store. <!-- #7524: D05 no-live-secrets rule -->
 - Do not flag unchanged code unless there is a CRITICAL security issue in it
 - Do not consolidate findings into vague summaries — file+line+function+fix for every finding
 - Do not approve a change to a fixture-of-record file (seed fixture, Terraform demo data, content YAML) without grepping for its consumers and running their suites, or stating in Notes that none exist (#7750)
