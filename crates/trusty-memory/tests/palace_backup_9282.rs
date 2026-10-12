@@ -237,7 +237,9 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
         .expect_err("a non-string dest is refused")
         .contains("dest"));
 
-    let existing = root.join("already-here");
+    // Outside the registry dir (`root`), which is refused for its own reason.
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let existing = elsewhere.path().join("already-here");
     std::fs::create_dir(&existing).expect("mkdir");
     let exists = raw(
         &fx.state,
@@ -267,6 +269,57 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
     assert!(!root
         .join(".trusty-memory/backups/manual/no-such-palace")
         .exists());
+}
+
+/// Every path under `dir`, relative and sorted.
+fn tree(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).expect("list") {
+            let p = e.expect("entry").path();
+            if p.is_dir() && !p.is_symlink() {
+                todo.push(p.clone());
+            }
+            out.push(p.strip_prefix(dir).expect("prefix").to_path_buf());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Why (#9282, Opus critic HIGH): in the flat layout the data root IS the
+/// palace registry dir. A backup written there holds a `palace.json`, so the
+/// palace lister takes it for a palace, and after a restart the live handle
+/// can point at the backup.
+/// What: `dest` = `<registry>/bk`, named directly and through a symlink to
+/// the registry. Each call is refused with the registry error, and the tree
+/// under the registry is unchanged: no `bk`, no `bk.tmp` staging dir.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_backup_refuses_a_dest_in_the_registry_dir() {
+    let fx = Fixture::new();
+    fx.palace("bk-reg");
+    let registry = fx.tmp.path().to_path_buf();
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let link = elsewhere.path().join("registry-link");
+    std::os::unix::fs::symlink(&registry, &link).expect("symlink");
+    let before = tree(&registry);
+    for dest in [registry.join("bk"), link.join("bk-via-link")] {
+        let res = raw(
+            &fx.state,
+            "palace_backup",
+            json!({"palace": "bk-reg", "dest": dest}),
+        )
+        .await;
+        let err = res.expect_err("a dest in the registry dir must be refused");
+        assert!(
+            err.contains("palace registry directory"),
+            "{}: {err}",
+            dest.display()
+        );
+        assert_eq!(tree(&registry), before, "{} wrote something", dest.display());
+    }
 }
 
 // --------------------------------------------------------------------- CLI
@@ -485,4 +538,44 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
         text(&out)
     );
     assert!(!snap.exists(), "no direct-open fallback: {}", text(&out));
+}
+
+/// Why (#9282, Opus critic HIGH): the offline path must refuse a backup into
+/// the palace registry dir as the daemon does; here the legacy layout,
+/// where the registry is `<data root>/palaces`.
+/// What: with no daemon, `palace backup --dest <data root>/palaces/bk` exits
+/// non-zero with the registry error, and nothing under the registry dir
+/// changes: no `bk`, no `bk.tmp` staging dir, no other new entry.
+/// Test: itself.
+#[test]
+fn cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing() {
+    let src = tempfile::tempdir().expect("src");
+    seed_on_disk(src.path(), "cli-reg");
+    let dd = data_dir(src.path());
+    let registry = dd.join("palaces");
+    let dest = registry.join("bk");
+    let before = tree(&registry);
+    let out = run(
+        src.path(),
+        &[
+            "palace",
+            "backup",
+            "cli-reg",
+            "--dest",
+            dest.to_str().expect("utf8"),
+        ],
+    );
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("palace registry directory"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(
+        tree(&registry),
+        before,
+        "nothing may be written: {}",
+        text(&out)
+    );
+    assert!(!dest.exists() && !registry.join("bk.tmp").exists());
 }

@@ -501,3 +501,52 @@ fn an_existing_destination_is_refused() {
     );
     assert!(listing(&dest).is_empty());
 }
+
+/// Every path under `dir`, relative and sorted.
+#[cfg(unix)]
+fn tree(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).expect("list") {
+            let p = e.expect("entry").path();
+            if p.is_dir() && !p.is_symlink() {
+                todo.push(p.clone());
+            }
+            out.push(p.strip_prefix(dir).expect("prefix").to_path_buf());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Fail-open check (#9282): a destination directly in the palace registry
+/// directory is refused before anything is written. A backup there holds a
+/// `palace.json`, so the palace lister would take it for a palace.
+/// What: the legacy layout (`<root>/palaces/<id>`); the registry dir named
+/// directly, through a symlink, and through a missing dir and `..`. Each is
+/// refused, and the tree under the data root is unchanged: no backup, no
+/// `.tmp` staging dir, no created parent.
+#[cfg(unix)]
+#[test]
+fn a_destination_in_the_registry_is_refused_and_writes_nothing() {
+    let fx = fixture();
+    let registry = fx.root.join("palaces");
+    let link = fx.root.join("registry-link");
+    std::os::unix::fs::symlink(&registry, &link).expect("symlink");
+    let before = tree(&fx.root);
+    for dest in [
+        registry.join("bk"),
+        link.join("bk-via-link"),
+        registry.join("missing").join("..").join("bk-dotdot"),
+    ] {
+        let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), no_fault)
+            .expect_err("a destination in the registry dir must be refused");
+        assert!(
+            err.to_string().contains("palace registry directory"),
+            "{}: {err}",
+            dest.display()
+        );
+        assert_eq!(tree(&fx.root), before, "{} wrote something", dest.display());
+    }
+}
