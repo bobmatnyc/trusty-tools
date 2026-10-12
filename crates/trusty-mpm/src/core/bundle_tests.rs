@@ -212,6 +212,8 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-slack.md",
         "skills/tm-secrets.md",
         "skills/tm-architect-setup.md",
+        // #8625: kuzu import with the masked refused-row review.
+        "skills/tm-memory-import.md",
         // #8376: entry file plus its four reference files.
         "skills/tm-epic.md",
         "skills/tm-epic/references/tracker-template.md",
@@ -443,6 +445,7 @@ fn tm_skills_have_frontmatter() {
             skill_text("skills/tm-architect-setup.md"),
         ),
         ("tm-epic", skill_text("skills/tm-epic.md")),
+        ("tm-memory-import", skill_text("skills/tm-memory-import.md")),
     ];
     for (name, content) in skills {
         assert!(
@@ -737,11 +740,13 @@ fn bundle_table_is_complete() {
     //   roster is runtime content (`content/agents`). 191 - 43 = 148.
     // Issue #9296 (+1): `skills/rust-runtime-performance.md` is NEW — the
     //   runtime half of the Rust guidance, loaded on demand. 148 + 1 = 149.
-    assert_eq!(deployed().len(), 149);
+    // Issue #8625 (+1): `skills/tm-memory-import.md` is NEW — the kuzu import
+    //   runbook with the masked refused-row review. 149 + 1 = 150.
+    assert_eq!(deployed().len(), 150);
     let mut paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 149, "artifact paths must be unique");
+    assert_eq!(paths.len(), 150, "artifact paths must be unique");
     for artifact in deployed() {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
