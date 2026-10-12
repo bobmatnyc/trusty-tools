@@ -41,7 +41,8 @@ pub struct LoadReport {
     /// One status per input project file, in input order.
     pub per_file: Vec<FileStatus>,
     /// A nonzero digest of the sources a [`crate::policy::PolicyLoader`]
-    /// loaded this report from; 0 for any other report. #8454 VC: 0 means
+    /// loaded this report from when that load settled (#9808); 0 for an
+    /// unsettled load and for any other report. #8454 VC: 0 means
     /// "never cache", so a cache keys only on a loader's report.
     pub fingerprint: u64,
 }

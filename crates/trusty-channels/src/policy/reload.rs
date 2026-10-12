@@ -92,7 +92,8 @@ impl Fingerprint {
     /// reserved for "never cache" (a report no loader stamped).
     /// What: hashes each field in order, the project count first; a digest
     /// of 0 is moved to 1.
-    /// Test: `loader_report_carries_a_fingerprint_that_follows_its_sources`.
+    /// Test: `loader_report_carries_a_fingerprint_that_follows_its_sources`,
+    /// `unsettled_load_reports_fingerprint_zero`.
     fn digest(&self) -> u64 {
         let mut h = DefaultHasher::new();
         self.host.hash(&mut h);
@@ -235,6 +236,13 @@ impl PolicyLoader {
         &self.report.policy
     }
 
+    /// The digest of the kept fingerprint; `None` when the last load did
+    /// not settle (#8454 VC test seam).
+    #[cfg(test)]
+    pub(crate) fn kept_digest(&self) -> Option<u64> {
+        self.fingerprint.as_ref().map(Fingerprint::digest)
+    }
+
     /// Reload when the fingerprint changed; true when it reloaded.
     ///
     /// Why: one call per batch or dispatch; git runs only on a change.
@@ -306,7 +314,8 @@ impl PolicyLoader {
             self.last_good.clear();
             self.report = assemble(prepared, &channels);
             // #8454 VC: a denied reload is stamped too; the route answers it as not ready.
-            self.report.fingerprint = self.fingerprint.digest();
+            // #9808: an unsettled load keeps no fingerprint and stamps 0, never cached.
+            self.report.fingerprint = self.fingerprint.as_ref().map_or(0, Fingerprint::digest);
             return;
         }
         let first = assemble(prepared.clone(), &channels);
@@ -367,8 +376,8 @@ impl PolicyLoader {
         }
         self.last_good = last_good;
         self.report = report;
-        // #8454 VC: only a loader's report carries a fingerprint.
-        self.report.fingerprint = self.fingerprint.digest();
+        // #8454 VC: only a loader's settled report carries a fingerprint (#9808).
+        self.report.fingerprint = self.fingerprint.as_ref().map_or(0, Fingerprint::digest);
     }
 }
 

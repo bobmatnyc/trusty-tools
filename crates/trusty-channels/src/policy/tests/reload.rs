@@ -604,3 +604,40 @@ fn persistent_change_during_load_reloads_once_then_settles() {
     assert_eq!(names(loader.report()), ["bob-dm", "eve-dm"]);
     assert!(!loader.refresh(), "the kept change never settled");
 }
+
+/// 🔴 #8454 VC: a load that did not settle reports fingerprint 0, the value
+/// the egress verdict route never serves, on both apply paths; a settled
+/// load reports the digest of the fingerprint it kept.
+#[test]
+fn unsettled_load_reports_fingerprint_zero() {
+    let (repo, home, mut loader) = loaded();
+    let settled = loader.report().fingerprint;
+    assert_ne!(settled, 0, "a settled load must carry a fingerprint");
+    assert_eq!(loader.kept_digest(), Some(settled), "not the kept digest");
+    // The project path: eve's route appears and is reverted inside the read.
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "unrelated"]);
+    assert!(loader.refresh_with(eve_then_back(&repo)));
+    assert_eq!(loader.kept_digest(), None, "the flipped load settled");
+    assert_eq!(
+        loader.report().fingerprint,
+        0,
+        "#8454 VC: an unsettled load was stamped"
+    );
+    assert!(loader.refresh());
+    let resettled = loader.report().fingerprint;
+    assert_ne!(resettled, 0);
+    assert_eq!(loader.kept_digest(), Some(resettled));
+    // The host-fault path: the load reads a faulty host file, then it is fixed.
+    let good = host_yaml(&[repo.dir()]);
+    loader.reload_with(flip_during_load(
+        || home.write_host("channels:\n  version: 1\n  surprise: true\n"),
+        || home.write_host(&good),
+    ));
+    assert!(loader.report().denied, "the load did not read the fault");
+    assert_eq!(loader.kept_digest(), None, "the flipped host load settled");
+    assert_eq!(
+        loader.report().fingerprint,
+        0,
+        "#8454 VC: an unsettled denied load was stamped"
+    );
+}
