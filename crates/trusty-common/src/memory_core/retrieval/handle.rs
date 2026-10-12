@@ -75,9 +75,11 @@ fn now_epoch_secs() -> u64 {
 /// the handle owns the vector store, KG pool, the in-memory drawer table used
 /// by retrieval to map vector hits back to metadata, and the pre-cached L0/L1
 /// payloads.
-/// What: Bundles `PalaceId`, identity text, an `l1_drawers` Vec (top-15 by
-/// importance), `Arc<UsearchStore>`, `Arc<KnowledgeGraph>`, and an
-/// `Arc<RwLock<Vec<Drawer>>>` for the in-memory drawer table.
+/// What: Bundles `PalaceId`, identity text, the live L1 in `l1_drawers`
+/// (an `Arc<RwLock<Vec<Drawer>>>` of the top `L1_CAP` (15)
+/// drawers, refreshed on every write, #9719), `Arc<UsearchStore>`,
+/// `Arc<KnowledgeGraph>`, and an `Arc<RwLock<Vec<Drawer>>>` for the in-memory
+/// drawer table.
 /// Test: See `l0_l1_always_present` (constructor + cache) and
 /// `l2_returns_relevant_drawer` (storage handles wired correctly).
 pub struct PalaceHandle {
@@ -400,9 +402,10 @@ impl PalaceHandle {
     /// (defaulting to empty), loads the L1 snapshot (defaulting to empty),
     /// opens the usearch index at `<data_dir>/index.usearch` (384-d), and
     /// opens the KG redb store at `<data_dir>/kg.redb`. The drawer table is
-    /// initialized from the L1 snapshot (the L1 cache is the only
-    /// authoritative drawer metadata until the full drawer table is
-    /// persisted in a follow-up issue).
+    /// loaded from redb. Until the palace is stamped `drawers_authoritative`,
+    /// the L1 snapshot fills drawers missing from it (the #32 migration), and
+    /// the maintainer's open persists them and stamps the marker (#9722). L1
+    /// is selected from the merged table.
     /// Test: `registry_create_and_open` creates a palace, drops the registry,
     /// and re-opens it.
     pub fn open(palace: &Palace) -> Result<Arc<PalaceHandle>> {

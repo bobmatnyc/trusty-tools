@@ -296,3 +296,160 @@ fn a_lane_hit_replaces_its_l1_copy() {
     let got: Vec<(Uuid, u8)> = base.iter().map(|r| (r.drawer.id, r.layer)).collect();
     assert_eq!(got, vec![(hit.id, 2), (kept.id, 1), (new.id, 2)]);
 }
+
+/// An unstamped palace opened by a non-maintainer, which adopts nothing.
+fn unstamped(dir: &std::path::Path, id: &str) -> (Palace, Arc<PalaceHandle>) {
+    let palace = disk_palace(dir, id);
+    let handle = PalaceHandle::open_with_intent_purging(&palace, OpenIntent::ReadOnlyClient, false)
+        .expect("non-maintainer open");
+    assert!(
+        !handle
+            .kg
+            .store()
+            .drawers_authoritative()
+            .expect("read marker"),
+        "precondition: the palace is unstamped"
+    );
+    (palace, handle)
+}
+
+/// #9722 critic: a degraded drawer load adopts nothing.
+///
+/// Why: a row that failed to load may be live in redb with newer content than
+/// its snapshot copy; adopting would overwrite it and stamp the marker, after
+/// which a forgotten drawer revived this way stays live.
+/// What: `maybe_adopt` on an unstamped, writable palace with `degraded` set
+/// writes no row and leaves the marker unstamped.
+/// Test: this test.
+#[test]
+fn a_degraded_load_adopts_nothing() {
+    let dir = tempdir().expect("tempdir");
+    let (palace, handle) = unstamped(dir.path(), "l1-degraded-adopt");
+    let snap = Drawer::new(Uuid::new_v4(), "a snapshot copy of an unreadable row");
+    let gap_filled = std::collections::HashSet::from([snap.id]);
+
+    let stamped = super::l1::maybe_adopt(
+        &handle.kg,
+        &Ok(false),
+        true,
+        true,
+        std::slice::from_ref(&snap),
+        &gap_filled,
+        &palace.id,
+    );
+
+    assert!(!stamped, "a degraded load must not stamp the marker");
+    assert!(handle.kg.load_drawer(snap.id).expect("load").is_none());
+    assert!(
+        !handle
+            .kg
+            .store()
+            .drawers_authoritative()
+            .expect("read marker")
+    );
+}
+
+/// #9722 critic: a snapshot-only drawer carrying a `fact_key` is not adopted.
+///
+/// Why: `fact_key` postdates #32, so such a drawer is a stale id; adopting it
+/// would also move the Tier C slot off its live claimant.
+/// What: redb holds the live claimant of a key; the snapshot holds another
+/// drawer on the same key. A maintainer open stamps the marker, writes no row
+/// for the snapshot drawer, and the key still resolves to the claimant.
+/// Test: this test.
+#[test]
+fn a_snapshot_only_fact_key_drawer_is_not_adopted() {
+    let dir = tempdir().expect("tempdir");
+    let (palace, first) = unstamped(dir.path(), "l1-fact-key-adopt");
+    let mut claimant = Drawer::new(Uuid::new_v4(), "the live claimant of the slot");
+    claimant.fact_key = Some("pr:1/state".into());
+    first
+        .kg
+        .upsert_drawer_sync(&claimant)
+        .expect("persist claimant");
+    let mut stale = Drawer::new(Uuid::new_v4(), "a stale snapshot copy of the slot");
+    stale.fact_key = claimant.fact_key.clone();
+    L1Cache::save_l1_cache(std::slice::from_ref(&stale), &palace.data_dir).expect("seed");
+    drop(first);
+
+    let opened = PalaceHandle::open(&palace).expect("maintainer open");
+
+    assert!(
+        opened
+            .kg
+            .store()
+            .drawers_authoritative()
+            .expect("read marker")
+    );
+    assert!(
+        opened.kg.load_drawer(stale.id).expect("load").is_none(),
+        "#9722: a snapshot-only fact_key drawer was adopted"
+    );
+    assert_eq!(
+        opened
+            .kg
+            .drawer_id_for_fact_key("pr:1/state")
+            .expect("index"),
+        Some(claimant.id),
+        "#9722: adoption moved the Tier C slot"
+    );
+}
+
+/// #9722 critic: an adoption that overran its budget never commits.
+///
+/// Why: an overrun write used to land when the redb writer let go. A `forget`
+/// issued after the open returned could take the lock first and delete
+/// nothing, and the late adoption then wrote the drawer back and stamped the
+/// marker.
+/// What: holds a raw write transaction, opens as maintainer (the adoption
+/// overruns), releases the transaction, waits for the helper to finish, and
+/// asserts the marker is unstamped and no snapshot-only row was written.
+/// Test: this test.
+#[test]
+fn an_adoption_that_overran_its_budget_never_commits() {
+    let dir = tempdir().expect("tempdir");
+    let (palace, first) = unstamped(dir.path(), "l1-late-adopt");
+    let legacy = Drawer::new(Uuid::new_v4(), "a pre-persistence drawer in the snapshot");
+    let id = legacy.id;
+    L1Cache::save_l1_cache(&[legacy], &palace.data_dir).expect("seed snapshot");
+    let store = first.kg.store();
+    let db = store.db_for_test();
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stuck = std::thread::spawn(move || {
+        let wtx = db.begin_write().expect("hold the write lock");
+        held_tx.send(()).expect("signal held");
+        let _ = release_rx.recv();
+        drop(wtx); // abort: never committed
+    });
+    held_rx.recv().expect("write lock held");
+
+    let overran = PalaceHandle::open(&palace).expect("maintainer open behind the stuck write");
+    assert!(
+        overran.drawers.read().iter().any(|d| d.id == id),
+        "the gap-fill still serves the snapshot-only drawer"
+    );
+    release_tx.send(()).expect("release");
+    stuck.join().expect("stuck writer");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let slot = loop {
+        if let Some(slot) = store.try_claim_open_write() {
+            break slot;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adoption helper never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    drop(slot);
+
+    assert!(
+        !store.drawers_authoritative().expect("read marker"),
+        "#9722: a late adoption stamped the marker"
+    );
+    assert!(
+        first.kg.load_drawer(id).expect("load").is_none(),
+        "#9722: a late adoption wrote a snapshot-only row"
+    );
+}

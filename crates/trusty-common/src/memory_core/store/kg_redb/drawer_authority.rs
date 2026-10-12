@@ -48,13 +48,24 @@ impl KgStoreRedb {
     /// Why: completes the #32 migration durably, so later opens can skip the
     /// gap-fill without losing a pre-persistence drawer.
     /// What: one write transaction; any error aborts it, so the marker is
-    /// never stamped without every row.
-    /// Test: `a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped`.
-    pub fn adopt_snapshot_drawers(&self, drawers: &[Drawer]) -> Result<()> {
+    /// never stamped without every row. `may_commit` runs once the write lock
+    /// is held; `false` aborts with nothing written, so a caller that has
+    /// given up on this write can stop it landing behind a later writer.
+    /// Test: `a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped`,
+    /// `an_adoption_that_overran_its_budget_never_commits`.
+    pub fn adopt_snapshot_drawers(
+        &self,
+        drawers: &[Drawer],
+        may_commit: impl FnOnce() -> bool,
+    ) -> Result<()> {
         self.check_writable()?;
         let gw = self
             .begin_write_guarded()
             .context("begin adopt_snapshot_drawers txn")?;
+        if !may_commit() {
+            // #9722: dropping `gw` aborts the transaction.
+            anyhow::bail!("adopt_snapshot_drawers cancelled: the open's budget ran out");
+        }
         {
             let wtx = &gw.txn;
             let mut table = wtx.open_table(DRAWERS).context("open drawers table")?;

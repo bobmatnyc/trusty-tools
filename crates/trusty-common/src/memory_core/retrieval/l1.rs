@@ -21,6 +21,7 @@ use crate::memory_core::store::l1_cache::L1Cache;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -97,7 +98,8 @@ pub(super) fn gap_fill(drawers: &mut Vec<Drawer>, snapshot: &[Drawer]) -> HashSe
 /// stale id, and adopting it would move a Tier C slot. The write is bounded
 /// by [`OPEN_WRITE_BUDGET`]; on failure the open proceeds unstamped and the
 /// next open retries. Returns whether the marker was stamped.
-/// Test: `a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped`.
+/// Test: `a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped`,
+/// `a_degraded_load_adopts_nothing`, `a_snapshot_only_fact_key_drawer_is_not_adopted`.
 pub(super) fn maybe_adopt(
     kg: &KnowledgeGraph,
     authority: &Result<bool>,
@@ -118,7 +120,31 @@ pub(super) fn maybe_adopt(
     adopt_within(kg, rows, palace, OPEN_WRITE_BUDGET)
 }
 
+/// The adoption has neither taken the write lock nor been cancelled.
+const PENDING: u8 = 0;
+/// The adoption holds the write lock and commits.
+const STARTED: u8 = 1;
+/// The open stopped waiting; the adoption must not commit.
+const CANCELLED: u8 = 2;
+
+/// Move `gate` from [`PENDING`] to `to`; `false` when the other side won.
+fn claim(gate: &AtomicU8, to: u8) -> bool {
+    gate.compare_exchange(PENDING, to, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
 /// [`maybe_adopt`]'s write, under `budget`.
+///
+/// Why: #9722 — an overrun write still lands when the redb writer lets go. A
+/// `forget` issued after this open returns could take the lock first and
+/// delete nothing; the late adoption would then write the forgotten drawer
+/// back and stamp the marker, so the drawer would stay live for good.
+/// What: the worker and the open race on one gate. The worker claims it once
+/// it holds the write lock, and commits only if it won; an open that stops
+/// waiting claims it as cancelled. So an adoption that has not taken the lock
+/// when the budget ends never commits, and one that has commits before any
+/// later writer.
+/// Test: `an_adoption_that_overran_its_budget_never_commits`.
 fn adopt_within(
     kg: &KnowledgeGraph,
     rows: Vec<Drawer>,
@@ -128,7 +154,9 @@ fn adopt_within(
     let store = kg.store();
     let worker = Arc::clone(&store);
     let n = rows.len();
-    let work = move || worker.adopt_snapshot_drawers(&rows);
+    let gate = Arc::new(AtomicU8::new(PENDING));
+    let worker_gate = Arc::clone(&gate);
+    let work = move || worker.adopt_snapshot_drawers(&rows, || claim(&worker_gate, STARTED));
     match run_open_write(&store, palace, "adopt_l1_snapshot", budget, work) {
         Some(Ok(())) => {
             tracing::info!(palace = %palace, adopted = n, "#9722: drawer table is authoritative");
@@ -139,8 +167,13 @@ fn adopt_within(
             tracing::warn!(palace = %palace, "adopt L1 snapshot drawers failed: {e:#}");
             false
         }
-        // `run_open_write` logged the skip or the overrun.
-        None => false,
+        // `run_open_write` logged the skip, the overrun or the panic.
+        None => {
+            if claim(&gate, CANCELLED) {
+                tracing::warn!(palace = %palace, "#9722: adoption cancelled; the next open retries");
+            }
+            false
+        }
     }
 }
 

@@ -920,8 +920,10 @@ pub async fn recall_across_palaces_with_default_embedder(
 /// query match.
 /// What: a lane hit whose drawer is an L1 entry replaces that entry; any other
 /// id already in `base` is kept; the rest are appended. Pass L0/L1 first.
-/// Test: `a_lane_hit_replaces_its_l1_copy`.
-pub(super) fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
+/// trusty-memory's warming path merges its BM25 lane through this too.
+/// Test: `a_lane_hit_replaces_its_l1_copy`; trusty-memory's
+/// `a_warming_lane_hit_replaces_its_l1_copy`.
+pub fn dedup_extend(base: &mut Vec<RecallResult>, extra: Vec<RecallResult>) {
     for r in extra {
         match base.iter().position(|b| b.drawer.id == r.drawer.id) {
             // #9719: the lane's query-scored row wins over the L1 copy.
