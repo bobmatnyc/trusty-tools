@@ -114,7 +114,7 @@ impl Probe {
         id: usize,
         method: &'static str,
         call: F,
-    ) -> impl Future<Output = F::Output> {
+    ) -> impl Future<Output = F::Output> + use<F> {
         let in_flight = Arc::clone(&self.in_flight);
         in_flight
             .lock()
