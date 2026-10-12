@@ -1855,6 +1855,10 @@ mod doctor_tests;
 #[path = "posture_tests.rs"]
 mod posture_tests;
 
+// #9793: the sandbox consent and backend-refusal tests share this fixture.
+#[path = "sandbox_tests.rs"]
+mod sandbox_tests;
+
 // #7519: the 1Password server-path tests share this module's fixture.
 #[cfg(all(unix, feature = "cli-backends"))]
 #[path = "onepassword_tests.rs"]

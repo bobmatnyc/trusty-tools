@@ -50,15 +50,22 @@ fn main() -> ExitCode {
     let onepassword_token = take_onepassword_env();
     // #7524 P2-M2: doctor's tool detection only; never the 1Password `op`.
     let search_path = std::env::var_os("PATH");
+    // #9793: the one read of the sandbox variables; the library never reads them.
+    let sandbox = trusty_secrets::server::SandboxEnv::new(
+        std::env::var_os(trusty_common::credentials::SANDBOX_ENV_VAR),
+        std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV),
+        std::env::var_os("HOME"),
+    );
     match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
     {
         // #9572: the runtime's shutdown is the crate's, so a test drives it.
-        Ok(runtime) => {
-            trusty_secrets::server::run_to_exit(runtime, run(onepassword_token, search_path))
-        }
+        Ok(runtime) => trusty_secrets::server::run_to_exit(
+            runtime,
+            run(onepassword_token, search_path, sandbox),
+        ),
         Err(e) => {
             eprintln!("trusty-secrets: cannot start the runtime: {e}");
             ExitCode::FAILURE
@@ -95,6 +102,7 @@ fn take_onepassword_env() -> Option<trusty_secrets::api::SecretValue> {
 async fn run(
     onepassword_token: Option<trusty_secrets::api::SecretValue>,
     search_path: Option<std::ffi::OsString>,
+    sandbox: trusty_secrets::server::SandboxEnv,
 ) -> ExitCode {
     use trusty_secrets::server::{ServerSettings, StartEnv, backends_for, serve_with};
 
@@ -117,11 +125,13 @@ async fn run(
     // #7519 P4: presence only; the token itself goes to the factory below.
     let start = StartEnv::default()
         .with_onepassword_token(onepassword_token.is_some())
-        .with_search_path(search_path);
+        .with_search_path(search_path)
+        .with_sandbox(sandbox.clone());
     // #7519: CLI backends read the account's own machine config (ruling
     // 74) and the template directory these settings name, and take the
-    // token captured at start. #7524 P2-M2: no `PATH`.
-    let backends = backends_for(&settings, onepassword_token);
+    // token captured at start. #7524 P2-M2: no `PATH`. #9793: the same
+    // sandbox variables the server gets in `start`.
+    let backends = backends_for(&settings, &sandbox, onepassword_token);
     match serve_with(settings, backends, start, trusty_common::shutdown_signal()).await {
         Ok(exit) => {
             eprintln!("trusty-secrets: {exit:?}; exiting");

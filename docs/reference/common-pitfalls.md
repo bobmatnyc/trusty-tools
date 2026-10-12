@@ -39,7 +39,8 @@ Always use `tracing::info!` / `tracing::debug!` etc. (which write to stderr).
 🔴 **A hand-built isolated `trusty-search` daemon** inherits every exported
 token and shares the live port and data — start one with
 `scripts/sandbox_search_daemon.sh` only (#9121; `sandbox_daemon.sh` is the
-`tm daemon` equivalent).
+`tm daemon` equivalent, `sandbox_secrets_console.sh` the trusty-secrets and
+console one, #9793).
 
 🔴 **Adding `axum` as an unconditional dependency in a library crate** — put it
 behind the `axum-server` feature flag, matching the pattern in `trusty-common`.

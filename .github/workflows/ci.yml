@@ -294,6 +294,10 @@ jobs:
       - name: Sandbox-daemon launcher selftest (#9121)
         run: bash scripts/sandbox_daemon_selftest.sh
 
+      # #9793: the secrets + console sandbox launcher; stub binaries, no build.
+      - name: Sandbox secrets+console launcher selftest (#9793)
+        run: bash scripts/sandbox_secrets_console_selftest.sh
+
       # #9224: the installed tagent wrapper must not export `.env.local` under
       # TRUSTY_SANDBOX=1. Its selftest drives a stub tagent, so it needs no build.
       - name: tagent wrapper selftest (#9224)

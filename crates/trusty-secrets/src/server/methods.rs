@@ -30,6 +30,7 @@ use super::errors::ErrorKind;
 use super::gate::{Gate, Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
+use super::sandbox;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
@@ -302,8 +303,10 @@ fn sweep_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKin
 /// `configured`, each opened through the factory. A factory that answers
 /// [`SecretsError::UnknownBackend`] has no such backend, so it holds
 /// nothing and is skipped. Any other open failure is returned: that backend
-/// may still hold a value.
+/// may still hold a value. #9793: an active sandbox skips every backend but
+/// `file`; the flag without the override does not.
 /// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_is_refused_under_the_flag_with_the_real_home`,
 /// `server_delete_fails_closed_when_an_old_backend_cannot_open`,
 /// `server_delete_sweeps_onepassword_when_the_machine_enables_it`.
 fn other_backends(
@@ -313,10 +316,14 @@ fn other_backends(
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
     for id in swept_backends(machine) {
-        if id == *configured {
+        // #9793: an active sandbox never opened the Keychain or a CLI
+        // backend, so they hold nothing it wrote; `State::open` refuses them.
+        // With the flag but no override (Q3) they are the account's, so the
+        // refusal below fails the delete closed and the index row stays.
+        if id == *configured || (state.sandbox_override && !sandbox::opens_in_sandbox(&id)) {
             continue;
         }
-        match (state.backends)(&id) {
+        match state.open(&id) {
             Ok(backend) => others.push(backend),
             Err(SecretsError::UnknownBackend { .. }) => {}
             Err(e) => return Err(ErrorKind::from(e)),
@@ -399,7 +406,7 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             // #7524 H1: the destination's posture check runs before any backend
             // opens; `tm secrets copy --to file` moved Keychain values to files.
             let destination = project.open_for_write(state, &request.to_backend)?;
-            let source = (state.backends)(&request.from_backend)?;
+            let source = state.open(&request.from_backend)?;
             if !source.capabilities().contains(Capabilities::READ)
                 || !destination.capabilities().contains(Capabilities::WRITE)
             {
