@@ -72,7 +72,7 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// Delay to wait after the `attempt`-th failure (1-based).
-    fn delay_for(&self, attempt: u32) -> Duration {
+    pub(super) fn delay_for(&self, attempt: u32) -> Duration {
         let shift = attempt.saturating_sub(1).min(6);
         self.base_delay.saturating_mul(1u32 << shift)
     }

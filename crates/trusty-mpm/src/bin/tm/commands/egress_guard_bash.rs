@@ -56,10 +56,14 @@ const FAMILY_HOSTS: &[(&str, &str)] = &[
     ("slack-edge.com", SLACK),
     ("notion.so", NOTION),
     ("notion.com", NOTION),
+    // #8454: O5 — the published-page host, missing from the S3 list.
+    ("notion.site", NOTION),
     ("gmail.googleapis.com", GMAIL),
     ("mail.google.com", GMAIL),
     ("smtp.gmail.com", GMAIL),
     ("chat.googleapis.com", GCHAT),
+    // #8454: O5 — the Google Chat web host, missing from the S3 list.
+    ("chat.google.com", GCHAT),
 ];
 
 /// URL schemes that speak SMTP.

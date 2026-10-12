@@ -29,6 +29,28 @@ thread_local! {
     static FAIL_GROUP_REMOVAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// #9735 test-only fault: drawer keys whose next group write fails before its
+/// redb commit. Process-wide, because the write runs on a blocking thread;
+/// keyed by drawer, so a test arms only its own drawer.
+#[cfg(test)]
+static FAIL_GROUP_COMMIT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Consume an armed [`FAIL_GROUP_COMMIT`] fault for `drawer`, if any.
+#[cfg(test)]
+fn take_group_commit_fault(drawer: &str) -> Result<()> {
+    let mut armed = FAIL_GROUP_COMMIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match armed.iter().position(|d| d == drawer) {
+        Some(i) => {
+            armed.swap_remove(i);
+            let io = std::io::Error::other("#9735 injected group-commit fault");
+            Err(Box::new(redb::StorageError::Io(io)).into())
+        }
+        None => Ok(()),
+    }
+}
+
 /// Remove `key` and every other row of its drawer, tombstoning each row's
 /// vector id and recording each removed key in `freed`.
 ///
@@ -219,6 +241,9 @@ impl HnswStore {
                 }
             }
         }
+        // #9735: the rows above are written; dropping `wtx` rolls them back.
+        #[cfg(test)]
+        take_group_commit_fault(drawer)?;
         wtx.commit()?;
         self.keys.invalidate(); // #9141
         Ok(written)
@@ -316,5 +341,15 @@ impl HnswStore {
     #[cfg(test)]
     pub(crate) fn fail_group_removal_for_test(on: bool) {
         FAIL_GROUP_REMOVAL.with(|f| f.set(on));
+    }
+
+    /// #9735 test seam: the next group write for `drawer` fails after its
+    /// rows are written and before the redb commit.
+    #[cfg(test)]
+    pub(crate) fn fail_next_group_commit_for_test(drawer: &str) {
+        FAIL_GROUP_COMMIT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(drawer.to_string());
     }
 }
