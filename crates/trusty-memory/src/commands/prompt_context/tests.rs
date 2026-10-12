@@ -1059,6 +1059,7 @@ async fn prompt_context_recalls_palace_drawers() {
 #[tokio::test]
 async fn prompt_context_header_names_the_alias_target() {
     let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_MIN_SCORE);
         std::env::remove_var(ENV_RECALL_DENY_TAGS);
@@ -1141,6 +1142,7 @@ async fn prompt_context_header_names_the_alias_target() {
 #[tokio::test]
 async fn prompt_context_off_topic_prompt_injects_nothing() {
     let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_MIN_SCORE);
         std::env::remove_var(ENV_RECALL_DENY_TAGS);
@@ -1438,6 +1440,7 @@ async fn prompt_context_recall_filters_deny_tags() {
     // Defensive: scrub the env override in case a sibling test set it
     // and panicked before its cleanup ran. Both vars are pinned to a
     // known state for this test.
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_RECALL_DENY_TAGS);
     }
@@ -1576,6 +1579,7 @@ async fn prompt_context_recall_env_override_extends_deny_list() {
 #[tokio::test]
 async fn prompt_context_recall_all_filtered_falls_back_to_global() {
     let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_RECALL_DENY_TAGS);
     }
@@ -1647,6 +1651,7 @@ async fn prompt_context_recall_all_filtered_falls_back_to_global() {
 async fn prompt_context_logs_attempt_without_daemon() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let tmp = tempfile::tempdir().expect("tempdir");
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
         std::env::remove_var(crate::prompt_log::ENV_ENABLED);
@@ -1757,6 +1762,7 @@ async fn bounded_blocking_returns_value_when_fast_enough() {
 async fn handle_prompt_context_fails_open_on_slow_daemon() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let tmp = tempfile::tempdir().expect("tempdir");
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
         std::env::remove_var(crate::prompt_log::ENV_ENABLED);
@@ -1960,6 +1966,7 @@ fn injection_caps_rendered_tag_bytes() {
 async fn prompt_context_injection_has_no_provenance_tags() {
     use format::MAX_RENDERED_TAGS;
     let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_MIN_SCORE);
         std::env::remove_var(ENV_RECALL_DENY_TAGS);
@@ -2054,6 +2061,7 @@ async fn prompt_context_injection_has_no_provenance_tags() {
 #[tokio::test]
 async fn prompt_context_logs_recall_query_shape() {
     let _guard = crate::commands::env_test_lock().lock().await;
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::remove_var(ENV_MIN_SCORE);
         std::env::remove_var(super::query::ENV_QUERY_TOKEN_BUDGET);

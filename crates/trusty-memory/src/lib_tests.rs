@@ -42,6 +42,7 @@ fn test_state_warming() -> (AppState, tempfile::TempDir) {
     // remaining consistent with the idempotent-write approach used in
     // `test_state()`.
     static SKIP_ENFORCEMENT_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    // SAFETY: the OnceLock runs this write once; every writer of this key sets the same "1".
     SKIP_ENFORCEMENT_SET.get_or_init(|| unsafe {
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
     });
@@ -1310,6 +1311,7 @@ async fn bm25_lane_disabled_by_default() {
 async fn bm25_lane_enabled_when_env_set() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var("TRUSTY_BM25_DAEMON", "1");
     }
@@ -1377,6 +1379,7 @@ async fn multi_tenant_mode_disabled_by_default() {
 async fn multi_tenant_mode_enabled_when_env_set() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let prev = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").ok();
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var("TRUSTY_MEMORY_MULTI_TENANT", "1");
     }
