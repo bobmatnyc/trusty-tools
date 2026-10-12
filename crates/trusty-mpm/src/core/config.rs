@@ -511,11 +511,22 @@ pub struct MpmConfig {
     /// restore the pre-ADR-0062 behaviour exactly.
     pub session_refs: SessionRefsConfig,
 
-    /// `[supervisor]` — projects allowed to run the supervisor profile (#8453).
+    /// `[architect]` — projects allowed to run the Architect profile (#8453).
     ///
-    /// Absent section → no project may. See
-    /// [`crate::core::session_profile::SupervisorConfig`].
-    pub supervisor: crate::core::session_profile::SupervisorConfig,
+    /// Absent section → no project may. Read it through
+    /// [`Self::architect_grant`], never directly: the grant may still sit in
+    /// the legacy `[supervisor]` table (D07, #9755).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub architect: Option<crate::core::session_profile::ArchitectConfig>,
+
+    /// `[supervisor]` — the pre-D07 name of `[architect]` (#9755, Q7).
+    ///
+    /// A separate field, not a serde alias: an alias makes a file with both
+    /// tables a duplicate-field error, and [`Self::load`] answers that by
+    /// resetting the whole config to defaults.
+    // DEPRECATED(D07): see `core::architect_compat`.
+    #[serde(rename = "supervisor", skip_serializing_if = "Option::is_none")]
+    pub legacy_supervisor: Option<crate::core::session_profile::ArchitectConfig>,
 
     /// `[notification_hook]` — opt-in `Notification` hook and push target (#8392).
     ///
@@ -529,6 +540,32 @@ pub struct MpmConfig {
 // ──────────────────────────────────────────────
 
 impl MpmConfig {
+    /// The operator's Architect grant: `[architect]`, else the legacy
+    /// `[supervisor]`, else the empty grant.
+    ///
+    /// Why: the one reader every grant check goes through, so no reader can
+    /// miss the legacy table and silently demote the Architect to PM (D07,
+    /// #9755). `[architect]` wins whole when both exist (Q7); doctor warns.
+    /// Test: `legacy_supervisor_table_still_grants_architect`,
+    /// `both_architect_tables_keep_architect_and_the_rest_of_the_config`.
+    pub fn architect_grant(&self) -> &crate::core::session_profile::ArchitectConfig {
+        static EMPTY: std::sync::LazyLock<crate::core::session_profile::ArchitectConfig> =
+            std::sync::LazyLock::new(Default::default);
+        // DEPRECATED(D07): the legacy arm.
+        self.architect
+            .as_ref()
+            .or(self.legacy_supervisor.as_ref())
+            .unwrap_or(&EMPTY)
+    }
+
+    /// Whether the file carries both `[architect]` and the legacy
+    /// `[supervisor]`; the legacy table is then ignored.
+    ///
+    /// Test: `both_architect_tables_warn`.
+    pub fn has_both_architect_tables(&self) -> bool {
+        self.architect.is_some() && self.legacy_supervisor.is_some()
+    }
+
     /// Load the user config from `~/.trusty-mpm/config.toml`.
     ///
     /// Why: every daemon and CLI path that cares about user preferences calls

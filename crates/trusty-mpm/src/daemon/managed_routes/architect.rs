@@ -2,7 +2,7 @@
 //!
 //! Why: `tm fleet init` starts the Architect outside the daemon; this route
 //! is how its sessions get protected, listed records.
-//! What: [`supervisor_routes`] mounts the route; [`register_supervisor_core`]
+//! What: [`architect_routes`] mounts the route; [`register_architect_core`]
 //! is the transport-neutral body, also served on the socket as
 //! `mpm.managed.register_supervisor`. [`LaunchRecordBinding`] is the
 //! production [`BindingVerifier`]: the `claude` in the session must be the one
@@ -23,25 +23,36 @@ use tracing::warn;
 
 use crate::daemon::rpc::managed::outcome::RouteOutcome;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::{BindingVerifier, RegisterError, SupervisorRegistration};
+use crate::session_manager::{ArchitectRegistration, BindingVerifier, RegisterError};
 
 /// The Architect registration route, as a sub-router merged by `api.rs`.
-pub fn supervisor_routes() -> Router<Arc<DaemonState>> {
-    Router::new().route(
-        "/api/v1/sessions/managed/supervisor",
-        post(register_supervisor_route),
-    )
+///
+/// What: the D07 path `.../managed/architect` and the legacy
+/// `.../managed/supervisor` mount the same handler (#9755); the client still
+/// posts to the legacy path, which every older daemon serves.
+/// Test: `legacy_register_route_still_served`, `architect_register_route_served`.
+pub fn architect_routes() -> Router<Arc<DaemonState>> {
+    Router::new()
+        .route(
+            "/api/v1/sessions/managed/architect",
+            post(register_architect_route),
+        )
+        // DEPRECATED(D07): the legacy path, until the client moves.
+        .route(
+            "/api/v1/sessions/managed/supervisor",
+            post(register_architect_route),
+        )
 }
 
 /// `POST /api/v1/sessions/managed/supervisor`; see the module doc.
-pub async fn register_supervisor_route(
+pub async fn register_architect_route(
     State(state): State<Arc<DaemonState>>,
-    Json(body): Json<SupervisorRegistration>,
+    Json(body): Json<ArchitectRegistration>,
 ) -> impl IntoResponse {
     let verifier = LaunchRecordBinding {
         root: state.framework_root().to_path_buf(),
     };
-    register_supervisor_core(&state, &body, &verifier).await
+    register_architect_core(&state, &body, &verifier).await
 }
 
 /// The transport-neutral body of the registration route (#8942).
@@ -49,13 +60,13 @@ pub async fn register_supervisor_route(
 /// What: runs the manager's registration and maps [`RegisterError`] onto
 /// 400/403/500.
 /// Test: `the_route_refuses_an_unbound_session_with_403`.
-pub(crate) async fn register_supervisor_core(
+pub(crate) async fn register_architect_core(
     state: &Arc<DaemonState>,
-    body: &SupervisorRegistration,
+    body: &ArchitectRegistration,
     verifier: &dyn BindingVerifier,
 ) -> RouteOutcome {
     let mgr = state.session_manager().await;
-    match mgr.register_supervisor(body, verifier).await {
+    match mgr.register_architect(body, verifier).await {
         Ok(report) => RouteOutcome::ok(&report),
         Err(e @ RegisterError::Invalid(_)) => RouteOutcome::text(400, e.to_string()),
         Err(e @ RegisterError::Unbound(_)) => {
@@ -86,5 +97,5 @@ impl BindingVerifier for LaunchRecordBinding {
 }
 
 #[cfg(test)]
-#[path = "supervisor_tests.rs"]
-mod supervisor_tests;
+#[path = "architect_tests.rs"]
+mod architect_tests;

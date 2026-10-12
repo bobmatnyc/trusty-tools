@@ -108,7 +108,7 @@ fn base(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
 /// because no shell parses it. The profile is the one `mcp_env`'s stamp names.
 /// Test: `isolated_spec_matches_the_shell_line_it_replaces`,
 /// `worst_case_cli_launch_line_is_short_and_carries_no_token`,
-/// `a_supervisor_isolated_spec_keeps_every_tool`.
+/// `an_architect_isolated_spec_keeps_every_tool`.
 pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
     let mut spec = base(cwd, launch.alternate_screen);
     if let Some(dir) = launch.config_dir {

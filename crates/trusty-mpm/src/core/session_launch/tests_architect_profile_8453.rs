@@ -10,7 +10,7 @@
 use super::tests::EnvVarGuard;
 use super::*;
 use crate::core::content_source::test_support::rc;
-use crate::core::session_profile::{SUPERVISOR_MODEL, SessionProfile};
+use crate::core::session_profile::{ARCHITECT_MODEL, SessionProfile};
 use tempfile::tempdir;
 
 /// Launch `project` with `home` as `$HOME`; return the profile, the settings
@@ -66,19 +66,19 @@ fn set_profile(project: &Path, profile: &str) {
 
 #[test]
 #[serial_test::serial]
-fn a_supervisor_launch_gets_the_supervisor_prompt_style_and_model() {
+fn an_architect_launch_gets_the_architect_prompt_style_and_model() {
     let tmp = tempdir().unwrap();
     set_profile(tmp.path(), "supervisor");
     let home = home_allowing(tmp.path());
     let (profile, settings, stash) = launch_in(tmp.path(), home.path());
-    assert_eq!(profile, SessionProfile::Supervisor);
+    assert_eq!(profile, SessionProfile::Architect);
     assert_eq!(
         settings["outputStyle"],
-        crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
+        crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID
     );
-    assert_eq!(settings["model"], SUPERVISOR_MODEL);
+    assert_eq!(settings["model"], ARCHITECT_MODEL);
     assert!(
-        stash.contains(&crate::core::session_profile::supervisor_prompt(rc())),
+        stash.contains(&crate::core::session_profile::architect_prompt(rc())),
         "{stash}"
     );
     assert!(!stash.contains("STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY"));
@@ -124,7 +124,7 @@ fn flipping_back_to_pm_removes_the_model_tm_wrote() {
     set_profile(tmp.path(), "supervisor");
     let home = home_allowing(tmp.path());
     let (_, settings, _) = launch_in(tmp.path(), home.path());
-    assert_eq!(settings["model"], SUPERVISOR_MODEL);
+    assert_eq!(settings["model"], ARCHITECT_MODEL);
     set_profile(tmp.path(), "pm");
     let (profile, settings, _) = launch_in(tmp.path(), home.path());
     assert_eq!(profile, SessionProfile::Pm);
@@ -145,7 +145,7 @@ fn a_user_set_model_is_never_touched() {
     let home = home_allowing(tmp.path());
     // A supervisor launch keeps the user's value …
     let (profile, settings, _) = launch_in(tmp.path(), home.path());
-    assert_eq!(profile, SessionProfile::Supervisor);
+    assert_eq!(profile, SessionProfile::Architect);
     assert_eq!(settings["model"], "sonnet");
     // … and so does the PM launch after it.
     set_profile(tmp.path(), "pm");

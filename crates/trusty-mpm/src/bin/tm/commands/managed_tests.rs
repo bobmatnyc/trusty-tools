@@ -1847,9 +1847,9 @@ fn session_table_pins_and_tags_the_architect_row() {
     };
     let rows = [
         with("ordinary", None, false),
-        with("gone-arch", Some(SessionKind::Supervisor), true),
-        with("poller", Some(SessionKind::SupervisorAux), false),
-        with("arch", Some(SessionKind::Supervisor), false),
+        with("gone-arch", Some(SessionKind::Architect), true),
+        with("poller", Some(SessionKind::ArchitectAux), false),
+        with("arch", Some(SessionKind::Architect), false),
     ];
     let order: Vec<&str> = pinned_first(&rows)
         .iter()

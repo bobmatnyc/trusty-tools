@@ -1,7 +1,8 @@
-//! End-to-end proof that the supervisor profile, not `TRUSTY_MPM_PM_UNRESTRICTED`,
-//! defines a supervisor session's guard behaviour (#8453).
+//! End-to-end proof that the Architect profile, not `TRUSTY_MPM_PM_UNRESTRICTED`,
+//! defines an Architect session's guard behaviour (#8453). The stamp and
+//! profile values stay the legacy `supervisor` the writers still emit (#9755).
 //!
-//! Why: a supervisor acts directly, so the PM delegation rules must not bind
+//! Why: the Architect acts directly, so the PM delegation rules must not bind
 //! it, while the destructive-command and worktree guards must. The exemption
 //! needs three things to agree — the launch stamp, the user-level allowlist and
 //! the project file — and only the built binary proves the hook reads them.
@@ -9,9 +10,9 @@
 //! `.trusty-mpm/config.toml` is the allowlist), `CLAUDE_PROJECT_DIR` naming a
 //! temp main checkout, `TRUSTY_MPM_PM_UNRESTRICTED` unset, and an unreachable
 //! daemon. A budget-eligible direct edit (`sed -i`) is denied on its fourth
-//! call for a PM and never for a supervisor; every absolute guard denies both.
+//! call for a PM and never for the Architect; every absolute guard denies both.
 //! Every fixture is fake: the guard only classifies the commands.
-//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_supervisor_8453::`.
+//! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_architect_8453::`.
 
 use crate::common;
 
@@ -70,8 +71,8 @@ fn session(profile: Option<&str>, stamp: Option<&'static str>, allow_listed: boo
     }
 }
 
-/// The fully granted supervisor: stamp, allowlist and file all agree.
-fn supervisor() -> Session {
+/// The fully granted Architect: stamp, allowlist and file all agree.
+fn architect() -> Session {
     session(Some("supervisor"), Some("supervisor"), true)
 }
 
@@ -124,8 +125,8 @@ fn fourth_direct_edit(s: &Session) -> String {
 }
 
 #[test]
-fn a_supervisor_session_is_not_bound_by_the_pm_delegation_rules() {
-    assert_eq!(fourth_direct_edit(&supervisor()).trim(), "");
+fn an_architect_session_is_not_bound_by_the_pm_delegation_rules() {
+    assert_eq!(fourth_direct_edit(&architect()).trim(), "");
 }
 
 #[test]
@@ -150,7 +151,7 @@ fn a_project_only_switch_keeps_the_pm_delegation_rules() {
 
 #[test]
 fn a_stamp_without_the_file_keeps_the_pm_delegation_rules() {
-    // The launch said supervisor; the project file no longer does.
+    // The launch said Architect; the project file no longer does.
     for profile in [Some("pm"), None] {
         let stale = session(profile, Some("supervisor"), true);
         assert!(
@@ -160,10 +161,36 @@ fn a_stamp_without_the_file_keeps_the_pm_delegation_rules() {
     }
 }
 
+// #9755 (D07): an Architect launched before the rename keeps the `supervisor`
+// stamp across a `tm` upgrade, and its hooks run the new binary.
+#[test]
+fn legacy_stamp_supervisor_is_still_architect() {
+    let legacy = session(Some("supervisor"), Some("supervisor"), true);
+    assert_eq!(fourth_direct_edit(&legacy).trim(), "");
+}
+
+#[test]
+fn architect_stamp_is_architect() {
+    let renamed = session(Some("supervisor"), Some("architect"), true);
+    assert_eq!(fourth_direct_edit(&renamed).trim(), "");
+}
+
+#[test]
+fn unrecognised_stamp_is_not_architect() {
+    // Fail-closed: only the two Architect stamps grant the exemption.
+    for stamp in ["other", "Architect", "supervisor "] {
+        let s = session(Some("supervisor"), Some(stamp), true);
+        assert!(
+            fourth_direct_edit(&s).contains("\"deny\""),
+            "stamp {stamp:?}"
+        );
+    }
+}
+
 #[test]
 fn an_undecidable_profile_keeps_the_pm_guards() {
-    // Fail-closed to the PM profile: a malformed config is not a supervisor.
-    let broken = supervisor();
+    // Fail-closed to the PM profile: a malformed config is not an Architect.
+    let broken = architect();
     std::fs::write(
         broken.project.join(".trusty-mpm.toml"),
         "profile = \"supervisor\"\n[[[ not toml\n",
@@ -173,11 +200,11 @@ fn an_undecidable_profile_keeps_the_pm_guards() {
 }
 
 #[test]
-fn every_absolute_guard_still_binds_a_supervisor() {
+fn every_absolute_guard_still_binds_an_architect() {
     // One row per absolute guard that binds a top-level caller. Each is asked
     // BEFORE the profile verdict; moving the verdict above them lets a granted
-    // supervisor through, and every row fails.
-    let s = supervisor();
+    // Architect through, and every row fails.
+    let s = architect();
     let lib = s.project.join("src/lib.rs").display().to_string();
     let bash = |command: &str| serde_json::json!({ "command": command });
     let rows: [(&str, &str, serde_json::Value, &str); 6] = [

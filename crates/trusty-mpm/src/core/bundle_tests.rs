@@ -487,8 +487,13 @@ fn every_bundled_style_reads_from_content() {
             "{} must be a required instruction, or a load would not guarantee it",
             style.content_path
         );
+        // #9755: the Architect style is read at its new path and deployed under
+        // the legacy file name its content still carries (D2d, R4).
+        let content_file =
+            crate::core::architect_compat::legacy_instruction_path(style.content_path)
+                .unwrap_or_else(|| style.content_path.to_owned());
         assert_eq!(
-            style.content_path,
+            content_file,
             format!("output-styles/{}", style.file_name),
             "a style deploys under the file name its content carries"
         );
@@ -519,7 +524,7 @@ fn output_style_registry_has_four_distinct_ids() {
 }
 
 #[test]
-fn the_pm_styles_are_every_style_but_the_supervisor_style() {
+fn the_pm_styles_are_every_style_but_the_architect_style() {
     // #8453: the PM-invariant tests iterate `pm_output_styles()`; it must drop
     // exactly the supervisor style and nothing else.
     let pm: Vec<&str> = pm_output_styles().map(|s| s.id).collect();
@@ -528,7 +533,7 @@ fn the_pm_styles_are_every_style_but_the_supervisor_style() {
         ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
     );
     assert!(OUTPUT_STYLES.iter().any(|s| s.id
-        == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
+        == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID
         && s.content(rc()) == instruction_text("output-styles/trusty-mpm-supervisor.md")));
 }
 
@@ -1838,11 +1843,11 @@ fn output_styles_keep_claude_code_coding_instructions() {
     }
     // #8453: the supervisor is not a coder — its style drops them on purpose,
     // as the reference supervisor's style did.
-    let supervisor = OUTPUT_STYLES
+    let architect = OUTPUT_STYLES
         .iter()
-        .find(|s| s.id == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID)
+        .find(|s| s.id == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID)
         .expect("the supervisor style is bundled");
-    assert!(frontmatter(supervisor).contains("keep-coding-instructions: false"));
+    assert!(frontmatter(architect).contains("keep-coding-instructions: false"));
 }
 
 /// Every prose RULE the output styles must state resident, as a short anchor.
@@ -1899,7 +1904,7 @@ fn output_styles_state_every_pm_prose_rule() {
     // moved their examples behind `Skill(skill="tm-prose-style")`, so the
     // contract is "the rule is still stated, and its evidence is one hop away".
     // #8453: the PM styles; the supervisor style's prose section is pinned
-    // verbatim by `the_supervisor_style_carries_write_plainly_verbatim`.
+    // verbatim by `the_architect_style_carries_write_plainly_verbatim`.
     for style in pm_output_styles() {
         for needle in PROSE_RULE_ANCHORS {
             // #7709: whitespace-insensitive, so a rewrap is not a regression.

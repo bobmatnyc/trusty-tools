@@ -20,8 +20,8 @@ async fn state() -> (tempfile::TempDir, Arc<DaemonState>) {
     (root, state)
 }
 
-fn body(dir: PathBuf) -> SupervisorRegistration {
-    SupervisorRegistration {
+fn body(dir: PathBuf) -> ArchitectRegistration {
+    ArchitectRegistration {
         dir,
         session: "tm-arch".into(),
         poll_session: None,
@@ -34,15 +34,15 @@ fn body(dir: PathBuf) -> SupervisorRegistration {
 async fn the_route_refuses_an_unbound_session_with_403() {
     let (root, state) = state().await;
     let reg = body(root.path().to_path_buf());
-    let out = register_supervisor_core(&state, &reg, &Fixed(Err("no record".into()))).await;
+    let out = register_architect_core(&state, &reg, &Fixed(Err("no record".into()))).await;
     assert_eq!(out.status, 403);
     assert!(state.session_manager().await.list().await.is_empty());
 
-    let out = register_supervisor_core(&state, &reg, &Fixed(Ok(()))).await;
+    let out = register_architect_core(&state, &reg, &Fixed(Ok(()))).await;
     assert_eq!(out.status, 200);
     let records = state.session_manager().await.list().await;
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].kind, SessionKind::Supervisor);
+    assert_eq!(records[0].kind, SessionKind::Architect);
 }
 
 /// Fail-Open Check, #8942 critic MEDIUM: the route itself, with its
@@ -55,7 +55,7 @@ async fn the_route_refuses_a_missing_session_through_the_launch_record() {
     assert_eq!(state.framework_root(), root.path(), "a scratch root");
     let dir = root.path().join("architect");
     std::fs::create_dir_all(&dir).expect("architect dir");
-    let reg = SupervisorRegistration {
+    let reg = ArchitectRegistration {
         poll_session: Some("tm-arch-8942-absent-poll".into()),
         session: "tm-arch-8942-absent".into(),
         ..body(dir)
@@ -64,7 +64,7 @@ async fn the_route_refuses_a_missing_session_through_the_launch_record() {
 
     let response = crate::core::tmux::with_tmux_binary(
         server.shim_bin().into(),
-        register_supervisor_route(State(Arc::clone(&state)), Json(reg)),
+        register_architect_route(State(Arc::clone(&state)), Json(reg)),
     )
     .await
     .into_response();
@@ -77,6 +77,6 @@ async fn the_route_refuses_a_missing_session_through_the_launch_record() {
 #[tokio::test]
 async fn the_route_rejects_a_relative_dir_with_400() {
     let (_root, state) = state().await;
-    let out = register_supervisor_core(&state, &body("rel".into()), &Fixed(Ok(()))).await;
+    let out = register_architect_core(&state, &body("rel".into()), &Fixed(Ok(()))).await;
     assert_eq!(out.status, 400);
 }

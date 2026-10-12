@@ -163,7 +163,7 @@ pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
 /// [`trusty_mpm::core::remote_mode::gh_disabled_for`] its root under `mpm`;
 /// otherwise `None`.
 /// Test: `load_gh_env_for_a_local_only_repo_disables_gh`,
-/// `an_allow_listed_supervisor_dir_keeps_gh_in_the_cli`,
+/// `an_allow_listed_architect_dir_keeps_gh_in_the_cli`,
 /// `a_pinned_session_keeps_its_pin_outside_the_repo`.
 pub(crate) fn local_only_pin(
     mode: Option<&trusty_mpm::core::remote_mode::RemoteMode>,
@@ -524,7 +524,7 @@ mod tests {
 
     fn allowing(dir: &std::path::Path) -> trusty_mpm::core::config::MpmConfig {
         let mut config = trusty_mpm::core::config::MpmConfig::default();
-        config.supervisor.projects = vec![dir.to_path_buf()];
+        config.architect.get_or_insert_default().projects = vec![dir.to_path_buf()];
         config
     }
 
@@ -533,7 +533,7 @@ mod tests {
     /// `tm issue`/`tm ticket`/`tm pr` and the in-place relaunch.
     /// Test: itself.
     #[test]
-    fn an_allow_listed_supervisor_dir_keeps_gh_in_the_cli() {
+    fn an_allow_listed_architect_dir_keeps_gh_in_the_cli() {
         use trusty_mpm::core::remote_mode::remote_mode;
         let (_repo, root) = local_only_repo("supervisor");
         let mode = remote_mode(&root).expect("mode");

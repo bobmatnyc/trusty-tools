@@ -174,7 +174,7 @@ pub(crate) fn start(
     home: &Path,
     session: &str,
 ) -> anyhow::Result<(Result<ArmingRecord, String>, ConversationStart)> {
-    require_supervisor(dir, session)?;
+    require_architect(dir, session)?;
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
         Ok(report) => {
             for err in &report.roster_errors {
@@ -195,7 +195,7 @@ pub(crate) fn start(
     let content = trusty_mpm::core::content_source::framework_content_for(dir)
         .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let cli = trusty_mpm::core::session_launch::cli_launch(&content, dir, None);
-    if !cli.profile.is_supervisor() {
+    if !cli.profile.is_architect() {
         bail!("{}", pm_refusal(dir, session));
     }
     let config = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(dir));
@@ -451,8 +451,8 @@ fn stamp_and_send(
 }
 
 /// Fail unless a launch in `dir` resolves to the supervisor profile.
-fn require_supervisor(dir: &Path, session: &str) -> anyhow::Result<()> {
-    if session_profile::resolve_ambient(dir).is_supervisor() {
+fn require_architect(dir: &Path, session: &str) -> anyhow::Result<()> {
+    if session_profile::resolve_ambient(dir).is_architect() {
         return Ok(());
     }
     bail!("{}", pm_refusal(dir, session))

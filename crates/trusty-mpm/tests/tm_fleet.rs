@@ -555,7 +555,7 @@ impl trusty_common::uds::server::RpcFallback for Registrar {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, trusty_common::uds::server::RpcError> {
         use trusty_mpm::session_manager::{
-            RegisteredSession, RegistrationReport, SessionKind, SupervisorRegistration,
+            ArchitectRegistration, RegisteredSession, RegistrationReport, SessionKind,
         };
         const METHOD: &str = "mpm.managed.register_supervisor";
         if method != METHOD {
@@ -565,19 +565,19 @@ impl trusty_common::uds::server::RpcFallback for Registrar {
             ));
         }
         self.0.lock().expect("requests").push(params.clone());
-        let reg: SupervisorRegistration = serde_json::from_value(params)
+        let reg: ArchitectRegistration = serde_json::from_value(params)
             .map_err(|e| trusty_common::uds::server::RpcError::invalid_params(e.to_string()))?;
         let row = |name: &str, kind| RegisteredSession {
             id: format!("id-{name}"),
             tmux_name: name.to_owned(),
             kind,
         };
-        let mut registered = vec![row(&reg.session, SessionKind::Supervisor)];
+        let mut registered = vec![row(&reg.session, SessionKind::Architect)];
         for helper in [&reg.poll_session, &reg.collector_session]
             .into_iter()
             .flatten()
         {
-            registered.push(row(helper, SessionKind::SupervisorAux));
+            registered.push(row(helper, SessionKind::ArchitectAux));
         }
         let report = RegistrationReport {
             registered,

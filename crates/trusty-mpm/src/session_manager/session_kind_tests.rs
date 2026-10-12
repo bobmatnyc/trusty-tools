@@ -40,8 +40,8 @@ fn an_unrecognised_kind_reads_as_unknown_and_is_protected() {
 fn session_kind_wire_tokens_round_trip() {
     for (kind, token) in [
         (SessionKind::Ordinary, "\"ordinary\""),
-        (SessionKind::Supervisor, "\"supervisor\""),
-        (SessionKind::SupervisorAux, "\"supervisor_aux\""),
+        (SessionKind::Architect, "\"supervisor\""),
+        (SessionKind::ArchitectAux, "\"supervisor_aux\""),
     ] {
         assert_eq!(serde_json::to_string(&kind).expect("serialize"), token);
         let back: SessionKind = serde_json::from_str(token).expect("deserialize");
@@ -53,10 +53,33 @@ fn session_kind_wire_tokens_round_trip() {
 fn only_ordinary_is_unprotected() {
     assert!(!SessionKind::Ordinary.is_protected());
     for kind in [
-        SessionKind::Supervisor,
-        SessionKind::SupervisorAux,
+        SessionKind::Architect,
+        SessionKind::ArchitectAux,
         SessionKind::Unknown,
     ] {
         assert!(kind.is_protected(), "{kind:?}");
     }
+}
+
+/// D07 pin (#9755): a `sessions.json` written before the rename keeps its
+/// Architect kinds, and those kinds still serialize to the names an older
+/// `tm` reads (owner answer Q1: write the old names for one release).
+#[test]
+fn a_pre_d07_store_keeps_its_architect_kinds() {
+    type Store =
+        std::collections::HashMap<String, std::collections::HashMap<String, SessionRecord>>;
+    let raw = include_str!("testdata/session-record-pre-d07.json");
+    let store: Store = serde_json::from_str(raw).expect("a pre-D07 store must load");
+    let kind = |id: &str| store["sessions"][id].kind;
+    let architect = kind("0708af71-2b5e-5dab-8c92-739ebdb04941");
+    let helper = kind("f75797ca-cc1e-5fdf-a528-5e24a3c627b5");
+    assert!(architect.is_protected() && architect != SessionKind::Unknown);
+    assert!(helper.is_protected() && helper != SessionKind::Unknown);
+    assert_ne!(architect, helper);
+    assert_eq!(
+        kind("6f1c2b9e-8f3a-4b7d-9c1e-2a3b4c5d6e7f"),
+        SessionKind::Ordinary
+    );
+    assert_eq!(serde_json::to_value(architect).unwrap(), "supervisor");
+    assert_eq!(serde_json::to_value(helper).unwrap(), "supervisor_aux");
 }

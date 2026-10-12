@@ -103,7 +103,7 @@ pub fn build_system_prompt_for_with_style_and_native(
 /// [`build_system_prompt_for_with_style_and_native`] for a profile the caller
 /// already resolved (#8453), so the prompt, the style and the launch stamp
 /// all come from one resolution.
-/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+/// Test: `an_architect_launch_gets_the_architect_prompt_style_and_model`.
 pub fn build_system_prompt_for_profile(
     content: &FrameworkContent,
     project_dir: &Path,

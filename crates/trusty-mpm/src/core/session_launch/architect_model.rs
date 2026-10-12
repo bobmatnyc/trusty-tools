@@ -5,18 +5,18 @@
 //! first version of that write was one-way: a project switched back to the PM
 //! profile kept the supervisor model, and a `model` the operator had set was
 //! overwritten.
-//! What: [`write_supervisor_model`] writes `model` only when it is absent or
+//! What: [`write_architect_model`] writes `model` only when it is absent or
 //! holds the value tm recorded writing, and records the write under the
 //! harness directory (`tm-written-model.json`, keyed by settings path). A PM
 //! launch removes `model` only when tm recorded writing it and the value is
 //! still tm's. A `model` tm did not write is never changed.
-//! Test: `session_launch/tests_supervisor_profile_8453.rs`.
+//! Test: `session_launch/tests_architect_profile_8453.rs`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
-use crate::core::session_profile::{SUPERVISOR_MODEL, SessionProfile};
+use crate::core::session_profile::{ARCHITECT_MODEL, SessionProfile};
 
 /// The record file, under [`crate::core::harness_root::harness_dir`].
 const RECORD_FILE: &str = "tm-written-model.json";
@@ -79,15 +79,15 @@ fn store_record(path: &Path, record: &Record) -> Result<(), PrepError> {
 /// Write or remove the supervisor `model` key for a launch of `profile`.
 ///
 /// Why: see the module doc.
-/// What: supervisor → set `model` to [`SUPERVISOR_MODEL`] when it is absent
+/// What: supervisor → set `model` to [`ARCHITECT_MODEL`] when it is absent
 /// or equals the recorded tm value, then record it; a user-set `model` is
 /// kept and the record dropped. PM → with a record, remove `model` when it
 /// still equals the recorded value, then drop the record; without one, touch
 /// nothing.
-/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`,
+/// Test: `an_architect_launch_gets_the_architect_prompt_style_and_model`,
 /// `flipping_back_to_pm_removes_the_model_tm_wrote`,
 /// `a_user_set_model_is_never_touched`.
-pub(super) fn write_supervisor_model(
+pub(super) fn write_architect_model(
     project_dir: &Path,
     profile: SessionProfile,
 ) -> Result<(), PrepError> {
@@ -95,7 +95,7 @@ pub(super) fn write_supervisor_model(
     let mut record = load_record(&path);
     let key = settings_key(project_dir);
     let owned = record.get(&key).cloned();
-    if profile.is_supervisor() {
+    if profile.is_architect() {
         let mut wrote = false;
         super::settings::merge_settings(project_dir, |settings| {
             let ours = match settings.get(MODEL_KEY) {
@@ -105,17 +105,17 @@ pub(super) fn write_supervisor_model(
                     .is_some_and(|v| current.as_str() == Some(v)),
             };
             if ours {
-                settings[MODEL_KEY] = serde_json::Value::from(SUPERVISOR_MODEL);
+                settings[MODEL_KEY] = serde_json::Value::from(ARCHITECT_MODEL);
                 wrote = true;
             }
         })?;
         if wrote {
-            record.insert(key, SUPERVISOR_MODEL.to_owned());
+            record.insert(key, ARCHITECT_MODEL.to_owned());
         } else {
             tracing::warn!(
                 project = %project_dir.display(),
                 "the project settings set their own `model`; the supervisor model \
-                 `{SUPERVISOR_MODEL}` is passed on the command line only"
+                 `{ARCHITECT_MODEL}` is passed on the command line only"
             );
             record.remove(&key);
         }

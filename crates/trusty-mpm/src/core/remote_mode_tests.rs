@@ -131,10 +131,10 @@ fn local_repo_asking_for(profile: &str) -> (tempfile::TempDir, std::path::PathBu
 /// directory spawns with no gh pin — the Architect keeps the machine's gh.
 /// Test: itself.
 #[test]
-fn an_allow_listed_supervisor_keeps_gh() {
+fn an_allow_listed_architect_keeps_gh() {
     let (_dir, root) = local_repo_asking_for("supervisor");
     let mut config = MpmConfig::default();
-    config.supervisor.projects = vec![root.clone()];
+    config.architect.get_or_insert_default().projects = vec![root.clone()];
     assert!(!gh_disabled_for(&root, &config));
     assert_eq!(local_only_spawn_vars(&root, &config), Vec::new());
 }
@@ -142,7 +142,7 @@ fn an_allow_listed_supervisor_keeps_gh() {
 /// #8453: a project's own `.trusty-mpm.toml` cannot exempt itself.
 /// Test: itself.
 #[test]
-fn a_self_declared_supervisor_does_not_keep_gh() {
+fn a_self_declared_architect_does_not_keep_gh() {
     let (_dir, root) = local_repo_asking_for("supervisor");
     let config = MpmConfig::default();
     assert!(gh_disabled_for(&root, &config));

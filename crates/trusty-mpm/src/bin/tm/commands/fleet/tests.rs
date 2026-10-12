@@ -123,7 +123,7 @@ fn a_first_run_writes_the_profile_the_grant_and_a_remote_less_repo() {
     assert!(!fx.config().contains("twin"), "{}", fx.config());
     // With these files, a launch in the directory resolves to the supervisor.
     let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(".trusty-mpm"));
-    assert!(trusty_mpm::core::session_profile::resolve(&dir, &cfg).is_supervisor());
+    assert!(trusty_mpm::core::session_profile::resolve(&dir, &cfg).is_architect());
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn an_unrelated_key_and_comment_survive_the_allowlist_write() {
     assert!(after.contains("[supervisor]"), "{after}");
     let cfg = trusty_mpm::core::config::MpmConfig::load(&fx.home().join(".trusty-mpm"));
     assert_eq!(
-        cfg.supervisor.projects,
+        cfg.architect_grant().projects,
         vec![PathBuf::from(canonical(&fx.dir()))]
     );
 }
@@ -225,11 +225,33 @@ fn an_existing_supervisor_table_gains_the_entry() {
         };
         let cfg: trusty_mpm::core::config::MpmConfig = toml::from_str(&text).unwrap();
         assert!(
-            cfg.supervisor.projects.contains(&PathBuf::from(&entry)),
+            cfg.architect_grant()
+                .projects
+                .contains(&PathBuf::from(&entry)),
             "{raw:?}\n{text}"
         );
         assert_eq!(text.matches(&entry).count(), 1, "{text}");
     }
+}
+
+/// #9755 (Q7): with `[architect]` present the grant lands there, the table
+/// the reader uses; the legacy `[supervisor]` is left byte-identical.
+#[test]
+fn an_existing_architect_table_gains_the_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Path::new("/h/.trusty-mpm/config.toml");
+    let entry = canonical(dir.path());
+    let raw = "[architect]\nprojects = []\n\n[supervisor]\nprojects = [\"/old\"]\n";
+    let Edit::Changed(text) = config::add_allowlist_entry(raw, Path::new(&entry), path).unwrap()
+    else {
+        panic!("the [architect] table should gain the entry");
+    };
+    let cfg: trusty_mpm::core::config::MpmConfig = toml::from_str(&text).unwrap();
+    assert_eq!(cfg.architect_grant().projects, [PathBuf::from(&entry)]);
+    assert!(
+        text.contains("[supervisor]\nprojects = [\"/old\"]\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -370,7 +392,7 @@ fn fleet_status_names_why_this_session_is_not_bound() {
     let pm = status::this_session_check(&fx.project, HookEnv::default(), granted);
     assert!(
         pm.detail
-            .ends_with(&NotArchitect::NoSupervisorStamp.to_string())
+            .ends_with(&NotArchitect::NoArchitectStamp.to_string())
     );
 
     let home = Fixture::new();

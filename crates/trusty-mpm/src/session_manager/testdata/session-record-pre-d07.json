@@ -1,0 +1,31 @@
+{
+  "sessions": {
+    "0708af71-2b5e-5dab-8c92-739ebdb04941": {
+      "id": "0708af71-2b5e-5dab-8c92-739ebdb04941",
+      "task": "Architect",
+      "tmux_name": "tm-supervisor",
+      "cwd": "/",
+      "state": "stopped",
+      "created_at": "2026-09-30T00:00:00Z",
+      "kind": "supervisor"
+    },
+    "f75797ca-cc1e-5fdf-a528-5e24a3c627b5": {
+      "id": "f75797ca-cc1e-5fdf-a528-5e24a3c627b5",
+      "task": "Architect poll",
+      "tmux_name": "tm-supervisor-poll",
+      "cwd": "/",
+      "state": "stopped",
+      "created_at": "2026-09-30T00:00:00Z",
+      "kind": "supervisor_aux"
+    },
+    "6f1c2b9e-8f3a-4b7d-9c1e-2a3b4c5d6e7f": {
+      "id": "6f1c2b9e-8f3a-4b7d-9c1e-2a3b4c5d6e7f",
+      "task": "ordinary",
+      "tmux_name": "tm-x",
+      "cwd": "/tmp",
+      "state": "stopped",
+      "created_at": "2026-09-30T00:00:00Z",
+      "kind": "ordinary"
+    }
+  }
+}

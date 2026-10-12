@@ -963,7 +963,7 @@ impl SessionManager {
             }
         }
         // #8942: the Architect is relaunched by `tm fleet init`, never here.
-        super::supervisor::refuse_protected(&record, super::supervisor::ProtectedVerb::Resume)?;
+        super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Resume)?;
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
         // below (`session_exists_checked`'s `list-sessions` probe), so a cold

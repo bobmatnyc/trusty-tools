@@ -6,16 +6,16 @@
 //! refusal. Anyone may call the route, so a record that makes a session
 //! unkillable is written only for a `claude` the launch record binds to the
 //! project.
-//! What: [`SupervisorRegistration`] is the request, [`RegistrationReport`]
-//! the answer, [`RegisterError`] the refusal. [`SessionManager::register_supervisor`]
+//! What: [`ArchitectRegistration`] is the request, [`RegistrationReport`]
+//! the answer, [`RegisterError`] the refusal. [`SessionManager::register_architect`]
 //! verifies the binding through a [`BindingVerifier`], then, in one store
 //! write, upserts the Architect's record under
-//! [`ManagedSessionId::for_supervisor`], a `supervisor_aux` record for each
+//! [`ManagedSessionId::for_architect`], a `supervisor_aux` record for each
 //! helper named after the Architect whose pane runs in the Architect
 //! directory provably without `claude`, and marks `deleted`, record-only, every other
 //! live record with one of those tmux names and every other non-terminal
 //! Architect record.
-//! Test: `supervisor_register_tests.rs`.
+//! Test: `architect_register_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -23,10 +23,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::architect_floor::ARCHITECT_ROLE;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::session_kind::SessionKind;
-use super::supervisor_floor::SUPERVISOR_ROLE;
 use crate::core::architect_session::{POLL_SUFFIX, poll_session_name, validate_session_name};
 use crate::core::process::PaneClaude;
 
@@ -44,7 +44,7 @@ pub fn collector_session_name(name: &str) -> String {
 /// register. A helper name must be the one derived from `session`
 /// ([`poll_session_name`], [`collector_session_name`]); any other is a 400.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SupervisorRegistration {
+pub struct ArchitectRegistration {
     /// The Architect project directory; absolute.
     pub dir: PathBuf,
     /// The Architect's tmux session.
@@ -120,7 +120,7 @@ impl SessionManager {
     /// and `pane_claude` proves no `claude` runs in the pane, the pane's own
     /// process included; `Present`, `Unknown` or another cwd lists it in
     /// `skipped`.
-    /// Test: `register_supervisor_refuses_an_unbound_session`,
+    /// Test: `register_architect_refuses_an_unbound_session`,
     /// `relaunching_the_architect_replaces_its_record`,
     /// `a_helper_not_named_after_the_architect_is_refused`,
     /// `a_helper_whose_pane_runs_claude_is_not_registered`,
@@ -128,21 +128,17 @@ impl SessionManager {
     /// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`,
     /// `registration_deletes_every_stale_architect_record`,
     /// `a_helper_whose_pane_cannot_be_placed_is_not_registered`,
-    /// `register_supervisor_refuses_a_relative_dir_or_a_bad_name`.
-    pub async fn register_supervisor(
+    /// `register_architect_refuses_a_relative_dir_or_a_bad_name`.
+    pub async fn register_architect(
         &self,
-        reg: &SupervisorRegistration,
+        reg: &ArchitectRegistration,
         verifier: &dyn BindingVerifier,
     ) -> Result<RegistrationReport, RegisterError> {
         let dir = validated_dir(reg)?;
         verifier
             .verify(&dir, &reg.session)
             .map_err(RegisterError::Unbound)?;
-        let mut wanted = vec![(
-            reg.session.clone(),
-            SessionKind::Supervisor,
-            SUPERVISOR_ROLE,
-        )];
+        let mut wanted = vec![(reg.session.clone(), SessionKind::Architect, ARCHITECT_ROLE)];
         let mut report = RegistrationReport::default();
         let helpers = [
             (&reg.poll_session, POLL_SUFFIX),
@@ -155,7 +151,7 @@ impl SessionManager {
                 // Architect, never a helper; "cannot tell" skips it too.
                 Some(cwd) if same_dir(&cwd, &dir) => match self.tmux.pane_claude(name) {
                     PaneClaude::Absent => {
-                        wanted.push((name.clone(), SessionKind::SupervisorAux, role));
+                        wanted.push((name.clone(), SessionKind::ArchitectAux, role));
                     }
                     PaneClaude::Present => report.skipped.push(format!(
                         "{name}: a `claude` runs in its pane, so it is no helper"
@@ -179,9 +175,9 @@ impl SessionManager {
         let now = Utc::now();
         let mut writes = Vec::new();
         for (name, kind, role) in &wanted {
-            let id = ManagedSessionId::for_supervisor(&dir, role);
+            let id = ManagedSessionId::for_architect(&dir, role);
             let prior = existing.iter().find(|r| r.id == id);
-            writes.push(supervisor_record(
+            writes.push(architect_record(
                 id,
                 name,
                 &dir,
@@ -209,7 +205,7 @@ impl SessionManager {
             // Architect record is stale, and a stopped one would pin its name.
             let stale_architect = matches!(
                 other.kind,
-                SessionKind::Supervisor | SessionKind::SupervisorAux
+                SessionKind::Architect | SessionKind::ArchitectAux
             );
             if stale_architect || (live && wanted.iter().any(|w| w.0 == other.tmux_name)) {
                 let mut replaced = other.clone();
@@ -231,7 +227,7 @@ impl SessionManager {
 }
 
 /// `reg.dir`, canonical when it can be, after the request checks.
-fn validated_dir(reg: &SupervisorRegistration) -> Result<PathBuf, RegisterError> {
+fn validated_dir(reg: &ArchitectRegistration) -> Result<PathBuf, RegisterError> {
     if !reg.dir.is_absolute() {
         return Err(RegisterError::Invalid(format!(
             "dir {} is not absolute",
@@ -263,7 +259,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// The record for one of the Architect's sessions, keeping `prior`'s history.
-fn supervisor_record(
+fn architect_record(
     id: ManagedSessionId,
     name: &str,
     dir: &Path,
@@ -272,7 +268,7 @@ fn supervisor_record(
     (pane_id, tmux_server): (Option<String>, Option<String>),
 ) -> SessionRecord {
     let task = match kind {
-        SessionKind::Supervisor => "the Architect (tm fleet init)",
+        SessionKind::Architect => "the Architect (tm fleet init)",
         _ => "the Architect's helper (tm fleet init)",
     };
     SessionRecord {
@@ -309,5 +305,5 @@ fn supervisor_record(
 }
 
 #[cfg(test)]
-#[path = "supervisor_register_tests.rs"]
+#[path = "architect_register_tests.rs"]
 mod tests;

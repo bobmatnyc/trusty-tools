@@ -299,7 +299,7 @@ pub fn resolve_pm_prompt(content: &FrameworkContent, project_dir: &Path) -> Stri
 /// Why: a launch resolves the profile once and hands the same value to the
 /// composer, the style, the model and the settings, so they cannot disagree.
 /// What: [`resolve_pm_prompt_with_roster_for`] with the live roster scan.
-/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+/// Test: `an_architect_launch_gets_the_architect_prompt_style_and_model`.
 pub fn resolve_pm_prompt_for(
     content: &FrameworkContent,
     project_dir: &Path,
@@ -328,7 +328,7 @@ pub fn resolve_pm_prompt_for(
 /// operator a log line saying which model produced their prompt.
 /// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
 /// [`PromptSource::Legacy`] for the two override configurations and for the
-/// compose-error degradation, [`PromptSource::Supervisor`] for a supervisor
+/// compose-error degradation, [`PromptSource::Architect`] for a supervisor
 /// project (#8453).
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
@@ -339,7 +339,7 @@ pub(crate) enum PromptSource {
     /// Assembled by the legacy string concatenation.
     Legacy,
     /// The supervisor profile's instructions, in place of the PM prompt (#8453).
-    Supervisor,
+    Architect,
 }
 
 /// [`resolve_pm_prompt`], additionally reporting which composer ran.
@@ -399,7 +399,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// Why: see [`resolve_pm_prompt_for`].
 /// What: the supervisor prompt for a supervisor profile; otherwise the PM
 /// composition, unchanged.
-/// Test: `a_supervisor_project_needs_no_claude_md_override_blocks`.
+/// Test: `an_architect_project_needs_no_claude_md_override_blocks`.
 pub(crate) fn resolve_pm_prompt_with_roster_for(
     content: &FrameworkContent,
     project_dir: &Path,
@@ -409,7 +409,7 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
     // #8453: a supervisor session receives the supervisor profile INSTEAD of
     // the PM prompt. CLAUDE.md named sections are PM-section overrides, so none
     // applies; an undecidable profile is already the PM path below.
-    if profile.is_supervisor() {
+    if profile.is_architect() {
         let named = crate::core::claude_md_sections::scan_project(project_dir);
         if !named.overrides.is_empty() {
             tracing::warn!(
@@ -419,8 +419,8 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
             );
         }
         return (
-            crate::core::session_profile::supervisor_prompt(content),
-            PromptSource::Supervisor,
+            crate::core::session_profile::architect_prompt(content),
+            PromptSource::Architect,
         );
     }
 

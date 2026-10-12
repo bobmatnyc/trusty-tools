@@ -308,10 +308,10 @@ fn a_pm_spawn_disables_artifacts_and_denies_the_optional_built_ins() {
 
 /// #8992: the supervisor is not a PM and keeps every tool.
 #[test]
-fn a_supervisor_spawn_keeps_every_tool() {
+fn an_architect_spawn_keeps_every_tool() {
     let w = Worst::new();
     let launch = ManagedLaunch {
-        profile: crate::core::session_profile::SessionProfile::Supervisor,
+        profile: crate::core::session_profile::SessionProfile::Architect,
         ..w.launch()
     };
     let spec = spawn_spec(&launch);

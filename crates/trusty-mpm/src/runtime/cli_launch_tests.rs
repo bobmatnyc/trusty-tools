@@ -107,10 +107,32 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
 }
 
 /// #8992: a stamp value tm does not recognise resolves to the PM default, so the
-/// launch is trimmed. Only an explicit `supervisor` stamp keeps every tool.
+/// launch is trimmed. Only an Architect stamp keeps every tool: `architect`
+/// or the legacy `supervisor` (#9755).
 #[test]
-fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
-    for value in ["Supervisor", "architect", ""] {
+fn only_an_architect_stamp_value_skips_the_pm_trim() {
+    for value in ["architect", "supervisor"] {
+        let env = vec![(
+            crate::core::session_profile::SESSION_PROFILE_ENV.to_owned(),
+            value.to_owned(),
+        )];
+        let launch = CliLaunch {
+            model: None,
+            prompt_file: None,
+            config_dir: None,
+            oauth_token: None,
+            mcp_env: &env,
+            scoped_mcp: None,
+            alternate_screen: false,
+        };
+        let spec = super::isolated_spec(Path::new("/work"), &launch);
+        assert!(
+            !spec.args.iter().any(|a| a == "--disallowedTools"),
+            "stamp {value:?}: {:?}",
+            spec.args
+        );
+    }
+    for value in ["other", "Supervisor", ""] {
         let env = vec![(
             crate::core::session_profile::SESSION_PROFILE_ENV.to_owned(),
             value.to_owned(),
@@ -143,9 +165,9 @@ fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
 /// #8992: a launch stamped supervisor (the Architect) keeps every tool — no
 /// Artifact switch, no `--disallowedTools`.
 #[test]
-fn a_supervisor_isolated_spec_keeps_every_tool() {
+fn an_architect_isolated_spec_keeps_every_tool() {
     use crate::core::session_profile::{SessionProfile, launch_env};
-    let env = vec![launch_env(SessionProfile::Supervisor)];
+    let env = vec![launch_env(SessionProfile::Architect)];
     let launch = CliLaunch {
         model: Some("opus"),
         prompt_file: None,
@@ -230,7 +252,7 @@ fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
     ]
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
-    .chain([launch_env(SessionProfile::Supervisor)])
+    .chain([launch_env(SessionProfile::Architect)])
     .collect();
     let launch = CliLaunch {
         model: Some("claude-opus-4-1-20250805"),

@@ -82,13 +82,13 @@ async fn an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_ses
 /// Ruling 1: an operator stop of the Architect is refused before any tmux
 /// call, and the refusal says how to stop it.
 #[tokio::test]
-async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
+async fn stop_refuses_an_architect_record_and_never_signals_it() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr.stop(&id).await.expect_err("stop must be refused");
@@ -104,13 +104,13 @@ async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
 
 /// The daemon's shutdown stops ordinary sessions and never the Architect's.
 #[tokio::test]
-async fn shutdown_skips_a_supervisor_session() {
+async fn shutdown_skips_an_architect_session() {
     let (dir, fake, mgr) = manager().await;
     let arch = seed(
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let work = seed(
@@ -146,13 +146,13 @@ async fn shutdown_skips_a_supervisor_session() {
 /// `--state all --include-active` never selects the Architect: a dry run does
 /// not list it, and a real run leaves it `Active`.
 #[tokio::test]
-async fn prune_include_active_never_decommissions_a_supervisor_record() {
+async fn prune_include_active_never_decommissions_an_architect_record() {
     let (dir, _fake, mgr) = manager().await;
     let id = seed(
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     for dry_run in [true, false] {
@@ -172,13 +172,13 @@ async fn prune_include_active_never_decommissions_a_supervisor_record() {
 /// An operator resume of a stopped Architect record is refused and points at
 /// `tm fleet init`; no pane is killed or created.
 #[tokio::test]
-async fn resume_refuses_a_supervisor_record() {
+async fn resume_refuses_an_architect_record() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
         &dir,
         ManagedSessionState::Stopped,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr.resume(&id).await.expect_err("resume must be refused");
@@ -194,13 +194,13 @@ async fn resume_refuses_a_supervisor_record() {
 /// Critic MEDIUM: `delete --force` of a live Architect record is refused, so
 /// the record keeps protecting its name.
 #[tokio::test]
-async fn delete_refuses_a_live_supervisor_record() {
+async fn delete_refuses_a_live_architect_record() {
     let (dir, _fake, mgr) = manager().await;
     let id = seed(
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let err = mgr
@@ -213,13 +213,13 @@ async fn delete_refuses_a_live_supervisor_record() {
 
 /// Ruling 4: a task is never typed into the Architect's ready pane.
 #[tokio::test]
-async fn task_injection_never_types_into_a_supervisor_pane() {
+async fn task_injection_never_types_into_an_architect_pane() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
         &dir,
         ManagedSessionState::Active,
-        SessionKind::Supervisor,
+        SessionKind::Architect,
     )
     .await;
     let sent = mgr
@@ -234,7 +234,7 @@ async fn task_injection_never_types_into_a_supervisor_pane() {
 /// A live pane a sidecar names is adopted at boot as the Architect's record,
 /// under its stable id, never as an ordinary adopted session.
 #[tokio::test]
-async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
+async fn boot_reconcile_adopts_a_sidecar_named_pane_as_architect() {
     let (dir, fake, mgr) = manager().await;
     sidecar(dir.path(), "tm-arch");
     let arch_dir = dir.path().join("architect");
@@ -253,10 +253,10 @@ async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
         .into_iter()
         .find(|r| r.tmux_name == "tm-arch")
         .expect("adopted");
-    assert_eq!(record.kind, SessionKind::Supervisor);
+    assert_eq!(record.kind, SessionKind::Architect);
     assert_eq!(
         record.id,
-        ManagedSessionId::for_supervisor(&arch_dir, "supervisor")
+        ManagedSessionId::for_architect(&arch_dir, "supervisor")
     );
     assert!(!record.is_auto_resumable());
 }
@@ -264,17 +264,29 @@ async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
 /// One Architect dir and role always give the same id; a different role or
 /// dir gives a different one.
 #[test]
-fn the_supervisor_id_is_stable_per_dir_and_role() {
+fn the_architect_id_is_stable_per_dir_and_role() {
     let dir = crate::test_support::hermetic_temp_dir();
     let other = crate::test_support::hermetic_temp_dir();
-    let id = ManagedSessionId::for_supervisor(dir.path(), "supervisor");
+    let id = ManagedSessionId::for_architect(dir.path(), "supervisor");
     assert_eq!(
         id,
-        ManagedSessionId::for_supervisor(dir.path(), "supervisor")
+        ManagedSessionId::for_architect(dir.path(), "supervisor")
     );
-    assert_ne!(id, ManagedSessionId::for_supervisor(dir.path(), "-poll"));
+    assert_ne!(id, ManagedSessionId::for_architect(dir.path(), "-poll"));
     assert_ne!(
         id,
-        ManagedSessionId::for_supervisor(other.path(), "supervisor")
+        ManagedSessionId::for_architect(other.path(), "supervisor")
     );
+}
+
+/// D07 pin (#9755): the Architect ids for `/` are the literals computed
+/// before the rename; a changed namespace or role string would orphan every
+/// existing Architect record and mint a second Architect.
+#[test]
+fn the_architect_id_is_stable_across_the_rename() {
+    let root = std::path::Path::new("/");
+    let id = |role: &str| ManagedSessionId::for_architect(root, role).to_string();
+    assert_eq!(id("supervisor"), "0708af71-2b5e-5dab-8c92-739ebdb04941");
+    assert_eq!(id("-poll"), "f75797ca-cc1e-5fdf-a528-5e24a3c627b5");
+    assert_eq!(id("-collector"), "46358247-da91-5895-a720-10b693332f6e");
 }

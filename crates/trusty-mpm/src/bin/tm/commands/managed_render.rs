@@ -260,8 +260,8 @@ fn row_state(s: &ManagedSessionSummary) -> String {
 pub(crate) fn kind_tag(kind: Option<SessionKind>) -> Option<&'static str> {
     match kind? {
         SessionKind::Ordinary => None,
-        SessionKind::Supervisor => Some("architect"),
-        SessionKind::SupervisorAux => Some("architect-helper"),
+        SessionKind::Architect => Some("architect"),
+        SessionKind::ArchitectAux => Some("architect-helper"),
         SessionKind::Unknown => Some("protected"),
     }
 }
@@ -274,7 +274,7 @@ pub(crate) fn kind_tag(kind: Option<SessionKind>) -> Option<&'static str> {
 /// Test: `session_table_pins_and_tags_the_architect_row`.
 pub(crate) fn pinned_first(sessions: &[ManagedSessionSummary]) -> Vec<&ManagedSessionSummary> {
     let rank = |s: &ManagedSessionSummary| match (s.deleted, s.kind) {
-        (false, Some(SessionKind::Supervisor)) => 0,
+        (false, Some(SessionKind::Architect)) => 0,
         (false, Some(k)) if k.is_protected() => 1,
         _ => 2,
     };
