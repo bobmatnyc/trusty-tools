@@ -67,7 +67,7 @@ name = "trusty-memory"
 # 0.32.0 (Refs #9274): minor — palace format gate; trusty-common floor moves 0.57 -> 0.58; 0.31.1 is live on crates.io.
 # 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
 # 0.35.0 (Refs #9275): minor by owner ruling Dfa — palace format 2; trusty-common floor moves 0.60 -> 0.61; 0.34.0 skipped on purpose and never published (0.33.0 is live on crates.io).
-version = "0.35.0"
+version = "0.35.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
