@@ -10,8 +10,8 @@
 //! under a bypass — so the two cannot drift. Its order: the value-printing
 //! rules (a printed credential, the pod/launchd/pm2 env dumps, a launchd
 //! plist, and since #8879 a run script whose body reads a credential) deny
-//! unconditionally, and so does the #8625 kuzu-store rule; then the #7266
-//! file rule; then a file-rule
+//! unconditionally; then the #7266 file rule; then the #8625 kuzu-store
+//! rule, which no exemption lifts (a #7266 deny keeps its label); then a file-rule
 //! deny is lifted only when [`envfile_shape`] matches AND the call is the
 //! process-bound Architect's main thread. A shape match with a failed
 //! identity denies with the #8878 PR-I identity suffix. [`gate_secret_file_read`]
@@ -155,29 +155,34 @@ pub(crate) fn evaluate_secret_file_read_gated(
     {
         return Some(secret(reason));
     }
-    // #8625: the kuzu-store rule, unconditionally too — ruling B10 binds the
-    // bypasses and the Architect, so it sits ahead of the step-3 exemption.
-    let home = gate.env().home.as_deref();
-    if let Some(reason) = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd, home) {
-        return Some(FloorDeny {
+    // #8625: the kuzu-store rule. Ruling B10 binds the bypasses and the
+    // Architect, so no step below lifts it; a #7266 deny of the same call
+    // keeps its own label.
+    let kuzu = || {
+        let home = gate.env().home.as_deref();
+        let reason = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd, home)?;
+        Some(FloorDeny {
             rule: KUZU_STORE_RULE,
             reason,
-        });
-    }
+        })
+    };
     // 2. The #7266 file rule. Its entry point re-runs the Bash value rules,
     // which step 1 has already cleared, so only the file rule can answer.
     // #8093: the hook cwd lets the copy grant see its destination.
-    let reason = evaluate_secret_file_read_in(tool_name, tool_input, Some(hook_cwd))?;
+    let Some(reason) = evaluate_secret_file_read_in(tool_name, tool_input, Some(hook_cwd)) else {
+        return kuzu();
+    };
     // 3. The exemption: the shape first, then the identity.
     let shape = |c| envfile_shape(c, hook_cwd, gate.env(), || gate.config());
     let Some(call) = command.and_then(shape) else {
         return Some(secret(reason));
     };
     match gate.identity() {
-        Ok(()) => {
+        // #8625: the exemption lifts the #7266 deny only.
+        Ok(()) => kuzu().or_else(|| {
             gate.record_envfile(call);
             None
-        }
+        }),
         Err(why) => Some(secret(with_identity(reason, why))),
     }
 }

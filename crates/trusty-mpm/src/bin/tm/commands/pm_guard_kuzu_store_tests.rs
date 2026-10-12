@@ -214,6 +214,7 @@ fn denies_a_glob_that_can_match_a_deny_name() {
             "cat .kuzu-m*/mem*.db",
             "cat .kuzu-memory/*",
             "cat /tmp/*kuzu-import-ab*/export.json",
+            "cat /tmp/trusty-k*/export.json",
             "cat ~/.trusty-tools/kuzu-imp*-venv/bin/python",
             "cat x/.{kuzu-memory,{a,b}}/y",
         ]),
@@ -228,7 +229,15 @@ fn denies_a_glob_that_can_match_a_deny_name() {
     // Ruling Q3: a word of wildcards only is not a deny name.
     assert_allowed(
         &fx,
-        &s(&["cat *", "cat */*.md", "cat *.rs", "head -n1 *.json"]),
+        &s(&[
+            "cat *",
+            "cat */*.md",
+            "cat *.rs",
+            "head -n1 *.json",
+            // #7266, #7533: pinned allows the temp-directory glob must not take.
+            "cat *test*",
+            "echo *Q",
+        ]),
     );
     for (name, input) in [
         ("Grep", json!({ "pattern": "x", "glob": "*.{rs,toml}" })),
@@ -460,6 +469,8 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
     };
     let fx = fixture();
     let store = fx.project.join(".kuzu-memory/memories.db");
+    std::fs::create_dir_all(fx.project.join(".kuzu-memory")).expect("mkdir store");
+    std::fs::write(fx.project.join(".kuzu-memory/.env.local"), "K=v\n").expect("env file");
     for (call, rule) in [
         (
             payload(
@@ -477,6 +488,20 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
             payload(&fx, "Bash", json!({ "command": "cat .env.local" })),
             SECRET_FILE_READ_RULE,
         ),
+        // Both rules deny `./.*`; the #7266 deny keeps its label.
+        (
+            payload(&fx, "Bash", json!({ "command": "cat ./.*" })),
+            SECRET_FILE_READ_RULE,
+        ),
+        // A `tm env` shape the Architect may run lifts the #7266 deny only.
+        (
+            payload(
+                &fx,
+                "Bash",
+                json!({ "command": "tm env keys .kuzu-memory/.env.local" }),
+            ),
+            KUZU_STORE_RULE,
+        ),
     ] {
         // Ruling B10: the Architect's main thread is bound too.
         let gate = ArchitectGate::new(&call, architect_env(&fx), || allowlist(&fx));
@@ -486,4 +511,11 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
             evaluate_secret_file_read_gated(tool, call.get("tool_input"), &fx.project, &gate);
         assert_eq!(deny.map(|d| d.rule), Some(rule), "{call}");
     }
+    // The same `tm env` shape outside a store is exempt, so the case above
+    // proves the kuzu deny outlives the exemption.
+    std::fs::write(fx.project.join(".env.local"), "K=v\n").expect("env file");
+    let call = payload(&fx, "Bash", json!({ "command": "tm env keys .env.local" }));
+    let gate = ArchitectGate::new(&call, architect_env(&fx), || allowlist(&fx));
+    let deny = evaluate_secret_file_read_gated("Bash", call.get("tool_input"), &fx.project, &gate);
+    assert_eq!(deny, None, "the exemption applies outside a store");
 }

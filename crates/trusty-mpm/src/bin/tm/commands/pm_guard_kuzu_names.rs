@@ -162,7 +162,8 @@ fn contains_deny_literal(text: &str) -> bool {
 /// [`KUZU_TEMP_PREFIX`] prefix. A glob denies when it carries that prefix
 /// literally or [`overlaps`] a deny name; the temp directory is modelled as
 /// the prefix plus one or more alphanumerics, the `tempfile` name shape, so
-/// `*.md` does not reach it and `*import-ab*` does.
+/// `*.md` does not reach it and `*import-ab*` does, and its glob must also
+/// carry part of the prefix ([`shares_a_prefix_run`]).
 /// Test: `denies_a_glob_that_can_match_a_deny_name`.
 fn component_denies(component: &str) -> bool {
     let lower = component.to_ascii_lowercase();
@@ -181,8 +182,32 @@ fn component_denies(component: &str) -> bool {
     KUZU_DENY_COMPONENTS.iter().any(|name| {
         let atoms: Vec<Atom> = name.bytes().map(Atom::Lit).collect();
         overlaps(candidate, &atoms)
-    }) || overlaps(candidate, &temp)
+    }) || (overlaps(candidate, &temp) && shares_a_prefix_run(&lower))
 }
+
+/// Whether a literal run of the glob `component` shares
+/// [`TEMP_PREFIX_RUN`] consecutive bytes with [`KUZU_TEMP_PREFIX`].
+///
+/// Why: the temp directory's random tail is any alphanumeric run, so a bare
+/// overlap test denies `*test*` and `*Q`, which the #7266 and #7533
+/// false-positive corpora pin as allowed. A glob aimed at the temp directory
+/// carries part of its name; `$TMPDIR/*/export.json` is already allowed by the
+/// ruling Q3 wildcard-only exemption, so a shorter literal adds no new reach.
+/// Test: `denies_a_glob_that_can_match_a_deny_name`.
+fn shares_a_prefix_run(component: &str) -> bool {
+    component.split(['*', '?']).any(|run| {
+        run.as_bytes().windows(TEMP_PREFIX_RUN).any(|w| {
+            KUZU_TEMP_PREFIX
+                .as_bytes()
+                .windows(TEMP_PREFIX_RUN)
+                .any(|p| p == w)
+        })
+    })
+}
+
+/// The shortest literal run [`shares_a_prefix_run`] reads as aimed at the
+/// temp directory.
+const TEMP_PREFIX_RUN: usize = 4;
 
 /// Whether the glob `glob` (`*` and `?`) can match a string `atoms` matches.
 ///
