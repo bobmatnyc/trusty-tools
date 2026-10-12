@@ -17,10 +17,10 @@
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use trusty_common::memory_core::room_identity::{
+use crate::engine::room_identity::{
     parse_room_preserving_case, room_type_tag, DEFAULT_WING_ID,
 };
-use trusty_common::memory_core::store::rooms::{
+use crate::engine::store::rooms::{
     create_room, list_room_summaries, rename_room, resolve_room_selector, RoomSummary,
 };
 use uuid::Uuid;

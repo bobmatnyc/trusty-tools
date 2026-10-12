@@ -9,7 +9,7 @@
 use std::io;
 use std::path::Path;
 
-use trusty_common::memory_core::maintenance_lease::MAINTENANCE_LOCK_FILE;
+use crate::engine::maintenance_lease::MAINTENANCE_LOCK_FILE;
 
 use super::super::CheckStatus;
 use super::{classify_lease, palace_locks_verdict, pid_liveness, LeaseHolder};

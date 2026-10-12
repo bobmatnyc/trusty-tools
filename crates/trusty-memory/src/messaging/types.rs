@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 /// Tag namespace prefix marking a drawer as a v1 inter-project message.

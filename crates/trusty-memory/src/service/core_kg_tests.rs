@@ -20,8 +20,8 @@
 //! Test: run with `cargo test -p trusty-memory service::core_kg_tests`.
 
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::Triple;
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg::Triple;
 
 use crate::service::{CreatePalaceBody, KgAssertBody, MemoryService, ServiceError};
 use crate::transport::methods::kg as folded;
@@ -29,7 +29,7 @@ use crate::{ActivitySource, AppState};
 
 /// Build a fresh `AppState` rooted in an ephemeral tempdir.
 fn test_state() -> AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -59,7 +59,7 @@ fn palace_body(name: &str) -> CreatePalaceBody {
 /// Create a palace on disk without going through the service, for a fixture
 /// that only needs the directory and a handle.
 fn seed_palace(state: &AppState, name: &str) {
-    let palace = trusty_common::memory_core::Palace {
+    let palace = crate::engine::Palace {
         id: PalaceId::new(name),
         name: name.to_string(),
         description: None,
@@ -635,7 +635,7 @@ async fn kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate() {
 
 /// A state whose default palace is `name`, with that palace on disk.
 fn state_with_palace(name: &str) -> AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -808,7 +808,7 @@ async fn list_prompt_facts_endpoint_returns_hot_triples() {
 /// Test: itself.
 #[tokio::test]
 async fn dream_status_aggregates_across_palaces() {
-    use trusty_common::memory_core::dream::{DreamStats, PersistedDreamStats};
+    use crate::engine::dream::{DreamStats, PersistedDreamStats};
 
     let (svc, state) = service();
     for (id, stats, ts) in [
@@ -1105,7 +1105,7 @@ async fn palace_info_blocking_matches_the_inline_row() {
     .expect("assert triple");
 
     let palace_id = PalaceId::new(id.clone());
-    let palace = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+    let palace = crate::engine::PalaceRegistry::list_palaces(&state.data_root)
         .expect("list palaces")
         .into_iter()
         .find(|p| p.id == palace_id)

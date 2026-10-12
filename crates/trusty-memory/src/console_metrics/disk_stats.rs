@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use redb::{ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableError};
-use trusty_common::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DELETED_VECTORS, DRAWERS, ROOMS, VECTORS,
 };
 
@@ -203,7 +203,7 @@ fn active_triple_count(rtx: &redb::ReadTransaction) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
     /// Build a palace at `root/<name>` and put `drawers` drawers in it, then
     /// let the registry drop so no handle holds the redb lock.
@@ -220,7 +220,7 @@ mod tests {
             .create_palace(root, palace)
             .unwrap_or_else(|e| panic!("create_palace({name}): {e:#}"));
         for i in 0..drawers {
-            let drawer = trusty_common::memory_core::Drawer::new(
+            let drawer = crate::engine::Drawer::new(
                 uuid::Uuid::new_v4(),
                 format!("seeded drawer {i}"),
             );

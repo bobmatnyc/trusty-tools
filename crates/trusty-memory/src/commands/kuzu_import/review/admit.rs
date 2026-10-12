@@ -12,7 +12,7 @@
 //! the row as it was, so the import refuses it as before.
 //! Test: `review::admit_tests`.
 
-use trusty_common::memory_core::filter::{find_secret_spans, SECRET_FILTER_VERSION};
+use crate::engine::filter::{find_secret_spans, SECRET_FILTER_VERSION};
 
 use super::super::apply::StorePlan;
 use super::super::ledger::MemoryPlan;

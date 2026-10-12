@@ -40,11 +40,11 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{info, warn};
-use trusty_common::memory_core::dream::{
+use crate::engine::dream::{
     dream_max_concurrent, stagger_offset, AfterCycle, Dreamer, PersistedDreamStats,
 };
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::palace::PalaceId;
+use crate::engine::PalaceRegistry;
 
 /// Environment variable that disables autonomous dream scheduling when set to
 /// any non-empty value (convention: set to `"1"`).
@@ -407,10 +407,10 @@ mod tests {
     use serial_test::serial;
     use std::sync::Arc;
     use std::time::Duration;
-    use trusty_common::memory_core::dream::DreamConfig;
-    use trusty_common::memory_core::dream::Dreamer;
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
-    use trusty_common::memory_core::PalaceRegistry;
+    use crate::engine::dream::DreamConfig;
+    use crate::engine::dream::Dreamer;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::PalaceRegistry;
 
     /// Helper: build a minimal `Palace` + open its `PalaceHandle` into a temp
     /// dir, register it in the given registry, and return the `PalaceId`.
@@ -566,7 +566,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn a_palace_outside_the_open_set_still_dreams() {
-        use trusty_common::memory_core::registry::MAX_OPEN_PALACES_ENV;
+        use crate::engine::registry::MAX_OPEN_PALACES_ENV;
         // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
         let _env = crate::commands::env_test_lock().lock().await;
         let root = tempfile::tempdir().expect("tempdir");
@@ -594,7 +594,7 @@ mod tests {
         while !dreamed && std::time::Instant::now() < deadline {
             assert!(state.registry.len() <= 1, "open handles passed the cap");
             tokio::time::sleep(Duration::from_millis(25)).await;
-            dreamed = trusty_common::memory_core::dream::PersistedDreamStats::load(&cold_dir)
+            dreamed = crate::engine::dream::PersistedDreamStats::load(&cold_dir)
                 .expect("load stats")
                 .is_some();
         }
@@ -656,7 +656,7 @@ mod tests {
         // `<data_root>/<palace_id>/` (not `<data_root>/` directly).
         let palace_data_dir = tmp.path().join(id.as_str());
         let persisted =
-            trusty_common::memory_core::dream::PersistedDreamStats::load(&palace_data_dir)
+            crate::engine::dream::PersistedDreamStats::load(&palace_data_dir)
                 .expect("load persisted stats")
                 .expect("persisted stats should exist after a cycle");
         assert_eq!(

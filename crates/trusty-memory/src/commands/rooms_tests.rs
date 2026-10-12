@@ -12,9 +12,9 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::path::Path;
-use trusty_common::memory_core::palace::{Drawer, PalaceId, RoomType};
-use trusty_common::memory_core::room_identity::room_to_uuid;
-use trusty_common::memory_core::store::PalaceStore;
+use crate::engine::palace::{Drawer, PalaceId, RoomType};
+use crate::engine::room_identity::room_to_uuid;
+use crate::engine::store::PalaceStore;
 
 /// Create a palace on disk holding one legacy-id drawer per room.
 ///
@@ -157,7 +157,7 @@ fn apply_writes_the_planned_rooms() {
 /// Writer open deletes no expired row. Pre-fix that open purged the row.
 #[test]
 fn apply_under_a_lease_held_elsewhere_deletes_no_expired_row() {
-    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_redb::KgStoreRedb;
     let tmp = tempfile::tempdir().expect("tempdir");
     let rooms = [RoomType::Planning];
     let palace = seed_palace(tmp.path(), "leased", &rooms);

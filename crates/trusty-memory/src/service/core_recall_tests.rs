@@ -8,8 +8,8 @@
 use std::path::Path;
 
 use chrono::Utc;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::{Drawer, PalaceRegistry};
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::{Drawer, PalaceRegistry};
 use uuid::Uuid;
 
 use super::core::MemoryService;
@@ -59,7 +59,7 @@ fn create_on_disk(root: &Path, full: &PalaceId, empty: &PalaceId) {
 /// open clears it (`PalaceRegistry::register_arc`).
 #[tokio::test]
 async fn recall_all_never_opens_an_empty_palace() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (full, empty) = (PalaceId::new("unit-full"), PalaceId::new("unit-empty"));
     create_on_disk(tmp.path(), &full, &empty);

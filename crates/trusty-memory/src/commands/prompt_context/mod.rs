@@ -62,7 +62,7 @@ use filter::{
 };
 use format::{compose_injection, count_facts};
 use query::{configured_query_budget, shape_recall_query, warn_if_reshaped};
-use trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR;
+use crate::engine::retrieval::DEFAULT_RELEVANCE_FLOOR;
 
 pub use query::ENV_QUERY_TOKEN_BUDGET;
 

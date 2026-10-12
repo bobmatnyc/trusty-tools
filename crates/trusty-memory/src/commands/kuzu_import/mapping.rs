@@ -17,7 +17,7 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
-use trusty_common::memory_core::store::kg::Triple;
+use crate::engine::store::kg::Triple;
 
 use super::bridge::{KuzuEntityRow, KuzuMemoryRow};
 use super::screen::{screen, SecretRule};

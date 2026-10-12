@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use trusty_common::memory_core::filter::{
+use crate::engine::filter::{
     find_secret_spans, mask_content, MaskError, SecretSpan, SECRET_FILTER_VERSION,
 };
 

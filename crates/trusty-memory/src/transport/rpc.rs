@@ -198,9 +198,9 @@ impl JsonRpcResponse {
         {
             // #9544: the same refusal the service layer maps to `Conflict`.
             error_codes::REFUSED
-        } else if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
+        } else if crate::engine::PalaceRegistry::open_error_is_absent(&e) {
             error_codes::NOT_FOUND
-        } else if trusty_common::memory_core::store::palace_format::is_format_refusal(&e) {
+        } else if crate::engine::store::palace_format::is_format_refusal(&e) {
             // #9665: a format refusal no retry can clear answered -32603.
             error_codes::REFUSED
         } else {
@@ -871,8 +871,8 @@ mod tests {
         // The alias is `personal`, the one name the project-slug gate always
         // admits, so the create reaches the registry without an env write.
         let state = test_state();
-        let target = trusty_common::memory_core::Palace {
-            id: trusty_common::memory_core::PalaceId::new("rpc-target"),
+        let target = crate::engine::Palace {
+            id: crate::engine::PalaceId::new("rpc-target"),
             name: "rpc-target".to_string(),
             description: None,
             created_at: chrono::Utc::now(),

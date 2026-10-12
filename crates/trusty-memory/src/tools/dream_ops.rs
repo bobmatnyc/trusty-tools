@@ -17,10 +17,10 @@
 use crate::AppState;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
+use crate::engine::dream::{consolidate_scoped, detect_fading, kg_compact_pass};
 
 use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
-use trusty_common::memory_core::palace::RoomType;
+use crate::engine::palace::RoomType;
 
 /// Default age window: only consolidate facts older than this many days.
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;

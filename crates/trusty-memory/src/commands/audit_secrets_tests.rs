@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use trusty_common::memory_core::palace::{Drawer, Palace, PalaceId};
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-use trusty_common::memory_core::store::{OpenIntent, PalaceStore};
+use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::{OpenIntent, PalaceStore};
 use uuid::Uuid;
 
 use super::*;
@@ -466,7 +466,7 @@ fn count_only_flag_is_required() {
 #[test]
 fn undecodable_drawer_row_is_counted_and_fails_the_run() {
     use redb::Database;
-    use trusty_common::memory_core::store::kg_store::DRAWERS;
+    use crate::engine::store::kg_store::DRAWERS;
 
     let root = tempfile::tempdir().expect("root");
     let scratch = tempfile::tempdir().expect("scratch");

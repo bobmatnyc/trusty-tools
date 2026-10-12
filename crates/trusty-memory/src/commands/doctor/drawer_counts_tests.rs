@@ -5,8 +5,8 @@ use super::*;
 use crate::commands::doctor::CheckStatus;
 use crate::drawer_counts::{take_snapshot, CountLine, CountSource};
 use chrono::Duration;
-use trusty_common::memory_core::maintenance_log::{record, DeletionReason, MaintenanceDeletion};
-use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+use crate::engine::maintenance_log::{record, DeletionReason, MaintenanceDeletion};
+use crate::engine::{Palace, PalaceId, PalaceRegistry};
 use uuid::Uuid;
 
 fn count(palace: &str, at: DateTime<Utc>, drawers: Option<usize>) -> CountLine {
@@ -60,7 +60,7 @@ fn seed(root: &Path, name: &str, drawers: usize) {
     };
     let handle = registry.create_palace(root, palace).expect("create_palace");
     for i in 0..drawers {
-        let d = trusty_common::memory_core::Drawer::new(Uuid::new_v4(), format!("drawer {i}"));
+        let d = crate::engine::Drawer::new(Uuid::new_v4(), format!("drawer {i}"));
         handle.kg.store().upsert_drawer(&d).expect("upsert");
     }
     drop(handle);
@@ -135,7 +135,7 @@ fn drawer_counts_doctor_green_when_journaled() {
 /// again — the check is green and the journal reason is `user_forget`.
 #[tokio::test]
 async fn drawer_counts_doctor_green_for_user_forget() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let registry = PalaceRegistry::with_max_open(4);
     let palace = Palace {
@@ -151,7 +151,7 @@ async fn drawer_counts_doctor_green_for_user_forget() {
         let id = handle
             .remember(
                 text.into(),
-                trusty_common::memory_core::RoomType::General,
+                crate::engine::RoomType::General,
                 vec![],
                 0.5,
             )

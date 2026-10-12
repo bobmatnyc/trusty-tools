@@ -22,12 +22,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use trusty_common::memory_core::dream::{kg_compact_pass, DreamConfig};
-use trusty_common::memory_core::palace::Palace;
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::kg_redb::KgRedbStats;
-use trusty_common::memory_core::store::OpenIntent;
-use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
+use crate::engine::dream::{kg_compact_pass, DreamConfig};
+use crate::engine::palace::Palace;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::kg_redb::KgRedbStats;
+use crate::engine::store::OpenIntent;
+use crate::engine::{MaintenanceLease, PalaceRegistry};
 
 use super::maintenance_gate::{open_purging_under_lease, require_lease};
 
@@ -476,19 +476,19 @@ fn percent(part: u64, whole: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::memory_core::palace::PalaceId;
+    use crate::engine::palace::PalaceId;
 
     /// A palace directory on disk with `n` live triples in its `kg.redb`.
     fn fixture(name: &str, n: usize) -> (tempfile::TempDir, Palace) {
         let dir = tempfile::tempdir().expect("tempdir");
         let data_dir = dir.path().join(name);
         std::fs::create_dir_all(&data_dir).expect("mkdir");
-        let kg = trusty_common::memory_core::store::kg_redb::KgStoreRedb::open(
+        let kg = crate::engine::store::kg_redb::KgStoreRedb::open(
             &data_dir.join("kg.redb"),
         )
         .expect("open kg");
         for i in 0..n {
-            kg.assert(&trusty_common::memory_core::store::Triple {
+            kg.assert(&crate::engine::store::Triple {
                 subject: format!("s{i}"),
                 predicate: "knows".into(),
                 object: format!("o{i}"),
@@ -566,8 +566,8 @@ mod tests {
     /// expired row. Pre-fix the real run compacted and its Writer open purged.
     #[tokio::test]
     async fn compact_under_a_lease_held_elsewhere_refuses_and_deletes_nothing() {
-        use trusty_common::memory_core::palace::Drawer;
-        use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+        use crate::engine::palace::Drawer;
+        use crate::engine::store::kg_redb::KgStoreRedb;
         let (dir, palace) = fixture("lease-fixture", 2);
         let kg_path = palace.data_dir.join("kg.redb");
         let mut expired = Drawer::new(uuid::Uuid::new_v4(), "an expired drawer");

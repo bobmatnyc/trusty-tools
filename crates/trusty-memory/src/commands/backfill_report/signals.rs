@@ -22,8 +22,8 @@
 //! `predates_log_window_fires_only_outside_coverage`.
 
 use chrono::{DateTime, Utc};
-use trusty_common::memory_core::decay::DecayConfig;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::decay::DecayConfig;
+use crate::engine::palace::Drawer;
 
 /// Characters of content scanned for an opening date stamp.
 ///

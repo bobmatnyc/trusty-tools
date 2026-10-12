@@ -18,7 +18,7 @@
 
 use super::*;
 use std::time::Duration;
-use trusty_common::memory_core::timeouts;
+use crate::engine::timeouts;
 
 /// Budget short enough that an exhausted-budget error lands promptly, and far
 /// enough below `write_lock_timeout()` (60 s) that observing it at all proves

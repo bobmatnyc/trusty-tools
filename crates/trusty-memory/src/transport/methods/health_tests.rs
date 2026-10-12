@@ -18,11 +18,11 @@ use super::health::{
 };
 use super::HEALTH_PROBE_PALACE;
 use serde_json::Value;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::{PalaceHandle, RecallResult};
-use trusty_common::memory_core::store::hnsw_store::OpPark;
-use trusty_common::memory_core::store::kg::KnowledgeGraph;
-use trusty_common::memory_core::store::vector::{UsearchStore, VectorHit, VectorStore};
+use crate::engine::palace::PalaceId;
+use crate::engine::retrieval::{PalaceHandle, RecallResult};
+use crate::engine::store::hnsw_store::OpPark;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::vector::{UsearchStore, VectorHit, VectorStore};
 use uuid::Uuid;
 
 /// `GET /health` returns HTTP 200 with `status: "ok"` after the
@@ -365,7 +365,7 @@ async fn health_endpoint_round_trip_on_fresh_install_is_ok() {
 #[ignore = "loads the default ONNX embedder; run with --include-ignored"]
 async fn health_endpoint_round_trip_with_palace_is_ok() {
     let state = test_state();
-    let palace = trusty_common::memory_core::Palace {
+    let palace = crate::engine::Palace {
         id: PalaceId::new("health-probe-palace"),
         name: "health-probe-palace".to_string(),
         description: None,
@@ -445,7 +445,7 @@ async fn health_probe_palace_is_invisible() {
 /// Test: this test.
 #[tokio::test]
 async fn health_probe_cleans_up_on_success() {
-    use trusty_common::memory_core::Drawer;
+    use crate::engine::Drawer;
 
     let state = test_state();
     ensure_health_probe_palace(&state).expect("ensure_health_probe_palace");
@@ -724,7 +724,7 @@ fn test_state() -> crate::AppState {
     // Seed the process-wide embedder cell with the mock: under per-test process
     // isolation each test gets a virgin cell and would otherwise reach for the
     // real ONNX model (#4413). Idempotent, so calling it here is free.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -832,7 +832,7 @@ async fn health_drawer_degraded_names_only_the_degraded_palace() {
 /// Test: this test.
 #[tokio::test]
 async fn health_drawer_degraded_check_opens_no_palace() {
-    use trusty_common::memory_core::{Palace, PalaceRegistry};
+    use crate::engine::{Palace, PalaceRegistry};
 
     let mut state = test_state();
     let registry = PalaceRegistry::with_max_open(2);

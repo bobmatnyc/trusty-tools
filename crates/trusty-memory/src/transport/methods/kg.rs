@@ -12,7 +12,7 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::kg::ExpandDirection;
+use crate::engine::store::kg::ExpandDirection;
 
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::transport::api_error::ApiError;

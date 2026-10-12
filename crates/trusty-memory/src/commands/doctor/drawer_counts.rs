@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::Args;
 use colored::Colorize;
-use trusty_common::memory_core::maintenance_log::{read_journal, MaintenanceDeletion};
+use crate::engine::maintenance_log::{read_journal, MaintenanceDeletion};
 
 use super::CheckResult;
 use crate::drawer_counts::analysis::{self, DrawerReport, Verdict, STALE_AFTER};

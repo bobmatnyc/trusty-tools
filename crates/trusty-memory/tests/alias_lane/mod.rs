@@ -18,7 +18,7 @@
 //! There is no binary to find now, so arming the lane is one env var.
 //! Test: used by `bm25_alias_recall.rs` and `bm25_alias_write.rs`.
 
-use trusty_common::memory_core::palace::{Palace, PalaceId};
+use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_common::palace_alias::PalaceAliasStore;
 use trusty_memory::AppState;
 

@@ -15,10 +15,10 @@ use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::RememberOptions;
-use trusty_common::memory_core::store::{PalaceStore, PalaceStoreError};
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::palace::{Palace, PalaceId, RoomType};
+use crate::engine::retrieval::RememberOptions;
+use crate::engine::store::{PalaceStore, PalaceStoreError};
+use crate::engine::PalaceRegistry;
 use trusty_common::palace_alias::canonical_palace_id;
 use uuid::Uuid;
 

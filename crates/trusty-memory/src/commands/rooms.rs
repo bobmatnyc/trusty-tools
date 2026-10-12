@@ -18,11 +18,11 @@
 //! `audit_can_be_scoped_to_one_palace`.
 
 use anyhow::{Context, Result};
-use trusty_common::memory_core::palace::Palace;
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::room_plan::{plan_rooms, RoomPlanAction, RoomPlanEntry};
-use trusty_common::memory_core::store::{backfill_rooms, OpenIntent};
-use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
+use crate::engine::palace::Palace;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::room_plan::{plan_rooms, RoomPlanAction, RoomPlanEntry};
+use crate::engine::store::{backfill_rooms, OpenIntent};
+use crate::engine::{MaintenanceLease, PalaceRegistry};
 
 use super::maintenance_gate::open_purging_under_lease;
 

@@ -10,8 +10,8 @@
 //! Test: `palace_deletions_shows_the_survivor_and_score_for_a_removed_drawer`.
 
 use anyhow::{Context, Result};
-use trusty_common::memory_core::maintenance_log::{read_journal, MaintenanceDeletion};
-use trusty_common::memory_core::palace::Palace;
+use crate::engine::maintenance_log::{read_journal, MaintenanceDeletion};
+use crate::engine::palace::Palace;
 use uuid::Uuid;
 
 /// Render the deletion trail for `palace` as text or JSON.
@@ -76,8 +76,8 @@ pub(crate) fn deletions_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::memory_core::maintenance_log::{record, DeletionReason};
-    use trusty_common::memory_core::palace::PalaceId;
+    use crate::engine::maintenance_log::{record, DeletionReason};
+    use crate::engine::palace::PalaceId;
 
     /// Why: #8729's open question is "which surviving drawer did each removed
     /// one duplicate, at what score" — the report must answer it per drawer.

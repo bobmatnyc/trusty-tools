@@ -10,8 +10,8 @@
 //! Test: this *is* the test file.
 
 use super::*;
-use trusty_common::memory_core::dream::DreamStats;
-use trusty_common::memory_core::palace::{Drawer, PalaceId};
+use crate::engine::dream::DreamStats;
+use crate::engine::palace::{Drawer, PalaceId};
 use uuid::Uuid;
 
 /// Why: a write burst drops many requests for one palace, and each drop calls
@@ -141,7 +141,7 @@ fn create_on_disk(state: &AppState, id: &str) {
         .registry
         .create_palace(
             &state.data_root,
-            trusty_common::memory_core::palace::Palace {
+            crate::engine::palace::Palace {
                 id: PalaceId::new(id),
                 name: id.to_string(),
                 description: None,

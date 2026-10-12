@@ -35,7 +35,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use trusty_common::memory_core::{Palace, PalaceHandle, PalaceRegistry};
+use crate::engine::{Palace, PalaceHandle, PalaceRegistry};
 
 use crate::console_metrics::disk_stats;
 use crate::idle_evict::EvictGate;

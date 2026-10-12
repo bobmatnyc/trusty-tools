@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use recall_support::{create_palaces, rank_of, recall, recall_envelope, remember, state_with};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::PalaceId;
+use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::tools::recall_rulings::parse_rulings_palaces;
 use trusty_memory::AppState;
 use uuid::Uuid;

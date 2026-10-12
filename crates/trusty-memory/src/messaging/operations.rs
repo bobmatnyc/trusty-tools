@@ -12,9 +12,9 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Arc;
-use trusty_common::memory_core::palace::{Drawer, RoomType};
-use trusty_common::memory_core::retrieval::RememberOptions;
-use trusty_common::memory_core::PalaceHandle;
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::retrieval::RememberOptions;
+use crate::engine::PalaceHandle;
 use uuid::Uuid;
 
 use super::types::{build_message_tags, Message, MSG_MARKER_TAG, TAG_READ_PREFIX};
@@ -35,7 +35,7 @@ use super::types::{build_message_tags, Message, MSG_MARKER_TAG, TAG_READ_PREFIX}
 /// caller so noise drawers can be traced back to their origin.
 /// Test: `round_trip_send_and_inbox`.
 pub async fn send_message_to_palace(
-    registry: &trusty_common::memory_core::PalaceRegistry,
+    registry: &crate::engine::PalaceRegistry,
     data_root: &Path,
     from_palace: &str,
     to_palace: &str,
@@ -43,7 +43,7 @@ pub async fn send_message_to_palace(
     content: String,
     creator: crate::attribution::CreatorInfo,
 ) -> Result<Uuid> {
-    let pid = trusty_common::memory_core::PalaceId::new(to_palace);
+    let pid = crate::engine::PalaceId::new(to_palace);
     let handle = registry
         .open_palace(data_root, &pid)
         .with_context(|| format!("open recipient palace {to_palace}"))?;

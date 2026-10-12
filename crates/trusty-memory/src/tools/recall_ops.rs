@@ -21,8 +21,8 @@
 use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Drawer, RoomType};
-use trusty_common::memory_core::retrieval::{
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::retrieval::{
     recall_across_palaces_reporting, recall_deep_scoped, recall_scoped, scope_admits,
     CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope,
 };
@@ -68,7 +68,7 @@ use super::wing_ops::resolve_wing_arg;
 /// — both drive recall with a live embedder behind a stranded `Warming` latch.
 fn vector_lane_available(state: &AppState) -> bool {
     state.readiness() != DaemonReadiness::Warming
-        || trusty_common::memory_core::retrieval::shared_embedder_initialized()
+        || crate::engine::retrieval::shared_embedder_initialized()
 }
 
 /// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
@@ -101,13 +101,13 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// `a_warming_lane_hit_replaces_its_l1_copy`.
 async fn recall_without_embedder(
     state: &AppState,
-    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    handle: &crate::engine::retrieval::PalaceHandle,
     query: &str,
     scope: &RecallScope,
     top_k: usize,
-) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
+) -> Vec<crate::engine::retrieval::RecallResult> {
     // #9719: the live L1 follows the wing scope, as on the ready path.
-    let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1_scoped(handle, scope);
+    let mut results = crate::engine::retrieval::retrieve_l0_l1_scoped(handle, scope);
     // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
     // scope so a WING-scoped recall issued while the embedder is warming is
     // filtered too. Without that, the warming path would return unscoped
@@ -118,7 +118,7 @@ async fn recall_without_embedder(
     let admits = |d: &Drawer| scope_admits(&allowed, d.room_id);
     if let Some(bm25_hits) = bm25_live_hits(state, handle, query, top_k, admits).await {
         // #9719: a lane hit replaces its L1 copy, as on the ready path.
-        trusty_common::memory_core::retrieval::dedup_extend(&mut results, bm25_hits);
+        crate::engine::retrieval::dedup_extend(&mut results, bm25_hits);
     }
     results.sort_by(|a, b| {
         b.score
@@ -390,16 +390,16 @@ impl RecallCut {
 /// cross-palace fan-out through a cold embedder yet.
 async fn recall_all_without_embedder(
     state: &AppState,
-    handles: &[std::sync::Arc<trusty_common::memory_core::retrieval::PalaceHandle>],
+    handles: &[std::sync::Arc<crate::engine::retrieval::PalaceHandle>],
     query: &str,
     top_k: usize,
-) -> Vec<trusty_common::memory_core::retrieval::CrossPalaceResult> {
+) -> Vec<crate::engine::retrieval::CrossPalaceResult> {
     let mut merged = Vec::new();
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
         let hits = recall_without_embedder(state, handle, query, &RecallScope::All, top_k).await;
         merged.extend(hits.into_iter().map(|result| {
-            trusty_common::memory_core::retrieval::CrossPalaceResult {
+            crate::engine::retrieval::CrossPalaceResult {
                 palace_id: palace_id.clone(),
                 result,
             }

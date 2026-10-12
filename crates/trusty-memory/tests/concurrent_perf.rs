@@ -267,7 +267,7 @@ impl Drop for PerfDaemon {
 /// perf test that spent its first minute fetching one would be measuring the
 /// network. `seed_shared_embedder_with_mock` is idempotent and process-wide.
 async fn start_daemon() -> PerfDaemon {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
     let data = tempfile::tempdir().expect("tempdir for the data root");
     let root = data.path().to_path_buf();

@@ -12,7 +12,7 @@
 //! `moved_store_reimports_nothing_and_shared_ids_are_reported`.
 
 use std::collections::HashMap;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 use super::mapping::{

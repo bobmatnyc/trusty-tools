@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use trusty_common::memory_core::store::{PalaceStore, PalaceStoreError};
+use crate::engine::store::{PalaceStore, PalaceStoreError};
 
 /// Stable on-disk identifier for the default unscoped palace.
 const DEFAULT_PALACE_ID: &str = "localLLM";
@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use tempfile::tempdir;
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    use crate::engine::palace::{Palace, PalaceId};
 
     /// Build a `Palace` with the given id + name and persist it under
     /// `<registry_root>/<id>/palace.json`. Returns the persisted palace.

@@ -47,7 +47,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use trusty_common::memory_core::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
+    use crate::engine::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
 
     /// RAII guard that sets or clears an environment variable for the duration
     /// of a test and restores the prior value on drop.
@@ -137,7 +137,7 @@ mod tests {
     /// reaches for the real ONNX model (HTTP 429 in CI) — same defect class as
     /// #4413. The call is idempotent, so order does not matter.
     fn fresh_palace(id: &str) -> (PalaceRegistry, Arc<PalaceHandle>, PathBuf) {
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn decode_message_from_drawer_round_trips() {
         use chrono::DateTime;
-        use trusty_common::memory_core::palace::Drawer;
+        use crate::engine::palace::Drawer;
         use uuid::Uuid;
         let ts = "2026-05-25T12:34:56+00:00"
             .parse::<DateTime<chrono::FixedOffset>>()
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn decode_skips_non_message_drawer() {
-        use trusty_common::memory_core::palace::Drawer;
+        use crate::engine::palace::Drawer;
         use uuid::Uuid;
         let d = Drawer::new(Uuid::new_v4(), "not a message");
         assert!(Message::from_drawer(&d).is_none());
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn formatted_message_includes_from_purpose_and_body() {
-        use trusty_common::memory_core::palace::Drawer;
+        use crate::engine::palace::Drawer;
         use uuid::Uuid;
         let mut d = Drawer::new(Uuid::new_v4(), "the body");
         let ts = Utc::now();

@@ -16,8 +16,8 @@ use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::Triple;
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg::Triple;
 
 use super::helpers::{open_palace_handle, resolve_palace};
 // #6318: the KG READ tools fall back to a palace index; `kg_assert`,
@@ -79,7 +79,7 @@ pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Va
 /// Re-asserting is not an escape either: outside `FUNCTIONAL_PREDICATES` a new
 /// object joins the wrong one instead of displacing it.
 /// What: resolves the palace, then calls
-/// [`trusty_common::memory_core::store::kg::KnowledgeGraph::retract_triple`],
+/// [`crate::engine::store::kg::KnowledgeGraph::retract_triple`],
 /// which targets the full `(subject, predicate, object)` key and leaves every
 /// sibling object at that pair active. Returns the `closed` count so a caller
 /// can tell a retraction (`1`) from a miss (`0`); a miss is a genuine no-op,

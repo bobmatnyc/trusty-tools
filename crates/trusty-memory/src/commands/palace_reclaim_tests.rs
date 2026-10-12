@@ -5,7 +5,7 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
-use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+use crate::engine::{Palace, PalaceId, PalaceRegistry};
 
 pub(crate) const DAY: i64 = 86_400;
 

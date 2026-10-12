@@ -4,7 +4,7 @@ use super::*;
 use crate::service::core_tests::LogCapture;
 use crate::tools::recall_rank::{by_score_desc, demote_stale_snapshots};
 use chrono::Utc;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 
 fn hit(score: f32) -> RecallResult {
     RecallResult {
@@ -205,12 +205,12 @@ struct Seed {
 /// Why (#9462): whether an edge's replacement exists is a palace question —
 /// the in-memory table, then the durable redb row — so the tests seed both.
 fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
-    use trusty_common::memory_core::palace::PalaceId;
-    use trusty_common::memory_core::share::SUPERSEDED_BY;
-    use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
-    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-    use trusty_common::memory_core::store::kg_store::DRAWERS;
-    use trusty_common::memory_core::store::vector::UsearchStore;
+    use crate::engine::palace::PalaceId;
+    use crate::engine::share::SUPERSEDED_BY;
+    use crate::engine::store::kg::{KnowledgeGraph, Triple};
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_store::DRAWERS;
+    use crate::engine::store::vector::UsearchStore;
 
     // `KnowledgeGraph::open` takes the legacy `kg.db` name and opens `kg.redb`.
     let kg_path = dir.join("kg.redb");

@@ -23,8 +23,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-use trusty_common::memory_core::store::OpenIntent;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::OpenIntent;
 
 /// Filename of a palace's KG store.
 pub(crate) const KG_FILE: &str = "kg.redb";

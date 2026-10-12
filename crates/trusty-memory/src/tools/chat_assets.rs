@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use {
     crate::AppState,
     anyhow::{Context, Result},
-    trusty_common::memory_core::store::chat_sessions::ChatImageAsset,
+    crate::engine::store::chat_sessions::ChatImageAsset,
 };
 
 /// Why: durable image bytes belong to trusty-memory rather than an assistant-local store.

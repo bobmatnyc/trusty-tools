@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::INCOMPATIBLE_SUFFIX;
+use crate::engine::palace::Drawer;
+use crate::engine::store::INCOMPATIBLE_SUFFIX;
 
 use super::store_snapshot::with_store_copy;
 

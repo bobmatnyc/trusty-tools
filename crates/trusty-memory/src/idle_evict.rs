@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::info;
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::PalaceRegistry;
 
 /// Serialises the idle-evict sweep against the drawer-count snapshot (#9283).
 ///
@@ -181,8 +181,8 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::sync::atomic::Ordering;
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
-    use trusty_common::memory_core::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::PalaceRegistry;
 
     /// Why: the env parse is the single source of truth for the TTL, including
     /// the `0`-disables contract and the default fallback.

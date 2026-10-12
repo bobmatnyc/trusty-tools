@@ -21,7 +21,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use trusty_common::memory_core::retrieval::{shared_embedder, shared_embedder_initialized};
+use crate::engine::retrieval::{shared_embedder, shared_embedder_initialized};
 
 use super::bridge::{KuzuExport, SystemRunner};
 use super::discovery::{resolve_from, DiscoveredStore, STORE_DB_NAME, STORE_DIR_NAME};

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::palace_emptiness::PalaceNotEmpty;
-use trusty_common::memory_core::registry::{PalaceRenameError, RenameOptions};
-use trusty_common::memory_core::store::{PalaceStore, PalaceStoreError};
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::palace_emptiness::PalaceNotEmpty;
+use crate::engine::registry::{PalaceRenameError, RenameOptions};
+use crate::engine::store::{PalaceStore, PalaceStoreError};
 
 use super::rename::{count_refusal, RenameError};
 use crate::service::MemoryService;
@@ -26,7 +26,7 @@ use crate::{AppState, DaemonEvent};
 const RENAME_BOUND: Duration = Duration::from_secs(10);
 
 fn fixture() -> (AppState, tempfile::TempDir) {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = AppState::new(tmp.path().to_path_buf());
     state.set_ready();

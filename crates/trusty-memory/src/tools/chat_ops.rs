@@ -18,7 +18,7 @@
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::chat_sessions::ChatMessage;
+use crate::engine::store::chat_sessions::ChatMessage;
 
 use super::helpers::resolve_palace;
 // #6318: the three session READ tools fall back to a palace index; create,

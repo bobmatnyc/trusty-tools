@@ -275,7 +275,7 @@ pub(crate) async fn bm25_search_optional(
 /// `fusion_ranks_tied_drawers_by_id_whatever_the_input_order`, plus
 /// downstream RRF behaviour observed end-to-end.
 pub(crate) fn fuse_bm25_into_recall(
-    results: &mut Vec<trusty_common::memory_core::retrieval::RecallResult>,
+    results: &mut Vec<crate::engine::retrieval::RecallResult>,
     bm25_hits: &[BM25Hit],
     top_k: usize,
 ) {
@@ -332,10 +332,10 @@ pub(crate) fn fuse_bm25_into_recall(
 /// Test: `bm25_hits_hydrate_from_handle_during_warmup`,
 /// `an_expired_slot_is_not_returned_by_the_warming_path`.
 pub(crate) fn bm25_hits_to_recall_results(
-    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    handle: &crate::engine::retrieval::PalaceHandle,
     bm25_hits: &[BM25Hit],
 ) -> (
-    Vec<trusty_common::memory_core::retrieval::RecallResult>,
+    Vec<crate::engine::retrieval::RecallResult>,
     usize,
 ) {
     let drawers = handle.drawers.read();
@@ -353,7 +353,7 @@ pub(crate) fn bm25_hits_to_recall_results(
                 return None;
             }
             let drawer = drawer.clone();
-            Some(trusty_common::memory_core::retrieval::RecallResult {
+            Some(crate::engine::retrieval::RecallResult {
                 drawer,
                 score: hit.score,
                 layer: 4,
@@ -378,12 +378,12 @@ pub(crate) fn bm25_hits_to_recall_results(
 /// Test: `recall_returns_the_live_slot_past_twenty_expired_ones_while_warming`.
 pub(crate) async fn bm25_live_hits(
     state: &AppState,
-    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    handle: &crate::engine::retrieval::PalaceHandle,
     query: &str,
     window: usize,
-    admits: impl Fn(&trusty_common::memory_core::palace::Drawer) -> bool,
-) -> Option<Vec<trusty_common::memory_core::retrieval::RecallResult>> {
-    use trusty_common::memory_core::retrieval::next_refill_window;
+    admits: impl Fn(&crate::engine::palace::Drawer) -> bool,
+) -> Option<Vec<crate::engine::retrieval::RecallResult>> {
+    use crate::engine::retrieval::next_refill_window;
     let mut fetch = window;
     let mut live = None;
     // #5036: key the lane on the RESOLVED palace id, read off the handle.

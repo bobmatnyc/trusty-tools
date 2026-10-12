@@ -7,7 +7,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use trusty_common::memory_core::filter::SECRET_FILTER_VERSION;
+use crate::engine::filter::SECRET_FILTER_VERSION;
 
 use super::super::mapping::map_memory;
 use super::carve_out::{is_high_entropy, HIGH_ENTROPY_MIN_LEN, HIGH_ENTROPY_TENTHS};

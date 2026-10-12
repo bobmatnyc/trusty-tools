@@ -32,7 +32,7 @@ pub(super) fn lock_stall_threshold() -> Duration {
         .and_then(|v| v.trim().parse::<u64>().ok());
     derive_lock_stall_threshold(
         override_secs,
-        trusty_common::memory_core::timeouts::write_lock_timeout(),
+        crate::engine::timeouts::write_lock_timeout(),
     )
 }
 

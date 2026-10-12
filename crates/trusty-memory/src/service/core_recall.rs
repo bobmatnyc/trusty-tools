@@ -15,7 +15,7 @@
 //! `recall_all_never_opens_an_empty_palace` (#9141).
 
 use serde_json::{json, Value};
-use trusty_common::memory_core::retrieval::{
+use crate::engine::retrieval::{
     recall_across_palaces_reporting, recall_deep_with_default_embedder,
     recall_with_default_embedder, shared_embedder, RecallResult,
 };

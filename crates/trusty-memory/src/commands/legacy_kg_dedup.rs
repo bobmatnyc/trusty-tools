@@ -21,12 +21,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use trusty_common::memory_core::dream::DreamConfig;
-use trusty_common::memory_core::embed::Embedder;
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::retrieval::{shared_embedder, PalaceHandle, VectorBackfillOptions};
-use trusty_common::memory_core::store::VectorStore as _;
-use trusty_common::memory_core::{memory_content_hash, timeouts};
+use crate::engine::dream::DreamConfig;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::{shared_embedder, PalaceHandle, VectorBackfillOptions};
+use crate::engine::store::VectorStore as _;
+use crate::engine::{memory_content_hash, timeouts};
 use uuid::Uuid;
 
 use super::LegacyReport;

@@ -28,7 +28,7 @@ pub use types::{
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use trusty_common::memory_core::store::kg::Triple;
+use crate::engine::store::kg::Triple;
 
 use crate::AppState;
 
@@ -51,7 +51,7 @@ pub async fn bootstrap_palace(
         .registry
         .open_palace(
             &state.data_root,
-            &trusty_common::memory_core::palace::PalaceId::new(palace_id),
+            &crate::engine::palace::PalaceId::new(palace_id),
         )
         .with_context(|| format!("open palace {palace_id}"))?;
 

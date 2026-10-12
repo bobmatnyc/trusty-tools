@@ -20,7 +20,7 @@
 //! `select_relevant_triples_filters_by_prompt_overlap` in `mod.rs`.
 
 use serde_json::Value;
-use trusty_common::memory_core::retrieval::{apply_relevance_floor, FloorOutcome};
+use crate::engine::retrieval::{apply_relevance_floor, FloorOutcome};
 
 /// A drawer parsed from the `/recall` endpoint's flat JSON shape.
 ///

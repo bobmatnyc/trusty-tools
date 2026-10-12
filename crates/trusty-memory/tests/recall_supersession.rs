@@ -366,9 +366,9 @@ async fn profile_recall(state: &trusty_memory::AppState) -> (u128, u128) {
 /// --nocapture` (a debug build spends most of an hour seeding the HNSW index).
 #[tokio::test(flavor = "multi_thread")]
 async fn recall_supersession_latency_profile() {
-    use trusty_common::memory_core::palace::{Drawer, PalaceId};
-    use trusty_common::memory_core::share::{import_palace_records, SharedMemoryRecord};
-    use trusty_common::memory_core::store::kg::Triple;
+    use trusty_memory::engine::palace::{Drawer, PalaceId};
+    use trusty_memory::engine::share::{import_palace_records, SharedMemoryRecord};
+    use trusty_memory::engine::store::kg::Triple;
 
     if std::env::var_os(PROFILE_ENV).is_none() {
         return;

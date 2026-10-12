@@ -12,11 +12,11 @@
 //! fallback and needs no separate wire test.
 
 use serde_json::json;
-use trusty_common::memory_core::palace::PalaceId;
+use crate::engine::palace::PalaceId;
 
 /// Build a fresh `AppState` rooted in an ephemeral tempdir.
 fn test_state() -> crate::AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -110,7 +110,7 @@ async fn execute_tool_dispatches_known_tools() {
 
 /// Create a palace on `state` and return its name, for the chat KG tests.
 fn seed_palace(state: &crate::AppState, name: &str) {
-    let palace = trusty_common::memory_core::Palace {
+    let palace = crate::engine::Palace {
         id: PalaceId::new(name),
         name: name.to_string(),
         description: None,

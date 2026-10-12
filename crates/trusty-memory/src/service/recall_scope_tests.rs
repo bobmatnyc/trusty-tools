@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::{Drawer, PalaceRegistry};
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::{Drawer, PalaceRegistry};
 use uuid::Uuid;
 
 use super::core::MemoryService;
@@ -27,7 +27,7 @@ use crate::AppState;
 
 /// A ready state rooted at `root`, with the mock embedder seeded.
 async fn ready_state(root: &Path) -> AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     // #88: bypass the project-slug enforcement gate, under the crate's env
     // lock (#5937).
     let guard = crate::commands::env_test_lock().lock().await;
@@ -496,7 +496,7 @@ async fn both_scopes_demote_a_superseded_drawer() {
         .registry
         .open_palace(&state.data_root, &PalaceId::new("sup-a"))
         .expect("open sup-a");
-    trusty_common::memory_core::share::assert_superseded_by(&handle.kg, old, new, "test:9299")
+    crate::engine::share::assert_superseded_by(&handle.kg, old, new, "test:9299")
         .await
         .expect("superseded_by edge");
     drop(handle);
@@ -527,7 +527,7 @@ struct FailFirstEmbedder {
 }
 
 #[async_trait::async_trait]
-impl trusty_common::memory_core::embed::Embedder for FailFirstEmbedder {
+impl crate::engine::embed::Embedder for FailFirstEmbedder {
     async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             return Ok(texts.iter().map(|_| vec![1.0; 8]).collect());
@@ -556,8 +556,8 @@ impl trusty_common::memory_core::embed::Embedder for FailFirstEmbedder {
 async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
     use super::recall_stream::{recall_all_scoped, RecallAllScope};
     use std::sync::Arc;
-    use trusty_common::memory_core::embed::Embedder;
-    use trusty_common::memory_core::retrieval::recall_across_palaces_reporting;
+    use crate::engine::embed::Embedder;
+    use crate::engine::retrieval::recall_across_palaces_reporting;
 
     for scope in [RecallAllScope::Resident, RecallAllScope::All] {
         let tmp = tempfile::tempdir().expect("tempdir");

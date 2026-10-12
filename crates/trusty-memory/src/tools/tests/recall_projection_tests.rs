@@ -16,8 +16,8 @@ use crate::tools::recall_projection::{
     RecallProjection, MAX_CANDIDATE_WINDOW,
 };
 use serde_json::json;
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::retrieval::RecallResult;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::RecallResult;
 use uuid::Uuid;
 
 /// The attribution a real MCP write attaches to every drawer (DOC-53).

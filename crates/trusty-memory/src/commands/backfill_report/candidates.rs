@@ -21,7 +21,7 @@
 //!    being run — the one outcome ADR-0028's human-gated migration forbids. It
 //!    would also delete the rows a human most wants to see.
 //! 2. **No open against the live file.** Going one level lower to
-//!    [`trusty_common::memory_core::store::kg_redb::KgStoreRedb`] is not enough
+//!    [`crate::engine::store::kg_redb::KgStoreRedb`] is not enough
 //!    on its own: `OpenIntent::ReadOnlyClient`
 //!    only snapshots when the file is *already locked*. On an unlocked palace it
 //!    reaches `Database::create`, which opens read-write and runs a table-init
@@ -40,11 +40,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use trusty_common::memory_core::decay::DecayConfig;
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-use trusty_common::memory_core::store::rooms::{list_room_summaries, RoomSummary};
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::decay::DecayConfig;
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::rooms::{list_room_summaries, RoomSummary};
+use crate::engine::PalaceRegistry;
 
 use super::log_index::InjectionIndex;
 use super::signals::Signal;

@@ -16,9 +16,9 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::RecallResult;
-use trusty_common::memory_core::PalaceHandle;
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::RecallResult;
+use crate::engine::PalaceHandle;
 use uuid::Uuid;
 
 use super::types::{PalaceInfo, ServiceResult};
@@ -216,7 +216,7 @@ where
 pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace>> {
     let root = state.data_root.clone();
     tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
+        crate::engine::PalaceRegistry::list_palaces(&root)
     })
     .await
     .map_err(|e| anyhow!("join list_palaces: {e}"))?
@@ -560,7 +560,7 @@ pub async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
 /// Test: network-dependent — not unit-tested.
 pub async fn enrich_gap_exploration(
     api_key: &str,
-    gap: &trusty_common::memory_core::community::KnowledgeGap,
+    gap: &crate::engine::community::KnowledgeGap,
 ) -> Option<String> {
     let preview: Vec<&str> = gap.entities.iter().take(5).map(String::as_str).collect();
     if preview.is_empty() {
@@ -627,7 +627,7 @@ pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Res
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use trusty_common::memory_core::palace::{Drawer, Palace};
+    use crate::engine::palace::{Drawer, Palace};
 
     fn test_state() -> AppState {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -875,7 +875,7 @@ mod tests {
         let data_root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
 
-        let registry = trusty_common::memory_core::PalaceRegistry::with_max_open(2);
+        let registry = crate::engine::PalaceRegistry::with_max_open(2);
         for name in ["a", "b", "c"] {
             let palace = Palace {
                 id: PalaceId::new(name),

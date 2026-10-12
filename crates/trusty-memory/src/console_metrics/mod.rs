@@ -25,8 +25,8 @@ mod usage;
 use anyhow::Result;
 use serde_json::{json, Value};
 use trusty_common::console_metrics::{make_report, ServiceHealth};
-use trusty_common::memory_core::store::rooms::list_room_summaries;
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::store::rooms::list_room_summaries;
+use crate::engine::PalaceRegistry;
 
 use crate::AppState;
 
@@ -224,7 +224,7 @@ fn insert_ram_breakdown(metrics: &mut Value, usage: &usage::DaemonUsage) {
 /// `console_metrics_uses_cache_only_and_does_not_evict`.
 fn count_palace(
     registry: &PalaceRegistry,
-    info: &trusty_common::memory_core::Palace,
+    info: &crate::engine::Palace,
 ) -> PalaceCounts {
     match registry.peek(&info.id) {
         Some(handle) => cached_counts(info, &handle),
@@ -266,8 +266,8 @@ fn count_palace(
 /// and `console_metrics_reports_room_counts_for_every_palace` cover this
 /// function's success path end-to-end.
 fn cached_counts(
-    info: &trusty_common::memory_core::Palace,
-    handle: &trusty_common::memory_core::PalaceHandle,
+    info: &crate::engine::Palace,
+    handle: &crate::engine::PalaceHandle,
 ) -> PalaceCounts {
     let drawers = handle.drawers.read().len();
 
@@ -331,7 +331,7 @@ fn cached_counts(
 /// Test: `cached_field_turns_a_read_error_into_unavailable_not_zero`,
 /// `cached_field_passes_a_successful_read_through`.
 fn cached_field(
-    palace: &trusty_common::memory_core::PalaceId,
+    palace: &crate::engine::PalaceId,
     field: &str,
     read: anyhow::Result<usize>,
 ) -> Result<usize, String> {
@@ -360,7 +360,7 @@ fn cached_field(
 /// `console_metrics_uses_cache_only_and_does_not_evict`.
 fn collect_palace_stats(
     registry: &PalaceRegistry,
-    palace_infos: &[trusty_common::memory_core::Palace],
+    palace_infos: &[crate::engine::Palace],
 ) -> PalaceStats {
     let palace_count = palace_infos.len();
     let mut stats = PalaceStats {
@@ -410,7 +410,7 @@ fn collect_palace_stats(
 /// otherwise.
 /// Test: `console_metrics_reports_real_counts_for_an_uncached_palace`,
 /// `console_metrics_marks_an_unreadable_palace_unavailable`.
-fn palace_entry(info: &trusty_common::memory_core::Palace, counts: &PalaceCounts) -> Value {
+fn palace_entry(info: &crate::engine::Palace, counts: &PalaceCounts) -> Value {
     let id = info.id.as_str().to_string();
     // #6424: one small file read per palace, on the same blocking pool as the
     // counts. Null for a palace never used since the stamp shipped — the tab
@@ -618,7 +618,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn console_metrics_uses_cache_only_and_does_not_evict() {
-        use trusty_common::memory_core::{Palace, PalaceId};
+        use crate::engine::{Palace, PalaceId};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_root = tmp.path().to_path_buf();
@@ -713,7 +713,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn console_metrics_reports_real_counts_for_an_uncached_palace() {
-        use trusty_common::memory_core::{Drawer, Palace, PalaceId};
+        use crate::engine::{Drawer, Palace, PalaceId};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_root = tmp.path().to_path_buf();
@@ -791,8 +791,8 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn console_metrics_reports_room_counts_for_every_palace() {
-        use trusty_common::memory_core::store::rooms::create_room;
-        use trusty_common::memory_core::{Palace, PalaceId, RoomType};
+        use crate::engine::store::rooms::create_room;
+        use crate::engine::{Palace, PalaceId, RoomType};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_root = tmp.path().to_path_buf();
@@ -866,7 +866,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn console_metrics_marks_an_unreadable_palace_unavailable() {
-        use trusty_common::memory_core::{Palace, PalaceId};
+        use crate::engine::{Palace, PalaceId};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let data_root = tmp.path().to_path_buf();
@@ -932,7 +932,7 @@ mod tests {
     /// Test: This test.
     #[test]
     fn cached_field_turns_a_read_error_into_unavailable_not_zero() {
-        use trusty_common::memory_core::PalaceId;
+        use crate::engine::PalaceId;
 
         let palace = PalaceId::new("hot");
         for field in ["vector index", "room list", "kg_triple count"] {
@@ -963,7 +963,7 @@ mod tests {
     /// Test: This test.
     #[test]
     fn cached_field_passes_a_successful_read_through() {
-        use trusty_common::memory_core::PalaceId;
+        use crate::engine::PalaceId;
 
         let palace = PalaceId::new("hot");
         assert_eq!(cached_field(&palace, "vector index", Ok(7)), Ok(7));

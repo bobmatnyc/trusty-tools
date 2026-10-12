@@ -11,8 +11,8 @@
 //! `service::tests`.
 
 use serde::{Deserialize, Serialize};
-use trusty_common::memory_core::dream::PersistedDreamStats;
-use trusty_common::memory_core::store::kg::Triple;
+use crate::engine::dream::PersistedDreamStats;
+use crate::engine::store::kg::Triple;
 
 /// Serializable palace summary used by `GET /api/v1/palaces` and
 /// `GET /api/v1/palaces/{id}`.
@@ -100,7 +100,7 @@ pub struct DreamStatusPayload {
     /// left empty on the cross-palace aggregate endpoint (no single palace to
     /// attribute). `#[serde(default)]` keeps it omissible for older clients.
     #[serde(default)]
-    pub fading: Vec<trusty_common::memory_core::dream::FadingMemory>,
+    pub fading: Vec<crate::engine::dream::FadingMemory>,
 }
 
 impl From<PersistedDreamStats> for DreamStatusPayload {
@@ -152,7 +152,7 @@ pub struct CreatePalaceBody {
 ///
 /// Why: `content` normally goes through `PalaceHandle::remember`'s signal/
 /// noise quality gate (noise patterns, short-content, non-alphabetic ratio —
-/// see `trusty_common::memory_core::filter`), which is correct for
+/// see `crate::engine::filter`), which is correct for
 /// human/LLM-authored prose but rejects legitimate structured payloads (a
 /// caller storing `{"score":0.42,"tier":3}`-shaped content is mostly
 /// punctuation/digits, so `non_alphabetic_ratio` trips the gate). Issue
@@ -269,8 +269,8 @@ pub struct KgNodeView {
     pub out_degree: u64,
 }
 
-impl From<trusty_common::memory_core::store::kg::SeedNode> for KgNodeView {
-    fn from(n: trusty_common::memory_core::store::kg::SeedNode) -> Self {
+impl From<crate::engine::store::kg::SeedNode> for KgNodeView {
+    fn from(n: crate::engine::store::kg::SeedNode) -> Self {
         Self {
             id: n.entity,
             degree: n.degree as u64,

@@ -42,7 +42,7 @@ fn test_state() -> AppState {
     // Seed the process-wide embedder cell with the mock: under per-test process
     // isolation each test gets a virgin cell and would otherwise reach for the
     // real ONNX model (#4413). Idempotent, so calling it here is free.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -305,10 +305,10 @@ async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
 /// Test: itself.
 #[tokio::test]
 async fn delete_palace_refuses_when_open_fails_or_load_is_degraded() {
-    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-    use trusty_common::memory_core::store::kg_store::DRAWERS;
-    use trusty_common::memory_core::store::PalaceStore;
-    use trusty_common::memory_core::{Palace, PalaceId};
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_store::DRAWERS;
+    use crate::engine::store::PalaceStore;
+    use crate::engine::{Palace, PalaceId};
     let (svc, state) = service();
     for (name, degraded) in [("unopenable", false), ("degraded", true)] {
         // Persist the palace without opening it, so no handle holds kg.redb.
@@ -929,7 +929,7 @@ async fn create_and_evict(svc: &MemoryService, state: &AppState, id: &str) -> st
         .expect("palace create must succeed");
     state
         .registry
-        .remove(&trusty_common::memory_core::PalaceId::new(id));
+        .remove(&crate::engine::PalaceId::new(id));
     state.data_root.join(id)
 }
 
@@ -1025,8 +1025,8 @@ async fn absent_palace_is_still_404_at_both_open_handles() {
 /// Why (#9665): the fixture `format_too_new_maps_to_refused_error_naming_variant`
 /// uses, shared by the service and the JSON-RPC wire tests.
 pub(crate) fn seed_too_new_palace(root: &std::path::Path, id: &str) -> std::path::PathBuf {
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
-    use trusty_common::memory_core::store::PalaceStore;
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::store::PalaceStore;
     let dir = root.join(id);
     PalaceStore::save_palace(&Palace {
         id: PalaceId::new(id),
@@ -1050,7 +1050,7 @@ pub(crate) fn seed_too_new_palace(root: &std::path::Path, id: &str) -> std::path
 /// same six `Format*` refusals and the same non-refusals. Each error carries
 /// the `open palace` context `open_palace_handle_within` adds.
 pub(crate) fn open_errors() -> Vec<(&'static str, anyhow::Error, bool)> {
-    use trusty_common::memory_core::store::PalaceStoreError as E;
+    use crate::engine::store::PalaceStoreError as E;
     let p = || "p".to_string();
     let path = || std::path::PathBuf::from("/x/p");
     let io = || std::io::Error::other("disk");

@@ -12,7 +12,7 @@
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
+use crate::engine::palace::{Palace, PalaceId};
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, require_maintenance_lease, resolve_palace};
@@ -167,7 +167,7 @@ pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Resul
 pub(crate) async fn handle_palace_list(state: &AppState, _args: Value) -> Result<Value> {
     let root = state.data_root.clone();
     let palaces = tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
+        crate::engine::PalaceRegistry::list_palaces(&root)
     })
     .await
     .context("join list_palaces")??;
@@ -310,7 +310,7 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
 /// repaired palace reports zero missing and does no work.
 /// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
 pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Result<Value> {
-    use trusty_common::memory_core::retrieval::VectorBackfillOptions;
+    use crate::engine::retrieval::VectorBackfillOptions;
     let palace = resolve_palace(state, &args, "palace_reembed")?;
     let handle = open_palace_handle(state, &palace)?;
     // Defaults to a dry run on purpose: the first thing an operator wants is
@@ -397,7 +397,7 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
 /// `dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent` for the
 /// write path (#5005 review: the success path had only ever run empty).
 pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Result<Value> {
-    use trusty_common::memory_core::retrieval::{AliasRepairOptions, AliasRepairOutcome};
+    use crate::engine::retrieval::{AliasRepairOptions, AliasRepairOutcome};
     let palace = resolve_palace(state, &args, "palace_unalias")?;
     let handle = open_palace_handle(state, &palace)?;
     // Defaults to a dry run for the same reason `palace_reembed` does, and with
@@ -463,7 +463,7 @@ pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Resu
 /// never read as the first.
 /// What: `"clean"`, `"aliased"`, or `"unavailable"`.
 /// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
-fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'static str {
+fn alias_audit_state(audit: &crate::engine::retrieval::AliasAudit) -> &'static str {
     if audit.unavailable_reason().is_some() {
         "unavailable"
     } else if audit.is_clean() {

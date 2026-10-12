@@ -3,7 +3,7 @@
 
 use super::*;
 use chrono::Duration as ChronoDuration;
-use trusty_common::memory_core::{Drawer, PalaceId};
+use crate::engine::{Drawer, PalaceId};
 
 fn palace(root: &Path, name: &str) -> Palace {
     Palace {

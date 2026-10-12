@@ -17,9 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::store::{KnowledgeGraph, OpenIntent};
-use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::store::{KnowledgeGraph, OpenIntent};
+use crate::engine::{PalaceHandle, PalaceRegistry};
 use trusty_common::palace_resolve::PalaceSource;
 
 use super::apply::SnapshotView;

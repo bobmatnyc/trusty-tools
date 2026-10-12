@@ -19,7 +19,7 @@
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::retrieval::RecallResult;
+use crate::engine::retrieval::RecallResult;
 
 use super::recall_rulings::RulingsDegraded;
 

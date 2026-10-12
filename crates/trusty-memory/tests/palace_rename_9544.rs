@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Palace, PalaceId};
+use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::transport::{dispatch, JsonRpcRequest};
@@ -26,7 +26,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         let lane = Bm25Lane::with_limits(root.clone(), 3, None);

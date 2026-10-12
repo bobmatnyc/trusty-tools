@@ -16,10 +16,10 @@ use crate::service::{load_user_config, palace_info_from, DreamStatusPayload, Mem
 use crate::AppState;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::PersistedDreamStats;
-use trusty_common::memory_core::palace::{PalaceId, RoomType};
-use trusty_common::memory_core::store::kg::Triple;
-use trusty_common::memory_core::PalaceRegistry;
+use crate::engine::dream::PersistedDreamStats;
+use crate::engine::palace::{PalaceId, RoomType};
+use crate::engine::store::kg::Triple;
+use crate::engine::PalaceRegistry;
 use trusty_common::{ChatMessage, ToolDef};
 
 // ---------------------------------------------------------------------------

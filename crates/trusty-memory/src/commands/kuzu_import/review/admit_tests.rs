@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use serde_json::json;
-use trusty_common::memory_core::filter::{
+use crate::engine::filter::{
     classify_secret, find_secret_spans, SECRET_FILTER_VERSION,
 };
 

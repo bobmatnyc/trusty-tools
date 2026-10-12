@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::oneshot;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::PalaceRegistry;
+use trusty_memory::engine::palace::{Palace, PalaceId};
+use trusty_memory::engine::PalaceRegistry;
 use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
 use trusty_common::monitor::memory_client::MemoryClient;
 use trusty_memory::AppState;
@@ -73,7 +73,7 @@ impl Daemon {
     async fn start() -> Self {
         // #4413: seed the process-wide embedder cell so nothing reaches for the
         // real ONNX model.
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
         let data = tempfile::tempdir().expect("tempdir");
         let root = data.path().to_path_buf();
