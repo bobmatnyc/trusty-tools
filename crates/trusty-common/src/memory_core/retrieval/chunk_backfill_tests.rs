@@ -386,6 +386,67 @@ async fn slice_embed_is_bounded_by_the_slice_timeout() {
     assert_eq!(shape(&h, id), Some((1, 0)));
 }
 
+/// Embeds in `spawn_blocking` under one model lock, as `FastEmbedder` does
+/// (`embedder/fast_embedder.rs`); a batch naming `SLOW` holds it for `slow`.
+/// A timeout drops the future, not the blocking job, so the lock stays held.
+struct Blocking {
+    inner: MockEmbedder,
+    model: Arc<std::sync::Mutex<()>>,
+    slow: Duration,
+}
+
+#[async_trait]
+impl Embedder for Blocking {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let model = self.model.clone();
+        let hold = if texts.iter().any(|t| t.contains("SLOW")) {
+            self.slow
+        } else {
+            Duration::ZERO
+        };
+        tokio::task::spawn_blocking(move || {
+            let _model = model
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::thread::sleep(hold);
+        })
+        .await?;
+        self.inner.embed_batch(texts).await
+    }
+    delegate!();
+}
+
+/// #9735 (critic HIGH): a timed-out embed keeps the model, so the next
+/// drawer's embed times out too; that pair must not read as a host failure.
+#[tokio::test]
+async fn a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handle(dir.path());
+    let slow = legacy(&h, &format!("SLOW {}", words(100)), 0.9).await;
+    let next = legacy(&h, &words(100), 0.5).await;
+    let e: Emb = Arc::new(Blocking {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        model: Arc::default(),
+        slow: Duration::from_millis(1500),
+    });
+    let tight = SliceBounds {
+        embed_timeout: Duration::from_millis(200),
+        ..bounds()
+    };
+    let first = h.reembed_slice(&e, &tight).await;
+    assert!(!first.host_failure, "{first:?}");
+    assert_eq!(ledger_ids(dir.path()), vec![slow], "{first:?}");
+    // The orphaned embed still holds the model; this bound waits it out.
+    let second = h.reembed_slice(&e, &bounds()).await;
+    assert_eq!(second.repaired, 1, "{second:?}");
+    assert!(full(&h, next));
+    assert_eq!(
+        shape(&h, slow),
+        Some((1, 0)),
+        "the timed-out drawer is backed off"
+    );
+}
+
 #[tokio::test]
 async fn slice_stops_starting_drawers_past_the_chunk_cap() {
     let dir = tempfile::tempdir().unwrap();
