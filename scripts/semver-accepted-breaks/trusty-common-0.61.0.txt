@@ -1,5 +1,5 @@
 crate   trusty-common
-version 0.60.1
+version 0.61.0
 reason  The #9390 expiring-slot stack adds the pub field verify_with to the non-#[non_exhaustive] RememberOptions struct; under Bob's 2026-09-26 versioning ruling a public-API break never forces a major version; PalaceHandle.fail_next_verify_record is a pub(crate) test seam behind cfg(any(test, feature = "embedder-test-support")), visible to the all-features gate. Refs #9390.
 accept  constructible_struct_adds_field  RememberOptions.verify_with
 accept  constructible_struct_adds_private_field  PalaceHandle.fail_next_verify_record
