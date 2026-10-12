@@ -1,8 +1,9 @@
 //! The secrets routes' request guard (#9066, DOC-74 §15.6 hardening, A6).
 //!
 //! Why: a secrets route changes credentials, so only the console's own page,
-//! loaded from the console's own loopback address, may call it. The console
-//! elsewhere answers any origin with permissive CORS; these routes do not.
+//! loaded from the console's own loopback address, may call it. It is
+//! stricter than the listener's own Host/Origin check (#9792): an `Origin`
+//! is required, and only loopback authorities count.
 //! What: [`check`], one pure decision per request, in this order: a tailnet
 //! request; an unknown own authority; `Host` and `Origin` (an absent
 //! `Origin` is refused on every method, Architect Q2); `OPTIONS`; any method

@@ -1,0 +1,4 @@
+Security
+- The loopback listener now refuses (403) any request, read or write, whose `Host` is not its own `ip:port` or `localhost:port`, or whose `Origin` is not `http://<Host>`; a request with no `Origin` is still served when `Host` matches. The permissive CORS layer is gone, so no other web page can read sessions, pids, tmux names, the disk tree or host metrics, and DNS rebinding and other local ports are refused too (#9792).
+- When `tailscale` reports this node's MagicDNS name, the loopback listener also answers `Host: <name>` with `Origin: https://<name>`, the shape `tailscale serve` forwards. If the name cannot be read, only loopback is accepted (#9792).
+- The ui-memory, ui-search and ui-analyze Vite dev proxies now rewrite `Host` and drop only the dev server's own `Origin` (`http://<Host>`); any other `Origin` is forwarded, so the console still refuses foreign pages (#9792).

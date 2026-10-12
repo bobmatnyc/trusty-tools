@@ -36,7 +36,7 @@ name        = "trusty-console"
 # `/api/secrets/*` bridge to the trusty-secrets socket), `AppState::with_secrets`
 # and `AppState::secrets`; `ServeArgs` and `serve_tailnet` are unchanged.
 # Publish after trusty-secrets 0.1.6, which carries the `ancestry` feature.
-version     = "0.12.6"
+version     = "0.13.0"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

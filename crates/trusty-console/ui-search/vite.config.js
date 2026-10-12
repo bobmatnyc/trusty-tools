@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 // #5936: emptyOutDir below deletes the tracked ui-source-hash.txt; this
 // re-writes it after the build that removed it.
 import { stampUiBundle } from '../../../scripts/lib/vite-stamp-bundle.mjs';
+// #9792: dev proxy rows the console's Host/Origin check admits.
+import { consoleProxy } from '../../../scripts/lib/vite-console-proxy.mjs';
 
 // Why: the console embeds this bundle with rust-embed and serves it at
 // `/tools/search/`; the bytes must therefore be self-contained and
@@ -50,21 +52,22 @@ export default defineConfig({
   server: {
     port: 5173,
     fs: { allow: ['.', FOUNDRY_COMPONENTS] },
-    proxy: {
+    // #9792: consoleProxy rewrites Host and drops only its own Origin.
+    proxy: consoleProxy('http://127.0.0.1:7788/api/search', [
       // Forward API calls through the console's `/api/search` bridge, which
       // reaches trusty-search over its Unix socket (#9214); the daemon has no
       // TCP listener to dial. `vite dev` serves the SPA at the origin root, so
       // base.js derives `/` and `/indexes` lands on `/api/search/indexes`.
       // Not proxied: `/facts` (no api.js caller, no bridge row) and `/admin`
       // (`POST /admin/stop` answers 501 from search_uds/map.rs).
-      '/health': 'http://127.0.0.1:7788/api/search',
-      '/status': 'http://127.0.0.1:7788/api/search',
-      '/indexes': 'http://127.0.0.1:7788/api/search',
-      '/search': 'http://127.0.0.1:7788/api/search',
-      '/chat': 'http://127.0.0.1:7788/api/search',
-      '/logs': 'http://127.0.0.1:7788/api/search',
-      '/config': 'http://127.0.0.1:7788/api/search',
-    },
+      '/health',
+      '/status',
+      '/indexes',
+      '/search',
+      '/chat',
+      '/logs',
+      '/config',
+    ]),
   },
   // Why: the API base-URL derivation (src/lib/base.js) reads document.baseURI,
   // so its regression tests (issue #1329) need a DOM. jsdom gives vitest a

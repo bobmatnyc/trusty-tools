@@ -15,7 +15,6 @@ use axum::{
     Router,
     routing::{any, get, post},
 };
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use super::{
@@ -31,7 +30,8 @@ use super::{
 /// `Local`/`Explicit` (non-Tailscale) bind mode use; Tailscale deployments use
 /// [`build_router_with_self_origins`] instead so their own bind address is
 /// also trusted (#3269).
-/// What: Returns a `Router<()>` with CORS, tracing middleware, and all routes.
+/// What: Returns a `Router<()>` with tracing middleware and all routes; no
+/// CORS layer (#9792), so no cross-origin page can read a response.
 /// Test: Called from `tests::test_services_route_returns_json` below.
 pub fn build_router(state: AppState) -> Router {
     build_router_with_self_origins(state, crate::routes::origin_guard::SelfOrigins::default())
@@ -392,9 +392,9 @@ fn build_router_inner(
 
     router
         // Same-origin guard for ALL destructive write routes, applied
-        // router-wide (#3268 fix). The console serves a permissive CORS
-        // policy (open reads), so without this guard any web page the
-        // operator visited could fire a cross-origin `fetch` and
+        // router-wide (#3268 fix). Without it any web page the operator
+        // visited could fire a cross-origin `fetch` (a write needs no CORS
+        // permission to land) and
         // spawn/stop/decommission sessions, or — since this is a plain
         // `.layer()`, not `route_layer` — reach destructive daemon endpoints
         // through the reverse-proxy routes above (`/api/{service}/{*path}`,
@@ -402,15 +402,17 @@ fn build_router_inner(
         // placed earlier in the chain would miss entirely (the #3268 root
         // cause). The middleware is method-aware — it only blocks
         // state-changing methods whose `Origin` header is present and
-        // neither loopback nor a trusted self-origin, so GET reads (and the
-        // read-only daemon proxy traffic) pass through untouched.
+        // neither loopback nor a trusted self-origin, so GET reads pass it.
+        // #9792: reads are guarded per listener instead — the loopback and
+        // tailnet listeners each admit only their own Host/Origin, every
+        // method (`tailnet_peer::guard_loopback`, `guard_tailnet_peer`).
         .layer(axum::middleware::from_fn_with_state(
             self_origins,
             crate::routes::origin_guard::guard_write_origin,
         ))
-        .layer(CorsLayer::permissive())
-        // #9066 A6: merged after the permissive CORS layer and the write-origin
-        // guard, so neither applies to `/api/secrets/*`; the bridge has its own.
+        // #9792: no CORS layer — the permissive one let any page read.
+        // #9066 A6: merged after the write-origin guard, so it does not apply
+        // to `/api/secrets/*`; the bridge has its own.
         .merge(secrets_routes(secrets))
         .layer(TraceLayer::new_for_http())
 }

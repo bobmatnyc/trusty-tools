@@ -4,9 +4,10 @@
 //! #9035 it served every route, writes included, to any tailnet node the ACLs
 //! let reach the port. The origin guard does not help there: it only inspects an
 //! `Origin` header when one is present, so `curl` from a foreign node passed.
-//! A peer gate alone is not enough either: CORS is permissive, so a foreign
-//! page in the owner's own browser on another of the owner's devices could read
-//! `GET` responses, and DNS rebinding reaches the same place.
+//! A peer gate alone is not enough either: the write guard lets safe methods
+//! through, so a foreign page in the owner's own browser on another of the
+//! owner's devices could read `GET` responses, and DNS rebinding reaches the
+//! same place.
 //! What: [`TailnetPeerGate`] decides, per peer address, whether the node behind
 //! it belongs to this machine's own Tailscale login and is untagged. Anything
 //! else — a foreign login, a tagged node, or an identity that cannot be
@@ -16,11 +17,14 @@
 //! ([`self_origin::check_target`]). [`serve_listeners`] is the one place the
 //! console's listeners are bound and served; it gates every listener whose
 //! address is not loopback, whatever bind mode produced it (#7524), so neither
-//! check can be left off. Loopback listeners are served ungated.
+//! check can be left off. Loopback listeners skip the peer gate but get their
+//! own Host/Origin check ([`guard_loopback`], #9792).
 //! Lookups are bounded by a timeout and cached per peer address, single-flight,
 //! so a request burst runs one `tailscale whois`, not one per request.
 //! Test: `tailnet_peer/tests.rs`.
 
+mod loopback_origin;
+mod own_name;
 mod self_origin;
 mod whois;
 
@@ -41,6 +45,8 @@ use tokio::sync::OnceCell;
 // #9035: tokio's clock, so a paused test clock can expire cache entries.
 use tokio::time::Instant;
 
+pub use loopback_origin::guard_loopback;
+pub use own_name::{OwnMagicDns, spawn_magic_dns_lookup};
 pub use self_origin::{SelfAuthorities, check_target};
 pub use whois::{PeerIdentity, PeerResolver, TailscaleCliResolver, WhoisError};
 
@@ -227,7 +233,7 @@ pub struct TailnetGuard {
 /// allow, or whose `Host`/`Origin` is not this listener's own.
 ///
 /// Why: layered outermost on the tailnet listener's router, so it runs before
-/// routing, CORS and the origin guard — every route, every method, the fallback
+/// routing and the origin guard — every route, every method, the fallback
 /// included.
 /// What: reads the peer address from `ConnectInfo` (missing → refuse, with no
 /// lookup), asks [`TailnetPeerGate::authorize`], then runs [`check_target`]
@@ -335,19 +341,22 @@ impl ConsoleListeners {
 /// `TRUSTY_CONSOLE_BIND`) served every route to any peer. The resolver is a
 /// parameter so the tests need no tailnet.
 /// What: binds each address in order (a bind failure aborts). A loopback
-/// listener is served by `axum::serve`, ungated, with the client's pid read
-/// at accept for the secrets bridge (#9066, Unix only); any other goes
+/// listener is served by `axum::serve` behind [`guard_loopback`] (its own
+/// `ip:port`, `localhost:port`, and `magic_dns` once known; #9792), with the
+/// client's pid read at accept for the secrets bridge (#9066, Unix only); any other goes
 /// through [`serve_tailnet`] with a [`TailnetPeerGate`] for its bound IP. A
 /// wildcard bind has no host identity, so its gate refuses every request
 /// ([`TailnetPeerGate::authorize`]). The first listener is the primary, whose
 /// task [`ConsoleListeners::wait_primary`] awaits; the rest log their exit.
 /// Test: `explicit_non_loopback_listener_is_gated_7524`,
 /// `listener_gating_follows_the_ip_not_the_position_7524`,
-/// `a_loopback_request_is_judged_from_the_pid_found_at_accept`.
+/// `a_loopback_request_is_judged_from_the_pid_found_at_accept`,
+/// `foreign_host_is_refused_9792`.
 pub async fn serve_listeners<S, F>(
     addrs: &[SocketAddr],
     router: &Router,
     resolver: Arc<dyn PeerResolver>,
+    magic_dns: &OwnMagicDns,
     shutdown: S,
 ) -> anyhow::Result<ConsoleListeners>
 where
@@ -361,7 +370,9 @@ where
         let local = listener.local_addr().context("get local addr")?;
         // #7524: select the gate by the bound IP, never by list position.
         let serve: BoxFuture<'static, std::io::Result<()>> = if local.ip().is_loopback() {
-            let (app, stop) = (router.clone(), shutdown());
+            // #9792: reads and writes alike must name this listener.
+            let app = guard_loopback(router.clone(), local, magic_dns.clone());
+            let stop = shutdown();
             Box::pin(async move {
                 // #9066 A9, F1: the pid lookup starts at accept, off the loop.
                 #[cfg(unix)]
@@ -402,5 +413,7 @@ where
     Ok(ConsoleListeners { bound, primary })
 }
 
+#[cfg(test)]
+mod loopback_tests;
 #[cfg(test)]
 mod tests;

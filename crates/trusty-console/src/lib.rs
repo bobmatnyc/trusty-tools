@@ -330,8 +330,9 @@ pub fn run_port(args: PortArgs) -> Result<()> {
 /// the discovery file, starts the background health-poll task, optionally opens
 /// a browser, then serves until SIGTERM/SIGINT with graceful shutdown.
 /// Every address is served by `tailnet_peer::serve_listeners`, which gates
-/// each non-loopback listener behind the tailnet peer gate (#7524); all run
-/// until the shared shutdown signal fires.
+/// each non-loopback listener behind the tailnet peer gate (#7524) and each
+/// loopback listener behind its own Host/Origin check (#9792); all run until
+/// the shared shutdown signal fires.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests);
 /// the listener wiring is `explicit_non_loopback_listener_is_gated_7524`.
@@ -603,10 +604,20 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // ── bind and serve every listener ───────────────────────────────────────
     // #7524: the gate is chosen per listener by IP, so an Explicit non-loopback
     // primary (`--http 0.0.0.0:7788`) is gated too; loopback is not.
+    // #9792: `tailscale serve` fronts the loopback listener at this node's
+    // MagicDNS name; learn it in the background. Until then, or if it is never
+    // found, loopback listeners answer to their own `ip:port` and `localhost`.
+    let magic_dns = tailnet_peer::OwnMagicDns::default();
+    tailnet_peer::spawn_magic_dns_lookup(
+        magic_dns.clone(),
+        bind::detect_tailscale_ipv4,
+        Arc::new(tailnet_peer::TailscaleCliResolver),
+    );
     let listeners = tailnet_peer::serve_listeners(
         &addrs,
         &router,
         Arc::new(tailnet_peer::TailscaleCliResolver),
+        &magic_dns,
         shutdown_signal,
     )
     .await?;
