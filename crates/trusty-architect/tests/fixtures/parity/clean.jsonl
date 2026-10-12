@@ -1,0 +1,8 @@
+["export API_KEY=abc123 then run", "export API_KEY=<redacted> then run", "6f597c29b2b7"]
+["  many   spaces\tand\nnewlines  ", "many spaces and newlines", "38ed76f4d9c4"]
+["password: hunter2 and PASSWD=x and Auth-Token = y", "password=<redacted> and PASSWD=<redacted> and Auth-Token=<redacted>", "a6d504fd07a3"]
+["sha 0123456789abcdef0123456789abcdef0123456789abcdef done; nodigitsxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "sha <redacted> done; nodigitsxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "a6027a8f9e47"]
+["secret_value=abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "secret_value=<redacted>", "c8bcf2d9170c"]
+["Résumé — ✻ ⏳ 📅 naïve SECRET:é", "Résumé — ✻ ⏳ 📅 naïve SECRET=<redacted>", "5150125e5229"]
+["tokenless key", "tokenless key", "7a6168bfb941"]
+["monkey=banana keyboard:qwerty", "monkey=<redacted> keyboard=<redacted>", "78d4a703bd08"]

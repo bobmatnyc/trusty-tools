@@ -1,0 +1,37 @@
+     170x37
+
+[38;5;114m⏺[39m [1mBash[0m(sed -n 190,216p scripts/fleet-poll.py; grep -n 'def classify' -A30 scripts/input-state.py | head -45)
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m [39m    m = re.search(pattern, text)
+         return int(m.group(1)) if m else None
+     [2m…[0m [2m+55[0m [2mlines[0m [2m(ctrl+o[0m [2mto[0m [2mexpand)[0m
+
+  [38;5;246mSearched for [1m1[0m[38;5;246m pattern (ctrl+o to expand)[39m
+
+[38;5;231m⏺[39m I'm finding out why the poller can't see my input box. I've scheduled a capture of my own pane for after this turn ends, when the pane is idle.
+
+[38;5;114m⏺[39m [1mBash[0m(sleep 40; S=/tmp/architect/scratchpad; tmux capture-pane -p -…)
+[38;5;246m  ⎿  Running in the background (↓ to manage)[39m
+
+[38;5;231m⏺[39m The engineer's second change fixes a mislabeled log message, but it does not fix the missed wakes. The poller has 239 alerts queued for me and hasn't delivered one
+  since 19:15Z yesterday.
+
+  - [1mWhat's broken.[0m The poller only wakes me when it can see my input box. It hasn't found the box since 19:15Z, even while my session sat idle. The engineer was wrong
+    that the old code was fine: the queue of pending alerts was working, but the wake itself was never delivered.
+  - [1mNext step.[0m In about 40 seconds I capture my own pane while it's idle and run the poller's box detection against it. That will show why the box isn't recognized. Then
+    the engineer fixes the detection.
+  - [1mPoller restart.[0m It waits until the detection fix is verified. That restart puts all three changes live together: the context alert, the corrected log message and the
+    detection fix.
+
+  [1mOpen[0m [1mquestions:[0m 0 for you. I'm waiting on dogfood for [94m]8;id=18bdx7r;https://github.com/example/project/issues/8729\#8729[39m]8;;\ (the memory loss) and #8261 round 7, and on the idle-pane capture.
+
+[38;5;246m✻[39m [38;5;246mChurned for 18m 9s · done 11:21 PM[39m [38;5;246m· 1[39m [38;5;246mshell, 2[39m [38;5;246mmonitors still running[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 9-26/2026 ─
+[39m❯ [2mStatus of trusty?[0m
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m]8;id=vlw6z3;http://127.0.0.1:7788\TM 1.7.8 ●]8;;\ | example/architect ⎇ tm-architect | @user⚠ | ✻account | Opus 5.5 | ⤵ 969k→96k (90%) | $193.80 | ⏳3% 📅1% | 💸—[39m
+  [38;5;211m⏵⏵ bypass permissions on[38;5;246m · [38;5;44m1 shell, 2 monitors[38;5;246m · ← 9 agents[39m
+                                                                                                                                  [38;5;114m✔ Update installed · Restart to update[39m
+                                                                                                                                                                     [38;5;114m]8;id=ozkwg5;https://claude.ai/code/session_000000000000000000000000?from=cli\/rc[39m]8;;\
+
+

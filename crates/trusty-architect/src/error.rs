@@ -49,3 +49,21 @@ pub enum SendError {
     #[error(transparent)]
     Tmux(#[from] TmuxError),
 }
+
+/// Why [`crate::self_ctx::self_ctx_tokens`] could not measure a transcript.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SelfCtxError {
+    /// The chosen transcript could not be read.
+    #[error("read transcript {}: {source}", path.display())]
+    Io {
+        /// The transcript path.
+        path: std::path::PathBuf,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A usage field (or `usage` itself) is not what the sum needs.
+    #[error("transcript usage field {0:?} is not an integer")]
+    BadUsage(String),
+}
