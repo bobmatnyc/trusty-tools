@@ -137,7 +137,8 @@ pub(crate) fn trusty_memory_kuzu_text(command: &str) -> Option<String> {
 /// What: a slot is a [`TEXT_PAYLOAD_FLAGS`] or [`SHORT_SLOT_FLAGS`] spelling
 /// that starts a word, then `=`, blanks or nothing, then a quoted string
 /// ([`closing_quote`]). An unquoted value is not a slot.
-fn without_text_slots(command: &str) -> String {
+// #9791: shared with the `file -f`/`-m` text rule.
+pub(crate) fn without_text_slots(command: &str) -> String {
     let mut out = String::with_capacity(command.len());
     let mut copied = 0;
     while let Some((open, close)) = next_text_slot(command, copied) {
