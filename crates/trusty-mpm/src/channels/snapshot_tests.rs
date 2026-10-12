@@ -768,8 +768,12 @@ fn settle<S: PolicySource + 'static, C: Clock + Send + Sync + 'static>(
     wait_idle(snap);
 }
 
+/// The longest [`wait_idle`] waits. Wider than [`HANG_GUARD`]: a real-git
+/// load runs several git steps, each bounded at 10 s, on a slow host.
+const IDLE_GUARD: Duration = Duration::from_secs(120);
+
 /// Wait until no refresh is in flight; a poisoned lock returns at once.
-/// Panics after [`HANG_GUARD`], so a wedged in-flight flag fails the test
+/// Panics after [`IDLE_GUARD`], so a wedged in-flight flag fails the test
 /// instead of hanging the suite.
 fn wait_idle<S, C>(snap: &PolicySnapshot<S, C>) {
     let Ok(published) = snap.inner.published.lock() else {
@@ -778,7 +782,7 @@ fn wait_idle<S, C>(snap: &PolicySnapshot<S, C>) {
     let waited = snap
         .inner
         .idle
-        .wait_timeout_while(published, HANG_GUARD, |p| p.in_flight);
+        .wait_timeout_while(published, IDLE_GUARD, |p| p.in_flight);
     if let Ok((published, wait)) = waited {
         drop(published);
         assert!(
