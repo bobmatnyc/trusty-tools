@@ -674,7 +674,10 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
     for id in &before {
         assert!(after.contains(id), "drawer {id} did not survive the import");
     }
-    assert!(after.contains(&a), "the L1-only legacy drawer must reach kg.redb");
+    assert!(
+        after.contains(&a),
+        "the L1-only legacy drawer must reach kg.redb"
+    );
 }
 
 /// Why (#8434): a `Writer` open renames an unreadable `kg.redb` or vector

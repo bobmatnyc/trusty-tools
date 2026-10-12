@@ -227,7 +227,12 @@ async fn l1_serves_the_live_row_not_its_cached_copy() {
 
 fn edit_row(handle: &PalaceHandle, id: Uuid, edit: impl FnOnce(&mut Drawer)) {
     let mut drawers = handle.drawers.write();
-    edit(drawers.iter_mut().find(|d| d.id == id).expect("row present"));
+    edit(
+        drawers
+            .iter_mut()
+            .find(|d| d.id == id)
+            .expect("row present"),
+    );
 }
 
 /// #9719: a wing scope bounds L1; a room scope and no scope do not.
@@ -259,7 +264,10 @@ fn a_wing_scoped_recall_drops_another_wings_l1_drawer() {
     };
     let wing = ids(&RecallScope::Wing(engineer));
     assert!(wing.contains(&eng_id), "the wing's own drawer is served");
-    assert!(!wing.contains(&pm_id), "#9719: another wing's L1 drawer leaked");
+    assert!(
+        !wing.contains(&pm_id),
+        "#9719: another wing's L1 drawer leaked"
+    );
     for scope in [RecallScope::All, RecallScope::Room(RoomType::Planning)] {
         let all = ids(&scope);
         assert!(all.contains(&eng_id) && all.contains(&pm_id), "{scope:?}");
