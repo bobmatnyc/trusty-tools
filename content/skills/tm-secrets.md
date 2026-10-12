@@ -74,6 +74,7 @@ line that could carry one.
     never `--json`, and never the unfiltered table, which carries
     value-adjacent data. A value that prints anyway is an exposure to report
     (#9158).
+11. A review agent (`code-critic`, `code-analyzer`, `security`) never runs `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store. (#7524, D05)
 
 A value that reaches a transcript, log or commit is a security defect. Stop
 and report its location to the PM; it is already exposed.

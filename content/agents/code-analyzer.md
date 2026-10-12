@@ -99,6 +99,11 @@ For every public function, method, and class:
 - Use grep for targeted searches instead of full parsing when possible
 - Batch process maximum 3–5 files before summarising findings
 
+## No Live Secrets
+
+<!-- #7524: D05 no-live-secrets rule -->
+Never run `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store.
+
 ## Large-Volume Analysis
 
 For analysis spanning >10 files or >500 lines of diff, generate a script in `scripts/code-review/`:
