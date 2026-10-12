@@ -327,6 +327,40 @@ async fn palace_backup_refuses_a_dest_in_the_registry_dir() {
     }
 }
 
+/// Why (#9282, delta critic BLOCKER): in the flat layout a backup under
+/// `<data root>/palaces` creates that directory, and the next start takes it
+/// as the palace registry, so every real palace vanishes from the daemon.
+/// What: `dest` = `<root>/palaces/bk` and `<root>/palaces/sub/bk`. Each call
+/// is refused with the registry-switch error, and the tree under the data
+/// root is unchanged: no `palaces/`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_backup_refuses_a_flat_layout_dest_under_palaces() {
+    let fx = Fixture::new();
+    fx.palace("bk-switch");
+    let root = fx.tmp.path().to_path_buf();
+    let before = tree(&root);
+    for dest in [
+        root.join("palaces").join("bk"),
+        root.join("palaces").join("sub").join("bk"),
+    ] {
+        let res = raw(
+            &fx.state,
+            "palace_backup",
+            json!({"palace": "bk-switch", "dest": dest}),
+        )
+        .await;
+        let err = res.expect_err("a dest under <root>/palaces must be refused");
+        assert!(
+            err.contains("switch its palace registry"),
+            "{}: {err}",
+            dest.display()
+        );
+        assert_eq!(tree(&root), before, "{} wrote something", dest.display());
+    }
+    assert!(!root.join("palaces").exists(), "palaces/ was created");
+}
+
 // --------------------------------------------------------------------- CLI
 
 fn bin() -> PathBuf {

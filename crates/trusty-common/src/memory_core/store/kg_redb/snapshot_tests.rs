@@ -550,3 +550,116 @@ fn a_destination_in_the_registry_is_refused_and_writes_nothing() {
         assert_eq!(tree(&fx.root), before, "{} wrote something", dest.display());
     }
 }
+
+/// A small flat-layout palace: `<root>/flat-p`, so the registry is `<root>`
+/// itself and no `<root>/palaces` exists. Returns the canonical root.
+#[cfg(unix)]
+fn flat_palace() -> (TempDir, PathBuf, Arc<PalaceHandle>) {
+    seed_shared_embedder_with_mock();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().canonicalize().expect("canonical root");
+    let palace = Palace {
+        id: PalaceId::new("flat-p"),
+        name: "flat-p".into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: root.join("flat-p"),
+    };
+    PalaceStore::save_palace(&palace).expect("palace.json");
+    let handle = PalaceHandle::open(&palace).expect("open palace");
+    (tmp, root, handle)
+}
+
+/// Fail-open check (#9282, delta critic BLOCKER): in the flat layout a
+/// destination anywhere under `<root>/palaces` is refused before any write.
+/// Creating `palaces/` there makes the next start take it as the registry
+/// (`palace_registry_dir_from`), and every real palace vanishes.
+/// What: `palaces/bk`, `palaces/sub/bk`, a symlink to the not-yet-existing
+/// `palaces`, and `Palaces/bk` (the same directory on a case-insensitive
+/// filesystem). Each is refused, and the tree is unchanged: no `palaces/`.
+#[cfg(unix)]
+#[test]
+fn a_flat_layout_dest_under_palaces_is_refused_and_creates_nothing() {
+    let (_tmp, root, handle) = flat_palace();
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let link = elsewhere.path().join("palaces-link");
+    std::os::unix::fs::symlink(root.join("palaces"), &link).expect("symlink");
+    let before = tree(&root);
+    for dest in [
+        root.join("palaces").join("bk"),
+        root.join("palaces").join("sub").join("bk"),
+        link.join("bk-via-link"),
+        root.join("Palaces").join("bk"),
+    ] {
+        let err = snapshot_palace(&handle, None, Some(&dest), no_fault)
+            .expect_err("a destination under <root>/palaces must be refused");
+        assert!(
+            err.to_string().contains("switch its palace registry"),
+            "{}: {err}",
+            dest.display()
+        );
+        assert_eq!(tree(&root), before, "{} wrote something", dest.display());
+    }
+    assert!(!root.join("palaces").exists() && !root.join("Palaces").exists());
+}
+
+/// Restores a directory's mode on drop, so the tempdir can be removed.
+#[cfg(unix)]
+struct ModeGuard(PathBuf, u32);
+
+#[cfg(unix)]
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
+}
+
+/// Fail-closed check (#9282, delta critic MEDIUM): a destination whose
+/// prefix cannot be resolved is an `Io { op: "resolve" }` error, never a
+/// pass. `resolve_existing_prefix` returns any error other than not-found.
+/// What: `dest` = `<locked>/bk` with `<locked>` at mode 000, so
+/// canonicalising `<locked>/bk` fails with EACCES. Skipped as root, which
+/// ignores the mode.
+#[cfg(unix)]
+#[test]
+fn an_unresolvable_dest_prefix_is_an_error_and_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root ignores mode 000");
+        return;
+    }
+    let (_tmp, root, handle) = flat_palace();
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let locked = elsewhere.path().join("locked");
+    std::fs::create_dir(&locked).expect("locked dir");
+    let before = tree(&root);
+    let err = {
+        let _restore = ModeGuard(locked.clone(), 0o755);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        snapshot_palace(&handle, None, Some(&locked.join("bk")), no_fault)
+            .expect_err("an unresolvable destination must be refused")
+    };
+    assert!(
+        matches!(&err, SnapshotError::Io { op: "resolve", .. }),
+        "{err}"
+    );
+    assert_eq!(tree(&root), before);
+    assert!(listing(&locked).is_empty(), "nothing under the locked dir");
+}
+
+/// Fail-closed check (#9282): a palace directory with no parent has no
+/// registry to compare against; the guard errors instead of passing.
+#[cfg(unix)]
+#[test]
+fn a_palace_dir_without_a_parent_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let err = super::check_snapshot_dest(Path::new("/"), &tmp.path().join("bk"))
+        .expect_err("a palace dir with no parent must be refused");
+    assert!(
+        matches!(&err, SnapshotError::Io { op: "resolve", .. }),
+        "{err}"
+    );
+}
