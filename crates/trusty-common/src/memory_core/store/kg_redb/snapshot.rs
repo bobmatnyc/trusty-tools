@@ -5,8 +5,9 @@
 //! compaction's rename, so the copy can be torn. The trusty-memory 1.0 gate
 //! needs a backup taken from a live daemon that reopens cleanly.
 //! What: [`snapshot_palace`] (called through `PalaceHandle::snapshot`) copies
-//! the ADR-0067 D2 primary files into
-//! `<data root>/backups/manual/<palace>/<UTC>/`. `kg.redb` and
+//! the ADR-0067 D2 primary files into a named directory under
+//! `<backup data root>/backups/manual/` (default `<palace>/<UTC>/`;
+//! `snapshot_dest.rs` owns where a backup may go). `kg.redb` and
 //! `chat_sessions.redb` are each copied row by row from ONE redb read
 //! transaction (MVCC, so writers are never paused). The append-only journals
 //! are copied up to their last complete line. Derived files — the vector
@@ -28,7 +29,6 @@ use crate::memory_core::maintenance_log::{
 };
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::chat_sessions::{CHAT_ASSETS_TABLE, ChatSessionStore};
-use crate::memory_core::store::format_backup::backup_data_root;
 use crate::memory_core::store::kg_store::SESSIONS;
 use crate::memory_core::store::palace_format::{KgMarker, read_marker};
 use chrono::{DateTime, Utc};
@@ -38,10 +38,14 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[path = "snapshot_dest.rs"]
+mod dest;
 #[path = "snapshot_io.rs"]
 mod io_util;
 #[path = "snapshot_restore.rs"]
 mod restore;
+pub use dest::check_backup_name;
+use dest::{manual_backup_root, prepare_dest};
 use io_util::{
     StagingDir, copy_verified, hash_file, io_err, redb_err, sibling, sync_file, write_verified,
 };
@@ -82,6 +86,18 @@ pub enum SnapshotError {
     /// The snapshot directory already exists.
     #[error("snapshot destination {path} already exists")]
     DestinationExists { path: PathBuf },
+    /// The backup name is not a relative path of plain segments (#9282).
+    #[error(
+        "backup name {name:?} is refused: {reason}; a backup name is a relative path of plain segments under the palace's backup root. No backup was written"
+    )]
+    InvalidBackupName { name: PathBuf, reason: String },
+    /// A segment of the backup name below the backup root is a symlink or not
+    /// a directory, or a created directory resolved outside the root (#9282).
+    #[error("backup destination component {path} is unsafe: {reason}. No backup was written")]
+    UnsafeBackupComponent { path: PathBuf, reason: String },
+    /// A fixed segment of the backup root is a symlink or not a directory (#9282).
+    #[error("backup root component {path} is unsafe: {reason}. No backup was written")]
+    BackupRootUnsafe { path: PathBuf, reason: String },
     /// A filesystem call failed.
     #[error("{op} {path}: {source}")]
     Io {
@@ -203,6 +219,8 @@ pub(crate) enum SnapshotStep {
     Verify,
     /// Before the manifest is written.
     WriteManifest,
+    /// Before a missing parent segment of the backup name is created (#9282).
+    CreateDest,
 }
 
 /// Test seam; production passes [`no_fault`].
@@ -224,8 +242,10 @@ impl PalaceHandle {
     /// transaction (writers are not paused), the metadata files, the journals
     /// up to their last complete line, and this palace's `drawer_counts.jsonl`
     /// lines, then writes a checksummed manifest. `chat_sessions` lends the
-    /// process's open chat store for this palace, if any; `dest` overrides the
-    /// default `<data root>/backups/manual/<palace>/<UTC>/` and must not exist.
+    /// process's open chat store for this palace, if any. `dest` is a name
+    /// relative to the backup root `<backup data root>/backups/manual/`
+    /// (default `<palace>/<UTC>`); see [`check_backup_name`]. It must not
+    /// exist.
     /// Blocking: run it on `spawn_blocking` from async code.
     /// Test: `snapshot_under_a_concurrent_writer_matches_its_manifest`,
     /// `a_kg_copy_failure_leaves_no_snapshot`.
@@ -244,9 +264,10 @@ impl PalaceHandle {
 /// What: `chat_sessions` is the process's open chat store for this palace,
 /// when it has one; redb allows one handle per file per process, so the
 /// caller that holds it must lend it. Without it the file is opened
-/// read-only, which fails closed while another process holds it. `dest`
-/// overrides the default directory and must not exist. Blocking I/O: call
-/// from `spawn_blocking` in async code.
+/// read-only, which fails closed while another process holds it. `dest` is
+/// a name under the backup root (default `<palace>/<UTC>`); it is checked,
+/// and its parents verified or created, before any other write (#9282).
+/// Blocking I/O: call from `spawn_blocking` in async code.
 /// Test: `snapshot_under_a_concurrent_writer_matches_its_manifest`,
 /// `a_kg_copy_failure_leaves_no_snapshot`.
 pub(crate) fn snapshot_palace(
@@ -266,13 +287,15 @@ pub(crate) fn snapshot_palace(
         return Err(SnapshotError::ReadOnlyHandle { palace });
     }
     let taken_at = Utc::now();
-    let final_dir = match dest {
+    let name = match dest {
         Some(d) => d.to_path_buf(),
-        None => default_snapshot_dir(&palace_dir, &palace, taken_at),
+        None => default_snapshot_name(&palace, taken_at),
     };
-    if final_dir.try_exists().map_err(io_err("stat", &final_dir))? {
-        return Err(SnapshotError::DestinationExists { path: final_dir });
-    }
+    // #9282 (option C): a plain name under `backups/manual`, checked before
+    // any write; the root and every parent are real directories.
+    check_backup_name(&name)?;
+    let root = manual_backup_root(&palace_dir)?;
+    let final_dir = prepare_dest(&root, &name, hook)?;
     let tmp = StagingDir::create(sibling(&final_dir, TMP_SUFFIX))?;
 
     let store = handle.kg.store();
@@ -325,13 +348,9 @@ pub(crate) fn snapshot_palace(
     })
 }
 
-/// `<data root>/backups/manual/<palace>/<UTC>`, beside the migration backups.
-fn default_snapshot_dir(palace_dir: &Path, palace: &str, at: DateTime<Utc>) -> PathBuf {
-    backup_data_root(palace_dir)
-        .join("backups")
-        .join("manual")
-        .join(palace)
-        .join(at.format("%Y%m%dT%H%M%S%.3fZ").to_string())
+/// `<palace>/<UTC>`, the default backup name under the backup root.
+fn default_snapshot_name(palace: &str, at: DateTime<Utc>) -> PathBuf {
+    Path::new(palace).join(at.format("%Y%m%dT%H%M%S%.3fZ").to_string())
 }
 
 /// Copy `kg.redb` from one read transaction; return its counts and format.
@@ -559,6 +578,9 @@ fn write_manifest(dir: &Path, manifest: &SnapshotManifest, hook: SnapshotHook) -
     std::fs::rename(&tmp, &path).map_err(io_err("rename", &path))
 }
 
+#[cfg(test)]
+#[path = "snapshot_dest_tests.rs"]
+mod dest_tests;
 #[cfg(test)]
 #[path = "snapshot_tests.rs"]
 mod tests;

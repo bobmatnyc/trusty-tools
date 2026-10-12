@@ -276,6 +276,23 @@ review:
   typed error after 1.0.0 is itself a break. Today 49 `memory_core` files
   import `anyhow::Result`, so E10 ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
   first narrows what `engine` re-exports and converts only what remains.
+- **`palace_backup` `dest` and `palace backup --dest` (#9282).** Decided
+  (Bob, 2026-10-12, ruling D5c): `dest` names a directory relative to the
+  palace's backup root, `<backup data root>/backups/manual/` (ADR-0067 D3
+  rule 3). Each segment is a plain name; an absolute path, `..`, `.`, an
+  empty segment, and a symlinked segment or root component are refused
+  and no backup is written. This meaning is frozen with the param in 1.x. Accepting
+  more input later is additive; refusing more is a break under D6. A refused
+  `--dest` exits `1`, a runtime refusal; D1.2's exit codes are unchanged.
+  Accepted residual risk (Architect ruling D, 2026-10-12): segments are
+  checked with `lstat` and created with `mkdir`, which never follow a symlink
+  at the last component, and the created parent's canonical path is then
+  re-checked against the canonical root. A same-user writer that swaps a
+  segment for a symlink between the walk and the re-check can make at most
+  one empty directory outside the root, and the re-check then refuses the
+  backup. A swap after the re-check and before the final rename commits can
+  redirect the backup. The writes are path-based, so an fd-based (`mkdirat`/`O_NOFOLLOW`)
+  walk would not close it; a bind mount is out of scope.
 
 ## Consequences
 

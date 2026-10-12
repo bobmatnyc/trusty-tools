@@ -31,6 +31,8 @@
 //! - `wing_create(palace, label)`                   -> wing_id (idempotent)
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
+// #9282: the `palace_backup` schema and its handler.
+pub mod backup_definitions;
 #[cfg(feature = "server")]
 pub mod bm25;
 // #7493: the serialized-response byte ceiling every result-returning tool
@@ -56,6 +58,8 @@ pub mod kg_ops;
 #[cfg(feature = "server")]
 pub mod memory_ops;
 // #6318: the no-palace fallback every palace-scoped READ tool shares.
+#[cfg(feature = "server")]
+pub mod palace_backup;
 #[cfg(feature = "server")]
 pub mod palace_index;
 #[cfg(feature = "server")]
@@ -251,6 +255,8 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
         "palace_update" => handle_palace_update(state, args).await,
         // #9544: move a palace to a new id; the old id keeps answering.
         "palace_rename" => handle_palace_rename(state, args).await,
+        // #9282: a consistent backup of a live palace.
+        "palace_backup" => palace_backup::handle_palace_backup(state, args).await,
         "kg_assert" => handle_kg_assert(state, args).await,
         // The inverse of `kg_assert`: closes one (subject, predicate, object)
         // and leaves the pair's other objects live.
