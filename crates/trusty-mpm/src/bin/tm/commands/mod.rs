@@ -195,6 +195,8 @@ pub(crate) mod pm_guard_routing;
 // every caller — the sibling `pm_guard_bash::secret_file_copy` screens only a
 // `cp`/`mv` of one, so nothing stopped `sed -n '38,46p' terraform.tfvars`.
 pub(crate) mod pm_guard_secret_read;
+// #9791: `file -f`/`-m` echoes each line of a secret-bearing file.
+pub(crate) mod pm_guard_secret_file_list;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
