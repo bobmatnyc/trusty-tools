@@ -2447,6 +2447,17 @@ mod tests {
         }
     }
 
+    /// 🔴 REGRESSION (#9791): `file -f`/`-m` echoes each line of its operand,
+    /// so the `file` grant above does not cover them. Rows in
+    /// `pm_guard_secret_file_list_tests.rs`.
+    #[test]
+    fn denies_file_reading_a_secret_file_as_a_list() {
+        for command in ["file -f .env", "file --files-from .env", "file -m .env"] {
+            let reason = eval(command).unwrap_or_default();
+            assert!(reason.contains("#9791"), "`{command}` must deny: {reason}");
+        }
+    }
+
     #[test]
     fn denies_a_git_subcommand_that_prints_file_bytes() {
         for command in [
