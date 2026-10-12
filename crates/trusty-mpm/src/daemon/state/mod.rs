@@ -15,9 +15,12 @@
 // #8454: the channel route-policy snapshot the daemon holds.
 #[cfg(feature = "channels")]
 mod channel_policy;
+// #8433 P2: the channel question table the daemon holds.
 mod core;
 mod overseer;
 pub(crate) mod pending_stops;
+#[cfg(feature = "channels")]
+mod question_table;
 mod resources;
 pub(crate) mod sessions;
 // #9010: whether a session's bound `claude` still runs.

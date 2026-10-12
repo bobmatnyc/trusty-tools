@@ -1,0 +1,838 @@
+//! Tests for the daemon question table (#8433 P2).
+//!
+//! Why: the table is a Fail-Open Check site. Each test goes red if an arm
+//! that must refuse (second resolve, wrong party, poisoned table, second
+//! opener, a log a correct table never writes) is changed to serve.
+//! What: real files under a hermetic temp dir; faults through the
+//! table's own test seam; the policy adapter through a real snapshot.
+//! Test: this is the test module.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
+
+use trusty_channels::policy::Channel;
+
+use super::{
+    Answer, Ask, Conversation, Fault, QuestionTable, QuestionTableError, ResolveOutcome, sha256_hex,
+};
+
+const BOB: &str = "U0ABCDEF1";
+const EVE: &str = "U0ABCDEF2";
+
+/// A temp dir and the table path inside a not-yet-created `channels/`.
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    path: PathBuf,
+}
+
+fn fixture() -> Fixture {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let path = tmp.path().join("channels").join("questions.jsonl");
+    Fixture { _tmp: tmp, path }
+}
+
+fn conv(dm: &str, ts: &str) -> Conversation {
+    Conversation {
+        dm_channel_id: dm.into(),
+        thread_ts: ts.into(),
+    }
+}
+
+fn bob_conv() -> Conversation {
+    conv("D0BOB", "1700000000.000100")
+}
+
+fn ask_of(route: &str, recipient: &str, conversation: Conversation) -> Ask {
+    Ask {
+        channel: Channel::Slack,
+        route: route.into(),
+        recipient: recipient.into(),
+        asker_managed_session: "tm-architect".into(),
+        conversation,
+        message_ts: "1700000000.000100".into(),
+    }
+}
+
+fn bob_ask() -> Ask {
+    ask_of("bob-dm", BOB, bob_conv())
+}
+
+fn open_at(path: &Path) -> QuestionTable {
+    QuestionTable::open_at(path).expect("open table")
+}
+
+/// Reserve and open one question; its id.
+fn ask(table: &QuestionTable, ask: Ask) -> u64 {
+    let id = table.reserve().expect("reserve");
+    table.open(id, ask).expect("open question");
+    id
+}
+
+/// Every decoded log line.
+fn log_lines(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .expect("read log")
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("log line is JSON"))
+        .collect()
+}
+
+/// The `resolve` lines for `id`.
+fn resolve_lines(path: &Path, id: u64) -> Vec<serde_json::Value> {
+    log_lines(path)
+        .into_iter()
+        .filter(|v| v["op"] == "resolve" && v["id"] == id)
+        .collect()
+}
+
+fn set_fault(table: &QuestionTable, fault: Option<Fault>) {
+    table.state.lock().expect("state lock").fault = fault;
+}
+
+fn append_raw(path: &Path, text: &str) {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open log");
+    f.write_all(text.as_bytes()).expect("append raw");
+}
+
+/// `rounds` questions; per round `threads` threads released together each
+/// resolve it with their own answer text.
+fn race(rounds: u64, threads: usize) {
+    let fx = fixture();
+    let table = Arc::new(open_at(&fx.path));
+    let mut winners = Vec::new();
+    for _ in 0..rounds {
+        let id = ask(&table, bob_ask());
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|n| {
+                let (table, barrier) = (Arc::clone(&table), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    let text = format!("answer {id}/{n}");
+                    barrier.wait();
+                    (text.clone(), table.resolve(id, BOB, &bob_conv(), &text))
+                })
+            })
+            .collect();
+        let outcomes: Vec<(String, ResolveOutcome)> = handles
+            .into_iter()
+            .map(|h| h.join().expect("resolver thread"))
+            .collect();
+        let won: Vec<&String> = outcomes
+            .iter()
+            .filter(|(_, o)| *o == ResolveOutcome::Resolved)
+            .map(|(t, _)| t)
+            .collect();
+        assert_eq!(won.len(), 1, "question {id}: {outcomes:?}");
+        let winner = sha256_hex(won[0]);
+        for (_, outcome) in outcomes
+            .iter()
+            .filter(|(_, o)| *o != ResolveOutcome::Resolved)
+        {
+            match outcome {
+                ResolveOutcome::AlreadyResolved { first } => {
+                    assert_eq!(
+                        first.text_sha256, winner,
+                        "question {id}: wrong winner named"
+                    );
+                }
+                other => panic!("question {id}: loser got {other:?}"),
+            }
+        }
+        winners.push((id, winner));
+    }
+    drop(table);
+    let reopened = open_at(&fx.path);
+    for (id, winner) in winners {
+        let lines = resolve_lines(&fx.path, id);
+        assert_eq!(lines.len(), 1, "question {id}: {lines:?}");
+        assert_eq!(
+            lines[0]["answer"]["text_sha256"],
+            winner.as_str(),
+            "question {id}"
+        );
+        assert!(reopened.state(id).expect("known").answered, "question {id}");
+    }
+}
+
+#[test]
+fn concurrent_answers_resolve_exactly_once_n_rounds() {
+    race(500, 2);
+    race(100, 8);
+}
+
+#[test]
+fn concurrent_reserve_issues_unique_ids() {
+    let fx = fixture();
+    let table = Arc::new(open_at(&fx.path));
+    let barrier = Arc::new(Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let (table, barrier) = (Arc::clone(&table), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                barrier.wait();
+                (0..100)
+                    .map(|_| table.reserve().expect("reserve"))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut ids: Vec<u64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("reserve thread"))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 800, "duplicate ids issued");
+    let reserves = log_lines(&fx.path)
+        .into_iter()
+        .filter(|v| v["op"] == "reserve")
+        .count();
+    assert_eq!(reserves, 800);
+}
+
+#[test]
+fn first_answer_wins_second_gets_already_answered_by_x_at_t() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    let line = resolve_lines(&fx.path, id).remove(0);
+    let at = line["answer"]["answered_at"]
+        .as_str()
+        .expect("time")
+        .to_owned();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let expected = Answer {
+        answerer: BOB.into(),
+        answered_at: at,
+        text_sha256: sha256_hex("yes"),
+        text_len: 3,
+    };
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "no, wait"),
+        ResolveOutcome::AlreadyResolved { first: expected }
+    );
+    assert_eq!(resolve_lines(&fx.path, id).len(), 1);
+}
+
+#[test]
+fn answerer_must_be_the_questions_recipient() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    // The question was asked of U1 on route `bob-dm`; the route's recipient
+    // later became U2, who answers in their own DM.
+    let id = ask(&table, bob_ask());
+    let before = std::fs::read(&fx.path).expect("log");
+    assert_eq!(
+        table.resolve(id, EVE, &conv("D0EVE", "1700000000.000100"), "yes"),
+        ResolveOutcome::NotRecipient
+    );
+    // The recipient's id in the recipient's conversation from anyone else.
+    assert_eq!(
+        table.resolve(id, EVE, &bob_conv(), "yes"),
+        ResolveOutcome::NotRecipient
+    );
+    assert_eq!(
+        std::fs::read(&fx.path).expect("log"),
+        before,
+        "a line was appended"
+    );
+    assert!(!table.state(id).expect("known").answered, "question closed");
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+}
+
+#[test]
+fn answer_from_other_conversation_is_refused() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    for other in [
+        conv("D0OTHER", "1700000000.000100"),
+        conv("D0BOB", "1700000099.000100"),
+    ] {
+        assert_eq!(
+            table.resolve(id, BOB, &other, "yes"),
+            ResolveOutcome::NotRecipient,
+            "{other:?}"
+        );
+    }
+    assert!(resolve_lines(&fx.path, id).is_empty());
+    assert!(!table.state(id).expect("known").answered);
+}
+
+#[test]
+fn table_survives_restart() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let reserved_only = table.reserve().expect("reserve");
+    let a = ask(&table, bob_ask());
+    let b = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(a, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    let question_b = table.get(b).expect("b");
+    drop(table);
+    let table = open_at(&fx.path);
+    assert!(table.state(a).expect("a").answered);
+    assert!(!table.state(b).expect("b").answered);
+    assert_eq!(table.get(b), Some(question_b));
+    assert_eq!(table.state(reserved_only), None);
+    assert_eq!(table.reserve().expect("reserve"), 4);
+    assert!(matches!(
+        table.resolve(a, BOB, &bob_conv(), "again"),
+        ResolveOutcome::AlreadyResolved { .. }
+    ));
+}
+
+#[test]
+fn reserved_never_opened_id_is_not_reused_after_restart() {
+    let fx = fixture();
+    let id = open_at(&fx.path).reserve().expect("reserve");
+    let table = open_at(&fx.path);
+    assert_eq!(table.reserve().expect("reserve"), id + 1);
+}
+
+#[test]
+fn id_reserved_before_send_is_never_reused() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    // The send outcome is unknown: the id stays reserved and no row exists.
+    let unknown = table.reserve().expect("reserve");
+    let next = ask(&table, bob_ask());
+    assert_ne!(next, unknown);
+    assert!(matches!(
+        table.open(next, bob_ask()),
+        Err(QuestionTableError::NotReserved(id)) if id == next
+    ));
+    drop(table);
+    let table = open_at(&fx.path);
+    let later = table.reserve().expect("reserve");
+    assert!(later > next, "{later} reused");
+}
+
+#[test]
+fn reply_to_reserved_only_id_is_unknown_and_drops() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = table.reserve().expect("reserve");
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Unknown
+    );
+    assert_eq!(table.state(id), None);
+    assert!(resolve_lines(&fx.path, id).is_empty());
+}
+
+#[test]
+fn open_refuses_unreserved_or_invalid_question() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    assert!(matches!(
+        table.open(7, bob_ask()),
+        Err(QuestionTableError::NotReserved(7))
+    ));
+    let id = table.reserve().expect("reserve");
+    let mut gchat = bob_ask();
+    gchat.channel = Channel::Gchat;
+    let mut bad_session = bob_ask();
+    bad_session.asker_managed_session = "../etc".into();
+    let mut no_thread = bob_ask();
+    no_thread.conversation.thread_ts.clear();
+    for bad in [gchat, bad_session, no_thread] {
+        assert!(
+            matches!(
+                table.open(id, bad.clone()),
+                Err(QuestionTableError::Invalid(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(table.state(id), None);
+}
+
+#[test]
+fn torn_final_line_quarantined() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let body_len = std::fs::read(&fx.path).expect("log").len();
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    // A crash mid-append: half of the resolve line, no newline.
+    let full = std::fs::read(&fx.path).expect("log");
+    let cut = body_len + (full.len() - body_len) / 2;
+    std::fs::write(&fx.path, &full[..cut]).expect("tear");
+    let table = open_at(&fx.path);
+    assert_eq!(table.quarantined_bytes(), Some(cut - body_len));
+    let torn = std::fs::read(fx.path.with_extension("jsonl.torn")).expect("torn file");
+    assert_eq!(torn, [&full[body_len..cut], b"\n"].concat());
+    assert_eq!(std::fs::read(&fx.path).expect("log"), &full[..body_len]);
+    assert!(
+        !table.state(id).expect("known").answered,
+        "fragment applied"
+    );
+    // The next append starts its own line.
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    assert_eq!(resolve_lines(&fx.path, id).len(), 1);
+}
+
+#[test]
+fn torn_open_line_leaves_the_id_reserved() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = table.reserve().expect("reserve");
+    let body_len = std::fs::read(&fx.path).expect("log").len();
+    table.open(id, bob_ask()).expect("open");
+    drop(table);
+    let full = std::fs::read(&fx.path).expect("log");
+    std::fs::write(&fx.path, &full[..body_len + 20]).expect("tear");
+    let table = open_at(&fx.path);
+    assert_eq!(table.quarantined_bytes(), Some(20));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Unknown
+    );
+    assert_eq!(table.reserve().expect("reserve"), id + 1);
+}
+
+#[test]
+fn final_line_missing_only_newline_is_kept() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    let mut full = std::fs::read(&fx.path).expect("log");
+    assert_eq!(full.pop(), Some(b'\n'));
+    std::fs::write(&fx.path, &full).expect("drop newline");
+    let table = open_at(&fx.path);
+    assert_eq!(table.quarantined_bytes(), None);
+    assert!(table.state(id).expect("known").answered, "answer lost");
+    assert!(!fx.path.with_extension("jsonl.torn").exists());
+    assert!(std::fs::read(&fx.path).expect("log").ends_with(b"\n"));
+}
+
+/// Assert opening `path` fails as `Corrupt` at `line`.
+fn assert_corrupt(path: &Path, line: usize, what: &str) {
+    match QuestionTable::open_at(path) {
+        Err(QuestionTableError::Corrupt { line: l, .. }) => assert_eq!(l, line, "{what}"),
+        other => panic!("{what}: opened: {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_middle_line_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_ask());
+    drop(table);
+    let text = std::fs::read_to_string(&fx.path).expect("log");
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.insert(1, "{\"v\":1,\"op\":\"reserve\",\"id\":");
+    std::fs::write(&fx.path, lines.join("\n") + "\n").expect("write");
+    assert_corrupt(&fx.path, 2, "malformed middle line");
+}
+
+#[test]
+fn resolve_for_unknown_id_in_log_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    let resolve = serde_json::to_string(&resolve_lines(&fx.path, id)[0]).expect("encode");
+    let pristine = std::fs::read(&fx.path).expect("log");
+    let cases = [
+        (
+            resolve.replace(&format!("\"id\":{id}"), "\"id\":99"),
+            "unknown id",
+        ),
+        (resolve.clone(), "second resolve"),
+    ];
+    for (line, what) in cases {
+        std::fs::write(&fx.path, &pristine).expect("restore");
+        append_raw(&fx.path, &format!("{line}\n"));
+        assert_corrupt(&fx.path, 4, what);
+    }
+}
+
+#[test]
+fn unknown_channel_or_gchat_row_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = table.reserve().expect("reserve");
+    drop(table);
+    let pristine = std::fs::read(&fx.path).expect("log");
+    for channel in ["gchat", "irc"] {
+        std::fs::write(&fx.path, &pristine).expect("restore");
+        let row = serde_json::json!({
+            "v": 1, "op": "open", "question": {
+                "id": id, "opened_at": "2026-10-12T00:00:00.000Z", "channel": channel,
+                "route": "bob-dm", "recipient": BOB, "asker_managed_session": "tm-architect",
+                "conversation": {"dm_channel_id": "D0BOB", "thread_ts": "1.2"},
+                "message_ts": "1.2"
+            }
+        });
+        append_raw(&fx.path, &format!("{row}\n"));
+        assert_corrupt(&fx.path, 2, channel);
+    }
+}
+
+#[test]
+fn unknown_question_id_refuses() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_ask());
+    let before = std::fs::read(&fx.path).expect("log");
+    assert_eq!(
+        table.resolve(42, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Unknown
+    );
+    assert_eq!(table.state(42), None);
+    assert_eq!(std::fs::read(&fx.path).expect("log"), before);
+}
+
+#[test]
+fn foreign_route_id_refuses() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let bobs = ask(&table, bob_ask());
+    let eves = ask(&table, ask_of("eve-dm", EVE, conv("D0EVE", "1.1")));
+    // Eve answers Bob's question from her own conversation, and the reverse.
+    assert_eq!(
+        table.resolve(bobs, EVE, &conv("D0EVE", "1.1"), "yes"),
+        ResolveOutcome::NotRecipient
+    );
+    assert_eq!(
+        table.resolve(eves, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::NotRecipient
+    );
+    assert!(!table.state(bobs).expect("bob's").answered);
+    assert!(!table.state(eves).expect("eve's").answered);
+}
+
+/// Every operation refuses on `table`.
+fn assert_refuses_everything(table: &QuestionTable, id: u64, reserved: u64, what: &str) {
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "later"),
+        ResolveOutcome::Poisoned,
+        "{what}: resolve"
+    );
+    assert!(
+        matches!(table.reserve(), Err(QuestionTableError::Poisoned)),
+        "{what}: reserve"
+    );
+    assert!(
+        matches!(
+            table.open(reserved, bob_ask()),
+            Err(QuestionTableError::Poisoned)
+        ),
+        "{what}: open"
+    );
+    assert_eq!(table.state(id), None, "{what}: state");
+    assert!(table.is_poisoned(), "{what}: is_poisoned");
+}
+
+#[test]
+fn append_error_poisons_table_until_reopen() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    set_fault(&table, Some(Fault::BeforeWrite));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Poisoned
+    );
+    set_fault(&table, None);
+    assert_refuses_everything(&table, id, reserved, "after a failed append");
+    drop(table);
+    // The reopen replays the log, which holds no answer.
+    let table = open_at(&fx.path);
+    assert!(!table.is_poisoned());
+    assert!(!table.state(id).expect("known").answered);
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+}
+
+#[test]
+fn failed_resolve_leaves_question_open_in_memory_only_if_log_agrees() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    // The line reaches the file, then `sync_data` fails.
+    set_fault(&table, Some(Fault::AfterWrite));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "first"),
+        ResolveOutcome::Poisoned
+    );
+    set_fault(&table, None);
+    assert_refuses_everything(&table, id, reserved, "after a failed sync");
+    drop(table);
+    let table = open_at(&fx.path);
+    let lines = resolve_lines(&fx.path, id);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(
+        lines[0]["answer"]["text_sha256"],
+        sha256_hex("first").as_str()
+    );
+    match table.resolve(id, BOB, &bob_conv(), "second") {
+        ResolveOutcome::AlreadyResolved { first } => {
+            assert_eq!(first.text_sha256, sha256_hex("first"));
+        }
+        other => panic!("second answer after reopen: {other:?}"),
+    }
+}
+
+#[test]
+fn second_table_on_same_path_is_refused_while_first_lives() {
+    let fx = fixture();
+    let first = open_at(&fx.path);
+    assert!(matches!(
+        QuestionTable::open_at(&fx.path),
+        Err(QuestionTableError::Locked { .. })
+    ));
+    let id = ask(&first, bob_ask());
+    assert!(matches!(
+        QuestionTable::open_at(&fx.path),
+        Err(QuestionTableError::Locked { .. })
+    ));
+    drop(first);
+    // lock_released_on_drop
+    let second = open_at(&fx.path);
+    assert!(second.state(id).is_some());
+}
+
+#[test]
+fn poisoned_mutex_refuses_every_op() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _held = table.state.lock().expect("state lock");
+        panic!("a panic inside a held section");
+    }));
+    assert!(panicked.is_err());
+    assert_refuses_everything(&table, id, reserved, "after a panic under the lock");
+    assert!(resolve_lines(&fx.path, id).is_empty());
+}
+
+#[test]
+fn file_is_0600_and_dir_0700() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_ask());
+    assert_eq!(mode(fx.path.parent().expect("dir")), 0o700, "directory");
+    assert_eq!(mode(&fx.path), 0o600, "log");
+    assert_eq!(mode(&fx.path.with_extension("jsonl.lock")), 0o600, "lock");
+    drop(table);
+    std::fs::set_permissions(&fx.path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let _table = open_at(&fx.path);
+    assert_eq!(mode(&fx.path), 0o600, "an existing wider log is narrowed");
+}
+
+#[test]
+fn home_write_fence_is_called() {
+    let root = crate::core::home_write_fence::armed_roots()
+        .first()
+        .expect("the lib test binary arms the fence")
+        .clone();
+    let dir = root.join(format!("p2-fence-{}", uuid::Uuid::new_v4()));
+    let path = dir.join("questions.jsonl");
+    let caught = std::panic::catch_unwind(|| QuestionTable::open_at(&path).map(drop));
+    let written = dir.exists();
+    if written {
+        // The fence was bypassed: undo the write before failing.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert!(
+        !written,
+        "open wrote under the fenced root {}",
+        root.display()
+    );
+    let payload = caught.expect_err("open under a fenced root did not panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("#8545"),
+        "not the fence's panic: {message}"
+    );
+}
+
+#[test]
+fn resolve_is_durable_before_it_returns() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "ship it"),
+        ResolveOutcome::Resolved
+    );
+    // A fresh reader, with the table still open, sees the answer.
+    let lines = resolve_lines(&fx.path, id);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["answer"]["answerer"], BOB);
+    assert_eq!(
+        lines[0]["answer"]["text_sha256"],
+        sha256_hex("ship it").as_str()
+    );
+    assert!(
+        !std::fs::read_to_string(&fx.path)
+            .expect("log")
+            .contains("ship it"),
+        "answer text stored"
+    );
+}
+
+/// A policy with `bob-dm` (BOB) and `eve-dm` (EVE) on Slack.
+struct TwoRoutes(PathBuf);
+
+impl crate::channels::snapshot::PolicySource for TwoRoutes {
+    fn refresh(&mut self) -> trusty_channels::policy::LoadReport {
+        use trusty_channels::policy::{ProjectInput, merge_for, parse_host, parse_project_file};
+        let home = &self.0;
+        let dir = home.join("proj");
+        let mut routes = String::from("version = 2\n");
+        for (name, who) in [("bob-dm", BOB), ("eve-dm", EVE)] {
+            routes.push_str(&format!(
+                "\n[[slack.routes]]\nname = \"{name}\"\nrecipient = \"{who}\"\nkinds = [\"question\"]\n"
+            ));
+        }
+        let host = format!(
+            "channels:\n  version: 1\n  slack:\n    enabled: true\n    connection: {{ bot_ref: slack, \
+             app_ref: slack-app }}\n    projects: [\"{}\"]\n",
+            dir.display()
+        );
+        merge_for(
+            parse_host(&host, Some(home)),
+            vec![ProjectInput {
+                file: dir.join(".trusty-channels/routes.toml"),
+                project_dir: dir,
+                parsed: parse_project_file(&routes, Some(home)),
+            }],
+            &[Channel::Slack, Channel::Telegram],
+        )
+    }
+}
+
+#[test]
+fn question_state_adapter_matches_policy() {
+    use crate::channels::snapshot::{PolicySnapshot, Refusal};
+    use trusty_channels::policy::{DropReason, MonotonicClock};
+    let fx = fixture();
+    let home = std::fs::canonicalize(fx._tmp.path()).expect("canonical home");
+    let snap = PolicySnapshot::new(TwoRoutes(home), MonotonicClock::new());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while let Err(e) = snap.current() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "policy never loaded: {e:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    let inbound = |sender: &str, id: u64| {
+        let states: Vec<_> = table.state(id).into_iter().collect();
+        snap.check_inbound(Channel::Slack, sender, &[id], &states)
+            .map(|(route, q)| (route.name().to_owned(), q))
+    };
+    assert_eq!(inbound(BOB, id), Ok(("bob-dm".to_owned(), id)));
+    assert_eq!(
+        inbound(EVE, id),
+        Err(Refusal::Policy(DropReason::NotOwnedByRoute))
+    );
+    assert_eq!(
+        inbound(BOB, reserved),
+        Err(Refusal::Policy(DropReason::NoOpenQuestion))
+    );
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    assert_eq!(
+        inbound(BOB, id),
+        Err(Refusal::Policy(DropReason::AlreadyResolved))
+    );
+}
+
+#[cfg(feature = "daemon")]
+#[tokio::test]
+async fn table_open_failure_refuses_ask_owner_and_inbound() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let state = crate::daemon::DaemonState::with_root_isolated_managed(tmp.path().into()).await;
+    let home = state.user_home().expect("pinned home");
+    let path = super::questions_path(&home);
+    let dir = path.parent().expect("channels dir");
+    std::fs::create_dir_all(dir).expect("mkdir");
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+    for attempt in 0..2 {
+        assert!(
+            matches!(state.question_table(), Err(QuestionTableError::Io { .. })),
+            "attempt {attempt}: a table opened in a read-only directory"
+        );
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    // The failed open was not cached: this call retries and succeeds.
+    let table = state.question_table().expect("retried open");
+    assert!(Arc::ptr_eq(&table, &state.question_table().expect("held")));
+}
+
+#[cfg(feature = "daemon")]
+#[tokio::test]
+async fn poisoned_table_is_reopened_by_the_holder() {
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let state = crate::daemon::DaemonState::with_root_isolated_managed(tmp.path().into()).await;
+    let table = state.question_table().expect("open");
+    let id = ask(&table, bob_ask());
+    set_fault(&table, Some(Fault::AfterWrite));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Poisoned
+    );
+    // The poisoned table still lives here, so its lock refuses the reopen.
+    assert!(matches!(
+        state.question_table(),
+        Err(QuestionTableError::Locked { .. })
+    ));
+    drop(table);
+    let reopened = state.question_table().expect("reopen");
+    assert!(!reopened.is_poisoned());
+    assert!(reopened.state(id).expect("replayed").answered);
+}

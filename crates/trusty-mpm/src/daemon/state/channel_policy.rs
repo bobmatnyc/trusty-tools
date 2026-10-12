@@ -4,7 +4,8 @@
 //! snapshot, so its 5 s refresh and 60 s max age apply daemon-wide.
 //! What: [`DaemonState::channel_policy`] builds the snapshot on first use
 //! over `config.yaml` under [`DaemonState::user_home`]. [`ChannelHold`] groups
-//! the daemon's channel state behind one `DaemonState` field.
+//! the daemon's channel state (this snapshot, the #8433 P2 question table)
+//! behind one `DaemonState` field.
 //! Test: `daemon_state_holds_snapshot_under_its_user_home`.
 
 use std::sync::OnceLock;
@@ -17,10 +18,12 @@ use super::DaemonState;
 ///
 /// Why: #8433 P2: one field for every channel hold keeps `core.rs` under the
 /// 500-SLOC cap as holds are added.
-/// What: the policy snapshot, built on first use.
+/// What: the policy snapshot, built on first use, and the question table.
 #[derive(Debug, Default)]
 pub(crate) struct ChannelHold {
     policy: OnceLock<DaemonPolicySnapshot>,
+    // #8433 P2: the question table, opened on first use.
+    pub(super) questions: super::question_table::QuestionTableHold,
 }
 
 impl DaemonState {
