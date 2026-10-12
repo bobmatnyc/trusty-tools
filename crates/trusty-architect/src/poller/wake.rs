@@ -196,15 +196,21 @@ fn pointer_text(now: f64, n: u64, logged: Option<u64>, alerts: &Path) -> String 
     }
 }
 
-/// An integer counter in `state.other`, 0 when absent.
-fn counter(state: &PollState, key: &str) -> u64 {
+/// A count in `state.other`: `absent` when the key is missing, `unreadable`
+/// when the stored value is not a non-negative integer.
+fn counter_or(state: &PollState, key: &str, unreadable: u64) -> u64 {
     match state.other.get(key) {
         None => 0,
         Some(v) => v.as_u64().unwrap_or_else(|| {
-            tracing::warn!(key, value = %v, "poll-state counter is not a count; reading 0");
-            0
+            tracing::warn!(key, value = %v, unreadable, "poll-state counter is not a count");
+            unreadable
         }),
     }
+}
+
+/// An integer counter in `state.other`, 0 when absent or unreadable.
+fn counter(state: &PollState, key: &str) -> u64 {
+    counter_or(state, key, 0)
 }
 
 /// `dispatch_wake(state, panes, new_count, dry_run, logged)`: carries
@@ -217,11 +223,13 @@ fn counter(state: &PollState, key: &str) -> u64 {
 /// `wake_logged`). Nothing pending: drops `wake_logged` and returns `none`
 /// without calling `wake`. Otherwise calls `wake(pending, logged_total)`
 /// (`logged_total` is `None` when `logged` is) and maps an error to
-/// `failed: <message>`. Only a result starting `sent` zeroes `wake_pending`
+/// `failed: <message>`. A stored `wake_pending` that is not a non-negative
+/// integer counts as 1. Only a result starting `sent` zeroes `wake_pending`
 /// and drops `wake_logged`, and outside a dry run stamps `wake_sent_at` with
 /// `clock.now_unix()`. The keys live in [`PollState::other`] until A3b-2
 /// types them.
 /// Test: `dispatch_wake_clears_only_on_sent`,
+/// `dispatch_wake_unreadable_pending_reads_as_owed`,
 /// `test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once`,
 /// `dispatch_wake_matches_python_goldens`.
 pub fn dispatch_wake<C: Clock + ?Sized>(
@@ -232,7 +240,8 @@ pub fn dispatch_wake<C: Clock + ?Sized>(
     clock: &C,
     wake: impl FnOnce(u64, Option<u64>) -> Result<String, WakeError>,
 ) -> String {
-    let pending = counter(state, "wake_pending").saturating_add(new_count);
+    // #9171 AC7: an unreadable stored count is a wake still owed, never 0.
+    let pending = counter_or(state, "wake_pending", 1).saturating_add(new_count);
     state
         .other
         .insert("wake_pending".to_owned(), Value::from(pending));
