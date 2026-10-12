@@ -663,3 +663,31 @@ fn a_palace_dir_without_a_parent_is_refused() {
         "{err}"
     );
 }
+
+/// Crash check (#9282, delta critic CRITICAL): a self-referencing dangling
+/// symlink in the destination is an error, never a stack overflow. With
+/// `evil -> missing/../evil`, canonicalising `evil` fails with ENOENT, not
+/// ELOOP, so a resolver that follows dangling links recursed forever and one
+/// `palace_backup` call aborted the daemon.
+/// What: `dest` = `<dir>/evil/bk`. The call returns an error (the process
+/// does not abort), and neither tree changes: no `bk`, no `missing`, no
+/// `palaces/`.
+#[cfg(unix)]
+#[test]
+fn a_self_referencing_dangling_symlink_dest_is_an_error_not_a_crash() {
+    let (_tmp, root, handle) = flat_palace();
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    let dir = elsewhere.path();
+    std::os::unix::fs::symlink(
+        Path::new("missing").join("..").join("evil"),
+        dir.join("evil"),
+    )
+    .expect("symlink");
+    let before_root = tree(&root);
+    let before_dir = tree(dir);
+    snapshot_palace(&handle, None, Some(&dir.join("evil").join("bk")), no_fault)
+        .expect_err("a destination through a dangling symlink must fail");
+    assert_eq!(tree(&root), before_root, "the data root changed");
+    assert_eq!(tree(dir), before_dir, "the destination dir changed");
+    assert!(!dir.join("missing").exists() && !root.join("palaces").exists());
+}
