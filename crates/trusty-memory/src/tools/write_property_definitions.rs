@@ -74,6 +74,6 @@ fn verify_property() -> Value {
 fn alias_property(name: &str) -> Value {
     json!({
         "type": "string",
-        "description": format!("#9746: alias of `{name}`. One of `text` or `content` is required; `{name}` is the documented one. Both with the same value is accepted; both with different values is an error and nothing is written.")
+        "description": format!("#9746: alias of `{name}`. One of `text` or `content` is required. `{name}` is the documented one. Both with the same value is accepted; both with different values is an error and nothing is written.")
     })
 }
