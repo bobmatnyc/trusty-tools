@@ -25,29 +25,7 @@ impl Env {
     /// self-ctx folder does not (no `self_ctx` alert).
     pub fn new(vars: &[(&str, &str)]) -> TestResult<Self> {
         let dir = tempfile::tempdir()?;
-        let root = dir.path().to_owned();
-        let base: Vec<(String, String)> = [
-            ("SUPERVISOR_INBOX_DIR", "inbox"),
-            ("SESSIONS_DIR", "sessions"),
-            ("TRANSCRIPT_BASE", "projects"),
-            ("SELF_CTX_DIR", "self"),
-        ]
-        .iter()
-        .map(|(k, sub)| {
-            (
-                (*k).to_owned(),
-                root.join(sub).to_string_lossy().into_owned(),
-            )
-        })
-        .chain(vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
-        .collect();
-        let get = move |k: &str| {
-            base.iter()
-                .rev()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.clone())
-        };
-        let config = Config::from_env(&root, &root, &get)?;
+        let config = config_at(dir.path(), vars)?;
         fs::create_dir_all(&config.inbox)?;
         fs::write(config.events(), "")?;
         Ok(Self { dir, config })
@@ -56,7 +34,35 @@ impl Env {
     pub fn root(&self) -> &Path {
         self.dir.path()
     }
+}
 
+/// The config for an Architect root at `root`, every path under it.
+pub fn config_at(root: &Path, vars: &[(&str, &str)]) -> TestResult<Config> {
+    let base: Vec<(String, String)> = [
+        ("SUPERVISOR_INBOX_DIR", "inbox"),
+        ("SESSIONS_DIR", "sessions"),
+        ("TRANSCRIPT_BASE", "projects"),
+        ("SELF_CTX_DIR", "self"),
+    ]
+    .iter()
+    .map(|(k, sub)| {
+        (
+            (*k).to_owned(),
+            root.join(sub).to_string_lossy().into_owned(),
+        )
+    })
+    .chain(vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
+    .collect();
+    let get = move |k: &str| {
+        base.iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    };
+    Ok(Config::from_env(root, root, &get)?)
+}
+
+impl Env {
     /// Writes `<root>/local/quiet-sessions.txt`.
     pub fn quiet(&self, text: &str) -> io::Result<()> {
         fs::create_dir_all(self.root().join("local"))?;

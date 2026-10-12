@@ -7,9 +7,13 @@
 //! from a watched session into an alert, and stores the new offset. The first
 //! run (no offset) skips the backlog; a file smaller than the offset was
 //! rotated and is read from 0; a line that is not JSON is skipped. The offset
-//! moves past a truncated last line, as in the prototype.
+//! stops after the last newline, so a line still being written is read whole
+//! next cycle. That is Architect ruling Q2 (#9171 A3b-2), a recorded
+//! divergence: the prototype moves past the partial line and loses its event.
 //! Test: `test_events_become_alerts_except_idle_prompt`,
-//! `read_events_matches_python_goldens`.
+//! `read_events_matches_python_goldens`,
+//! `read_events_holds_offset_at_last_newline`,
+//! `first_run_skips_the_backlog_but_holds_a_partial_last_line`.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -32,6 +36,30 @@ fn text_field<'a>(ev: &'a serde_json::Map<String, Value>, key: &str) -> &'a str 
     ev.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
+/// The offset just past the last newline in the first `size` bytes of
+/// `path`, or 0 when there is none: where the first run starts, so the
+/// backlog is skipped but a line still being written is not.
+fn backlog_end(path: &Path, size: u64) -> io::Result<u64> {
+    const BLOCK: u64 = 4096;
+    if size == 0 {
+        return Ok(0);
+    }
+    let mut f = File::open(path)?;
+    let mut end = size;
+    let mut buf = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(BLOCK);
+        buf.resize((end - start) as usize, 0);
+        f.seek(SeekFrom::Start(start))?;
+        f.read_exact(&mut buf)?;
+        if let Some(i) = buf.iter().rposition(|b| *b == b'\n') {
+            return Ok(start + i as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
+}
+
 /// New alert-worthy events since `offset`; updates `offset`.
 ///
 /// # Errors
@@ -43,7 +71,8 @@ pub fn read_events(path: &Path, offset: &mut Option<u64>, now: f64) -> io::Resul
         Err(e) => return Err(e),
     };
     let mut off = match *offset {
-        None => size,
+        // #9171 ruling Q2: hold a partial last line on the first run too.
+        None => backlog_end(path, size)?,
         Some(o) if size < o => 0,
         Some(o) => o,
     };
@@ -53,7 +82,11 @@ pub fn read_events(path: &Path, offset: &mut Option<u64>, now: f64) -> io::Resul
         f.seek(SeekFrom::Start(off))?;
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
-        off += bytes.len() as u64;
+        // #9171 ruling Q2: stop at the last newline; a partial last line is
+        // read whole next cycle.
+        let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        bytes.truncate(whole);
+        off += whole as u64;
         let chunk = String::from_utf8_lossy(&bytes);
         for line in splitlines(&chunk) {
             let Ok(Value::Object(ev)) = serde_json::from_str::<Value>(line) else {

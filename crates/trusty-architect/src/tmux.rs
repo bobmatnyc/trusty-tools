@@ -57,6 +57,29 @@ impl fmt::Display for PaneId {
     }
 }
 
+/// One window, named exactly: `=<session>:<index>`.
+///
+/// Why: `rename-window` needs a window target, and a bare `session:index` is
+/// prefix-matched (#8443). This leaf crate cannot use trusty-common's
+/// `exact_window_target` (#9171 A3b-2).
+/// What: the `=` prefix makes tmux match the session name exactly;
+/// [`WindowTarget::as_target`] passes it to `-t`.
+/// Test: `test_runner_renames_with_exact_target_and_no_send_keys`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WindowTarget(String);
+
+impl WindowTarget {
+    /// The exact target for window `index` of `session`.
+    pub(crate) fn exact(session: &str, index: &str) -> Self {
+        Self(format!("={session}:{index}"))
+    }
+
+    /// The `-t` target.
+    pub(crate) fn as_target(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Proof that a call came from this crate's guarded send path.
 ///
 /// Why: [`Tmux::run`] must not carry `send-keys`, yet [`send_guarded`] has to

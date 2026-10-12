@@ -136,11 +136,10 @@ pub enum SelfCtxError {
 
 /// An environment value the poller cannot use (#9171 A3a).
 ///
-/// The prototype re-reads these on every cycle. A bad `LOAD_FACTOR` fails the
-/// whole host check there, so [`crate::poller::Config::from_env`] returns this
-/// error for it. A bad `PANE_CTX_WINDOW`, `SELF_CTX_WINDOW` or
-/// `SELF_CTX_THRESHOLD` is caught inside its own sensor there, so the port
-/// keeps the config and lists the error in `Config::problems`.
+/// A bad `LOAD_FACTOR`, `PANE_CTX_WINDOW`, `SELF_CTX_WINDOW` or
+/// `SELF_CTX_THRESHOLD` turns off the sensor that reads it and is listed in
+/// `Config::problems` (for `LOAD_FACTOR`, Architect ruling Q4, #9171 A3b-2).
+/// A bad poll interval is returned as this error before the loop starts.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("environment {name}={value:?} is not a valid {want}")]
 pub struct ConfigError {
@@ -174,4 +173,50 @@ pub enum StateError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+/// Why one poll cycle stopped before its alerts were written (#9171 A3b-2).
+///
+/// The prototype raises from `read_events` and `host_alerts` and its main
+/// loop logs the exception; the port returns this, and the run commits
+/// nothing from that cycle.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CycleError {
+    /// `events.jsonl` exists but could not be read.
+    #[error("events: {0}")]
+    Events(#[source] std::io::Error),
+    /// The load average or the data disk could not be read.
+    #[error("host: {0}")]
+    Host(#[source] std::io::Error),
+}
+
+/// Why the poll loop, or one run of it, stopped (#9171 A3b-2).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RunError {
+    /// Another poller holds `poll.lock` for this inbox.
+    #[error("another poller is running: {} is locked", path.display())]
+    AlreadyRunning {
+        /// The lock file.
+        path: std::path::PathBuf,
+    },
+    /// A setting the loop cannot start with (the interval).
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    /// The cycle stopped before its alerts were written; nothing was committed.
+    #[error(transparent)]
+    Cycle(#[from] CycleError),
+    /// A file the run writes could not be written, or a phase hook stopped it.
+    #[error("{what}: {source}")]
+    Io {
+        /// What was being done (`append alerts`, `lock`, a phase).
+        what: String,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The state could not be saved; the cycle's alerts are already written.
+    #[error(transparent)]
+    State(#[from] StateError),
 }

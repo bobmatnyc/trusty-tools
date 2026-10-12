@@ -99,8 +99,10 @@ fn failed_cycle_commits_nothing() -> TestResult {
     let env = Env::new(&[])?;
     let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(50));
     let clock = FakeClock::new(1_000.0);
-    let mut state = PollState::default();
-    state.events_offset = Some(0);
+    let state = PollState {
+        events_offset: Some(0),
+        ..PollState::default()
+    };
     let mut session = PollSession::new(state.clone());
     let r = env
         .runner(&tmux, &clock, &BrokenHost)
