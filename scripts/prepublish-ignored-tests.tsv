@@ -139,5 +139,10 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # trusty-secrets binary and the console role, and returns early on macOS so no
 # run opens the Keychain; run it by name on EVO Linux. 123 -> 124.
 #
+# #9730 (#9720 timing probe) added trusty-mpm
+# `heredoc_density_timings_9720_profile` (`src/bin/tm/commands/pm_guard_bash/tests.rs`).
+# It stays unselected: a timing probe run by hand with `--nocapture`, not a gate
+# test. 124 -> 125.
+#
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 124
+# UNSELECTED-BASELINE: 125
