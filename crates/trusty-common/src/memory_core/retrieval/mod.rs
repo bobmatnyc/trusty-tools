@@ -24,6 +24,8 @@ mod handle;
 // #9279: L2/L3 candidate scoring and the exact short-id token boost.
 mod candidates;
 mod id_tokens;
+// #9719/#9722: the live L1 cache and the open-time snapshot gap-fill.
+mod l1;
 mod layers;
 pub(crate) mod open_sweep;
 // #9390: the bounded refill past expired slots every recall lane shares.

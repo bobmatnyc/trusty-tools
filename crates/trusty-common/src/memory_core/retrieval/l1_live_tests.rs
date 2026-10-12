@@ -7,7 +7,9 @@
 //! Test: this file IS the tests.
 
 use super::*;
-use crate::memory_core::palace::{Palace, PalaceId, RoomType};
+use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::memory_core::store::concurrent_open::OpenIntent;
+use crate::memory_core::store::l1_cache::L1Cache;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -81,7 +83,10 @@ async fn a_stale_second_handle_does_not_revive_a_forgotten_drawer_on_reopen() {
         "precondition: B opened before the forget and holds the drawer"
     );
 
-    assert_eq!(a.forget(gone).await.expect("forget"), ForgetOutcome::Deleted);
+    assert_eq!(
+        a.forget(gone).await.expect("forget"),
+        ForgetOutcome::Deleted
+    );
     let kept = remember(&b, "Octopuses taste with their suckers").await;
     drop(a);
     drop(b);
@@ -105,5 +110,86 @@ async fn a_stale_second_handle_does_not_revive_a_forgotten_drawer_on_reopen() {
     assert!(
         reopened.drawers.read().iter().any(|d| d.id == kept),
         "B's own write must survive the reopen"
+    );
+}
+
+/// #9722 fail-open arm: an unreadable authority marker keeps the gap-fill.
+///
+/// Why: the snapshot may be the only copy of a pre-#32 drawer; failing toward
+/// "authoritative" would hide it.
+/// What: `gap_fill_needed` with an `Err` marker read answers `true`.
+/// Test: this test.
+#[test]
+fn gap_fill_runs_when_the_marker_is_unreadable() {
+    let palace = PalaceId::new("marker-unreadable");
+    assert!(super::l1::gap_fill_needed(
+        &Err(anyhow::anyhow!("kg_schema unreadable")),
+        false,
+        &palace
+    ));
+}
+
+/// #9722 fail-open arm: a degraded drawer load keeps the gap-fill.
+///
+/// Why: rows skipped as unreadable may survive only in the snapshot.
+/// What: a stamped marker skips the gap-fill only on a complete load.
+/// Test: this test.
+#[test]
+fn gap_fill_runs_on_a_degraded_load_even_when_stamped() {
+    let palace = PalaceId::new("degraded");
+    assert!(super::l1::gap_fill_needed(&Ok(true), true, &palace));
+    assert!(
+        !super::l1::gap_fill_needed(&Ok(true), false, &palace),
+        "a stamped palace with a complete load skips the gap-fill"
+    );
+}
+
+/// #9722: the #32 gap-fill still serves a snapshot-only drawer, and adoption
+/// stamps the marker only once that drawer is durable.
+///
+/// Why: retiring the gap-fill must never lose a pre-persistence drawer, and a
+/// skipped or failed adoption must leave the palace unstamped.
+/// What: seeds `l1_cache.json` with a drawer that has no redb row. With the
+/// open-write slot held, an open serves the drawer and stamps nothing; once
+/// the slot frees, the next open adopts the row and stamps the marker.
+/// Test: this test.
+#[tokio::test]
+async fn a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped() {
+    let dir = tempdir().expect("tempdir");
+    let palace = disk_palace(dir.path(), "l1-legacy");
+    let mut legacy = Drawer::new(Uuid::new_v4(), "A pre-persistence drawer in the snapshot");
+    legacy.importance = 0.9;
+    let id = legacy.id;
+    L1Cache::save_l1_cache(&[legacy], &palace.data_dir).expect("seed snapshot");
+
+    // A non-maintainer open adopts nothing; its store is the shared one.
+    let non_maintainer =
+        PalaceHandle::open_with_intent_purging(&palace, OpenIntent::ReadOnlyClient, false)
+            .expect("non-maintainer open");
+    let store = non_maintainer.kg.store();
+    let claim = store
+        .try_claim_open_write()
+        .expect("claim the open-write slot");
+    let skipped = PalaceHandle::open(&palace).expect("open while adoption is skipped");
+    assert!(
+        skipped.drawers.read().iter().any(|d| d.id == id),
+        "the gap-fill must still serve a snapshot-only drawer"
+    );
+    assert!(l0_l1_ids(&skipped).contains(&id), "and L1 must serve it");
+    assert!(
+        !store.drawers_authoritative().expect("read marker"),
+        "a skipped adoption must not stamp the marker"
+    );
+    drop(claim);
+    drop(skipped);
+
+    let adopted = PalaceHandle::open(&palace).expect("open with the slot free");
+    assert!(
+        store.drawers_authoritative().expect("read marker"),
+        "adoption stamps the marker"
+    );
+    assert!(
+        adopted.kg.load_drawer(id).expect("load row").is_some(),
+        "the snapshot-only drawer is durable once the marker is stamped"
     );
 }

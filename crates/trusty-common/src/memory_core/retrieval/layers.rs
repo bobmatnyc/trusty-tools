@@ -201,7 +201,9 @@ pub(super) fn uuid_prefix_eq(a: Uuid, b: Uuid) -> bool {
 /// `expired_l1_drawer_is_excluded_without_reopen` covers the filter;
 /// `forgotten_drawer_is_not_served_by_l0_l1_on_the_same_handle` covers forget.
 pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
-    let mut out: Vec<RecallResult> = Vec::with_capacity(1 + handle.l1_drawers.len());
+    // #9719: a clone, so no lock is held while results are built.
+    let l1 = handle.l1_drawers.read().clone();
+    let mut out: Vec<RecallResult> = Vec::with_capacity(1 + l1.len());
     let now = chrono::Utc::now();
 
     if !handle.identity.is_empty() {
@@ -227,7 +229,7 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
     let live_ids: std::collections::HashSet<Uuid> =
         handle.drawers.read().iter().map(|d| d.id).collect();
 
-    for d in &handle.l1_drawers {
+    for d in &l1 {
         if !live_ids.contains(&d.id) {
             continue;
         }

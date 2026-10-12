@@ -53,7 +53,7 @@ async fn an_aliased_recall_reads_the_corpus_the_backfill_wrote() {
     let drawer_id = drawer.id.to_string();
     handle.drawers.write().push(drawer);
     assert!(
-        handle.identity.is_empty() && handle.l1_drawers.is_empty(),
+        handle.identity.is_empty() && handle.l1_drawers.read().is_empty(),
         "L0/L1 must be empty, or the drawer could surface without the lexical lane"
     );
 

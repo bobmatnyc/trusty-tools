@@ -4,13 +4,14 @@
 //! cap (#607). Owns the struct definition and all its `impl` methods.
 //! What: `PalaceHandle` struct plus `new`, `open`, `flush`, `remember`,
 //! `remember_with_options`, `forget`, `list_drawers`, `purge_expired`,
-//! `rebuild_closets`, `refresh_l1`, `is_compacting`, `is_read_only`.
+//! `rebuild_closets`, `is_compacting`, `is_read_only` (`refresh_l1` is in
+//! `l1.rs`).
 //! Test: `registry_create_and_open`, `cli_remember_and_recall`, and
 //! the full retrieval test suite in retrieval::tests.
 
 // #4906: the deferred-embed lane — retry, then durably record what was lost.
 use super::deferred_embed;
-use super::types::{ForgetOutcome, L1_CAP, RememberOptions};
+use super::types::{ForgetOutcome, RememberOptions};
 // #6366: the bounded write critical section this handle's `remember` runs in.
 use super::write_pipeline;
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
@@ -82,7 +83,8 @@ fn now_epoch_secs() -> u64 {
 pub struct PalaceHandle {
     pub id: PalaceId,
     pub identity: String,
-    pub l1_drawers: Vec<Drawer>,
+    /// #9719: refreshed by every write path; see `l1.rs`.
+    pub l1_drawers: Arc<RwLock<Vec<Drawer>>>,
     pub vector_store: Arc<UsearchStore>,
     pub kg: Arc<KnowledgeGraph>,
     pub drawers: Arc<RwLock<Vec<Drawer>>>,
@@ -317,7 +319,7 @@ impl PalaceHandle {
         Self {
             id,
             identity,
-            l1_drawers: Vec::new(),
+            l1_drawers: Arc::default(),
             vector_store: Arc::new(vector_store),
             kg: Arc::new(kg),
             drawers: Arc::new(RwLock::new(Vec::new())),
@@ -454,7 +456,7 @@ impl PalaceHandle {
             .with_context(|| format!("load identity for {}", palace.id))?
             .unwrap_or_default();
 
-        let l1_drawers = L1Cache::load_l1_cache(data_dir)
+        let snapshot = L1Cache::load_l1_cache(data_dir)
             .with_context(|| format!("load L1 cache for {}", palace.id))?;
 
         let vector_path = data_dir.join("index.usearch");
@@ -495,12 +497,15 @@ impl PalaceHandle {
 
         // Merge: persisted is authoritative; L1 snapshot fills gaps for
         // palaces created before drawer persistence existed (issue #32 migration).
+        // #9722: only until the drawer table is stamped authoritative.
+        let authority = kg.store().drawers_authoritative();
         let mut all_drawers = persisted_drawers;
-        for l1 in &l1_drawers {
-            if !all_drawers.iter().any(|d| d.id == l1.id) {
-                all_drawers.push(l1.clone());
-            }
-        }
+        let gap_filled = if super::l1::gap_fill_needed(&authority, drawer_load_degraded, &palace.id)
+        {
+            super::l1::gap_fill(&mut all_drawers, &snapshot)
+        } else {
+            HashSet::new()
+        };
 
         // Issue #61: prune expired session events at open. We delete the
         // persistent row synchronously here (best-effort — failures are
@@ -567,6 +572,19 @@ impl PalaceHandle {
             );
         }
 
+        // #9722: make the gap-fill durable, then retire it.
+        let maintainer = purge_expired && intent != OpenIntent::Observer;
+        super::l1::maybe_adopt(
+            &kg,
+            &authority,
+            maintainer,
+            drawer_load_degraded,
+            &all_drawers,
+            &gap_filled,
+            &palace.id,
+        );
+        // #9719: L1 is selected from the merged table, not the raw snapshot.
+        let l1_drawers = Arc::new(RwLock::new(super::l1::select_l1(&all_drawers)));
         let drawers = Arc::new(RwLock::new(all_drawers));
 
         // Attach a per-palace RecallLog at <data_dir>/recall.db so every disk-
@@ -627,8 +645,8 @@ impl PalaceHandle {
         let Some(data_dir) = self.data_dir.as_ref() else {
             return Ok(());
         };
-        let drawers = self.drawers.read().clone();
-        L1Cache::save_l1_cache(&drawers, data_dir)
+        // #9719: the live L1 follows the snapshot.
+        self.save_and_refresh_l1()
             .with_context(|| format!("save L1 cache for {}", self.id))?;
         PalaceStore::save_identity(&self.id, &self.identity, data_dir)
             .with_context(|| format!("save identity for {}", self.id))?;
@@ -664,30 +682,6 @@ impl PalaceHandle {
     pub fn add_drawer(&self, drawer: Drawer) {
         let mut drawers = self.drawers.write();
         drawers.push(drawer);
-    }
-
-    /// Rebuild the L1 cache: the top `L1_CAP` drawers in
-    /// `drawer_listing_order`.
-    ///
-    /// Why: L1 is the always-on essential context; we keep it pre-sorted so
-    /// reads are constant-time. The L1 cap is small enough that a full re-sort
-    /// is cheaper than maintaining a heap. #4836: this is a SELECTION, not
-    /// just an ordering — `l1_drawers` feeds `retrieve_l0_l1` and through it
-    /// `retrieve_l2`, so an importance-only sort here chose which 15 drawers
-    /// reach a prompt without reference to age.
-    /// What: Reads the drawer table, sorts a clone by `drawer_listing_order`,
-    /// and stores the first `L1_CAP` entries on `self.l1_drawers`.
-    /// Test: `l0_l1_always_present` asserts a high-importance drawer makes it
-    /// into L1 after `refresh_l1` is called;
-    /// `refresh_l1_keeps_the_newest_drawers_within_an_importance_tie` covers
-    /// what the cap cuts when importance ties.
-    pub fn refresh_l1(&mut self) {
-        let drawers = self.drawers.read();
-        let mut sorted: Vec<Drawer> = drawers.clone();
-        // #4836: shares the listers' comparator so L1 membership is decided by
-        // recency within a tie rather than by the drawer table's own order.
-        sorted.sort_by(super::types::drawer_listing_order);
-        self.l1_drawers = sorted.into_iter().take(L1_CAP).collect();
     }
 
     /// Store a new memory: embed, upsert to vector store, append to drawer
@@ -1020,13 +1014,10 @@ impl PalaceHandle {
             drawers.retain(|d| d.id != id);
         }
 
-        let l1_saved = match self.data_dir.as_ref() {
-            Some(data_dir) => {
-                let snap = self.drawers.read().clone();
-                L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")
-            }
-            None => Ok(()),
-        };
+        // #9719: the live L1 follows the forget too.
+        let l1_saved = self
+            .save_and_refresh_l1()
+            .context("save L1 snapshot after forget");
 
         Ok((removed, l1_saved))
     }
