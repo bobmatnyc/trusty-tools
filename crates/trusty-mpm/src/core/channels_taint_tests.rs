@@ -214,6 +214,68 @@ fn retire_hands_an_id_to_a_mark_nested_in_its_workspace() {
     assert_eq!(record_of(&dir, "x").managed_session, "m-b");
 }
 
+/// 🔴 #8433 C1: the heir is chosen by the file's own scope, not by the
+/// retiring mark's workspace. Marks A=/w, B=/w/x, C=/w/y; an id A tainted is
+/// scoped to /w. Retiring A, then B, must leave it tainted while C lives.
+#[test]
+fn retire_never_untaints_an_id_another_live_mark_covers() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    for sub in ["x", "y"] {
+        std::fs::create_dir_all(ws.path().join(sub)).expect("sub");
+    }
+    taint_managed_session(&dir, "m-a", "sx", &in_workspace(ws.path())).expect("a");
+    mark_managed(&dir, "m-b", &in_workspace(&ws.path().join("x"))).expect("b");
+    mark_managed(&dir, "m-c", &in_workspace(&ws.path().join("y"))).expect("c");
+    retire(&dir, "m-a").expect("retire a");
+    retire(&dir, "m-b").expect("retire b");
+    assert!(
+        read_state(&dir, "sx").is_tainted(),
+        "m-c still covers sx's scope"
+    );
+    assert_eq!(record_of(&dir, "sx").managed_session, "m-c");
+    retire(&dir, "m-c").expect("retire c");
+    assert_eq!(read_state(&dir, "sx"), TaintState::Untainted, "last retire");
+}
+
+/// 🔴 #8433 C1: a record written before the scope field existed has no
+/// known scope, so no retire may untaint it; the retire fails and keeps the
+/// file and the mark.
+#[test]
+fn a_record_without_a_scope_is_never_untainted_by_a_retire() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    mark_managed(&dir, "m-a", &in_workspace(ws.path())).expect("mark a");
+    let legacy = r#"{"v":1,"session_id":"old","managed_session":"m-a","channel":"slack","route":"owner-dm","question_id":"Q-1","tainted_at":"2026-01-01T00:00:00Z"}"#;
+    std::fs::write(dir.join("old.json"), legacy).expect("legacy record");
+    assert_eq!(record_of(&dir, "old").managed_session, "m-a", "it parses");
+    let result = retire(&dir, "m-a");
+    assert!(
+        matches!(&result, Err(e) if e.to_string().contains("no workspace scope")),
+        "{result:?}"
+    );
+    assert!(read_state(&dir, "old").is_tainted(), "the file stays");
+    assert!(
+        managed_mark(&dir, "m-a").expect("read").is_some(),
+        "the mark stays"
+    );
+}
+
+/// 🔴 #8433 (H1, r-078): a retiring mark whose own mark cannot be read still
+/// hands its id to another live mark that may cover it.
+#[test]
+fn retire_with_an_unreadable_own_mark_hands_the_id_to_a_covering_mark() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    std::fs::create_dir_all(ws.path().join("y")).expect("sub");
+    taint_managed_session(&dir, "m-a", "sx", &in_workspace(ws.path())).expect("a");
+    std::fs::write(dir.join("managed").join("m-a.json"), "garbage").expect("bad own mark");
+    mark_managed(&dir, "m-c", &in_workspace(&ws.path().join("y"))).expect("c");
+    retire(&dir, "m-a").expect("retire a");
+    assert!(read_state(&dir, "sx").is_tainted(), "m-c may cover sx");
+    assert_eq!(record_of(&dir, "sx").managed_session, "m-c");
+}
+
 /// 🔴 #8433 (B1, r-078): another mark that cannot be read may cover the id,
 /// so retire keeps the file for it; marks that cannot be listed fail the
 /// retire and keep both the file and the retiring mark.
