@@ -489,6 +489,11 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         .position(|t| t["name"] == "palace_update")
         .map_or(tools.len(), |i| i + 1);
     tools.insert(at, palace_rename_definition());
+    // #9282: `palace_backup` follows `palace_rename`.
+    tools.insert(
+        at + 1,
+        super::backup_definitions::palace_backup_definition(),
+    );
     // #9144 `type`, #9390 `verify`: own `json!` calls for the recursion limit.
     super::write_property_definitions::splice(tools);
     tools.extend(task_tool_definitions(has_default));
