@@ -867,6 +867,13 @@ fn the_exception_cannot_widen() {
         format!("{ok} --root \"a\""),
         format!("{ok} --root a\\ b"),
         format!("{ok} --root a#b"),
+        // Each of `|`, `&`, `<`, `>` and a newline glued into an allowed value.
+        format!("{ok} --root ~/p|sh"),
+        format!("{ok} --root ~/p&&ls"),
+        format!("{ok} --root ~/p&"),
+        format!("{ok} --root ~/p>~/.zshrc"),
+        format!("{ok} --root ~/p<x"),
+        format!("{ok} --root ~/p\nls"),
         format!("{ok} --root !!"),
         format!("{ok} | tee {review}/r.txt | sh"),
         format!("{ok} | tee {review}/r.txt; rm -rf ~"),
