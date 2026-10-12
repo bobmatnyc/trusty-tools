@@ -3,10 +3,10 @@
 //! Why: an agent records one verdict per row of a `--export-refusals` run,
 //! checks what is left, and closes the run; the import then applies the
 //! sealed ledger. v1 has no human confirmation step (Architect ruling).
-//! What: each command names a run under the fixed review root; [`run_dir`]
-//! checks the name, the guard and the directory's owner-only mode. [`record`]
+//! What: each command names a run under the fixed review root; `run_dir`
+//! checks the name, the guard and the directory's owner-only mode. `record`
 //! validates a verdict against the row's exported shapes and appends it;
-//! [`status`] counts reviewed and pending rows; `finish` seals the ledger.
+//! `status` counts reviewed and pending rows; `finish` seals the ledger.
 //! Output carries counts, verdict labels and key prefixes, never row text.
 //! Test: `review::ledger_tests`.
 

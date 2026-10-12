@@ -11,9 +11,9 @@
 //! never written. The root is fixed (ruling Q4): [`paths::default_root`].
 //!
 //! PR-C adds the review itself: `import kuzu review record|status|finish`
-//! ([`cli`]) writes and seals a ledger of agent verdicts ([`ledger`],
-//! [`verdict`]), and `import kuzu --review-ledger` applies it ([`admit`]),
-//! with closed redaction [`ops`] and the verbatim [`carve_out`].
+//! (`cli`) writes and seals a ledger of agent verdicts (`ledger`,
+//! `verdict`), and `import kuzu --review-ledger` applies it (`admit`),
+//! with closed redaction `ops` and the verbatim `carve_out`.
 //! Test: `review::tests`, `review::export_tests`, `review::paths_tests`,
 //! `review::ledger_tests`, `review::admit_tests`.
 
