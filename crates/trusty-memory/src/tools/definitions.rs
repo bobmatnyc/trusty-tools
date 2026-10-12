@@ -63,11 +63,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     // #9746: the body is `text` or its alias `content`. Neither is required
     // here, so an alias-only call passes a schema-validating client; the
     // handler refuses a call with neither.
-    let memory_remember_required: Vec<&str> = if has_default {
-        vec![]
-    } else {
-        vec!["palace"]
-    };
+    let memory_remember_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     // #6318: `palace` is never required on a palace-scoped READ tool. With
     // neither an argument nor a `--palace` default the handler answers with an
     // index of the palaces on this host, so a client that cannot name one must
@@ -95,11 +91,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     let palace_compact_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     // #9746: `memory_remember`'s rule from the mirror side — `content` or its
     // alias `text`.
-    let memory_note_required: Vec<&str> = if has_default {
-        vec![]
-    } else {
-        vec!["palace"]
-    };
+    let memory_note_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     // Issue #664: add_alias and discover_aliases both call resolve_palace() but
     // previously omitted `palace` from their schemas, making them uncallable
     // without a server-side default. Now follow the memory_remember pattern.
