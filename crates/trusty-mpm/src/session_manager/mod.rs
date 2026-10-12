@@ -9,6 +9,8 @@
 //! tested in `manager::tests`.
 
 pub mod adopt;
+// #8433 P0: a managed session's end retires its channel taint.
+mod channel_taint;
 pub mod create;
 pub mod decommission;
 // #7660: the in-project removal step, `--force` policy and kept reason.
