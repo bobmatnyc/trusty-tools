@@ -84,6 +84,9 @@ fn wrappers_redirections_and_quote_joins_still_deny() {
         ("file -f - < .env", ".env"),
         ("bash -c \"file -f .env\"", ".env"),
         ("bash <<< 'file -f .env'", ".env"),
+        // #9791: a backslash-newline line continuation is ordinary wrapping.
+        ("file -f \\\n.env", ".env"),
+        ("file \\\n  --files-from .env", ".env"),
     ]);
 }
 

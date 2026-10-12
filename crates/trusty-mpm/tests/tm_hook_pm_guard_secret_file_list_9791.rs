@@ -32,6 +32,8 @@ const DENIED: &[&str] = &[
     "file --magic-file=.env",
     "bash -c \"file -m .env\"",
     "sudo /usr/bin/file -bf .env 2>&1 | head",
+    "file -f \\\n.env",
+    "file \\\n  --files-from .env",
 ];
 
 /// The #8878 fixture plus a `.env` in the project.
