@@ -14,6 +14,7 @@ fn tainted() -> Fixture {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: chrono::Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     };
     taint_managed_session(&taint_dir(&fx.home), "m-1", "s-1", &mark).expect("taint");
     fx
@@ -111,5 +112,61 @@ fn the_architect_cannot_write_a_live_taint() {
             MpmConfig::default
         ),
         None
+    );
+}
+
+/// 🔴 #8433 (r-078): while a taint is live, a write the guard cannot place
+/// (`xargs cp`) is denied to the Architect too.
+#[test]
+fn the_architect_cannot_untaint_through_an_unplaceable_write() {
+    let fx = tainted();
+    let env = architect_env(&fx);
+    let reason = bash(&fx, &env, "ls | xargs cp a.txt").expect("denied");
+    assert!(reason.contains("#8433"), "{reason}");
+    let clean = fixture();
+    let env = architect_env(&clean);
+    assert_eq!(
+        bash(&clean, &env, "ls | xargs cp a.txt"),
+        None,
+        "no taint, no rule"
+    );
+}
+
+/// 🔴 #8433 (r-078): a taint directory that does not resolve (a link loop)
+/// still reads live, fences everything under it and guards the directories
+/// above it.
+#[test]
+fn an_unresolvable_taint_dir_still_guards_the_dirs_above_it() {
+    let fx = fixture();
+    let channels = fx.home.join(".trusty-tools/trusty-mpm/channels");
+    std::fs::create_dir_all(&channels).expect("mkdir");
+    std::os::unix::fs::symlink("taint", channels.join("taint")).expect("loop");
+    let env = architect_env(&fx);
+    for command in [
+        "rm -rf ~/.trusty-tools/trusty-mpm/channels",
+        "mv ~/.trusty-tools/trusty-mpm/channels /tmp/away",
+        "echo x > ~/.trusty-tools/trusty-mpm/channels/taint/s.json",
+    ] {
+        assert!(bash(&fx, &env, command).is_some(), "allowed: {command}");
+    }
+}
+
+/// #8433 (D09): the hook's double-failure record sits in the taint dir, so
+/// no session may delete it.
+#[test]
+fn anchor_denies_rm_of_the_reapply_failures_record() {
+    let fx = fixture();
+    let dir = taint_dir(&fx.home);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join(trusty_mpm::core::channels_taint::REAPPLY_FAILURES_FILE),
+        "{}\n",
+    )
+    .expect("record");
+    let command = "rm ~/.trusty-tools/trusty-mpm/channels/taint/reapply-failures.jsonl";
+    assert!(bash(&fx, &pm_env(&fx), command).is_some(), "a PM");
+    assert!(
+        bash(&fx, &architect_env(&fx), command).is_some(),
+        "the Architect"
     );
 }

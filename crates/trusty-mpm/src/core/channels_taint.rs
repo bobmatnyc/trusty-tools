@@ -93,6 +93,26 @@ pub struct TaintMark {
     pub question_id: String,
     /// When the managed session was first tainted.
     pub tainted_at: DateTime<Utc>,
+    /// The managed session's working directory, absolute. A `SessionStart`
+    /// the daemon does not confirm taints the new id only when its cwd is at
+    /// or under this path (D09); a relative or empty path covers every cwd.
+    pub workspace: PathBuf,
+}
+
+/// Which managed session's taint covers a `SessionStart` at one cwd (D09).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cover {
+    /// No mark covers the cwd: there is nothing to re-apply.
+    None,
+    /// This managed session's mark covers the cwd, or cannot be read.
+    Managed(String),
+    /// The marks cannot be listed, so any session could be covered.
+    Unknown,
+}
+
+/// The managed session whose mark covers a `SessionStart` at `cwd`.
+pub fn covering_mark(_dir: &Path, _cwd: Option<&Path>) -> Cover {
+    Cover::Unknown
 }
 
 impl TaintMark {

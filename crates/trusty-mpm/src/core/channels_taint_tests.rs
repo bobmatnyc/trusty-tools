@@ -9,6 +9,7 @@ fn mark() -> TaintMark {
         route: "owner-dm".into(),
         question_id: "Q-1".into(),
         tainted_at: Utc::now(),
+        workspace: std::path::PathBuf::from("/"),
     }
 }
 
@@ -224,5 +225,137 @@ fn presence_counts_files_and_marks() {
         "an empty managed dir is no taint"
     );
     mark_managed(&dir, "m1", &mark()).expect("mark");
+    assert_eq!(presence(&dir), Presence::Some);
+}
+
+/// Set `path`'s mode; the tests restore it before their tempdir drops.
+fn chmod(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// 🔴 #8433 (r-078): a directory that cannot be listed is `Unknown`, never `None`.
+#[test]
+fn presence_is_unknown_when_a_dir_cannot_be_read() {
+    let (_tmp, dir) = dir();
+    mark_managed(&dir, "m1", &mark()).expect("mark");
+    chmod(&dir, 0o000);
+    let top = presence(&dir);
+    chmod(&dir, 0o700);
+    assert_eq!(top, Presence::Unknown, "an unreadable taint dir");
+    chmod(&dir.join("managed"), 0o000);
+    let sub = presence(&dir);
+    chmod(&dir.join("managed"), 0o700);
+    assert_eq!(sub, Presence::Unknown, "an unreadable managed dir");
+}
+
+/// 🔴 #8433 (r-078): a mark that exists but cannot be read is an `Io` error,
+/// and a re-apply over it fails.
+#[test]
+fn managed_mark_io_error_is_err_and_reapply_fails() {
+    let (_tmp, dir) = dir();
+    std::fs::create_dir_all(dir.join("managed").join("m1.json")).expect("dir at the mark");
+    assert!(
+        matches!(managed_mark(&dir, "m1"), Err(TaintError::Io { .. })),
+        "an unreadable mark is an Io error"
+    );
+    assert!(reapply(&dir, "m1", "n1").is_err(), "the re-apply fails");
+    assert_eq!(read_state(&dir, "n1"), TaintState::Untainted);
+}
+
+/// 🔴 #8433 (r-078): a taint file retire cannot remove fails the retire and
+/// keeps the mark, so the session stays tainted.
+#[test]
+fn retire_remove_failure_keeps_the_mark() {
+    let (_tmp, dir) = dir();
+    taint_managed_session(&dir, "m1", "a1", &mark()).expect("m1");
+    chmod(&dir, 0o500);
+    let result = retire(&dir, "m1");
+    chmod(&dir, 0o700);
+    assert!(matches!(result, Err(TaintError::Io { .. })), "{result:?}");
+    assert!(
+        managed_mark(&dir, "m1").expect("read").is_some(),
+        "the mark stays"
+    );
+    assert!(read_state(&dir, "a1").is_tainted(), "the file stays");
+}
+
+/// 🔴 #8433 (r-078): a mark retire cannot remove fails the retire.
+#[test]
+fn retire_marker_removal_failure_is_err() {
+    let (_tmp, dir) = dir();
+    taint_managed_session(&dir, "m1", "a1", &mark()).expect("m1");
+    chmod(&dir.join("managed"), 0o500);
+    let result = retire(&dir, "m1");
+    chmod(&dir.join("managed"), 0o700);
+    assert!(matches!(result, Err(TaintError::Io { .. })), "{result:?}");
+    assert!(
+        managed_mark(&dir, "m1").expect("read").is_some(),
+        "the mark stays"
+    );
+}
+
+/// 🔴 #8433 (r-078): a failed atomic write removes its temp file.
+#[test]
+fn taint_write_failure_leaves_no_temp_file() {
+    let (_tmp, dir) = dir();
+    std::fs::create_dir_all(dir.join("s2.json").join("occupied")).expect("dir at the target");
+    assert!(write_taint(&dir, &mark().record_for("s2", "m")).is_err());
+    let names: Vec<_> = std::fs::read_dir(&dir)
+        .expect("ls")
+        .map(|e| e.expect("e").file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("s2.json")],
+        "a temp file was left"
+    );
+}
+
+/// 🔴 #8433 (D09): a mark covers a cwd at or under its workspace; a mark that
+/// cannot be read covers every cwd; marks that cannot be listed are unknown.
+#[test]
+fn covering_mark_follows_the_workspace_and_fails_closed() {
+    let (_tmp, dir) = dir();
+    let ws = tempfile::tempdir().expect("ws");
+    let other = tempfile::tempdir().expect("other");
+    std::fs::create_dir_all(ws.path().join("sub")).expect("sub");
+    assert_eq!(covering_mark(&dir, Some(ws.path())), Cover::None, "no mark");
+    let mut m1 = mark();
+    m1.workspace = ws.path().to_path_buf();
+    mark_managed(&dir, "m1", &m1).expect("mark");
+    let m1_id = Cover::Managed("m1".into());
+    assert_eq!(covering_mark(&dir, Some(ws.path())), m1_id);
+    assert_eq!(covering_mark(&dir, Some(&ws.path().join("sub"))), m1_id);
+    assert_eq!(covering_mark(&dir, None), m1_id, "no cwd: covered");
+    assert_eq!(covering_mark(&dir, Some(other.path())), Cover::None);
+    std::fs::write(dir.join("managed").join("m2.json"), "garbage").expect("bad mark");
+    assert_eq!(
+        covering_mark(&dir, Some(other.path())),
+        Cover::Managed("m2".into()),
+        "an unreadable mark covers every cwd"
+    );
+    std::fs::remove_file(dir.join("managed").join("m2.json")).expect("rm");
+    let mut rel = mark();
+    rel.workspace = PathBuf::new();
+    mark_managed(&dir, "m3", &rel).expect("mark");
+    assert_eq!(
+        covering_mark(&dir, Some(other.path())),
+        Cover::Managed("m3".into()),
+        "an empty workspace covers every cwd"
+    );
+    chmod(&dir.join("managed"), 0o000);
+    let blocked = covering_mark(&dir, Some(other.path()));
+    chmod(&dir.join("managed"), 0o700);
+    assert_eq!(blocked, Cover::Unknown);
+}
+
+/// #8433 (D09): the double-failure record in the taint dir is not a taint
+/// file, but it keeps the directory live.
+#[test]
+fn the_reapply_failures_record_is_not_a_taint_file() {
+    let (_tmp, dir) = dir();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join(REAPPLY_FAILURES_FILE), "{}\n").expect("record");
+    assert!(list_taints(&dir).expect("list").is_empty());
     assert_eq!(presence(&dir), Presence::Some);
 }
