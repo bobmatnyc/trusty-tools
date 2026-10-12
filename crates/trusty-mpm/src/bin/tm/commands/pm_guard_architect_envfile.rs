@@ -10,7 +10,8 @@
 //! under a bypass — so the two cannot drift. Its order: the value-printing
 //! rules (a printed credential, the pod/launchd/pm2 env dumps, a launchd
 //! plist, and since #8879 a run script whose body reads a credential) deny
-//! unconditionally; then the #7266 file rule; then a file-rule
+//! unconditionally, and so does the #8625 kuzu-store rule; then the #7266
+//! file rule; then a file-rule
 //! deny is lifted only when [`envfile_shape`] matches AND the call is the
 //! process-bound Architect's main thread. A shape match with a failed
 //! identity denies with the #8878 PR-I identity suffix. [`gate_secret_file_read`]
@@ -43,7 +44,8 @@ use crate::commands::env_file_grant;
 use crate::commands::pm_guard_architect_reason::with_identity;
 use crate::commands::pm_guard_bash::evaluate_credential_print_command;
 use crate::commands::pm_guard_deny_log::{AUDIT_POST_TIMEOUT, DenyContext};
-use crate::commands::pm_guard_floor::ArchitectGate;
+use crate::commands::pm_guard_floor::{ArchitectGate, FloorDeny};
+use crate::commands::pm_guard_kuzu_store::{KUZU_STORE_RULE, evaluate_kuzu_store_access};
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_in;
@@ -110,22 +112,32 @@ pub(crate) fn envfile_policy(
     in_scope(&path, env, config).then_some(ScopedEnvfile(path))
 }
 
-/// The secret-read decision for one tool call: `Some(reason)` denies.
+/// The audit label of a #7266 secret-file deny.
+pub(crate) const SECRET_FILE_READ_RULE: &str = "secret-file-read";
+
+/// The secret-read decision for one tool call: `Some(deny)` denies, and its
+/// `rule` is the audit label both callers record.
 ///
 /// Why: #8939 — one function for both deny sites, so the guarded and the
-/// bypassed path cannot drift.
+/// bypassed path cannot drift. #8625: the kuzu-store rule needs its own label
+/// (ruling Q7), so the label travels with the reason.
 /// What: see the module doc. On an exemption the call is recorded on `gate`
 /// for [`audit_envfile_allow`].
 /// Test: `the_architect_main_thread_may_list_env_key_names`,
 /// `the_architect_main_thread_may_set_an_env_key`,
 /// `the_value_rules_run_before_the_envfile_exemption`,
-/// `every_identity_failure_denies_the_envfile_exemption`.
+/// `every_identity_failure_denies_the_envfile_exemption`,
+/// `the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect`.
 pub(crate) fn evaluate_secret_file_read_gated(
     tool_name: &str,
     tool_input: Option<&Value>,
     hook_cwd: &Path,
     gate: &ArchitectGate<'_>,
-) -> Option<String> {
+) -> Option<FloorDeny> {
+    let secret = |reason| FloorDeny {
+        rule: SECRET_FILE_READ_RULE,
+        reason,
+    };
     let command = (tool_name == "Bash").then(|| {
         tool_input
             .and_then(|v| v.get("command"))
@@ -141,7 +153,16 @@ pub(crate) fn evaluate_secret_file_read_gated(
         // #8879: a script the command runs is judged by its body.
         .or_else(|| command.and_then(|c| evaluate_script_body_secret_read(c, hook_cwd)))
     {
-        return Some(reason);
+        return Some(secret(reason));
+    }
+    // #8625: the kuzu-store rule, unconditionally too — ruling B10 binds the
+    // bypasses and the Architect, so it sits ahead of the step-3 exemption.
+    let home = gate.env().home.as_deref();
+    if let Some(reason) = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd, home) {
+        return Some(FloorDeny {
+            rule: KUZU_STORE_RULE,
+            reason,
+        });
     }
     // 2. The #7266 file rule. Its entry point re-runs the Bash value rules,
     // which step 1 has already cleared, so only the file rule can answer.
@@ -150,14 +171,14 @@ pub(crate) fn evaluate_secret_file_read_gated(
     // 3. The exemption: the shape first, then the identity.
     let shape = |c| envfile_shape(c, hook_cwd, gate.env(), || gate.config());
     let Some(call) = command.and_then(shape) else {
-        return Some(reason);
+        return Some(secret(reason));
     };
     match gate.identity() {
         Ok(()) => {
             gate.record_envfile(call);
             None
         }
-        Err(why) => Some(with_identity(reason, why)),
+        Err(why) => Some(secret(with_identity(reason, why))),
     }
 }
 
@@ -168,7 +189,7 @@ pub(crate) async fn gate_secret_file_read(
     tool_input: Option<&Value>,
     hook_cwd: &Path,
     gate: &ArchitectGate<'_>,
-) -> Option<String> {
+) -> Option<FloorDeny> {
     let deny = evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate);
     if deny.is_none() {
         audit_envfile_allow(ctx, gate).await;

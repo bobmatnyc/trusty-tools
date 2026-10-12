@@ -182,6 +182,8 @@ pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
 // #8625: no tool call reads a kuzu-memory store, the import venv or its temp export.
+pub(crate) mod pm_guard_kuzu_import;
+pub(crate) mod pm_guard_kuzu_names;
 pub(crate) mod pm_guard_kuzu_store;
 // #8453: the PM delegation rules apply by session profile.
 pub(crate) mod pm_guard_profile;

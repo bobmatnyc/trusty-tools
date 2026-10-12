@@ -448,3 +448,42 @@ fn denies_a_bash_call_from_inside_a_store_directory() {
         );
     }
 }
+
+#[test]
+fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
+    use crate::commands::pm_guard_architect_envfile::{
+        SECRET_FILE_READ_RULE, evaluate_secret_file_read_gated,
+    };
+    use crate::commands::pm_guard_floor::ArchitectGate;
+    use crate::commands::pm_guard_trust_anchor::tests::{
+        allowlist, architect_env, fixture, payload,
+    };
+    let fx = fixture();
+    let store = fx.project.join(".kuzu-memory/memories.db");
+    for (call, rule) in [
+        (
+            payload(
+                &fx,
+                "Bash",
+                json!({ "command": "cat .kuzu-memory/memories.db" }),
+            ),
+            KUZU_STORE_RULE,
+        ),
+        (
+            payload(&fx, "Read", json!({ "file_path": store })),
+            KUZU_STORE_RULE,
+        ),
+        (
+            payload(&fx, "Bash", json!({ "command": "cat .env.local" })),
+            SECRET_FILE_READ_RULE,
+        ),
+    ] {
+        // Ruling B10: the Architect's main thread is bound too.
+        let gate = ArchitectGate::new(&call, architect_env(&fx), || allowlist(&fx));
+        assert!(gate.is_architect(), "the fixture is the Architect");
+        let tool = call["tool_name"].as_str().unwrap_or_default();
+        let deny =
+            evaluate_secret_file_read_gated(tool, call.get("tool_input"), &fx.project, &gate);
+        assert_eq!(deny.map(|d| d.rule), Some(rule), "{call}");
+    }
+}

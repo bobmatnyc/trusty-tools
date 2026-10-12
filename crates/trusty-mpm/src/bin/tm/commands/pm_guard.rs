@@ -594,11 +594,12 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // #8523: a launchd plist is judged by CONTENT, so it needs the hook cwd.
     // #8878 D8: under a bypass `pm_guard_floor` runs this same rule instead.
     // #8939: one gated decision on both paths; the Architect's `tm env` shapes pass.
-    if let Some(reason) =
+    // #8625: the deny names its own audit label (`kuzu-store-read`, ruling Q7).
+    if let Some(deny) =
         gate_secret_file_read(&refused, tool_name, tool_input, &hook_cwd, &architect).await
     {
-        audit_denied_tool(&refused, "secret-file-read", &reason).await;
-        println!("{}", build_pm_guard_deny_response(&reason));
+        audit_denied_tool(&refused, deny.rule, &deny.reason).await;
+        println!("{}", build_pm_guard_deny_response(&deny.reason));
         return Ok(());
     }
 
