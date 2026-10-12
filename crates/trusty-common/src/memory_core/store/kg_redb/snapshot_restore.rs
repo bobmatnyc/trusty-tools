@@ -174,4 +174,3 @@ fn recount(path: &Path, expected: &BTreeMap<String, u64>) -> Result<()> {
     let actual = table_counts(&rtx, path, &names)?;
     check_counts(path, expected, &actual)
 }
-

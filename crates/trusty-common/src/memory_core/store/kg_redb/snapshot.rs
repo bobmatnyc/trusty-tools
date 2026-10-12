@@ -75,7 +75,9 @@ pub enum SnapshotError {
     #[error("palace {palace} has no data directory; an in-memory palace cannot be snapshotted")]
     NoDataDir { palace: String },
     /// The handle reads a raw-copied redb snapshot, which may itself be torn.
-    #[error("palace {palace} is open read-only from a copied file; snapshot it through the daemon that owns it")]
+    #[error(
+        "palace {palace} is open read-only from a copied file; snapshot it through the daemon that owns it"
+    )]
     ReadOnlyHandle { palace: String },
     /// The snapshot directory already exists.
     #[error("snapshot destination {path} already exists")]
@@ -290,7 +292,12 @@ pub(crate) fn snapshot_palace(
     }
     for name in JOURNAL_FILES {
         if let Some(bytes) = read_optional(&palace_dir.join(name))? {
-            files.push(write_verified(&tmp.path, name, complete_lines(&bytes), hook)?);
+            files.push(write_verified(
+                &tmp.path,
+                name,
+                complete_lines(&bytes),
+                hook,
+            )?);
         }
     }
     if let Some(bytes) = drawer_count_lines(&palace_dir, &palace)? {
@@ -540,12 +547,11 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 fn write_manifest(dir: &Path, manifest: &SnapshotManifest, hook: SnapshotHook) -> Result<()> {
     let path = dir.join(SNAPSHOT_MANIFEST);
     hook(SnapshotStep::WriteManifest, &path).map_err(io_err("write", &path))?;
-    let bytes = serde_json::to_vec_pretty(manifest).map_err(|source| {
-        SnapshotError::ManifestJson {
+    let bytes =
+        serde_json::to_vec_pretty(manifest).map_err(|source| SnapshotError::ManifestJson {
             path: path.clone(),
             source,
-        }
-    })?;
+        })?;
     let tmp = sibling(&path, TMP_SUFFIX);
     let mut f = std::fs::File::create(&tmp).map_err(io_err("create", &tmp))?;
     f.write_all(&bytes).map_err(io_err("write", &tmp))?;

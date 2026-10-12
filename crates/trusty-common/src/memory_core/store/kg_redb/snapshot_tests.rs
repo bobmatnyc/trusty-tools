@@ -14,8 +14,7 @@
 use super::restore::restore_with;
 use super::{
     CHAT_FILE, DRAWER_COUNTS_FILE, KG_FILE, PalaceSnapshot, SNAPSHOT_MANIFEST, SnapshotError,
-    SnapshotStep, complete_lines, no_fault, restore_palace_snapshot, snapshot_palace,
-    table_counts,
+    SnapshotStep, complete_lines, no_fault, restore_palace_snapshot, snapshot_palace, table_counts,
 };
 use crate::memory_core::maintenance_log::{
     MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME,
@@ -73,7 +72,10 @@ fn write_pair(store: &KgStoreRedb, room: Uuid, n: u64) {
     let drawer = Drawer::new(room, format!("snapshot drawer {n}"));
     let triple = triple_for(drawer.id);
     store
-        .apply_batch(&[BatchWriteOp::UpsertDrawer(drawer), BatchWriteOp::Assert(triple)])
+        .apply_batch(&[
+            BatchWriteOp::UpsertDrawer(drawer),
+            BatchWriteOp::Assert(triple),
+        ])
         .expect("write pair");
 }
 
@@ -102,10 +104,16 @@ fn fixture() -> Fixture {
     }
     let chat = ChatSessionStore::open(&data_dir.join(CHAT_FILE)).expect("chat store");
     chat.create_session(Some("kept".into())).expect("session");
-    std::fs::write(data_dir.join(MAINTENANCE_LOG_ROTATED_FILENAME), b"{\"old\":1}\n")
-        .expect("rotated journal");
-    std::fs::write(data_dir.join(MAINTENANCE_LOG_FILENAME), b"{\"a\":1}\n{\"b\":2}\n")
-        .expect("journal");
+    std::fs::write(
+        data_dir.join(MAINTENANCE_LOG_ROTATED_FILENAME),
+        b"{\"old\":1}\n",
+    )
+    .expect("rotated journal");
+    std::fs::write(
+        data_dir.join(MAINTENANCE_LOG_FILENAME),
+        b"{\"a\":1}\n{\"b\":2}\n",
+    )
+    .expect("journal");
     let counts = format!(
         "{{\"v\":1,\"palace\":\"{PALACE}\",\"drawers\":1}}\n{{\"v\":1,\"palace\":\"other\",\"drawers\":9}}\n{{\"v\":1,\"palace\":\"{PALACE}\",\"drawers\":2}}\n{{\"v\":1,\"palace\":\"{PALACE}\""
     );
@@ -177,14 +185,20 @@ fn snapshot_under_a_concurrent_writer_matches_its_manifest() {
     let names: Vec<String> = m.kg_tables.keys().cloned().collect();
     assert_eq!(counts_of(&snap.dir.join(KG_FILE), &names), m.kg_tables);
     let chat_names: Vec<String> = m.chat_tables.keys().cloned().collect();
-    assert_eq!(counts_of(&snap.dir.join(CHAT_FILE), &chat_names), m.chat_tables);
+    assert_eq!(
+        counts_of(&snap.dir.join(CHAT_FILE), &chat_names),
+        m.chat_tables
+    );
     assert_eq!(m.chat_tables["chat_sessions"], 1);
 
     let drawers = m.kg_tables["drawers"];
     assert_eq!(m.drawer_count, drawers);
     assert_eq!(m.room_count, 3);
     assert_eq!(drawers, m.kg_tables["triples"], "drawer/triple pairs torn");
-    assert!(drawers >= SEED_DRAWERS as u64 + before, "snapshot predates the writer");
+    assert!(
+        drawers >= SEED_DRAWERS as u64 + before,
+        "snapshot predates the writer"
+    );
     let live = fx.handle.kg.store().db().begin_read().expect("live read");
     let live_counts = table_counts(&live, Path::new("live"), &["drawers"]).expect("live");
     assert!(
@@ -214,10 +228,16 @@ fn restore_into_an_empty_root_reopens_with_the_manifest_counts() {
     let handle = PalaceHandle::open(&palace).expect("open restored palace");
     assert_eq!(handle.drawers.read().len() as u64, manifest.drawer_count);
     let store = handle.kg.store();
-    assert_eq!(store.list_rooms().expect("rooms").len() as u64, manifest.room_count);
+    assert_eq!(
+        store.list_rooms().expect("rooms").len() as u64,
+        manifest.room_count
+    );
     let rtx = store.db().begin_read().expect("read");
     let names: Vec<&str> = manifest.kg_tables.keys().map(String::as_str).collect();
-    assert_eq!(table_counts(&rtx, &target, &names).expect("c"), manifest.kg_tables);
+    assert_eq!(
+        table_counts(&rtx, &target, &names).expect("c"),
+        manifest.kg_tables
+    );
 }
 
 /// AC3 (#9282): a journal's torn final line is dropped, never copied.
@@ -229,7 +249,10 @@ fn a_journal_torn_final_line_is_not_copied() {
     let snap = fx.handle.snapshot(Some(&fx.chat), None).expect("snapshot");
     let copied = std::fs::read(snap.dir.join(MAINTENANCE_LOG_FILENAME)).expect("copy");
     assert_eq!(copied, b"{\"a\":1}\n{\"b\":2}\n");
-    assert!(snap.dir.starts_with(fx.root.join("backups").join("manual").join(PALACE)));
+    assert!(
+        snap.dir
+            .starts_with(fx.root.join("backups").join("manual").join(PALACE))
+    );
     assert_eq!(complete_lines(b"no newline at all"), b"");
 }
 
@@ -268,8 +291,15 @@ fn restore_refuses_a_non_empty_target_and_leaves_it_unchanged() {
     let err = restore_palace_snapshot(&snap.dir, &target).expect_err("must refuse");
     assert!(matches!(err, SnapshotError::TargetNotEmpty { .. }), "{err}");
     assert_eq!(listing(&target), vec!["kg.redb".to_string()]);
-    assert_eq!(std::fs::read(target.join("kg.redb")).expect("r"), b"existing data");
-    assert_eq!(listing(&parent), vec![PALACE.to_string()], "no staging left");
+    assert_eq!(
+        std::fs::read(target.join("kg.redb")).expect("r"),
+        b"existing data"
+    );
+    assert_eq!(
+        listing(&parent),
+        vec![PALACE.to_string()],
+        "no staging left"
+    );
 }
 
 /// AC5 (#9282): one flipped byte fails the restore before any write.
@@ -285,7 +315,10 @@ fn restore_with_a_checksum_mismatch_writes_nothing() {
     let parent = fx.root.join("restore-parent");
     std::fs::create_dir_all(&parent).expect("parent");
     let err = restore_palace_snapshot(&snap.dir, &parent.join(PALACE)).expect_err("tampered");
-    assert!(matches!(err, SnapshotError::ChecksumMismatch { .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::ChecksumMismatch { .. }),
+        "{err}"
+    );
     assert!(listing(&parent).is_empty(), "nothing may be written");
 }
 
@@ -300,7 +333,10 @@ fn restore_refuses_a_newer_palace_format() {
     std::fs::write(&path, serde_json::to_vec(&m).expect("json")).expect("write");
     let target = fx.root.join("newer").join(PALACE);
     let err = restore_palace_snapshot(&snap.dir, &target).expect_err("newer");
-    assert!(matches!(err, SnapshotError::PalaceFormatTooNew { found: 99, .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::PalaceFormatTooNew { found: 99, .. }),
+        "{err}"
+    );
     assert!(!target.exists());
 }
 
@@ -309,15 +345,27 @@ fn injected() -> io::Error {
 }
 
 fn fail_copy(step: SnapshotStep, _: &Path) -> io::Result<()> {
-    if step == SnapshotStep::CopyDb { Err(injected()) } else { Ok(()) }
+    if step == SnapshotStep::CopyDb {
+        Err(injected())
+    } else {
+        Ok(())
+    }
 }
 
 fn fail_fsync(step: SnapshotStep, _: &Path) -> io::Result<()> {
-    if step == SnapshotStep::Fsync { Err(injected()) } else { Ok(()) }
+    if step == SnapshotStep::Fsync {
+        Err(injected())
+    } else {
+        Ok(())
+    }
 }
 
 fn fail_manifest(step: SnapshotStep, _: &Path) -> io::Result<()> {
-    if step == SnapshotStep::WriteManifest { Err(injected()) } else { Ok(()) }
+    if step == SnapshotStep::WriteManifest {
+        Err(injected())
+    } else {
+        Ok(())
+    }
 }
 
 /// Alters `palace.json` after its fsync, before it is re-hashed.
@@ -335,7 +383,10 @@ fn assert_fails_closed(hook: super::SnapshotHook) -> SnapshotError {
     let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), hook)
         .expect_err("fault must surface as Err");
     assert!(!dest.exists(), "no partial snapshot may exist");
-    assert!(!fx.root.join("snap.tmp").exists(), "staging must be removed");
+    assert!(
+        !fx.root.join("snap.tmp").exists(),
+        "staging must be removed"
+    );
     err
 }
 
@@ -343,28 +394,46 @@ fn assert_fails_closed(hook: super::SnapshotHook) -> SnapshotError {
 #[test]
 fn a_kg_copy_failure_leaves_no_snapshot() {
     let err = assert_fails_closed(fail_copy);
-    assert!(matches!(err, SnapshotError::Io { op: "copy into", .. }), "{err}");
+    assert!(
+        matches!(
+            err,
+            SnapshotError::Io {
+                op: "copy into",
+                ..
+            }
+        ),
+        "{err}"
+    );
 }
 
 /// Fail-open check (#9282): an fsync failure is an error, not a warning.
 #[test]
 fn an_fsync_failure_leaves_no_snapshot() {
     let err = assert_fails_closed(fail_fsync);
-    assert!(matches!(err, SnapshotError::Io { op: "fsync", .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::Io { op: "fsync", .. }),
+        "{err}"
+    );
 }
 
 /// Fail-open check (#9282): no manifest, no snapshot.
 #[test]
 fn a_manifest_write_failure_leaves_no_snapshot() {
     let err = assert_fails_closed(fail_manifest);
-    assert!(matches!(err, SnapshotError::Io { op: "write", .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::Io { op: "write", .. }),
+        "{err}"
+    );
 }
 
 /// Fail-open check (#9282): a copy that differs after fsync is a checksum error.
 #[test]
 fn a_copy_altered_after_fsync_fails_verification() {
     let err = assert_fails_closed(alter_after_fsync);
-    assert!(matches!(err, SnapshotError::ChecksumMismatch { .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::ChecksumMismatch { .. }),
+        "{err}"
+    );
 }
 
 /// Fail-open check (#9282): an unreadable journal fails the snapshot.
@@ -389,8 +458,14 @@ fn a_restore_write_failure_leaves_no_target() {
     let parent = fx.root.join("restore-parent");
     std::fs::create_dir_all(&parent).expect("parent");
     let err = restore_with(&snap.dir, &parent.join(PALACE), fail_fsync).expect_err("fault");
-    assert!(matches!(err, SnapshotError::Io { op: "fsync", .. }), "{err}");
-    assert!(listing(&parent).is_empty(), "target and staging must be absent");
+    assert!(
+        matches!(err, SnapshotError::Io { op: "fsync", .. }),
+        "{err}"
+    );
+    assert!(
+        listing(&parent).is_empty(),
+        "target and staging must be absent"
+    );
 }
 
 /// Fail-open check (#9282): a restored copy that differs after fsync is a
@@ -402,8 +477,14 @@ fn a_restored_copy_altered_after_fsync_fails_verification() {
     let parent = fx.root.join("restore-parent");
     std::fs::create_dir_all(&parent).expect("parent");
     let err = restore_with(&snap.dir, &parent.join(PALACE), alter_after_fsync).expect_err("x");
-    assert!(matches!(err, SnapshotError::ChecksumMismatch { .. }), "{err}");
-    assert!(listing(&parent).is_empty(), "target and staging must be absent");
+    assert!(
+        matches!(err, SnapshotError::ChecksumMismatch { .. }),
+        "{err}"
+    );
+    assert!(
+        listing(&parent).is_empty(),
+        "target and staging must be absent"
+    );
 }
 
 /// Fail-open check (#9282): the snapshot refuses to overwrite a destination.
@@ -414,6 +495,9 @@ fn an_existing_destination_is_refused() {
     std::fs::create_dir_all(&dest).expect("dest");
     let err = snapshot_palace(&fx.handle, Some(&fx.chat), Some(&dest), no_fault)
         .expect_err("existing destination");
-    assert!(matches!(err, SnapshotError::DestinationExists { .. }), "{err}");
+    assert!(
+        matches!(err, SnapshotError::DestinationExists { .. }),
+        "{err}"
+    );
     assert!(listing(&dest).is_empty());
 }
