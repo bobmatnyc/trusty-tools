@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::sync::Mutex;
 
 use super::*;
+use crate::server::StartEnv;
 use crate::server::sandbox::{SandboxEnv, file_consent_config_for, sandbox_consent_config};
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
 use crate::store::{FileBackend, VALUES_SUBDIR};
@@ -221,9 +222,14 @@ fn sandbox_consent_is_none_when_home_is_the_account_home() {
     );
     let link = fx.tmp.path().join("home-link");
     std::os::unix::fs::symlink(&layout.account, &link).unwrap();
-    let bad: [Option<OsString>; 5] = [
+    // #9793: a second path to the same inode, by a chain of links; the
+    // comparison is by `(dev, ino)`, so every alias is the account home.
+    let chain = fx.tmp.path().join("home-chain");
+    std::os::unix::fs::symlink(&link, &chain).unwrap();
+    let bad: [Option<OsString>; 6] = [
         Some(layout.account.clone().into()),
         Some(link.into()),
+        Some(chain.into()),
         Some("sandbox/home".into()),
         Some(fx.tmp.path().join("no-such-home").into()),
         None,
@@ -241,6 +247,39 @@ fn sandbox_consent_is_none_when_home_is_the_account_home() {
     let env = layout.env();
     assert_eq!(sandbox_consent_config(&env, None), None);
     assert_eq!(file_consent_config_for(&env, None), None);
+    // #9793: an account home that cannot be read is doubt, never a sandbox.
+    let missing = fx.tmp.path().join("no-such-account");
+    assert_eq!(sandbox_consent_config(&env, Some(&missing)), None);
+}
+
+/// Why: #9793, ruling Q1 — `canonicalize` does not resolve a macOS firmlink,
+/// so `/System/Volumes/Data/<path>` passed as a sandbox home that is the
+/// account's own. The comparison is by `(dev, ino)`, which sees one inode.
+/// Red before the fix on macOS: the alias gives an override. Other targets
+/// have no firmlinks and skip.
+/// Test: itself.
+#[test]
+fn sandbox_consent_is_none_for_a_firmlink_alias_of_the_account_home() {
+    let fx = fixture();
+    let layout = Layout::new(&fx);
+    let mut alias = PathBuf::from("/System/Volumes/Data");
+    alias.push(
+        layout
+            .account
+            .canonicalize()
+            .unwrap()
+            .strip_prefix("/")
+            .unwrap(),
+    );
+    if !cfg!(target_os = "macos") || !alias.exists() {
+        return;
+    }
+    let mut env = layout.env();
+    env.home = Some(alias.into());
+    assert_eq!(
+        sandbox_consent_config(&env, Some(layout.account.as_path())),
+        None
+    );
 }
 
 /// Why: #9793 — the point of the override. Under the flag, a sandbox home
@@ -520,4 +559,132 @@ fn sandbox_flag_with_the_real_home_still_refuses_the_keychain() {
     env.flag = None;
     let state = sandbox_state(fx.settings.clone(), factory, &env, &layout);
     assert!(state.open(&BackendId::keychain()).is_ok(), "control");
+}
+
+/// Why: #9793 (fix round), ruling Q3 — the flag with the real home gives no
+/// override, so the Keychain is still the account's: a delete there cannot
+/// skip a backend `State::open` refuses. The index row and the `file` value
+/// stay, and the answer is `backend_not_enabled`. The sweep reaches the
+/// Keychain on macOS and an enabled CLI backend on a `cli-backends` build;
+/// on any other build it reaches neither and the test returns early.
+/// Red before the fix: the sweep skips the refused backend, the delete
+/// answers `removed: true` and the Keychain value is left with no row.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_is_refused_under_the_flag_with_the_real_home() {
+    if !cfg!(target_os = "macos") && !cfg!(feature = "cli-backends") {
+        return;
+    }
+    let fx = fixture();
+    let layout = Layout::new(&fx);
+    select_file_by_flag(&fx);
+    // Consent and the sweep's machine config: the account's own file.
+    let account_config = layout.account_consent();
+    std::fs::create_dir_all(account_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &account_config,
+        "secrets:\n  default_backend: file\n  onepassword: {}\n",
+    )
+    .unwrap();
+    let file = layout.file();
+    let (factory, _) = recording(&fx, file.clone());
+    let mut env = layout.env();
+    env.home = Some(layout.account.clone().into());
+    let target = json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A"});
+
+    // Without the flag: the key is set and indexed.
+    let mut plain = env.clone();
+    plain.flag = None;
+    let state = sandbox_state(fx.settings.clone(), factory.clone(), &plain, &layout);
+    let server = fx.start_state(state).await;
+    ok(call(&fx.settings.socket, method::SET, set_params(&fx, "A")).await);
+    server.stop().await;
+
+    // With the flag and the real home: the delete is refused whole.
+    let state = sandbox_state(fx.settings.clone(), factory, &env, &layout);
+    assert!(state.sandboxed && !state.sandbox_override);
+    let server = fx.start_state(state).await;
+    let refused = call(&fx.settings.socket, method::DELETE, target).await;
+    let list = json!({"project": fx.project(), "vault": "trusty/acme/web"});
+    let listed = ok(call(&fx.settings.socket, method::LIST, list).await);
+    server.stop().await;
+    assert_eq!(
+        fixed_error(&refused, method::DELETE),
+        ErrorKind::BackendNotEnabled
+    );
+    assert_eq!(listed["keys"][0]["name"], "A", "the index row stays");
+    assert!(
+        file.get(&vault("trusty/acme/web"), &key("A"))
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// Why: #9793 (fix round) — `State::new` once read the process environment,
+/// so a test binary that set `TRUSTY_SANDBOX=1` turned every server in the
+/// process into a sandbox. The sandbox variables now reach a server only
+/// through `StartEnv`, and `State::new` is never sandboxed.
+/// Red before the fix: `with_start` and `with_sandbox` do not exist.
+/// Test: itself.
+#[test]
+fn state_takes_the_sandbox_from_start_env_and_new_is_never_sandboxed() {
+    let fx = fixture();
+    let layout = Layout::new(&fx);
+    let start = StartEnv::default().with_sandbox(layout.env());
+    let state = State::with_start(
+        fx.settings.clone(),
+        fx.backends(),
+        start,
+        Some(&layout.account),
+    );
+    assert!(state.sandboxed && state.sandbox_override);
+    assert_eq!(state.file_consent_config, Some(layout.consent()));
+
+    let state = State::new(fx.settings.clone(), fx.backends());
+    assert!(!state.sandboxed && !state.sandbox_override);
+    assert_eq!(StartEnv::default().sandbox, SandboxEnv::default());
+}
+
+/// Every non-test `.rs` file under `dir`, except the binary's own.
+fn library_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if name != "bin" {
+                library_sources(&path, out);
+            }
+        } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// Why: #9793 (fix round) — library code must not read `TRUSTY_SANDBOX`,
+/// `TRUSTY_DATA_DIR_OVERRIDE` or the sandbox `HOME` from the process
+/// environment; only the binary does, once, at start.
+/// What: scans every non-test source under `src/` but `src/bin` for the
+/// variables' names and constants.
+/// Red before the fix: `sandbox.rs` read all three.
+/// Test: itself.
+#[test]
+fn library_code_never_reads_the_sandbox_variables_from_the_process_env() {
+    let mut files = Vec::new();
+    library_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 10, "the scan found {} files", files.len());
+    let banned = [
+        "SANDBOX_ENV_VAR",
+        "DATA_DIR_OVERRIDE_ENV",
+        "\"TRUSTY_SANDBOX\"",
+        "var_os(\"HOME\")",
+    ];
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for name in banned {
+            assert!(!text.contains(name), "{} reads {name}", file.display());
+        }
+    }
 }
