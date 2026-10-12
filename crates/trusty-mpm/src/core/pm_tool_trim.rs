@@ -39,7 +39,7 @@ pub const DISALLOWED_TOOLS: [&str; 2] = ["Workflow", "DesignSync"];
 ///
 /// What: `CLAUDE_CODE_DISABLE_ARTIFACT=1` for a PM; nothing for a supervisor.
 /// Test: `a_pm_launch_disables_the_artifact_tools`,
-/// `a_supervisor_launch_keeps_every_tool`.
+/// `an_architect_launch_keeps_every_tool`.
 pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
     match profile {
         SessionProfile::Pm => vec![(DISABLE_ARTIFACT_ENV.to_owned(), "1".to_owned())],
@@ -54,7 +54,7 @@ pub fn trim_env(profile: SessionProfile) -> Vec<(String, String)> {
 /// What: `["--disallowedTools", "Workflow,DesignSync"]`
 /// for a PM; empty for a supervisor.
 /// Test: `a_pm_launch_denies_the_optional_built_ins`,
-/// `a_supervisor_launch_keeps_every_tool`.
+/// `an_architect_launch_keeps_every_tool`.
 pub fn trim_args(profile: SessionProfile) -> Vec<String> {
     match profile {
         SessionProfile::Pm => vec![DISALLOWED_TOOLS_FLAG.to_owned(), DISALLOWED_TOOLS.join(",")],

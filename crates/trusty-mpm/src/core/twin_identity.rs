@@ -39,7 +39,7 @@ use crate::core::session_profile;
 /// boundary, like the #8453 `[supervisor] projects` allowlist it narrows.
 /// What: `projects` — absolute project paths granted twin mode, matched after
 /// canonicalization. A relative entry matches nothing. Absent → no grant.
-/// Test: `a_supervisor_without_the_twin_grant_is_not_twin`.
+/// Test: `an_architect_without_the_twin_grant_is_not_twin`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TwinGrant {
@@ -211,8 +211,8 @@ pub fn thread_kind(payload: &Value, sub_agent_env: bool) -> ThreadKind {
 /// What: `Err(NotArchitectProfile)` unless [`session_profile::resolve`] says
 /// supervisor; `Err(NoGrant)` unless `[supervisor.twin] projects` lists the
 /// project ([`session_profile::path_is_listed`]).
-/// Test: `a_supervisor_without_the_twin_grant_is_not_twin`,
-/// `a_twin_grant_without_the_supervisor_allowlist_is_not_twin`.
+/// Test: `an_architect_without_the_twin_grant_is_not_twin`,
+/// `a_twin_grant_without_the_architect_allowlist_is_not_twin`.
 pub fn check_grant(project_dir: &Path, config: &MpmConfig) -> Result<(), TwinRefusal> {
     if !session_profile::resolve(project_dir, config).is_architect() {
         return Err(TwinRefusal::NotArchitectProfile);

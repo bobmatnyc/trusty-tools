@@ -41,7 +41,7 @@ use serde_json::Value;
 /// `~/.trusty-mpm/config.toml` and reads it back through `toml_edit`
 /// (`bin/tm/commands/fleet/session_name.rs`), so `MpmConfig` never declares it.
 /// A key the product itself wrote is not a typo and must not be reported as one.
-/// Test: `a_product_written_supervisor_session_is_not_reported`,
+/// Test: `a_product_written_architect_session_is_not_reported`,
 /// `the_recorded_session_key_is_exempt_from_the_unknown_key_report`.
 // #9755: `architect.session` is read before the legacy `supervisor.session`.
 pub const KEYS_READ_ELSEWHERE: &[&str] = &["architect.session", "supervisor.session"];

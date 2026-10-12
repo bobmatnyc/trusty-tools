@@ -50,8 +50,8 @@ impl ProtectedVerb {
 /// manual `tmux kill-session`; the daemon's own verbs all refuse.
 /// What: `Err(InvalidState)` naming the kind and the way out when the record
 /// is protected and not terminal; `Ok(())` otherwise.
-/// Test: `stop_refuses_a_supervisor_record_and_never_signals_it`,
-/// `resume_refuses_a_supervisor_record`, `delete_refuses_a_live_supervisor_record`.
+/// Test: `stop_refuses_an_architect_record_and_never_signals_it`,
+/// `resume_refuses_an_architect_record`, `delete_refuses_a_live_architect_record`.
 pub(crate) fn refuse_protected(
     record: &SessionRecord,
     verb: ProtectedVerb,
@@ -72,9 +72,9 @@ pub(crate) fn refuse_protected(
 /// Whether a daemon sweep named `path` must leave `record` alone (#8942).
 ///
 /// What: `true`, logged at debug, for a live record of a protected kind.
-/// Test: `idle_reaper_never_stops_a_supervisor_record`,
-/// `shutdown_skips_a_supervisor_session`,
-/// `prune_include_active_never_decommissions_a_supervisor_record`.
+/// Test: `idle_reaper_never_stops_an_architect_record`,
+/// `shutdown_skips_an_architect_session`,
+/// `prune_include_active_never_decommissions_an_architect_record`.
 pub(crate) fn skip_protected(record: &SessionRecord, path: &str) -> bool {
     let skip = record.kind.is_protected() && !record.state.is_terminal();
     if skip {
@@ -110,7 +110,7 @@ impl SessionManager {
     /// gone; the record must say so, but no teardown may run for it.
     /// What: refuses a terminal record like `stop`; otherwise sets `Stopped`
     /// with `cause`, persists, and bumps the residency generation.
-    /// Test: `the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown`.
+    /// Test: `the_tmux_gone_reaper_marks_an_architect_record_stopped_without_teardown`.
     pub async fn mark_stopped_record_only(
         &self,
         id: &ManagedSessionId,
@@ -139,7 +139,7 @@ impl ManagedSessionId {
     /// never mint a second one.
     /// What: UUIDv5, under a fixed namespace, of the canonical `dir`, a NUL,
     /// and `role` (`supervisor`, or a helper suffix such as `-poll`).
-    /// Test: `the_supervisor_id_is_stable_per_dir_and_role`.
+    /// Test: `the_architect_id_is_stable_per_dir_and_role`.
     pub fn for_architect(dir: &Path, role: &str) -> Self {
         /// Never change it: the value IS the identity of every Architect record.
         const ARCHITECT_NAMESPACE: Uuid =

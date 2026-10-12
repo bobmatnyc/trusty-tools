@@ -8,7 +8,7 @@
 //! is installed. `env_serial` runs one test at a time, so the `$HOME` change
 //! is invisible to every other test.
 //! Test: this file IS the test; run with
-//! `cargo test -p trusty-mpm --test env_serial supervisor_floor_host::`.
+//! `cargo test -p trusty-mpm --test env_serial architect_floor_host::`.
 
 use trusty_mpm::session_manager::{ArchitectFloor, KillVerdict};
 

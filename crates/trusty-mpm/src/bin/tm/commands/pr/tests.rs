@@ -3674,13 +3674,10 @@ fn pr_8934_an_explicit_repo_never_skips() {
         "profile = \"supervisor\"\n",
     )
     .expect("toml");
-    let mut supervisor = trusty_mpm::core::config::MpmConfig::default();
-    supervisor.architect.get_or_insert_default().projects =
+    let mut architect = trusty_mpm::core::config::MpmConfig::default();
+    architect.architect.get_or_insert_default().projects =
         vec![std::fs::canonicalize(local.path()).expect("canon")];
-    assert_eq!(
-        super::local_only_skip(local.path(), None, &supervisor),
-        None
-    );
+    assert_eq!(super::local_only_skip(local.path(), None, &architect), None);
 }
 
 // #9571: `tm pr open`'s phase-title tests, split out for the test SLOC cap.

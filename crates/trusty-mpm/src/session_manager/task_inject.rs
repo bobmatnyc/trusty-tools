@@ -230,7 +230,7 @@ impl SessionManager {
     /// #8942: a live protected-kind record returns `Ok(false)` untouched.
     /// Test: `inject_when_ready_sends_task_via_send_seam`,
     /// `inject_when_ready_skips_empty_task`,
-    /// `task_injection_never_types_into_a_supervisor_pane`,
+    /// `task_injection_never_types_into_an_architect_pane`,
     /// `inject_when_ready_marks_success_status`,
     /// `inject_when_ready_marks_failed_session_died_status`,
     /// `inject_when_ready_times_out_when_modal_never_clears`,

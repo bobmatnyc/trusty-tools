@@ -260,7 +260,7 @@ pub async fn idle_reaper_loop<P>(
 /// case it only logs the action it would take and leaves the session untouched.
 /// #8942: a live protected-kind record is skipped before the verdict.
 /// Test: `sweep_dry_run_does_not_stop`, `sweep_live_stops_idle_session`,
-/// `sweep_live_decommissions_done_session`, `idle_reaper_never_stops_a_supervisor_record`;
+/// `sweep_live_decommissions_done_session`, `idle_reaper_never_stops_an_architect_record`;
 /// decision logic via `apply_verdict`.
 async fn run_one_sweep<P: IdleVerdictProvider>(
     manager: &Arc<SessionManager>,
@@ -768,7 +768,7 @@ mod tests {
     /// The stop refusal would hide a missing skip, so the test also asserts
     /// the sweep never asks the classifier about the record.
     #[tokio::test]
-    async fn idle_reaper_never_stops_a_supervisor_record() {
+    async fn idle_reaper_never_stops_an_architect_record() {
         let dir = TempDir::new().unwrap();
         let (mgr, id) = manager_with_active_session(&dir).await;
         let mut record = mgr.get(&id).await.expect("record");

@@ -75,7 +75,7 @@ impl SessionManager {
     /// [`ManagedError::InvalidState`] before any tmux call, and a kill-floor
     /// refusal ([`ManagedError::KillRefused`]) returns before the record moves.
     /// Test: `stop_records_deliberate_cause` in `stop_cause_tests`;
-    /// `stop_refuses_a_supervisor_record_and_never_signals_it`,
+    /// `stop_refuses_an_architect_record_and_never_signals_it`,
     /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`;
     /// `reap_marks_a_targeted_kill_deliberate`,
     /// `reap_leaves_a_whole_server_loss_auto_resumable`,

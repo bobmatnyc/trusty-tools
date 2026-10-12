@@ -9,8 +9,8 @@
 //! does not list the project under `[supervisor] projects`; otherwise `Ok`,
 //! naming the profile a launch would resolve. `Warn`s too when the config has
 //! both `[architect]` and the legacy `[supervisor]` (#9755, Q7). Read-only.
-//! Test: `a_project_only_supervisor_switch_warns`,
-//! `an_allow_listed_supervisor_is_ok`, `both_architect_tables_warn`.
+//! Test: `a_project_only_architect_switch_warns`,
+//! `an_allow_listed_architect_is_ok`, `both_architect_tables_warn`.
 
 use std::path::Path;
 
@@ -27,8 +27,8 @@ const NAME: &str = "session_profile";
 /// What: loads the user config under `<home>/.trusty-mpm`; `Warn` with the
 /// refusal reason, else `Ok` naming the profile. No project → `Ok`, nothing to
 /// resolve.
-/// Test: `a_project_only_supervisor_switch_warns`,
-/// `an_allow_listed_supervisor_is_ok`, `both_architect_tables_warn`.
+/// Test: `a_project_only_architect_switch_warns`,
+/// `an_allow_listed_architect_is_ok`, `both_architect_tables_warn`.
 pub(super) fn check_session_profile(project_dir: Option<&Path>, home: &Path) -> DoctorCheck {
     let config = MpmConfig::load(&home.join(".trusty-mpm"));
     let (status, message) = profile_verdict(project_dir, &config);
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn a_project_only_supervisor_switch_warns() {
+    fn a_project_only_architect_switch_warns() {
         let (project, home) = fixture();
         let check = check_session_profile(Some(project.path()), home.path());
         assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_listed_supervisor_is_ok() {
+    fn an_allow_listed_architect_is_ok() {
         let (project, home) = fixture();
         let root = home.path().join(".trusty-mpm");
         std::fs::create_dir_all(&root).unwrap();

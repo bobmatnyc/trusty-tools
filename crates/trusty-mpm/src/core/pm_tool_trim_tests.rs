@@ -39,7 +39,7 @@ fn the_chrome_tools_are_never_denied() {
 }
 
 #[test]
-fn a_supervisor_launch_keeps_every_tool() {
+fn an_architect_launch_keeps_every_tool() {
     assert!(trim_env(SessionProfile::Architect).is_empty());
     assert!(trim_args(SessionProfile::Architect).is_empty());
 }

@@ -67,7 +67,7 @@ impl SessionManager {
     /// [`ManagedError::TmuxUnavailable`] and no record is touched (#5859).
     /// #8942: a non-terminal record of a protected kind is refused with
     /// [`ManagedError::InvalidState`], even with `force`.
-    /// Test: `delete_refuses_a_live_supervisor_record`, `delete_record_marks_deleted`,
+    /// Test: `delete_refuses_a_live_architect_record`, `delete_record_marks_deleted`,
     /// `delete_record_refuses_when_the_tmux_probe_fails` (#5859),
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,

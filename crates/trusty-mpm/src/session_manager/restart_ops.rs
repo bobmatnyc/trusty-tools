@@ -54,7 +54,7 @@ impl SessionManager {
     /// the `$N` id it read. A session gone by then counts as stopped. Fails
     /// open per session; logs a summary.
     /// Test: `shutdown_stops_an_owned_active_session` in tests.rs;
-    /// `shutdown_skips_a_supervisor_session`;
+    /// `shutdown_skips_an_architect_session`;
     /// `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`,
     /// `shutdown_skips_a_record_whose_pane_identity_is_unreadable`.
     pub async fn shutdown(&self) {

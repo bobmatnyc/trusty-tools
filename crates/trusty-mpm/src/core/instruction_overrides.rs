@@ -299,7 +299,7 @@ pub fn resolve_pm_prompt(content: &FrameworkContent, project_dir: &Path) -> Stri
 /// Why: a launch resolves the profile once and hands the same value to the
 /// composer, the style, the model and the settings, so they cannot disagree.
 /// What: [`resolve_pm_prompt_with_roster_for`] with the live roster scan.
-/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
+/// Test: `an_architect_launch_gets_the_architect_prompt_style_and_model`.
 pub fn resolve_pm_prompt_for(
     content: &FrameworkContent,
     project_dir: &Path,
@@ -399,7 +399,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// Why: see [`resolve_pm_prompt_for`].
 /// What: the supervisor prompt for a supervisor profile; otherwise the PM
 /// composition, unchanged.
-/// Test: `a_supervisor_project_needs_no_claude_md_override_blocks`.
+/// Test: `an_architect_project_needs_no_claude_md_override_blocks`.
 pub(crate) fn resolve_pm_prompt_with_roster_for(
     content: &FrameworkContent,
     project_dir: &Path,

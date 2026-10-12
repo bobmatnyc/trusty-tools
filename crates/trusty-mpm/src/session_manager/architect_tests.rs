@@ -82,7 +82,7 @@ async fn an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_ses
 /// Ruling 1: an operator stop of the Architect is refused before any tmux
 /// call, and the refusal says how to stop it.
 #[tokio::test]
-async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
+async fn stop_refuses_an_architect_record_and_never_signals_it() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
@@ -104,7 +104,7 @@ async fn stop_refuses_a_supervisor_record_and_never_signals_it() {
 
 /// The daemon's shutdown stops ordinary sessions and never the Architect's.
 #[tokio::test]
-async fn shutdown_skips_a_supervisor_session() {
+async fn shutdown_skips_an_architect_session() {
     let (dir, fake, mgr) = manager().await;
     let arch = seed(
         &mgr,
@@ -146,7 +146,7 @@ async fn shutdown_skips_a_supervisor_session() {
 /// `--state all --include-active` never selects the Architect: a dry run does
 /// not list it, and a real run leaves it `Active`.
 #[tokio::test]
-async fn prune_include_active_never_decommissions_a_supervisor_record() {
+async fn prune_include_active_never_decommissions_an_architect_record() {
     let (dir, _fake, mgr) = manager().await;
     let id = seed(
         &mgr,
@@ -172,7 +172,7 @@ async fn prune_include_active_never_decommissions_a_supervisor_record() {
 /// An operator resume of a stopped Architect record is refused and points at
 /// `tm fleet init`; no pane is killed or created.
 #[tokio::test]
-async fn resume_refuses_a_supervisor_record() {
+async fn resume_refuses_an_architect_record() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
@@ -194,7 +194,7 @@ async fn resume_refuses_a_supervisor_record() {
 /// Critic MEDIUM: `delete --force` of a live Architect record is refused, so
 /// the record keeps protecting its name.
 #[tokio::test]
-async fn delete_refuses_a_live_supervisor_record() {
+async fn delete_refuses_a_live_architect_record() {
     let (dir, _fake, mgr) = manager().await;
     let id = seed(
         &mgr,
@@ -213,7 +213,7 @@ async fn delete_refuses_a_live_supervisor_record() {
 
 /// Ruling 4: a task is never typed into the Architect's ready pane.
 #[tokio::test]
-async fn task_injection_never_types_into_a_supervisor_pane() {
+async fn task_injection_never_types_into_an_architect_pane() {
     let (dir, fake, mgr) = manager().await;
     let id = seed(
         &mgr,
@@ -234,7 +234,7 @@ async fn task_injection_never_types_into_a_supervisor_pane() {
 /// A live pane a sidecar names is adopted at boot as the Architect's record,
 /// under its stable id, never as an ordinary adopted session.
 #[tokio::test]
-async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
+async fn boot_reconcile_adopts_a_sidecar_named_pane_as_architect() {
     let (dir, fake, mgr) = manager().await;
     sidecar(dir.path(), "tm-arch");
     let arch_dir = dir.path().join("architect");
@@ -264,7 +264,7 @@ async fn boot_reconcile_adopts_a_sidecar_named_pane_as_supervisor() {
 /// One Architect dir and role always give the same id; a different role or
 /// dir gives a different one.
 #[test]
-fn the_supervisor_id_is_stable_per_dir_and_role() {
+fn the_architect_id_is_stable_per_dir_and_role() {
     let dir = crate::test_support::hermetic_temp_dir();
     let other = crate::test_support::hermetic_temp_dir();
     let id = ManagedSessionId::for_architect(dir.path(), "supervisor");

@@ -106,7 +106,7 @@ pub enum NudgeOutcome {
 /// manager's normal `inject` path.
 /// #8942: a live protected-kind record never correlates.
 /// Test: `run_nudge_injects_when_idle_and_enabled`,
-/// `idle_nudge_never_types_into_a_supervisor_pane`,
+/// `idle_nudge_never_types_into_an_architect_pane`,
 /// `run_nudge_skips_when_disabled`, `run_nudge_skips_when_live_children`,
 /// `run_nudge_skips_human_wait_phrase`, `run_nudge_no_managed_session`,
 /// `run_nudge_respects_cap`, `run_nudge_prunes_stale_ledger_entries`.
@@ -404,7 +404,7 @@ mod tests {
     /// #8942 ruling 4: the same parked, correlated, idle session is never
     /// nudged once its record is the Architect's.
     #[tokio::test]
-    async fn idle_nudge_never_types_into_a_supervisor_pane() {
+    async fn idle_nudge_never_types_into_an_architect_pane() {
         let dir = TempDir::new().unwrap();
         let claude_id = uuid::Uuid::new_v4().to_string();
         let (mgr, id) = manager_with_active_correlated(&dir, &claude_id).await;

@@ -1044,7 +1044,7 @@ impl SessionManager {
     /// refusal at the runtime teardown aborts before any removal or record
     /// write. #8935: so does a live session whose ownership of the record's
     /// pane cannot be proved ([`ManagedError::InvalidState`]).
-    /// Test: `prune_include_active_never_decommissions_a_supervisor_record`,
+    /// Test: `prune_include_active_never_decommissions_an_architect_record`,
     /// `an_undeterminable_floor_aborts_stop_and_decommission_of_an_ordinary_session`,
     /// `decommission_with_an_unlistable_pane_set_changes_nothing`.
     async fn decommission_with_root_checked(

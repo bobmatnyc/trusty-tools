@@ -101,7 +101,7 @@ async fn seed_kind(
 /// Fail-Open Check: a verifier that cannot bind the session writes nothing,
 /// so no caller can make an arbitrary session unkillable.
 #[tokio::test]
-async fn register_supervisor_refuses_an_unbound_session() {
+async fn register_architect_refuses_an_unbound_session() {
     let (root, _fake, mgr) = manager().await;
     let reg = registration(&root, None);
     let err = mgr
@@ -143,11 +143,11 @@ async fn relaunching_the_architect_replaces_its_record() {
     assert_eq!(record.kind, SessionKind::Architect);
     assert_eq!(record.state, ManagedSessionState::Active);
     assert!(!record.workspace_owned);
-    let supervisors = mgr.list().await;
-    let supervisors = supervisors
+    let architects = mgr.list().await;
+    let architects = architects
         .iter()
         .filter(|r| r.kind == SessionKind::Architect);
-    assert_eq!(supervisors.count(), 1, "one live row, never two");
+    assert_eq!(architects.count(), 1, "one live row, never two");
     let live_state = mgr.get(&live).await.expect("record").state;
     assert_eq!(live_state, ManagedSessionState::Deleted);
     let stopped_state = mgr.get(&stopped).await.expect("record").state;
@@ -452,7 +452,7 @@ async fn a_helper_whose_pane_cannot_be_placed_is_not_registered() {
 /// A relative directory or a name tmux could misread is refused before the
 /// binding is checked or anything is written.
 #[tokio::test]
-async fn register_supervisor_refuses_a_relative_dir_or_a_bad_name() {
+async fn register_architect_refuses_a_relative_dir_or_a_bad_name() {
     let (root, _fake, mgr) = manager().await;
     let verifier = Verifier::bound();
     let mut relative = registration(&root, None);

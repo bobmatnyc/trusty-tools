@@ -165,7 +165,7 @@ fn an_unknown_thread_is_not_twin() {
 }
 
 #[test]
-fn a_session_without_the_supervisor_stamp_is_not_twin() {
+fn a_session_without_the_architect_stamp_is_not_twin() {
     let twin = Twin::new();
     let payload = main_payload();
     for (stamp, dir) in [
@@ -205,7 +205,7 @@ fn an_unreadable_user_config_is_not_twin() {
 }
 
 #[test]
-fn a_supervisor_without_the_twin_grant_is_not_twin() {
+fn an_architect_without_the_twin_grant_is_not_twin() {
     let twin = Twin::new();
     let other = TempDir::new().expect("tempdir");
     for grant in [vec![], vec![other.path().to_path_buf()], vec!["rel".into()]] {
@@ -220,7 +220,7 @@ fn a_supervisor_without_the_twin_grant_is_not_twin() {
 }
 
 #[test]
-fn a_twin_grant_without_the_supervisor_allowlist_is_not_twin() {
+fn a_twin_grant_without_the_architect_allowlist_is_not_twin() {
     let twin = Twin::new();
     let mut config = twin.config();
     config.architect.get_or_insert_default().projects.clear();

@@ -496,14 +496,14 @@ fn a_pane_listing_run_is_classified() {
     type Sidecars = Result<Vec<String>, String>;
     type Marks = Result<Vec<bool>, String>;
     let text = "%1\t@1\t$1\t100\t0\ttm-architect\n%2\t@2\t$2\t300\t0\tpm\n";
-    let custom = "%1\t@1\t$1\t100\t0\ttm-supervisor\n%2\t@2\t$2\t300\t0\tpm\n";
+    let custom = "%1\t@1\t$1\t100\t0\ttm-arch-ops\n%2\t@2\t$2\t300\t0\tpm\n";
     let marks = |r: Result<Vec<Pane>, String>| -> Marks {
         r.map(|panes| panes.iter().map(|p| p.architect).collect())
     };
     let ran = |ok, stdout, stderr| Listed::Ran { ok, stdout, stderr };
     let unreadable: Lineage = Err("records unreadable".into());
     let none: Sidecars = Ok(vec![]);
-    let supervisor: Sidecars = Ok(vec!["tm-supervisor".into()]);
+    let custom_named: Sidecars = Ok(vec!["tm-arch-ops".into()]);
     let stale_pm: Sidecars = Ok(vec!["pm".into()]);
     let no_sidecars: Sidecars = Err("sidecars unreadable".into());
     let neither = "the Architect launch records do not read (records unreadable; \
@@ -568,7 +568,7 @@ fn a_pane_listing_run_is_classified() {
         (
             ran(true, custom, ""),
             &unreadable,
-            &supervisor,
+            &custom_named,
             Ok(vec![true, false]),
         ),
         (

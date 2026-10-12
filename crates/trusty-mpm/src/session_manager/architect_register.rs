@@ -120,7 +120,7 @@ impl SessionManager {
     /// and `pane_claude` proves no `claude` runs in the pane, the pane's own
     /// process included; `Present`, `Unknown` or another cwd lists it in
     /// `skipped`.
-    /// Test: `register_supervisor_refuses_an_unbound_session`,
+    /// Test: `register_architect_refuses_an_unbound_session`,
     /// `relaunching_the_architect_replaces_its_record`,
     /// `a_helper_not_named_after_the_architect_is_refused`,
     /// `a_helper_whose_pane_runs_claude_is_not_registered`,
@@ -128,7 +128,7 @@ impl SessionManager {
     /// `a_helper_whose_pane_pid_cannot_be_read_is_not_registered`,
     /// `registration_deletes_every_stale_architect_record`,
     /// `a_helper_whose_pane_cannot_be_placed_is_not_registered`,
-    /// `register_supervisor_refuses_a_relative_dir_or_a_bad_name`.
+    /// `register_architect_refuses_a_relative_dir_or_a_bad_name`.
     pub async fn register_architect(
         &self,
         reg: &ArchitectRegistration,

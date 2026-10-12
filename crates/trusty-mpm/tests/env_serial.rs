@@ -22,6 +22,7 @@ mod common;
 mod auth_cost;
 mod daemon_dual_serve;
 // #9121: a test daemon's environment carries no inherited secret.
+mod architect_floor_host;
 mod daemon_env_isolation;
 mod inproject_cold_start;
 mod inproject_git_failure;
@@ -33,7 +34,6 @@ mod scratch_root_tmux_gate;
 mod session_manager_mvp;
 mod session_new_requires_a_local_path;
 mod standalone_isolation;
-mod supervisor_floor_host;
 mod test_session_lifecycle;
 mod worktree_disk_usage_gate;
 mod worktree_request_fail_closed;

@@ -109,10 +109,10 @@ fn a_bad_session_flag_is_refused_before_any_write() {
         let err = SessionNames::new(bad).expect_err(bad);
         assert!(format!("{err:#}").contains("invalid --session"), "{err:#}");
     }
-    let names = SessionNames::new("tm-supervisor").expect("valid");
+    let names = SessionNames::new("tm-arch-ops").expect("valid");
     assert_eq!(
         (names.architect(), names.poll()),
-        ("tm-supervisor", "tm-supervisor-poll")
+        ("tm-arch-ops", "tm-arch-ops-poll")
     );
     let default = SessionNames::default_names();
     assert_eq!(
@@ -126,17 +126,17 @@ fn a_bad_session_flag_is_refused_before_any_write() {
 #[test]
 fn init_with_a_session_records_it_and_status_reads_it_back() {
     let h = Home::new();
-    let report = h.init(Some("tm-supervisor"), LOGGING).expect("init");
+    let report = h.init(Some("tm-arch-ops"), LOGGING).expect("init");
     assert!(
         report
             .steps
             .iter()
-            .any(|s| matches!(s, Step::Changed(t) if t.contains("`[supervisor] session = \"tm-supervisor\"`"))),
+            .any(|s| matches!(s, Step::Changed(t) if t.contains("`[supervisor] session = \"tm-arch-ops\"`"))),
         "{}",
         report.render()
     );
     assert!(
-        h.config().contains("session = \"tm-supervisor\""),
+        h.config().contains("session = \"tm-arch-ops\""),
         "{}",
         h.config()
     );
@@ -144,23 +144,23 @@ fn init_with_a_session_records_it_and_status_reads_it_back() {
 
     let again = h.init(None, LOGGING).expect("second init");
     assert!(!again.changed(), "{}", again.render());
-    assert!(asked().iter().all(|n| n == "tm-supervisor"));
+    assert!(asked().iter().all(|n| n == "tm-arch-ops"));
 
     let report = h.status(None, LOGGING);
-    assert_eq!(report.session, "tm-supervisor");
+    assert_eq!(report.session, "tm-arch-ops");
     assert!(
-        check(&report, "session").detail.contains("tm-supervisor"),
+        check(&report, "session").detail.contains("tm-arch-ops"),
         "{}",
         report.render()
     );
     let seen = asked();
     assert!(
-        !seen.is_empty() && seen.iter().all(|n| n == "tm-supervisor"),
+        !seen.is_empty() && seen.iter().all(|n| n == "tm-arch-ops"),
         "{seen:?}"
     );
 
     // The same flag again changes nothing.
-    let same = h.init(Some("tm-supervisor"), LOGGING).expect("same flag");
+    let same = h.init(Some("tm-arch-ops"), LOGGING).expect("same flag");
     assert!(!same.changed(), "{}", same.render());
 }
 
@@ -193,7 +193,7 @@ fn status_without_the_flag_reads_the_recorded_name() {
 #[test]
 fn a_rename_is_refused_while_the_recorded_session_runs() {
     let h = Home::new();
-    h.init(Some("tm-supervisor"), NO_TMUX).expect("first init");
+    h.init(Some("tm-arch-ops"), NO_TMUX).expect("first init");
     let before = h.config();
     let live = Probe {
         pane: |_| PaneState::Live(PathBuf::from("/fleet-stub/any")),
@@ -242,8 +242,8 @@ fn a_malformed_recorded_name_refuses_init_and_fails_status() {
         assert!(!report.complete);
         // An explicit flag does not read the recorded name.
         assert_eq!(
-            h.status(Some("tm-supervisor"), NO_TMUX).session,
-            "tm-supervisor"
+            h.status(Some("tm-arch-ops"), NO_TMUX).session,
+            "tm-arch-ops"
         );
     }
 }
@@ -271,7 +271,7 @@ fn status_binding_needs_the_record_and_the_same_session() {
     );
 
     unbound(
-        binding(Some("tm-supervisor"), LIVE_ME),
+        binding(Some("tm-arch-ops"), LIVE_ME),
         "names tmux session tm-architect",
     );
     let no_claude = Probe {
@@ -352,11 +352,11 @@ fn a_running_unbound_session_is_reported_by_init() {
 #[test]
 fn a_rename_is_refused_while_only_the_recorded_poller_runs() {
     let h = Home::new();
-    h.init(Some("tm-supervisor"), NO_TMUX).expect("first init");
+    h.init(Some("tm-arch-ops"), NO_TMUX).expect("first init");
     let before = h.config();
     let poller_only = Probe {
         pane: |name| {
-            if name == "tm-supervisor-poll" {
+            if name == "tm-arch-ops-poll" {
                 PaneState::Live(PathBuf::from("/fleet-stub/any"))
             } else {
                 PaneState::Absent
@@ -366,7 +366,7 @@ fn a_rename_is_refused_while_only_the_recorded_poller_runs() {
     };
     let err = h.init(Some("other"), poller_only).expect_err("poller runs");
     assert!(
-        format!("{err:#}").contains("the recorded session tm-supervisor-poll still exists"),
+        format!("{err:#}").contains("the recorded session tm-arch-ops-poll still exists"),
         "{err:#}"
     );
     assert_eq!(h.config(), before);
@@ -385,12 +385,12 @@ fn the_start_command_carries_the_chosen_session_names() {
         };
         (get("ARCHITECT_SESSION"), get("ARCHITECT_POLL_SESSION"))
     };
-    let chosen = SessionNames::new("tm-supervisor").expect("valid");
+    let chosen = SessionNames::new("tm-arch-ops").expect("valid");
     assert_eq!(
         env(&chosen),
         (
-            Some("tm-supervisor".to_owned()),
-            Some("tm-supervisor-poll".to_owned())
+            Some("tm-arch-ops".to_owned()),
+            Some("tm-arch-ops-poll".to_owned())
         )
     );
     assert_eq!(

@@ -105,7 +105,7 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
 /// Why (#8453): the PM invariants — the mandatory-delegation floor, the
 /// identity protocol, the TodoWrite section — hold for every style a PM session
 /// can select, and the supervisor style deliberately carries none of them.
-/// Test: `the_pm_styles_are_every_style_but_the_supervisor_style`.
+/// Test: `the_pm_styles_are_every_style_but_the_architect_style`.
 pub fn pm_output_styles() -> impl Iterator<Item = &'static BundledStyle> {
     OUTPUT_STYLES
         .iter()

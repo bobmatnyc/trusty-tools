@@ -11,11 +11,11 @@
 //! user-level allowlist and the project file to agree
 //! ([`session_profile::hook_profile`]); a session cannot grant it to itself
 //! by editing `.trusty-mpm.toml`.
-//! Test: `a_supervisor_session_is_not_bound_by_the_pm_delegation_rules`,
+//! Test: `an_architect_session_is_not_bound_by_the_pm_delegation_rules`,
 //! `a_project_only_switch_keeps_the_pm_delegation_rules`,
 //! `a_stamp_without_the_file_keeps_the_pm_delegation_rules`,
-//! `every_absolute_guard_still_binds_a_supervisor`
-//! (`tests/tm_hook_pm_guard_supervisor_8453.rs`).
+//! `every_absolute_guard_still_binds_an_architect`
+//! (`tests/tm_hook_pm_guard_architect_8453.rs`).
 
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
@@ -29,7 +29,7 @@ use trusty_mpm::core::session_profile;
 /// (allow). Otherwise — including every case where any input is missing or
 /// unreadable — the unchanged [`crate::commands::pm_guard::evaluate_tool`]
 /// verdict.
-/// Test: `a_supervisor_session_is_not_bound_by_the_pm_delegation_rules`,
+/// Test: `an_architect_session_is_not_bound_by_the_pm_delegation_rules`,
 /// `a_project_only_switch_keeps_the_pm_delegation_rules`.
 pub(crate) fn verdict(
     tool_name: &str,

@@ -345,7 +345,7 @@ pub struct SelectedStyle {
 /// supervisor style; any other session that names it gets the default plus a
 /// warning, because the supervisor style carries no delegation floor.
 /// Test: `a_manifest_only_style_is_named_alike_by_the_report_and_the_launch`,
-/// `a_pm_project_cannot_select_the_supervisor_style`.
+/// `a_pm_project_cannot_select_the_architect_style`.
 pub fn select_style(
     project_dir: &Path,
     explicit: Option<&str>,
@@ -354,7 +354,7 @@ pub fn select_style(
     profile: SessionProfile,
 ) -> SelectedStyle {
     let id = style_chain(project_dir, explicit, config, manifest, profile);
-    let supervisor_id = crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID;
+    let style_id = crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID;
     // #9755: the Architect style is refused to a PM under either id.
     if id
         .as_deref()
@@ -362,7 +362,7 @@ pub fn select_style(
         && !profile.is_architect()
     {
         let warning = format!(
-            "output style '{supervisor_id}' is for the supervisor profile only (set \
+            "output style '{style_id}' is for the supervisor profile only (set \
              `profile = \"supervisor\"` in .trusty-mpm.toml and allow-list the project under \
              `[supervisor] projects` in ~/.trusty-mpm/config.toml); using \
              `{DEFAULT_OUTPUT_STYLE_ID}` instead"

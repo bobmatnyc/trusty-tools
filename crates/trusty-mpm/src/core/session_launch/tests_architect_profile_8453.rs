@@ -66,7 +66,7 @@ fn set_profile(project: &Path, profile: &str) {
 
 #[test]
 #[serial_test::serial]
-fn a_supervisor_launch_gets_the_supervisor_prompt_style_and_model() {
+fn an_architect_launch_gets_the_architect_prompt_style_and_model() {
     let tmp = tempdir().unwrap();
     set_profile(tmp.path(), "supervisor");
     let home = home_allowing(tmp.path());

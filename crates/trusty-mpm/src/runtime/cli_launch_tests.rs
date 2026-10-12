@@ -110,7 +110,7 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
 /// launch is trimmed. Only an Architect stamp keeps every tool: `architect`
 /// or the legacy `supervisor` (#9755).
 #[test]
-fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
+fn only_an_architect_stamp_value_skips_the_pm_trim() {
     for value in ["architect", "supervisor"] {
         let env = vec![(
             crate::core::session_profile::SESSION_PROFILE_ENV.to_owned(),
@@ -165,7 +165,7 @@ fn an_unrecognised_stamp_value_launches_a_trimmed_pm() {
 /// #8992: a launch stamped supervisor (the Architect) keeps every tool — no
 /// Artifact switch, no `--disallowedTools`.
 #[test]
-fn a_supervisor_isolated_spec_keeps_every_tool() {
+fn an_architect_isolated_spec_keeps_every_tool() {
     use crate::core::session_profile::{SessionProfile, launch_env};
     let env = vec![launch_env(SessionProfile::Architect)];
     let launch = CliLaunch {

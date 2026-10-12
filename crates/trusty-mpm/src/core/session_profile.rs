@@ -69,7 +69,7 @@ pub const NOT_ALLOW_LISTED: &str = "project requests the supervisor profile but 
 /// What: `"opus"`, passed to `--model` and written to the project settings
 /// verbatim. It never goes through `MpmConfig::expand_model_alias`, which maps
 /// `opus` to a pinned id.
-/// Test: `the_supervisor_model_is_the_opus_tier_alias`.
+/// Test: `the_architect_model_is_the_opus_tier_alias`.
 pub const ARCHITECT_MODEL: &str = "opus";
 
 /// Which instruction profile a session runs.
@@ -121,7 +121,7 @@ pub struct ArchitectConfig {
 /// What: `(name, content path)`; `name` matches the file stem under
 /// `content/instructions/supervisor/`, and the path is relative to the content
 /// bundle's `instructions/` (#9012: runtime content, no longer compiled in).
-/// Test: `golden_supervisor_prompt`, `every_kept_item_reaches_the_supervisor_prompt`.
+/// Test: `golden_architect_prompt`, `every_kept_item_reaches_the_architect_prompt`.
 pub const ARCHITECT_SECTIONS: [(&str, &str); 8] = [
     ("identity", "architect/identity.md"),
     ("hard-limits", "architect/hard-limits.md"),
@@ -139,7 +139,7 @@ pub const ARCHITECT_SECTIONS: [(&str, &str); 8] = [
 /// What: each [`ARCHITECT_SECTIONS`] body, read from `content`, folded on its
 /// own (authoring comments removed, as the PM composer does), trimmed, and
 /// joined with a blank line. Pure and deterministic for one content source.
-/// Test: `golden_supervisor_prompt`, `the_supervisor_prompt_is_never_empty`.
+/// Test: `golden_architect_prompt`, `the_architect_prompt_is_never_empty`.
 pub fn architect_prompt(content: &crate::core::framework_content::FrameworkContent) -> String {
     ARCHITECT_SECTIONS
         .iter()
@@ -208,7 +208,7 @@ pub fn is_allow_listed(project_dir: &Path, allowed: &ArchitectConfig) -> bool {
 /// What: a relative entry, or a path that cannot be canonicalized, matches
 /// nothing.
 /// Test: `a_symlinked_allowlist_entry_is_canonicalized`,
-/// `a_supervisor_without_the_twin_grant_is_not_twin`.
+/// `an_architect_without_the_twin_grant_is_not_twin`.
 pub fn path_is_listed(project_dir: &Path, entries: &[PathBuf]) -> bool {
     let Ok(project) = std::fs::canonicalize(project_dir) else {
         return false;
@@ -239,7 +239,7 @@ pub fn refusal(project_dir: &Path, config: &MpmConfig) -> Option<&'static str> {
 /// allow-listed in `config` (the user-level config) AND [`requested`] says
 /// supervisor. Otherwise [`SessionProfile::Pm`]; a refused request is logged
 /// at `warn` with [`NOT_ALLOW_LISTED`].
-/// Test: `a_supervisor_config_selects_the_supervisor_profile`,
+/// Test: `an_architect_config_selects_the_architect_profile`,
 /// `a_project_only_switch_stays_pm`.
 pub fn resolve(project_dir: &Path, config: &MpmConfig) -> SessionProfile {
     if !requested(project_dir).is_architect() {
@@ -276,7 +276,7 @@ pub fn launch_env(profile: SessionProfile) -> (String, String) {
 /// it must name the supervisor's model too.
 /// What: [`ARCHITECT_MODEL`] for a supervisor; otherwise the PM model from
 /// [`crate::core::model_inject::resolve_pm_model`], unchanged.
-/// Test: `the_supervisor_model_is_the_opus_tier_alias`.
+/// Test: `the_architect_model_is_the_opus_tier_alias`.
 pub fn launch_model(profile: SessionProfile, config: &MpmConfig) -> String {
     match profile {
         SessionProfile::Architect => ARCHITECT_MODEL.to_string(),

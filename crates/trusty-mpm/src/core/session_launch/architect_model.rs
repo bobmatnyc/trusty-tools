@@ -84,7 +84,7 @@ fn store_record(path: &Path, record: &Record) -> Result<(), PrepError> {
 /// kept and the record dropped. PM → with a record, remove `model` when it
 /// still equals the recorded value, then drop the record; without one, touch
 /// nothing.
-/// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`,
+/// Test: `an_architect_launch_gets_the_architect_prompt_style_and_model`,
 /// `flipping_back_to_pm_removes_the_model_tm_wrote`,
 /// `a_user_set_model_is_never_touched`.
 pub(super) fn write_architect_model(

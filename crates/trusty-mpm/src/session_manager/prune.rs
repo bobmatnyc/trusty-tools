@@ -271,7 +271,7 @@ impl SessionManager {
     ///
     /// #8942: a live record of a protected kind (the Architect and its
     /// helpers) is left out of the target set on every filter, like the
-    /// invoker. Test: `prune_include_active_never_decommissions_a_supervisor_record`.
+    /// invoker. Test: `prune_include_active_never_decommissions_an_architect_record`.
     pub async fn prune_managed(
         &self,
         filter: PruneFilter,

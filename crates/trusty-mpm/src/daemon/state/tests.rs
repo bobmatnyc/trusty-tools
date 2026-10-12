@@ -1209,7 +1209,7 @@ async fn reap_leaves_a_whole_server_loss_auto_resumable() {
 /// #8942: when the Architect's name is missing from the live set, its record
 /// goes `Stopped`, and no teardown reaches a pane of that name.
 #[tokio::test]
-async fn the_tmux_gone_reaper_marks_a_supervisor_record_stopped_without_teardown() {
+async fn the_tmux_gone_reaper_marks_an_architect_record_stopped_without_teardown() {
     let tmp = tempfile::TempDir::new().unwrap();
     let driver = MinFakeDriver::new();
     let mgr = crate::session_manager::SessionManager::new(tmp.path(), driver.clone())

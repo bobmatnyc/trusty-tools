@@ -567,7 +567,7 @@ fn an_unreadable_armed_dir_is_live() {
 /// project and the allowlist, as `TRUSTY_MPM_SESSION_PROFILE=supervisor claude`
 /// run from the Architect directory produces, but no tm launch record.
 #[test]
-fn a_supervisor_stamp_without_a_launch_record_is_denied() {
+fn an_architect_stamp_without_a_launch_record_is_denied() {
     let fx = fixture();
     let spoof = HookEnv {
         home: Some(fx.home.clone()),
