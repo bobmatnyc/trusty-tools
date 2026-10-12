@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
-use trusty_mpm::core::channels_readiness::{NotReady, policy_ready};
+use trusty_mpm::core::channels_readiness::{HostBranch, NotReady, policy_ready};
 use trusty_mpm::core::channels_taint::{TaintMark, taint_dir, taint_managed_session};
 use trusty_mpm::core::egress_verdict::{Unserved, VERDICT_ROUTE};
 
@@ -72,21 +72,54 @@ async fn read_request(sock: &mut TcpStream) -> String {
 /// A loopback daemon that answers one request with `response`; the handle
 /// yields the request it read. `None` holds the connection unanswered.
 async fn serve_once(response: Option<String>) -> (String, tokio::task::JoinHandle<String>) {
+    match response {
+        Some(response) => serve_raw(response, false).await,
+        None => serve_raw(String::new(), true).await,
+    }
+}
+
+/// A loopback daemon that reads one request, writes `bytes` (any prefix of
+/// a reply, or nothing), then holds the connection open when `stall` or
+/// closes it.
+async fn serve_raw(bytes: String, stall: bool) -> (String, tokio::task::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
     let server = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.expect("accept");
         let request = read_request(&mut sock).await;
-        match response {
-            Some(response) => {
-                sock.write_all(response.as_bytes()).await.expect("write");
-                let _ = sock.shutdown().await;
-            }
-            None => tokio::time::sleep(Duration::from_secs(10)).await,
+        sock.write_all(bytes.as_bytes()).await.expect("write");
+        sock.flush().await.expect("flush");
+        if stall {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        } else {
+            let _ = sock.shutdown().await;
         }
         request
     });
     (url, server)
+}
+
+/// A 200 head promising a 100-byte body.
+fn head_of_100() -> String {
+    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\
+     connection: close\r\n\r\n"
+        .to_owned()
+}
+
+/// `cached_policy_ready` against a daemon writing `bytes` then stalling or
+/// closing; the result and the inline run count (the inline load refuses
+/// with `Stopped`).
+async fn ready_against_raw(bytes: String, stall: bool) -> (Result<(), NotReady>, usize) {
+    let (url, server) = serve_raw(bytes, stall).await;
+    let mut runs = 0;
+    let home = home();
+    let result = cached_policy_ready(&url, Some(&home), || {
+        runs += 1;
+        Err(NotReady::Stopped)
+    })
+    .await;
+    server.abort();
+    (result, runs)
 }
 
 /// A URL on a loopback port nothing listens on: a daemon that is down.
@@ -364,4 +397,120 @@ async fn untainted_session_never_queries_the_daemon() {
             ..
         }
     ));
+}
+
+/// 🔴 #8454 VC (r-078): with no home there is nothing to ask under, so the
+/// inline load runs once, even with a daemon URL that cannot answer, and its
+/// `HomeUnknown` refusal stands.
+#[tokio::test]
+async fn no_home_runs_the_inline_load_once() {
+    let mut runs = 0;
+    let result = cached_policy_ready(&down_url(), None, || {
+        runs += 1;
+        policy_ready(None)
+    })
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(NotReady::Host {
+                branch: HostBranch::HomeUnknown,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(runs, 1, "the inline load must run exactly once");
+}
+
+/// 🔴 #8454 VC (r-078): a daemon that reads the request and closes without
+/// a reply answered, unusably: `Unanswered`, and the inline load never runs.
+#[tokio::test]
+async fn daemon_closing_without_a_reply_denies() {
+    let (result, runs) = ready_against_raw(String::new(), false).await;
+    assert!(
+        matches!(result, Err(NotReady::Unanswered { .. })),
+        "{result:?}"
+    );
+    assert_eq!(runs, 0);
+}
+
+/// 🔴 #8454 VC (r-078): a body cut short of its `content-length` is a body
+/// read error that is not a timeout: `Unanswered`, and no inline load.
+#[tokio::test]
+async fn daemon_cutting_the_body_short_denies() {
+    let short = format!("{}{{\"answer\":", head_of_100());
+    assert_eq!(short.len() - head_of_100().len(), 10, "fixture: 10 body bytes");
+    let (result, runs) = ready_against_raw(short.clone(), false).await;
+    assert!(
+        matches!(result, Err(NotReady::Unanswered { .. })),
+        "{result:?}"
+    );
+    assert_eq!(runs, 0);
+    let (url, server) = serve_raw(short, false).await;
+    assert_eq!(verdict_query(&url, &home()).await, Err(QueryError::Malformed));
+    server.abort();
+}
+
+/// 🔴 #8454 VC (r-078): a daemon that sends its head and then stalls the
+/// body past the query timeout has not answered: the inline load runs once.
+#[tokio::test]
+async fn daemon_stalling_the_body_falls_back_to_inline_load() {
+    let started = Instant::now();
+    let (result, runs) = ready_against_raw(head_of_100(), true).await;
+    assert_eq!((result, runs), (Err(NotReady::Stopped), 1));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// The table row of each [`QueryError`] variant. No wildcard: a new variant
+/// fails to compile here until it has a row.
+fn row(e: &QueryError) -> usize {
+    match e {
+        QueryError::Client => 0,
+        QueryError::Unreachable => 1,
+        QueryError::TimedOut(_) => 2,
+        QueryError::Status(_) => 3,
+        QueryError::Malformed => 4,
+    }
+}
+
+/// 🔴 #8454 VC (r-078): every `QueryError` maps to its pinned outcome: no
+/// daemon answered (client fault, unreachable, timeout) runs the inline load
+/// once; an unusable answer (status, malformed) denies `Unanswered` without
+/// it. The `Client` arm cannot be induced through a query, so it is pinned
+/// here.
+#[test]
+fn every_query_error_maps_to_inline_or_deny() {
+    let cases = [
+        (QueryError::Client, true),
+        (QueryError::Unreachable, true),
+        (QueryError::TimedOut(VERDICT_QUERY_TIMEOUT), true),
+        (QueryError::Status(503), false),
+        (QueryError::Malformed, false),
+    ];
+    let mut rows: Vec<usize> = cases.iter().map(|(e, _)| row(e)).collect();
+    rows.sort_unstable();
+    assert_eq!(rows, [0, 1, 2, 3, 4], "every variant has exactly one row");
+    for (e, inline) in cases {
+        assert_eq!(e.asked_no_one(), inline, "{e:?}");
+        let mut runs = 0;
+        let detail = e.to_string();
+        let result = e.clone().readiness(|| {
+            runs += 1;
+            Err(NotReady::Stopped)
+        });
+        if inline {
+            assert_eq!((result, runs), (Err(NotReady::Stopped), 1), "{e:?}");
+        } else {
+            assert_eq!(
+                (result, runs),
+                (Err(NotReady::Unanswered { detail }), 0),
+                "{e:?}"
+            );
+        }
+    }
 }

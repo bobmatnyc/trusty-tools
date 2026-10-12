@@ -373,8 +373,8 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
 /// What: [`guard_once`] under [`deny_on_panic`]. A deny is printed as the one
 /// stdout object and the process exits 0 at once, so a stdin that never
 /// closed cannot hold the runtime's shutdown past Claude Code's hook timeout.
-/// An allow returns `Ok(())` with nothing printed. `url` is used only for the
-/// audit POST.
+/// An allow returns `Ok(())` with nothing printed. `url` is the daemon the
+/// taint arm asks for its policy verdict (#8454 VC) and the audit POST goes to.
 /// Test: `tests/tm_hook_egress_guard_8454.rs`.
 pub(crate) async fn egress_guard(url: &str) -> anyhow::Result<()> {
     if let Some(response) = deny_on_panic(guard_once(url)).await {

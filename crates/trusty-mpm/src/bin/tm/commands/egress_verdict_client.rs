@@ -60,8 +60,28 @@ pub(crate) enum QueryError {
 impl QueryError {
     /// True when no daemon answered, so the hook runs the inline load; an
     /// answer that came back unusable is not one, and denies.
+    /// Test: `every_query_error_maps_to_inline_or_deny`.
     pub(crate) fn asked_no_one(&self) -> bool {
         matches!(self, Self::Client | Self::Unreachable | Self::TimedOut(_))
+    }
+
+    /// The taint arm's readiness for a query that failed with `self`.
+    ///
+    /// What: `inline` when [`Self::asked_no_one`], else
+    /// [`NotReady::Unanswered`], a `POLICY_CHECK` deny.
+    /// Test: `every_query_error_maps_to_inline_or_deny`.
+    pub(crate) fn readiness(
+        self,
+        inline: impl FnOnce() -> Result<(), NotReady>,
+    ) -> Result<(), NotReady> {
+        // #8454: a pure step, so a test pins the `Client` arm no query can induce.
+        if self.asked_no_one() {
+            inline()
+        } else {
+            Err(NotReady::Unanswered {
+                detail: self.to_string(),
+            })
+        }
     }
 }
 
@@ -76,7 +96,10 @@ impl QueryError {
 /// `Status`; the 2xx body goes to [`parse`].
 /// Test: `daemon_unreachable_falls_back_to_inline_load_never_allow`,
 /// `daemon_timeout_falls_back_to_inline_load`,
-/// `non_2xx_daemon_answer_denies`, `verdict_query_sends_its_home`.
+/// `non_2xx_daemon_answer_denies`, `verdict_query_sends_its_home`,
+/// `daemon_closing_without_a_reply_denies`,
+/// `daemon_cutting_the_body_short_denies`,
+/// `daemon_stalling_the_body_falls_back_to_inline_load`.
 pub(crate) async fn verdict_query(url: &str, home: &Path) -> Result<DaemonVerdict, QueryError> {
     let client = reqwest::Client::builder()
         .connect_timeout(VERDICT_CONNECT_TIMEOUT)
@@ -169,7 +192,8 @@ pub(crate) fn parse(body: &[u8]) -> Result<DaemonVerdict, QueryError> {
 /// [`NotReady::Unanswered`], a `POLICY_CHECK` deny.
 /// Test: `daemon_unreachable_falls_back_to_inline_load_never_allow`,
 /// `malformed_daemon_answer_denies`, `ready_answer_skips_the_inline_load`,
-/// `unserved_answers_fall_back_to_inline_load`.
+/// `unserved_answers_fall_back_to_inline_load`,
+/// `no_home_runs_the_inline_load_once`.
 pub(crate) async fn cached_policy_ready(
     url: &str,
     home: Option<&Path>,
@@ -182,10 +206,7 @@ pub(crate) async fn cached_policy_ready(
         Ok(DaemonVerdict::Ready) => Ok(()),
         Ok(DaemonVerdict::NotReady(not_ready)) => Err(not_ready),
         Ok(DaemonVerdict::Unserved(_)) => inline(),
-        Err(e) if e.asked_no_one() => inline(),
-        Err(e) => Err(NotReady::Unanswered {
-            detail: e.to_string(),
-        }),
+        Err(e) => e.readiness(inline),
     }
 }
 
