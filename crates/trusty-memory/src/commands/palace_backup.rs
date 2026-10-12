@@ -6,9 +6,9 @@
 //! What: [`handle_backup`] calls the daemon's `palace_backup` tool when a
 //! daemon serves this data root, and otherwise opens the palace directly
 //! under the exclusive redb lock ([`backup_offline`]). A failed daemon call
-//! is an error, never a fallback to the direct open. Both refuse a
-//! destination directly in the palace registry dir or under
-//! `<registry>/palaces` (`check_snapshot_dest`).
+//! is an error, never a fallback to the direct open. `--dest` is a name
+//! under the palace's backup root; both paths refuse a bad name
+//! (`check_backup_name`) before anything opens (#9282, option C).
 //! [`handle_restore`] probes the daemon socket
 //! and then runs [`restore_into`], which refuses a foreign or malformed
 //! palace id and a live or unknown daemon before PR 1's
@@ -26,7 +26,7 @@ use trusty_common::memory_core::palace::Palace;
 use trusty_common::memory_core::retrieval::PalaceHandle;
 use trusty_common::memory_core::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
 use trusty_common::memory_core::store::kg_redb::{
-    check_snapshot_dest, restore_palace_snapshot, SnapshotManifest,
+    check_backup_name, restore_palace_snapshot, SnapshotManifest,
 };
 use trusty_common::memory_core::store::OpenIntent;
 use trusty_common::uds::{probe_socket_verdict, SocketVerdict};
@@ -84,20 +84,26 @@ pub struct RestoreReport {
     pub manifest: SnapshotManifest,
 }
 
-/// `trusty-memory palace backup <name> [--dest DIR]`.
+/// `trusty-memory palace backup <name> [--dest NAME]`.
 ///
-/// Why/What: see the module doc. `dest` is made absolute against the current
-/// directory before it is sent, because the daemon resolves a relative path
-/// against its own.
+/// Why/What: see the module doc. `dest` is a name under the backup root,
+/// sent as given and never resolved against the current directory; a bad
+/// name is refused (exit 1) before the daemon is called or the palace opens.
 /// Test: `cli_backup_then_restore_into_a_fresh_root_keeps_counts`,
-/// `cli_backup_with_a_failing_daemon_errors_without_falling_back`.
+/// `cli_backup_with_a_failing_daemon_errors_without_falling_back`,
+/// `cli_backup_long_s_and_cwd_names_land_under_the_backup_root`,
+/// `cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing`.
 pub async fn handle_backup(name: String, dest: Option<PathBuf>) -> Result<()> {
-    let dest = dest
-        .map(|d| std::path::absolute(&d).with_context(|| format!("resolve {}", d.display())))
-        .transpose()?;
+    // #9282: refuse a bad name on both paths before any call or open.
+    if let Some(d) = &dest {
+        check_backup_name(d).with_context(|| format!("back up palace {name}: --dest"))?;
+    }
     let report = if crate::client::is_running().await {
         let mut params = json!({ "palace": name });
         if let Some(d) = &dest {
+            let d = d
+                .to_str()
+                .with_context(|| format!("--dest {} is not UTF-8", d.display()))?;
             params["dest"] = json!(d);
         }
         // #9282: a daemon is up, so its answer is final; no direct-open fallback.
@@ -119,19 +125,16 @@ pub async fn handle_backup(name: String, dest: Option<PathBuf>) -> Result<()> {
 /// the length of the backup. If a daemon started in the meantime and holds
 /// the store, the open falls back to a copied file and
 /// `PalaceHandle::snapshot` refuses it (`SnapshotError::ReadOnlyHandle`).
-/// What: refuses a `dest` that `check_snapshot_dest` rejects (in the palace
-/// registry dir, or under `<registry>/palaces`) before the open, opens the
-/// palace with the read-only intent, snapshots it with no lent chat store
+/// What: refuses a `dest` that `check_backup_name` rejects before the open,
+/// opens the palace with the read-only intent, snapshots it with no lent chat store
 /// (the read-only open of `chat_sessions.redb` works with no other holder),
 /// and returns [`snapshot_json`].
 /// Test: `cli_backup_then_restore_into_a_fresh_root_keeps_counts`,
 /// `cli_backup_refuses_a_dest_in_the_registry_dir_and_writes_nothing`.
 pub fn backup_offline(palace: &Palace, dest: Option<&Path>) -> Result<Value> {
-    // #9282: a backup in the registry dir would be listed as a palace, and
-    // one under `<registry>/palaces` switches the registry.
+    // #9282: a name under the backup root only; refused before the open.
     if let Some(d) = dest {
-        check_snapshot_dest(&palace.data_dir, d)
-            .with_context(|| format!("back up palace {}", palace.id))?;
+        check_backup_name(d).with_context(|| format!("back up palace {}", palace.id))?;
     }
     let handle = PalaceHandle::open_with_intent_purging(palace, OpenIntent::ReadOnlyClient, false)
         .with_context(|| format!("open palace {}", palace.id))?;

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::kg_redb::{check_snapshot_dest, PalaceSnapshot};
+use trusty_common::memory_core::store::kg_redb::{check_backup_name, PalaceSnapshot};
 
 use super::helpers::{open_palace_handle, resolve_palace};
 use crate::AppState;
@@ -28,28 +28,21 @@ use crate::AppState;
 /// it, and while its handle was held every chat call that opened the store
 /// would fail.
 /// What: resolves `palace` as the other palace tools do, parses `dest`
-/// (absent, or an absolute path that must not exist), opens the handle
-/// FIRST so a missing palace errors before the session store could create
-/// its directory, refuses a `dest` that `check_snapshot_dest` rejects (in
-/// the palace registry dir, or under `<registry>/palaces`) before the
-/// session store is opened, then snapshots. Every failure is an
-/// `Err`.
+/// (absent, or a name under the backup root, checked by `check_backup_name`
+/// before anything opens), opens the handle FIRST so a missing palace errors
+/// before the session store could create its directory, then snapshots; the
+/// snapshot verifies the root and the name's parents before it writes.
+/// Every failure is an `Err`.
 /// Test: `palace_backup_manifest_counts_equal_the_palace_counts`,
 /// `palace_backup_lends_the_cached_chat_store`,
 /// `palace_backup_error_arms_fail_and_write_nothing`,
 /// `palace_backup_refuses_a_dest_in_the_registry_dir`,
-/// `palace_backup_refuses_a_flat_layout_dest_under_palaces`.
+/// `palace_backup_refuses_a_symlinked_dest_component`,
+/// `palace_backup_long_s_and_nested_names_land_under_the_backup_root`.
 pub(crate) async fn handle_palace_backup(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_backup")?;
     let dest = parse_dest(&args)?;
     let handle = open_palace_handle(state, &palace)?;
-    // #9282: a backup in the registry dir would be listed as a palace, and
-    // one under `<registry>/palaces` switches the registry; refuse it before
-    // the chat store below is opened (it can create a file).
-    if let (Some(d), Some(palace_dir)) = (dest.as_deref(), handle.data_dir.as_deref()) {
-        check_snapshot_dest(palace_dir, d)
-            .with_context(|| format!("palace_backup: back up palace {palace}"))?;
-    }
     // #9282: lend the cached store, keyed by the handle's canonical id.
     let chat = state.session_store(handle.id.as_str())?;
     let snapshot =
@@ -60,22 +53,20 @@ pub(crate) async fn handle_palace_backup(state: &AppState, args: Value) -> Resul
     Ok(snapshot_json(&snapshot))
 }
 
-/// `dest` as an absolute path, or `None` for the default directory.
+/// `dest` as a backup name, or `None` for the default `<palace>/<UTC>`.
 ///
-/// Why: a relative path would resolve against the daemon's working
-/// directory, which the caller cannot see.
+/// Why (#9282, option C): `dest` names a directory under the palace's backup
+/// root, never a path the daemon resolves; an absolute path, `..`, `.`, an
+/// empty segment or a NUL byte is refused here, before anything opens.
+/// Test: `palace_backup_error_arms_fail_and_write_nothing`,
+/// `palace_backup_refuses_dotdot_after_a_missing_component`.
 fn parse_dest(args: &Value) -> Result<Option<PathBuf>> {
     match args.get("dest") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => {
-            let path = PathBuf::from(s);
-            if path.is_absolute() {
-                Ok(Some(path))
-            } else {
-                Err(anyhow!(
-                    "palace_backup: 'dest' must be an absolute path, got {s:?}"
-                ))
-            }
+            let name = PathBuf::from(s);
+            check_backup_name(&name).context("palace_backup: 'dest'")?;
+            Ok(Some(name))
         }
         Some(other) => Err(anyhow!(
             "palace_backup: 'dest' must be a string, got {other}"

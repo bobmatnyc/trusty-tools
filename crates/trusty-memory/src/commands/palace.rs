@@ -188,16 +188,14 @@ pub enum PalaceAction {
     Backup {
         /// Palace id.
         name: String,
-        /// Directory to create for the backup; it must not exist, and it must
-        /// not sit directly in the palace registry directory (<data root>, or
-        /// <data root>/palaces when that exists), nor anywhere under
-        /// <registry directory>/palaces in any letter case: in the flat layout
-        /// that is <data root>/palaces, which the daemon would take as its
-        /// registry once it exists. Default:
-        /// <data root>/.trusty-memory/backups/manual/<palace>/<UTC timestamp>/,
-        /// or <data root>/backups/manual/<palace>/<UTC timestamp>/ when
-        /// palaces live under <data root>/palaces.
-        #[arg(long, value_name = "DIR")]
+        /// Relative path of the backup directory to create under this
+        /// palace's backup root, <data root>/.trusty-memory/backups/manual/
+        /// (or <data root>/backups/manual/ when palaces live under
+        /// <data root>/palaces). Plain names only: an absolute path, '..',
+        /// '.', an empty segment or a symlinked segment is refused, and
+        /// nothing is written. It must not exist. Default:
+        /// <palace>/<UTC timestamp>.
+        #[arg(long, value_name = "NAME")]
         dest: Option<PathBuf>,
     },
     /// Restore a palace backup into this data root (#9282).
