@@ -80,14 +80,21 @@ fn tool(fx: &Fx, tool: &str, input: Value) -> Option<String> {
     evaluate_kuzu_store_access(tool, Some(&input), &fx.project, Some(&fx.home))
 }
 
+/// Asserts every command denies with `slug`, listing every one that does not.
 fn assert_denied(fx: &Fx, commands: &[String], slug: &str) {
-    for command in commands {
-        let deny = bash(fx, command);
-        assert!(
-            deny.as_deref().is_some_and(|r| r.contains(slug)),
-            "expected a `{slug}` deny for {command:?}, got {deny:?}"
-        );
-    }
+    let missed: Vec<String> = commands
+        .iter()
+        .filter_map(|command| {
+            let deny = bash(fx, command);
+            let ok = deny.as_deref().is_some_and(|r| r.contains(slug));
+            (!ok).then(|| format!("{command:?} -> {deny:?}"))
+        })
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "expected a `{slug}` deny for each of:\n{}",
+        missed.join("\n")
+    );
 }
 
 fn assert_allowed(fx: &Fx, commands: &[String]) {
@@ -642,5 +649,107 @@ fn denies_a_tilde_bash_does_not_expand_and_a_relative_python() {
     assert!(
         deny.is_some_and(|r| r.contains("kuzu-import-python")),
         "relative --python"
+    );
+}
+
+// #8625 re-scope (Architect ruling 2026-10-12): every `trusty-memory import
+// kuzu` denies under the guard, whatever surrounds it.
+
+#[test]
+fn denies_an_import_kuzu_after_an_environment_prefix() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "PYTHONPATH=/tmp/x trusty-memory import kuzu --discover",
+            "PATH=/tmp/x:$PATH trusty-memory import kuzu --root ~/p",
+            "export PYTHONPATH=/tmp/x; trusty-memory import kuzu --discover",
+            "export PYTHONPATH=/tmp/x && trusty-memory import kuzu --discover",
+            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover",
+            "nice --bogus trusty-memory import kuzu --discover",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_an_import_kuzu_inside_a_substitution_or_a_shell_string() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "echo $(trusty-memory import kuzu --discover)",
+            "echo `trusty-memory import kuzu --discover`",
+            "bash -c 'trusty-memory import kuzu --discover'",
+            "sh -c \"trusty-memory import kuzu --discover\"",
+            "echo kuzu | xargs trusty-memory import",
+            "echo import kuzu | xargs trusty-memory",
+            "trusty-memory import kuzu --dry-run | tail -50",
+            "trusty-memory import kuzu --dry-run 2>&1 | tee /tmp/report.txt",
+            "python3 -c \"import subprocess; subprocess.run(['trusty-memory','import','kuzu'])\"",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_an_import_kuzu_in_another_spelling() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &s(&[
+            "TRUSTY-MEMORY import kuzu --discover",
+            "Trusty-Memory import kuzu --discover",
+            "/usr/local/bin/TRUSTY-MEMORY import kuzu --discover",
+            "~/.cargo/bin/trusty-memory import kuzu --discover",
+            "~/.cargo/bin/trusty-m* import kuzu --discover",
+            "\\trusty-memory import kuzu --discover",
+            "trusty-memory import -v kuzu --discover",
+            "trusty-memory import --verbose kuzu --discover",
+            "trusty-memory -vv import kuzu --discover",
+            "trusty-memory import KUZU --discover",
+            "trusty-memory import ${X:-kuzu} --discover",
+            "TRUSTY-MEMORY migrate kuzu-data",
+            "trusty-memory migrate KUZU_MEMORY --dry-run",
+        ]),
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn denies_the_plain_import_and_the_exact_sanctioned_form() {
+    let fx = Fx::new(true);
+    assert_denied(
+        &fx,
+        &[
+            "trusty-memory import kuzu --discover --dry-run".into(),
+            "trusty-memory import kuzu --discover --dry-run --python \
+             /Users/x/.trusty-tools/kuzu-import-venv/bin/python3"
+                .into(),
+            format!(
+                "trusty-memory import kuzu --discover --dry-run --python {}",
+                fx.venv("python3")
+            ),
+        ],
+        "kuzu-store-read",
+    );
+}
+
+#[test]
+fn keeps_unrelated_trusty_memory_commands_allowed() {
+    let fx = Fx::new(true);
+    assert_allowed(
+        &fx,
+        &s(&[
+            "trusty-memory doctor",
+            "trusty-memory import other",
+            "trusty-memory import --help",
+            "trusty-memory -v recall kuzu",
+            "ls ~/p",
+            "git commit -m \"docs: trusty-memory import kuzu is denied under the guard\"",
+            "gh issue comment 1 --body \"run trusty-memory import kuzu from your shell\"",
+            "grep -rn \"trusty-memory import kuzu\" content/",
+            "echo trusty-memory import kuzu is denied",
+        ]),
     );
 }
