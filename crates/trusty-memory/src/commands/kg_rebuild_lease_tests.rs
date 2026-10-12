@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
+use crate::engine::MaintenanceLease;
 use anyhow::Result;
 use serde_json::json;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
-use trusty_common::memory_core::MaintenanceLease;
 
 use super::{kg_rebuild_at, purge_palaces, scan_active_triples, KgRebuildOptions};
 use crate::commands::kg_twin_merge::merge_palaces;
@@ -37,7 +37,7 @@ fn auto_triple(subject: &str, predicate: &str, object: &str) -> Triple {
 
 /// A ready `AppState` on `root` holding palace `a`, with the palace's KG.
 async fn palace_a(root: &std::path::Path) -> Result<(AppState, Arc<KnowledgeGraph>)> {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     // Issue #88: bypass palace-slug enforcement for test palaces. #5937: the
     // write happens under the crate's env lock.
     {
@@ -206,7 +206,7 @@ async fn destructive_passes_fail_closed_on_an_unavailable_lease() -> Result<()> 
     let before = active_rows(&kg).await?;
     std::fs::create_dir(
         tmp.path()
-            .join(trusty_common::memory_core::maintenance_lease::MAINTENANCE_LOCK_FILE),
+            .join(crate::engine::maintenance_lease::MAINTENANCE_LOCK_FILE),
     )?;
 
     let purge = purge_palaces(&state, Some("a"), true)

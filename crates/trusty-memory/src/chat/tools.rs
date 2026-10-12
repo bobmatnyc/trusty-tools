@@ -9,6 +9,10 @@
 //! Test: `all_tools_returns_expected_set`,
 //! `execute_tool_dispatches_known_tools` in `tools_tests.rs`.
 
+use crate::engine::dream::PersistedDreamStats;
+use crate::engine::palace::{PalaceId, RoomType};
+use crate::engine::store::kg::Triple;
+use crate::engine::PalaceRegistry;
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
 use crate::service::recall_stream::RecallAllScope;
@@ -16,10 +20,6 @@ use crate::service::{load_user_config, palace_info_from, DreamStatusPayload, Mem
 use crate::AppState;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::PersistedDreamStats;
-use trusty_common::memory_core::palace::{PalaceId, RoomType};
-use trusty_common::memory_core::store::kg::Triple;
-use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::{ChatMessage, ToolDef};
 
 // ---------------------------------------------------------------------------

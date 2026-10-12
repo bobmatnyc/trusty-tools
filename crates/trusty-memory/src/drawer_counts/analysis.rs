@@ -14,9 +14,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::engine::maintenance_log::MaintenanceDeletion;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
-use trusty_common::memory_core::maintenance_log::MaintenanceDeletion;
 use uuid::Uuid;
 
 use super::{CountLine, CountSource, History};

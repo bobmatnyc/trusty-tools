@@ -39,7 +39,7 @@ const FREE: u64 = 0;
 ///
 /// Why: this must sit ABOVE every legitimately-bounded wait, or healthy load
 /// would read as a wedge. Two such bounds are tracked: the palace open queue,
-/// `memory_core::timeouts::open_queue_timeout()` (default 60 s, issue #3992),
+/// `engine::timeouts::open_queue_timeout()` (default 60 s, issue #3992),
 /// and a writer queued on the palace write lock, `write_lock_timeout()`
 /// (default 60 s), tracked since #4001. Doubling the larger means any operation
 /// still outstanding has already blown through the bound that was supposed to
@@ -56,8 +56,8 @@ pub fn wedge_threshold() -> Duration {
         .and_then(|v| v.parse::<u64>().ok());
     derive_wedge_threshold(
         override_secs,
-        trusty_common::memory_core::timeouts::open_queue_timeout(),
-        trusty_common::memory_core::timeouts::write_lock_timeout(),
+        crate::engine::timeouts::open_queue_timeout(),
+        crate::engine::timeouts::write_lock_timeout(),
     )
 }
 

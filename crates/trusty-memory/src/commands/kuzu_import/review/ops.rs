@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use trusty_common::memory_core::filter::SecretSpan;
+use crate::engine::filter::SecretSpan;
 
 use super::verdict::RedactOp;
 

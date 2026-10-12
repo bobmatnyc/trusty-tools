@@ -119,7 +119,7 @@ impl Drop for TestDaemon {
 ///
 /// When a tempdir cannot be created.
 pub fn new_test_state() -> AppState {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir for the test data root");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);

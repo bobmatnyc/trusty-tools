@@ -8,9 +8,9 @@
 //! Test: this is the test file.
 
 use super::*;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::{recall_with_default_embedder, PalaceHandle};
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+use crate::engine::palace::PalaceId;
+use crate::engine::retrieval::{recall_with_default_embedder, PalaceHandle};
+use crate::engine::store::kg_redb::KgStoreRedb;
 
 /// Room every legacy fixture drawer sits in.
 pub(crate) const ROOM: &str = "6f1c1f64-8a3c-4c43-9d51-0d5a4e0b2c11";
@@ -511,9 +511,9 @@ async fn apply_with_a_failing_backup_writes_nothing() {
 /// Test: itself.
 #[tokio::test]
 async fn apply_leaves_a_verified_backup_of_the_pre_apply_bytes() {
+    use crate::engine::store::vector::UsearchStore;
     use sha2::{Digest, Sha256};
-    use trusty_common::memory_core::store::vector::UsearchStore;
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let (_root, palace) = fixture();
     let dir = &palace.data_dir;
     drop(
@@ -561,7 +561,7 @@ async fn apply_leaves_a_verified_backup_of_the_pre_apply_bytes() {
 /// Test: itself.
 #[tokio::test]
 async fn apply_makes_legacy_drawers_reachable_and_rerun_is_a_noop() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let (_root, palace) = fixture();
     let legacy_before = bytes(&palace.data_dir.join("kg.db"));
 
@@ -636,7 +636,7 @@ async fn l1_only_legacy_drawer_is_imported_to_redb() {
         "the deploy key rotates every ninety days per the ops runbook",
     );
     l1.id = a;
-    trusty_common::memory_core::store::L1Cache::save_l1_cache(&[l1], &palace.data_dir)
+    crate::engine::store::L1Cache::save_l1_cache(&[l1], &palace.data_dir)
         .expect("seed L1 snapshot");
     let kg_path = palace.data_dir.join("kg.redb");
     let redb_ids = |p: &Path| -> HashSet<Uuid> {
@@ -958,14 +958,14 @@ const INDEXED_LIVE: &str = "the staging database snapshots nightly at two in the
 /// Test: itself.
 #[tokio::test]
 async fn apply_holds_back_drawers_dream_dedup_would_merge() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let (_root, palace) = fixture();
     let live_id = {
         let handle = PalaceHandle::open(&palace).expect("open");
         handle
             .remember(
                 INDEXED_LIVE.into(),
-                trusty_common::memory_core::palace::RoomType::General,
+                crate::engine::palace::RoomType::General,
                 vec![],
                 0.5,
             )
@@ -1024,7 +1024,7 @@ async fn apply_holds_back_drawers_dream_dedup_would_merge() {
 struct FailingEmbedder;
 
 #[async_trait::async_trait]
-impl trusty_common::memory_core::embed::Embedder for FailingEmbedder {
+impl crate::engine::embed::Embedder for FailingEmbedder {
     async fn embed_batch(&self, _texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         anyhow::bail!("embedder down")
     }
@@ -1055,7 +1055,7 @@ async fn a_failing_embedder_fails_the_near_duplicate_screen() {
 /// Test: itself.
 #[tokio::test]
 async fn apply_screens_against_a_live_drawer_that_had_no_vector() {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let (_root, palace) = fixture();
     // A live drawer in kg.redb with no vector, as `fixture` writes its own.
     let mut unvectored = Drawer::new(Uuid::parse_str(ROOM).expect("room"), INDEXED_LIVE);

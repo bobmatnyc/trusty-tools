@@ -8,7 +8,7 @@
 //! redb 4.1.0 — see `tests/testdata/activity-redb41.redb-fixture`.
 //!
 //! The production opener (`ActivityLog::open` ->
-//! `trusty_common::memory_core::store::open_or_recreate`) RECREATES a database
+//! `trusty_memory::engine::store::open_or_recreate`) RECREATES a database
 //! it classifies as an incompatible format. That is exactly the silent-data-loss
 //! path this test guards: a 4.3 build that could not read 4.1 bytes would wipe
 //! the file and report success, so asserting the rows are still there is the

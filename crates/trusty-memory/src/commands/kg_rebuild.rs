@@ -13,11 +13,11 @@
 //! Test: `kg_rebuild_processes_all_drawers`,
 //! `kg_rebuild_processes_named_palace_only`.
 
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
+use crate::engine::store::OpenIntent;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
-use trusty_common::memory_core::store::OpenIntent;
 
 use super::kg_twin_merge::report_merge;
 use super::maintenance_gate::require_state_lease;
@@ -413,7 +413,7 @@ pub async fn purge_palaces(
 ) -> Result<Vec<PalacePurgeSummary>> {
     let mut out: Vec<PalacePurgeSummary> = Vec::new();
     // #5511: an unreadable data root is a failed purge, never an empty one.
-    let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+    let palaces = crate::engine::PalaceRegistry::list_palaces(&state.data_root)
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     // #8744: deleting subjects is maintenance; a daemon mid-dream-pass holds
     // the lease, so refuse before any Writer open and hold it to the end.
@@ -592,7 +592,7 @@ pub async fn rebuild_palaces(
 ) -> Result<Vec<PalaceRebuildSummary>> {
     let mut out: Vec<PalaceRebuildSummary> = Vec::new();
     // #5511: an unreadable data root is a failed back-fill, never an empty one.
-    let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+    let palaces = crate::engine::PalaceRegistry::list_palaces(&state.data_root)
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     for palace in palaces {
         let id = palace.id.0.clone();
@@ -737,7 +737,7 @@ mod tests {
     /// Test: `kg_rebuild_processes_all_drawers`,
     ///       `kg_rebuild_processes_named_palace_only`.
     fn seed_embedder() {
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
     }
 
     /// Build an active triple for the purge-selection tests.
@@ -1050,8 +1050,8 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn purge_dry_run_does_not_prune_expired_drawers() -> Result<()> {
-        use trusty_common::memory_core::palace::{Drawer, DrawerType};
-        use trusty_common::memory_core::store::kg::KnowledgeGraph;
+        use crate::engine::palace::{Drawer, DrawerType};
+        use crate::engine::store::kg::KnowledgeGraph;
 
         seed_embedder();
         let tmp = tempfile::tempdir()?;

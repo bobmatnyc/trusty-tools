@@ -55,7 +55,7 @@ async fn an_aliased_write_indexes_into_the_resolved_palaces_corpus() {
     // The write path embeds; the mock keeps that off the ONNX model-download
     // path. It has no bearing on which socket the index request is sent to,
     // which is the only thing this test measures.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
     let fx = alias_lane::Aliased::new("w");
 
     let token = "zqxjrollback";

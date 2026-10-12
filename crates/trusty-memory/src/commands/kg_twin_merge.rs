@@ -20,10 +20,10 @@
 //! `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
 //! `merge_reports_a_failed_repoint_and_leaves_the_fact_readable`.
 
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
+use crate::engine::store::OpenIntent;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
-use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
-use trusty_common::memory_core::store::OpenIntent;
 
 use super::kg_rebuild::{scan_active_triples, STRUCTURAL_PREFIXES};
 use super::maintenance_gate::require_state_lease;
@@ -234,7 +234,7 @@ pub async fn merge_palaces(
 ) -> Result<Vec<PalaceMergeSummary>> {
     let mut out: Vec<PalaceMergeSummary> = Vec::new();
     // #5401: an unreadable data root is a failed run, never an empty one.
-    let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+    let palaces = crate::engine::PalaceRegistry::list_palaces(&state.data_root)
         .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     // #8744: re-pointing retracts live rows, which is maintenance; refuse
     // before any Writer open while another process holds the lease.
@@ -361,8 +361,8 @@ async fn repoint(
 mod tests {
     use super::*;
     use crate::commands::kg_rebuild::stale_subject_candidates;
+    use crate::engine::palace::PalaceId;
     use serde_json::json;
-    use trusty_common::memory_core::palace::PalaceId;
 
     /// Build an active triple for the selection tests.
     fn triple(subject: &str, predicate: &str, object: &str, provenance: Option<&str>) -> Triple {
@@ -521,7 +521,7 @@ mod tests {
 
     /// Seed a palace in a tempdir and return its `AppState`.
     async fn palace_fixture(data_root: std::path::PathBuf) -> Result<AppState> {
-        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
         // Issue #88: bypass palace-slug enforcement for test palaces.
         // SAFETY: idempotent constant write "1"; safe across test threads.
         unsafe {

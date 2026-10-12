@@ -25,9 +25,9 @@
 //! Test: `tools::recall_rank_tests`; end to end in
 //! `tests/recall_temporal_rank.rs`.
 
+use crate::engine::palace::{Drawer, DrawerType};
+use crate::engine::retrieval::{CrossPalaceResult, RecallResult};
 use chrono::{DateTime, Utc};
-use trusty_common::memory_core::palace::{Drawer, DrawerType};
-use trusty_common::memory_core::retrieval::{CrossPalaceResult, RecallResult};
 
 use super::recall_projection::{candidate_window, MAX_CANDIDATE_WINDOW};
 // #9421: superseded drawers rank below their replacements.

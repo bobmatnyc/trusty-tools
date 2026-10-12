@@ -17,17 +17,17 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::engine::filter::{check_secret, FilterReject};
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::RememberOptions;
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use trusty_common::memory_core::filter::{check_secret, FilterReject};
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::retrieval::RememberOptions;
 use uuid::Uuid;
 
+use crate::engine::store::concurrent_open::try_open_or_snapshot;
+use crate::engine::store::OpenIntent;
 use std::panic::AssertUnwindSafe;
-use trusty_common::memory_core::store::concurrent_open::try_open_or_snapshot;
-use trusty_common::memory_core::store::OpenIntent;
 
 use super::{COPIED_SUFFIXES, INDEX_FILE, LEGACY_KG_FILE};
 use crate::commands::store_snapshot::{with_store_copy, KG_FILE, SCRATCH_PREFIX};

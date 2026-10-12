@@ -18,13 +18,18 @@
 # What (default mode): `git grep` for the literal `trusty_common::memory_core`
 #   over tracked files under `crates/`, plus a second matcher over `*.rs` for a
 #   bare `memory_core` path segment (group, multi-line group, spaced and aliased
-#   imports), excluding `crates/trusty-common/` (the
-#   module's home), `crates/trusty-memory/` (the re-export) and every
-#   `changelog.d/` directory (fragments quote the old path as history). A hit
-#   on a comment line is not an import and is skipped: a line whose first
-#   non-blank text is `//`, `/*`, `*`, or `#` followed by a space or the line
-#   end. A Rust attribute (`#[`, `#![`) is code and is still reported. Every
-#   other hit is a failure, printed as `path:line: text`.
+#   imports), excluding `crates/trusty-common/` (the module's home), every
+#   `changelog.d/` directory and every `CHANGELOG.md` (both quote the old path
+#   as history). Inside `crates/trusty-memory/` two exact lines are exempt
+#   (#9271): the re-export `pub use trusty_common::memory_core as engine;` in
+#   `src/lib.rs` and the identity check `use trusty_common::memory_core as
+#   core_path;` in `tests/engine_reexport.rs` that proves it. Every other
+#   trusty-memory line uses `crate::engine` (lib) or `trusty_memory::engine`
+#   (binaries, tests, examples). A hit on a comment line is not an import and
+#   is skipped: a line whose first non-blank text is `//`, `/*`, `*`, or `#`
+#   followed by a space or the line end. A Rust attribute (`#[`, `#![`) is
+#   code and is still reported. Every other hit is a failure, printed as
+#   `path:line: text`.
 #
 #   Fails CLOSED. A `git grep` error is exit 2, and a scan over fewer than
 #   ENGINE_PATH_MIN_FILES tracked files under `crates/` is a SCAN FLOOR
@@ -54,8 +59,9 @@
 #   floor; 2 on a usage or tool error.
 #
 # Test: scripts/check_engine_import_path_selftest.sh — a code hit, an inline
-#   path, an attribute, comment-only hits, a changelog.d hit, hits inside the
-#   two owning crates, a group, a multi-line group, a spaced and an aliased
+#   path, an attribute, comment-only hits, a changelog.d and a CHANGELOG.md
+#   hit, hits inside trusty-common, a trusty-memory hit, the two exempt
+#   trusty-memory lines, a group, a multi-line group, a spaced and an aliased
 #   import, an empty scan, each --dep-graph verdict, and a tree over 128 KB.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); git, awk, grep.
@@ -157,8 +163,14 @@ fi
 #      literal does not spell: `use trusty_common::{memory_core::x, ..}`, a
 #      `use` group split over lines, `trusty_common :: memory_core`, and an
 #      alias (`use trusty_common as tc; use tc::memory_core::x`).
-EXCLUDES=(':(exclude)crates/trusty-common/' ':(exclude)crates/trusty-memory/'
-  ':(exclude,glob)**/changelog.d/**')
+EXCLUDES=(':(exclude)crates/trusty-common/' ':(exclude,glob)**/changelog.d/**'
+  ':(exclude,glob)**/CHANGELOG.md')
+# #9271: the only trusty-memory lines that may name the old path, matched as
+#   `path<TAB>trimmed text` so a moved line keeps its exemption and any other
+#   line in the same file is still reported. PR C deletes both.
+EXEMPT_LINES="$(printf '%s\t%s\n' \
+  crates/trusty-memory/src/lib.rs 'pub use trusty_common::memory_core as engine;' \
+  crates/trusty-memory/tests/engine_reexport.rs 'use trusty_common::memory_core as core_path;')"
 SEGMENT='(^|[^/[:alnum:]_])memory_core([[:space:]]*(::|,|\}|;|$)|[[:space:]]+as[[:space:]])'
 
 set +e
@@ -175,21 +187,29 @@ if [ "$status" -gt 1 ]; then
 fi
 hits="$(printf '%s\n%s\n' "$hits_literal" "$hits_segment" | sort -u)"
 
-# `path:line:text` -> keep only hits whose text is not a comment line.
-offending="$(printf '%s\n' "$hits" | awk '
+# `path:line:text` -> keep only hits whose text is not a comment line and is
+#   not an exempt line.
+offending="$(printf '%s\n' "$hits" | EXEMPT_LINES="$EXEMPT_LINES" awk '
+  BEGIN {
+    n = split(ENVIRON["EXEMPT_LINES"], rows, "\n")
+    for (i = 1; i <= n; i++) if (rows[i] != "") exempt[rows[i]] = 1
+  }
   NF == 0 { next }
   {
-    rest = $0
-    p = index(rest, ":"); rest = substr(rest, p + 1)
+    p = index($0, ":"); path = substr($0, 1, p - 1); rest = substr($0, p + 1)
     p = index(rest, ":"); text = substr(rest, p + 1)
     if (text ~ /^[ \t]*(\/\/|\/\*|\*|#[ \t]|#$)/) next
+    trimmed = text
+    sub(/^[ \t]+/, "", trimmed); sub(/[ \t\r]+$/, "", trimmed)
+    if ((path "\t" trimmed) in exempt) next
     print
   }')"
 
 if [ -n "$offending" ]; then
-  echo "FAIL: '$PATTERN' outside crates/trusty-common and crates/trusty-memory."
-  echo "      Import through 'trusty_memory::engine' instead (#9270):"
+  echo "FAIL: '$PATTERN' outside crates/trusty-common."
+  echo "      Import through 'trusty_memory::engine' instead, or 'crate::engine'"
+  echo "      inside the trusty-memory library (#9270, #9271):"
   printf '%s\n' "$offending" | sed 's/^/  /'
   exit 1
 fi
-echo "OK: no '$PATTERN' path outside crates/trusty-common and crates/trusty-memory ($scanned files under crates/)"
+echo "OK: no '$PATTERN' path outside crates/trusty-common and the trusty-memory re-export ($scanned files under crates/)"

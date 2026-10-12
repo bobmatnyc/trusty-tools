@@ -20,10 +20,10 @@
 //! `extract_triples_extracts_is_a_pattern`,
 //! `extract_triples_never_panics_on_empty_input`.
 
+use crate::engine::store::kg::Triple;
 use crate::wordnet_pos::{self, WordNetPos};
 use chrono::Utc;
 use std::collections::HashSet;
-use trusty_common::memory_core::store::kg::Triple;
 use uuid::Uuid;
 
 /// Default tags that cause a drawer to be skipped during auto-extraction.

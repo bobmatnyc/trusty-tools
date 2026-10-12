@@ -11,14 +11,14 @@
 //! Test: this IS the test module.
 
 use super::recall_stream::{recall_streamed, RECALL_PALACE_BATCH};
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::CrossPalaceRecall;
+use crate::engine::PalaceRegistry;
 use crate::AppState;
 use anyhow::anyhow;
 use chrono::Utc;
 use std::cell::RefCell;
 use std::path::Path;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::CrossPalaceRecall;
-use trusty_common::memory_core::PalaceRegistry;
 
 /// Create `n` palaces on disk and close every handle again.
 ///
@@ -165,8 +165,7 @@ async fn recall_all_skips_empty_palaces_without_opening_them() {
             .create_palace(tmp.path(), palace.clone())
             .expect("create_palace");
         if i < 2 {
-            let drawer =
-                trusty_common::memory_core::Drawer::new(uuid::Uuid::new_v4(), "a stored fact");
+            let drawer = crate::engine::Drawer::new(uuid::Uuid::new_v4(), "a stored fact");
             handle.kg.store().upsert_drawer(&drawer).expect("upsert");
         }
         drop(handle);

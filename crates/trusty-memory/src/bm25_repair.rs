@@ -28,8 +28,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trusty_common::memory_core::dream::{AfterCycle, DreamStats};
-use trusty_common::memory_core::palace::PalaceId;
+use crate::engine::dream::{AfterCycle, DreamStats};
+use crate::engine::palace::PalaceId;
 
 use crate::AppState;
 
@@ -186,7 +186,7 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
 
     let root = state.data_root.clone();
     let on_disk = match tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::registry::PalaceRegistry::list_palaces(&root)
+        crate::engine::registry::PalaceRegistry::list_palaces(&root)
     })
     .await
     {
@@ -216,7 +216,7 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
             continue;
         }
 
-        let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
+        let id = crate::engine::palace::PalaceId::new(palace.clone());
         // #7106: this pass draws on the same startup budget hydration and the
         // startup sweep do, so the three cannot hold more than one limit's
         // worth of palaces open between them. `bm25_dirty` is fed by the write

@@ -36,13 +36,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::engine::palace::{Drawer, Palace};
+use crate::engine::retrieval::VectorBackfillOptions;
+use crate::engine::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
+use crate::engine::{memory_content_hash, ContentHash, MaintenanceLease};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
-use trusty_common::memory_core::palace::{Drawer, Palace};
-use trusty_common::memory_core::retrieval::VectorBackfillOptions;
-use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
-use trusty_common::memory_core::{memory_content_hash, ContentHash, MaintenanceLease};
 use uuid::Uuid;
 
 use super::maintenance_gate::open_purging_under_lease;

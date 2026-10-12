@@ -13,8 +13,8 @@
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+use trusty_memory::engine::palace::PalaceId;
+use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 use trusty_memory::service::MemoryService;
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
@@ -141,7 +141,7 @@ pub async fn supersede(state: &AppState, palace: &str, old: Uuid, new: Uuid) {
         .registry
         .open_palace(&state.data_root, &PalaceId::new(palace))
         .expect("open palace");
-    trusty_common::memory_core::share::assert_superseded_by(&handle.kg, old, new, "test:9421")
+    trusty_memory::engine::share::assert_superseded_by(&handle.kg, old, new, "test:9421")
         .await
         .expect("superseded_by edge");
 }

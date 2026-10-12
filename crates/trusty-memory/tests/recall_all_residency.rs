@@ -20,8 +20,8 @@
 
 use serde_json::json;
 use std::path::Path;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::PalaceRegistry;
+use trusty_memory::engine::palace::{Palace, PalaceId};
+use trusty_memory::engine::PalaceRegistry;
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 

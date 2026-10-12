@@ -13,9 +13,9 @@
 
 use std::path::PathBuf;
 
+use crate::engine::store::kg_redb::{check_backup_name, PalaceSnapshot};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::kg_redb::{check_backup_name, PalaceSnapshot};
 
 use super::helpers::{open_palace_handle, resolve_palace};
 use crate::AppState;

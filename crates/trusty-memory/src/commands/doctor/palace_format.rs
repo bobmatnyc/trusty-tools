@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use trusty_common::memory_core::store::palace_format::{
+use crate::engine::store::palace_format::{
     palace_format_status, PalaceFormatStatus, PALACE_FORMAT_SUPPORTED,
 };
 

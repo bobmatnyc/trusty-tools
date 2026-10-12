@@ -89,7 +89,7 @@ fn spawn_startup_tasks_populates_pin_map() {
     // the ONNX model on a blocking-pool thread. Seeding the mock first makes
     // `shared_embedder()` resolve from an already-initialised OnceCell, so no
     // download starts. Must happen before the runtime exists.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    trusty_memory::engine::retrieval::seed_shared_embedder_with_mock();
 
     // Build a temp search root with one pinned project.
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -208,14 +208,14 @@ fn hydration_never_exceeds_the_startup_open_limit() {
     const LIMIT: usize = 2;
     for i in 0..PALACES {
         let id = format!("palace-{i}");
-        let palace = trusty_common::memory_core::palace::Palace {
-            id: trusty_common::memory_core::palace::PalaceId::new(id.clone()),
+        let palace = trusty_memory::engine::palace::Palace {
+            id: trusty_memory::engine::palace::PalaceId::new(id.clone()),
             name: id.clone(),
             description: None,
             created_at: chrono::Utc::now(),
             data_dir: state_root.join(&id),
         };
-        trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
+        trusty_memory::engine::store::PalaceStore::save_palace(&palace)
             .expect("seed palace metadata");
     }
 

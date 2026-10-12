@@ -34,9 +34,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::engine::palace::PalaceId;
+use crate::engine::PalaceRegistry;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::PalaceRegistry;
 
 /// Environment variable overriding [`DEFAULT_STARTUP_OPEN_LIMIT`].
 pub const STARTUP_OPEN_LIMIT_ENV: &str = "TRUSTY_MEMORY_STARTUP_OPEN_LIMIT";

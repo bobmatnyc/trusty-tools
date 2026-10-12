@@ -20,15 +20,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::engine::palace::Palace;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
+use crate::engine::store::kg_redb::{check_backup_name, restore_palace_snapshot, SnapshotManifest};
+use crate::engine::store::OpenIntent;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::Palace;
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
-use trusty_common::memory_core::store::kg_redb::{
-    check_backup_name, restore_palace_snapshot, SnapshotManifest,
-};
-use trusty_common::memory_core::store::OpenIntent;
 use trusty_common::uds::{probe_socket_verdict, SocketVerdict};
 
 use crate::tools::palace_backup::snapshot_json;

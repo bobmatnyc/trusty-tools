@@ -26,7 +26,7 @@ use chrono::Duration;
 use recall_support::{backdate, create_palaces, fact_key, rank_of, recall, remember, supersede};
 use serde::Deserialize;
 use tempfile::TempDir;
-use trusty_common::memory_core::embed::Embedder;
+use trusty_memory::engine::embed::Embedder;
 use trusty_memory::AppState;
 use uuid::Uuid;
 

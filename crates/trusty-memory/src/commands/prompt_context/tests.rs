@@ -1275,7 +1275,7 @@ async fn spin_up_test_daemon_with_palace(
     // these; under per-test process isolation (`cargo nextest run`) each gets a
     // virgin cell and reaches for the real ONNX model (HTTP 429 in CI) — same
     // defect class as #4413. The call is idempotent, so order does not matter.
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let data_tmp = tempfile::tempdir().expect("data tempdir");
     let project_tmp = tempfile::tempdir().expect("project tempdir");
     // Build a project directory whose basename equals the palace slug.

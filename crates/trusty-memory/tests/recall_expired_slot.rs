@@ -15,7 +15,7 @@ mod recall_support;
 use chrono::{Duration, Utc};
 use recall_support::{rank_of, recall_on, remember, state_with, Surface};
 use serde_json::json;
-use trusty_common::memory_core::palace::PalaceId;
+use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::tools::dispatch_tool;
 
 /// Why (#9390): the ready path must exclude an expired slot on every surface,

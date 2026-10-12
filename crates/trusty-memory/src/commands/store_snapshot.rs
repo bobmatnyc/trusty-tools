@@ -22,9 +22,9 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::OpenIntent;
 use anyhow::{Context, Result};
-use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
-use trusty_common::memory_core::store::OpenIntent;
 
 /// Filename of a palace's KG store.
 pub(crate) const KG_FILE: &str = "kg.redb";

@@ -2,7 +2,7 @@
 //! per-palace search state, and the fold that merges the leg into a recall.
 
 use super::*;
-use trusty_common::memory_core::Drawer;
+use crate::engine::Drawer;
 use uuid::Uuid;
 
 fn hit(content: &str, tags: &[&str], score: f32, layer: u8) -> RecallResult {
@@ -108,7 +108,7 @@ fn rulings_contribute_at_most_a_third_of_top_k() {
 /// at layer 1 and the Status hit is dropped.
 #[test]
 fn typed_rulings_join_the_leg_without_a_ruling_tag() {
-    use trusty_common::memory_core::palace::DrawerType;
+    use crate::engine::palace::DrawerType;
     let typed = |content: &str, t: DrawerType, score: f32| {
         let mut h = hit(content, &[], score, 2);
         h.drawer.drawer_type = t;

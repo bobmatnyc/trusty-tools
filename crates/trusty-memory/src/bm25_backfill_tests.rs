@@ -12,7 +12,7 @@
 //! Test: this *is* the test file.
 
 use super::*;
-use trusty_common::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use uuid::Uuid;
 
 /// Why: with the lane off, a backfill must be a reported no-op — not an error
@@ -50,17 +50,14 @@ async fn backfill_state_palace_is_disabled_without_a_lane() {
 /// disk — `PalaceHandle::new` takes an in-memory vector store and KG.
 /// What: an empty palace with the given drawer contents pushed in.
 /// Test: used by the tests above and below.
-fn test_handle(
-    dir: &std::path::Path,
-    contents: &[&str],
-) -> trusty_common::memory_core::retrieval::PalaceHandle {
-    use trusty_common::memory_core::palace::PalaceId;
-    use trusty_common::memory_core::store::kg::KnowledgeGraph;
-    use trusty_common::memory_core::store::vector::UsearchStore;
+fn test_handle(dir: &std::path::Path, contents: &[&str]) -> crate::engine::retrieval::PalaceHandle {
+    use crate::engine::palace::PalaceId;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::vector::UsearchStore;
 
     let vs = UsearchStore::new(dir.join("idx.usearch"), 384).expect("vector store");
     let kg = KnowledgeGraph::open(&dir.join("kg.db")).expect("kg");
-    let handle = trusty_common::memory_core::retrieval::PalaceHandle::new(
+    let handle = crate::engine::retrieval::PalaceHandle::new(
         PalaceId::new("unit-test"),
         String::new(),
         vs,
@@ -424,7 +421,7 @@ async fn coverage_probe_counts_an_edited_drawer_as_missing() {
 /// What: returns the ids created.
 /// Test: used by the sweep tests below.
 fn create_palaces_on_disk(state: &AppState, count: usize) -> Vec<String> {
-    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    use crate::engine::palace::{Palace, PalaceId};
     (0..count)
         .map(|i| {
             let id = format!("sweep-{i}");

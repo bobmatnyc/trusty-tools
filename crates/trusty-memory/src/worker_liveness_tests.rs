@@ -129,7 +129,7 @@ fn wedge_threshold_exceeds_the_open_queue_bound() {
     if std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS").is_ok() {
         return; // operator override in effect; the relationship is theirs to pick
     }
-    let bound = trusty_common::memory_core::timeouts::open_queue_timeout();
+    let bound = crate::engine::timeouts::open_queue_timeout();
     assert!(
         wedge_threshold() > bound,
         "wedge threshold {:?} must exceed the open-queue bound {bound:?}, or normal \

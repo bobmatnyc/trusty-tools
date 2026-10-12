@@ -10,13 +10,13 @@
 //! [`resolve_wing_arg`] — the shared parser the wing-scoped read tools use.
 //! Test: `crates/trusty-memory/tests/wing_mcp.rs`.
 
+use crate::engine::store::wings::{
+    list_wings, rename_wing, resolve_or_create_wing, resolve_wing_selector, WingSummary,
+};
+use crate::engine::PalaceHandle;
 use crate::AppState;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::wings::{
-    list_wings, rename_wing, resolve_or_create_wing, resolve_wing_selector, WingSummary,
-};
-use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};

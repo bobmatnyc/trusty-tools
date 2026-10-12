@@ -11,11 +11,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::store::Triple;
+use crate::engine::{PalaceHandle, PalaceRegistry};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::{Drawer, Palace, PalaceId};
-use trusty_common::memory_core::store::Triple;
-use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
 use uuid::Uuid;
 
 use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
@@ -168,7 +168,7 @@ pub(super) fn store_on_disk(root: &Path, project: &str) -> DiscoveredStore {
 
 /// A real palace in a temp data root, with the mock embedder seeded.
 pub(super) fn palace(data_root: &Path, name: &str) -> Arc<PalaceHandle> {
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     PalaceRegistry::new()
         .create_palace(
             data_root,
@@ -885,8 +885,8 @@ fn deprecated_kuzu_data_forwards_to_import() {
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_memory_rewrites_the_whole_chunk_group() {
+    use crate::engine::embed::Embedder as _;
     use trusty_common::embedder::{chunk_text, MockEmbedder};
-    use trusty_common::memory_core::embed::Embedder as _;
     let tmp = tempfile::tempdir().expect("tmp");
     let sink = HandleSink {
         handle: palace(tmp.path(), "kuzu-chunks"),

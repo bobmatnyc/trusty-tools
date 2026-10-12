@@ -19,9 +19,9 @@
 //! `run_health_round_trip_inner` helper.
 //! Test: `rpc_health_*` in `crate::transport::uds::tests`.
 
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::recall_with_default_embedder;
-use trusty_common::memory_core::store::hnsw_store::op_budget::abandoned_ops_in_flight;
+use crate::engine::palace::{Palace, PalaceId, RoomType};
+use crate::engine::retrieval::recall_with_default_embedder;
+use crate::engine::store::hnsw_store::op_budget::abandoned_ops_in_flight;
 use uuid::Uuid;
 
 /// Persistent content stored in the probe palace as an always-present
@@ -182,7 +182,7 @@ pub struct HealthResponse {
     /// registry records every skip; this is the only place a human or a script
     /// can read that record back.
     /// What: `(palace_id, reason)` pairs from
-    /// [`trusty_common::memory_core::PalaceRegistry::unopenable`]. Omitted
+    /// [`crate::engine::PalaceRegistry::unopenable`]. Omitted
     /// entirely when empty, so a healthy daemon's payload is unchanged.
     /// Test: `health_reports_unopenable_palaces`,
     /// `health_omits_unopenable_palaces_when_none`.
@@ -199,7 +199,7 @@ pub struct HealthResponse {
     /// time. Recall keeps answering, with silently missing corpus. This field is
     /// the API surface for that state.
     /// What: palace ids read from the handle cache via
-    /// [`trusty_common::memory_core::PalaceRegistry::peek`], sorted, and omitted
+    /// [`crate::engine::PalaceRegistry::peek`], sorted, and omitted
     /// entirely when none are degraded so a healthy payload is unchanged. It
     /// deliberately leaves `status` at `"ok"`: a partial corpus is durable state
     /// an operator must repair, not a live outage a restart can clear, and
@@ -518,7 +518,7 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
     let daemon_state = match state.readiness() {
         crate::DaemonReadiness::Ready => "ready",
         crate::DaemonReadiness::Warming
-            if trusty_common::memory_core::retrieval::shared_embedder_initialized() =>
+            if crate::engine::retrieval::shared_embedder_initialized() =>
         {
             "ready"
         }
@@ -729,7 +729,7 @@ pub(crate) fn ensure_health_probe_palace(state: &AppState) -> Result<(), HealthP
 /// the sentinel was already present.
 /// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142).
 pub(crate) async fn seed_probe_sentinel_if_absent(
-    handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    handle: &std::sync::Arc<crate::engine::PalaceHandle>,
 ) -> Result<bool, HealthProbeError> {
     // Issue #1156: use a prefix match rather than exact equality so that
     // future content changes (e.g. appending a version tag) don't make older
@@ -745,7 +745,7 @@ pub(crate) async fn seed_probe_sentinel_if_absent(
         return Ok(false);
     }
 
-    use trusty_common::memory_core::retrieval::RememberOptions;
+    use crate::engine::retrieval::RememberOptions;
     handle
         .remember_with_options(
             PROBE_SENTINEL_CONTENT.to_string(),
@@ -841,13 +841,13 @@ pub(crate) async fn run_health_round_trip(state: &AppState) -> Result<(), Health
 /// `health_probe_cleans_up_on_recall_error` exercise both failure modes with
 /// a stubbed recall; `health_probe_cleans_up_on_success` covers the happy path.
 pub(crate) async fn run_health_round_trip_inner<F, Fut>(
-    handle: std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    handle: std::sync::Arc<crate::engine::PalaceHandle>,
     recall: F,
 ) -> Result<(), HealthProbeError>
 where
-    F: FnOnce(std::sync::Arc<trusty_common::memory_core::PalaceHandle>, String) -> Fut,
+    F: FnOnce(std::sync::Arc<crate::engine::PalaceHandle>, String) -> Fut,
     Fut: std::future::Future<
-        Output = Result<Vec<trusty_common::memory_core::retrieval::RecallResult>, HealthProbeError>,
+        Output = Result<Vec<crate::engine::retrieval::RecallResult>, HealthProbeError>,
     >,
 {
     // Content-unique probe phrase. `__trusty_memory_healthcheck__` makes the

@@ -5,8 +5,8 @@
 use super::*;
 use crate::commands::palace_reclaim::tests::{backdate, drawer, seed_palace};
 use crate::commands::palace_reclaim_trash::{purge_trash, TrashManifest, MANIFEST_FILE};
+use crate::engine::palace::Drawer;
 use chrono::NaiveDate;
-use trusty_common::memory_core::palace::Drawer;
 
 const DATE: &str = "2026-10-04";
 
@@ -476,8 +476,8 @@ fn purge_refuses_a_symlinked_trash_base() {
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reclaim_apply_removal_is_journaled_via_daemon_forget() {
-    use trusty_common::memory_core::maintenance_log::read_journal;
-    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    use crate::engine::maintenance_log::read_journal;
+    crate::engine::retrieval::seed_shared_embedder_with_mock();
     let s = scene(2);
     let list = review(&s);
     let state = crate::AppState::new(s.root.clone());

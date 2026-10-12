@@ -9,8 +9,8 @@
 //! Test: this IS the test module.
 
 use super::*;
-use trusty_common::memory_core::store::kg_redb::KgRedbStats;
-use trusty_common::memory_core::{MaintenanceLease, PalaceRegistry};
+use crate::engine::store::kg_redb::KgRedbStats;
+use crate::engine::{MaintenanceLease, PalaceRegistry};
 
 /// A writer state whose data root's lease `holder` owns, with one palace
 /// ("leased") holding one triple.

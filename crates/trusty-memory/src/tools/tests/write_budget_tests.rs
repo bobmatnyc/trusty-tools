@@ -17,8 +17,8 @@
 //! verdict. [`hang_guard`] only stops a handler that never returns.
 
 use super::*;
+use crate::engine::timeouts;
 use std::time::Duration;
-use trusty_common::memory_core::timeouts;
 
 /// Budget short enough that an exhausted-budget error lands promptly, and far
 /// enough below `write_lock_timeout()` (60 s) that observing it at all proves

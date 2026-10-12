@@ -15,7 +15,7 @@
 //! `carve_out_admits_low_entropy_and_refuses_at_the_threshold`,
 //! `carve_out_admits_a_high_entropy_mixed_case_alnum_span`.
 
-use trusty_common::memory_core::filter::SecretRule;
+use crate::engine::filter::SecretRule;
 
 /// 4.5 bits/char, in the tenths `classify_secret` reports.
 pub(crate) const HIGH_ENTROPY_TENTHS: u16 = 45;

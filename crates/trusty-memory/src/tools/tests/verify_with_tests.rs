@@ -235,7 +235,7 @@ async fn verify_without_fact_key_is_refused() {
 /// retirement runs fails open). PR C's resume pass acts on this listing.
 #[tokio::test]
 async fn a_displaced_drawer_never_lists_a_verify_command() {
-    use trusty_common::memory_core::store::kg::Triple;
+    use crate::engine::store::kg::Triple;
 
     let (state, _tmp) = test_state();
     create(&state, "vw5").await;
@@ -281,7 +281,7 @@ async fn a_displaced_drawer_never_lists_a_verify_command() {
 /// vector, and the caller gets the error after both.
 #[tokio::test]
 async fn a_failed_verify_record_still_indexes_the_drawer() {
-    use trusty_common::memory_core::store::VectorStore;
+    use crate::engine::store::VectorStore;
 
     // Warming defers the embed to a post-commit task, so the vector lane
     // depends on the post-commit steps too.
@@ -323,7 +323,7 @@ async fn a_failed_verify_record_still_indexes_the_drawer() {
         "the committed drawer must reach the BM25 lane: {enqueued:?}"
     );
 
-    let embedder = trusty_common::memory_core::retrieval::shared_embedder()
+    let embedder = crate::engine::retrieval::shared_embedder()
         .await
         .expect("shared embedder");
     let query = embedder

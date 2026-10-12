@@ -13,8 +13,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::engine::filter::SECRET_FILTER_VERSION;
 use serde::Deserialize;
-use trusty_common::memory_core::filter::SECRET_FILTER_VERSION;
 
 use super::carve_out::row_admissible;
 use super::export::{DIR_MODE, EXPORTABLE, MASKED_FILE, RECORD_SCHEMA};

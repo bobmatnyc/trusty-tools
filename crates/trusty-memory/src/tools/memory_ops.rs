@@ -12,11 +12,11 @@
 //! `dispatch_memory_list_*` in `tools::tests`.
 
 use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
+use crate::engine::palace::RoomType;
+use crate::engine::retrieval::{list_drawers_in_wing, RecallScope, RememberOptions};
 use crate::{ActivitySource, AppState, DaemonEvent, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::palace::RoomType;
-use trusty_common::memory_core::retrieval::{list_drawers_in_wing, RecallScope, RememberOptions};
 use uuid::Uuid;
 
 use super::bm25::bm25_delete_document;

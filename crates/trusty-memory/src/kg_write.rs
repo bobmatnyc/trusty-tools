@@ -30,8 +30,8 @@
 
 use std::sync::Arc;
 
-use trusty_common::memory_core::store::kg::Triple;
-use trusty_common::memory_core::PalaceHandle;
+use crate::engine::store::kg::Triple;
+use crate::engine::PalaceHandle;
 
 use crate::AppState;
 
@@ -173,7 +173,7 @@ async fn refresh(state: &AppState) -> Result<(), KgWriteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::memory_core::palace::PalaceId;
+    use crate::engine::palace::PalaceId;
 
     /// Build an `AppState` over a fresh temp root with one created palace.
     fn state_with_palace(name: &str) -> (AppState, Arc<PalaceHandle>) {
@@ -181,7 +181,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let state = AppState::new(root).with_default_palace(Some(name.to_string()));
-        let palace = trusty_common::memory_core::Palace {
+        let palace = crate::engine::Palace {
             id: PalaceId::new(name),
             name: name.to_string(),
             description: None,

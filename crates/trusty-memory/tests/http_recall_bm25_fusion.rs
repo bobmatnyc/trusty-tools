@@ -4,7 +4,7 @@
 //! Why: `handle_memory_recall` has run vector and BM25 in parallel and RRF-fused
 //! them since #156. The hook does not go through it. It goes
 //! `commands/prompt_context/fetch.rs` → the daemon's recall route →
-//! `MemoryService::recall` → `memory_core::retrieval::layers`, and there was no
+//! `MemoryService::recall` → `engine::retrieval::layers`, and there was no
 //! BM25 anywhere on that chain — so a prompt was answered by vector centroid
 //! with no lexical counterweight, which is dense retrieval's known weak spot and
 //! BM25's strength.
@@ -24,11 +24,11 @@
 //!
 //! Test: this IS the test file.
 
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
+use trusty_memory::bm25_backfill::run_startup_sweep;
+use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
+use trusty_memory::engine::retrieval::{
     recall_with_default_embedder, seed_shared_embedder_with_mock,
 };
-use trusty_memory::bm25_backfill::run_startup_sweep;
 use trusty_memory::service::MemoryService;
 use trusty_memory::AppState;
 
