@@ -19,6 +19,7 @@
 
 use std::collections::BTreeSet;
 
+use super::super::heredoc::scan_work::{Site, charge};
 use super::credential_print_programs::basename;
 use super::credential_print_taint_forms::reads_tainted;
 use super::{Lifted, carries};
@@ -148,6 +149,8 @@ fn expands_at(word: &str, names: &BTreeSet<String>, depth: usize) -> bool {
     if depth > MAX_BRACE_DEPTH {
         return true;
     }
+    // #9715: this level's `i`/`j` walk covers `word` once; count it.
+    charge(Site::TaintRead, word.len());
     let bytes = word.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
