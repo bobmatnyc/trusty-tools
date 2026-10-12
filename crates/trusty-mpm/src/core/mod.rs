@@ -86,6 +86,10 @@ pub mod channels_taint;
 pub mod channels_readiness;
 #[cfg(test)]
 mod channels_readiness_tests;
+// #8454 VC: the egress verdict contract between the daemon and the hook.
+pub mod egress_verdict;
+#[cfg(test)]
+mod egress_verdict_tests;
 pub mod circuit;
 pub mod claude_config;
 // Issue #4467: the shared set of Claude Code process-local session markers every

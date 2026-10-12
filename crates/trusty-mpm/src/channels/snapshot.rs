@@ -175,8 +175,10 @@ impl Published {
                 .is_none_or(|at| now.saturating_sub(at) >= REFRESH_INTERVAL)
     }
 
-    /// The report a check at `now` may serve, or why none may be served.
-    fn judge(&self, now: Duration) -> Result<Arc<LoadReport>, SnapshotDeny> {
+    /// The report a check at `now` may read and its age, or why none may be
+    /// read. A denied report is returned; [`PolicySnapshot::current`]
+    /// refuses it.
+    fn judge(&self, now: Duration) -> Result<(Arc<LoadReport>, Duration), SnapshotDeny> {
         let (Some(report), Some(fresh_at)) = (&self.report, self.fresh_at) else {
             return Err(SnapshotDeny::NeverLoaded);
         };
@@ -184,10 +186,7 @@ impl Published {
         if age > MAX_AGE {
             return Err(SnapshotDeny::Stale { age, max: MAX_AGE });
         }
-        if report.denied {
-            return Err(SnapshotDeny::Denied);
-        }
-        Ok(Arc::clone(report))
+        Ok((Arc::clone(report), age))
     }
 }
 
@@ -269,6 +268,26 @@ where
     /// `denied_report_denies_egress_and_inbound`,
     /// `poisoned_snapshot_lock_denies`.
     pub fn current(&self) -> Result<Arc<LoadReport>, SnapshotDeny> {
+        let (report, _age) = self.current_aged()?;
+        if report.denied {
+            return Err(SnapshotDeny::Denied);
+        }
+        Ok(report)
+    }
+
+    /// [`Self::current`] with the report's age, and a denied report
+    /// returned rather than refused.
+    ///
+    /// Why: #8454 VC, the egress verdict route classifies a denied report
+    /// itself, to answer it as not ready under the same branch the hook's
+    /// inline load would name, and reports the snapshot's age.
+    /// What: the same refresh start and the same never-loaded, stale and
+    /// poisoned refusals as [`Self::current`]; the age is the time since the
+    /// last fresh refresh started. A caller must not read a denied report
+    /// as ready.
+    /// Test: `denied_policy_report_is_cached_as_deny_not_allow`,
+    /// `snapshot_older_than_max_age_is_not_served`.
+    pub fn current_aged(&self) -> Result<(Arc<LoadReport>, Duration), SnapshotDeny> {
         // #8454: a poisoned lock denies; nothing vouches for its state.
         let mut published = self
             .inner
