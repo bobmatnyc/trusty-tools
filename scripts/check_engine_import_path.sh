@@ -16,7 +16,9 @@
 #   dependency graph.
 #
 # What (default mode): `git grep` for the literal `trusty_common::memory_core`
-#   over tracked files under `crates/`, excluding `crates/trusty-common/` (the
+#   over tracked files under `crates/`, plus a second matcher over `*.rs` for a
+#   bare `memory_core` path segment (group, multi-line group, spaced and aliased
+#   imports), excluding `crates/trusty-common/` (the
 #   module's home), `crates/trusty-memory/` (the re-export) and every
 #   `changelog.d/` directory (fragments quote the old path as history). A hit
 #   on a comment line is not an import and is skipped: a line whose first
@@ -53,7 +55,8 @@
 #
 # Test: scripts/check_engine_import_path_selftest.sh — a code hit, an inline
 #   path, an attribute, comment-only hits, a changelog.d hit, hits inside the
-#   two owning crates, an empty scan, and each --dep-graph verdict.
+#   two owning crates, a group, a multi-line group, a spaced and an aliased
+#   import, an empty scan, each --dep-graph verdict, and a tree over 128 KB.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); git, awk, grep.
 
@@ -65,7 +68,7 @@ PATTERN='trusty_common::memory_core'
 
 case "${1:-}" in
   -h|--help)
-    sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^# Portability/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   ""|--dep-graph) ;;
@@ -95,8 +98,22 @@ tree_text() {
 }
 
 # has_crate <tree-text> <crate>: the tree names <crate> as a package line.
+#   A `case` match, never `printf | grep -q`: under pipefail an early grep exit
+#   hands printf a SIGPIPE (141) once the text outgrows the pipe buffer, and the
+#   check then fails on size alone.
 has_crate() {
-  printf '%s\n' "$1" | grep -qE "^$2 v"
+  case $'\n'"$1" in
+    *$'\n'"$2 v"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# root_is_mpm <tree-text>: the first line is the `trusty-mpm v` root.
+root_is_mpm() {
+  case "${1%%$'\n'*}" in
+    "trusty-mpm v"*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 if [ "${1:-}" = "--dep-graph" ]; then
@@ -105,7 +122,7 @@ if [ "${1:-}" = "--dep-graph" ]; then
   fail=0
   for label in default features; do
     if [ "$label" = default ]; then tree="$default_tree"; else tree="$feature_tree"; fi
-    if ! printf '%s\n' "$tree" | head -n 1 | grep -qE '^trusty-mpm v'; then
+    if ! root_is_mpm "$tree"; then
       echo "FAIL: the $label tree has no 'trusty-mpm v' root line (SCAN FLOOR)"
       fail=1
     fi
@@ -134,17 +151,29 @@ if [ "$scanned" -lt "$min_files" ]; then
   exit 1
 fi
 
+# Two matchers, both fail closed on a git grep error (exit > 1):
+#   1. the literal path, over every tracked text file under crates/;
+#   2. a bare `memory_core` path segment in `*.rs`, which catches the forms the
+#      literal does not spell: `use trusty_common::{memory_core::x, ..}`, a
+#      `use` group split over lines, `trusty_common :: memory_core`, and an
+#      alias (`use trusty_common as tc; use tc::memory_core::x`).
+EXCLUDES=(':(exclude)crates/trusty-common/' ':(exclude)crates/trusty-memory/'
+  ':(exclude,glob)**/changelog.d/**')
+SEGMENT='(^|[^/[:alnum:]_])memory_core([[:space:]]*(::|,|\}|;|$)|[[:space:]]+as[[:space:]])'
+
 set +e
-hits="$(git grep -n -I -F -e "$PATTERN" -- 'crates/' \
-  ':(exclude)crates/trusty-common/' \
-  ':(exclude)crates/trusty-memory/' \
-  ':(exclude,glob)**/changelog.d/**')"
+hits_literal="$(git grep -n -I -F -e "$PATTERN" -- 'crates/' "${EXCLUDES[@]}")"
 status=$?
+if [ "$status" -le 1 ]; then
+  hits_segment="$(git grep -n -I -E -e "$SEGMENT" -- 'crates/*.rs' "${EXCLUDES[@]}")"
+  status=$?
+fi
 set -e
 if [ "$status" -gt 1 ]; then
   echo "check_engine_import_path: git grep failed (exit $status)" >&2
   exit 2
 fi
+hits="$(printf '%s\n%s\n' "$hits_literal" "$hits_segment" | sort -u)"
 
 # `path:line:text` -> keep only hits whose text is not a comment line.
 offending="$(printf '%s\n' "$hits" | awk '

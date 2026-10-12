@@ -44,14 +44,18 @@ new_fixture() {
 
 # check <name> <want-exit> <needle-or-empty> <output> <status>
 check() {
-  local name="$1" want="$2" needle="$3" out="$4" status="$5"
+  local name="$1" want="$2" needle="$3" out="$4" status="$5" missing
   if [ "$status" -ne "$want" ]; then
     echo "FAIL $name: exit $status, want $want"
     printf '%s\n' "$out" | sed 's/^/    /'
     FAILED=$((FAILED + 1))
     return
   fi
-  if [ -n "$needle" ] && ! printf '%s' "$out" | grep -qF -- "$needle"; then
+  # A `case` match, not `printf | grep -q`: grep -q exits early and pipefail
+  # then reads the printf SIGPIPE as a failed match on a large output.
+  missing=0
+  if [ -n "$needle" ]; then case "$out" in *"$needle"*) ;; *) missing=1 ;; esac; fi
+  if [ "$missing" -eq 1 ]; then
     echo "FAIL $name: output lacks '$needle'"
     printf '%s\n' "$out" | sed 's/^/    /'
     FAILED=$((FAILED + 1))
@@ -105,6 +109,26 @@ printf '// trusty_common::memory_core in a comment\nuse trusty_common::memory_co
   > "$d/crates/consumer/src/a.rs"
 run_scan code_beside_comment 1 'crates/consumer/src/a.rs:2:' "$d"
 
+# Forms the literal `trusty_common::memory_core` does not spell (#9270 fix round).
+d="$(new_fixture group_import)"
+printf 'use trusty_common::{memory_core::store::OpenIntent, other};\n' \
+  > "$d/crates/consumer/src/a.rs"
+run_scan group_import 1 'crates/consumer/src/a.rs:1:' "$d"
+
+d="$(new_fixture multiline_group)"
+printf 'use trusty_common::{\n    other,\n    memory_core::store::OpenIntent,\n};\n' \
+  > "$d/crates/consumer/src/a.rs"
+run_scan multiline_group 1 'crates/consumer/src/a.rs:3:' "$d"
+
+d="$(new_fixture spaced_path)"
+printf 'use trusty_common :: memory_core::store::OpenIntent;\n' > "$d/crates/consumer/src/a.rs"
+run_scan spaced_path 1 'crates/consumer/src/a.rs:1:' "$d"
+
+d="$(new_fixture alias_use)"
+printf 'use trusty_common as tc;\nuse tc::memory_core::store::OpenIntent;\n' \
+  > "$d/crates/consumer/src/a.rs"
+run_scan alias_use 1 'crates/consumer/src/a.rs:2:' "$d"
+
 # ── Source scan: accepted forms ───────────────────────────────────────────────
 d="$(new_fixture comment_lines)"
 cat > "$d/crates/consumer/src/a.rs" <<'RS'
@@ -120,6 +144,11 @@ RS
 printf '[package]\nname = "consumer"\n# trusty_common::memory_core is reached via trusty-memory\n' \
   > "$d/crates/consumer/Cargo.toml"
 run_scan comment_lines 0 'OK:' "$d"
+
+d="$(new_fixture bare_comment)"
+printf '//! whose format `memory_core::filter` depends on.\n/// uses memory_core, as before.\n' \
+  > "$d/crates/consumer/src/a.rs"
+run_scan bare_comment 0 'OK:' "$d"
 
 d="$(new_fixture changelog_fragment)"
 mkdir -p "$d/crates/consumer/changelog.d"
@@ -175,6 +204,22 @@ run_graph graph_default_ort 1 "pulls in 'ort'" \
 run_graph graph_features_lack_engine 1 "does not pull in 'trusty-memory'" \
   "$CLEAN_DEFAULT" "$CLEAN_DEFAULT"
 run_graph graph_empty_tree 1 'SCAN FLOOR' '' "$FULL_FEATURES"
+
+# A tree over the pipe buffer must not turn a match into a failed check: with
+# `printf | grep -q` under pipefail, an early grep exit read as SIGPIPE (141).
+FILLER="$(awk 'BEGIN { for (i = 0; i < 6000; i++) printf "filler-crate-%05d v1.0.%d\n", i, i }')"
+BIG_DEFAULT="${CLEAN_DEFAULT}${FILLER}
+"
+BIG_FEATURES="trusty-mpm v1.9.0 (/x/crates/trusty-mpm)
+trusty-memory v0.35.1 (/x/crates/trusty-memory)
+hnsw_rs v0.3.4
+${FILLER}
+"
+if [ "${#BIG_FEATURES}" -le 131072 ] || [ "${#BIG_DEFAULT}" -le 131072 ]; then
+  echo "FAIL graph_large_tree: fixture is not over 128 KB"
+  FAILED=$((FAILED + 1))
+fi
+run_graph graph_large_tree 0 'OK: default trusty-mpm graph' "$BIG_DEFAULT" "$BIG_FEATURES"
 
 echo "check_engine_import_path_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
