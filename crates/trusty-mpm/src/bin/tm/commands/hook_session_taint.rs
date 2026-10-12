@@ -169,6 +169,9 @@ pub(crate) fn settle_session_start(
         route: String::new(),
         question_id: String::new(),
         tainted_at: chrono::Utc::now(),
+        // #8433 C1: scoped to the session's cwd; an unknown cwd is empty,
+        // which covers every cwd, so every other live mark may inherit it.
+        workspace: Some(cwd.map(Path::to_path_buf).unwrap_or_default()),
     };
     match channels_taint::write_taint(&dir, &record) {
         Ok(path) => Err(format!(

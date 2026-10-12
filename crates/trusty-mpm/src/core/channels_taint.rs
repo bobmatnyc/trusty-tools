@@ -13,7 +13,8 @@
 //! inside the same trust anchor, so it survives a Claude `session_id` change
 //! (Dfc) and [`reapply`] re-writes the taint for the new id. The mark names
 //! the session's workspace, so [`covering_mark`] scopes the SessionStart
-//! hook's own re-apply (D09) to that workspace. Only [`retire`]
+//! hook's own re-apply (D09) to that workspace. Each taint record carries its
+//! own workspace scope, which a retire's hand-off keeps (C1). Only [`retire`]
 //! removes either, when the managed session ends; no timer exists. The
 //! verdict reads presence only: absent is untainted, and every other outcome,
 //! including an unreadable or malformed file and a bad id, is tainted.
@@ -65,6 +66,16 @@ pub enum TaintError {
         /// What the parser said.
         reason: String,
     },
+    /// A taint record names no workspace scope, so a retire cannot tell which
+    /// other marks still cover it (#8433 C1).
+    #[error(
+        "{}: the taint record has no workspace scope, so a retire keeps it",
+        path.display()
+    )]
+    Unscoped {
+        /// The file.
+        path: PathBuf,
+    },
 }
 
 /// One taint file's content.
@@ -84,6 +95,12 @@ pub struct TaintRecord {
     pub question_id: String,
     /// When the taint was first set.
     pub tainted_at: DateTime<Utc>,
+    /// The directory the tainted id's cwd is at or under; a relative or empty
+    /// path is every cwd. It survives a retire's hand-off, so the heir is
+    /// chosen by this scope (#8433 C1). `None` only in a record written
+    /// before the field existed, which no retire removes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
 }
 
 /// What a managed session was tainted by; the record flag (Dfc).
@@ -121,27 +138,11 @@ impl TaintMark {
     /// cwd (fail closed); otherwise `cwd` must be the workspace or under it,
     /// compared after canonicalizing the workspace.
     pub fn covers(&self, cwd: Option<&Path>) -> bool {
-        let Some(cwd) = cwd else {
-            return true;
-        };
-        if !self.workspace.is_absolute() {
-            return true;
-        }
-        let workspace =
-            std::fs::canonicalize(&self.workspace).unwrap_or_else(|_| self.workspace.clone());
-        cwd.starts_with(&workspace)
+        cwd.is_none_or(|cwd| scope_covers(&self.workspace, cwd))
     }
 
-    /// Whether a cwd this mark covers may also be covered by `other` (B1).
-    ///
-    /// What: true when either workspace is relative or empty, or one is at
-    /// or under the other, each canonicalized; disjoint workspaces are false.
-    fn may_share_a_cwd_with(&self, other: &TaintMark) -> bool {
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        self.covers(Some(&canon(&other.workspace))) || other.covers(Some(&canon(&self.workspace)))
-    }
-
-    /// The taint record this mark writes for one Claude session id.
+    /// The taint record this mark writes for one Claude session id, scoped
+    /// to this mark's workspace.
     pub fn record_for(&self, session_id: &str, managed_session: &str) -> TaintRecord {
         TaintRecord {
             v: FORMAT_VERSION,
@@ -151,8 +152,26 @@ impl TaintMark {
             route: self.route.clone(),
             question_id: self.question_id.clone(),
             tainted_at: self.tainted_at,
+            workspace: Some(self.workspace.clone()),
         }
     }
+}
+
+/// `path` canonicalized, or as given when it cannot be.
+fn canon(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether the canonical `cwd` is at or under `scope`; a relative or empty
+/// scope covers every cwd (fail closed).
+fn scope_covers(scope: &Path, cwd: &Path) -> bool {
+    !scope.is_absolute() || cwd.starts_with(canon(scope))
+}
+
+/// Whether some cwd is covered by both scopes: either is relative or empty,
+/// or one is at or under the other (#8433 B1, C1).
+fn scopes_overlap(a: &Path, b: &Path) -> bool {
+    scope_covers(a, &canon(b)) || scope_covers(b, &canon(a))
 }
 
 /// The taint directory under `home`.
@@ -488,29 +507,39 @@ pub fn marked_managed(dir: &Path) -> Result<Vec<String>, TaintError> {
         .collect())
 }
 
-/// The other marked session that may cover an id `managed` covers (B1).
+/// One other live mark a retire may hand a file to: its id, and its
+/// workspace, or `None` when the mark cannot be read.
+type OtherMark = (String, Option<PathBuf>);
+
+/// Every live mark but `managed`'s, in id order, read once per retire.
 ///
-/// What: the first other mark, in id order, that cannot be read or whose
-/// workspace may share a cwd with `managed`'s. A missing or unreadable own
-/// mark has an unknown workspace, so any other mark qualifies. Marks that
-/// cannot be listed are an `Err`.
-fn heir(dir: &Path, managed: &str) -> Result<Option<String>, TaintError> {
-    let own = managed_mark(dir, managed).ok().flatten();
+/// What: a mark retired between the listing and the read is skipped; marks
+/// that cannot be listed are an `Err`.
+fn other_marks(dir: &Path, managed: &str) -> Result<Vec<OtherMark>, TaintError> {
+    let mut others = Vec::new();
     for other in marked_managed(dir)? {
         if other == managed {
             continue;
         }
-        let shares = match (managed_mark(dir, &other), &own) {
-            // Retired between the listing and the read.
-            (Ok(None), _) => false,
-            (Ok(Some(theirs)), Some(own)) => own.may_share_a_cwd_with(&theirs),
-            (Err(_), _) | (Ok(Some(_)), None) => true,
-        };
-        if shares {
-            return Ok(Some(other));
+        match managed_mark(dir, &other) {
+            Ok(None) => {}
+            Ok(Some(mark)) => others.push((other, Some(mark.workspace))),
+            Err(_) => others.push((other, None)),
         }
     }
-    Ok(None)
+    Ok(others)
+}
+
+/// The first other mark that may cover an id whose file is scoped to
+/// `scope`: one that cannot be read, or whose workspace overlaps `scope`.
+///
+/// #8433 C1: the file's own scope decides, never the retiring mark's
+/// workspace, so a hand-off cannot narrow the set of marks that cover it.
+fn heir<'a>(others: &'a [OtherMark], scope: &Path) -> Option<&'a str> {
+    others
+        .iter()
+        .find(|(_, ws)| ws.as_deref().is_none_or(|ws| scopes_overlap(ws, scope)))
+        .map(|(id, _)| id.as_str())
 }
 
 /// Retire managed session `managed`: hand off or remove its taint files,
@@ -519,18 +548,23 @@ fn heir(dir: &Path, managed: &str) -> Result<Option<String>, TaintError> {
 /// Why (Dfc): a taint ends only when the managed session ends. A partial
 /// retire must leave the session tainted, so the mark goes last and only
 /// when every file is gone. Two marked sessions can share one Claude id, so
-/// a file another mark may cover outlives this retire (#8433 B1).
+/// a file another mark may cover outlives this retire (#8433 B1). Retiring
+/// a mark never untaints an id another live mark still covers (C1).
 /// What: for each `*.json` in `dir` whose `managed_session` is `managed`,
-/// rewrites it for another mark that may cover it (`heir`), else removes it.
-/// Marks that cannot be listed, a file that cannot be read or parsed, and a
-/// failed rewrite or removal each leave the file in place and make the
-/// retire an `Err`; the mark is then kept. Returns how many files were
+/// rewrites it, scope unchanged, for the first other mark that may cover the
+/// file's own `workspace` scope (`heir`), else removes it. Marks that cannot
+/// be listed, a file that cannot be read or parsed, a record with no scope,
+/// and a failed rewrite or removal each leave the file in place and make
+/// the retire an `Err`; the mark is then kept. Returns how many files were
 /// removed.
 /// Test: `retire_removes_only_that_managed_sessions_files`,
 /// `retire_hands_a_shared_id_to_the_other_tainted_session_in_its_workspace`,
 /// `retire_hands_an_id_to_a_mark_nested_in_its_workspace`,
 /// `retire_keeps_a_shared_id_when_another_mark_cannot_be_read`,
 /// `retire_hand_off_write_failure_keeps_the_mark`,
+/// `retire_never_untaints_an_id_another_live_mark_covers`,
+/// `a_record_without_a_scope_is_never_untainted_by_a_retire`,
+/// `retire_with_an_unreadable_own_mark_hands_the_id_to_a_covering_mark`,
 /// `stop_and_decommission_retire_taint`.
 pub fn retire(dir: &Path, managed: &str) -> Result<usize, TaintError> {
     let marker = managed_path(dir, managed)?;
@@ -538,30 +572,44 @@ pub fn retire(dir: &Path, managed: &str) -> Result<usize, TaintError> {
     let owns_one = taints
         .iter()
         .any(|(_, parsed)| matches!(parsed, Ok(r) if r.managed_session == managed));
-    let heir_id = if owns_one { heir(dir, managed)? } else { None };
+    // #8433 C1: read the other marks once; each file picks its heir by scope.
+    let others = if owns_one {
+        other_marks(dir, managed)?
+    } else {
+        Vec::new()
+    };
     let mut removed = 0;
     let mut first_err = None;
     for (path, parsed) in taints {
-        match (parsed, &heir_id) {
-            (Ok(record), _) if record.managed_session != managed => {}
-            (Ok(record), Some(heir_id)) => {
+        let record = match parsed {
+            Ok(record) if record.managed_session != managed => continue,
+            Ok(record) => record,
+            Err(reason) => {
+                first_err.get_or_insert(TaintError::Malformed { path, reason });
+                continue;
+            }
+        };
+        // #8433 C1: no scope means no retire can prove nothing else covers it.
+        let Some(scope) = record.workspace.as_deref() else {
+            first_err.get_or_insert(TaintError::Unscoped { path });
+            continue;
+        };
+        match heir(&others, scope) {
+            Some(heir_id) => {
                 let handed = TaintRecord {
-                    managed_session: heir_id.clone(),
+                    managed_session: heir_id.to_owned(),
                     ..record
                 };
                 if let Err(e) = write_taint(dir, &handed) {
                     first_err.get_or_insert(e);
                 }
             }
-            (Ok(_), None) => match std::fs::remove_file(&path) {
+            None => match std::fs::remove_file(&path) {
                 Ok(()) => removed += 1,
                 Err(source) => {
                     first_err.get_or_insert(TaintError::Io { path, source });
                 }
             },
-            (Err(reason), _) => {
-                first_err.get_or_insert(TaintError::Malformed { path, reason });
-            }
         }
     }
     if let Some(err) = first_err {
