@@ -3,12 +3,14 @@
 //! Why: every chat channel is deny by default. An operator needs to see what
 //! a fresh load of the route policy would put in effect, and why anything is
 //! refused, without sending a message or changing a file.
-//! What: four READ-ONLY rows, each the verdict of
+//! What: five READ-ONLY rows, each the verdict of
 //! `trusty_channels::policy::load_effective_until`: `channels_host` (the host
 //! ceiling, loaded with no channel, so no git runs), `channels_routes` (the
 //! daemon view: Slack and Telegram over every listed project),
-//! `channels_gchat` (one load per gchat-listed project, as gchat-mcp loads)
-//! and `channels_gate` (the default-branch gate's refusals, with the fix).
+//! `channels_gchat` (one load per gchat-listed project, as gchat-mcp loads),
+//! `channels_gate` (the default-branch gate's refusals, with the fix) and
+//! `egress_policy_ready` (the daemon view judged as the egress guard judges
+//! it, #9741; in `doctor_channels_egress.rs`).
 //! Each load runs on its own thread under [`LOAD_TIMEOUT`], and its git is
 //! killed [`KILL_MARGIN`] before that wait ends; one that does not finish
 //! reads Unknown and doctor moves on. No enforcement, no `refresh()`
@@ -27,6 +29,8 @@ use trusty_channels::policy::{
     LoadRequest, ProjectFileError, load_effective_until, parse_host,
 };
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
+
+use crate::commands::doctor_channels_egress::egress_ready_row;
 
 /// The budget for each channel load (S2c ruling Q8).
 pub(crate) const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -77,7 +81,7 @@ pub(crate) struct HostProbe {
     pub(crate) ceiling: Option<HostCeiling>,
 }
 
-/// The four rows for this host.
+/// The five rows for this host.
 ///
 /// Why: `tm doctor` reports what a fresh start would load (S2c plan §0.2:
 /// a one-shot process holds no last-good state, so it never reports Stale).
@@ -92,7 +96,7 @@ pub(crate) async fn channel_rows() -> Vec<DoctorCheck> {
     .await
 }
 
-/// The four rows for `base`'s host file and home, loading through `loader`.
+/// The five rows for `base`'s host file and home, loading through `loader`.
 ///
 /// Why: one combined load would false-Fail: two projects routing gchat to one
 /// person deny the combined set, while gchat-mcp loads one project at a time
@@ -141,6 +145,8 @@ pub(crate) async fn rows_with(
         view_row(ROUTES, "daemon view", &daemon),
         view_row(GCHAT, "gchat view", &gchat),
         gate_row(&daemon, &gchat),
+        // #9741: judged from the daemon view already loaded; no extra load.
+        egress_ready_row(&daemon),
     ]
 }
 
