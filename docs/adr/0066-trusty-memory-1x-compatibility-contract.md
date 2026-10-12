@@ -281,16 +281,17 @@ review:
   palace's backup root, `<backup data root>/backups/manual/` (ADR-0067 D3
   rule 3). Each segment is a plain name; an absolute path, `..`, `.`, an
   empty segment, and a symlinked segment or root component are refused
-  before any write. This meaning is frozen with the param in 1.x. Accepting
+  and no backup is written. This meaning is frozen with the param in 1.x. Accepting
   more input later is additive; refusing more is a break under D6. A refused
   `--dest` exits `1`, a runtime refusal; D1.2's exit codes are unchanged.
   Accepted residual risk (Architect ruling D, 2026-10-12): segments are
   checked with `lstat` and created with `mkdir`, which never follow a symlink
   at the last component, and the created parent's canonical path is then
   re-checked against the canonical root. A same-user writer that swaps a
-  verified segment for a symlink inside that window, or after the re-check
-  and before the staging directory is created, can still redirect the
-  backup. The writes are path-based, so an fd-based (`mkdirat`/`O_NOFOLLOW`)
+  segment for a symlink between the walk and the re-check can make at most
+  one empty directory outside the root, and the re-check then refuses the
+  backup. A swap after the re-check and before the final rename commits can
+  redirect the backup. The writes are path-based, so an fd-based (`mkdirat`/`O_NOFOLLOW`)
   walk would not close it; a bind mount is out of scope.
 
 ## Consequences

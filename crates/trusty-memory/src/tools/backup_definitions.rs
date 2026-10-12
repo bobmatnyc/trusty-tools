@@ -23,7 +23,7 @@ pub fn palace_backup_definition() -> Value {
             "type": "object",
             "properties": {
                 "palace": {"type": "string", "description": "Palace id. Required unless the server was started with --palace."},
-                "dest":   {"type": "string", "description": "Relative path of the backup directory to create under this palace's backup root, <data root>/.trusty-memory/backups/manual/ (or <data root>/backups/manual/ when palaces live under <data root>/palaces). Plain names only: an absolute path, '..', '.', an empty segment or a symlinked segment is refused, and nothing is written. It must not exist. Default: <palace>/<UTC timestamp>."}
+                "dest":   {"type": "string", "description": "Relative path of the backup directory to create under this palace's backup root, <data root>/.trusty-memory/backups/manual/ (or <data root>/backups/manual/ when palaces live under <data root>/palaces). Plain names only: an absolute path, '..', '.', an empty segment or a symlinked segment is refused, and no backup is written. It must not exist. Default: <palace>/<UTC timestamp>."}
             },
             "required": []
         }

@@ -13,9 +13,10 @@
 //! creates each parent with `lstat` + `mkdir`, which never follow a symlink
 //! at the last component, then re-checks the canonical parent against the
 //! root. Every created path is the canonical root joined with plain names.
-//! Residual risk (ruling D): a same-user writer swapping a verified segment
-//! for a symlink between the walk and the staging create; the canonical
-//! re-check catches a swap made before it runs.
+//! Residual risk (ruling D): a same-user writer swapping a segment for a
+//! symlink between the walk and the re-check can make at most one empty
+//! directory outside the root, and the re-check then refuses the backup;
+//! a swap after the re-check and before the final rename can redirect it.
 //! Test: `snapshot_dest_tests.rs`.
 
 use super::io_util::io_err;

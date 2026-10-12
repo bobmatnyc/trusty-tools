@@ -192,8 +192,8 @@ pub enum PalaceAction {
         /// palace's backup root, <data root>/.trusty-memory/backups/manual/
         /// (or <data root>/backups/manual/ when palaces live under
         /// <data root>/palaces). Plain names only: an absolute path, '..',
-        /// '.', an empty segment or a symlinked segment is refused, and
-        /// nothing is written. It must not exist. Default:
+        /// '.', an empty segment or a symlinked segment is refused, and no
+        /// backup is written. It must not exist. Default:
         /// <palace>/<UTC timestamp>.
         #[arg(long, value_name = "NAME")]
         dest: Option<PathBuf>,
