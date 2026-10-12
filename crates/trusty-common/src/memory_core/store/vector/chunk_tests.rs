@@ -438,6 +438,7 @@ async fn upsert_chunks_with_one_bad_dimension_changes_nothing() {
 /// happens before any insert, so it costs no graph work.
 #[tokio::test]
 async fn upsert_chunks_rejects_empty_and_over_cap() {
+    use crate::memory_core::store::hnsw_store::op_budget::OpProgress;
     use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
     const CAP: usize = 32;
     let dir = tempdir().unwrap();
@@ -459,7 +460,7 @@ async fn upsert_chunks_rejects_empty_and_over_cap() {
     assert!(
         store
             .hnsw_for_test()
-            .replace_group_capped(&key, &[], CAP)
+            .replace_group_capped(&key, &[], CAP, &OpProgress::default())
             .is_err()
     );
 
@@ -471,7 +472,7 @@ async fn upsert_chunks_rejects_empty_and_over_cap() {
 
     let over = store
         .hnsw_for_test()
-        .replace_group_capped(&key, &many(CAP + 1), CAP)
+        .replace_group_capped(&key, &many(CAP + 1), CAP, &OpProgress::default())
         .unwrap_err();
     assert!(over.to_string().contains("1..=32"), "{over}");
     assert!(
@@ -482,7 +483,7 @@ async fn upsert_chunks_rejects_empty_and_over_cap() {
 
     store
         .hnsw_for_test()
-        .replace_group_capped(&key, &many(CAP), CAP)
+        .replace_group_capped(&key, &many(CAP), CAP, &OpProgress::default())
         .unwrap();
     assert_eq!(store.index_size(), CAP);
     assert_eq!(store.entry_count().unwrap(), 1);
