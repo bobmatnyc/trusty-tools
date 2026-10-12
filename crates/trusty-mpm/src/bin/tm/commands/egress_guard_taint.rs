@@ -77,3 +77,7 @@ pub(crate) fn taint_verdict(payload: &Value, home: Option<&Path>) -> Option<Stri
 #[cfg(test)]
 #[path = "egress_guard_taint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "egress_guard_policy_tests.rs"]
+mod policy_tests;

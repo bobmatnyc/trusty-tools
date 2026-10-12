@@ -82,6 +82,9 @@ pub mod bundled_roster;
 pub mod catchup;
 // #8433 P0: the channel taint contract the daemon and the egress hook share.
 pub mod channels_taint;
+// #9741: tests of the egress guard's policy readiness gate (B9 lives here).
+#[cfg(test)]
+mod channels_readiness_tests;
 pub mod circuit;
 pub mod claude_config;
 // Issue #4467: the shared set of Claude Code process-local session markers every
