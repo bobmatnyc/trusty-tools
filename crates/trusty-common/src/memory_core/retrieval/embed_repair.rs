@@ -726,6 +726,7 @@ impl PalaceHandle {
     /// first) through `PalaceHandle::repair_one` (#9735 Q5).
     /// Test: `backfill_limit_applies_to_missing_then_short`,
     /// `backfill_lock_timeout_returns_an_error_naming_the_palace`,
+    /// `backfill_lock_timeout_clears_the_repaired_rows_first`,
     /// `backfill_dry_run_counts_short_drawers_and_writes_nothing`.
     pub(crate) async fn backfill_with(
         &self,
