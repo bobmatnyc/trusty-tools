@@ -434,6 +434,7 @@ async fn a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it() {
         ..bounds()
     };
     let first = h.reembed_slice(&e, &tight).await;
+    assert_eq!(first.stop, SliceStop::EmbedTimeout, "{first:?}");
     assert!(!first.host_failure, "{first:?}");
     assert_eq!(ledger_ids(dir.path()), vec![slow], "{first:?}");
     // The orphaned embed still holds the model; this bound waits it out.

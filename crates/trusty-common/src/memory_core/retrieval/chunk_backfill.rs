@@ -11,7 +11,7 @@
 
 use super::deferred_embed::{EmbedLoss, RetryPolicy, with_retry};
 use super::embed_repair::EmbedHealth;
-use super::embed_store::{embed_planned_within, plan_chunks};
+use super::embed_store::{chunked_embed_timeout, embed_planned, embed_planned_within, plan_chunks};
 use super::handle::PalaceHandle;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::Drawer;
@@ -56,8 +56,8 @@ pub struct SliceBounds {
     /// A drawer with a ledger row younger than this is skipped. Env
     /// `TRUSTY_CHUNK_BACKFILL_BACKOFF_SECS`, default 86 400.
     pub ledger_backoff: Duration,
-    /// Consecutive embed failures that end the slice as host-level. Env
-    /// `TRUSTY_CHUNK_BACKFILL_HOST_FAILURES`, default 2.
+    /// Consecutive embed errors that end the slice as host-level; a timeout
+    /// never counts. Env `TRUSTY_CHUNK_BACKFILL_HOST_FAILURES`, default 2.
     pub host_failures: usize,
 }
 
@@ -127,8 +127,11 @@ pub enum SliceStop {
     DrawerCap,
     /// `max_chunks` chunks were embedded.
     ChunkCap,
-    /// `host_failures` consecutive embeds failed.
+    /// `host_failures` consecutive embeds returned an error.
     HostFailure,
+    /// One drawer's embed outlived its bound; that drawer is ledgered. The
+    /// embedder may still be running it, so no further drawer is started.
+    EmbedTimeout,
     /// `write_mutex` was not granted within `lock_wait`; the palace is busy.
     LockTimeout(String),
     /// The vector store refused an upsert.
@@ -149,8 +152,8 @@ pub struct SliceReport {
     pub stale: usize,
     /// Chunks embedded successfully in this slice.
     pub chunks_embedded: usize,
-    /// `host_failures` or more embed failures and no success: the fault is
-    /// the host's, so no ledger row was written for those failures.
+    /// `host_failures` or more embed errors and no success: the fault is
+    /// the host's, so no ledger row was written for those errors.
     pub host_failure: bool,
     /// Why the slice ended.
     pub stop: SliceStop,
@@ -194,11 +197,13 @@ impl PalaceHandle {
     /// older than `min_age`, then short drawers by importance, skipping any
     /// with a ledger row younger than `ledger_backoff`. Per drawer: split, embed
     /// under `embed_timeout` with no lock, then [`Self::commit_if_current`].
-    /// Stops on the bounds, a lock timeout, a store error, or `host_failures`
-    /// consecutive embed failures. Ledger rows are written at the end, except
-    /// embed failures in a host-level slice; repaired drawers' rows are cleared.
+    /// Stops on the bounds, a lock timeout, a store error, an embed timeout
+    /// (that drawer is ledgered as drawer-specific), or `host_failures`
+    /// consecutive embed errors. Ledger rows are written at the end, except
+    /// embed errors in a host-level slice; repaired drawers' rows are cleared.
     /// Test: `chunk_backfill_tests` (e.g. `crash_midway_through_n_drawers_resumes_and_finishes`,
-    /// `host_level_slice_failure_writes_no_ledger_rows`).
+    /// `host_level_slice_failure_writes_no_ledger_rows`,
+    /// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`).
     pub async fn reembed_slice(
         &self,
         embedder: &Arc<dyn Embedder + Send + Sync>,
@@ -241,7 +246,16 @@ impl PalaceHandle {
             };
             let vectors = match embed_bounded(embedder, &chunks, bounds.embed_timeout).await {
                 Ok(v) => v,
-                Err(reason) => {
+                // #9735: the dropped embed may still hold the model, so the
+                // next drawer would time out behind it; stop on this drawer.
+                Err(EmbedFail::TimedOut(reason)) => {
+                    report.attempted += 1;
+                    report.failed += 1;
+                    rows.push(PendingRow::new(id, embed_loss(reason), true));
+                    report.stop = SliceStop::EmbedTimeout;
+                    break;
+                }
+                Err(EmbedFail::Error(reason)) => {
                     report.attempted += 1;
                     report.failed += 1;
                     (consecutive, embed_failures) = (consecutive + 1, embed_failures + 1);
@@ -470,23 +484,37 @@ fn limit_reached(
     }
 }
 
+/// Why one drawer's slice embed failed.
+enum EmbedFail {
+    /// The embedder returned an error.
+    Error(String),
+    /// The bound elapsed. Only the future was dropped: the embedder's
+    /// blocking work, and its model lock, may still be running.
+    TimedOut(String),
+}
+
 /// Embed `chunks` under the scaled per-chunk ceiling and the slice's own.
 ///
 /// Why (#9735 gap 11): the scaled ceiling can be minutes; a slice must give
-/// up on one drawer sooner.
-/// What: the lower of `slice_timeout` and the per-chunk scaled bound wins.
-/// Test: `slice_embed_is_bounded_by_the_slice_timeout`.
+/// up on one drawer sooner, and must tell a timeout from an error.
+/// What: one timeout at the lower of `slice_timeout` and the scaled bound,
+/// so either expiry is [`EmbedFail::TimedOut`].
+/// Test: `slice_embed_is_bounded_by_the_slice_timeout`,
+/// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`.
 async fn embed_bounded(
     embedder: &Arc<dyn Embedder + Send + Sync>,
     chunks: &[String],
     slice_timeout: Duration,
-) -> Result<Vec<Vec<f32>>, String> {
-    let per_chunk = timeouts::embed_batch_timeout();
-    let embed = embed_planned_within(embedder.as_ref(), chunks, per_chunk);
-    match tokio::time::timeout(slice_timeout, embed).await {
+) -> Result<Vec<Vec<f32>>, EmbedFail> {
+    let scaled = chunked_embed_timeout(timeouts::embed_batch_timeout(), chunks.len());
+    let bound = slice_timeout.min(scaled);
+    match tokio::time::timeout(bound, embed_planned(embedder.as_ref(), chunks)).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(format!("{e:#}")),
-        Err(_) => Err(format!("slice embed timed out after {slice_timeout:?}")),
+        Ok(Err(e)) => Err(EmbedFail::Error(format!("{e:#}"))),
+        Err(_) => Err(EmbedFail::TimedOut(format!(
+            "slice embed of {} chunks timed out after {bound:?}",
+            chunks.len()
+        ))),
     }
 }
 
