@@ -342,3 +342,38 @@ fn host_fault_on_an_unserved_entry_denies_all_on_refresh() {
     );
     assert!(filtered.report().denied);
 }
+
+/// 🔴 #8454 VC (R1): a loader stamps a nonzero digest of its source
+/// fingerprint; a no-op refresh keeps it and a reload moves it, so a cache
+/// keyed on it sees every reload.
+#[test]
+fn loader_report_carries_a_fingerprint_that_follows_its_sources() {
+    let (repo, home, mut loader) = loaded();
+    let first = loader.report().fingerprint;
+    assert_ne!(first, 0, "a loader report must carry a fingerprint");
+    assert!(!loader.refresh(), "nothing changed");
+    assert_eq!(loader.report().fingerprint, first, "a no-op refresh moved it");
+    repo.commit_routes(&bob_and_eve());
+    assert!(loader.refresh());
+    let second = loader.report().fingerprint;
+    assert_ne!(second, 0);
+    assert_ne!(second, first, "a reviewed change kept the old fingerprint");
+    // A host fault is a reload too: the denied report is stamped as well.
+    home.write_host("channels:\n  version: 1\n  surprise: true\n");
+    assert!(loader.refresh());
+    assert!(loader.report().denied);
+    assert_ne!(loader.report().fingerprint, 0);
+    assert_ne!(loader.report().fingerprint, second);
+}
+
+/// 🔴 #8454 VC (R1): a one-shot load has no loader fingerprint, so it is 0,
+/// the value a cache must never key on.
+#[test]
+fn one_shot_load_has_no_fingerprint() {
+    let repo = Repo::init("main");
+    repo.commit_routes(&bob());
+    let home = Home::listing(&[repo.dir()]);
+    let report = load_effective(&home.request());
+    assert_eq!(names(&report), ["bob-dm"]);
+    assert_eq!(report.fingerprint, 0);
+}
