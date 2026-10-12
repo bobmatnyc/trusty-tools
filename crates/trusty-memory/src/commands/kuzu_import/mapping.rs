@@ -33,6 +33,11 @@ pub const STORE_TAG_PREFIX: &str = "kuzu-store:";
 pub const PENDING_TAG_PREFIX: &str = "kuzu-pending:";
 /// Tag marking a drawer as imported from kuzu-memory, for filtering.
 pub const ORIGIN_TAG: &str = "kuzu-memory";
+/// Prefix of the tags the review ledger adds (#8624); the importer owns them.
+pub const REVIEW_TAG_PREFIX: &str = "kuzu-review:";
+/// Tag on a drawer admitted verbatim by the review carve-out (#8624), so the
+/// admission can be found and retracted.
+pub const OVERRIDE_TAG: &str = "kuzu-review:override";
 /// Column tags [`map_memory`] generates; `--update` replaces only these.
 const COLUMN_TAG_PREFIXES: &[&str] = &[
     "memory_type:",
@@ -72,6 +77,9 @@ pub struct MappedMemory {
     pub tags: Vec<String>,
     /// Rules that refused a store-supplied tag value, which was dropped.
     pub refused_tags: Vec<SecretRule>,
+    /// Set only by the review ledger's carve-out (#8624): the content is still
+    /// secret-shaped and is admitted verbatim, past the secret screen.
+    pub review_override: bool,
 }
 
 impl MappedMemory {
@@ -106,6 +114,7 @@ pub fn is_generated_tag(tag: &str) -> bool {
             HASH_TAG_PREFIX,
             STORE_TAG_PREFIX,
             PENDING_TAG_PREFIX,
+            REVIEW_TAG_PREFIX,
         ]
         .iter()
         .chain(COLUMN_TAG_PREFIXES)
@@ -222,6 +231,7 @@ pub fn map_memory(row: &KuzuMemoryRow, store: &str) -> Option<MappedMemory> {
             .unwrap_or(DEFAULT_IMPORTANCE),
         tags,
         refused_tags,
+        review_override: false,
     })
 }
 

@@ -9,13 +9,29 @@
 //! [`ReviewBatch::finish`] writes `<root>/<run>/masked.jsonl`, owner-only from
 //! creation, and prints the counts. Rows of an auto-refuse rule are counted,
 //! never written. The root is fixed (ruling Q4): [`paths::default_root`].
-//! Test: `review::tests`, `review::export_tests`, `review::paths_tests`.
+//!
+//! PR-C adds the review itself: `import kuzu review record|status|finish`
+//! ([`cli`]) writes and seals a ledger of agent verdicts ([`ledger`],
+//! [`verdict`]), and `import kuzu --review-ledger` applies it ([`admit`]),
+//! with closed redaction [`ops`] and the verbatim [`carve_out`].
+//! Test: `review::tests`, `review::export_tests`, `review::paths_tests`,
+//! `review::ledger_tests`, `review::admit_tests`.
 
+pub(crate) mod admit;
+pub(crate) mod carve_out;
+pub mod cli;
 pub(crate) mod export;
+pub(crate) mod ledger;
+pub(crate) mod ops;
 pub(crate) mod paths;
+pub mod verdict;
 
 #[cfg(test)]
+mod admit_tests;
+#[cfg(test)]
 mod export_tests;
+#[cfg(test)]
+mod ledger_tests;
 #[cfg(test)]
 mod paths_tests;
 #[cfg(test)]
@@ -25,8 +41,11 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+pub(crate) use admit::apply_verdicts;
+pub use cli::{KuzuCommand, ReviewCommand};
 pub(crate) use export::OsFs;
 use export::{classify_row, write_run, MaskedRecord, ReviewFs, RowVerdict};
+pub(crate) use ledger::{load_sealed, ReviewLedger};
 pub(crate) use paths::default_root;
 use paths::{guard_destination, run_name};
 
@@ -56,6 +75,12 @@ pub(crate) enum ReviewError {
 
 impl From<ReviewError> for KuzuImportError {
     fn from(e: ReviewError) -> Self {
+        KuzuImportError::Io(e.to_string())
+    }
+}
+
+impl From<ledger::LedgerError> for KuzuImportError {
+    fn from(e: ledger::LedgerError) -> Self {
         KuzuImportError::Io(e.to_string())
     }
 }
