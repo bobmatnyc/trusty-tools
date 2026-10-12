@@ -136,6 +136,13 @@ fn bounds() -> SliceBounds {
     }
 }
 
+/// #9735: every env-mutating test here holds the lib target's one env lock.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn ledger_ids(dir: &std::path::Path) -> Vec<Uuid> {
     embed_ledger::load(dir)
         .iter()
@@ -602,7 +609,8 @@ async fn missing_vector_drawer_younger_than_two_minutes_is_skipped() {
 
 #[test]
 fn slice_bounds_read_their_env_overrides() {
-    // SAFETY: only this test sets these names.
+    let _env = env_lock();
+    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
     unsafe {
         std::env::set_var("TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS", "7");
         std::env::set_var("TRUSTY_CHUNK_BACKFILL_EMBED_SECS", "not-a-number");
@@ -770,13 +778,15 @@ async fn backfill_embed_and_retry_sleeps_run_outside_write_mutex() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
 async fn backfill_lock_timeout_returns_an_error_naming_the_palace() {
+    let _env = env_lock();
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let id = legacy(&h, &words(100), 0.5).await;
     let m = h.write_mutex_for_test();
     let held = m.lock().await;
-    // Precedent: `timeout_tests` sets this name the same way.
+    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
     unsafe { std::env::set_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", "0") };
     let result = h
         .backfill_with(backfill_opts(1, Duration::ZERO), &chunking())

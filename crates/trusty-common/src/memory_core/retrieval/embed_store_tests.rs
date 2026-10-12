@@ -352,7 +352,10 @@ fn chunked_embed_timeout_never_drops_below_the_operators_per_chunk() {
 /// #9735 Q3: the cap is `TRUSTY_EMBED_CHUNKED_CAP_SECS`, not a constant.
 #[test]
 fn chunked_embed_timeout_honours_the_cap_env() {
-    // SAFETY: only this test sets this name; other callers stay below 60 s.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
     unsafe { std::env::set_var("TRUSTY_EMBED_CHUNKED_CAP_SECS", "60") };
     let got = chunked_embed_timeout(std::time::Duration::from_secs(30), 4096);
     unsafe { std::env::remove_var("TRUSTY_EMBED_CHUNKED_CAP_SECS") };
