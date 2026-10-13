@@ -64,6 +64,8 @@ pub mod prune;
 pub mod reactivate;
 // #9313: `tm sessions rebind`.
 pub mod rebind;
+// #9162: `tm sessions output <managed name>`.
+pub mod output;
 pub mod reconcile;
 // #7087: the `mpm.residency.active` producer route.
 pub(crate) mod residency;

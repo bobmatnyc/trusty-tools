@@ -49,24 +49,53 @@ pub trait Resolvable {
 /// Test: `resolve_target_precedence`, `resolve_target_prefix`,
 /// `resolve_target_prefix_is_unambiguous`, `resolve_target_no_match`.
 pub fn resolve_target<'a, T: Resolvable>(items: &'a [T], query: &str) -> Option<&'a T> {
+    match classify_target(items, query) {
+        TargetMatch::Found(item) => Some(item),
+        TargetMatch::Ambiguous(_) | TargetMatch::NotFound => None,
+    }
+}
+
+/// The outcome of [`classify_target`].
+///
+/// Why (#9162): [`resolve_target`] folds "ambiguous prefix" into `None`, so a
+/// caller cannot tell it from "no such session" and reports the wrong error.
+#[derive(Debug)]
+pub enum TargetMatch<'a, T> {
+    /// Exactly one item matched, by the [`resolve_target`] precedence.
+    Found(&'a T),
+    /// Two or more items share the queried name prefix (never guessed).
+    Ambiguous(Vec<&'a T>),
+    /// Nothing matched, or `query` was empty.
+    NotFound,
+}
+
+/// [`resolve_target`] with the ambiguous-prefix case kept distinct.
+///
+/// What: the same precedence — id-exact, name-exact, unambiguous name-prefix —
+/// but two or more prefix matches return [`TargetMatch::Ambiguous`] with every
+/// candidate.
+/// Test: `classify_target_separates_ambiguous_from_not_found`.
+pub fn classify_target<'a, T: Resolvable>(items: &'a [T], query: &str) -> TargetMatch<'a, T> {
     if query.is_empty() {
-        return None;
+        return TargetMatch::NotFound;
     }
     // 1. id-exact.
     if let Some(item) = items.iter().find(|i| i.id_matches(query)) {
-        return Some(item);
+        return TargetMatch::Found(item);
     }
     // 2. name-exact.
     if let Some(item) = items.iter().find(|i| i.resolve_name() == query) {
-        return Some(item);
+        return TargetMatch::Found(item);
     }
     // 3. unambiguous name-prefix.
-    let mut prefix_matches = items
+    let mut prefix_matches: Vec<&T> = items
         .iter()
-        .filter(|i| !i.resolve_name().is_empty() && i.resolve_name().starts_with(query));
-    match (prefix_matches.next(), prefix_matches.next()) {
-        (Some(only), None) => Some(only),
-        _ => None,
+        .filter(|i| !i.resolve_name().is_empty() && i.resolve_name().starts_with(query))
+        .collect();
+    match prefix_matches.len() {
+        0 => TargetMatch::NotFound,
+        1 => TargetMatch::Found(prefix_matches.remove(0)),
+        _ => TargetMatch::Ambiguous(prefix_matches),
     }
 }
 
@@ -157,6 +186,23 @@ mod tests {
             Some("uuid-1"),
             "exact name match beats the ambiguous-prefix rule"
         );
+    }
+
+    #[test]
+    fn classify_target_separates_ambiguous_from_not_found() {
+        let items = vec![stub("uuid-1", "frontend-a"), stub("uuid-2", "frontend-b")];
+        assert!(matches!(
+            classify_target(&items, "frontend-"),
+            TargetMatch::Ambiguous(v) if v.len() == 2
+        ));
+        assert!(matches!(
+            classify_target(&items, "no-such"),
+            TargetMatch::NotFound
+        ));
+        assert!(matches!(
+            classify_target(&items, "frontend-b"),
+            TargetMatch::Found(s) if s.id == "uuid-2"
+        ));
     }
 
     #[test]

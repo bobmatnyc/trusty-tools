@@ -210,6 +210,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.answer",
         "mpm.managed.attach_cmd",
         "mpm.managed.activity",
+        "mpm.managed.output", // #9162
         "mpm.managed.resume",
         "mpm.managed.reactivate",
         "mpm.managed.decommission",
@@ -1627,4 +1628,157 @@ async fn residency_active_round_trips_over_the_real_socket() {
     assert_eq!(set.projects.len(), 0, "no managed sessions seeded");
 
     let _ = stop.send(());
+}
+
+// ── `mpm.managed.output` (#9162) ─────────────────────────────────────────────
+
+/// What a session-scoped capture of the same tmux session would return.
+const SIBLING_TEXT: &str = "SIBLING PANE - must never be read";
+
+/// A managed session on a fake tmux whose record carries `pane` (or none).
+///
+/// Why (#9162): `tm sessions output <managed name>` needs a record whose pane
+/// the owned-pane guard can prove, and a sibling session-scoped capture that a
+/// wrong implementation would read instead.
+/// What: seeds the fake before `create`, so the record captures the pane id,
+/// and registers `pane_text` under the pane and [`SIBLING_TEXT`] under the
+/// session name.
+async fn managed_output_fixture(
+    pane: Option<&str>,
+    pane_text: &str,
+) -> (
+    Arc<DaemonState>,
+    tempfile::TempDir,
+    Arc<crate::session_manager::tests::FakeTmuxDriver>,
+    String,
+) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fake = crate::session_manager::tests::FakeTmuxDriver::new();
+    *fake.pane_id_override.lock().expect("lock") = pane.map(str::to_owned);
+    let driver: Arc<dyn crate::session_manager::ManagedTmuxDriver> = fake.clone();
+    let state =
+        DaemonState::with_root_isolated_managed_and_driver(dir.path().to_path_buf(), driver).await;
+    let state = Arc::new(state);
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(dir.path().to_path_buf()),
+            Some("managed-output-9162".into()),
+            Some(dir.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("seed session");
+    let mut responses = fake.capture_responses.lock().expect("lock");
+    if let Some(p) = pane {
+        responses.insert(p.to_owned(), pane_text.to_owned());
+    }
+    responses.insert(record.tmux_name.clone(), SIBLING_TEXT.to_owned());
+    drop(responses);
+    (state, dir, fake, record.id.to_string())
+}
+
+/// #9162 (criterion 1, 6): the managed output route returns the owned pane's
+/// text and the same body over the socket. Red on main: no such route.
+#[tokio::test]
+async fn managed_output_returns_pane_text_for_a_managed_session_9162() {
+    let (state, _dir, fake, id) = managed_output_fixture(Some("%77"), "line one\nline two\n").await;
+
+    let http = http_call(
+        http_router(Arc::clone(&state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/output?lines=20"),
+        None,
+    )
+    .await;
+    assert_eq!(http.status, 200, "body={:?}", http.text);
+    let body = http.json.clone().expect("json body");
+    assert_eq!(body["output"], "line one\nline two\n");
+    assert_eq!(body["lines"], 20);
+    assert_eq!(body["input_box"], Value::Null, "Q2: never classified");
+    let rpc = rpc_call(
+        &rpc_router(&state),
+        "mpm.managed.output",
+        json!({"id": id, "lines": 20}),
+    )
+    .await;
+    assert_parity("mpm.managed.output", &http, &rpc);
+
+    // `compress` reaches the body on both transports.
+    let http = http_call(
+        http_router(Arc::clone(&state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/output?compress=summarise"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        http.json.as_ref().expect("json")["compress_level"],
+        "summarise"
+    );
+    let rpc = rpc_call(
+        &rpc_router(&state),
+        "mpm.managed.output",
+        json!({"id": id, "compress": "summarise"}),
+    )
+    .await;
+    assert_parity("mpm.managed.output (compress)", &http, &rpc);
+
+    let calls = fake.pane_capture_calls.lock().expect("lock").clone();
+    assert!(
+        calls.iter().all(|(_, pane)| pane == "%77"),
+        "only the owned pane is captured: {calls:?}"
+    );
+}
+
+/// #9162 (criterion 4): a record with no owned pane is refused on both
+/// transports, and nothing is captured, least of all a sibling pane.
+#[tokio::test]
+async fn managed_output_with_no_owned_pane_fails_closed_9162() {
+    let (state, _dir, fake, id) = managed_output_fixture(None, "").await;
+
+    let http = http_call(
+        http_router(Arc::clone(&state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/output"),
+        None,
+    )
+    .await;
+    assert_eq!(http.status, 409, "body={:?}", http.text);
+    assert!(http.text.contains("no pane id"), "reason: {:?}", http.text);
+    assert!(!http.text.contains(SIBLING_TEXT));
+    let rpc = rpc_call(&rpc_router(&state), "mpm.managed.output", json!({"id": id})).await;
+    assert_parity("mpm.managed.output (no pane)", &http, &rpc);
+    assert!(
+        fake.pane_capture_calls.lock().expect("lock").is_empty(),
+        "no pane may be captured for a record that owns none"
+    );
+}
+
+/// #9162 (criterion 6): an absent id refuses identically on both transports.
+#[tokio::test]
+async fn managed_output_parity_9162() {
+    assert_missing_session_parity(
+        "mpm.managed.output",
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{MISSING_ID}/output"),
+        "mpm.managed.output",
+        json!({"id": MISSING_ID}),
+    )
+    .await;
+}
+
+/// #9162 (criterion 6): the client's HTTP-to-socket map names the new route.
+#[test]
+fn the_client_socket_map_names_the_managed_output_route_9162() {
+    assert!(
+        crate::client::http_client::socket_routes::ROUTES.contains(&(
+            "GET",
+            "/api/v1/sessions/managed/{id}/output",
+            "mpm.managed.output"
+        )),
+        "ROUTES is missing the managed output route"
+    );
 }

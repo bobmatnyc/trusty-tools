@@ -21,6 +21,7 @@ pub(crate) mod catchup;
 // #7422: the instruction pipeline and its new scope notice live in their own
 // module — this file was at the 500-SLOC production cap.
 pub(crate) mod instructions;
+mod output;
 mod start;
 
 use instructions::{compose_session_instructions, print_excluded_scope};
@@ -380,23 +381,8 @@ pub(crate) async fn session(
             lines,
             summarize,
         } => {
-            // #6288: `lines` typed, so the socket's params struct decodes it.
-            let mut req = daemon
-                .get(format!("/sessions/{id_or_name}/output"))
-                .query(&[("lines", lines)]);
-            if summarize {
-                req = req.query(&[("compress", "summarise")]);
-            }
-            let resp = req.send().await?;
-            if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                anyhow::bail!("session '{id_or_name}' not found");
-            }
-            let body: serde_json::Value = resp.error_for_status()?.json().await?;
-            let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
-            print!("{output}");
-            print_compression_stats(&body);
-            // #8407: on stderr, so stdout stays the pane text byte for byte.
-            eprintln!("{}", crate::formatters::session::input_box_note(&body));
+            // #9162: the verb lives in `output` (this file is at the SLOC cap).
+            output::session_output(daemon, &id_or_name, lines, summarize).await?;
         }
         // ── Managed session-manager actions ──────────────────────────────────
         // All `ls` variants are routed through the direct HTTP path so the

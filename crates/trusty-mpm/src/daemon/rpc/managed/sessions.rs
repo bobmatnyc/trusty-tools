@@ -31,6 +31,7 @@
 //! | `mpm.managed.answer` | `POST /api/v1/sessions/managed/{id}/answer` |
 //! | `mpm.managed.attach_cmd` | `GET /api/v1/sessions/managed/{id}/attach-cmd` |
 //! | `mpm.managed.activity` | `GET /api/v1/sessions/managed/{id}/activity` |
+//! | `mpm.managed.output` | `GET /api/v1/sessions/managed/{id}/output` |
 //! | `mpm.managed.runtime_stop` | `POST /api/v1/sessions/managed/{id}/runtime-stop` |
 //! | `mpm.managed.resume` | `POST /api/v1/sessions/managed/{id}/resume` |
 //! | `mpm.managed.reactivate` | `POST /api/v1/sessions/managed/{id}/reactivate` |
@@ -53,8 +54,8 @@ use trusty_common::uds::server::RpcRouter;
 use crate::daemon::managed_routes::prune::{PruneRequest, PruneWorktreesRequest};
 use crate::daemon::managed_routes::{
     AdoptExistingRequest, AnswerRequest, ReactivateQuery, RenameRequest, SendInputRequest,
-    SpawnRequest, activity, architect, cores, delete, fleet, provision_status, prune, reactivate,
-    rebind, reconcile, rename, residency, sync_assets,
+    SpawnRequest, activity, architect, cores, delete, fleet, output, provision_status, prune,
+    reactivate, rebind, reconcile, rename, residency, sync_assets,
 };
 use crate::daemon::state::DaemonState;
 
@@ -63,6 +64,20 @@ use crate::daemon::state::DaemonState;
 pub struct SessionParams {
     /// The managed-session id the HTTP route reads from its path.
     pub id: String,
+}
+
+/// `mpm.managed.output` parameters — the id plus the HTTP route's two query
+/// fields (#9162).
+#[derive(Debug, Deserialize)]
+pub struct OutputParams {
+    /// The managed-session id the HTTP route reads from its path.
+    pub id: String,
+    /// Trailing pane lines to capture (default 50).
+    #[serde(default)]
+    pub lines: Option<u32>,
+    /// Compression level applied before returning.
+    #[serde(default)]
+    pub compress: Option<crate::core::compress::CompressionLevel>,
 }
 
 /// `mpm.managed.list` parameters — the HTTP route's two query flags.
@@ -308,7 +323,7 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
     }
     let (get_s, stop_s, rstop_s, rename_s, send_s) = (st!(), st!(), st!(), st!(), st!());
     let (ps_s, sa_s, ans_s, ac_s, act_s) = (st!(), st!(), st!(), st!(), st!());
-    let (res_s, react_s, dec_s, del_s) = (st!(), st!(), st!(), st!());
+    let (res_s, react_s, dec_s, del_s, out_s) = (st!(), st!(), st!(), st!(), st!());
 
     router
         .typed("mpm.managed.get", move |req: SessionParams| {
@@ -372,6 +387,15 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
         .typed("mpm.managed.activity", move |req: SessionParams| {
             let state = Arc::clone(&act_s);
             async move { activity::activity_core(&state, &req.id).await.into_rpc() }
+        })
+        // #9162: a managed session's pane output.
+        .typed("mpm.managed.output", move |req: OutputParams| {
+            let state = Arc::clone(&out_s);
+            async move {
+                output::output_core(&state, &req.id, req.lines, req.compress)
+                    .await
+                    .into_rpc()
+            }
         })
         .typed("mpm.managed.resume", move |req: SessionParams| {
             let state = Arc::clone(&res_s);
