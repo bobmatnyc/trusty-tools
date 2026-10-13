@@ -203,10 +203,27 @@ pub fn contained_transcript_file(claude_config_dir: &Path, candidate: &Path) -> 
 /// `CLAUDE_CONFIG_DIR` at its fixture directory rather than mutating this
 /// process's environment.
 pub fn claude_config_dir() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
-        _ => Some(crate::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir()),
+    match claude_config_dir_override() {
+        Some(dir) => Some(dir),
+        None => {
+            Some(crate::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir())
+        }
     }
+}
+
+/// `CLAUDE_CONFIG_DIR` when set and non-blank, else `None`.
+///
+/// Why (#9156): `tm doctor`'s `deployment` and `auto_memory` rows read the
+/// user tier from this dir when it is set, and keep their own `~/.claude`
+/// fallback when it is not. [`claude_config_dir`] folds the two together, so
+/// they need the env half alone.
+/// What: the env branch of [`claude_config_dir`]; no fallback.
+/// Test: `deployment_check_reads_settings_from_claude_config_dir`,
+/// `auto_memory_reads_the_user_tier_from_claude_config_dir`.
+pub fn claude_config_dir_override() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The record's path under an explicit framework root.

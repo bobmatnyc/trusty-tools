@@ -16,6 +16,7 @@ use super::*;
 use crate::core::auto_memory_import::{INDEX_FILE, auto_memory_dir};
 use crate::core::doctor::CheckStatus;
 use crate::core::memory_reachable::MemoryReachability;
+use crate::secret_source::test_env::EnvVarGuard;
 
 /// Write `<root>/<rel>` with `body`, creating parents.
 fn write_settings(root: &Path, rel: &str, body: &str) {
@@ -69,10 +70,15 @@ fn auto_memory_fails_when_on_beside_a_healthy_trusty_memory() {
     );
 }
 
+// #9156: this test reaches the user tier, so it runs `#[serial]` with
+// `CLAUDE_CONFIG_DIR` unset — the value a tm session exports would otherwise
+// point it at the operator's config dir.
+#[serial_test::serial]
 #[test]
 fn auto_memory_fails_when_unset_beside_a_healthy_trusty_memory() {
     // A settings file that exists and is silent on the key is not a pass —
     // Claude Code defaults auto memory ON.
+    let _env = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
     let (_tmp, home, project) = fixture(Some(r#"{"outputStyle": "x"}"#));
 
     let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
@@ -263,8 +269,11 @@ fn auto_memory_project_local_overrides_project() {
     );
 }
 
+// #9156: serial with `CLAUDE_CONFIG_DIR` unset, as above.
+#[serial_test::serial]
 #[test]
 fn auto_memory_falls_back_to_the_user_tier() {
+    let _env = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
     let (_tmp, home, project) = fixture(None);
     write_settings(&home, ".claude/settings.json", OFF);
 
@@ -274,6 +283,29 @@ fn auto_memory_falls_back_to_the_user_tier() {
     assert!(
         check.message.contains("user tier"),
         "the row must name the tier it resolved from: {}",
+        check.message
+    );
+}
+
+/// REGRESSION (#9156): with `CLAUDE_CONFIG_DIR` set, the user tier is that
+/// dir's `settings.json`, not `<home>/.claude/settings.json`.
+#[serial_test::serial]
+#[test]
+fn auto_memory_reads_the_user_tier_from_claude_config_dir() {
+    let (tmp, home, project) = fixture(None);
+    let config_dir = tmp.path().join("claude-config");
+    write_settings(&config_dir, "settings.json", OFF);
+    // The stale `~/.claude` tier says the opposite; it must not be read.
+    write_settings(&home, ".claude/settings.json", ON);
+    let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &config_dir);
+
+    let check = check_auto_memory(Some(&project), &home, None, &MemoryReachability::Reachable);
+
+    assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+    let expected = config_dir.join("settings.json").display().to_string();
+    assert!(
+        check.message.contains(&expected),
+        "the row must name the config dir it read: {}",
         check.message
     );
 }

@@ -308,10 +308,35 @@ pub(crate) fn validate_workspace_with_probe(
     fw: &FrameworkPaths,
     probe: HookGroupProbe<'_>,
 ) -> ValidationReport {
+    validate_workspace_at(fw, &fw.claude_home_dir().join(".claude"), probe)
+}
+
+/// [`validate_workspace`] with `settings.json` and `output-styles/` read from
+/// `settings_dir` instead of `<claude_home_dir>/.claude` (#9156).
+///
+/// Why: `tm doctor`'s `deployment` row checks the user tier the session reads,
+/// which is `CLAUDE_CONFIG_DIR` when that is set. `tm validate` and the
+/// spawn/resume gate keep [`validate_workspace`]; only the doctor row calls
+/// this.
+/// What: the same three probes; the hook-group probe still receives
+/// `fw.claude_home_dir()` as its project dir.
+/// Test: `deployment_check_reads_settings_from_claude_config_dir`.
+pub(crate) fn validate_workspace_in(fw: &FrameworkPaths, settings_dir: &Path) -> ValidationReport {
+    validate_workspace_at(fw, settings_dir, &|fw, project_dir, settings| {
+        crate::core::session_launch::project_hook_group_gaps(fw, project_dir, settings, None)
+    })
+}
+
+/// The probe sequence, with the settings dir named by the caller.
+fn validate_workspace_at(
+    fw: &FrameworkPaths,
+    settings_dir: &Path,
+    probe: HookGroupProbe<'_>,
+) -> ValidationReport {
     let mut gaps = Vec::new();
     validate_agents(fw, &mut gaps);
     validate_skills(fw, &mut gaps);
-    validate_settings(fw, probe, &mut gaps);
+    validate_settings(fw, settings_dir, probe, &mut gaps);
     ValidationReport { gaps }
 }
 
@@ -396,10 +421,11 @@ fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
 /// current config asks for.
 fn validate_settings(
     fw: &FrameworkPaths,
+    settings_dir: &Path,
     probe: HookGroupProbe<'_>,
     gaps: &mut Vec<DeploymentGap>,
 ) {
-    let settings_path = fw.claude_home_dir().join(".claude").join("settings.json");
+    let settings_path = settings_dir.join("settings.json");
     let text = match std::fs::read_to_string(&settings_path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -424,11 +450,7 @@ fn validate_settings(
         Some(id) => match OUTPUT_STYLES.iter().find(|s| s.id == id) {
             None => gaps.push(DeploymentGap::OutputStyleUnknownId(id.to_string())),
             Some(style) => {
-                let style_path = fw
-                    .claude_home_dir()
-                    .join(".claude")
-                    .join("output-styles")
-                    .join(style.file_name);
+                let style_path = settings_dir.join("output-styles").join(style.file_name);
                 let deployed = std::fs::metadata(&style_path)
                     .map(|m| m.len() > 0)
                     .unwrap_or(false);

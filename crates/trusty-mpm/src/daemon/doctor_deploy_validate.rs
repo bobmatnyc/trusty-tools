@@ -18,9 +18,12 @@
 //! [`DoctorCheck`] — `Ok` when complete, `Fail` naming every gap otherwise.
 //! Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`.
 
-use crate::core::deploy_validate::validate_workspace;
+use std::path::PathBuf;
+
+use crate::core::deploy_validate::{validate_workspace, validate_workspace_in};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
+use crate::core::session_record::claude_config_dir_override;
 
 /// Probe deployment completeness by diffing against the canonical bundled roster.
 ///
@@ -31,9 +34,16 @@ use crate::core::paths::FrameworkPaths;
 /// gap (semicolon-joined, capped implicitly by the small roster size so the
 /// message stays readable) plus the actionable hint to run `tm validate
 /// --repair` otherwise.
-/// Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`.
+/// #9156: a home-scoped run reads `settings.json` from `CLAUDE_CONFIG_DIR`
+/// when that is set; see [`user_tier_settings_dir`].
+/// Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`,
+/// `deployment_check_reads_settings_from_claude_config_dir`,
+/// `deployment_check_keeps_the_project_tier_under_claude_config_dir`.
 pub(super) fn check_deployment_completeness(paths: &FrameworkPaths) -> DoctorCheck {
-    let report = validate_workspace(paths);
+    let report = match user_tier_settings_dir(paths) {
+        Some(dir) => validate_workspace_in(paths, &dir),
+        None => validate_workspace(paths),
+    };
     if report.is_complete() {
         return DoctorCheck::new(
             "deployment",
@@ -53,21 +63,29 @@ pub(super) fn check_deployment_completeness(paths: &FrameworkPaths) -> DoctorChe
     )
 }
 
+/// The active Claude config dir, when `paths` is scoped to the user tier.
+///
+/// Why (#9156): a home-scoped run reads `<home>/.claude/settings.json`, but a
+/// session launched with `CLAUDE_CONFIG_DIR` reads its user tier from that dir.
+/// A project-scoped run reads the project's own `.claude/`, which
+/// `CLAUDE_CONFIG_DIR` does not replace.
+/// What: [`claude_config_dir_override`] when `paths.claude_home_dir()` is the
+/// base the layout was resolved against (`paths.root`'s parent), else `None`.
+/// Test: `deployment_check_reads_settings_from_claude_config_dir`,
+/// `deployment_check_keeps_the_project_tier_under_claude_config_dir`.
+fn user_tier_settings_dir(paths: &FrameworkPaths) -> Option<PathBuf> {
+    let home_scoped = paths.root.parent() == Some(paths.claude_home_dir().as_path());
+    home_scoped.then(claude_config_dir_override).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret_source::test_env::EnvVarGuard;
+    use std::path::Path;
 
-    #[test]
-    fn deployment_check_ok_when_complete() {
-        // An entirely empty temp dir has no canonical source agents/skills to
-        // diff against (both `agent_source_dir()`/`skill_source_dir()` and the
-        // deploy targets are empty), so there is nothing to report missing —
-        // the settings.json probes are the only ones that can still fail, so
-        // seed a minimal complete settings.json plus manifests.
-        let tmp = tempfile::tempdir().unwrap();
-        let mut paths = FrameworkPaths::under(tmp.path());
-        paths.trusty_mpm_root = None;
-
+    /// Seed the agent and skill ownership manifests `paths` deploys into.
+    fn seed_manifests(paths: &FrameworkPaths) {
         let agents_dir = paths.agent_deploy_dir();
         std::fs::create_dir_all(&agents_dir).unwrap();
         crate::core::agent_manifest::AgentManifest::default()
@@ -80,9 +98,11 @@ mod tests {
         crate::core::skill_manifest::SkillManifest::default()
             .save(&skills_dir)
             .unwrap();
+    }
 
-        let claude_dir = paths.claude_home_dir().join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
+    /// Seed a complete `settings.json` and its output style under `claude_dir`.
+    fn seed_settings(claude_dir: &Path) {
+        std::fs::create_dir_all(claude_dir).unwrap();
         let style_dir = claude_dir.join("output-styles");
         std::fs::create_dir_all(&style_dir).unwrap();
         let default_style = crate::core::bundle::OUTPUT_STYLES[0];
@@ -96,15 +116,83 @@ mod tests {
             r#"{"outputStyle": "trusty-mpm", "hooks": {"SessionStart": []}}"#,
         )
         .unwrap();
+    }
+
+    // #9156: `#[serial]` with `CLAUDE_CONFIG_DIR` unset, so the ambient value a
+    // tm session exports cannot point this test at the operator's config dir.
+    #[serial_test::serial]
+    #[test]
+    fn deployment_check_ok_when_complete() {
+        // An entirely empty temp dir has no canonical source agents/skills to
+        // diff against (both `agent_source_dir()`/`skill_source_dir()` and the
+        // deploy targets are empty), so there is nothing to report missing —
+        // the settings.json probes are the only ones that can still fail, so
+        // seed a minimal complete settings.json plus manifests.
+        let _env = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut paths = FrameworkPaths::under(tmp.path());
+        paths.trusty_mpm_root = None;
+        seed_manifests(&paths);
+        seed_settings(&paths.claude_home_dir().join(".claude"));
 
         let check = check_deployment_completeness(&paths);
         assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
     }
 
+    /// REGRESSION (#9156): with `CLAUDE_CONFIG_DIR` set, a home-scoped run
+    /// reads `settings.json` and the output style from that dir, not
+    /// `<home>/.claude`.
+    #[serial_test::serial]
+    #[test]
+    fn deployment_check_reads_settings_from_claude_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("claude-config");
+        let mut paths = FrameworkPaths::under(tmp.path().join("home"));
+        paths.trusty_mpm_root = None;
+        seed_manifests(&paths);
+        // `<home>/.claude/settings.json` is absent; only the config dir has one.
+        seed_settings(&config_dir);
+        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &config_dir);
+
+        let check = check_deployment_completeness(&paths);
+        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
+    }
+
+    /// #9156: a project-scoped run keeps reading the project's own
+    /// `.claude/settings.json`; `CLAUDE_CONFIG_DIR` replaces the user tier only.
+    #[serial_test::serial]
+    #[test]
+    fn deployment_check_keeps_the_project_tier_under_claude_config_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("claude-config");
+        let project = tmp.path().join("project");
+        let mut paths =
+            FrameworkPaths::for_managed_workspace_under(tmp.path().join("home"), &project);
+        paths.trusty_mpm_root = None;
+        seed_manifests(&paths);
+        seed_settings(&config_dir);
+        let _env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &config_dir);
+
+        let check = check_deployment_completeness(&paths);
+        assert_eq!(
+            check.status,
+            CheckStatus::Fail,
+            "message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("settings.json is missing"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[serial_test::serial]
     #[test]
     fn deployment_check_fail_lists_gaps() {
         // A totally unprovisioned workspace (no manifests, no settings.json)
         // must Fail and name the gaps in the message.
+        let _env = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
         let tmp = tempfile::tempdir().unwrap();
         let mut paths = FrameworkPaths::under(tmp.path());
         paths.trusty_mpm_root = None;
