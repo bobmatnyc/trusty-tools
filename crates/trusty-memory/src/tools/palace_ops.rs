@@ -192,7 +192,8 @@ pub(crate) async fn handle_palace_delete(state: &AppState, args: Value) -> Resul
     let svc = MemoryService::new(state.clone());
     match svc.delete_palace(&palace_id, force).await {
         Ok(()) => Ok(json!({ "deleted": palace_id })),
-        Err(ServiceError::NotFound(_)) => Err(anyhow!("Palace not found: {palace_id}")),
+        // #9751: relay the service's message, which names the existing palaces.
+        Err(ServiceError::NotFound(msg)) => Err(anyhow!(msg)),
         Err(ServiceError::Conflict(msg)) => Err(anyhow!(msg)),
         Err(e) => Err(anyhow!("palace_delete: {e}")),
     }

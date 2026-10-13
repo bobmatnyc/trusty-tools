@@ -1165,7 +1165,10 @@ pub(crate) fn open_errors() -> Vec<(&'static str, anyhow::Error, bool)> {
 #[tokio::test]
 async fn format_too_new_is_a_conflict_at_the_service_open_handle() {
     for (name, e, refusal) in open_errors() {
-        match (super::core_kg::open_failure("p", &e), refusal) {
+        match (
+            super::core_kg::open_failure("p", &e, std::path::Path::new("/nonexistent")),
+            refusal,
+        ) {
             (ServiceError::Conflict(m), true) => assert!(m.contains(name), "{m}"),
             (ServiceError::Internal(_), false) => {}
             (other, _) => panic!("{name}: refusal={refusal}, got {other:?}"),

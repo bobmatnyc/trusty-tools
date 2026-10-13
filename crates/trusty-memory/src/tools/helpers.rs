@@ -463,8 +463,10 @@ pub(crate) fn open_palace_handle(
 /// clamped by `budget` and it registers no liveness guard of its own. Every
 /// caller runs inside [`begin_budgeted_write`], whose [`WriteGuard`] already
 /// counts the write once. Read paths keep calling [`open_palace_handle`], which
-/// stamps a full budget and therefore behaves exactly as before.
-/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`.
+/// stamps a full budget and therefore behaves exactly as before. A missing
+/// palace fails with the listed [`crate::engine::PalaceNotFound`] (#9751).
+/// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`,
+/// `memory_remember_and_note_name_a_missing_palace_without_its_path`.
 pub(crate) fn open_palace_handle_within(
     state: &AppState,
     palace_id: &str,
@@ -475,7 +477,14 @@ pub(crate) fn open_palace_handle_within(
     state
         .registry
         .open_palace_within(&state.data_root, &pid, budget)
-        .with_context(|| format!("open palace {palace_id}"))
+        .map_err(|e| {
+            // #9751: an absence answers with the id and the existing palace
+            // ids, no path; the type survives for the -32004 wire code.
+            match crate::engine::PalaceNotFound::listed_absence(&e, &state.data_root) {
+                Some(absent) => absent.into(),
+                None => e.context(format!("open palace {palace_id}")),
+            }
+        })
 }
 
 /// Acquire the per-palace write mutex as the FIRST leg of a budgeted write

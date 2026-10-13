@@ -4,7 +4,7 @@
 //! Why: every surface asserts the same contract — the missing id and the capped
 //! list of existing palace ids, never a filesystem path — so one copy of the
 //! fixture and the assertion keeps the surfaces from drifting apart.
-//! Test: this IS test support; the callers are the `palace_missing` tests.
+//! Test: this IS test support, and it holds the helper's own unit tests.
 
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::store::PalaceStore;
@@ -90,4 +90,63 @@ pub(crate) fn assert_unlisted_absence(message: &str, root: &Path, missing: &str)
         message.contains("could not be listed"),
         "a failed listing must say so rather than list nothing: {message}"
     );
+}
+
+/// Why (#9751): the listing is the part a caller acts on, so its order, its cap
+/// and its count are the contract.
+/// What: 25 palaces under a temp root; the listed message shows the first 20
+/// sorted ids, says `20 of 25`, and names no path. A short list says `3 of 3`.
+/// Test: itself.
+#[test]
+fn listing_is_sorted_capped_at_twenty_and_counted() {
+    use crate::engine::palace_not_found::{ExistingPalaces, PalaceNotFound};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    seed_listed_palaces(tmp.path(), 25);
+    let absent = PalaceNotFound::listing("ghost-palace", tmp.path());
+    match absent.existing() {
+        ExistingPalaces::Listed { shown, total } => {
+            assert_eq!((shown.len(), *total), (20, 25));
+            assert_eq!(shown.first().map(String::as_str), Some("listed-00"));
+        }
+        other => panic!("expected a listing, got {other:?}"),
+    }
+    assert_listed_absence(&absent.to_string(), tmp.path(), "ghost-palace", 25);
+
+    let short = PalaceNotFound::from_ids("x", ["c", "a", "b", "a"].map(String::from));
+    assert_eq!(
+        short.to_string(),
+        "palace not found: x; existing palaces (3 of 3 shown): a, b, c"
+    );
+}
+
+/// Why (#9751): a root with no palaces must not read as a listing failure.
+/// Test: itself.
+#[test]
+fn an_empty_root_says_no_palaces_exist() {
+    use crate::engine::palace_not_found::PalaceNotFound;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert_eq!(
+        PalaceNotFound::listing("ghost-palace", tmp.path()).to_string(),
+        "palace not found: ghost-palace; no palaces exist"
+    );
+}
+
+/// Why (#9751 fail-open check): a listing that fails leaves a not-found error
+/// that names the id and lists nothing; it is still the absence type, so every
+/// surface still answers not-found.
+/// Test: itself.
+#[test]
+fn a_failed_listing_is_still_not_found_and_lists_nothing() {
+    use crate::engine::palace_not_found::{ExistingPalaces, PalaceNotFound};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    seed_listed_palaces(tmp.path(), 2);
+    seed_unlistable_palace(tmp.path());
+    let bare = anyhow::Error::new(PalaceNotFound::new("ghost-palace"));
+    let absent = PalaceNotFound::listed_absence(&bare, tmp.path()).expect("an absence");
+    assert_eq!(absent.existing(), &ExistingPalaces::Unavailable);
+    assert_unlisted_absence(&absent.to_string(), tmp.path(), "ghost-palace");
+    assert!(crate::engine::PalaceRegistry::open_error_is_absent(
+        &anyhow::Error::new(absent)
+    ));
+    assert!(PalaceNotFound::listed_absence(&anyhow::anyhow!("other"), tmp.path()).is_none());
 }

@@ -1,0 +1,2 @@
+Fixed
+- A request naming a palace that does not exist no longer reports the daemon's filesystem path. `memory_remember`, `memory_note` and every other MCP tool, the daemon's wire methods, and the service layer answer `palace not found: <id>; existing palaces (<n> of <total> shown): …`, listing at most 20 palace ids. The request still fails with the not-found code; nothing is created. When the palaces cannot be listed, the error says so and lists none. The server log keeps the path at debug level (#9751).
