@@ -34,50 +34,105 @@ const SLOTS: usize = 64;
 /// tracker's epoch and are stored as `millis + 1`, so 0 is never a valid entry.
 const FREE: u64 = 0;
 
-/// How long the oldest in-flight operation may run before the pool is called
-/// wedged.
+/// The configured bounds the wedge line is derived from (#4001, #9783).
 ///
-/// Why: this must sit ABOVE every legitimately-bounded wait, or healthy load
-/// would read as a wedge. Two such bounds are tracked: the palace open queue,
-/// `engine::timeouts::open_queue_timeout()` (default 60 s, issue #3992),
-/// and a writer queued on the palace write lock, `write_lock_timeout()`
-/// (default 60 s), tracked since #4001. Doubling the larger means any operation
-/// still outstanding has already blown through the bound that was supposed to
-/// release it — the #3992 signature, where a `memory_remember` ran ~1800 s.
-/// Env-overridable so an operator running a deliberately long bound can move
-/// the wedge line with it.
+/// Why: each is a process-wide env read, so a test cannot vary them without
+/// racing its siblings; naming them in one struct lets the derivation stay a
+/// pure function of its inputs.
+/// What: the two wait bounds (#3992, #4001) and the two write bounds (#4002,
+/// #6366).
+/// Test: `wedge_line_is_the_write_span_plus_the_wait_line`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WedgeBounds {
+    /// `open_queue_timeout()`: a palace open waits this long at most.
+    pub open_queue: Duration,
+    /// `write_lock_timeout()`: one write-mutex wait lasts this long at most.
+    pub write_lock: Duration,
+    /// `write_op_budget()`: a write's acquisition legs share this budget.
+    pub write_op_budget: Duration,
+    /// `write_pipeline_timeout()`: a write holds the palace write lock across
+    /// embed, upsert and persist for this long at most.
+    pub write_pipeline: Duration,
+}
+
+impl WedgeBounds {
+    /// The env-configured wait bounds, with the two write bounds the caller
+    /// enforces.
+    pub(crate) fn configured(write_op_budget: Duration, write_pipeline: Duration) -> Self {
+        Self {
+            open_queue: crate::engine::timeouts::open_queue_timeout(),
+            write_lock: crate::engine::timeouts::write_lock_timeout(),
+            write_op_budget,
+            write_pipeline,
+        }
+    }
+}
+
+/// How long the oldest in-flight operation, or a held palace handle lock, may
+/// last before `/health` calls it wedged.
+///
+/// Why: this must sit ABOVE every legitimately-bounded operation, or healthy
+/// load reads as a wedge. #9783: a `memory_remember` holds the palace write
+/// lock across embed, upsert and persist for up to `write_pipeline_timeout()`
+/// (240 s), so the old `2 × max(open_queue, write_lock)` line (120 s) called a
+/// progressing write wedged. Env-overridable so an operator can pick the line.
 /// What: `TRUSTY_WEDGE_THRESHOLD_SECS` if set and parseable, else
-/// `2 × max(open_queue_timeout(), write_lock_timeout())`.
+/// [`derive_wedge_threshold`] over the env-configured bounds (420 s at the
+/// defaults).
 /// Test: `wedge_threshold_exceeds_the_open_queue_bound`,
-/// `wedge_threshold_doubles_the_larger_wait_bound`.
+/// `a_legal_write_span_does_not_cross_the_default_wedge_line`.
 pub fn wedge_threshold() -> Duration {
+    wedge_threshold_for(
+        crate::engine::timeouts::write_op_budget(),
+        crate::engine::timeouts::write_pipeline_timeout(),
+    )
+}
+
+/// [`wedge_threshold`] for a daemon enforcing the given write bounds (#9783).
+///
+/// Why: `AppState` carries its own write budget and pipeline ceiling, and the
+/// line must follow the bounds the daemon actually enforces.
+/// What: the env override when set, else [`derive_wedge_threshold`] over
+/// [`WedgeBounds::configured`].
+/// Test: `the_wedge_line_follows_the_configured_write_budgets`.
+pub(crate) fn wedge_threshold_for(write_op_budget: Duration, write_pipeline: Duration) -> Duration {
     let override_secs = std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
     derive_wedge_threshold(
         override_secs,
-        crate::engine::timeouts::open_queue_timeout(),
-        crate::engine::timeouts::write_lock_timeout(),
+        &WedgeBounds::configured(write_op_budget, write_pipeline),
     )
 }
 
-/// [`wedge_threshold`] with its inputs supplied (#4001).
+/// The wedge line for `bounds`, or the operator's override (#4001, #9783).
 ///
-/// Why: both bounds are process-wide env reads, so a test cannot vary them
-/// without racing its siblings. A raised `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` must
-/// move the line, or a writer legitimately queued past the old line would read
-/// as wedged.
-/// What: the override in seconds when present, else twice the larger bound.
-/// Test: `wedge_threshold_doubles_the_larger_wait_bound`.
-pub(crate) fn derive_wedge_threshold(
-    override_secs: Option<u64>,
-    open_queue: Duration,
-    write_lock: Duration,
-) -> Duration {
-    match override_secs {
-        Some(secs) => Duration::from_secs(secs),
-        None => open_queue.max(write_lock) * 2,
+/// Why: a write's whole legal span is its acquisition budget plus its
+/// pipeline ceiling. The margin on top is the pre-#9783 wait line,
+/// `2 × max(open_queue, write_lock)`: it covers the handle write-mutex wait
+/// inside the pipeline call, which draws on no budget, and a palace open
+/// outside any write, so no wait that sat inside the old line can cross the new
+/// one. A line below the span calls a progressing write wedged; one with no
+/// finite bound would hide the #3992 shape (a remember stuck ~1800 s).
+/// What: the override in seconds when present, else
+/// `write_op_budget + write_pipeline + 2 × max(open_queue, write_lock)`,
+/// saturating so an absurd bound cannot panic the daemon at construction.
+/// Zero inputs never disable detection: the env path floors the pipeline
+/// ceiling ([`crate::engine::timeouts::floor_write_pipeline`]), and an
+/// all-zero input yields a zero line, under which `/health` reports any held
+/// lock wedged rather than none.
+/// Test: `wedge_line_is_the_write_span_plus_the_wait_line`,
+/// `a_zero_or_absurd_bound_never_disables_wedge_detection`.
+pub(crate) fn derive_wedge_threshold(override_secs: Option<u64>, bounds: &WedgeBounds) -> Duration {
+    if let Some(secs) = override_secs {
+        return Duration::from_secs(secs);
     }
+    // #9783: the write span (budget + pipeline) plus the pre-#9783 wait line.
+    let wait_line = bounds.open_queue.max(bounds.write_lock).saturating_mul(2);
+    bounds
+        .write_op_budget
+        .saturating_add(bounds.write_pipeline)
+        .saturating_add(wait_line)
 }
 
 /// Tracks how long the oldest in-flight palace operation has been running.

@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::transport::methods::health::{HealthQuery, health};
+use crate::worker_liveness::{WedgeBounds, derive_wedge_threshold};
 use std::time::Duration;
 
 /// Hang guard on any single condition wait in this module. It only stops a
@@ -68,7 +69,7 @@ async fn health_body(state: &AppState) -> serde_json::Value {
 #[tokio::test]
 async fn a_write_stalled_holding_the_palace_lock_reads_as_wedged() {
     // Waiters give up at 300 ms; the wedge line sits above that, mirroring the
-    // production relationship (60 s waiter bound, 120 s threshold).
+    // production relationship (60 s waiter bound, 420 s threshold).
     let budget = Duration::from_millis(300);
     let threshold = Duration::from_millis(600);
     let (mut state, _tmp) = liveness_state(budget);
@@ -226,7 +227,7 @@ async fn a_dream_cycle_holding_the_handle_write_mutex_reads_as_wedged() {
 }
 
 /// Why (issue #4001, no false alarm): a dream cycle legitimately runs 38-53 s
-/// under the default 120 s threshold. Holding the handle lock inside the
+/// under the default threshold (420 s since #9783). Holding the handle lock inside the
 /// threshold must be visible but not wedged.
 /// What: holds `handle.write_mutex` under the production-derived threshold
 /// with a writer queued, polls until health reports the held lock, and asserts
@@ -253,6 +254,94 @@ async fn a_handle_lock_held_inside_the_threshold_is_visible_but_not_wedged() {
     );
     assert_eq!(v["worker"]["wedged"], false, "got {v}");
     drop(dream);
+}
+
+/// The production bounds scaled down: a 250 ms wait bound, a 500 ms
+/// acquisition budget and a 4 s pipeline ceiling. The pre-#9783 line is 500 ms
+/// and the derived line is 5 s.
+fn scaled_bounds() -> WedgeBounds {
+    WedgeBounds {
+        open_queue: Duration::from_millis(250),
+        write_lock: Duration::from_millis(250),
+        write_op_budget: Duration::from_millis(500),
+        write_pipeline: Duration::from_secs(4),
+    }
+}
+
+/// Hold a palace's handle write mutex and a liveness slot, as a remember inside
+/// its pipeline does, and wait until health reports both ages at >= 1 s.
+async fn hold_like_a_long_write(
+    state: &AppState,
+    palace: &str,
+) -> (tokio::sync::OwnedMutexGuard<()>, serde_json::Value) {
+    let _ = dispatch_tool(state, "palace_create", json!({"name": palace}))
+        .await
+        .expect("palace_create");
+    let handle = open_palace_handle(state, palace).expect("open palace");
+    let held = handle.write_mutex.clone().lock_owned().await;
+    let v = wait_for_health(state, "both arms to see the hold at >= 1 s", |v| {
+        v["worker"]["stalled_lock"]["age_secs"].as_u64() >= Some(1)
+            && v["worker"]["oldest_age_secs"].as_u64() >= Some(1)
+    })
+    .await;
+    (held, v)
+}
+
+/// Why (#9783): a remember holds the write lock across embed, upsert and
+/// persist for up to its pipeline ceiling. Past the pre-#9783 line but inside
+/// its bounds it is progressing, and `/health` must not call it wedged.
+/// What: scaled bounds (old line 500 ms, derived line 5 s); holds the handle
+/// write mutex and a liveness slot for >= 1 s and asserts neither the lock arm
+/// nor the pool arm reports wedged.
+/// Test: this test.
+#[tokio::test]
+async fn a_write_held_past_the_old_line_inside_its_bounds_is_not_wedged() {
+    let (mut state, _tmp) = liveness_state(Duration::from_millis(500));
+    state.wedge_threshold = derive_wedge_threshold(None, &scaled_bounds());
+    let tracked = state.worker_liveness.clone();
+    let _slot = tracked.track();
+    let (held, v) = hold_like_a_long_write(&state, "longwrite").await;
+    assert_eq!(
+        v["status"], "ok",
+        "a write inside its bounds is busy; got {v}"
+    );
+    assert_eq!(v["worker"]["wedged"], false, "got {v}");
+    assert!(v["worker"]["wedged_reason"].is_null(), "got {v}");
+    drop(held);
+}
+
+/// Why (#9783): raising the line must not hide a writer that is genuinely
+/// stuck. A holder past the derived line is the #3992 shape and must still
+/// read as wedged, on the lock arm and on the pool arm.
+/// What: scaled bounds (derived line 5 s); holds the handle write mutex and a
+/// liveness slot until health reports `wedged` naming the write lock, then
+/// releases the lock and checks the still-open slot reports `wedged` on the
+/// pool arm.
+/// Test: this test.
+#[tokio::test]
+async fn a_write_stuck_past_the_derived_line_reads_as_wedged() {
+    let (mut state, _tmp) = liveness_state(Duration::from_millis(500));
+    state.wedge_threshold = derive_wedge_threshold(None, &scaled_bounds());
+    let tracked = state.worker_liveness.clone();
+    let slot = tracked.track();
+    let (held, _) = hold_like_a_long_write(&state, "stuckwrite").await;
+    // The slot is older than the lock stamp, so the pool arm may cross first;
+    // the lock arm outranks it once it crosses too.
+    let v = wait_for_health(&state, "the stuck lock holder to read as wedged", |v| {
+        v["worker"]["wedged_reason"] == "lock"
+    })
+    .await;
+    assert_eq!(v["status"], "wedged", "got {v}");
+    assert_eq!(v["worker"]["stalled_lock"]["lock"], "write", "got {v}");
+
+    drop(held);
+    let v = wait_for_health(&state, "the stuck slot to read as wedged", |v| {
+        v["worker"]["stalled_lock"].is_null()
+    })
+    .await;
+    assert_eq!(v["status"], "wedged", "got {v}");
+    assert_eq!(v["worker"]["wedged_reason"], "pool", "got {v}");
+    drop(slot);
 }
 
 /// Why (#9783): the wedge line must follow the write bounds this state
