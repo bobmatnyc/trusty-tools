@@ -109,11 +109,18 @@ pub trait PolicySource: Send {
 /// fingerprint does not describe its report, and that change would never
 /// reload. #9808: on a normal return the fingerprint describes the bytes
 /// the load read, or is unset so the next refresh reloads; keeping the
-/// clone then keeps no stale report.
-/// What: loads lazily on the first refresh, then refreshes a clone and
-/// keeps it only once the refresh returned.
+/// clone then keeps no stale report. #9832 (#8433 D5): no route set goes
+/// live without a durable record of the change.
+/// What: loads lazily on the first refresh, then refreshes a clone. When the
+/// routes changed against the kept loader's report (or this is the first
+/// load), the change is recorded before the clone is kept; a failed record
+/// keeps the old loader, report and fingerprint and returns `None`, so the
+/// next refresh retries and the snapshot ages to deny.
 /// Test: `routes_edit_outside_config_yaml_has_no_effect_in_daemon`,
-/// `overlapping_routes_deny_daemon_snapshot`.
+/// `overlapping_routes_deny_daemon_snapshot`,
+/// `audit_write_failure_keeps_old_loader_and_fingerprint`,
+/// `routes_not_served_until_record_appended`,
+/// `first_load_audit_failure_stays_never_loaded`.
 #[derive(Debug)]
 pub struct LoaderSource {
     req: LoadRequest,
@@ -151,6 +158,12 @@ impl PolicySource for LoaderSource {
             }
             None => PolicyLoader::new(self.req.clone()),
         };
+        let old = self.loader.as_ref().map(PolicyLoader::report);
+        // #9832 (#8433 D5): durable record first; on failure keep the old loader.
+        if let Err(error) = self.audit.record_change(old, next.report()) {
+            tracing::error!(%error, "channel route change not recorded; routes in effect kept");
+            return None;
+        }
         let report = next.report().clone();
         self.loader = Some(next);
         Some(report)
