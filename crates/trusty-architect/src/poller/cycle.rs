@@ -19,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use super::architect::is_shell;
 use super::config::Config;
 use super::ctx::TranscriptCtx;
 use super::events::read_events;
@@ -27,8 +28,7 @@ use super::listing::{Pane, capture, list_panes};
 use super::self_ctx_alerts::self_ctx_alerts;
 use super::state::PollState;
 use super::windows::rename_windows;
-use super::{SKIP_SESSIONS, architect::is_shell};
-use crate::classify::{Alert, alert, dedup, evaluate, fleet_plan_alerts, parse_pane};
+use crate::classify::{Alert, PaneInfo, alert, dedup, evaluate, fleet_plan_alerts, parse_pane};
 use crate::error::{CycleError, TmuxError};
 use crate::quiet::{is_test_fixture_session, read_quiet_sessions};
 use crate::tmux::Tmux;
@@ -70,6 +70,39 @@ pub struct Sensors<'a, T: Tmux + ?Sized> {
     pub dry_run: bool,
 }
 
+/// `cycle()`'s dry-run line for one watched pane (988152c line 1527), with
+/// Python's `str()` of each value: `True`/`False`, `None`, and the list of
+/// alert kinds as its `repr`, or `-` when empty.
+///
+/// Test: `dry_run_pane_lines_match_python` (tests/verbs_poll.rs).
+pub(crate) fn dry_run_line(
+    sess: &str,
+    pid: &str,
+    cmd: &str,
+    info: &PaneInfo,
+    found: &[Alert],
+) -> String {
+    let py_bool = |b: bool| if b { "True" } else { "False" };
+    let py_opt = |v: Option<u64>| v.map_or_else(|| "None".to_owned(), |n| n.to_string());
+    let alerts = if found.is_empty() {
+        "-".to_owned()
+    } else {
+        let kinds: Vec<String> = found.iter().map(|a| format!("'{}'", a.kind)).collect();
+        format!("[{}]", kinds.join(", "))
+    };
+    format!(
+        "  {sess} {pid} cmd={cmd} box={} agents={} busy={} dialog={} ctx={} plan={}/{} q={} alerts={alerts}",
+        info.box_reading.as_str(),
+        info.agents,
+        py_bool(info.busy),
+        py_bool(info.dialog.is_some()),
+        py_opt(info.ctx),
+        py_opt(info.plan5h),
+        py_opt(info.planwk),
+        py_bool(info.question.as_deref().is_some_and(|q| !q.is_empty())),
+    )
+}
+
 /// Runs one cycle's sensing and dedup against `state` at time `now`.
 ///
 /// # Errors
@@ -92,7 +125,7 @@ pub fn collect<T: Tmux + ?Sized>(
     let watched: Vec<&Pane> = listing
         .panes
         .iter()
-        .filter(|p| p.session.starts_with("tm-") && !SKIP_SESSIONS.contains(&p.session.as_str()))
+        .filter(|p| p.session.starts_with("tm-") && !s.config.skips(&p.session))
         .collect();
     let mut candidates = Vec::new();
     let mut infos = Vec::new();
@@ -121,7 +154,12 @@ pub fn collect<T: Tmux + ?Sized>(
         if let Err(e) = transcripts.fill_ctx(s.config, &mut info, pid) {
             log.push(format!("transcript ctx ERROR {e}"));
         }
-        candidates.extend(evaluate(&info, ps, now, sess, pid));
+        let found = evaluate(&info, ps, now, sess, pid);
+        if s.dry_run {
+            // #9822: the prototype's per-pane dry-run line, for `tm architect poll --dry-run`.
+            log.push(dry_run_line(sess, pid, &p.cmd, &info, &found));
+        }
+        candidates.extend(found);
         infos.push((sess.to_owned(), info));
     }
     for (sess, pid) in &state.sessions {
@@ -142,7 +180,8 @@ pub fn collect<T: Tmux + ?Sized>(
     candidates.extend(fleet_plan_alerts(&infos, now));
     let failed = |e, log| Stopped::Failed(e, log);
     match read_events(&s.config.events(), &mut state.events_offset, now) {
-        Ok(found) => candidates.extend(found),
+        // #9822: a configured supervisor's own events drop too.
+        Ok(found) => candidates.extend(found.into_iter().filter(|a| !s.config.skips(&a.session))),
         Err(e) => return Err(failed(CycleError::Events(e), log)),
     }
     match host_alerts(s.probe, s.config, now, Some(&mut state.band)) {

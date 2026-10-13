@@ -887,6 +887,34 @@ fn the_start_command_drops_tmux_socket() {
     assert!(removed, "TMUX_SOCKET is not removed");
 }
 
+/// #9822: both ported skills classify the input box with the Rust verb, not
+/// `input-state.py`. The poller itself still runs `fleet-poll.py`.
+#[test]
+fn the_seeded_skills_run_tm_architect_input_state_not_python() {
+    let seeded = |dest: &str| {
+        super::seed::FILES
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap()
+            .contents
+    };
+    for dest in [
+        ".claude/skills/tm-fleet-check/SKILL.md",
+        ".claude/skills/tm-context-refresh/SKILL.md",
+    ] {
+        let text = seeded(dest);
+        assert!(!text.contains("python3"), "{dest} still runs python3");
+        assert!(
+            !text.contains("input-state.py"),
+            "{dest} still names input-state.py"
+        );
+        assert!(
+            text.contains("tm architect input-state '=<session>:'"),
+            "{dest} does not classify the box with tm architect input-state"
+        );
+    }
+}
+
 /// The `#{pane_dead} #{session_path}` answers `pane_state` reads.
 #[test]
 fn a_pane_answer_parses_to_its_state() {

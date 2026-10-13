@@ -22,15 +22,22 @@ use crate::pystr::{splitlines, strip};
 /// `UnicodeDecodeError` there; the poller treats this list as advisory, so an
 /// unreadable list must not stop a cycle.
 pub fn read_quiet_sessions(path: &Path) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BTreeSet::new();
-    };
-    splitlines(&text)
+    read_quiet_sessions_checked(path).unwrap_or_default()
+}
+
+/// [`read_quiet_sessions`] for a caller that must not read a failure as an
+/// empty list: `tm architect quiet` (#9822).
+///
+/// # Errors
+/// The read error: a missing file, a permission error, or non-UTF-8 bytes.
+pub fn read_quiet_sessions_checked(path: &Path) -> std::io::Result<BTreeSet<String>> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(splitlines(&text)
         .into_iter()
         .map(|line| strip(line.split('#').next().unwrap_or_default()))
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-        .collect()
+        .collect())
 }
 
 /// True for a throwaway test-fixture session name (`tm-xtest-*`, `tm-qa*-*`,
