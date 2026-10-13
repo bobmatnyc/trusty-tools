@@ -55,9 +55,9 @@ struct Scripted {
 }
 
 impl PolicySource for Scripted {
-    fn refresh(&mut self) -> LoadReport {
+    fn refresh(&mut self) -> Option<LoadReport> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        (self.script)(n)
+        Some((self.script)(n))
     }
 }
 

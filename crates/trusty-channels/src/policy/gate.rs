@@ -280,6 +280,68 @@ pub fn check_default_branch(project_dir: &Path, bytes: &[u8]) -> Result<BranchSt
     Ok(state)
 }
 
+/// Who last changed the route file at a commit, and when, as git records it.
+///
+/// Why: #9832: the route-change audit names who changed the routes. git's
+/// author is self-asserted, so a caller marks it inferred.
+/// What: the author name (`%an`) and the commit time in Unix seconds (`%ct`).
+/// Test: `commit_author_reads_author_and_time_of_last_routes_commit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CommitAuthor {
+    /// The author name, as git printed it.
+    pub name: String,
+    /// The committer time, Unix seconds.
+    pub time: i64,
+}
+
+/// The author and time of the last commit at or before `commit` that
+/// changed [`ROUTES_REL_PATH`] in `project_dir`'s repo.
+///
+/// Why: #9832 (A1, A2): the gate verified the bytes at `commit`; the author
+/// of that commit's last route change is who changed the routes, not
+/// whoever authored the branch tip.
+/// What: refuses unless `commit` is a 40 or 64 lowercase-hex object id, so
+/// no option reaches git; then one `git log -1 --format=%an|%ct <commit> --
+/// <routes file>` through the same hardened runner as the gate. Empty
+/// output (no such change), a non-UTF-8 or malformed line, or an empty name
+/// refuses with `GitFailed`.
+/// Test: `commit_author_reads_author_and_time_of_last_routes_commit`,
+/// `commit_author_refuses_non_hex_commit`, `missing_commit_object_refuses`.
+pub fn commit_author(project_dir: &Path, commit: &str) -> Result<CommitAuthor, GateError> {
+    const STEP: &str = "log <routes>";
+    let failed = || GateError::GitFailed { step: STEP };
+    // #9832: only an object id reaches git, never an option or a rev name.
+    if !is_object_id(commit) {
+        return Err(failed());
+    }
+    let out = run(
+        git(project_dir).args([
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--format=%an|%ct",
+            commit,
+            "--",
+            ROUTES_REL_PATH,
+        ]),
+        STEP,
+    )?;
+    if !out.status.success() {
+        return Err(failed());
+    }
+    let text = line(&out, STEP)?;
+    let (name, time) = text.rsplit_once('|').ok_or_else(failed)?;
+    let time = time.parse::<i64>().map_err(|_| failed())?;
+    if name.is_empty() {
+        return Err(failed());
+    }
+    Ok(CommitAuthor {
+        name: name.to_string(),
+        time,
+    })
+}
+
 /// The default branch, resolved locally (Architect G2): `origin/HEAD`'s
 /// target with `origin/` stripped; else exactly one of `main`, `master`.
 /// `init.defaultBranch` is not read. No remote is contacted.
@@ -361,13 +423,18 @@ pub(super) fn object_id<'a>(out: &'a Output, step: &'static str) -> Result<&'a s
     let id =
         std::str::from_utf8(out.stdout.trim_ascii()).map_err(|_| GateError::GitFailed { step })?;
     // #8454: unexpected git output refuses; it never compares equal by accident.
-    let hex = id
-        .bytes()
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if !hex || !(id.len() == 40 || id.len() == 64) {
+    if !is_object_id(id) {
         return Err(GateError::GitFailed { step });
     }
     Ok(id)
+}
+
+/// True for a SHA-1 or SHA-256 object id: 40 or 64 lowercase hex.
+fn is_object_id(id: &str) -> bool {
+    let hex = id
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex && (id.len() == 40 || id.len() == 64)
 }
 
 /// One non-empty UTF-8 line of output.

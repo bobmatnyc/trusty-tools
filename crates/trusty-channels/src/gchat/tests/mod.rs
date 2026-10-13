@@ -11,6 +11,7 @@
 
 #![cfg(unix)]
 
+mod audit;
 mod auth;
 mod client_send;
 mod default_branch;

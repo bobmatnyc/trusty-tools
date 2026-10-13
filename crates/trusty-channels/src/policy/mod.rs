@@ -42,7 +42,7 @@ pub use check::{
 };
 pub use error::PolicyError;
 pub use fs::MAX_FILE_BYTES;
-pub use gate::{check_default_branch, BranchState, GateError};
+pub use gate::{check_default_branch, commit_author, BranchState, CommitAuthor, GateError};
 pub use host::{parse_host, HostCeiling, HostChannel, HostError, RefFault, HOST_SCHEMA_VERSION};
 pub use load::{load_effective, load_effective_until, LoadRequest};
 pub use merge::{merge, merge_for, ProjectInput};

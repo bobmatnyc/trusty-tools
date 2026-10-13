@@ -5,6 +5,7 @@
 //! data; no file, network or sleep.
 //! Test: this module is the test.
 
+mod author;
 mod bucket;
 mod build;
 mod deadline;
