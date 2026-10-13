@@ -173,8 +173,10 @@ impl AuditLog {
     /// What: encodes every record as one JSON line, then appends them all
     /// with one `write_all` and one `sync_data`; an empty batch writes
     /// nothing. An encode or I/O failure returns the error and appends
-    /// nothing it can avoid; a crash mid-write can leave a torn last line.
-    /// Test: `record_all_appends_every_line`, `owner_only_log_creates_file_0600`.
+    /// nothing it can avoid; an owner-only log cuts a failed batch back off.
+    /// A crash mid-write can still leave a torn last line.
+    /// Test: `record_all_appends_every_line`, `owner_only_log_creates_file_0600`,
+    /// `failed_owner_only_append_leaves_no_torn_line`.
     pub fn record_all(&self, records: &[AuditRecord]) -> Result<(), StateError> {
         if records.is_empty() {
             return Ok(());
@@ -197,10 +199,22 @@ impl AuditLog {
 }
 
 /// Append `bytes` to `path` with one `write_all` and an fsync, creating the
-/// file 0600 and narrowing an existing one to 0600 first (#9832 A3).
+/// file 0600 and narrowing an existing one to 0600 first (#9832 A3). A
+/// failed write or fsync truncates the file back to its length before the
+/// write, so no fragment is left for the next line to join.
 #[cfg(unix)]
 fn append_owner_only(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
     use std::io::Write as _;
+    append_owner_only_with(path, bytes, |file, bytes| file.write_all(bytes))
+}
+
+/// [`append_owner_only`], writing through `write` (a test's partial write).
+#[cfg(unix)]
+pub(crate) fn append_owner_only_with(
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), StateError> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let io = |e: std::io::Error| StateError::io(path, &e);
     let mut file = std::fs::OpenOptions::new()
@@ -212,9 +226,17 @@ fn append_owner_only(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
     // #9832: narrow through the open handle, so a swapped path is not chmodded.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(io)?;
-    file.write_all(bytes)
+    let before = file.metadata().map_err(io)?.len();
+    write(&mut file, bytes)
         .and_then(|()| file.sync_data())
-        .map_err(io)
+        .map_err(|e| {
+            // #9832: cut a partial batch back off, so the next append starts
+            // on a line boundary; the write's own error is what is returned.
+            if let Err(cut) = file.set_len(before).and_then(|()| file.sync_data()) {
+                tracing::error!(%cut, path = %path.display(), "audit log not cut back after a failed append");
+            }
+            io(e)
+        })
 }
 
 /// Owner-only modes are a Unix notion; elsewhere this is a plain append.

@@ -120,7 +120,8 @@ pub trait PolicySource: Send {
 /// `overlapping_routes_deny_daemon_snapshot`,
 /// `audit_write_failure_keeps_old_loader_and_fingerprint`,
 /// `routes_not_served_until_record_appended`,
-/// `first_load_audit_failure_stays_never_loaded`.
+/// `first_load_audit_failure_stays_never_loaded`,
+/// `panicking_append_keeps_old_loader_and_fingerprint`.
 #[derive(Debug)]
 pub struct LoaderSource {
     req: LoadRequest,

@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use crate::audit::{AuditEvent, AuditLog, AuditRecord};
+use crate::gchat::state::audit::append_owner_only_with;
 
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
@@ -65,6 +66,35 @@ fn owner_only_log_creates_file_0600() {
         .expect("append");
     assert_eq!(mode(&path), 0o600, "narrowed");
     assert_eq!(lines(&path).len(), 2);
+}
+
+#[test]
+fn failed_owner_only_append_leaves_no_torn_line() {
+    use std::io::Write as _;
+    // #9832: a write that fails partway (ENOSPC) must not leave a fragment
+    // the next append joins onto.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("audit.jsonl");
+    let log = AuditLog::owner_only(&path);
+    log.record_all(&[record("first_load")]).expect("append");
+    let mut line = serde_json::to_vec(&record("routes_changed")).expect("encode");
+    line.push(b'\n');
+    let failed = append_owner_only_with(&path, &line, |file, bytes| {
+        file.write_all(&bytes[..bytes.len() / 2])?;
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    });
+    assert!(failed.is_err(), "the partial write reported success");
+    log.record_all(&[record("retried")]).expect("retry");
+    let text = std::fs::read_to_string(&path).expect("read log");
+    assert!(text.ends_with('\n'), "{text}");
+    let reasons: Vec<String> = text
+        .lines()
+        .map(|l| match serde_json::from_str::<serde_json::Value>(l) {
+            Ok(v) => v["reason"].to_string(),
+            Err(e) => panic!("torn line {l:?}: {e}"),
+        })
+        .collect();
+    assert_eq!(reasons, ["\"first_load\"", "\"retried\""]);
 }
 
 #[test]

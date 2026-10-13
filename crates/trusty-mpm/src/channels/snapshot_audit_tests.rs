@@ -240,6 +240,52 @@ fn routes_not_served_until_record_appended() {
 }
 
 #[test]
+fn panicking_append_keeps_old_loader_and_fingerprint() {
+    // #8433 D5: a panic while recording a change keeps the old loader. The
+    // second refresh catches a source that swapped before it recorded: that
+    // loader would see no change, record nothing, and serve eve.
+    let (home, dir) = alice_project();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let panics: AuditAppend = Arc::new(move |path: &Path, records: &[AuditRecord]| {
+        if counted.fetch_add(1, Ordering::SeqCst) > 0 {
+            panic!("scripted audit append panic");
+        }
+        append(path, records)
+    });
+    let audit = RouteAudit::with(
+        Some(audit_path(&home.home)),
+        Arc::new(commit_author),
+        panics,
+    );
+    let clock = TestClock::default();
+    let snap = PolicySnapshot::new(
+        LoaderSource::with_audit(home.request(), audit),
+        clock.clone(),
+    );
+    settle(&snap);
+    assert_eq!(bob_verdicts(&snap), Ok(()));
+    let before = snap.current().expect("first load").fingerprint;
+    commit_routes_as(&dir, &routes(&[("bob-dm", BOB), ("eve-dm", EVE)]), "Bob");
+    for at in [5.0, 10.0] {
+        clock.set(secs(at));
+        settle(&snap);
+        assert!(!eve_allowed(&snap), "at {at} s: unrecorded change served");
+        assert_eq!(bob_verdicts(&snap), Ok(()), "at {at} s: old route lost");
+        let now = snap
+            .current()
+            .expect("old report inside max age")
+            .fingerprint;
+        assert_eq!(now, before, "at {at} s: published fingerprint moved");
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "the change was not retried"
+    );
+}
+
+#[test]
 fn author_lookup_failure_records_unknown_inferred() {
     let (home, dir) = alice_project();
     let lookups = Arc::new(AtomicUsize::new(0));
