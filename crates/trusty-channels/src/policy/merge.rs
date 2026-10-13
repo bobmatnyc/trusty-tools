@@ -127,6 +127,8 @@ pub fn merge_for(
             denied: false,
             findings,
             per_file,
+            // #8454 VC: only `PolicyLoader` stamps a fingerprint.
+            fingerprint: 0,
         },
         // #8454 Q1: every file passed alone, so this is a cross-file overlap.
         // It denies the whole load, naming both files.

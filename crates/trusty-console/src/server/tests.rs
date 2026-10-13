@@ -1420,3 +1420,91 @@ fn architect_link_refuses_non_localhost_url() {
         );
     }
 }
+
+/// A trusty-mpm connector whose daemon answers at `url`.
+struct MpmAt {
+    url: String,
+}
+
+impl ServiceConnector for MpmAt {
+    fn id(&self) -> &'static str {
+        "trusty-mpm"
+    }
+    fn display_name(&self) -> &'static str {
+        "Trusty MPM"
+    }
+    fn detect(&self) -> ServiceInfo {
+        ServiceInfo {
+            id: self.id().to_string(),
+            display_name: self.display_name().to_string(),
+            status: ServiceStatus::Running,
+            version: None,
+            url: Some(self.url.clone()),
+            hint: None,
+            lifecycle: self.lifecycle(),
+            cpu_pct: None,
+            rss_bytes: None,
+        }
+    }
+}
+
+/// 🔴 #8454 VC (R2): when `tm`'s resolved daemon URL is this console's
+/// `/api/mpm` gateway, the hook's egress verdict query is forwarded to the
+/// daemon's `/api/v1/channels/egress-verdict` — method, path and JSON body
+/// intact — and the daemon's reply comes back unchanged.
+///
+/// What: a one-connection loopback daemon records the request it receives
+/// and answers a verdict reply; the console's poll cache names it as
+/// trusty-mpm; the test POSTs through `/api/mpm/...` with no `Origin`, as the
+/// hook does.
+/// Test: this test itself.
+#[tokio::test]
+async fn proxy_forwards_the_egress_verdict_query_to_the_mpm_daemon() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let daemon = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!("http://{}", daemon.local_addr().expect("addr"));
+    let reply = r#"{"answer":"ready","fingerprint":7,"age_ms":12}"#;
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = daemon.accept().await.expect("accept");
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Read until the body (the hook's JSON) has arrived.
+        while !seen.ends_with(b"}") {
+            let n = sock.read(&mut chunk).await.expect("read");
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&chunk[..n]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{reply}",
+            reply.len()
+        );
+        sock.write_all(response.as_bytes()).await.expect("write");
+        String::from_utf8_lossy(&seen).into_owned()
+    });
+
+    let state = make_test_state();
+    let connectors: Vec<Box<dyn ServiceConnector>> = vec![Box::new(MpmAt { url })];
+    state.poller_cache().poll_once(Arc::new(connectors)).await;
+    let router = build_router(state);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/mpm/api/v1/channels/egress-verdict")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"home":"/home/tester"}"#))
+        .expect("request");
+    let resp = router.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(get_bytes(resp).await, reply.as_bytes());
+    let seen = server.await.expect("daemon");
+    assert!(
+        seen.starts_with("POST /api/v1/channels/egress-verdict HTTP/1.1"),
+        "{seen}"
+    );
+    assert!(seen.ends_with(r#"{"home":"/home/tester"}"#), "{seen}");
+}
