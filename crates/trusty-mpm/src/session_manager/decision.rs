@@ -294,10 +294,13 @@ pub(crate) fn early_conflict(record: &SessionRecord, claim: &AnswerClaim) -> Opt
 /// `pending_decision_id` on every change, so a copy whose two fields differ
 /// from the stored record's is stale; its `pending_decision`,
 /// `proposed_default`, `pending_decision_id` and `last_answer` are replaced
-/// with the stored ones. Every other field is the writer's. A copy read after
-/// the last decision write (a teardown clearing the decision) passes as is.
+/// with the stored ones, except that a terminal copy keeps no live decision:
+/// its `pending_decision` and `proposed_default` are cleared. Every other
+/// field is the writer's. A copy read after the last decision write (a
+/// teardown clearing the decision) passes as is.
 /// Test: `a_send_in_flight_cannot_restore_a_claimed_decision`,
-/// `a_stale_write_cannot_erase_a_newer_decision`.
+/// `a_stale_write_cannot_erase_a_newer_decision`,
+/// `a_decommission_straddling_a_new_decision_leaves_none_live`.
 pub(super) fn keep_newer_decision(
     incoming: &mut SessionRecord,
     stored: Option<&SessionRecord>,
@@ -310,8 +313,16 @@ pub(super) fn keep_newer_decision(
     {
         return false;
     }
-    incoming.pending_decision = stored.pending_decision.clone();
-    incoming.proposed_default = stored.proposed_default.clone();
+    // #9841: a decision set while a teardown was in flight must not sit live
+    // on the terminal record; the id and last answer still carry, so a later
+    // answer is refused rather than claimed.
+    if incoming.state.is_terminal() {
+        incoming.pending_decision = None;
+        incoming.proposed_default = None;
+    } else {
+        incoming.pending_decision = stored.pending_decision.clone();
+        incoming.proposed_default = stored.proposed_default.clone();
+    }
     incoming.pending_decision_id = stored.pending_decision_id;
     incoming.last_answer = stored.last_answer.clone();
     true

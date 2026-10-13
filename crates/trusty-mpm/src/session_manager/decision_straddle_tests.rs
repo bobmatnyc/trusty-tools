@@ -10,7 +10,8 @@
 //! a conflict. The send is paused by [`AnswerDriver`]'s park seam; the three
 //! store-only writers are ordered by the store lock's FIFO queue (the writer
 //! queues first, the claim second, so the claim runs between the writer's
-//! read and its write).
+//! read and its write). The last test lands a new decision inside a
+//! decommission the same way.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use std::future::Future;
@@ -199,4 +200,52 @@ async fn a_stale_write_cannot_erase_a_newer_decision() {
     assert_eq!(record.pending_decision.as_deref(), Some("second question"));
     assert!(record.pending_decision_id.is_some());
     assert_eq!(record.workspace_path, Some(dir.path().join("stale-writer")));
+}
+
+/// #9841: a decision set between `decommission_record_only`'s read and its
+/// write does not sit live on the Decommissioned record; the new id and the
+/// last answer carry, so a later answer is refused. Ordered by the store
+/// lock's FIFO queue, as in [`straddle`].
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decommission_straddling_a_new_decision_leaves_none_live() {
+    let (_dir, mgr, _driver, id) = pending().await;
+    mgr.claim_decision(&id, &AnswerClaim::by("alice"))
+        .await
+        .expect("answer the first decision");
+    let answered = mgr.get(&id).await.expect("record").last_answer;
+
+    let held = mgr.store.write().await;
+    let m = Arc::clone(&mgr);
+    let decommission = tokio::spawn(async move { m.decommission_record_only(&id).await });
+    tokio::time::sleep(QUEUE).await;
+    let m = Arc::clone(&mgr);
+    let decide = tokio::spawn(async move {
+        m.set_pending_decision(&id, "second question", Some("yes"))
+            .await
+    });
+    tokio::time::sleep(QUEUE).await;
+    drop(held);
+    decommission.await.expect("join").expect("the decommission");
+    decide.await.expect("join").expect("the new decision");
+
+    let record = mgr.get(&id).await.expect("record");
+    assert_eq!(record.state, ManagedSessionState::Decommissioned);
+    assert_eq!(
+        record.pending_decision, None,
+        "a terminal record kept a live decision"
+    );
+    assert_eq!(record.proposed_default, None);
+    assert_eq!(record.live_decision_id(), None);
+    assert_eq!(record.last_answer, answered, "the last answer was lost");
+    assert!(
+        record.pending_decision_id.is_some()
+            && record.pending_decision_id != answered.and_then(|a| a.decision_id),
+        "the new decision's id was lost: {:?}",
+        record.pending_decision_id
+    );
+    let retry = mgr.claim_decision(&id, &AnswerClaim::by("bob")).await;
+    assert!(
+        matches!(retry, Err(ManagedError::DecisionConflict(_))),
+        "{retry:?}"
+    );
 }
