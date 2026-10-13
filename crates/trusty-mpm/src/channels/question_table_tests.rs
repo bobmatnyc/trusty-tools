@@ -74,6 +74,7 @@ const REOPEN_GRACE: Duration = Duration::from_secs(10);
 /// What: every other result returns at once. A live second holder never
 /// releases, so it still ends `Locked` once `grace` runs out.
 /// Test: `reopen_waits_out_a_forked_childs_lock_descriptor`,
+/// `unsealed_reason_waits_out_a_forked_childs_lock_descriptor`,
 /// `retry_locked_still_refuses_a_live_holder`.
 fn retry_locked<T>(
     grace: Duration,
@@ -749,36 +750,62 @@ fn second_table_on_same_path_is_refused_while_first_lives() {
     assert!(second.state(id).is_some());
 }
 
+/// A forked child that holds a copy of every descriptor open at the fork,
+/// stopped before exec until released (#9833).
+struct HeldChild {
+    spawner: std::thread::JoinHandle<std::process::ExitStatus>,
+    go_tx: std::io::PipeWriter,
+}
+
+impl HeldChild {
+    /// Fork the child from another thread; returns once it has forked.
+    fn fork() -> Self {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (mut ready_rx, ready_tx) = std::io::pipe().expect("ready pipe");
+        let (go_rx, go_tx) = std::io::pipe().expect("go pipe");
+        let (ready_fd, go_rx_fd, go_tx_fd) =
+            (ready_tx.as_raw_fd(), go_rx.as_raw_fd(), go_tx.as_raw_fd());
+        let mut child = std::process::Command::new("true");
+        // SAFETY: the hook runs between fork and exec and makes only the
+        // async-signal-safe calls close, write and read on inherited fds.
+        unsafe {
+            child.pre_exec(move || {
+                // Our own copy of the release end closes, so a parent that dies
+                // reads as EOF here and the child still execs.
+                libc::close(go_tx_fd);
+                libc::write(ready_fd, [1u8].as_ptr().cast(), 1);
+                let mut byte = 0u8;
+                libc::read(go_rx_fd, (&raw mut byte).cast(), 1);
+                Ok(())
+            });
+        }
+        let spawner = std::thread::spawn(move || child.status().expect("spawn child"));
+        ready_rx.read_exact(&mut [0u8; 1]).expect("child forked");
+        Self { spawner, go_tx }
+    }
+
+    /// Let the child exec after `delay`; the handle yields its exit status.
+    fn release_after(self, delay: Duration) -> std::thread::JoinHandle<std::process::ExitStatus> {
+        use std::io::Write as _;
+        let Self { spawner, mut go_tx } = self;
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            go_tx.write_all(&[1]).expect("release child");
+            spawner.join().expect("spawner thread")
+        })
+    }
+}
+
 /// #9833: a child another thread forked holds a copy of the lock descriptor
 /// until it execs, so the flock outlives the dropped table for that window.
 #[test]
 fn reopen_waits_out_a_forked_childs_lock_descriptor() {
-    use std::io::{Read as _, Write as _};
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::process::CommandExt as _;
     let fx = fixture();
     let table = open_at(&fx.path);
     let id = ask(&table, bob_ask());
-    let (mut ready_rx, ready_tx) = std::io::pipe().expect("ready pipe");
-    let (go_rx, mut go_tx) = std::io::pipe().expect("go pipe");
-    let (ready_fd, go_rx_fd, go_tx_fd) =
-        (ready_tx.as_raw_fd(), go_rx.as_raw_fd(), go_tx.as_raw_fd());
-    let mut child = std::process::Command::new("true");
-    // SAFETY: the hook runs between fork and exec and makes only the
-    // async-signal-safe calls close, write and read on inherited fds.
-    unsafe {
-        child.pre_exec(move || {
-            // Our own copy of the release end closes, so a parent that dies
-            // reads as EOF here and the child still execs.
-            libc::close(go_tx_fd);
-            libc::write(ready_fd, [1u8].as_ptr().cast(), 1);
-            let mut byte = 0u8;
-            libc::read(go_rx_fd, (&raw mut byte).cast(), 1);
-            Ok(())
-        });
-    }
-    let spawner = std::thread::spawn(move || child.status().expect("spawn child"));
-    ready_rx.read_exact(&mut [0u8; 1]).expect("child forked");
+    let child = HeldChild::fork();
     drop(table);
     // The cause: the forked child's descriptor keeps the flock after drop.
     assert!(
@@ -788,14 +815,36 @@ fn reopen_waits_out_a_forked_childs_lock_descriptor() {
         ),
         "a forked child's copy of the lock descriptor did not hold the flock"
     );
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        go_tx.write_all(&[1]).expect("release child");
-    });
+    let released = child.release_after(Duration::from_millis(300));
     let reopened = open_at(&fx.path);
-    release.join().expect("release thread");
-    assert!(spawner.join().expect("spawner thread").success());
+    assert!(released.join().expect("release thread").success());
     assert!(reopened.state(id).is_some());
+}
+
+/// #9842: a refused reopen right after a drop must also wait out a forked
+/// child's lock descriptor, or it reports `Locked` instead of `Unsealed`.
+#[test]
+fn unsealed_reason_waits_out_a_forked_childs_lock_descriptor() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let child = HeldChild::fork();
+    drop(table);
+    std::fs::set_permissions(&fx.path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    // The cause: the flock is taken before the seal check, so it wins.
+    assert!(
+        matches!(
+            QuestionTable::open_at(&fx.path),
+            Err(QuestionTableError::Locked { .. })
+        ),
+        "a forked child's copy of the lock descriptor did not hold the flock"
+    );
+    let released = child.release_after(Duration::from_millis(300));
+    assert_eq!(
+        unsealed_reason(&fx.path, &fx.path),
+        "mode grants access beyond the owner"
+    );
+    assert!(released.join().expect("release thread").success());
 }
 
 /// #9833: the reopen wait must not outlast a real second holder.
@@ -1025,7 +1074,9 @@ async fn poisoned_table_is_reopened_by_the_holder() {
 
 /// The `Unsealed` reason `open_at(path)` fails with, naming `want`.
 fn unsealed_reason(path: &Path, want: &Path) -> &'static str {
-    match QuestionTable::open_at(path) {
+    // #9842: the flock is taken before the seal check; wait out a forked
+    // child's copy of a dropped table's lock fd (#9833).
+    match retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)) {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, want, "the refusal names the unsealed file");
             reason
@@ -1252,8 +1303,12 @@ fn fifo_at_the_torn_file_refuses_to_open_without_blocking() {
     let log = table_with_torn_tail(&fx);
     let torn = super::torn_path(&fx.path);
     mkfifo(&torn);
+    // #9842: a Locked spell must end before FIFO_BOUND, or it reads as a block.
+    const FIFO_REOPEN_GRACE: Duration = Duration::from_secs(3);
     let path = fx.path.clone();
-    let opened = bounded_on_fifo(&torn, move || QuestionTable::open_at(&path).map(drop));
+    let opened = bounded_on_fifo(&torn, move || {
+        retry_locked(FIFO_REOPEN_GRACE, || QuestionTable::open_at(&path)).map(drop)
+    });
     match opened {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, torn, "the refusal names the torn file");
