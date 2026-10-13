@@ -294,6 +294,9 @@ mod reload_error_tests;
 pub(crate) mod decision_tests;
 
 #[cfg(test)]
+mod decision_straddle_tests;
+
+#[cfg(test)]
 mod pane_scoped_tests;
 
 #[cfg(test)]

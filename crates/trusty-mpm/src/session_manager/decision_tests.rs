@@ -39,6 +39,19 @@ pub(crate) struct SendHooks {
     /// Make this directory read-only after the send, so the next store write
     /// fails.
     pub(crate) read_only_after: Option<PathBuf>,
+    /// Park a send of exactly this text until [`AnswerDriver::release`]
+    /// (bounded by [`PARK_LIMIT`]), so a test can land a claim mid-send.
+    pub(crate) park_text: Option<String>,
+}
+
+/// The longest a parked send waits for [`AnswerDriver::release`].
+const PARK_LIMIT: Duration = Duration::from_secs(5);
+
+/// `(parked, released)` for [`SendHooks::park_text`].
+#[derive(Default)]
+pub(crate) struct Park {
+    parked: bool,
+    released: bool,
 }
 
 /// A [`FakeTmuxDriver`] whose pane sends a test can race, fail and inspect.
@@ -53,6 +66,8 @@ pub(crate) struct AnswerDriver {
     pub(crate) store: Mutex<Option<Arc<RwLock<SessionStore>>>>,
     /// Set when a send ran while `store` was locked.
     pub(crate) sent_under_guard: Mutex<bool>,
+    park: Mutex<Park>,
+    park_cv: Condvar,
 }
 
 impl AnswerDriver {
@@ -67,7 +82,36 @@ impl AnswerDriver {
             arrived: Condvar::new(),
             store: Mutex::new(None),
             sent_under_guard: Mutex::new(false),
+            park: Mutex::new(Park::default()),
+            park_cv: Condvar::new(),
         })
+    }
+
+    /// Wait (bounded) until a send of [`SendHooks::park_text`] is parked.
+    pub(crate) async fn wait_parked(&self) {
+        for _ in 0..500 {
+            if self.park.lock().unwrap().parked {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no send parked");
+    }
+
+    /// Let the parked send finish.
+    pub(crate) fn release(&self) {
+        self.park.lock().unwrap().released = true;
+        self.park_cv.notify_all();
+    }
+
+    /// Hold this send until [`Self::release`] or [`PARK_LIMIT`].
+    fn park_here(&self) {
+        let mut p = self.park.lock().unwrap();
+        p.parked = true;
+        let _ = self
+            .park_cv
+            .wait_timeout_while(p, PARK_LIMIT, |p| !p.released)
+            .unwrap();
     }
 
     pub(crate) fn sends(&self) -> Vec<String> {
@@ -125,12 +169,16 @@ impl ManagedTmuxDriver for AnswerDriver {
         {
             *self.sent_under_guard.lock().unwrap() = true;
         }
-        let (hold, fail, read_only) = {
+        let (hold, fail, read_only, park) = {
             let h = self.hooks.lock().unwrap();
-            (h.hold_first, h.fail, h.read_only_after.clone())
+            let park = h.park_text.as_deref() == Some(text);
+            (h.hold_first, h.fail, h.read_only_after.clone(), park)
         };
         if hold {
             self.rendezvous();
+        }
+        if park {
+            self.park_here();
         }
         self.sends.lock().unwrap().push(text.to_owned());
         if let Some(dir) = read_only {

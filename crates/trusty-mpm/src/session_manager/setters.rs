@@ -140,7 +140,8 @@ impl SessionManager {
         record.proposed_default = proposed_default.map(str::to_string);
         record.pending_decision_id = Some(DecisionId::new()); // See #9841
         record.last_activity_at = Some(Utc::now());
-        store.upsert(record).await?;
+        // #9841: a decision writer; `upsert` would keep the old decision.
+        store.upsert_decision(record).await?;
         Ok(())
     }
 

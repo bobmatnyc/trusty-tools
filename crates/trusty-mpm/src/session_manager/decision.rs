@@ -10,9 +10,21 @@
 //! write guard; the caller performs the effect after the guard is dropped and
 //! reports it with [`SessionManager::settle_answer`].
 //!
-//! Residual (D9): the guard is in-process, so "exactly once" holds within one
-//! daemon. Another process that writes back a whole record it read before the
-//! claim (the supervisor, #1219) can restore a claimed decision.
+//! Those two and [`SessionManager::set_pending_decision`] are the only writers
+//! of the decision fields; each holds the guard from its read to its
+//! [`SessionStore::upsert_decision`]. Every other writer goes through
+//! [`SessionStore::upsert`], which keeps the stored decision fields
+//! when its copy was read before they last changed
+//! ([`keep_newer_decision`]), so a whole-record write that straddles a claim
+//! (`tm session send`, `set_workspace`, `mark_errored`,
+//! `set_claude_session_id`, and every other read-then-write path) cannot put
+//! a claimed decision back or erase a newer one.
+//!
+//! Residual (D9): the claim's guard is in-process, so "exactly once" holds
+//! within one daemon. Another process's `upsert` (the supervisor, #1219)
+//! reloads the file first and applies the same rule, so only a write landing
+//! between that reload and its rename can still undo a claim; closing it
+//! needs a cross-process file lock.
 //! Test: `decision_tests.rs`; the route arms in
 //! `managed_routes::answer_route_tests`.
 
@@ -271,6 +283,40 @@ pub(crate) fn early_conflict(record: &SessionRecord, claim: &AnswerClaim) -> Opt
     (!takes(record, claim)).then(|| refusal(record, claim))
 }
 
+/// Keep `stored`'s decision fields when `incoming` was read before they last
+/// changed (#9841); `true` when it did.
+///
+/// Why: a writer that reads the whole record, releases the store guard and
+/// upserts the copy later carries the decision fields it read. If a claim,
+/// a settle or a new decision landed in between, the copy would undo it, and
+/// an undone claim lets a retried answer type a second time.
+/// What: the decision writers set `last_answer` or mint a new
+/// `pending_decision_id` on every change, so a copy whose two fields differ
+/// from the stored record's is stale; its `pending_decision`,
+/// `proposed_default`, `pending_decision_id` and `last_answer` are replaced
+/// with the stored ones. Every other field is the writer's. A copy read after
+/// the last decision write (a teardown clearing the decision) passes as is.
+/// Test: `a_send_in_flight_cannot_restore_a_claimed_decision`,
+/// `a_stale_write_cannot_erase_a_newer_decision`.
+pub(super) fn keep_newer_decision(
+    incoming: &mut SessionRecord,
+    stored: Option<&SessionRecord>,
+) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    if incoming.last_answer == stored.last_answer
+        && incoming.pending_decision_id == stored.pending_decision_id
+    {
+        return false;
+    }
+    incoming.pending_decision = stored.pending_decision.clone();
+    incoming.proposed_default = stored.proposed_default.clone();
+    incoming.pending_decision_id = stored.pending_decision_id;
+    incoming.last_answer = stored.last_answer.clone();
+    true
+}
+
 /// Look `id` up through a held store guard, reloading first.
 ///
 /// Why: the claim must see another writer's latest record, and fail closed
@@ -329,7 +375,7 @@ impl SessionManager {
             answered_at: now,
             outcome: AnswerOutcome::Claimed,
         });
-        store.upsert_or_restore(record).await?;
+        store.upsert_decision(record).await?;
         Ok(Claim {
             decision_id,
             front_gate,
@@ -359,7 +405,7 @@ impl SessionManager {
                         && last.outcome == AnswerOutcome::Claimed =>
                 {
                     last.outcome = outcome;
-                    store.upsert_or_restore(record).await.map_err(Into::into)
+                    store.upsert_decision(record).await.map_err(Into::into)
                 }
                 _ => Ok(()),
             },
