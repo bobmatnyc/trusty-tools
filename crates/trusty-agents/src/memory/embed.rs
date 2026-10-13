@@ -215,13 +215,20 @@ impl FastEmbedder {
             .context("failed to initialize fastembed TextEmbedding (AllMiniLML6V2)")
     }
 
-    /// fastembed options for `AllMiniLML6V2` cached in `cache_dir`. No side
-    /// effects.
+    /// fastembed options for `AllMiniLML6V2` cached in `cache_dir`.
+    ///
+    /// Why: fastembed 5 truncates at min(`max_length`, the cached
+    /// `tokenizer_config.json` `model_max_length`). Left at its 512 default,
+    /// the truncation length follows the MiniLM revision a host cached.
+    /// What: pins `max_length` to trusty-common's `FASTEMBED_MAX_LENGTH`
+    /// (256), so every host truncates alike. No side effects.
     /// Test: `init_options_pin_max_length_to_the_minilm_window`.
     fn init_options(cache_dir: PathBuf) -> InitOptions {
         InitOptions::new(EmbeddingModel::AllMiniLML6V2)
             .with_show_download_progress(false)
             .with_cache_dir(cache_dir)
+            // #9708: 512 by default; the cached MiniLM revision caps it at 512 or 256.
+            .with_max_length(trusty_common::embedder::FASTEMBED_MAX_LENGTH)
     }
 
     /// Resolve the on-disk cache directory for model files.
