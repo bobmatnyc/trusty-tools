@@ -1611,7 +1611,8 @@ jobs:
     if: ${{ !cancelled() && needs.affected-plan.result == 'success' && needs.affected-plan.outputs.count != '0' }}
     runs-on: ubuntu-latest
     # `test-shard` legs run 13-27 min (build ~9-12 min from the shared cache).
-    timeout-minutes: 45
+    # #9271: the trusty-memory leg now carries the engine tests moved from `trusty-common-lanes` (~45 min); 60 matches that job.
+    timeout-minutes: 60
     strategy:
       # Every leg runs to completion, as in `test-shard`.
       fail-fast: false
