@@ -1074,7 +1074,9 @@ async fn poisoned_table_is_reopened_by_the_holder() {
 
 /// The `Unsealed` reason `open_at(path)` fails with, naming `want`.
 fn unsealed_reason(path: &Path, want: &Path) -> &'static str {
-    match QuestionTable::open_at(path) {
+    // #9842: the flock is taken before the seal check; wait out a forked
+    // child's copy of a dropped table's lock fd (#9833).
+    match retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)) {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, want, "the refusal names the unsealed file");
             reason
@@ -1301,8 +1303,12 @@ fn fifo_at_the_torn_file_refuses_to_open_without_blocking() {
     let log = table_with_torn_tail(&fx);
     let torn = super::torn_path(&fx.path);
     mkfifo(&torn);
+    // #9842: a Locked spell must end before FIFO_BOUND, or it reads as a block.
+    const FIFO_REOPEN_GRACE: Duration = Duration::from_secs(3);
     let path = fx.path.clone();
-    let opened = bounded_on_fifo(&torn, move || QuestionTable::open_at(&path).map(drop));
+    let opened = bounded_on_fifo(&torn, move || {
+        retry_locked(FIFO_REOPEN_GRACE, || QuestionTable::open_at(&path)).map(drop)
+    });
     match opened {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, torn, "the refusal names the torn file");
