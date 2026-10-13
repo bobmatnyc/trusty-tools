@@ -165,7 +165,7 @@ async fn resolve(client: &OnDemandSecrets, token: &str, key: &SecretKey) -> Resu
 ///
 /// What: the token is 64 bytes, under the pipe buffer, so the write never
 /// blocks; the write end is closed, so the command reads the token to EOF.
-fn token_for_command(token: &str) -> Option<i32> {
+pub(super) fn token_for_command(token: &str) -> Option<i32> {
     let (reader, mut writer) = std::io::pipe().ok()?;
     writer.write_all(token.as_bytes()).ok()?;
     drop(writer);
