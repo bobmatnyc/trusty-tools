@@ -216,6 +216,31 @@ pub(crate) async fn seed_answerable(
     id
 }
 
+/// Answer the `Provisioning` record `id`'s front gate through the claim write
+/// the `/answer` route makes (#9850): `Denied` when `deny`, else an approve
+/// settled `Delivered`, which is not a hold.
+pub(crate) async fn answer_front_gate(mgr: &SessionManager, id: &ManagedSessionId, deny: bool) {
+    mgr.set_pending_decision(id, "launch the task?", Some("yes"))
+        .await
+        .expect("ask");
+    let claim = AnswerClaim::from_wire(None, None, "test").expect("claim");
+    let outcome = if deny {
+        AnswerOutcome::Denied
+    } else {
+        AnswerOutcome::Claimed
+    };
+    let taken = mgr
+        .claim_front_gate(id, &claim, outcome)
+        .await
+        .expect("front-gate claim");
+    if !deny {
+        mgr.settle_answer(id, taken.decision_id, AnswerOutcome::Delivered)
+            .await;
+    }
+    let held = mgr.get(id).await.expect("record").front_gate_hold();
+    assert_eq!(held.is_some(), deny, "front_gate_hold after deny={deny}");
+}
+
 /// A manager over a fresh [`AnswerDriver`], with one record in `state`.
 struct Fixture {
     dir: TempDir,
