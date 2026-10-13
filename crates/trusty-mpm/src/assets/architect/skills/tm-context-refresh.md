@@ -31,7 +31,7 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
 
 1. **Revalidate.** Confirm the session, window, pane and project path with raw
    `tmux`, then classify the input box with
-   `python3 scripts/input-state.py '=<session>:'`. Continue only on `empty`
+   `tm architect input-state '=<session>:'`. Continue only on `empty`
    or `suggestion`. Re-capture immediately before every send.
 2. **Send `/tm-session-pause` alone**, with the two-step send: the literal
    text first (`tmux send-keys -t '=<session>:' -l '/tm-session-pause'`),

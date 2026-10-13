@@ -887,6 +887,53 @@ fn the_start_command_drops_tmux_socket() {
     assert!(removed, "TMUX_SOCKET is not removed");
 }
 
+/// #9822: the poller session runs `tm architect poll` from this same binary,
+/// never whichever `tm` the tmux server's PATH finds first.
+#[test]
+fn the_start_command_names_this_tm_binary() {
+    let cmd = super::poller::start_command(Path::new(STUB_DIR), &SessionNames::default_names());
+    let this = std::env::current_exe().unwrap();
+    assert!(
+        cmd.get_envs()
+            .any(|(key, value)| key == "TM_BIN" && value == Some(this.as_os_str())),
+        "TM_BIN is not this binary"
+    );
+}
+
+/// #9822: the seeded start script and both ported skills call the Rust verbs;
+/// none runs a Python script.
+#[test]
+fn the_seeded_callers_run_tm_architect_not_python() {
+    let seeded = |dest: &str| {
+        super::seed::FILES
+            .iter()
+            .find(|f| f.dest == dest)
+            .unwrap()
+            .contents
+    };
+    let script = seeded("scripts/start-fleet-poll.sh");
+    assert!(script.contains("architect poll $*"), "{script}");
+    assert!(script.contains("${TM_BIN:-tm}"), "{script}");
+    for dest in [
+        "scripts/start-fleet-poll.sh",
+        ".claude/skills/tm-fleet-check/SKILL.md",
+        ".claude/skills/tm-context-refresh/SKILL.md",
+    ] {
+        let text = seeded(dest);
+        assert!(!text.contains("python3"), "{dest} still runs python3");
+        assert!(!text.contains(".py"), "{dest} still names a Python script");
+    }
+    for dest in [
+        ".claude/skills/tm-fleet-check/SKILL.md",
+        ".claude/skills/tm-context-refresh/SKILL.md",
+    ] {
+        assert!(
+            seeded(dest).contains("tm architect input-state '=<session>:'"),
+            "{dest} does not classify the box with tm architect input-state"
+        );
+    }
+}
+
 /// The `#{pane_dead} #{session_path}` answers `pane_state` reads.
 #[test]
 fn a_pane_answer_parses_to_its_state() {

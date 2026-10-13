@@ -19,7 +19,7 @@ exit 0
 """
 
 
-def _run(tmp_path, new_session):
+def _run(tmp_path, new_session, extra_env=None):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "tmux.log"
@@ -27,9 +27,10 @@ def _run(tmp_path, new_session):
     fake.write_text(FAKE_TMUX.format(log=log, new_session=new_session))
     fake.chmod(0o755)
     env = {k: v for k, v in os.environ.items()
-           if k not in ("TMUX", "TMUX_SOCKET", "TMUX_PANE")}
+           if k not in ("TMUX", "TMUX_SOCKET", "TMUX_PANE", "TM_BIN")}
     env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
     env["ARCHITECT_POLL_SESSION"] = "arch-test-poll"
+    env.update(extra_env or {})
     out = subprocess.run(["bash", SCRIPT], env=env, capture_output=True,
                          text=True, timeout=30)
     return out, log.read_text().splitlines()
@@ -48,3 +49,11 @@ def test_a_successful_new_session_exits_0(tmp_path):
     assert out.returncode == 0, out
     assert "started: arch-test-poll" in out.stdout
     assert calls[-1].startswith("new-session -d -s arch-test-poll")
+    # #9822: the session runs the Rust poller, `tm architect poll`.
+    assert calls[-1].endswith("'tm' architect poll "), calls[-1]
+
+
+def test_tm_bin_names_the_poller_binary(tmp_path):
+    out, calls = _run(tmp_path, "exit 0", extra_env={"TM_BIN": "/opt/tm"})
+    assert out.returncode == 0, out
+    assert calls[-1].endswith("'/opt/tm' architect poll "), calls[-1]

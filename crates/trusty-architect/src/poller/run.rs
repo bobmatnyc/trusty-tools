@@ -15,7 +15,9 @@
 //! every cycle, whatever the cycle did. Every cycle also logs each bad
 //! `Config::problems` entry with the sensor it turned off. A dry run takes no lock, writes no
 //! file, sends no keys and runs one cycle. No signal handler (A3 ruling Q8).
-//! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`.
+//! [`Runner::run_single`] is `--once`: the same start, one cycle, no sleep,
+//! and an error for a skipped or unsaved cycle (#9822).
+//! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/verbs_poll.rs`.
 
 use std::fs;
 use std::io;
@@ -60,6 +62,8 @@ pub struct CycleSummary {
     pub logged: u64,
     /// The wake phrase; `None` when the cycle was skipped.
     pub wake: Option<String>,
+    /// Why the cycle was skipped (the `list-panes` error), when it was.
+    pub skipped: Option<String>,
 }
 
 /// `--interval`: whole seconds, at least 1.
@@ -162,7 +166,10 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             Ok(found) => found,
             Err(Stopped::ListPanes(e)) => {
                 log.push(format!("panes=? ERROR {e}; cycle skipped"));
-                return Ok(CycleSummary::default());
+                return Ok(CycleSummary {
+                    skipped: Some(e.to_string()),
+                    ..CycleSummary::default()
+                });
             }
             Err(Stopped::Failed(e, lines)) => {
                 log.extend(lines);
@@ -198,7 +205,13 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             alerts: &alerts,
             dry_run: self.dry_run,
         };
-        let wake = waker.dispatch(&mut next, &found.panes, woken.len() as u64, Some(logged));
+        let wake = waker.dispatch_as(
+            &self.config.supervisor,
+            &mut next,
+            &found.panes,
+            woken.len() as u64,
+            Some(logged),
+        );
         log.push(format!(
             "panes={} new={} woken={} logged={logged} suppressed={} wake={wake}",
             found.watched,
@@ -217,6 +230,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             woken: woken.len(),
             logged,
             wake: Some(wake),
+            skipped: None,
         })
     }
 
@@ -247,21 +261,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
     /// lock cannot be made. A failed cycle is logged, never returned.
     pub fn run_loop(&self, interval: &str, cycles: Option<u64>) -> Result<(), RunError> {
         let every = parse_interval(interval)?;
-        let _lock = if self.dry_run {
-            None
-        } else {
-            fs::create_dir_all(&self.config.inbox).map_err(|source| RunError::Io {
-                what: format!("create {}", self.config.inbox.display()),
-                source,
-            })?;
-            Some(PollLock::acquire(&self.config.lock())?)
-        };
-        let (mut session, mut lines) =
-            PollSession::load(self.config, self.dry_run, self.clock.now_unix());
-        if !self.dry_run {
-            lines.push(format!("poll start interval={}s", every.as_secs()));
-        }
-        self.write_log(&lines);
+        let (_lock, mut session) = self.start(every)?;
         let mut done = 0u64;
         loop {
             // #9171 AC4: a failed cycle is already logged; it never skips the sleep.
@@ -275,5 +275,50 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
                 return Ok(());
             }
         }
+    }
+
+    /// `fleet-poll.py --once` / `--dry-run`: the loop's start, one cycle and no
+    /// sleep, failing closed where the prototype logs and exits 0 (#9822).
+    ///
+    /// # Errors
+    /// As [`Runner::run_loop`] before the cycle; then the cycle's own error,
+    /// or [`RunError::Incomplete`] when tmux could not list panes or the
+    /// state could not be read and so was not saved.
+    pub fn run_single(&self, interval: &str) -> Result<CycleSummary, RunError> {
+        let every = parse_interval(interval)?;
+        let (_lock, mut session) = self.start(every)?;
+        let summary = self.run_once(&mut session)?;
+        if let Some(why) = &summary.skipped {
+            return Err(RunError::Incomplete(format!(
+                "tmux could not list panes: {why}"
+            )));
+        }
+        if !self.dry_run && session.save_blocked() {
+            return Err(RunError::Incomplete(format!(
+                "{} could not be read, so it was not saved",
+                self.config.state().display()
+            )));
+        }
+        Ok(summary)
+    }
+
+    /// Takes the lock (not in a dry run), loads the state and logs the start.
+    fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
+        let lock = if self.dry_run {
+            None
+        } else {
+            fs::create_dir_all(&self.config.inbox).map_err(|source| RunError::Io {
+                what: format!("create {}", self.config.inbox.display()),
+                source,
+            })?;
+            Some(PollLock::acquire(&self.config.lock())?)
+        };
+        let (session, mut lines) =
+            PollSession::load(self.config, self.dry_run, self.clock.now_unix());
+        if !self.dry_run {
+            lines.push(format!("poll start interval={}s", every.as_secs()));
+        }
+        self.write_log(&lines);
+        Ok((lock, session))
     }
 }

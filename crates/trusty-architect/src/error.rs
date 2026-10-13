@@ -219,4 +219,9 @@ pub enum RunError {
     /// The state could not be saved; the cycle's alerts are already written.
     #[error(transparent)]
     State(#[from] StateError),
+    /// A single run ([`crate::poller::Runner::run_single`]) did not finish its
+    /// cycle: tmux could not list panes, or the state file could not be read
+    /// and so was not saved (#9822).
+    #[error("cycle incomplete: {0}")]
+    Incomplete(String),
 }

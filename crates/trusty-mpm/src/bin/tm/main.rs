@@ -276,6 +276,10 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Fleet { action }) = cli.command {
         return commands::fleet::run(action).await;
     }
+    // #9822: `tm architect` is daemon-less, and its stdout is a script's.
+    if let Some(Command::Architect { action }) = cli.command {
+        std::process::exit(commands::architect::run(action));
+    }
     // #8939: `tm env` is daemon-less too, and prints no value.
     if let Some(Command::Env { action }) = cli.command {
         return commands::env_file::run(action);
@@ -628,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
+        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
         Some(Command::Env { action }) => commands::env_file::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,

@@ -1,0 +1,6 @@
+Added
+- `verbs`, the library behind `tm architect poll|classify|input-state|quiet|self-ctx`: each verb prints what the Architect's Python script printed for the same input, and fails with exit status 1 (bad input, tmux, or state) or 2 (bad argument) where the script printed a default and exited 0 ([#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822))
+- `Runner::run_single`, the poller's `--once`: one cycle and no sleep, returning `RunError::Incomplete` when tmux cannot list panes or the state file cannot be read and saved ([#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822))
+- `Config::supervisor` and `Config::poll_session` (default `tm-architect` and `tm-architect-poll`), set by `ARCHITECT_SESSION` and `ARCHITECT_POLL_SESSION` through `verbs::poll_config`; the cycle skips both sessions and their events, and `Waker::dispatch_as` wakes only the configured supervisor ([#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822))
+- `quiet::read_quiet_sessions_checked`, which returns the read error instead of an empty list ([#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822))
+- A dry-run cycle logs the prototype's per-pane line (`  <session> <pane> cmd=… box=… alerts=…`) ([#9822](https://github.com/bobmatnyc/trusty-tools/issues/9822))

@@ -33,7 +33,7 @@ its `CLAUDE.md`.
    a stopped one, and it never lists this session. Native tmux decides what
    runs. Note a disagreement in `records/actions.md`; it is not evidence that
    a session failed.
-2. **Read the alerts.** The poller, `scripts/fleet-poll.py`, runs in the tmux
+2. **Read the alerts.** The poller, `tm architect poll`, runs in the tmux
    session named after this one plus `-poll`. It appends each new alert as one
    JSON line to `inbox/alerts.jsonl` and types a one-line pointer into this
    pane. Read the lines newer than `last_alert_ts` in `records/state.md`; each
@@ -80,29 +80,30 @@ its `CLAUDE.md`.
    the input box:
 
    ```sh
-   python3 scripts/input-state.py '=<session>:'
+   tm architect input-state '=<session>:'
    ```
 
    It prints `<target> <state> | <text>`. Send only when the state is `empty`
    or `suggestion` (Claude Code's dim auto-suggestion). `typed` is a draft
    that belongs to the user or another agent; `no-prompt` means a turn or a
-   dialog is running. Wait for the next pass in both cases.
+   dialog is running. Wait for the next pass in both cases. `missing`, with
+   exit status 1, means the pane could not be captured: send nothing.
 7. **Send with the two-step pattern**, never in one call:
 
    ```sh
    tmux send-keys -t '=<session>:' -l '[<Name> supervisor HH:MMZ] Supervisor answer: … (basis: …)'
-   python3 scripts/input-state.py '=<session>:'    # typed | <the start of your text>
+   tm architect input-state '=<session>:'    # typed | <the start of your text>
    tmux send-keys -t '=<session>:' Enter
    tmux capture-pane -p -t '=<session>:' -S -20    # a submitted turn and an acknowledgement
    ```
 
    Press Enter only when the state is `typed` and your message starts with
-   the printed text. The script prints only the `❯` row, cut at 100
+   the printed text. The command prints only the `❯` row, cut at 100
    characters, so a message that wraps shows its first row alone. Otherwise
    do not press Enter; record it and check again next pass.
    `HH:MMZ` comes from `date -u`. When the fleet runs on a non-default tmux
    server, add `-S "$TMUX_SOCKET"` to each `tmux` call and export
-   `TMUX_SOCKET` for `scripts/input-state.py`.
+   `TMUX_SOCKET` for `tm architect input-state`.
 8. **Check context.** A pane whose status line shows `ctx` at or above 50%
    needs a refresh; 45 to 49% is approaching. 50% is the default; this
    project's `CLAUDE.md` may set another threshold. Run `tm-context-refresh`

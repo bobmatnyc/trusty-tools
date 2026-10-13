@@ -7,7 +7,8 @@
 //! What: [`step`] does nothing under `--no-launch`. Otherwise it leaves a
 //! poller already running in this directory alone, and fails on one running
 //! from another directory, on a dead pane, and on a tmux answer it cannot
-//! read. It runs the deployed `scripts/start-fleet-poll.sh` through [`start`],
+//! read. It runs the deployed `scripts/start-fleet-poll.sh` (which runs
+//! `tm architect poll`, #9822) through [`start`],
 //! which checks the script's exit status and then that the poller's tmux
 //! session (`<Architect session>-poll`, default `tm-architect-poll`, #8878 R1)
 //! runs with a live pane. tmux is read through a [`Probe`].
@@ -105,9 +106,11 @@ pub(crate) fn start(dir: &Path, probe: Probe, names: &SessionNames) -> anyhow::R
         PaneState::Unknown(err) => {
             bail!("{START_SCRIPT} exited 0, but tmux session {poll} cannot be read: {err}")
         }
+        // #9822: the poller is `tm architect poll` now, not `python3 fleet-poll.py`.
         PaneState::Absent => bail!(
             "{START_SCRIPT} exited 0 but tmux session {poll} is not running; \
-             check that `python3` runs `scripts/fleet-poll.py`"
+             check that `tm architect poll --dry-run` runs in {}",
+            dir.display()
         ),
     }
 }
@@ -116,11 +119,13 @@ pub(crate) fn start(dir: &Path, probe: Probe, names: &SessionNames) -> anyhow::R
 ///
 /// What: sets the Architect's session, the poller's session (both from
 /// `names`, #8878 R1) and `ARCHITECT_PROJECT_DIR`, so the poller wakes this
-/// Architect and measures this project's context. Removes `TMUX_SOCKET`: the
-/// script's tmux would honour it, and tm's own tmux calls, which read the
-/// session back, do not.
+/// Architect and measures this project's context, and `TM_BIN` to this `tm`,
+/// so the poller session runs `tm architect poll` from the same binary
+/// (#9822). Removes `TMUX_SOCKET`: the script's tmux would honour it, and
+/// tm's own tmux calls, which read the session back, do not.
 /// Test: `the_start_command_drops_tmux_socket`,
-/// `the_start_command_carries_the_chosen_session_names`.
+/// `the_start_command_carries_the_chosen_session_names`,
+/// `the_start_command_names_this_tm_binary`.
 pub(crate) fn start_command(dir: &Path, names: &SessionNames) -> Command {
     let mut cmd = Command::new("bash");
     cmd.arg(dir.join(START_SCRIPT))
@@ -130,5 +135,13 @@ pub(crate) fn start_command(dir: &Path, names: &SessionNames) -> Command {
         .env("ARCHITECT_PROJECT_DIR", dir)
         // #8436 P4 fix: one tmux server for the script and for tm.
         .env_remove("TMUX_SOCKET");
+    // #9822: the poller is this binary's `architect poll`; without TM_BIN the
+    // script falls back to `tm` on the tmux server's PATH.
+    match std::env::current_exe() {
+        Ok(tm) => {
+            cmd.env("TM_BIN", tm);
+        }
+        Err(e) => tracing::warn!(error = %e, "cannot name this tm for the poller; TM_BIN unset"),
+    }
     cmd
 }

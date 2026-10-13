@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use super::band::BandConfig;
 use super::pyfmt::{py_float, py_int};
+use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
 use crate::self_ctx::{default_dir, projects_dir};
 
@@ -61,6 +62,12 @@ pub struct Config {
     pub band: BandConfig,
     /// `<root>/local/quiet-sessions.txt`: sessions whose `idle` alerts drop.
     pub quiet_sessions: PathBuf,
+    /// The Architect's session: the one pane the poller wakes. [`SUPERVISOR`]
+    /// here; `tm architect poll` sets `ARCHITECT_SESSION` (#9822).
+    pub supervisor: String,
+    /// The poller's own session, never watched: `tm-architect-poll` here;
+    /// `tm architect poll` sets `ARCHITECT_POLL_SESSION` (#9822).
+    pub poll_session: String,
 }
 
 impl Config {
@@ -141,7 +148,19 @@ impl Config {
                 ),
             },
             quiet_sessions: root.join("local").join("quiet-sessions.txt"),
+            supervisor: SUPERVISOR.to_owned(),
+            poll_session: format!("{SUPERVISOR}-poll"),
         })
+    }
+
+    /// True for a session the poller never watches and whose events it drops:
+    /// [`SKIP_SESSIONS`], plus this config's supervisor and poller sessions.
+    ///
+    /// Test: `a_configured_supervisor_is_skipped_and_the_only_pane_woken`.
+    pub fn skips(&self, session: &str) -> bool {
+        SKIP_SESSIONS.contains(&session)
+            || session == self.supervisor
+            || session == self.poll_session
     }
 
     /// `<inbox>/events.jsonl`: hook events the poller turns into alerts.

@@ -79,8 +79,9 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         self.wake_as(SUPERVISOR, panes, n, logged)
     }
 
-    /// [`Waker::wake`] for the session `owner`. Production passes only
-    /// [`SUPERVISOR`]; the scratch-server live test passes its own session.
+    /// [`Waker::wake`] for the session `owner`. Production passes the
+    /// configured supervisor ([`SUPERVISOR`] unless `ARCHITECT_SESSION` names
+    /// another, #9822); the scratch-server live test passes its own session.
     fn wake_as(
         &self,
         owner: &str,
@@ -159,13 +160,28 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         new_count: u64,
         logged: Option<u64>,
     ) -> String {
+        self.dispatch_as(SUPERVISOR, state, panes, new_count, logged)
+    }
+
+    /// [`Waker::dispatch`] waking the session `owner` (the config's
+    /// supervisor, #9822).
+    ///
+    /// Test: `a_configured_supervisor_is_skipped_and_the_only_pane_woken`.
+    pub fn dispatch_as(
+        &self,
+        owner: &str,
+        state: &mut PollState,
+        panes: &[Pane],
+        new_count: u64,
+        logged: Option<u64>,
+    ) -> String {
         dispatch_wake(
             state,
             new_count,
             logged,
             self.dry_run,
             self.clock,
-            |n, l| self.wake(panes, n, l),
+            |n, l| self.wake_as(owner, panes, n, l),
         )
     }
 }
