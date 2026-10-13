@@ -149,6 +149,7 @@ fn the_skill_floor_holds_the_prefix_and_the_exact_names() {
         "TM-Anything",
         "systematic-debugging",
         "Git-Workflow",
+        "workflow-authoring",
     ] {
         assert!(is_skill_floor(name), "{name} must be in the skill floor");
     }
