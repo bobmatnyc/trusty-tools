@@ -226,6 +226,18 @@ fn screens_a_path_valued_candidate_the_same_way() {
     assert_eq!(contained_transcript_file(config.path(), &outside), None);
 }
 
+/// Why (#9847): `claude_home_dir()` is the base that holds `.claude`, so the
+/// default boundary must append `.claude` — the bare base is `$HOME`, under
+/// which every file in the home directory would pass the screen.
+/// Test: itself.
+#[test]
+fn the_default_boundary_is_dot_claude_under_home() {
+    assert_eq!(
+        default_claude_config_dir_under(Path::new("/h")),
+        PathBuf::from("/h/.claude")
+    );
+}
+
 /// Why (#9847): with `CLAUDE_CONFIG_DIR` unset the boundary is `~/.claude`,
 /// which a host that never ran Claude Code does not have. The screen must fail
 /// closed then — a boundary that does not canonicalize admits nothing — rather
