@@ -101,8 +101,14 @@ fn the_architect_cannot_write_a_live_taint() {
     assert!(reason.contains("#8433"), "{reason}");
     let clean = fixture();
     let env = architect_env(&clean);
+    // #9815: `channels/` itself now holds the sealed question table, so the
+    // taint-off case removes the taint directory alone.
     assert_eq!(
-        bash(&clean, &env, "rm -rf ~/.trusty-tools/trusty-mpm/channels"),
+        bash(
+            &clean,
+            &env,
+            "rm -rf ~/.trusty-tools/trusty-mpm/channels/taint"
+        ),
         None
     );
     assert_eq!(
@@ -125,10 +131,11 @@ fn the_architect_cannot_untaint_through_an_unplaceable_write() {
     assert!(reason.contains("#8433"), "{reason}");
     let clean = fixture();
     let env = architect_env(&clean);
-    assert_eq!(
-        bash(&clean, &env, "ls | xargs cp a.txt"),
-        None,
-        "no taint, no rule"
+    // #9815: no taint, no taint rule; the question-table seal denies instead.
+    let reason = bash(&clean, &env, "ls | xargs cp a.txt").expect("question-table seal");
+    assert!(
+        !reason.contains("#8433") && reason.contains("#9815"),
+        "{reason}"
     );
 }
 

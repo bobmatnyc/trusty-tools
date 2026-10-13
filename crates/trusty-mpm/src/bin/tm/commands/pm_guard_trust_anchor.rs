@@ -22,6 +22,8 @@
 //! is live — or to anything under `architect-launch/`. Anchor names and the
 //! `.json` and `.architect` extensions compare ASCII case-insensitively, as
 //! APFS does.
+//! #9815: the channel question table's files are anchors too, and bind the
+//! Architect's main thread as well (`pm_guard_trust_anchor_questions.rs`).
 //! FAIL-CLOSED (Q4/Q5): an unknown home, a config location that does not
 //! resolve, a target that does not resolve, a target built from an expansion,
 //! glob or `cd` whose file name could name an anchor, an unplaceable write
@@ -43,15 +45,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use trusty_mpm::core::architect_conversation::CONVERSATION_EXT;
-use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
-use trusty_mpm::core::architect_session::SESSION_EXT;
+use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
 use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
-use crate::commands::env_file_grant::{GRANT_DIR, GRANT_EXT};
+use crate::commands::env_file_grant::GRANT_DIR;
 use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
@@ -168,8 +168,10 @@ pub(crate) async fn deny_trust_anchor_write(url: &str, payload: &Value) -> bool 
 /// The trust-anchor verdict for one `PreToolUse` payload: `Some(reason)` denies.
 ///
 /// Why/What: see the module doc. `config` is read only when the launch stamp
-/// says supervisor. The payload `cwd` places a relative path; with no `cwd`
-/// a relative path cannot be placed.
+/// says supervisor. #9815: the Architect's main thread is still judged
+/// against the question table ([`questions::questions_verdict`]). The
+/// payload `cwd` places a relative path; with no `cwd` a relative path cannot
+/// be placed.
 /// Test: `an_edit_tool_write_to_the_anchor_is_denied`,
 /// `the_architect_main_thread_may_write_the_anchor`,
 /// `an_unknown_home_denies_every_write`.
@@ -198,7 +200,8 @@ pub(crate) fn evaluate(
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
-        return None;
+        // #9815: the question table binds the Architect too, taint or none.
+        return questions::questions_verdict(&writes, cwd, env.home.as_deref());
     };
     decide(writes, cwd, env.home.as_deref()).map(|reason| with_identity(reason, why))
 }
@@ -335,6 +338,9 @@ struct Anchors {
     /// Every path component of every anchor, lexical and resolved: the names
     /// an unplaceable target's file name is compared against.
     names: Vec<String>,
+    /// #9815 (ruling (b)): when set, [`Self::could_be`] compares only these
+    /// question-table names, by [`names::could_name_table`].
+    table_names: Option<Vec<String>>,
 }
 
 /// The live arming records.
@@ -346,6 +352,20 @@ struct ArmedAnchors {
 }
 
 impl Anchors {
+    /// An empty anchor set a child module fills: the taint (#8433) and
+    /// question-table (#9815) seals judge their own paths alone.
+    fn bare(records_live: bool) -> Self {
+        Self {
+            guarded: Vec::new(),
+            ids: Vec::new(),
+            armed: None,
+            fence: Vec::new(),
+            records_live,
+            names: Vec::new(),
+            table_names: None,
+        }
+    }
+
     /// Resolve the anchors under `home`; `Err(path)` when the config's own
     /// location does not resolve.
     ///
@@ -409,16 +429,25 @@ impl Anchors {
         // a taint is live a `*.json` in an unknown directory could be one.
         let taint = taint::TaintAnchor::locate(home);
         taint.extend(&mut guarded, &mut fence, &mut paths);
+        // #9815: the question table's files, with the config's rules.
+        let questions = questions::QuestionsAnchor::locate(home)?;
+        guarded.extend(questions.guarded);
+        paths.extend(questions.paths);
         let mut names = component_names(&paths);
         // #8939: the `tm env` grant directory under the launch-record anchor.
         names.push(GRANT_DIR.to_owned());
         Ok(Self {
             guarded,
-            ids: file_id(&config).into_iter().chain(extra.ids).collect(),
+            ids: file_id(&config)
+                .into_iter()
+                .chain(extra.ids)
+                .chain(questions.ids)
+                .collect(),
             records_live: records_live || taint.live,
             armed,
             fence,
             names,
+            table_names: None,
         })
     }
 
@@ -440,38 +469,6 @@ impl Anchors {
                 || (resolved.parent().is_some_and(|p| same_ci(p, &armed.dir))
                     && resolved.file_name().is_some_and(is_json))
         })
-    }
-
-    /// Whether a target whose directory is unknown could still name an
-    /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
-    /// anchor path component (`envfile-grants` included), a `*.architect`
-    /// launch record, its `*.architect-session` name sidecar, the
-    /// `*.architect-conversation` record or a `*.grant` `tm env` grant (any
-    /// case), or a `*.json` while records could be live.
-    /// Test: `the_launch_record_dir_is_an_anchor`.
-    fn could_be(&self, spelling: &str) -> bool {
-        let name = spelling.trim_end_matches('/');
-        let name = name.rsplit('/').next().unwrap_or(name);
-        name.is_empty()
-            || name == "."
-            || name == ".."
-            || name.starts_with('~')
-            || has_shell_pattern(name)
-            || self
-                .names
-                .iter()
-                .any(|anchor| anchor.eq_ignore_ascii_case(name))
-            // #8878 ruling A: a planted launch record would be an identity,
-            // and (R1 critic HIGH) a planted name sidecar would rename it.
-            // #8939: a planted `tm env` grant would be a main-thread proof.
-            // #8981: a planted conversation record would pick what it resumes.
-            || Path::new(name).extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case(ARCHITECT_EXT)
-                    || ext.eq_ignore_ascii_case(SESSION_EXT)
-                    || ext.eq_ignore_ascii_case(GRANT_EXT)
-                    || ext.eq_ignore_ascii_case(CONVERSATION_EXT)
-            })
-            || (self.records_live && is_json(name.as_ref()))
     }
 
     /// The deny for one write, or `None` when it misses every anchor.
@@ -522,7 +519,7 @@ impl Anchors {
         let path = match place(dest, base, home, true) {
             Placed::At(path) => path,
             Placed::Unknown => {
-                if self.could_be(dest) {
+                if self.could_be_dest(dest, dest_too) {
                     return Some(unknown_reason(dest));
                 }
                 let name = names.iter().find(|name| self.could_be(name))?;
@@ -623,7 +620,8 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session. \
-     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433).";
+     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), \
+     as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815).";
 
 /// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {
@@ -701,6 +699,14 @@ mod egress;
 // #8433 P0: the channel taint directory as a trust anchor.
 #[path = "pm_guard_trust_anchor_taint.rs"]
 mod taint;
+
+// #9815 (P2a of #8433): the channel question table as a trust anchor.
+#[path = "pm_guard_trust_anchor_questions.rs"]
+mod questions;
+
+// #8878, #9815: the name rules for a target the guard cannot place.
+#[path = "pm_guard_trust_anchor_names.rs"]
+mod names;
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]

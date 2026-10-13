@@ -28,12 +28,15 @@ use trusty_channels::policy::{Channel, QuestionId, QuestionState};
 mod replay;
 use replay::{Book, LineOut, Record, decode, replay_line, validate};
 
+// #9815: the open-time seal check on the log and its lock.
+mod seal;
+
 /// The record format version every line carries.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The question table under `home`:
 /// `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`.
-// See #9815: the trust anchor seals this file and its `.lock` (P2a, G7).
+// #9815: `tm hook --pm-guard` seals this file, its `.lock` and `.torn`.
 pub fn questions_path(home: &Path) -> PathBuf {
     trusty_common::crate_config::crate_config_dir_at(
         home,
@@ -41,6 +44,16 @@ pub fn questions_path(home: &Path) -> PathBuf {
     )
     .join("channels")
     .join("questions.jsonl")
+}
+
+/// The lifetime lock beside the table log at `path`.
+pub fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.lock")
+}
+
+/// Where [`QuestionTable::open_at`] moves a torn final line of `path`.
+pub fn torn_path(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.torn")
 }
 
 /// A question-table operation that could not be completed.
@@ -83,6 +96,15 @@ pub enum QuestionTableError {
     /// The daemon has no home to hold the table under.
     #[error("no home directory to hold the question table")]
     NoHome,
+    /// The log or its lock is not in the state the daemon leaves it in, so a
+    /// writer outside the trust-anchor seal changed it (#9815).
+    #[error("{}: not sealed ({reason}); the question table refuses to open", path.display())]
+    Unsealed {
+        /// The log or lock.
+        path: PathBuf,
+        /// A content-free reason.
+        reason: &'static str,
+    },
 }
 
 /// Where a question was asked: the DM channel id and the posted thread.
@@ -215,13 +237,18 @@ impl QuestionTable {
     /// [`Book::apply`], or the open fails with `Corrupt`. An unterminated
     /// final line that decodes is kept and given its newline; one that does
     /// not is appended to `questions.jsonl.torn` before the log is cut. A new
-    /// file is created 0600, and its directory fsynced; an existing one is
-    /// set to 0600.
+    /// file is created 0600, and its directory fsynced. #9815: an existing log,
+    /// lock or torn file that is not sealed ([`seal::check_path`]) refuses the
+    /// open with `Unsealed`; the torn-file append follows no symlink and does
+    /// not wait on a FIFO.
     /// Test: `table_survives_restart`, `torn_final_line_quarantined`,
     /// `final_line_missing_only_newline_is_kept`,
     /// `malformed_middle_line_fails_the_open`,
     /// `second_table_on_same_path_is_refused_while_first_lives`,
-    /// `file_is_0600_and_dir_0700`, `home_write_fence_is_called`.
+    /// `file_is_0600_and_dir_0700`, `home_write_fence_is_called`,
+    /// `symlinked_log_refuses_to_open`, `symlinked_lock_refuses_to_open`,
+    /// `torn_file_symlink_is_not_followed`,
+    /// `fifo_at_the_torn_file_refuses_to_open_without_blocking`.
     pub fn open_at(path: &Path) -> Result<Self, QuestionTableError> {
         // #8433: a test must never write the operator's home (#8545); the
         // lock and torn files are siblings of `path`.
@@ -235,7 +262,9 @@ impl QuestionTable {
             .mode(0o700)
             .create(dir)
             .map_err(io_err(dir))?;
-        let lock = take_lock(&path.with_extension("jsonl.lock"))?;
+        let lock = take_lock(&lock_path(path))?;
+        // #9815: a log changed outside the trust-anchor seal never opens.
+        seal::check_path(path)?;
         let (bytes, created) = match std::fs::read(path) {
             Ok(bytes) => (bytes, false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
@@ -262,7 +291,10 @@ impl QuestionTable {
                 Err(_) => {
                     // #8433: copy the fragment aside BEFORE cutting it, so a
                     // failed copy fails the open and loses nothing.
-                    let torn = path.with_extension("jsonl.torn");
+                    let torn = torn_path(path);
+                    // #9815: a torn file changed outside the seal (a FIFO, a
+                    // link) is never written; it would block or redirect.
+                    seal::check_path(&torn)?;
                     append_once(&torn, &[tail, b"\n"].concat())?;
                     cut(path, body_len)?;
                     quarantined = Some(tail.len());
@@ -491,6 +523,8 @@ fn append(state: &mut State, record: &Record) -> std::io::Result<()> {
 
 /// Open (creating, 0600) and exclusively `flock` `path` without waiting.
 fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
+    // #9815: a lock changed outside the trust-anchor seal is never taken.
+    seal::check_path(path)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -508,11 +542,17 @@ fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
 }
 
 /// Append `bytes` to `path` (creating, 0600) with one write, then sync.
+/// Test: `torn_line_append_on_a_fifo_fails_fast`,
+/// `torn_file_symlink_is_not_followed`.
 fn append_once(path: &Path, bytes: &[u8]) -> Result<(), QuestionTableError> {
     OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
+        // #9815: a symlink planted here would aim the daemon's write elsewhere,
+        // and a FIFO swapped in after the seal check would block the open
+        // (and the daemon's table slot) until a reader came; fail fast.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_data()))
         .map_err(io_err(path))
