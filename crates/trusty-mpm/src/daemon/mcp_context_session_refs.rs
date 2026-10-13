@@ -199,19 +199,28 @@ pub(crate) async fn publish_session_ref_with(
         if !enabled {
             return SessionRefReceipt::default();
         }
-        // RED STUB (#9160): the pre-fix publish, with no identity resolved.
-        drop(resolve);
-        let _ = session_ref_for;
-        publish_receipt(
+        // #9160: resolved on the blocking thread — proving a pin may run `gh`.
+        let git_env = resolve(&repo);
+        git_env.log(&repo, "publish");
+        if let Some(reason) = git_env.refusal() {
+            return SessionRefReceipt {
+                ref_name: session_ref_for(&repo, &session),
+                published: false,
+                error: Some(reason.to_string()),
+            };
+        }
+        let mut receipt = publish_receipt(
             &SessionRefRequest {
                 repo: &repo,
                 session_id: &session,
                 snapshot_path: &snapshot,
                 timestamp,
-                git_env: &[],
+                git_env: git_env.vars(),
             },
             true,
-        )
+        );
+        receipt.error = receipt.error.map(|e| git_env.annotate(&e));
+        receipt
     })
     .await
     .unwrap_or_else(|e| SessionRefReceipt {

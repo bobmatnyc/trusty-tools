@@ -433,9 +433,6 @@ pub fn push_session_ref(
     }
 }
 
-/// RED STUB (#9160): the pre-fix publish runs every network call with no env.
-const RED_STUB_NO_ENV: &[(String, String)] = &[];
-
 /// `env` in the borrowed-key shape [`git`] takes (#9160).
 fn borrowed(env: &[(String, String)]) -> Vec<(&str, String)> {
     env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect()
@@ -527,12 +524,12 @@ pub fn publish_session_ref_as(
 
     // #9160: the three network calls run under the caller's credential pin;
     // every local plumbing step below gets no env.
-    let parent = remote_tip(req.repo, &ref_name, RED_STUB_NO_ENV)?;
+    let parent = remote_tip(req.repo, &ref_name, req.git_env)?;
     if parent.is_some() {
         // Force-fetch the tip into the local ref so `commit-tree -p` can reach
         // it AND so a local ref left ahead by an earlier failed push is reset.
         let refspec = format!("+{ref_name}:{ref_name}");
-        let env = borrowed(RED_STUB_NO_ENV);
+        let env = borrowed(req.git_env);
         git(
             req.repo,
             &["fetch", "origin", &refspec],
@@ -599,7 +596,7 @@ pub fn publish_session_ref_as(
         &[],
         "update-ref",
     )?;
-    push_session_ref(req.repo, &ref_name, parent.as_deref(), RED_STUB_NO_ENV)?;
+    push_session_ref(req.repo, &ref_name, parent.as_deref(), req.git_env)?;
 
     Ok(SessionRefOutcome {
         ref_name,
