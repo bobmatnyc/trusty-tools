@@ -85,9 +85,9 @@ impl FromStr for DecisionId {
 ///
 /// Why: a send that fails after the claim may have typed half the answer, so
 /// the decision closes either way (D4) and a repeat must say how it ended.
-/// What: `Claimed` until the effect returns, then `Delivered` or
-/// `DeliveryFailed`. A crash between the two leaves `Claimed`, which a repeat
-/// reports as "delivery unconfirmed".
+/// What: `Claimed` until the effect returns, then `Delivered`,
+/// `DeliveryFailed` or (front gate only) `Denied`. A crash between the two
+/// leaves `Claimed`, which a repeat reports as "delivery unconfirmed".
 /// Test: `send_failure_after_claim_closes_decision_as_failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +98,8 @@ pub enum AnswerOutcome {
     Delivered,
     /// The effect failed after the claim; the decision stays closed.
     DeliveryFailed,
+    /// #9843: a front-gate answer denied the launch; the runtime never starts.
+    Denied,
 }
 
 /// The last answer a session's decision received (#9841).
@@ -225,6 +227,7 @@ fn already_answered(last: &DecisionAnswer, session: &ManagedSessionId) -> Manage
         AnswerOutcome::Claimed => " (delivery unconfirmed)",
         AnswerOutcome::Delivered => "",
         AnswerOutcome::DeliveryFailed => " (delivery failed)",
+        AnswerOutcome::Denied => " (denied)",
     };
     ManagedError::DecisionConflict(format!(
         "{} already answered by {} at {}{how}",
