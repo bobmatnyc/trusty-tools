@@ -18,9 +18,8 @@ use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::{RuntimeAdapter, build_adapter};
-use crate::session_manager::decommission_force::ProvisioningDirt;
 use crate::session_manager::{
-    AnswerOutcome, DecisionId, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
+    DecisionId, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
 };
 
 /// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
@@ -172,14 +171,14 @@ pub(crate) fn unclear_front_gate_answer(id: &ManagedSessionId) -> String {
     )
 }
 
-/// Close a claimed front-gate decision without launching (#9843, Q1, Q3).
+/// Close a front-gate decision the claim recorded `Denied` (#9843, Q1, Q3).
 ///
 /// Why: a denied task must never run, and `Stopped`/`Errored` are both
 /// resumable, so the session ends `Decommissioned`.
-/// What: settles the claim `Denied` first, so a crash or a failed teardown
-/// still leaves a record resume refuses, then decommissions with
-/// [`ProvisioningDirt::Refuse`]. A teardown error is `Err` (the route's 500);
-/// the decision stays closed and nothing launches.
+/// What: the claim's own write already made the record unlaunchable, so a
+/// crash or a failed teardown leaves a record resume refuses; this runs
+/// `SessionManager::decommission_denied_front_gate`. A teardown error is
+/// `Err` (the route's 500); the decision stays closed and nothing launches.
 /// Test: `front_gate_deny_closes_the_decision_without_launch`,
 /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
 pub(crate) async fn deny_front_gate(
@@ -187,17 +186,12 @@ pub(crate) async fn deny_front_gate(
     id: &ManagedSessionId,
     decision_id: Option<DecisionId>,
 ) -> Result<Option<DecisionId>, String> {
-    mgr.settle_answer(id, decision_id, AnswerOutcome::Denied)
-        .await;
-    let report = mgr
-        .decommission_reporting(id, None, ProvisioningDirt::Refuse)
-        .await
-        .map_err(|e| {
-            format!(
-                "the front-gate launch of session {id} was denied and will not run, but \
+    let report = mgr.decommission_denied_front_gate(id).await.map_err(|e| {
+        format!(
+            "the front-gate launch of session {id} was denied and will not run, but \
                  its teardown failed: {e}; decommission it once that is addressed"
-            )
-        })?;
+        )
+    })?;
     if let Some(why) = report.workspace_kept_reason {
         warn!(id = %id, "front gate denied; workspace kept: {why}");
     }

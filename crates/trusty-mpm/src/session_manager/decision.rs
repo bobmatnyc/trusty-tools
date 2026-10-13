@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+
+use super::decommission::is_session_worktree;
+use super::decommission_force::{DecommissionReport, ProvisioningDirt};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::store::{SessionStore, StoreError};
@@ -85,9 +89,10 @@ impl FromStr for DecisionId {
 ///
 /// Why: a send that fails after the claim may have typed half the answer, so
 /// the decision closes either way (D4) and a repeat must say how it ended.
-/// What: `Claimed` until the effect returns, then `Delivered`,
-/// `DeliveryFailed` or (front gate only) `Denied`. A crash between the two
-/// leaves `Claimed`, which a repeat reports as "delivery unconfirmed".
+/// What: `Claimed` until the effect returns, then `Delivered` or
+/// `DeliveryFailed`. A crash between the two leaves `Claimed`, which a repeat
+/// reports as "delivery unconfirmed". A front-gate deny is `Denied` in the
+/// claim's own write (#9843).
 /// Test: `send_failure_after_claim_closes_decision_as_failed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -294,6 +299,20 @@ fn takes(record: &SessionRecord, claim: &AnswerClaim) -> bool {
             .is_none_or(|asked| record.pending_decision_id == Some(asked))
 }
 
+/// The refusal for an answer to a pending decision on a record that is not at
+/// its front gate (#9843, M2).
+///
+/// Why: the front gate is the only writer of `pending_decision`, so such a
+/// record is a gated task that left `Provisioning` (the pre-fix reconcile, a
+/// stop); typing into its pane or launching it would run an unapproved task.
+pub(crate) fn not_at_front_gate(record: &SessionRecord) -> ManagedError {
+    ManagedError::DecisionConflict(format!(
+        "session {} holds a front-gate decision but is {}, not waiting at its front gate; \
+         nothing was typed or launched. Decommission the session",
+        record.id, record.state
+    ))
+}
+
 /// The conflict an answer meets before its pane is proven (#9841).
 ///
 /// Why: a repeat must get the 409 naming the first answerer even when its
@@ -388,12 +407,45 @@ impl SessionManager {
     /// Test: `two_concurrent_answers_reach_the_pane_once`,
     /// `stale_decision_id_conflicts`,
     /// `claim_persist_failure_sends_nothing_and_keeps_the_decision`,
-    /// `two_concurrent_front_gate_answers_spawn_once`,
     /// `answer_decision_without_a_pending_decision_is_refused`.
     pub async fn claim_decision(
         &self,
         id: &ManagedSessionId,
         claim: &AnswerClaim,
+    ) -> Result<Claim, ManagedError> {
+        self.claim_with(id, claim, None).await
+    }
+
+    /// Take a FRONT-gate decision for `claim`, recording `outcome` in the
+    /// claim's own write (#9843).
+    ///
+    /// Why: a deny settled in a second write left a window in which the
+    /// record read `Claimed` with no pending decision; a crash there gave a
+    /// record restart, stop and resume treated as launchable.
+    /// What: [`Self::claim_decision`]'s guarded claim, refused with a
+    /// [`ManagedError::DecisionConflict`] (nothing written) when the record
+    /// is not `Provisioning`, and recording `outcome`: `Claimed` for an
+    /// approve, which `settle_launch` settles after the launch, or `Denied`,
+    /// which is final.
+    /// Test: `a_front_gate_deny_is_denied_in_the_claim_write`,
+    /// `two_concurrent_front_gate_answers_spawn_once`,
+    /// `a_pending_decision_off_the_front_gate_is_409_decommission`.
+    pub(crate) async fn claim_front_gate(
+        &self,
+        id: &ManagedSessionId,
+        claim: &AnswerClaim,
+        outcome: AnswerOutcome,
+    ) -> Result<Claim, ManagedError> {
+        self.claim_with(id, claim, Some(outcome)).await
+    }
+
+    /// The claim body; `gate` is the front-gate outcome, or `None` for a
+    /// plain claim.
+    async fn claim_with(
+        &self,
+        id: &ManagedSessionId,
+        claim: &AnswerClaim,
+        gate: Option<AnswerOutcome>,
     ) -> Result<Claim, ManagedError> {
         let mut store = self.store.write().await;
         let mut record = locked_get(&mut store, id).await?;
@@ -401,6 +453,10 @@ impl SessionManager {
             return Err(refusal(&record, claim));
         }
         let front_gate = record.state == ManagedSessionState::Provisioning;
+        // #9843 (M2): a front-gate answer takes only a decision at its gate.
+        if gate.is_some() && !front_gate {
+            return Err(not_at_front_gate(&record));
+        }
         let decision_id = record.pending_decision_id.take();
         let now = Utc::now();
         record.pending_decision = None;
@@ -410,13 +466,49 @@ impl SessionManager {
             decision_id,
             answered_by: claim.answered_by.clone(),
             answered_at: now,
-            outcome: AnswerOutcome::Claimed,
+            // #9843: a deny is final in this write; no settle can be lost.
+            outcome: gate.unwrap_or(AnswerOutcome::Claimed),
         });
         store.upsert_decision(record).await?;
         Ok(Claim {
             decision_id,
             front_gate,
         })
+    }
+
+    /// Tear down a session whose front gate denied its launch (#9843).
+    ///
+    /// Why: the runtime never ran, so tm's own provisioning files are the only
+    /// dirt to expect (M4); and a launch-on-main session shares the main
+    /// checkout with Active siblings, which the #3764 guard refused although
+    /// nothing there is removed (M3).
+    /// What: a full decommission under [`ProvisioningDirt::Discard`], which
+    /// still keeps user edits, unpushed commits, an edited `TASK.md` and a
+    /// tree a live process stands in. The foreign-active-claim check runs
+    /// only when the teardown can remove the workspace: an owned one, or an
+    /// in-project session worktree.
+    /// Test: `a_front_gate_deny_removes_the_provisioned_worktree`,
+    /// `a_launch_on_main_deny_ignores_an_active_sibling_on_main`,
+    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
+    pub(crate) async fn decommission_denied_front_gate(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<DecommissionReport, ManagedError> {
+        let record = self.get(id).await?;
+        let removable = record.workspace_owned
+            || record
+                .workspace_path
+                .as_deref()
+                .is_some_and(is_session_worktree);
+        let managed_root = workspace_root(&TrustyToolsConfig::load());
+        self.decommission_with_root_checked(
+            id,
+            &managed_root,
+            None,
+            removable,
+            ProvisioningDirt::Discard,
+        )
+        .await
     }
 
     /// Record how a claimed answer ended (#9841).
