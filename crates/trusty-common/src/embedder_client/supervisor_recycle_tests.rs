@@ -5,9 +5,11 @@
 //! tests pin the three recycle triggers (footprint ceiling, max age, max
 //! calls) and the footprint-read-failure arm against a real child process.
 //! What: a POSIX-shell mock of `trusty-embedderd --stdio` (a request whose
-//! text contains `slow` is answered after one second, so a call can be in
-//! flight across a recycle), an injected footprint sampler, and an injected
-//! manual clock — the max-age test never sleeps for the age it asserts.
+//! text contains `slow` is answered after one second and `crawl` after two,
+//! so a call can be in flight across a recycle; a `fail` file beside the
+//! script makes a new mock exit at once and a `hang` file makes it never
+//! answer), an injected footprint sampler, and an injected manual clock — the
+//! max-age test never sleeps for the age it asserts.
 //! `max_restarts: 0` makes "no failure counted" observable: one counted
 //! failure would trip `should_give_up` and flip `has_given_up`.
 //! Test: this module.
@@ -24,10 +26,13 @@ fn write_mock() -> (tempfile::TempDir, PathBuf) {
     std::fs::write(
         &path,
         r#"#!/bin/sh
+here=$(dirname "$0")
+[ -e "$here/fail" ] && exit 1
+[ -e "$here/hang" ] && exec sleep 600
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] || id=1
-  case "$line" in *slow*) sleep 1 ;; esac
+  case "$line" in *slow*) sleep 1 ;; *crawl*) sleep 2 ;; esac
   printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
 done
 "#,
@@ -344,4 +349,239 @@ fn recycle_config_from_env_defaults_and_overrides() {
             }
         }
     }
+}
+
+/// Hooks with a fixed footprint for every pid and a manual clock.
+fn hooks_reading(mb: u64, stats: &Arc<RecycleStats>) -> RecycleHooks {
+    let (_now, clock) = manual_clock();
+    RecycleHooks {
+        sampler: Arc::new(move |_| Some(mb)),
+        clock,
+        stats: Arc::clone(stats),
+    }
+}
+
+/// #9828 row 1: a hand-built zero check interval, recycling on or off, must
+/// not panic the supervision task (which would take the sidecar with it).
+#[tokio::test]
+async fn zero_check_interval_does_not_panic_the_supervision_task() {
+    for recycle_on in [true, false] {
+        let (_dir, binary) = write_mock();
+        let mut recycle = quiet_recycle();
+        recycle.check_interval = Duration::ZERO;
+        if recycle_on {
+            recycle.footprint_ceiling_mb = 100;
+        }
+        let (supervisor, client_slot, pid_slot) =
+            EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+                .await
+                .expect("spawn_stdio");
+        let pid = pid_slot.load(Ordering::Acquire);
+        let stats = Arc::new(RecycleStats::new());
+        let handle = supervisor
+            .with_recycle_hooks(hooks_reading(50, &stats))
+            .start_supervisor_task();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !handle.join.is_finished(),
+            "supervision task ended (recycle_on={recycle_on}) on a zero check interval"
+        );
+        assert!(process_alive(pid), "sidecar died (recycle_on={recycle_on})");
+        let client = client_slot.read().await.clone();
+        assert!(client.embed_batch(vec!["zero".into()]).await.is_ok());
+        assert_eq!(stats.snapshot().recycles_total, 0);
+        handle.shutdown().await;
+    }
+}
+
+/// #9828 row 2: with `drain_secs: 0`, calls that run longer than the drain
+/// bound (two seconds each, the third queued on the in-flight semaphore) but
+/// inside the per-call timeout all complete across a recycle.
+#[tokio::test]
+async fn recycle_drain_waits_for_calls_slower_than_drain_secs() {
+    let (_dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    recycle.drain_secs = 0;
+    let (supervisor, client_slot, pid_slot) =
+        EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+            .await
+            .expect("spawn_stdio");
+    let first_pid = pid_slot.load(Ordering::Acquire);
+    let stats = Arc::new(RecycleStats::new());
+    let fed = first_pid;
+    let (_now, clock) = manual_clock();
+    let supervisor = supervisor.with_recycle_hooks(RecycleHooks {
+        sampler: Arc::new(move |pid| Some(if pid == fed { 101 } else { 50 })),
+        clock,
+        stats: Arc::clone(&stats),
+    });
+    let mut calls = Vec::new();
+    for i in 0..3 {
+        let client = client_slot.read().await.clone();
+        calls.push(tokio::spawn(async move {
+            client.embed_batch(vec![format!("crawl {i}")]).await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let handle = supervisor.start_supervisor_task();
+    assert!(
+        wait_until(5, || pid_slot.load(Ordering::Acquire) != first_pid).await,
+        "no recycle"
+    );
+    for (i, call) in calls.into_iter().enumerate() {
+        let answered = call.await.expect("join call");
+        assert!(
+            answered.is_ok(),
+            "call {i} failed across the recycle: {answered:?}"
+        );
+    }
+    assert!(
+        wait_until(5, || !process_alive(first_pid)).await,
+        "the recycled sidecar was never stopped after its calls finished"
+    );
+    assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// #9828 row 5(a): every fresh sidecar already reads over the ceiling. The
+/// recycles back off instead of repeating every second check.
+#[tokio::test]
+async fn recycle_backs_off_when_a_fresh_sidecar_is_already_over_the_ceiling() {
+    let (_dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let (supervisor, client_slot, _pid_slot) =
+        EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+            .await
+            .expect("spawn_stdio");
+    let stats = Arc::new(RecycleStats::new());
+    let handle = supervisor
+        .with_recycle_hooks(hooks_reading(200, &stats))
+        .start_supervisor_task();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let snap = stats.snapshot();
+    // Without a back-off: one recycle per ~120 ms, about 25 in 3 s. With it:
+    // holds of 100, 200, 400, 800 ms... about 5.
+    assert!(
+        (2..=8).contains(&snap.recycles_total),
+        "recycle storm: {snap:?}"
+    );
+    assert!(snap.backoff_level >= 2, "{snap:?}");
+    assert_eq!(snap.backoff_cause.as_deref(), Some("premature_recycle"));
+    assert!(snap.backoff_until_unix_secs.is_some(), "{snap:?}");
+    assert!(!handle.has_given_up());
+    let client = client_slot.read().await.clone();
+    assert!(client.embed_batch(vec!["after".into()]).await.is_ok());
+    handle.shutdown().await;
+}
+
+/// #9828 row 5(b): a replacement that cannot start is retried with growing
+/// spacing, not on every tick; the old sidecar keeps serving.
+#[tokio::test]
+async fn recycle_spawn_failures_back_off() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let (supervisor, client_slot, pid_slot) =
+        EmbedderSupervisor::spawn_stdio(binary, config(recycle))
+            .await
+            .expect("spawn_stdio");
+    let first_pid = pid_slot.load(Ordering::Acquire);
+    std::fs::write(dir.path().join("fail"), b"").expect("write fail marker");
+    let stats = Arc::new(RecycleStats::new());
+    let handle = supervisor
+        .with_recycle_hooks(hooks_reading(200, &stats))
+        .start_supervisor_task();
+
+    let start = tokio::time::Instant::now();
+    let mut seen = 0;
+    let mut attempts = Vec::new();
+    while start.elapsed() < Duration::from_secs(3) {
+        let n = stats.snapshot().spawn_failures;
+        if n != seen {
+            seen = n;
+            attempts.push(start.elapsed());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let snap = stats.snapshot();
+    // Without a back-off: one attempt per 50 ms tick, about 50 in 3 s.
+    assert!(
+        (3..=8).contains(&snap.spawn_failures),
+        "spawn retried without back-off: {snap:?} at {attempts:?}"
+    );
+    let gaps: Vec<_> = attempts.windows(2).map(|w| w[1] - w[0]).collect();
+    let (first, last) = (gaps[0], gaps[gaps.len() - 1]);
+    assert!(last >= first * 2, "attempt spacing did not grow: {gaps:?}");
+    assert_eq!(snap.recycles_total, 0, "{snap:?}");
+    assert!(snap.backoff_level >= 3, "{snap:?}");
+    assert_eq!(snap.backoff_cause.as_deref(), Some("spawn_failure"));
+    assert_eq!(pid_slot.load(Ordering::Acquire), first_pid);
+    let client = client_slot.read().await.clone();
+    assert!(client.embed_batch(vec!["kept".into()]).await.is_ok());
+    assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// #9828 row 5: while a replacement spawn hangs on its startup probe, the
+/// old sidecar crashes; the crash path respawns it (after its 2 s back-off)
+/// before the probe's own 5 s timeout would even have freed the loop.
+#[tokio::test]
+async fn old_sidecar_crash_during_a_blocked_respawn_is_handled() {
+    let (dir, binary) = write_mock();
+    let mut recycle = quiet_recycle();
+    recycle.footprint_ceiling_mb = 100;
+    let cfg = SupervisorConfig {
+        max_restarts: 3,
+        ..config(recycle)
+    };
+    let (supervisor, client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+        .await
+        .expect("spawn_stdio");
+    let first_pid = pid_slot.load(Ordering::Acquire);
+    let hang = dir.path().join("hang");
+    std::fs::write(&hang, b"").expect("write hang marker");
+    let stats = Arc::new(RecycleStats::new());
+    let handle = supervisor
+        .with_recycle_hooks(hooks_reading(200, &stats))
+        .start_supervisor_task();
+    // The first judged check (~100 ms) starts a replacement that never answers.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    std::fs::remove_file(&hang).expect("remove hang marker");
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &first_pid.to_string()])
+        .status()
+        .expect("kill");
+    assert!(killed.success());
+    assert!(
+        wait_until(4, || {
+            let pid = pid_slot.load(Ordering::Acquire);
+            pid != 0 && pid != first_pid && process_alive(pid)
+        })
+        .await,
+        "the old sidecar's crash went unhandled behind the blocked respawn"
+    );
+    let client = client_slot.read().await.clone();
+    assert!(client.embed_batch(vec!["back".into()]).await.is_ok());
+    assert!(!handle.has_given_up());
+    handle.shutdown().await;
+}
+
+/// The back-off doubles per step from twice the base and stops at one hour.
+#[test]
+fn backoff_delay_doubles_and_caps() {
+    let base = Duration::from_secs(30);
+    assert_eq!(
+        supervisor_recycle::backoff_delay(base, 1),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        supervisor_recycle::backoff_delay(base, 2),
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        supervisor_recycle::backoff_delay(base, 40),
+        Duration::from_secs(3600)
+    );
 }

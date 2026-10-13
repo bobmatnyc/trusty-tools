@@ -125,7 +125,8 @@ const EMBED_CALL_TIMEOUT_DEFAULT_SECS: u64 = 30;
 /// override via `std::env::set_var`.
 /// What: reads the env var, parses as u64, falls back to `EMBED_CALL_TIMEOUT_DEFAULT_SECS`.
 /// Test: `embed_call_stalled_reader_times_out` exercises the timeout path.
-fn embed_call_timeout() -> Duration {
+// #9828: the recycle drain floors its stall bound on this timeout.
+pub(super) fn embed_call_timeout() -> Duration {
     static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         let secs = std::env::var("TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS")

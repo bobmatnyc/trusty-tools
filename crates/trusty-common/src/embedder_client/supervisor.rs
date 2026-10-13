@@ -91,7 +91,9 @@ pub use supervisor_recycle::{
     FootprintSampler, RecycleClock, RecycleConfig, RecycleHooks, RecycleSnapshot, RecycleStats,
     RecycleTrigger, process_recycle_stats,
 };
-use supervisor_recycle::{RecycleCtx, RecycleWatch, TrackedClient, perform_recycle};
+use supervisor_recycle::{
+    RecycleCtx, RecycleOutcome, RecycleWatch, TrackedClient, perform_recycle,
+};
 
 // ── Supervisor ───────────────────────────────────────────────────────────────
 
@@ -618,7 +620,9 @@ fn should_give_up(
 /// respawn and must start being watched again.
 /// A recycle tick (#9828) that finds a trigger crossed is handled before the
 /// crash counters: `perform_recycle` swaps in a fresh sidecar and the loop
-/// continues, so a recycle can never escalate toward `max_restarts`.
+/// continues, so a recycle can never escalate toward `max_restarts`. A
+/// premature recycle or a failed replacement spawn backs off; an old sidecar
+/// that exits during the replacement spawn goes down the crash path.
 /// Test: `supervisor_restarts_on_crash`,
 /// `supervisor_intentional_shutdown_does_not_respawn`,
 /// `recycle_on_footprint_ceiling_keeps_inflight_call_and_counts_no_failure`,
@@ -673,9 +677,10 @@ async fn supervision_loop(
     // shutdown branches below are permanently excluded from the `select!` —
     // supervision continues via `child.wait()` / `unhealthy_signal` only.
     let mut shutdown_closed = false;
-    // #9828: recycle check cadence; off when every trigger is 0.
+    // #9828: recycle check cadence; off when every trigger is 0. Floored so a
+    // hand-built zero interval cannot panic `interval_at`.
     let recycle_on = config.recycle.enabled();
-    let every = config.recycle.check_interval;
+    let every = config.recycle.effective_check_interval();
     let mut recycle_tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     recycle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -822,13 +827,19 @@ async fn supervision_loop(
                 child_pid_slot: &child_pid_slot,
                 shutdown_rx: &shutdown_rx,
             };
+            // #9828: premature recycles and failed spawns back off; an old
+            // sidecar that exited mid-spawn is left for the crash path.
             tracked = match perform_recycle(ctx, reason, tracked).await {
-                Ok(fresh) => {
+                RecycleOutcome::Swapped(fresh) => {
                     unhealthy_signal = fresh.unhealthy_signal();
-                    watch.reset(&hooks);
+                    watch.after_swap(&config.recycle, &hooks);
                     fresh
                 }
-                Err(kept) => kept,
+                RecycleOutcome::SpawnFailed(kept) => {
+                    watch.after_spawn_failure(&config.recycle, &hooks);
+                    kept
+                }
+                RecycleOutcome::OldExited(kept) => kept,
             };
             continue;
         }

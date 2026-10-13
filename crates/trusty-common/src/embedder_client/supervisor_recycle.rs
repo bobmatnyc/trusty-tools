@@ -10,39 +10,45 @@
 //! [`RecycleHooks`] (the injectable footprint sampler, clock, and counters),
 //! [`RecycleStats`] / [`RecycleSnapshot`] (what `/health` reports), the
 //! per-generation [`RecycleWatch`] that decides when a recycle is due, the
-//! [`TrackedClient`] wrapper that counts calls and in-flight calls, and
-//! [`perform_recycle`], which spawns the replacement before it drains and
-//! stops the old child.
+//! [`TrackedClient`] wrapper that counts calls and in-flight calls and, once
+//! retired, forwards new calls to its successor. The recycle back-off lives
+//! on [`RecycleWatch`]; `supervisor_recycle_swap.rs` holds `perform_recycle`,
+//! which spawns the replacement before it drains and stops the old child.
 //! Test: `supervisor_recycle_tests.rs`.
 
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::process::Child;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::watch;
 
 use super::supervisor_config::parse_env;
-use super::{EmbedderClient, StdioEmbedderClient, SupervisorConfig};
+use super::{EmbedderClient, StdioEmbedderClient};
 use crate::embedder_client::EmbedderError;
+
+// #9828: the swap / drain half, split out for the 500-SLOC cap.
+#[path = "supervisor_recycle_swap.rs"]
+mod swap;
+pub(crate) use swap::{RecycleCtx, RecycleOutcome, perform_recycle};
 
 /// Consecutive failed footprint reads that count as "cannot observe".
 const FOOTPRINT_UNREADABLE_LIMIT: u32 = 3;
-/// How long an idle old client must stay idle before it is stopped while a
-/// caller still holds a clone of it (covers the clone-then-call window).
-const DRAIN_SETTLE: Duration = Duration::from_secs(2);
-/// Drain poll cadence.
-const DRAIN_POLL: Duration = Duration::from_millis(20);
+/// #9828: floor on the check interval; `tokio::time::interval` panics on zero.
+const MIN_CHECK_INTERVAL: Duration = Duration::from_millis(10);
+/// #9828: ceiling on the recycle back-off hold.
+const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 
 /// Recycle thresholds and cadence. `0` disables a trigger.
 ///
 /// Why: three independent bounds, so a leak is capped whether it grows with
 /// memory, wall time, or traffic.
 /// What: see each field's env var; [`RecycleConfig::from_env`] reads them.
+/// `#[non_exhaustive]`: outside this crate, start from `default()` or
+/// `from_env()` and set fields.
 /// Test: `recycle_config_from_env_defaults_and_overrides`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecycleConfig {
     /// Recycle once the sidecar's footprint exceeds this many MB.
     /// Env: `TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB` (default 4096).
@@ -53,11 +59,13 @@ pub struct RecycleConfig {
     /// Recycle once the sidecar has served this many embed calls.
     /// Env: `TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS` (default 100000).
     pub max_calls: u64,
-    /// How often the triggers are evaluated.
+    /// How often the triggers are evaluated; also the recycle back-off base.
+    /// Below 10 ms (zero included) it runs at 10 ms.
     /// Env: `TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS` (default 30, minimum 1).
     pub check_interval: Duration,
-    /// Upper bound on waiting for the old sidecar's in-flight calls (seconds).
-    /// Longer than the 30 s per-call timeout, so every call ends on its own.
+    /// How long the drain waits with no in-flight call on the old sidecar
+    /// finishing before it stops that sidecar anyway (seconds). Never less
+    /// than the per-call timeout plus 5 s, so `0` means exactly that floor.
     /// Env: `TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS` (default 60).
     pub drain_secs: u64,
 }
@@ -99,6 +107,16 @@ impl RecycleConfig {
     /// True when at least one trigger is on.
     pub fn enabled(&self) -> bool {
         self.footprint_ceiling_mb > 0 || self.max_age_secs > 0 || self.max_calls > 0
+    }
+
+    /// The check interval the supervisor runs, floored at 10 ms.
+    ///
+    /// Why (#9828): a hand-built `check_interval` of zero panicked the
+    /// supervision task inside `tokio::time::interval_at`, and the sidecar
+    /// died with it.
+    /// Test: `zero_check_interval_does_not_panic_the_supervision_task`.
+    pub fn effective_check_interval(&self) -> Duration {
+        self.check_interval.max(MIN_CHECK_INTERVAL)
     }
 }
 
@@ -174,6 +192,21 @@ struct LastRecycle {
     at_unix_secs: Option<u64>,
 }
 
+/// #9828: the recycle back-off as `/health` shows it.
+#[derive(Debug, Clone, Default)]
+struct BackoffView {
+    level: u32,
+    cause: Option<&'static str>,
+    until_unix_secs: Option<u64>,
+}
+
+fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
 /// Recycle counters, shared between the supervision loop and `/health`.
 /// Test: asserted through [`RecycleStats::snapshot`] in every recycle test.
 #[derive(Debug, Default)]
@@ -185,6 +218,7 @@ pub struct RecycleStats {
     spawn_failures: AtomicU64,
     footprint_read_errors: AtomicU64,
     last: Mutex<LastRecycle>,
+    backoff: Mutex<BackoffView>,
 }
 
 /// Point-in-time copy of [`RecycleStats`], serialized into `/health`.
@@ -203,6 +237,14 @@ pub struct RecycleSnapshot {
     pub last_old_pid: Option<u32>,
     pub last_new_pid: Option<u32>,
     pub last_recycle_unix_secs: Option<u64>,
+    /// #9828: consecutive back-off steps (premature recycles or failed
+    /// replacement spawns); `0` = no back-off.
+    pub backoff_level: u32,
+    /// `premature_recycle` (a fresh sidecar already over a trigger) or
+    /// `spawn_failure`; `None` when `backoff_level` is 0.
+    pub backoff_cause: Option<String>,
+    /// Wall-clock second the current hold ends; no recycle is tried before it.
+    pub backoff_until_unix_secs: Option<u64>,
 }
 
 impl RecycleStats {
@@ -218,17 +260,19 @@ impl RecycleStats {
             RecycleTrigger::FootprintUnreadable => &self.footprint_unreadable,
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_secs());
         if let Ok(mut last) = self.last.lock() {
             *last = LastRecycle {
                 trigger: Some(trigger.as_str()),
                 old_pid: Some(old_pid),
                 new_pid: Some(new_pid),
-                at_unix_secs: at,
+                at_unix_secs: unix_now(),
             };
+        }
+    }
+
+    fn set_backoff(&self, view: BackoffView) {
+        if let Ok(mut b) = self.backoff.lock() {
+            *b = view;
         }
     }
 
@@ -239,6 +283,7 @@ impl RecycleStats {
         let max_calls = self.max_calls.load(Ordering::Relaxed);
         let unreadable = self.footprint_unreadable.load(Ordering::Relaxed);
         let last = self.last.lock().map(|l| l.clone()).unwrap_or_default();
+        let backoff = self.backoff.lock().map(|b| b.clone()).unwrap_or_default();
         RecycleSnapshot {
             recycles_total: footprint + max_age + max_calls + unreadable,
             footprint,
@@ -251,19 +296,31 @@ impl RecycleStats {
             last_old_pid: last.old_pid,
             last_new_pid: last.new_pid,
             last_recycle_unix_secs: last.at_unix_secs,
+            backoff_level: backoff.level,
+            backoff_cause: backoff.cause.map(str::to_string),
+            backoff_until_unix_secs: backoff.until_unix_secs,
         }
     }
 }
 
-/// `StdioEmbedderClient` plus a call counter and an in-flight counter.
+/// `StdioEmbedderClient` plus call, in-flight and finished counters.
 ///
 /// Why: max-calls needs a count of real embed calls (never the startup probe,
 /// which runs on the bare client before wrapping), and the drain needs to
-/// know when the old sidecar has no call left.
+/// know when the old sidecar has no call left and whether its calls progress.
+/// What (#9828): once [`Self::retire`] names a successor, a new call forwards
+/// there instead of reaching the old sidecar. `embed_batch` raises
+/// `in_flight` before it reads `retired`, and `retire` sets `retired` before
+/// the drain reads `in_flight`, both `SeqCst`: so a drain that reads zero
+/// knows no later call can reach the old sidecar.
+/// Test: `recycle_drain_waits_for_calls_slower_than_drain_secs`.
 pub(crate) struct TrackedClient {
     inner: StdioEmbedderClient,
     calls: AtomicU64,
-    in_flight: Arc<AtomicU32>,
+    in_flight: AtomicU32,
+    finished: AtomicU64,
+    retired: AtomicBool,
+    successor: OnceLock<Arc<dyn EmbedderClient>>,
 }
 
 impl TrackedClient {
@@ -271,30 +328,47 @@ impl TrackedClient {
         Arc::new(Self {
             inner,
             calls: AtomicU64::new(0),
-            in_flight: Arc::new(AtomicU32::new(0)),
+            in_flight: AtomicU32::new(0),
+            finished: AtomicU64::new(0),
+            retired: AtomicBool::new(false),
+            successor: OnceLock::new(),
         })
     }
 
     pub(crate) fn unhealthy_signal(&self) -> watch::Receiver<bool> {
         self.inner.unhealthy_signal()
     }
+
+    /// Send every later call to `successor` (set before the flag).
+    fn retire(&self, successor: Arc<dyn EmbedderClient>) {
+        let _ = self.successor.set(successor);
+        self.retired.store(true, Ordering::SeqCst);
+    }
 }
 
-/// Decrements the in-flight count on every exit path, including cancellation.
-struct InFlight(Arc<AtomicU32>);
+/// Ends one call on every exit path, including cancellation.
+struct InFlight<'a>(&'a TrackedClient);
 
-impl Drop for InFlight {
+impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.finished.fetch_add(1, Ordering::AcqRel);
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl EmbedderClient for TrackedClient {
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
+        // #9828: count first, then look (see the type doc).
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        if self.retired.load(Ordering::SeqCst)
+            && let Some(next) = self.successor.get()
+        {
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            return next.embed_batch(texts).await;
+        }
+        let _guard = InFlight(self);
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.in_flight.fetch_add(1, Ordering::AcqRel);
-        let _guard = InFlight(Arc::clone(&self.in_flight));
         self.inner.embed_batch(texts).await
     }
 
@@ -309,13 +383,21 @@ impl EmbedderClient for TrackedClient {
 /// from the process plumbing in [`perform_recycle`].
 /// What: `born` and `ticks` reset on every new generation (spawn, crash
 /// respawn, recycle); `read_failures` counts consecutive failed footprint reads;
-/// `unreadable_latched` survives generations — see [`Self::due`].
+/// `unreadable_latched` survives generations — see [`Self::due`]. The back-off
+/// fields (#9828) also survive generations: `quick_streak` counts consecutive
+/// recycles judged on a generation's first look, `fail_streak` consecutive
+/// failed replacement spawns, and `hold_until` blocks every recycle until it
+/// passes. The hold runs on tokio time, not the injectable clock.
 pub(crate) struct RecycleWatch {
     born: Duration,
     ticks: u32,
     read_failures: u32,
     unreadable_latched: bool,
     warned_read_failure: bool,
+    first_look: bool,
+    quick_streak: u32,
+    fail_streak: u32,
+    hold_until: Option<tokio::time::Instant>,
 }
 
 impl RecycleWatch {
@@ -326,14 +408,69 @@ impl RecycleWatch {
             read_failures: 0,
             unreadable_latched: false,
             warned_read_failure: false,
+            first_look: false,
+            quick_streak: 0,
+            fail_streak: 0,
+            hold_until: None,
         }
     }
 
-    /// Start a new generation (keeps the unreadable latch).
+    /// Start a new generation (keeps the unreadable latch and the back-off).
     pub(crate) fn reset(&mut self, hooks: &RecycleHooks) {
         self.born = (hooks.clock)();
         self.ticks = 0;
         self.read_failures = 0;
+    }
+
+    /// A recycle swapped in a new generation: reset, then back off when the
+    /// old generation was recycled on its first judged check.
+    ///
+    /// Why (#9828): a ceiling below the sidecar's resting footprint made
+    /// every fresh sidecar due on its first look — a recycle (and a model
+    /// reload) about once a minute, forever.
+    /// What: such a recycle raises `quick_streak` and holds the next recycle
+    /// for [`backoff_delay`]; any other recycle clears both streaks.
+    /// Test: `recycle_backs_off_when_a_fresh_sidecar_is_already_over_the_ceiling`.
+    pub(crate) fn after_swap(&mut self, cfg: &RecycleConfig, hooks: &RecycleHooks) {
+        self.reset(hooks);
+        self.fail_streak = 0;
+        self.quick_streak = if self.first_look {
+            self.quick_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.hold(cfg, hooks, self.quick_streak, "premature_recycle");
+    }
+
+    /// The replacement failed to start: hold the next attempt.
+    ///
+    /// Why (#9828): the retry ran on every tick, each one blocking the loop
+    /// for up to the startup timeout.
+    /// Test: `recycle_spawn_failures_back_off`.
+    pub(crate) fn after_spawn_failure(&mut self, cfg: &RecycleConfig, hooks: &RecycleHooks) {
+        self.fail_streak = self.fail_streak.saturating_add(1);
+        self.hold(cfg, hooks, self.fail_streak, "spawn_failure");
+    }
+
+    fn hold(&mut self, cfg: &RecycleConfig, hooks: &RecycleHooks, level: u32, cause: &'static str) {
+        if level == 0 {
+            self.hold_until = None;
+            hooks.stats.set_backoff(BackoffView::default());
+            return;
+        }
+        let delay = backoff_delay(cfg.effective_check_interval(), level);
+        self.hold_until = Some(tokio::time::Instant::now() + delay);
+        tracing::warn!(
+            level,
+            cause,
+            hold_secs = delay.as_secs_f64(),
+            "EmbedderSupervisor: recycle back-off — no recycle for {delay:?}"
+        );
+        hooks.stats.set_backoff(BackoffView {
+            level,
+            cause: Some(cause),
+            until_unix_secs: unix_now().map(|t| t + delay.as_secs()),
+        });
     }
 
     /// Decide whether the live sidecar is due for a recycle.
@@ -344,6 +481,7 @@ impl RecycleWatch {
     /// the latch is set, further failures (on any generation) recycle nothing
     /// — the sampler, not the sidecar, is then the likely fault, and the age
     /// and call bounds still apply. One successful read clears the latch.
+    /// Nothing is judged while a back-off hold runs.
     pub(crate) fn due(
         &mut self,
         cfg: &RecycleConfig,
@@ -351,12 +489,30 @@ impl RecycleWatch {
         pid: u32,
         tracked: &TrackedClient,
     ) -> Option<RecycleTrigger> {
-        // Never judge a generation before its second check: a ceiling set
-        // below the sidecar's resting size must not respawn on every tick.
+        if self
+            .hold_until
+            .is_some_and(|t| tokio::time::Instant::now() < t)
+        {
+            return None;
+        }
+        // Never judge a generation before its second check.
         self.ticks = self.ticks.saturating_add(1);
         if self.ticks < 2 {
             return None;
         }
+        let trigger = self.judge(cfg, hooks, pid, tracked);
+        // #9828: due on the first judged check feeds the back-off.
+        self.first_look = trigger.is_some() && self.ticks == 2;
+        trigger
+    }
+
+    fn judge(
+        &mut self,
+        cfg: &RecycleConfig,
+        hooks: &RecycleHooks,
+        pid: u32,
+        tracked: &TrackedClient,
+    ) -> Option<RecycleTrigger> {
         let age = (hooks.clock)().saturating_sub(self.born);
         if cfg.footprint_ceiling_mb > 0 && pid != 0 {
             match (hooks.sampler)(pid) {
@@ -406,107 +562,8 @@ impl RecycleWatch {
     }
 }
 
-/// Everything the supervision loop threads into a recycle.
-pub(crate) struct RecycleCtx<'a> {
-    pub binary_path: &'a Path,
-    pub config: &'a SupervisorConfig,
-    pub hooks: &'a RecycleHooks,
-    pub child_slot: &'a tokio::sync::Mutex<Option<Child>>,
-    pub client_slot: &'a RwLock<Arc<dyn EmbedderClient>>,
-    pub child_pid_slot: &'a AtomicU32,
-    pub shutdown_rx: &'a watch::Receiver<bool>,
-}
-
-/// Replace the live sidecar with a fresh one, then drain and stop the old.
-///
-/// Why (#9828): a recycle must never fail or drop a caller's call and must
-/// never count as a crash. Spawning first means there is never a moment with
-/// no sidecar; draining before the kill means no in-flight call is lost.
-/// What: spawns and probes the replacement; on failure logs WARN, counts a
-/// `spawn_failure`, and leaves the old sidecar serving (returns `Err(old)`). On
-/// success swaps `client_slot`, moves the new child into `child_slot`,
-/// publishes the new pid, records the recycle in [`RecycleStats`], then waits until no caller holds the old client
-/// (or it has been idle for `DRAIN_SETTLE`), bounded by `drain_secs` and cut
-/// short by a shutdown request; then kills and reaps the old child. Logs the
-/// trigger and both pids at INFO. Returns the new tracked client. `old` is
-/// taken by value so the drain can see when it holds the last reference.
-/// Test: `recycle_on_footprint_ceiling_keeps_inflight_call_and_counts_no_failure`.
-pub(crate) async fn perform_recycle(
-    ctx: RecycleCtx<'_>,
-    trigger: RecycleTrigger,
-    old: Arc<TrackedClient>,
-) -> Result<Arc<TrackedClient>, Arc<TrackedClient>> {
-    let old_pid = ctx.child_pid_slot.load(Ordering::Acquire);
-    let (new_child, new_client) = match super::spawn_child(ctx.binary_path, ctx.config).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            ctx.hooks
-                .stats
-                .spawn_failures
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                trigger = trigger.as_str(),
-                old_pid,
-                "EmbedderSupervisor: recycle replacement failed to start — keeping the \
-                     current sidecar: {e:#}"
-            );
-            return Err(old);
-        }
-    };
-    let new_pid = new_child.id().unwrap_or(0);
-    let tracked = TrackedClient::new(new_client);
-    *ctx.client_slot.write().await = Arc::clone(&tracked) as Arc<dyn EmbedderClient>;
-    let old_child = ctx.child_slot.lock().await.replace(new_child);
-    ctx.child_pid_slot.store(new_pid, Ordering::Release);
-    tracing::info!(
-        trigger = trigger.as_str(),
-        old_pid,
-        new_pid,
-        "EmbedderSupervisor: recycling sidecar (old pid={old_pid}, new pid={new_pid}, \
-         trigger={})",
-        trigger.as_str()
-    );
-
-    // Counted once the new sidecar serves; the drain below only tidies up.
-    ctx.hooks.stats.record(trigger, old_pid, new_pid);
-    drain(&old, ctx.config.recycle.drain_secs, ctx.shutdown_rx).await;
-    drop(old);
-    if let Some(mut child) = old_child {
-        if let Err(e) = child.start_kill() {
-            tracing::debug!("EmbedderSupervisor: recycled sidecar already exited: {e}");
-        }
-        let _ = child.wait().await;
-    }
-    Ok(tracked)
-}
-
-/// Wait until no caller can still be using `old`.
-async fn drain(old: &Arc<TrackedClient>, drain_secs: u64, shutdown_rx: &watch::Receiver<bool>) {
-    let start = tokio::time::Instant::now();
-    let bound = Duration::from_secs(drain_secs);
-    let mut idle_since: Option<tokio::time::Instant> = None;
-    loop {
-        // Only this function holds the Arc: nobody can start a call on it.
-        if Arc::strong_count(old) == 1 || *shutdown_rx.borrow() {
-            return;
-        }
-        let now = tokio::time::Instant::now();
-        if old.in_flight.load(Ordering::Acquire) == 0 {
-            let since = *idle_since.get_or_insert(now);
-            if now.duration_since(since) >= DRAIN_SETTLE {
-                return;
-            }
-        } else {
-            idle_since = None;
-        }
-        if now.duration_since(start) >= bound {
-            tracing::warn!(
-                in_flight = old.in_flight.load(Ordering::Acquire),
-                "EmbedderSupervisor: recycle drain bound ({drain_secs}s) reached — \
-                 stopping the old sidecar"
-            );
-            return;
-        }
-        tokio::time::sleep(DRAIN_POLL).await;
-    }
+/// Back-off hold for step `level` (>= 1): `base * 2^level`, capped at 1 h.
+/// Test: `backoff_delay_doubles_and_caps`.
+pub(crate) fn backoff_delay(base: Duration, level: u32) -> Duration {
+    base.saturating_mul(1u32 << level.min(16)).min(MAX_BACKOFF)
 }

@@ -1369,8 +1369,8 @@ Silicon hosts are completely unaffected (unchanged ort default).
 | `TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB` | `4096` | **Recycle by footprint (#9828).** When the sidecar's footprint (macOS physical footprint, Linux `VmRSS`) exceeds this many MB, the supervisor starts a replacement, swaps it in, drains the old sidecar's in-flight calls, then stops it. A recycle is never counted toward `TRUSTY_EMBEDDERD_MAX_RESTARTS`. Three consecutive failed footprint reads recycle once (`footprint_unreadable`); further failures recycle nothing until a read succeeds (max age still applies). `0` disables. |
 | `TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS` | `21600` | **Recycle by age (#9828).** Same graceful recycle once the sidecar is this many seconds old (6 h). `0` disables. |
 | `TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS` | `100000` | **Recycle by call count (#9828).** Same graceful recycle once the sidecar has served this many embed calls (the startup probe is not counted). `0` disables. |
-| `TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS` | `30` | How often the three recycle triggers are evaluated (minimum 1). A sidecar is never judged before its second check. |
-| `TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS` | `60` | Upper bound on waiting for the old sidecar's in-flight calls during a recycle; longer than the per-call timeout so each call finishes on its own. |
+| `TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS` | `30` | How often the three recycle triggers are evaluated (minimum 1). A sidecar is never judged before its second check. A recycle on a fresh sidecar's first judged check, or a replacement that fails to start, holds the next recycle for twice this interval, doubling per repeat up to 1 h; `/health` `embedder_recycle.backoff_*` shows the hold. |
+| `TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS` | `60` | During a recycle the old sidecar is stopped once no call is in flight on it (new calls already go to the replacement). This bound applies only when no call on it has finished for this long; it is never below the per-call timeout plus 5 s, so `0` means that floor. |
 
 ---
 
