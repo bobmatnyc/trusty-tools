@@ -28,7 +28,8 @@ impl DaemonState {
     /// What: returns the held table unless it is poisoned; else opens it
     /// again. An open error is returned and not cached. Blocking I/O: async
     /// callers use `spawn_blocking`.
-    /// Test: `table_open_failure_refuses_ask_owner_and_inbound`.
+    /// Test: `table_open_failure_refuses_ask_owner_and_inbound`,
+    /// `poisoned_table_is_reopened_by_the_holder`.
     pub fn question_table(&self) -> Result<Arc<QuestionTable>, QuestionTableError> {
         let home = self.user_home().ok_or(QuestionTableError::NoHome)?;
         // #8433 r6: a poisoned slot refuses; it is never recovered.
@@ -41,8 +42,9 @@ impl DaemonState {
         if let Some(table) = slot.as_ref().filter(|t| !t.is_poisoned()) {
             return Ok(Arc::clone(table));
         }
-        // #8433 r6 G1: drop a poisoned table so its lock is released once
-        // its last user finishes; until then the reopen sees `Locked`.
+        // #8433 r6 G1: drop a poisoned table and reopen; the replay decides.
+        // #8433: it released its flock when it poisoned, so the reopen takes
+        // the lock while stale holders finish; they refuse every operation.
         *slot = None;
         let table = Arc::new(QuestionTable::open_at(&questions_path(&home))?);
         *slot = Some(Arc::clone(&table));

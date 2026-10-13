@@ -1,0 +1,2 @@
+Fixed
+- The daemon question table now releases its file lock as soon as it is poisoned or dropped, so the next open succeeds at once. Before, the lock stayed held while any earlier user of a poisoned table was still running, or while a just-started child process still held a copy of the lock descriptor, and the reopen failed with "held by another question table". A live table still refuses a second opener, and a poisoned table refuses every operation, so the reopened table is the only writer (Refs #8433).
