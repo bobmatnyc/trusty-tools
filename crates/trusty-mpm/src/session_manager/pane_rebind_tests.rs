@@ -830,3 +830,166 @@ async fn a_store_write_failure_leaves_the_record_unchanged() {
         )
     );
 }
+
+/// A `Stopped` record named `name` whose front gate was answered (#9850).
+///
+/// Seeded `Provisioning` on the live server, answered through the `/answer`
+/// route's claim write (`deny`, or an approve settled `Delivered`), stopped,
+/// then left naming [`OLD`]: the record a tmux server replacement leaves
+/// once the session is restored by name on the new server.
+async fn answered_then_stopped(mgr: &SessionManager, name: &str, deny: bool) -> ManagedSessionId {
+    use crate::session_manager::decision_tests::answer_front_gate;
+
+    let id = seed(mgr, name, ManagedSessionState::Provisioning, "%1", NEW).await;
+    answer_front_gate(mgr, &id, deny).await;
+    mgr.stop_reporting(&id, StopCause::Deliberate)
+        .await
+        .expect("stop");
+    let mut record = mgr.get(&id).await.expect("record");
+    assert_eq!(record.state, ManagedSessionState::Stopped);
+    record.tmux_server = Some(OLD.into());
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("old server");
+    id
+}
+
+/// #9850: the automatic rebind skips a `Stopped` record its front gate
+/// denied, on a replaced server; the record keeps its state and binding.
+///
+/// Why: the pass runs in boot reconcile and writes `Active`, so a stopped
+/// denied task restored on a new tmux server would come back listed, and
+/// treated, as a running session.
+/// Test: this test; the no-hold control is
+/// `rebind_still_moves_a_record_whose_front_gate_approved`.
+#[tokio::test]
+async fn the_automatic_rebind_skips_a_record_its_front_gate_denied() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-denied"], &[("%1", NEW, "tm-denied")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-denied", true).await;
+
+    let results = mgr.rebind_stale_panes().await;
+
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!(
+        st,
+        ManagedSessionState::Stopped,
+        "the automatic pass reactivated a front-gate-denied record: {results:?}"
+    );
+    assert_eq!((name, pane, server), bound("tm-denied", "%1", OLD));
+    assert!(results.is_empty(), "{results:?}");
+}
+
+/// #9850: `tm sessions rebind` refuses a `Stopped` record its front gate
+/// denied: `InvalidState` from the verb, a 409 naming the front gate from
+/// its route. The record keeps its state and binding.
+///
+/// Why: the verb writes `Active` like the automatic pass, on an operator's
+/// word, but a denied launch is not the operator's to revive by rebinding.
+/// Test: this test; the no-hold control is
+/// `rebind_still_moves_a_record_whose_front_gate_approved`.
+#[tokio::test]
+async fn the_manual_rebind_refuses_a_record_its_front_gate_denied() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-denied"], &[("%1", NEW, "tm-denied")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-denied", true).await;
+    let state = Arc::new(DaemonState::with_session_manager(Arc::clone(&mgr)));
+
+    let verb = mgr.rebind_session(&id, None).await;
+
+    assert!(
+        matches!(&verb, Err(ManagedError::InvalidState(_, why)) if why.contains("front gate")),
+        "the manual verb rebound a front-gate-denied record: {verb:?}"
+    );
+    let route = rebind_core(&state, &id.to_string(), None).await;
+    assert_eq!(route.status, 409, "{:?}", route.body);
+    let RouteBody::Text(why) = &route.body else {
+        panic!("rebind answered {:?}", route.body);
+    };
+    assert!(why.contains("front gate"), "{why}");
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-denied", "%1", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+}
+
+/// #9850 (control): an approved front-gate answer is not a hold, so both
+/// rebind paths still move a stopped record that carries one.
+#[tokio::test]
+async fn rebind_still_moves_a_record_whose_front_gate_approved() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-auto"], &[("%1", NEW, "tm-auto")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let auto = answered_then_stopped(&mgr, "tm-auto", false).await;
+
+    let results = mgr.rebind_stale_panes().await;
+
+    assert!(
+        matches!(results.as_slice(), [(rid, RebindOutcome::Rebound { .. })] if *rid == auto),
+        "{results:?}"
+    );
+    assert_eq!(binding(&mgr, &auto).await.3, ManagedSessionState::Active);
+
+    let tmux = Arc::new(RebindTmux::new(&["tm-verb"], &[("%1", NEW, "tm-verb")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let verb = answered_then_stopped(&mgr, "tm-verb", false).await;
+
+    let outcome = mgr.rebind_session(&verb, None).await.expect("verb");
+
+    assert!(
+        matches!(outcome, RebindOutcome::Rebound { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(binding(&mgr, &verb).await.3, ManagedSessionState::Active);
+}
+
+/// #9850: boot reconcile's live arm keeps a `Stopped` record its front gate
+/// denied `Stopped`, after a tmux server replacement restored its session
+/// name on the new server.
+///
+/// Why: the automatic rebind skips the record, but the live arm a few lines
+/// later matched it by name and wrote `Active`, so a daemon restart listed
+/// the denied task as running.
+/// Test: this test; the no-hold control is
+/// `boot_reconcile_still_readopts_a_stopped_record_whose_front_gate_approved`.
+#[tokio::test]
+async fn boot_reconcile_keeps_a_stopped_front_gate_denied_record_stopped() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-denied"], &[("%1", NEW, "tm-denied")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-denied", true).await;
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        binding(&mgr, &id).await.3,
+        ManagedSessionState::Stopped,
+        "boot reconcile re-adopted a front-gate-denied record: {report:?}"
+    );
+}
+
+/// #9850 (control): an approved front-gate answer is not a hold, so the
+/// live arm still re-adopts a `Stopped` record carrying one as `Active`. The
+/// record names the live server, so the automatic rebind leaves it to the
+/// live arm.
+#[tokio::test]
+async fn boot_reconcile_still_readopts_a_stopped_record_whose_front_gate_approved() {
+    let tmux = Arc::new(RebindTmux::new(
+        &["tm-approved"],
+        &[("%1", NEW, "tm-approved")],
+    ));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-approved", false).await;
+    let mut record = mgr.get(&id).await.expect("record");
+    record.tmux_server = Some(NEW.into());
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("live server");
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(binding(&mgr, &id).await.3, ManagedSessionState::Active);
+}

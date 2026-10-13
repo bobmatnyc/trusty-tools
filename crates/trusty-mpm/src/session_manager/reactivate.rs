@@ -75,7 +75,10 @@ impl SessionManager {
     /// `mark_reactivated_flips_decommissioned_to_active`,
     /// `mark_reactivated_rejects_non_stopped`,
     /// `mark_reactivated_refuses_when_workspace_removed_by_decommission`,
-    /// `mark_reactivated_clears_stale_claude_session_id`; the #7087 residency
+    /// `mark_reactivated_clears_stale_claude_session_id`;
+    /// `mark_reactivated_refuses_a_record_its_front_gate_holds` and
+    /// `mark_reactivated_still_revives_an_approved_front_gate_record` (#9850:
+    /// a record [`SessionRecord::front_gate_hold`] holds is refused); the #7087 residency
     /// bump by `generation_increments_across_mark_reactivated` in
     /// `daemon::managed_routes::residency`'s route tests.
     pub async fn mark_reactivated(
@@ -96,6 +99,9 @@ impl SessionManager {
                 ),
             ));
         }
+        // #9850: the client execs `claude` into the pane on success, so a
+        // task its front gate holds or denied must never be revived here.
+        record.refuse_front_gate_hold("reactivate")?;
 
         let resume_dir = record
             .workspace_path

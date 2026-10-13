@@ -360,3 +360,102 @@ async fn mark_reactivated_clears_the_terminal_stamp() {
         "and the cleared stamp is what got persisted"
     );
 }
+
+/// A created session forced back to its front gate (`Provisioning`) in
+/// `ws`, which tm does not own, so a decommission leaves it on disk.
+async fn gated_session(mgr: &super::SessionManager, ws: &std::path::Path) -> ManagedSessionId {
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(ws.to_owned()),
+            None,
+            Some(ws.to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_workspace(&record.id, ws.to_owned(), ManagedSessionState::Provisioning)
+        .await
+        .expect("force Provisioning");
+    record.id
+}
+
+/// #9850: `mark_reactivated` refuses a record its front gate holds, and the
+/// record keeps its state.
+///
+/// Why: the in-place relaunch (`bin/tm`) execs `claude` into the pane once
+/// this returns, so a denied task revived here runs although nobody
+/// approved it.
+/// What: three holds, each built by production writers: a deny then the
+/// deny route's own teardown (`Decommissioned`, what a successful deny
+/// leaves), a deny then a stop (`Stopped`), and a decision still pending
+/// then a stop (`Stopped`). Each reactivate is an `InvalidState` naming the
+/// front gate.
+/// Test: this test; the no-hold controls are
+/// `mark_reactivated_still_revives_an_approved_front_gate_record`,
+/// `mark_reactivated_flips_stopped_to_active` and
+/// `mark_reactivated_flips_decommissioned_to_active`.
+#[tokio::test]
+async fn mark_reactivated_refuses_a_record_its_front_gate_holds() {
+    use super::decision_tests::answer_front_gate;
+    use super::record::StopCause;
+
+    let dir = TempDir::new().unwrap();
+    let ws: [TempDir; 3] = std::array::from_fn(|_| TempDir::new().unwrap());
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
+
+    let decommissioned = gated_session(&mgr, ws[0].path()).await;
+    answer_front_gate(&mgr, &decommissioned, true).await;
+    mgr.decommission_denied_front_gate(&decommissioned)
+        .await
+        .expect("deny teardown");
+    let stopped = gated_session(&mgr, ws[1].path()).await;
+    answer_front_gate(&mgr, &stopped, true).await;
+    mgr.stop_reporting(&stopped, StopCause::Deliberate)
+        .await
+        .expect("stop");
+    let pending = gated_session(&mgr, ws[2].path()).await;
+    mgr.set_pending_decision(&pending, "launch the task?", Some("yes"))
+        .await
+        .expect("ask");
+    mgr.stop_reporting(&pending, StopCause::Deliberate)
+        .await
+        .expect("stop");
+    assert!(ws[0].path().is_dir(), "the unowned workspace was removed");
+
+    for (id, state) in [
+        (decommissioned, ManagedSessionState::Decommissioned),
+        (stopped, ManagedSessionState::Stopped),
+        (pending, ManagedSessionState::Stopped),
+    ] {
+        assert_eq!(mgr.get(&id).await.expect("get").state, state);
+        let refused = mgr.mark_reactivated(&id).await;
+        assert!(
+            matches!(&refused, Err(ManagedError::InvalidState(_, why)) if why.contains("front")),
+            "{state:?}: a held record was reactivated: {refused:?}"
+        );
+        assert_eq!(mgr.get(&id).await.expect("get").state, state);
+    }
+}
+
+/// #9850 (control): an approved front-gate answer is not a hold, so a
+/// stopped record that carries one is still reactivated in place.
+#[tokio::test]
+async fn mark_reactivated_still_revives_an_approved_front_gate_record() {
+    use super::decision_tests::answer_front_gate;
+    use super::record::StopCause;
+
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let (mgr, _fake) = super::tests::make_manager_with_pane(&dir).await;
+    let id = gated_session(&mgr, ws.path()).await;
+    answer_front_gate(&mgr, &id, false).await;
+    mgr.stop_reporting(&id, StopCause::Deliberate)
+        .await
+        .expect("stop");
+
+    let revived = mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    assert_eq!(revived.state, ManagedSessionState::Active);
+}
