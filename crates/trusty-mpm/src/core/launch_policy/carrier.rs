@@ -9,7 +9,12 @@
 //! ([`deny_set`]: allow applied, then deny, the floor never named), and writes
 //! `{"deniedMcpServers":[…],"disableClaudeAiConnectors":true}` (each key only
 //! when it has something to say) to
-//! `<state_root>/session-settings/<hash of cwd>.json`, mode `0600`. No owner
+//! `<state_root>/session-settings/<sha256 of the body>.json`, mode `0600`. The
+//! name is the body's hash, so a file once written is never rewritten with other
+//! contents: two launches in one cwd that read different `.claude.json` files
+//! get two files, and identical policies share one. The directory is bounded by
+//! the number of distinct policies; nothing deletes a file, because another
+//! live session may have it as its `--settings`. No owner
 //! layer, or a policy that subtracts nothing, writes nothing and adds no argv —
 //! the launch is byte-identical to one before #8988.
 //! Server names compare EXACTLY, case-sensitively, everywhere — the floor
@@ -141,13 +146,22 @@ pub fn settings_body(deny: &BTreeSet<String>, connectors_off: bool) -> Option<St
     (!map.is_empty()).then(|| format!("{:#}", Value::Object(map)))
 }
 
-/// Where a session's settings file lives: `<state_root>/session-settings/<key>.json`,
-/// keyed on the cwd exactly as the session-MCP file is.
-pub fn settings_path_at(state_root: &Path, cwd: &Path) -> PathBuf {
-    state_root.join(SESSION_SETTINGS_DIR).join(format!(
-        "{}.json",
-        crate::core::session_mcp_scope::workspace_key(cwd)
-    ))
+/// Where the settings file for `body` lives:
+/// `<state_root>/session-settings/<sha256 hex of body>.json`.
+///
+/// Why: the deny set depends on the `.claude.json` a launch read as well as on
+/// the cwd, so a cwd-keyed name let one launch overwrite another's file inside
+/// its write-to-startup window (#8988).
+/// What: content-addressed, so a path never holds two different bodies.
+/// Test: `launches_in_one_cwd_with_different_claude_json_get_different_files`,
+/// `identical_policies_in_one_cwd_share_one_file`.
+pub fn settings_path_at(state_root: &Path, body: &str) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(body.as_bytes());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    state_root
+        .join(SESSION_SETTINGS_DIR)
+        .join(format!("{hex}.json"))
 }
 
 /// Resolve the owner layer and write this launch's settings file.
@@ -203,7 +217,7 @@ fn write_policy(
     };
     let deny = deny_set(policy, user.as_deref());
     let body = settings_body(&deny, policy.claude_ai_connectors == Some(false))?;
-    let path = settings_path_at(inputs.state_root, inputs.cwd);
+    let path = settings_path_at(inputs.state_root, &body);
     match write_owner_only(&path, body.as_bytes()) {
         Ok(()) => Some(path),
         // #8988 Fail-Open Check: launch without the flag, and say so.

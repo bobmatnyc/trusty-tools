@@ -580,7 +580,7 @@ fn build_inplace_resume_command_with(
         claude_session_id,
         Some(prompt_file.as_path()),
     );
-    // #8988: the owner MCP policy this relaunch provisioned, carried not re-derived.
+    // #8988: the owner MCP policy provisioned for this relaunch under `fw`.
     args.extend(owner_settings(fw, cwd, &config_dir).argv());
     // #8992: a relaunched PM drops the unused tools; the exec seam sets the env.
     args.extend(crate::core::pm_tool_trim::trim_args(profile));

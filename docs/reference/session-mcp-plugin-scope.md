@@ -87,8 +87,12 @@ claude_ai_connectors = false    # turn the claude.ai connectors off
 ```
 
 - **Carrier.** Each launch writes
-  `~/.trusty-tools/trusty-mpm/session-settings/<hash of cwd>.json` (mode
-  `0600`) and passes it as `--settings <file>`. It holds only
+  `~/.trusty-tools/trusty-mpm/session-settings/<sha256 of the body>.json`
+  (mode `0600`) and passes it as `--settings <file>`. The name is the body's
+  hash, so a file is never rewritten with other contents: launches with
+  different policies get different files and identical policies share one.
+  The directory is bounded by the number of distinct policies and nothing
+  deletes a file (another live session may use it). It holds only
   `deniedMcpServers` and `disableClaudeAiConnectors: true`. Claude Code
   unions deny lists across scopes, so an operator or managed deny survives.
   Nothing is written into a repository or into any `settings.json`.

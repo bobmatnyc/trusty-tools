@@ -78,7 +78,7 @@ pub(super) fn check_owner_config_at(
         }
         Outcome::Loaded(chain) => {
             let summary = format!(
-                "owner `{owner}` ({}): {}; applied at launch via --settings (#8988)",
+                "owner `{owner}` ({}): {}; applied at each launch via --settings; a launch that cannot write it warns (daemon log for daemon spawns) and runs unfiltered (#8988)",
                 chain.chain.join(" → "),
                 describe(&chain.policy)
             );

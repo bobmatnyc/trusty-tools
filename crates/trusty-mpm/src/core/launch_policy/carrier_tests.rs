@@ -265,7 +265,10 @@ fn launches_in_one_cwd_with_different_claude_json_get_different_files() {
     fx.owner("[mcp]\nallow = [\"apex\"]\n");
     let first = fx.provision();
     let first_body = body_of(&first);
-    assert_eq!(first_body, json!({"deniedMcpServers": [{"serverName": "heygen"}]}));
+    assert_eq!(
+        first_body,
+        json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
 
     // A second launch whose `claude` reads a `.claude.json` with other servers.
     std::fs::write(
