@@ -224,4 +224,8 @@ pub enum RunError {
     /// and so was not saved (#9822).
     #[error("cycle incomplete: {0}")]
     Incomplete(String),
+    /// A single run was refused because a setting is bad: each
+    /// `Config::problems` entry, with the sensor it would turn off (#9822).
+    #[error("poller configuration has problems: {0}")]
+    BadConfig(String),
 }

@@ -105,6 +105,45 @@ fn run_single_fails_closed_when_the_state_cannot_be_read() -> TestResult {
     Ok(())
 }
 
+/// #9822 criterion 5: a single run with `var` set to `value` returns an error
+/// that names `var`, in a real run and in a dry run, and does not sleep.
+fn single_run_rejects(var: &str, value: &str) -> TestResult {
+    for dry_run in [false, true] {
+        let env = Env::new(&[(var, value)])?;
+        let tmux = fleet(&[("tm-a", "%1", "claude")], &screen(30));
+        let clock = FakeClock::new(NOW);
+        let mut runner = env.runner(&tmux, &clock, &QuietHost);
+        runner.dry_run = dry_run;
+        let err = runner
+            .run_single("60")
+            .expect_err("a bad variable must fail a single run");
+        assert!(matches!(err, RunError::BadConfig(_)), "{err}");
+        assert!(err.to_string().contains(var), "dry_run={dry_run}: {err}");
+        assert!(clock.sleeps().is_empty(), "--once never sleeps");
+    }
+    Ok(())
+}
+
+#[test]
+fn run_single_fails_closed_on_a_bad_self_ctx_threshold() -> TestResult {
+    single_run_rejects("SELF_CTX_THRESHOLD", "25%")
+}
+
+#[test]
+fn run_single_fails_closed_on_a_bad_load_factor() -> TestResult {
+    single_run_rejects("LOAD_FACTOR", "lots")
+}
+
+#[test]
+fn run_single_fails_closed_on_a_bad_pane_ctx_window() -> TestResult {
+    single_run_rejects("PANE_CTX_WINDOW", "")
+}
+
+#[test]
+fn run_single_fails_closed_on_a_bad_self_ctx_window() -> TestResult {
+    single_run_rejects("SELF_CTX_WINDOW", "1e6")
+}
+
 #[test]
 fn run_single_runs_one_cycle_and_saves() -> TestResult {
     let env = Env::new(&[])?;
@@ -151,15 +190,6 @@ fn poll_config_reads_the_shipped_names() -> TestResult {
     assert_eq!(c.inbox, Path::new("/q/inbox"));
     assert_eq!(c.quiet_sessions, Path::new("/q/quiet.txt"));
 
-    let both = vars(&[
-        ("ARCHITECT_INBOX_DIR", "/q/inbox"),
-        ("SUPERVISOR_INBOX_DIR", "/s/inbox"),
-    ]);
-    assert_eq!(
-        verbs::poll_config(root, home, &both)?.inbox,
-        Path::new("/s/inbox")
-    );
-
     assert_eq!(
         (c.supervisor.as_str(), c.poll_session.as_str()),
         ("tm-architect", "tm-architect-poll")
@@ -180,6 +210,20 @@ fn poll_config_reads_the_shipped_names() -> TestResult {
         assert!(matches!(err, VerbError::Usage(_)), "{err}");
         assert_eq!(err.exit_code(), 2);
     }
+    Ok(())
+}
+
+/// #9822: `fleet-poll.py` reads only `ARCHITECT_INBOX_DIR`, so it wins over
+/// `SUPERVISOR_INBOX_DIR` when both are set.
+#[test]
+fn architect_inbox_dir_outranks_supervisor_inbox_dir() -> TestResult {
+    let both = |k: &str| match k {
+        "ARCHITECT_INBOX_DIR" => Some("/q/inbox".to_owned()),
+        "SUPERVISOR_INBOX_DIR" => Some("/s/inbox".to_owned()),
+        _ => None,
+    };
+    let c = verbs::poll_config(Path::new("/arch"), Path::new("/home/u"), &both)?;
+    assert_eq!(c.inbox, Path::new("/q/inbox"));
     Ok(())
 }
 
