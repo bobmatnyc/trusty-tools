@@ -2,10 +2,11 @@
 //!
 //! Why: extracted from `session.rs` to keep that production file under the
 //! 500-SLOC cap while retaining full test coverage for the private helpers.
-//! What: tests for `derive_source_id_from_path` and `matches_session`.
+//! What: tests for `derive_source_id_from_path`; `info` resolution lives in
+//! `session/target_tests.rs` (#9862).
 //! Test: this file (budget: 1500 SLOC as a `_tests.rs` file).
 
-use super::{derive_source_id_from_path, matches_session};
+use super::derive_source_id_from_path;
 
 #[test]
 fn derive_source_id_from_cwd_returns_none_without_git() {
@@ -37,36 +38,6 @@ fn ls_source_id_filter_selects_correct_slug() {
     let (owner, repo) = slug.split_once('/').unwrap();
     assert!(!owner.is_empty());
     assert!(!repo.is_empty());
-}
-
-#[test]
-fn info_managed_fallback_matches_by_id_and_name() {
-    let session = serde_json::json!({
-        "id": "abc-1234-uuid",
-        "name": "tmpm-red-owl",
-        "state": "active"
-    });
-    assert!(
-        matches_session(&session, "abc-1234-uuid"),
-        "must match by exact id"
-    );
-    assert!(
-        matches_session(&session, "tmpm-red-owl"),
-        "must match by exact name"
-    );
-    assert!(
-        !matches_session(&session, "tmpm-blue-fox"),
-        "must not match a different name"
-    );
-    assert!(
-        !matches_session(&session, "xyz-9999"),
-        "must not match a different id"
-    );
-    // Partial matches are not accepted — the lookup is exact.
-    assert!(
-        !matches_session(&session, "abc-1234"),
-        "partial id must not match"
-    );
 }
 
 #[test]
