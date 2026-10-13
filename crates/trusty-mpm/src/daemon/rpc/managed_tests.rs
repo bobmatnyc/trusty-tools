@@ -823,6 +823,53 @@ async fn answer_conflict_is_409_over_http_and_rpc() {
     assert_parity("mpm.managed.answer conflict", &http, &rpc);
 }
 
+/// #9841 (D1, D73 ruling: strict): an answer to a live session with no
+/// pending decision is the same 409 over HTTP and JSON-RPC, and its text says
+/// there is no pending decision.
+#[tokio::test]
+async fn answer_with_no_pending_decision_refused() {
+    use crate::session_manager::ManagedSessionState;
+
+    let (state, dir) = test_state().await;
+    let mgr = state.session_manager().await;
+    let id = crate::session_manager::ManagedSessionId::new();
+    let ws = dir.path().join(format!("{id}-no-decision"));
+    std::fs::create_dir_all(&ws).expect("workspace");
+    mgr.create_with_id(
+        id,
+        "no decision".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws.clone()),
+        None,
+        None,
+        crate::runtime::RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed");
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("active");
+
+    let uri = format!("/api/v1/sessions/managed/{id}/answer");
+    let body = Some(json!({"answer": "/approve"}));
+    let http = http_call(http_router(Arc::clone(&state)), Method::POST, &uri, body).await;
+    assert_eq!(http.status, 409, "{}", http.text);
+    assert!(
+        http.text
+            .starts_with(&format!("no pending decision on session {id}")),
+        "{}",
+        http.text
+    );
+    let params = json!({"id": id.to_string(), "answer": "/approve"});
+    let rpc = rpc_call(&rpc_router(&state), "mpm.managed.answer", params).await;
+    assert_parity("mpm.managed.answer no pending decision", &http, &rpc);
+    let record = mgr.get(&id).await.expect("record");
+    assert!(record.last_answer.is_none(), "a refusal recorded an answer");
+}
+
 #[tokio::test]
 async fn managed_attach_cmd_parity() {
     assert_missing_session_parity(

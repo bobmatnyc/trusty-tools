@@ -163,10 +163,11 @@ async fn front_gate_launch_failure_closes_the_decision() {
     assert!(h.driver.sends().is_empty(), "typed: {:?}", h.driver.sends());
 }
 
-/// #9841 (D1 not ruled): once the front gate's runtime launched, the session
-/// answers live-pane `/approve` as it did before the decision.
+/// #9841 (D1, D73 ruling: strict): once the front gate's runtime launched,
+/// a later `/approve` has no decision to answer: a 409 naming the first
+/// answer, and nothing typed.
 #[tokio::test]
-async fn a_delivered_front_gate_answer_returns_the_session_to_live_answering() {
+async fn a_delivered_front_gate_answer_leaves_nothing_to_answer() {
     let h = Harness::new(ManagedSessionState::Provisioning).await;
     h.ask().await;
     let mgr = h.state.session_manager().await;
@@ -182,8 +183,12 @@ async fn a_delivered_front_gate_answer_returns_the_session_to_live_answering() {
     assert_eq!(launched.status, 200, "{launched:?}");
 
     let live = h.answer(request("/approve"), |_| async { Ok(()) }).await;
-    assert_eq!(live.status, 200, "{live:?}");
-    assert_eq!(h.driver.sends(), vec!["/approve".to_string()]);
+    assert_eq!(live.status, 409, "{live:?}");
+    assert!(
+        text(&live).contains("already answered by http at "),
+        "{live:?}"
+    );
+    assert!(h.driver.sends().is_empty(), "typed: {:?}", h.driver.sends());
 }
 
 /// #9841: a `decision_id` that is not a UUID is a 400 naming it; nothing is

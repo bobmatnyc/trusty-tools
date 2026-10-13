@@ -999,6 +999,62 @@ async fn pair_request_then_confirm_succeeds() {
     }
 }
 
+/// #9841 (D1, D73 ruling: strict): `tm session answer` (`ManagedAnswer`) and
+/// the chat `/approve`/`/deny` reach the daemon's `/answer` core; with no
+/// pending decision each is refused, and the error carries the daemon's
+/// "no pending decision" text rather than a bare HTTP status.
+#[tokio::test]
+async fn cli_answer_approve_and_deny_without_a_pending_decision_are_refused() {
+    use crate::session_manager::ManagedSessionState;
+
+    let (state, url) = spawn_test_daemon().await;
+    let mgr = state.session_manager().await;
+    let id = crate::session_manager::ManagedSessionId::new();
+    let ws = tempfile::tempdir().unwrap().keep().join("no-decision");
+    std::fs::create_dir_all(&ws).expect("workspace");
+    mgr.create_with_id(
+        id,
+        "no decision".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws.clone()),
+        None,
+        None,
+        crate::runtime::RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed");
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("active");
+
+    let executor = CommandExecutor::new(url);
+    let commands = [
+        TrustyCommand::ManagedAnswer {
+            target: id.to_string(),
+            answer: "yes".into(),
+        },
+        TrustyCommand::Approve {
+            session_id: id.to_string(),
+        },
+        TrustyCommand::Deny {
+            session_id: id.to_string(),
+        },
+    ];
+    for command in commands {
+        let label = format!("{command:?}");
+        match executor.execute(command).await {
+            CommandResult::Error(msg) => assert!(
+                msg.contains(&format!("no pending decision on session {id}")),
+                "{label}: {msg}"
+            ),
+            other => panic!("{label}: expected the 409 refusal, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn execute_approve_errors_when_managed_list_unreachable() {
     // Regression for the swallowed-daemon-error fix: `decide()` fetches the

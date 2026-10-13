@@ -452,6 +452,10 @@ async fn session_manager_answer_clears_pending_and_injects() {
         )
         .await
         .expect("create");
+    // #9841 (D1): an answer needs a pending decision.
+    mgr.set_pending_decision(&record.id, "merge or rebase?", Some("merge"))
+        .await
+        .expect("seed a pending decision");
 
     mgr.answer_decision(
         &record.id,

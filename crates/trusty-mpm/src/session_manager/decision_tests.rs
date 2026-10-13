@@ -515,20 +515,28 @@ async fn claim_is_durable_across_store_reload() {
     assert_eq!(f.driver.sends().len(), 1);
 }
 
-/// #9841 (D1 not ruled): with no decision pending and none answered, an
-/// answer types into the live pane exactly as before, every time.
+/// #9841 (D1, D73 ruling: strict): with no decision pending and none
+/// answered, an answer is refused; nothing is typed and the record is
+/// unchanged.
 #[tokio::test]
-async fn answers_with_no_decision_keep_typing_into_the_pane() {
+async fn answer_decision_without_a_pending_decision_is_refused() {
     let f = fixture(ManagedSessionState::Active).await;
+    let before = serde_json::to_value(f.record().await).expect("json");
     for text in ["/approve", "/deny"] {
-        let r = f.answer(text, AnswerClaim::by("slack")).await;
-        assert_eq!(r.expect("a live-pane answer"), None);
+        let e = f
+            .answer(text, AnswerClaim::by("slack"))
+            .await
+            .expect_err("an answer with nothing pending must be refused");
+        assert!(
+            e.to_string().starts_with("no pending decision on session"),
+            "{e}"
+        );
     }
+    assert!(f.driver.sends().is_empty(), "typed: {:?}", f.driver.sends());
     assert_eq!(
-        f.driver.sends(),
-        vec!["/approve".to_string(), "/deny".to_string()]
+        serde_json::to_value(f.record().await).expect("json"),
+        before
     );
-    assert!(f.record().await.last_answer.is_none());
 }
 
 /// #9841 (D5): `answered_by` is cleaned and clipped, and falls back to the

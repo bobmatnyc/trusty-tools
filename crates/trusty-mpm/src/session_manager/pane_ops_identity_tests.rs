@@ -29,6 +29,10 @@ async fn assert_every_pane_op_refuses(
     }
     let r = f.scoped(m.send_input(active, MARK)).await;
     assert!(r.is_err(), "send_input acted: {r:?}");
+    // #9841 (D1): seed a decision so the refusal is the pane gate's.
+    m.set_pending_decision(active, "pane identity probe", None)
+        .await
+        .expect("seed a pending decision");
     let r = f
         .scoped(m.answer_decision(
             active,
@@ -318,6 +322,10 @@ async fn live_a_stale_record_after_a_server_restart_never_sends_keys() {
     };
     let id = r.stale("active").await;
     let m = &r.f.mgr;
+    // #9841 (D1): seed a decision so the answer reaches the pane gate.
+    m.set_pending_decision(&id, "pane identity probe", None)
+        .await
+        .expect("seed a pending decision");
     let sent = [
         r.f.scoped(m.inject(&id, MARK, Submit::NoSubmit)).await,
         r.f.scoped(m.send_input(&id, MARK)).await,
