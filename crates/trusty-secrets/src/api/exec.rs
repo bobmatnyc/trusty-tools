@@ -21,6 +21,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{SecretKey, SecretValue, VaultName};
 
+/// The variable that names the inherited fd carrying the grant token.
+///
+/// Why: Architect ruling 2026-10-10 Q1 — for tier 3 the token stays on an
+/// inherited fd; only its number goes in the environment. tm sets it and
+/// every client reads it, so the name lives here once (#9071); tm's
+/// `exec_tests.rs` pins tm to it.
+/// Test: `granted_client_resolves_through_the_real_binary`.
+pub const TOKEN_FD_ENV: &str = "TRUSTY_SECRETS_TOKEN_FD";
+
 /// `secrets.grant` request, beside `project`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +68,8 @@ impl ExecGrantRequest {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecGrantResponse {
-    /// The token to hand the child, through its environment only.
+    /// The token to hand the child, on an inherited pipe whose fd number is
+    /// in [`TOKEN_FD_ENV`] (#9071).
     pub token: String,
     /// Expiry, in seconds since the Unix epoch.
     pub expires_at: u64,

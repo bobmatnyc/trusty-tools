@@ -18,11 +18,9 @@ use std::path::Path;
 use anyhow::{anyhow, bail};
 use trusty_secrets::SecretKey;
 
-/// The variable that names the inherited fd carrying the grant token.
-///
-/// Why: Architect ruling 2026-10-10 Q1 — for tier 3 the token stays on an
-/// inherited fd; only its number goes in the environment.
-pub(crate) const TOKEN_FD_ENV: &str = "TRUSTY_SECRETS_TOKEN_FD";
+// #9071: the variable naming the inherited token fd comes from trusty-secrets,
+// so tm and the tier-3 client cannot drift apart.
+pub(crate) use trusty_secrets::api::TOKEN_FD_ENV;
 
 /// The hidden `tm secrets` verb the stub runs as.
 pub(crate) const STUB_VERB: &str = "__exec-stub";

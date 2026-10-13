@@ -28,7 +28,7 @@ use super::{BackendId, SecretKey, SecretValue, VaultName};
 mod exec;
 pub use exec::{
     ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
-    RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse,
+    RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
 };
 
 /// Method names.
