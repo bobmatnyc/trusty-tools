@@ -111,6 +111,20 @@ impl SessionRefGitEnv {
     }
 }
 
+/// Which session-ref network calls the resolved env will serve.
+///
+/// Why: a catch-up only fetches, so only its effective fetch URL decides the
+/// transport; a pause also pushes, so its effective push URL decides too (#9160).
+/// Test: `an_insteadof_ssh_rewrite_is_never_pinned`,
+/// `a_push_url_rewritten_to_ssh_is_never_pinned_for_publish`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionRefOp {
+    /// Catch-up: `git fetch` only.
+    Fetch,
+    /// Pause: `ls-remote`, `fetch` and `push`.
+    Publish,
+}
+
 /// Where [`session_ref_git_env_with`] reads pins and proves tokens.
 ///
 /// Why: production reads the host's registry, `[accounts]` table, `gh` and
@@ -151,6 +165,7 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
     };
     session_ref_git_env_with(
         repo,
+        SessionRefOp::Fetch,
         &IdentitySeams {
             registry_dir: &registry_dir,
             state_root: &state_root,
@@ -178,7 +193,11 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
 /// `an_unreadable_registry_refuses_without_proving`,
 /// `an_ssh_origin_reports_that_the_pin_cannot_apply`,
 /// `a_proven_identity_is_reused_across_two_resolutions`.
-pub(crate) fn session_ref_git_env_with(repo: &Path, seams: &IdentitySeams<'_>) -> SessionRefGitEnv {
+pub(crate) fn session_ref_git_env_with(
+    repo: &Path,
+    _op: SessionRefOp,
+    seams: &IdentitySeams<'_>,
+) -> SessionRefGitEnv {
     use crate::core::remote_mode::{RemoteMode, remote_mode};
     let origin = match remote_mode(repo) {
         Ok(RemoteMode::Origin(origin)) => origin,

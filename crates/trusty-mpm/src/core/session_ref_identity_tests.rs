@@ -10,7 +10,9 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use super::{IdentitySeams, SessionRefGitEnv, Transport, session_ref_git_env_with, transport};
+use super::{
+    IdentitySeams, SessionRefGitEnv, SessionRefOp, Transport, session_ref_git_env_with, transport,
+};
 use crate::core::gh_account::PinnedGhIdentity;
 use crate::core::gh_account_proof::ProvenToken;
 use crate::core::gh_org_accounts::OrgAccounts;
@@ -69,9 +71,20 @@ impl Fixture {
         load: &dyn Fn() -> Result<OrgAccounts, crate::core::gh_org_accounts::OrgAccountsError>,
         prove: &dyn Fn(&PinnedGhIdentity, &str, &str) -> Result<ProvenToken, String>,
     ) -> SessionRefGitEnv {
+        self.resolve_op(SessionRefOp::Fetch, load, prove)
+    }
+
+    /// [`Self::resolve`] for `op`.
+    fn resolve_op(
+        &self,
+        op: SessionRefOp,
+        load: &dyn Fn() -> Result<OrgAccounts, crate::core::gh_org_accounts::OrgAccountsError>,
+        prove: &dyn Fn(&PinnedGhIdentity, &str, &str) -> Result<ProvenToken, String>,
+    ) -> SessionRefGitEnv {
         let registry_dir = self.registry_dir();
         session_ref_git_env_with(
             &self.repo,
+            op,
             &IdentitySeams {
                 registry_dir: &registry_dir,
                 state_root: self.tmp.path(),
@@ -267,6 +280,71 @@ fn an_ssh_origin_reports_that_the_pin_cannot_apply() {
     );
     assert!(env.annotate("push failed").contains("cannot apply"));
     assert!(asked.borrow().is_empty());
+}
+
+/// Set `key` to `value` in the fixture checkout's local git config.
+fn git_config(fx: &Fixture, key: &str, value: &str) {
+    let out = trusty_common::git::command_in(&fx.repo)
+        .args(["config", key, value])
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "fixture `git config {key}` failed");
+}
+
+/// Assert `env` is the Q4 ambient "pin cannot apply" outcome and nothing was proven.
+fn assert_pin_cannot_apply(env: &SessionRefGitEnv, asked: &RefCell<Vec<String>>) {
+    let SessionRefGitEnv::Ambient { note } = env else {
+        panic!("an ssh-bound transport must never be pinned: {env:?}");
+    };
+    assert!(
+        note.contains("ssh") && note.contains("cannot apply"),
+        "{note}"
+    );
+    assert!(env.vars().is_empty());
+    assert!(asked.borrow().is_empty(), "nothing may be proven");
+}
+
+/// 🔴 #9160: an https origin that `url.<base>.insteadOf` rewrites to ssh is
+/// fetched over ssh, so the pin cannot apply to a fetch or a publish.
+/// Test: itself.
+#[test]
+fn an_insteadof_ssh_rewrite_is_never_pinned() {
+    for op in [SessionRefOp::Fetch, SessionRefOp::Publish] {
+        let fx = Fixture::new(ORIGIN);
+        fx.pin(r#""gh_account":"octo-pinned""#);
+        git_config(&fx, "url.git@github.com:.insteadOf", "https://github.com/");
+        let asked = RefCell::new(Vec::new());
+        let env = fx.resolve_op(op, &no_map, &proving(&asked));
+        assert_pin_cannot_apply(&env, &asked);
+    }
+}
+
+/// 🔴 #9160: a `pushInsteadOf` (or `pushurl`) to ssh leaves fetch on https
+/// (still pinned) but moves the publish push onto ssh (never pinned).
+/// Test: itself.
+#[test]
+fn a_push_url_rewritten_to_ssh_is_never_pinned_for_publish() {
+    let rewrites = [
+        ("url.git@github.com:.pushInsteadOf", "https://github.com/"),
+        (
+            "remote.origin.pushurl",
+            "git@github.com:acme-9160/widget.git",
+        ),
+    ];
+    for (key, value) in rewrites {
+        let fx = Fixture::new(ORIGIN);
+        fx.pin(r#""gh_account":"octo-pinned""#);
+        git_config(&fx, key, value);
+        let asked = RefCell::new(Vec::new());
+        let fetch = fx.resolve_op(SessionRefOp::Fetch, &no_map, &proving(&asked));
+        assert!(
+            matches!(fetch, SessionRefGitEnv::Pinned { .. }),
+            "{key}: {fetch:?}"
+        );
+        let asked = RefCell::new(Vec::new());
+        let publish = fx.resolve_op(SessionRefOp::Publish, &no_map, &proving(&asked));
+        assert_pin_cannot_apply(&publish, &asked);
+    }
 }
 
 /// #9160: only `https://` takes the helper pin; ssh and scp syntax are ssh;
