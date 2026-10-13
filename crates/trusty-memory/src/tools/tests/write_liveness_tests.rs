@@ -255,6 +255,39 @@ async fn a_handle_lock_held_inside_the_threshold_is_visible_but_not_wedged() {
     drop(dream);
 }
 
+/// Why (#9783): the wedge line must follow the write bounds this state
+/// enforces. With a 60 s acquisition budget and a 240 s pipeline ceiling, a
+/// remember holding the write lock for 130 s is progressing, but the
+/// pre-#9783 line (120 s, blind to both bounds) called it wedged. A raised
+/// ceiling has to move the line with it, or the same false alarm returns.
+/// What: builds states with the budget and two pipeline ceilings and checks
+/// each state's `wedge_threshold` clears budget + ceiling, so a 130 s hold is
+/// not past it.
+/// Test: this test.
+#[tokio::test]
+async fn the_wedge_line_follows_the_configured_write_budgets() {
+    let _env = crate::env_test_lock::env_test_lock().lock().await;
+    if std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS").is_ok() {
+        return; // operator override in effect; the relationship is theirs to pick
+    }
+    let budget = Duration::from_secs(60);
+    for pipeline in [Duration::from_secs(240), Duration::from_secs(900)] {
+        let (state, _tmp) = liveness_state(budget);
+        let state = state.with_write_pipeline_budget(pipeline);
+        let line = state.wedge_threshold;
+        let progressing = Duration::from_secs(130);
+        assert!(
+            line >= progressing,
+            "a write holding the lock {progressing:?} under a {pipeline:?} ceiling \
+             is progressing, yet the wedge line is {line:?}"
+        );
+        assert!(
+            line > budget + pipeline,
+            "the wedge line {line:?} must clear budget {budget:?} + pipeline {pipeline:?}"
+        );
+    }
+}
+
 /// Why (issue #4001, no false alarm): tracking writes must not turn ordinary
 /// contention into a wedge. A writer queued behind a live holder, well inside
 /// its bound, is busy rather than stuck.

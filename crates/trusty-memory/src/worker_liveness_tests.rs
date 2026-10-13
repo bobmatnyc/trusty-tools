@@ -162,6 +162,42 @@ fn wedge_threshold_doubles_the_larger_wait_bound() {
     );
 }
 
+/// Why (#9783): a `memory_remember` waits up to `write_op_budget()` (60 s) for
+/// the palace write lock, then holds it across embed, upsert and persist for up
+/// to `write_pipeline_timeout()` (240 s). The pre-#9783 line,
+/// `2 x max(open_queue, write_lock)` = 120 s, called that write wedged while it
+/// was still inside both bounds.
+/// What: under the default env, a hold one second short of the pipeline
+/// ceiling, and the whole legal write span, must both sit inside
+/// `wedge_threshold()` — the `age > threshold` comparison `/health` makes for
+/// the lock arm and the pool arm.
+/// Test: itself.
+#[test]
+fn a_legal_write_span_does_not_cross_the_default_wedge_line() {
+    let _env = crate::env_test_lock::env_test_lock().blocking_lock();
+    if std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS").is_ok() {
+        return; // operator override in effect; the relationship is theirs to pick
+    }
+    let line = wedge_threshold();
+    let pipeline = crate::engine::timeouts::write_pipeline_timeout();
+    let span = crate::engine::timeouts::write_op_budget() + pipeline;
+    let progressing = pipeline - Duration::from_secs(1);
+    assert!(
+        progressing > Duration::from_secs(120),
+        "precondition: the hold must sit past the pre-#9783 120 s line"
+    );
+    assert!(
+        line > progressing,
+        "a write {progressing:?} into its {pipeline:?} pipeline ceiling is progressing, \
+         yet the wedge line is {line:?}"
+    );
+    assert!(
+        line > span,
+        "the wedge line {line:?} must clear the full legal write span {span:?} \
+         (acquisition budget + pipeline ceiling)"
+    );
+}
+
 #[test]
 fn overflow_is_counted_when_slots_exhausted() {
     let t = WorkerLiveness::new();
