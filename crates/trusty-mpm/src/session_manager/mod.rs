@@ -17,6 +17,8 @@ pub mod decommission;
 pub mod decommission_force;
 // #8663: the content gates on decommission's two `remove_dir_all` routes.
 mod decommission_owned;
+// #9841: answer idempotency — decision ids and the claim.
+pub mod decision;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
@@ -325,6 +327,7 @@ pub use architect_floor::{ArchitectFloor, KillVerdict, SidecarRole};
 pub use architect_register::{
     ArchitectRegistration, BindingVerifier, RegisterError, RegisteredSession, RegistrationReport,
 };
+pub use decision::{AnswerClaim, AnswerOutcome, Claim, DecisionAnswer, DecisionId};
 pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};

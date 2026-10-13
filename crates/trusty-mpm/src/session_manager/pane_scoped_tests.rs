@@ -23,6 +23,7 @@ use tempfile::TempDir;
 
 use crate::core::sm::control::Submit;
 
+use super::AnswerClaim;
 use super::manager::ManagedError;
 use super::record::ManagedSessionState;
 use super::tests::make_manager;
@@ -180,7 +181,7 @@ async fn answer_decision_targets_pane_when_pane_id_known() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
 
-    mgr.answer_decision(&record.id, "rebase")
+    mgr.answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect("answer_decision");
 
@@ -205,7 +206,7 @@ async fn answer_decision_refuses_when_stored_pane_gone() {
     *fake.pane_exists_override.lock().unwrap() = Some(false);
 
     let err = mgr
-        .answer_decision(&record.id, "rebase")
+        .answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect_err("a confirmed-gone recorded pane must refuse, not fall back");
 
@@ -230,7 +231,7 @@ async fn answer_decision_refuses_a_legacy_record_without_pane_id() {
     let (mgr, fake, record) = make_active_session(&dir, None).await;
 
     let err = mgr
-        .answer_decision(&record.id, "rebase")
+        .answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect_err("a legacy record must refuse");
 

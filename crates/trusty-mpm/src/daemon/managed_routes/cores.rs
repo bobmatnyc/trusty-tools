@@ -21,6 +21,7 @@ use tracing::warn;
 use super::route_outcome_http::outcome_from_response;
 use super::*;
 use crate::daemon::rpc::managed::outcome::{CODE_PANE_GONE, CODE_WORKSPACE_GONE, RouteOutcome};
+use crate::session_manager::SessionRecord;
 
 /// Parse a managed-session id, or the 400 the HTTP route answers with.
 fn parse_id_neutral(id_str: &str) -> Result<ManagedSessionId, RouteOutcome> {
@@ -239,12 +240,36 @@ pub(crate) async fn send_core(
 }
 
 /// `POST /api/v1/sessions/managed/{id}/answer` — see
-/// [`super::answer_session_decision`].
+/// [`super::answer_session_decision`]. `transport` (`http`/`rpc`) is the
+/// answerer name when the request gives none (#9841, D5).
 pub(crate) async fn answer_core(
     state: &Arc<DaemonState>,
     id_str: &str,
     req: AnswerRequest,
+    transport: &str,
 ) -> RouteOutcome {
+    let st = Arc::clone(state);
+    let spawn = move |record: SessionRecord| async move { spawn_runtime_for(&st, &record).await };
+    answer_core_with(state, id_str, req, transport, spawn).await
+}
+
+/// [`answer_core`] with the front gate's runtime launch injected (#9841).
+///
+/// Why: a test must count launches and hold the first one open while a second
+/// answer races it; `spawn_runtime_for` launches a real runtime.
+/// What: `spawn` receives the record re-read after the decision clears.
+/// Test: `two_concurrent_front_gate_answers_spawn_once`.
+pub(crate) async fn answer_core_with<F, Fut>(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+    req: AnswerRequest,
+    _transport: &str,
+    spawn: F,
+) -> RouteOutcome
+where
+    F: FnOnce(SessionRecord) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let id = match parse_id_neutral(id_str) {
         Ok(id) => id,
         Err(refusal) => return refusal,
@@ -274,18 +299,21 @@ pub(crate) async fn answer_core(
             Ok(r) => r,
             Err(_) => return not_found(id_str),
         };
-        match spawn_runtime_for(state, &fresh).await {
+        match spawn(fresh).await {
             Ok(()) => RouteOutcome::ok(&AnswerResponse {
                 injected: true,
                 tmux_name,
+                decision_id: None,
             }),
             Err(e) => RouteOutcome::text(500, e),
         }
     } else {
-        match mgr.answer_decision(&id, &req.answer).await {
-            Ok(()) => RouteOutcome::ok(&AnswerResponse {
+        let claim = crate::session_manager::AnswerClaim::by("http");
+        match mgr.answer_decision(&id, &req.answer, &claim).await {
+            Ok(_) => RouteOutcome::ok(&AnswerResponse {
                 injected: true,
                 tmux_name,
+                decision_id: None,
             }),
             Err(e) => RouteOutcome::text(500, e.to_string()),
         }

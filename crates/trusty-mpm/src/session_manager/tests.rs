@@ -1772,7 +1772,7 @@ async fn manager_answer_decision() {
         store.upsert(r).await.unwrap();
     }
 
-    mgr.answer_decision(&record.id, "rebase")
+    mgr.answer_decision(&record.id, "rebase", &super::AnswerClaim::by("test"))
         .await
         .expect("answer");
 

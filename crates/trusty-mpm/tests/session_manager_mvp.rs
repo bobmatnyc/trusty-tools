@@ -453,9 +453,13 @@ async fn session_manager_answer_clears_pending_and_injects() {
         .await
         .expect("create");
 
-    mgr.answer_decision(&record.id, "rebase")
-        .await
-        .expect("answer");
+    mgr.answer_decision(
+        &record.id,
+        "rebase",
+        &trusty_mpm::session_manager::AnswerClaim::by("test"),
+    )
+    .await
+    .expect("answer");
 
     // The answer must have been injected into the pane. Compute the assertion
     // into an owned bool so the mutex guard is released before the next `.await`.

@@ -29,7 +29,13 @@ async fn assert_every_pane_op_refuses(
     }
     let r = f.scoped(m.send_input(active, MARK)).await;
     assert!(r.is_err(), "send_input acted: {r:?}");
-    let r = f.scoped(m.answer_decision(active, MARK)).await;
+    let r = f
+        .scoped(m.answer_decision(
+            active,
+            MARK,
+            &crate::session_manager::AnswerClaim::by("test"),
+        ))
+        .await;
     assert!(r.is_err(), "answer_decision acted: {r:?}");
     let r = f.scoped(m.observe(active, 20)).await;
     assert!(r.is_err(), "observe read the pane: {r:?}");
@@ -315,7 +321,9 @@ async fn live_a_stale_record_after_a_server_restart_never_sends_keys() {
     let sent = [
         r.f.scoped(m.inject(&id, MARK, Submit::NoSubmit)).await,
         r.f.scoped(m.send_input(&id, MARK)).await,
-        r.f.scoped(m.answer_decision(&id, MARK)).await,
+        r.f.scoped(m.answer_decision(&id, MARK, &crate::session_manager::AnswerClaim::by("test")))
+            .await
+            .map(|_| ()),
     ];
     // tmux echoes typed keys through the pane's tty asynchronously.
     std::thread::sleep(std::time::Duration::from_millis(300));

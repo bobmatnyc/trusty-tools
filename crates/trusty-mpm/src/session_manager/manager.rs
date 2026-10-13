@@ -102,6 +102,27 @@ pub enum ManagedError {
     #[error("a resume is already in flight for session {0}; not starting a second one")]
     ResumeInFlight(String),
 
+    /// The answer's decision was already answered, or is not the pending one
+    /// (#9841).
+    ///
+    /// Why: a repeat or stale answer must not reach the pane; the caller needs
+    /// to learn who answered and when. The routes answer it with a 409.
+    /// What: carries the full text, e.g. `decision <id> already answered by
+    /// <X> at <T>`.
+    /// Test: `repeat_answer_names_first_answerer_and_time`,
+    /// `stale_decision_id_conflicts`.
+    #[error("{0}")]
+    DecisionConflict(String),
+
+    /// An answer took its decision, and its effect then failed (#9841, D4).
+    ///
+    /// Why: the send may have typed part of the answer, so the decision closes
+    /// rather than reopening; the routes answer it with a 500.
+    /// What: carries the text naming the decision and the effect's error.
+    /// Test: `send_failure_after_claim_closes_decision_as_failed`.
+    #[error("{0}")]
+    DeliveryFailed(String),
+
     /// An auto-resume failed AND has already recorded the failure (#8233).
     ///
     /// Why: `resume_auto` marks the record errored itself, which APPENDS
@@ -435,7 +456,8 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
         answer: &str,
-    ) -> Result<(), ManagedError> {
+        _claim: &super::AnswerClaim,
+    ) -> Result<Option<super::DecisionId>, ManagedError> {
         let mut record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
         self.tmux
@@ -445,7 +467,7 @@ impl SessionManager {
         record.proposed_default = None;
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
-        Ok(())
+        Ok(None)
     }
 
     /// Look up a session by its managed id.
