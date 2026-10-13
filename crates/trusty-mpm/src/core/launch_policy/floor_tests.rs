@@ -15,7 +15,7 @@ fn agent_tools_mcp_servers(agents_dir: &Path) -> BTreeSet<String> {
         }
         let text = std::fs::read_to_string(&path).expect("read agent file");
         for line in text.lines().filter(|l| l.starts_with("tools:")) {
-            for token in line.split(|c: char| c == '[' || c == ']' || c == ',') {
+            for token in line.split(['[', ']', ',']) {
                 if let Some(rest) = token.trim().strip_prefix("mcp__") {
                     let server = rest.split("__").next().unwrap_or(rest);
                     servers.insert(server.to_string());
