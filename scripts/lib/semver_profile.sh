@@ -210,14 +210,23 @@ semver_profile_check_crate() {
   cat "$run_log"
 
   blocking="no"
-  if ! verdict_computed "$run_log"; then
-    echo "NO VERDICT ${crate} (profile ${PROFILE}): cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
+  # A computed break is a non-zero exit AND a summary that counts a failed lint.
+  # A non-zero exit after a clean summary is a tool fault, not a break.
+  local computed=0 has_fail=0 because
+  verdict_computed "$run_log" && computed=1
+  if [[ "$computed" -eq 1 ]] && grep -Eq 'checks:.*[^0-9][1-9][0-9]* fail' "${run_log}.plain"; then
+    has_fail=1
+  fi
+  if [[ "$computed" -eq 0 || ( "$rc" -ne 0 && "$has_fail" -eq 0 ) ]]; then
+    because="$(no_verdict_because)"
+    [[ "$computed" -eq 1 ]] && because="printed a summary with no failed lint but still failed"
+    echo "NO VERDICT ${crate} (profile ${PROFILE}): cargo semver-checks exited ${rc} and ${because}." >&2
     echo "           Informational covers a computed break only; a run that compared nothing is a fault." >&2
     scratch_resolution_report "$crate" "$run_log"
     noverdict=$((noverdict + 1))
     result="no-verdict"
   elif [[ "$rc" -ne 0 ]]; then
-    result="break"
+    result="break" # rc != 0 with has_fail=1 only; see above
     if [[ "$mode" == "blocking" && "$rtype" != "major" ]]; then
       blocking="yes"
       echo "FAIL ${crate}: profile ${PROFILE} (mode blocking) found breaking change(s) against v${base}" >&2

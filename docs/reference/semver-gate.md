@@ -663,11 +663,15 @@ An already-breaking delta (a pinned 0.34.0 against a declared 0.35.1, say) adds
 `--release-type minor` so every lint still runs, as the INVENTORY arm does. A
 break found there is reported and never blocks, whatever the mode.
 
-**The type differ shares the cache.** A profile run writes the crate's current
-rustdoc JSON under `target/semver-checks/` like any run, so a
-`check_semver_types.sh --crate trusty-memory` straight after it diffs the
-no-features build. Run the default `--crate` first when the type diff should
-cover the all-features build.
+**The type differ shares the cache, so order matters.** A profile run writes
+the crate's current rustdoc JSON under `target/semver-checks/` like any run.
+`check_semver_types.sh --crate trusty-memory` then finds the no-features build,
+or, when the all-features build is also cached, two
+`local-trusty_memory-<ver>-*` directories, and refuses the second case as
+ambiguous (exit 3). To diff the all-features build, run
+`check_semver_types.sh --crate` BEFORE the profile run. To diff the
+`--no-default-features` build, or when both builds are cached, name the pair
+with `--baseline-json` and `--current-json`.
 
 ### The pin step
 

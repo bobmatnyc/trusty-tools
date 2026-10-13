@@ -358,6 +358,17 @@ out="$(run_gate "$IDX" build-error.out 101 "${P[@]}" engine-nodefault)" || rc=$?
 check "closed: a tool error in informational mode is NO VERDICT" 3 "$rc" "$out" \
   "NO VERDICT stub-engine (profile engine-nodefault)" "result=no-verdict" "!INFORMATIONAL — breaking"
 
+# A non-zero exit after a clean summary is a tool fault, not a computed break.
+rc=0
+out="$(run_gate "$IDX" clean.out 1 "${P[@]}" engine-nodefault)" || rc=$?
+check "closed: rc=1 after a clean summary in informational mode is NO VERDICT" 3 "$rc" "$out" \
+  "NO VERDICT stub-engine (profile engine-nodefault)" "result=no-verdict" "!result=break" "!INFORMATIONAL — breaking"
+
+rc=0
+out="$(run_gate "$IDX" clean.out 1 "${P[@]}" engine-blocking)" || rc=$?
+check "closed: rc=1 after a clean summary in blocking mode is NO VERDICT, not a break" 3 "$rc" "$out" \
+  "NO VERDICT stub-engine (profile engine-blocking)" "result=no-verdict" "!result=break"
+
 rc=0
 out="$(run_gate "$IDX" all-skipped.out 0 "${P[@]}" engine-nodefault)" || rc=$?
 check "closed: a zero-check run in informational mode is NO VERDICT" 3 "$rc" "$out" \
