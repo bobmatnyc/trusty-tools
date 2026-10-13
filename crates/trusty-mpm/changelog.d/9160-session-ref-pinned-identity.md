@@ -1,0 +1,2 @@
+Fixed
+- A catch-up's session-ref fetch now runs as the project's pinned gh account (a registry pin or an `[accounts]` org entry) once `GET /user` proves its token, instead of the daemon's ambient git credential. A pin that cannot be proven, or a registry that cannot be read, makes no fetch: the `session_refs` receipt says `hydrated: false` and names the account, its `GH_CONFIG_DIR` and the reason. An origin with no pin keeps the ambient credential and the error says so; an ssh origin reports that a gh pin cannot apply to it (#9160).

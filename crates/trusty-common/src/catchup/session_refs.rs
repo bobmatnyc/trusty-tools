@@ -450,10 +450,7 @@ pub fn hydrate_session_cache_with_env(
         repo,
         &["fetch", "origin", SESSION_REF_FETCH_REFSPEC],
         "fetch",
-        {
-            let _ = env; // RED STUB (#9160): the pre-fix fetch ignores env.
-            &[]
-        },
+        env,
     )?;
 
     let want = target.ref_name();

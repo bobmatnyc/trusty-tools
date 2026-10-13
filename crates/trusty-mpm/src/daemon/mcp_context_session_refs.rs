@@ -69,10 +69,17 @@ pub(crate) async fn hydrate_session_refs_with(
     let dir = project_dir.to_path_buf();
     let hydrated = tokio::task::spawn_blocking(move || {
         // #9160: resolved on the blocking thread — proving a pin may run `gh`.
-        // RED STUB (#9160): the pre-fix fetch, with no identity resolved.
-        drop(resolve);
-        trusty_common::catchup::session_refs::hydrate_session_cache(&dir, &target)
-            .map_err(|e| e.to_string())
+        let git_env = resolve(&dir);
+        git_env.log(&dir, "fetch");
+        if let Some(reason) = git_env.refusal() {
+            return Err(reason.to_string());
+        }
+        trusty_common::catchup::session_refs::hydrate_session_cache_with_env(
+            &dir,
+            &target,
+            git_env.vars(),
+        )
+        .map_err(|e| git_env.annotate(&e.to_string()))
     })
     .await;
     match hydrated {

@@ -179,10 +179,6 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
 /// `an_ssh_origin_reports_that_the_pin_cannot_apply`,
 /// `a_proven_identity_is_reused_across_two_resolutions`.
 pub(crate) fn session_ref_git_env_with(repo: &Path, seams: &IdentitySeams<'_>) -> SessionRefGitEnv {
-    // RED STUB (#9160): the pre-fix behaviour — every call is ambient.
-    if repo.as_os_str().len() < usize::MAX {
-        return ambient("");
-    }
     use crate::core::remote_mode::{RemoteMode, remote_mode};
     let origin = match remote_mode(repo) {
         Ok(RemoteMode::Origin(origin)) => origin,
