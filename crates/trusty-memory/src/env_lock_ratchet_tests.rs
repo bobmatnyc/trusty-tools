@@ -4,13 +4,14 @@
 //! Why: #5937's hang was a race between a test that set an env var and a test
 //! that read it under a different lock. This crate's one env lock is
 //! `env_test_lock::env_test_lock()` (#7995; out of `commands` since #9271,
-//! which re-exports it); `messaging`'s `palace_env_lock()` wraps it. A `#[serial]` group or a private mutex excludes nothing of it.
+//! which re-exports it); `messaging`'s `palace_env_lock()` wraps it. A
+//! `#[serial]` group or a private mutex excludes nothing of it.
 //! What: over `src/**` test code, a file that calls `set_var`, `remove_var` or
-//! `set_current_dir` must call `env_test_lock()` through a path
-//! (`crate::commands::env_test_lock()`, `super::super::env_test_lock()`), or
-//! be `commands/mod.rs`, which declares it. Files that cannot are listed in
-//! [`WRITERS_WITHOUT_ENV_TEST_LOCK`] with a reason. A new offender fails, and
-//! so does a stale row.
+//! `set_current_dir`, or names `EnvVarGuard`, must call `env_test_lock()`
+//! through a path (`crate::commands::env_test_lock()`,
+//! `super::super::env_test_lock()`), or be [`LOCK_OWNER`], which declares it.
+//! Files that cannot are listed in [`WRITERS_WITHOUT_ENV_TEST_LOCK`] with a
+//! reason. A new offender fails, and so does a stale row.
 //!
 //! Limits: the unit is the FILE, as in trusty-common's ratchet. `tests/**`
 //! binaries are separate processes that cannot reach the `pub(crate)` lock,
@@ -34,7 +35,15 @@ const WRITERS_WITHOUT_ENV_TEST_LOCK: &[(&str, &str)] = &[
     ("src/test_daemon.rs", SKIP_ENFORCEMENT_1),
     ("src/tools/tests.rs", SKIP_ENFORCEMENT_1),
     ("src/transport/methods/health_tests.rs", SKIP_ENFORCEMENT_1),
-    // #9271: moved with the engine from trusty-common, whose ratchet listed it.
+    // #9271: moved with the engine from trusty-common, whose ratchet listed them.
+    (
+        "src/engine/dream/tests.rs",
+        "OPENROUTER_API_KEY via EnvVarGuard; #[serial(dotenv_credential_env)]",
+    ),
+    (
+        "src/engine/semantic_consolidation/mod.rs",
+        "OPENROUTER_API_KEY and OLLAMA_HOST via EnvVarGuard; #[serial(dotenv_credential_env)]",
+    ),
     (
         "src/engine/registry_tests.rs",
         "TRUSTY_MEMORY_MAX_OPEN_PALACES",
@@ -54,10 +63,20 @@ const SKIP_ENFORCEMENT_1: &str =
 const SELF_BASENAME: &str = "env_lock_ratchet_tests.rs";
 
 /// The file that declares the lock and reaches it unqualified.
-const LOCK_OWNER: &str = "src/commands/mod.rs";
+///
+/// #9271: `src/env_test_lock.rs`, not `commands/mod.rs`, since the hoist; the
+/// ratchet fails if this file stops declaring `fn env_test_lock`.
+const LOCK_OWNER: &str = "src/env_test_lock.rs";
 
 /// Calls that write the process environment.
 const ENV_WRITE_CALLS: &[&str] = &["set_var", "remove_var", "set_current_dir"];
+
+/// Type names whose mere mention means the file writes the environment.
+///
+/// Why: trusty-common's RAII guard `credentials::env_guard::EnvVarGuard` hides
+/// the std call, so its users carry no `set_var` of their own (#9271; the same
+/// rule as trusty-common's `ENV_MUTATION_TYPES`).
+const ENV_WRITE_TYPES: &[&str] = &["EnvVarGuard"];
 
 /// Does the stripped code take the crate lock through a path?
 ///
@@ -81,15 +100,27 @@ fn is_offender(rel: &str, code: &str) -> bool {
 /// `the_ratchet_detects_an_unlocked_env_writer` proves the detection.
 #[test]
 fn env_writing_tests_take_env_test_lock() {
+    let owner = Path::new(env!("CARGO_MANIFEST_DIR")).join(LOCK_OWNER);
+    let owner_code = strip_noncode(&std::fs::read_to_string(&owner).unwrap_or_default());
+    assert!(
+        owner_code.contains("fn env_test_lock"),
+        "`LOCK_OWNER` ({LOCK_OWNER}) does not declare `fn env_test_lock` — point it at the \
+         file that does, or the exemption skips a file that owns nothing"
+    );
     let mut unlisted = Vec::new();
     let mut matched = Vec::new();
+    let mut writers = 0usize;
     for path in lib_sources() {
         let rel = relative(&path);
         if rel == LOCK_OWNER {
             continue;
         }
         let offender = match std::fs::read_to_string(&path) {
-            Ok(text) => is_offender(&rel, &strip_noncode(&text)),
+            Ok(text) => {
+                let code = strip_noncode(&text);
+                writers += usize::from(writes_env(test_code(&rel, &code)));
+                is_offender(&rel, &code)
+            }
             Err(_) => true,
         };
         if !offender {
@@ -103,6 +134,12 @@ fn env_writing_tests_take_env_test_lock() {
             None => unlisted.push(rel),
         }
     }
+    assert!(
+        writers > WRITERS_WITHOUT_ENV_TEST_LOCK.len(),
+        "the scan found {writers} env-writing files, no more than the {} listed exceptions — \
+         a detection that matches nothing reports a clean crate",
+        WRITERS_WITHOUT_ENV_TEST_LOCK.len()
+    );
     let stale: Vec<&str> = WRITERS_WITHOUT_ENV_TEST_LOCK
         .iter()
         .map(|(suffix, _)| *suffix)
@@ -145,6 +182,15 @@ fn the_ratchet_detects_an_unlocked_env_writer() {
     assert!(
         is_offender("src/a_tests.rs", &strip_noncode(local_fn)),
         "a file-local lock of the same name is not the crate lock"
+    );
+
+    let guard_only = concat!(
+        "use trusty_common::credentials::env_guard::EnvVarGuard;\n",
+        "#[test]\n#[serial]\nfn t() { let _g = EnvVarGuard::remove(\"K\"); }\n",
+    );
+    assert!(
+        is_offender("src/a_tests.rs", &strip_noncode(guard_only)),
+        "an `EnvVarGuard` write is a write"
     );
 
     let prose = "// call crate::commands::env_test_lock() before set_var(\"K\")\nfn f() {}\n";
@@ -217,6 +263,7 @@ fn test_code<'a>(rel: &str, code: &'a str) -> &'a str {
 /// Does the stripped test code write the process environment?
 fn writes_env(code: &str) -> bool {
     ENV_WRITE_CALLS.iter().any(|c| contains_call(code, c))
+        || ENV_WRITE_TYPES.iter().any(|t| code.contains(t))
 }
 
 /// Is `name` called anywhere in `code` (`name`, optional whitespace, `(`)?
