@@ -122,7 +122,9 @@ pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, 
 /// What: one [`crate::core::session_launch::cli_launch`] resolution gives the
 /// prompt and the stamp; the prompt is written under `prompt_dir` (production:
 /// the process temp dir). `Err` names the file, the I/O cause and `workdir`,
-/// and the caller refuses the spawn on it.
+/// and the caller refuses the spawn on it. #8988: the owner `--settings` pair,
+/// shell-quoted ([`crate::core::launch_policy::LaunchSettings::shell_words`]),
+/// ends the line when the workdir's owner has a policy.
 /// Test: `gui_spawn_line_writes_the_prompt_it_names`,
 /// `gui_spawn_line_refuses_when_the_prompt_file_cannot_be_written`.
 pub(crate) fn gui_spawn_line(
@@ -139,9 +141,16 @@ pub(crate) fn gui_spawn_line(
         workdir,
         "spawn",
     )?;
-    Ok(gui_spawn_command(
-        &file,
-        &crate::core::session_profile::launch_env(cli.profile),
+    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`;
+    // the pane shell re-splits the line, so each token is single-quoted.
+    let settings = crate::core::launch_policy::provision_settings_default(workdir, None);
+    Ok(format!(
+        "{}{}",
+        gui_spawn_command(
+            &file,
+            &crate::core::session_profile::launch_env(cli.profile)
+        ),
+        settings.shell_words()
     ))
 }
 

@@ -204,6 +204,7 @@ fn launch_lines() -> Vec<LaunchLine> {
             oauth_token: Some(PROBE_TOKEN),
             mcp_env: &[],
             scoped_mcp: None,
+            settings: None,
             alternate_screen: false,
         },
     );

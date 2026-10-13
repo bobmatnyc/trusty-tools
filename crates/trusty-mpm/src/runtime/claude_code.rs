@@ -303,6 +303,18 @@ fn prepare_managed_config(fw: &FrameworkPaths, tmux_name: &str, cwd: &Path) -> s
     prepare_managed_config_with_exe(fw, tmux_name, cwd, None)
 }
 
+/// #8988: the owner `--settings` file for a managed launch under `fw`, whose
+/// `claude` reads `config_dir/.claude.json`.
+/// Test: `a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers`,
+/// `an_inplace_relaunch_under_an_owner_file_carries_the_settings`.
+fn owner_settings(
+    fw: &FrameworkPaths,
+    cwd: &Path,
+    config_dir: &Path,
+) -> crate::core::launch_policy::LaunchSettings {
+    crate::core::launch_policy::provision_settings(&fw.crate_config_root(), cwd, Some(config_dir))
+}
+
 /// [`prepare_managed_config`] with the hook binary pinned by the caller.
 ///
 /// Why (#7244): provisioning writes the managed hook triad, and that write
@@ -568,6 +580,8 @@ fn build_inplace_resume_command_with(
         claude_session_id,
         Some(prompt_file.as_path()),
     );
+    // #8988: the owner MCP policy this relaunch provisioned, carried not re-derived.
+    args.extend(owner_settings(fw, cwd, &config_dir).argv());
     // #8992: a relaunched PM drops the unused tools; the exec seam sets the env.
     args.extend(crate::core::pm_tool_trim::trim_args(profile));
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
@@ -826,6 +840,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // already where it could; this only probes when nothing did, so the
         // spec builders below stay pure functions of their arguments.
         let memory_reachable = resolve_spawn_memory_reachable(self.memory_reachable);
+        // #8988: the owner MCP policy, under the same named state home.
+        let settings = owner_settings(&self.fw, cwd, &config_dir);
         // #2997: `claude_bin` is passed UNWRAPPED — the shim is now the process
         // that reads the spec, so it `posix_spawn`s `claude` itself, disclaimed,
         // with one hop less than the old `env`-as-program shape.
@@ -839,6 +855,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             gh_env,
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
+            settings: settings.file.as_deref(),
             memory_reachable,
             alternate_screen,
             profile,
@@ -1001,6 +1018,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // #2997: `claude_bin` stays UNWRAPPED — the shim reads the spec and
         // `posix_spawn`s `claude` disclaimed itself, so every resumed /
         // guided-resume / crash-recovery pane keeps the same TCC contract.
+        // #8988: a resume carries the owner MCP policy exactly as `spawn` does.
+        let settings = owner_settings(&self.fw, cwd, &config_dir);
         let launch = ManagedLaunch {
             cwd,
             claude_bin: &claude_bin,
@@ -1011,6 +1030,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             gh_env,
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
+            settings: settings.file.as_deref(),
             // #7685: same fallback rule as `spawn` — a resumed session must not
             // lose auto memory while trusty-memory is down either.
             memory_reachable: resolve_memory_reachable(self.memory_reachable),

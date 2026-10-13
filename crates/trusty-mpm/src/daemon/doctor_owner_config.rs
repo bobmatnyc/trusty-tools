@@ -66,7 +66,7 @@ pub(super) fn check_owner_config_at(
             "none: {} belongs to no owner",
             inputs.cwd.display()
         )),
-        Outcome::NoFile { retained } => {
+        Outcome::NoFile { retained, .. } => {
             let mut msg = format!("none: owner `{owner}` has no {file}; owner layer off");
             if let Some(record) = retained {
                 msg.push_str(&format!(
@@ -78,7 +78,7 @@ pub(super) fn check_owner_config_at(
         }
         Outcome::Loaded(chain) => {
             let summary = format!(
-                "owner `{owner}` ({}): {}; not yet applied at launch (#8988)",
+                "owner `{owner}` ({}): {}; applied at launch via --settings (#8988)",
                 chain.chain.join(" → "),
                 describe(&chain.policy)
             );

@@ -200,8 +200,14 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     // #8308: the seam returns a spec; `spec_text` renders it for substrings.
     let spec = |dir| {
         let cwd = std::path::Path::new("/work/p");
-        let spec =
-            crate::commands::launch::connect_claude_spec(cwd, Some(path), dir, &[], None, None);
+        let spec = crate::commands::launch::connect_claude_spec(
+            cwd,
+            Some(path),
+            dir,
+            &[],
+            &Default::default(),
+            None,
+        );
         crate::test_support::spec_text(&spec)
     };
     let fallback = spec(None);
@@ -2423,7 +2429,7 @@ fn connect_claude_spec_follows_the_configured_renderer() {
             None,
             None,
             &[],
-            None,
+            &Default::default(),
             Some(root.path()),
         );
         let line = crate::test_support::spec_text(&spec);
@@ -2445,7 +2451,7 @@ fn launch_claude_spec_follows_the_configured_renderer() {
             None,
             None,
             &[],
-            None,
+            &Default::default(),
         );
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);

@@ -298,3 +298,56 @@ fn a_spawn_with_no_owner_file_carries_no_settings_flag() {
             .exists()
     );
 }
+
+/// The in-place relaunch (bare `tm` inside a managed pane, exec'd by
+/// `guided_inplace`) carries the file it provisioned, not a re-derived path.
+#[test]
+#[cfg(unix)]
+fn an_inplace_relaunch_under_an_owner_file_carries_the_settings() {
+    let fx = Fixture::new();
+    fx.owner_file("[mcp]\ndeny = [\"heygen\"]\n");
+    let fw = trusty_mpm::core::paths::FrameworkPaths::under(&fx.home);
+
+    let resume = trusty_mpm::runtime::build_inplace_resume_command_under(&fw, &fx.project, None)
+        .expect("the relaunch must build with claude on PATH");
+
+    let (_, settings) = settings_file(&resume.args);
+    assert_eq!(
+        settings,
+        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
+}
+
+/// df-D0e through the launch path: deleting the owner file turns the layer off
+/// AND retires its last-good record, so a later bad file has nothing to fall
+/// back to and the launch carries no `--settings`.
+#[test]
+#[cfg(unix)]
+fn a_deleted_owner_file_stays_off_when_a_bad_file_follows() {
+    let fx = Fixture::new();
+    let spawn_args = || {
+        let tmux = Arc::new(Recorder::default());
+        fx.adapter(&tmux)
+            .spawn(
+                "tm-acme-01",
+                &fx.project,
+                "t",
+                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+                &[],
+            )
+            .expect("spawn");
+        launched_args(&tmux)
+    };
+    fx.owner_file("[mcp]\ndeny = [\"heygen\"]\n");
+    assert!(spawn_args().iter().any(|a| a == "--settings"));
+
+    std::fs::remove_file(fx.repos_root.join("acme").join(OWNER_FILE)).expect("delete");
+    assert!(!spawn_args().iter().any(|a| a == "--settings"));
+
+    fx.owner_file("[mcp\n");
+    let args = spawn_args();
+    assert!(
+        !args.iter().any(|a| a == "--settings"),
+        "a bad file after a delete must not revive the old policy: {args:?}"
+    );
+}

@@ -305,6 +305,9 @@ fn client_prompt_spec(
         .extend(crate::core::pm_tool_trim::trim_env(profile));
     spec.args
         .extend(crate::core::pm_tool_trim::trim_args(profile));
+    // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
+    spec.args
+        .extend(crate::core::launch_policy::provision_settings_default(project, None).argv());
     Ok(spec)
 }
 
