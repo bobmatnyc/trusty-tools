@@ -46,7 +46,7 @@ pub use proxy::{
     ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,
     SessionProxy, SummarizeOutcome, route_free_text,
 };
-pub use resolver::{Resolvable, resolve_target};
+pub use resolver::{Resolvable, TargetMatch, classify_target, resolve_target};
 pub(crate) use result::fleet_state_glyph;
 pub use result::{
     CommandResult, DecisionCounts, DiscoveredProjectSummary, HealthReport, ManagedSessionView,

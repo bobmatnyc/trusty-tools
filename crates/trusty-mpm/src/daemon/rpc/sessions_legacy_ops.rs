@@ -139,7 +139,8 @@ pub fn compression_level_label(level: CompressionLevel) -> String {
 }
 
 /// Default trailing-line count for a pane capture.
-fn default_output_lines() -> u32 {
+// #9162: `pub(crate)` so the managed output route shares the default.
+pub(crate) fn default_output_lines() -> u32 {
     50
 }
 

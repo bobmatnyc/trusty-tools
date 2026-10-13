@@ -31,10 +31,17 @@ pub(crate) async fn session_output(
     Ok(())
 }
 
-/// Fetch the output body for a session.
+/// Fetch the output body for a session, managed sessions first.
 ///
-/// Why: a seam the tests drive without capturing stdout.
-/// What: `GET /sessions/{id}/output` (project sessions only).
+/// Why (#9162): `GET /sessions/{id}/output` resolves only project sessions, so
+/// every managed session read "not found". Stop and Resume resolve managed
+/// sessions first; Output now does too.
+/// What: lists the managed sessions and classifies `id_or_name` against them
+/// (id, exact name, unique prefix). A match reads
+/// `GET /api/v1/sessions/managed/{id}/output`; an ambiguous prefix is an error
+/// naming the candidates; no match falls through to the project route. A list
+/// failure is returned as that failure, never as "not found", and a refused
+/// managed read is returned with the daemon's reason.
 /// Test: `output_tests.rs`.
 pub(crate) async fn fetch_output(
     daemon: &trusty_mpm::client::DaemonClient,
@@ -42,15 +49,37 @@ pub(crate) async fn fetch_output(
     lines: u32,
     summarize: bool,
 ) -> anyhow::Result<serde_json::Value> {
+    use trusty_mpm::client::{TargetMatch, classify_target};
+
+    // #9162: not `resolve_managed_match`, which swallows a list error as `None`
+    // and would send the request down the project path to a false "not found".
+    let managed = daemon.list_managed_sessions().await.map_err(|e| {
+        anyhow::anyhow!("could not list managed sessions to resolve '{id_or_name}': {e}")
+    })?;
+    let path = match classify_target(&managed, id_or_name) {
+        TargetMatch::Found(m) => format!("/api/v1/sessions/managed/{}/output", m.id),
+        TargetMatch::Ambiguous(all) => {
+            let names: Vec<&str> = all.iter().map(|m| m.name.as_str()).collect();
+            anyhow::bail!(
+                "session '{id_or_name}' is ambiguous: it matches {}; use a full name or id",
+                names.join(", ")
+            );
+        }
+        TargetMatch::NotFound => format!("/sessions/{id_or_name}/output"),
+    };
+    let managed_hit = path.starts_with("/api/");
     // #6288: `lines` typed, so the socket's params struct decodes it.
-    let mut req = daemon
-        .get(format!("/sessions/{id_or_name}/output"))
-        .query(&[("lines", lines)]);
+    let mut req = daemon.get(path).query(&[("lines", lines)]);
     if summarize {
         req = req.query(&[("compress", "summarise")]);
     }
     let resp = req.send().await?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    let status = resp.status();
+    if managed_hit && !status.is_success() {
+        let reason = resp.text().await.unwrap_or_default();
+        anyhow::bail!("session '{id_or_name}' output refused ({status}): {reason}");
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("session '{id_or_name}' not found");
     }
     Ok(resp.error_for_status()?.json().await?)

@@ -174,6 +174,12 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/sessions/managed/{id}/activity",
         "mpm.managed.activity",
     ),
+    // #9162: a managed session's pane output.
+    (
+        "GET",
+        "/api/v1/sessions/managed/{id}/output",
+        "mpm.managed.output",
+    ),
     (
         "POST",
         "/api/v1/sessions/managed/{id}/runtime-stop",
