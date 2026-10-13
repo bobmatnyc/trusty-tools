@@ -217,6 +217,20 @@ fn skills_off_naming_workflow_authoring_is_a_bad_file() {
     }
 }
 
+/// #8992: `TaskStop` cancels a running subagent and its PostToolUse releases
+/// the tree claim (`delegation_tracker`), so denying it is a bad file.
+#[test]
+fn tools_deny_naming_task_stop_is_a_bad_file() {
+    for name in ["TaskStop", "taskstop"] {
+        let body = format!("[tools]\ndeny = [{name:?}]\n");
+        let err = parse(&body).expect_err(&format!("{body:?} must be a bad file"));
+        assert!(
+            matches!(&err, OwnerPolicyError::Invalid { key, .. } if *key == "tools.deny"),
+            "{body:?}: {err}"
+        );
+    }
+}
+
 /// #8992: a wrong type, or a key the new tables do not define (`on`, `allow`,
 /// `ask`), is a malformed file whose message names the problem.
 #[test]

@@ -189,7 +189,9 @@ fn tool_floor_covers_every_agent_tools_builtin_grant() {
 /// by an agent, a prompt, a skill or the PM tool trim, so none is decorative.
 #[test]
 fn every_tool_floor_name_is_used_by_a_source() {
+    // #8992: `core/agent.rs` defines the dispatch and `TaskStop` tool names.
     let mut corpus = String::from(include_str!("../pm_tool_trim.rs"));
+    corpus.push_str(include_str!("../agent.rs"));
     for sub in ["agents", "instructions", "skills"] {
         for path in md_files(&content(sub)) {
             corpus.push_str(&std::fs::read_to_string(&path).expect("read content file"));
@@ -203,6 +205,16 @@ fn every_tool_floor_name_is_used_by_a_source() {
         unused.is_empty(),
         "TOOL_FLOOR names no source uses — a rename left them stale: {unused:?}"
     );
+}
+
+/// #8992: the tools `core/agent.rs` names for dispatching and cancelling a
+/// subagent are floored, so an owner deny cannot break delegation tracking.
+#[test]
+fn every_subagent_dispatch_and_stop_tool_is_in_the_tool_floor() {
+    use crate::core::agent::{SUBAGENT_DISPATCH_TOOLS, TASK_STOP_TOOL};
+    for tool in SUBAGENT_DISPATCH_TOOLS.iter().chain([&TASK_STOP_TOOL]) {
+        assert!(is_tool_floor(tool), "{tool} must be in the tool floor");
+    }
 }
 
 /// #8992 drift guard: every skill an agent preloads is floored.
