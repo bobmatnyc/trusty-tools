@@ -325,6 +325,15 @@ jobs:
       - name: Engine import-path gate (#9270)
         run: bash scripts/check_engine_import_path.sh
 
+      # #9273: every public trusty-memory error enum is #[non_exhaustive], so a
+      # new variant is not a semver break. Same job, same reason: no new
+      # required context, no toolchain. Selftest first.
+      - name: Non-exhaustive error-enum selftest (#9273)
+        run: bash scripts/check_non_exhaustive_errors_selftest.sh
+
+      - name: Non-exhaustive error-enum gate (#9273)
+        run: bash scripts/check_non_exhaustive_errors.sh
+
       # #8389: content-release.yml runs only on dispatch, so a packager change
       # would otherwise meet its selftest for the first time at release time.
       - name: Content-bundle packager selftest (#8389)
