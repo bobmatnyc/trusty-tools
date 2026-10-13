@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use trusty_mpm::provisioner::FakeGitBackend;
 use trusty_mpm::session_manager::pane_identity::PaneIdentity;
 use trusty_mpm::session_manager::{
-    AnswerClaim, Claim, ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
+    AnswerClaim, ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
 
 // ── RAII HOME guard (#3965) ─────────────────────────────────────────────────
@@ -571,16 +571,7 @@ async fn front_gate_clear_pending_decision_no_injection() {
         .claim_decision(&record.id, &AnswerClaim::by("test"))
         .await
         .expect("claim");
-    assert!(
-        matches!(
-            claimed,
-            Claim::Claimed {
-                front_gate: true,
-                ..
-            }
-        ),
-        "{claimed:?}"
-    );
+    assert!(claimed.front_gate, "{claimed:?}");
 
     let after = mgr.get(&record.id).await.expect("get");
     assert!(after.pending_decision.is_none());

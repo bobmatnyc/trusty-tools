@@ -123,6 +123,17 @@ pub enum ManagedError {
     #[error("{0}")]
     DeliveryFailed(String),
 
+    /// An answer reached a session with no pending decision (#9841, D1).
+    ///
+    /// Why: the D73 ruling is strict: an answer types into a pane only to
+    /// resolve a record-backed decision. The routes answer it with a 409 that
+    /// points at `tm session send`.
+    /// What: carries the full text, `no pending decision on session <id>; …`.
+    /// Test: `answer_with_no_pending_decision_refused`,
+    /// `answer_decision_without_a_pending_decision_is_refused`.
+    #[error("{0}")]
+    NoPendingDecision(String),
+
     /// An auto-resume failed AND has already recorded the failure (#8233).
     ///
     /// Why: `resume_auto` marks the record errored itself, which APPENDS
@@ -448,10 +459,10 @@ impl SessionManager {
     /// refused), then (#9841) claims the pending decision for `claim` under
     /// the store guard, and only then sends the answer text via
     /// `send_line_to_pane`. A repeat or stale answer is a
-    /// [`ManagedError::DecisionConflict`]; a send that fails after the claim
-    /// is a [`ManagedError::DeliveryFailed`] and the decision stays closed.
-    /// With nothing pending and nothing answered, the answer types into the
-    /// pane as before (D1 not ruled). Returns the decision taken, if any.
+    /// [`ManagedError::DecisionConflict`]; with nothing pending and nothing
+    /// answered it is a [`ManagedError::NoPendingDecision`] (D1); a send that
+    /// fails after the claim is a [`ManagedError::DeliveryFailed`] and the
+    /// decision stays closed. Returns the decision taken.
     /// Test: `manager_answer_decision` in tests;
     /// `two_concurrent_answers_reach_the_pane_once`,
     /// `repeat_answer_names_first_answerer_and_time` in `decision_tests.rs`;

@@ -261,7 +261,8 @@ pub(crate) async fn answer_core(
 /// open while a second answer races it; `spawn_runtime_for` launches a real
 /// runtime.
 /// What: parses the optional `decision_id`/`answered_by` (400 on a bad id),
-/// answers a repeat or stale answer with its 409 before anything else,
+/// answers a repeat, a stale id, or (D1) an answer with no pending decision
+/// with its 409 before anything else,
 /// proves a live session's pane BEFORE the claim (a refusal leaves the
 /// decision pending), then claims under the store guard
 /// (`SessionManager::claim_decision`). A front-gate claim calls `spawn` with
@@ -270,7 +271,8 @@ pub(crate) async fn answer_core(
 /// effect that fails after the claim is a 500 and the decision stays closed.
 /// Test: `two_concurrent_front_gate_answers_spawn_once`,
 /// `front_gate_launch_failure_closes_the_decision`,
-/// `a_malformed_decision_id_is_400`, `answer_conflict_is_409_over_http_and_rpc`.
+/// `a_malformed_decision_id_is_400`, `answer_conflict_is_409_over_http_and_rpc`,
+/// `answer_with_no_pending_decision_refused`.
 pub(crate) async fn answer_core_with<F, Fut>(
     state: &Arc<DaemonState>,
     id_str: &str,
@@ -326,7 +328,7 @@ where
     };
     let claimed = match mgr.claim_decision(&id, &claim).await {
         Ok(claimed) => claimed,
-        Err(e @ ManagedError::DecisionConflict(_)) => {
+        Err(e @ (ManagedError::DecisionConflict(_) | ManagedError::NoPendingDecision(_))) => {
             return RouteOutcome::text(409, e.to_string());
         }
         Err(ManagedError::SessionNotFound(_)) => return not_found(id_str),
@@ -335,7 +337,7 @@ where
 
     // FRONT gate (AC-15): the claim cleared the decision; launch the withheld
     // runtime from the re-read record, never type the answer into a bare pane.
-    if let Claim::Claimed {
+    if let Claim {
         decision_id,
         front_gate: true,
     } = claimed

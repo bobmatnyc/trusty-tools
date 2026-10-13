@@ -93,8 +93,7 @@ pub enum AnswerOutcome {
 /// Why: a repeat answer gets a conflict that names the first answerer and the
 /// time, which needs the claim to outlive the cleared decision.
 /// What: persisted on [`super::SessionRecord::last_answer`]. Holds no answer
-/// text. `front_gate` marks a claim that launched the withheld runtime rather
-/// than typing into a live pane.
+/// text.
 /// Test: `repeat_answer_names_first_answerer_and_time`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionAnswer {
@@ -107,9 +106,6 @@ pub struct DecisionAnswer {
     pub answered_at: DateTime<Utc>,
     /// How the answer ended.
     pub outcome: AnswerOutcome,
-    /// Whether the claim launched the front gate's withheld runtime.
-    #[serde(default)]
-    pub front_gate: bool,
 }
 
 /// What a caller brings to an answer (#9841).
@@ -178,36 +174,19 @@ fn clean_answered_by(raw: Option<&str>, fallback: &str) -> String {
     }
 }
 
-/// What the claim step hands back (#9841).
+/// A decision this caller took, and alone acts on (#9841).
 ///
 /// Why: the caller performs the effect only when it holds the claim, and it
 /// must know which effect: type into the pane, or launch the runtime.
-/// What: `Claimed` names the decision taken and whether the session was still
-/// in the front gate; `Unclaimed` means nothing was pending and the answer
-/// keeps today's live-pane behaviour (D1 is not ruled).
+/// What: the decision taken and whether the session was still in the front
+/// gate. Since D1 (D73 ruling: strict) there is no claim-less answer.
 /// Test: `two_concurrent_answers_reach_the_pane_once`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Claim {
-    /// This caller took the decision and alone performs its effect.
-    Claimed {
-        /// The decision taken; `None` for one set before #9841.
-        decision_id: Option<DecisionId>,
-        /// The session was `Provisioning`: launch the withheld runtime.
-        front_gate: bool,
-    },
-    /// No decision was pending: type the answer into the live pane as before.
-    Unclaimed,
-}
-
-impl DecisionAnswer {
-    /// Whether this answer refuses a later answer that names no decision.
-    ///
-    /// Why: with D1 not ruled, a session whose front-gate answer launched its
-    /// runtime goes back to live-pane answering. Every other answer keeps
-    /// refusing repeats, so a duplicate never types into the pane.
-    fn refuses_repeats(&self) -> bool {
-        !(self.front_gate && self.outcome == AnswerOutcome::Delivered)
-    }
+pub struct Claim {
+    /// The decision taken; `None` for one set before #9841.
+    pub decision_id: Option<DecisionId>,
+    /// The session was `Provisioning`: launch the withheld runtime.
+    pub front_gate: bool,
 }
 
 impl SessionRecord {
@@ -243,27 +222,28 @@ fn already_answered(last: &DecisionAnswer, session: &ManagedSessionId) -> Manage
     ))
 }
 
-/// The claim's answer when there is no decision for `claim` to take.
+/// The refusal for an answer with no decision for `claim` to take.
 ///
-/// Why: a repeat and a stale id are conflicts; an answer with nothing pending
-/// and nothing answered keeps today's live-pane behaviour.
-/// What: an id the last answer took is "already answered"; any other id is
-/// "not pending"; no id is "already answered" while the last answer refuses
-/// repeats, else [`Claim::Unclaimed`].
-fn refuse_or_pass(record: &SessionRecord, claim: &AnswerClaim) -> Result<Claim, ManagedError> {
-    let last = record.last_answer.as_ref();
-    match (claim.decision_id, last) {
+/// Why: a repeat and a stale id are conflicts, and (D1, D73 ruling: strict)
+/// an answer with nothing pending is refused rather than typed into the pane.
+/// What: an id the last answer took, or no id after an answer, is "already
+/// answered by X at T"; any other id is "not pending"; no id and no earlier
+/// answer is [`ManagedError::NoPendingDecision`].
+fn refusal(record: &SessionRecord, claim: &AnswerClaim) -> ManagedError {
+    match (claim.decision_id, record.last_answer.as_ref()) {
         (Some(asked), Some(last)) if last.decision_id == Some(asked) => {
-            Err(already_answered(last, &record.id))
+            already_answered(last, &record.id)
         }
-        (Some(asked), _) => Err(ManagedError::DecisionConflict(format!(
+        (Some(asked), _) => ManagedError::DecisionConflict(format!(
             "decision {asked} is not pending on session {}",
             record.id
-        ))),
-        (None, Some(last)) if last.refuses_repeats() => Err(already_answered(last, &record.id)),
-        // #9841 D1 is not ruled: nothing pending, so the answer is a live-pane
-        // `/approve`, `/deny` or `/answer` and types into the pane as before.
-        (None, _) => Ok(Claim::Unclaimed),
+        )),
+        (None, Some(last)) => already_answered(last, &record.id),
+        // See #9841 (D1): no record-backed decision, so nothing to answer.
+        (None, None) => ManagedError::NoPendingDecision(format!(
+            "no pending decision on session {}; use `tm session send` to type into its pane",
+            record.id
+        )),
     }
 }
 
@@ -282,15 +262,13 @@ fn takes(record: &SessionRecord, claim: &AnswerClaim) -> bool {
 /// pane can no longer be proven, as after a failed front-gate launch marks
 /// the record errored; the pane refusal hid it.
 /// What: the claim's own refusal, computed on a record the caller read;
-/// `None` when the claim would take the decision or pass the answer through.
-/// The claim re-checks under its guard, so this never grants a claim.
+/// `None` when the claim would take the decision. The claim re-checks under
+/// its guard, so this never grants a claim.
 /// Test: `repeat_answer_is_a_conflict_even_when_the_pane_is_gone`,
-/// `front_gate_launch_failure_closes_the_decision`.
+/// `front_gate_launch_failure_closes_the_decision`,
+/// `answer_with_no_pending_decision_refused`.
 pub(crate) fn early_conflict(record: &SessionRecord, claim: &AnswerClaim) -> Option<ManagedError> {
-    if takes(record, claim) {
-        return None;
-    }
-    refuse_or_pass(record, claim).err()
+    (!takes(record, claim)).then(|| refusal(record, claim))
 }
 
 /// Look `id` up through a held store guard, reloading first.
@@ -317,15 +295,18 @@ impl SessionManager {
     /// reload, test, clear `pending_decision`, record a `Claimed`
     /// [`DecisionAnswer`], and persist. Every claim of a session is ordered by
     /// that guard, and the first one clears the decision before the guard is
-    /// released, so at most one caller gets [`Claim::Claimed`]. No tmux call
+    /// released, so at most one caller gets a [`Claim`]. No tmux call
     /// runs while the guard is held (#3698). A store error fails closed: the
     /// in-memory record is restored and nothing is claimed.
     /// Residual (D9): the guard is in-process; the guarantee is within one
     /// daemon.
+    /// With nothing to take, the refusal is [`ManagedError::DecisionConflict`]
+    /// or (D1) [`ManagedError::NoPendingDecision`].
     /// Test: `two_concurrent_answers_reach_the_pane_once`,
     /// `stale_decision_id_conflicts`,
     /// `claim_persist_failure_sends_nothing_and_keeps_the_decision`,
-    /// `two_concurrent_front_gate_answers_spawn_once`.
+    /// `two_concurrent_front_gate_answers_spawn_once`,
+    /// `answer_decision_without_a_pending_decision_is_refused`.
     pub async fn claim_decision(
         &self,
         id: &ManagedSessionId,
@@ -334,7 +315,7 @@ impl SessionManager {
         let mut store = self.store.write().await;
         let mut record = locked_get(&mut store, id).await?;
         if !takes(&record, claim) {
-            return refuse_or_pass(&record, claim);
+            return Err(refusal(&record, claim));
         }
         let front_gate = record.state == ManagedSessionState::Provisioning;
         let decision_id = record.pending_decision_id.take();
@@ -347,10 +328,9 @@ impl SessionManager {
             answered_by: claim.answered_by.clone(),
             answered_at: now,
             outcome: AnswerOutcome::Claimed,
-            front_gate,
         });
         store.upsert_or_restore(record).await?;
-        Ok(Claim::Claimed {
+        Ok(Claim {
             decision_id,
             front_gate,
         })
@@ -390,16 +370,15 @@ impl SessionManager {
         }
     }
 
-    /// Type a claimed (or unclaimed) answer into the session's proven pane.
+    /// Type a claimed answer into the session's proven pane.
     ///
     /// Why: the effect runs after the claim's guard is dropped, and its
     /// failure must close the decision rather than reopen it (D4).
-    /// What: sends `answer` to `pane`. Unclaimed: a send error returns as
-    /// before, and a success stamps `last_activity_at`. Claimed: settles
-    /// `Delivered` or `DeliveryFailed`, and a failure (including a pane that
-    /// could not be proven) returns [`ManagedError::DeliveryFailed`].
+    /// What: sends `answer` to `pane`, then settles `Delivered` or
+    /// `DeliveryFailed`; a failure (including a pane that could not be
+    /// proven) returns [`ManagedError::DeliveryFailed`].
     /// Test: `send_failure_after_claim_closes_decision_as_failed`,
-    /// `answers_with_no_decision_keep_typing_into_the_pane`.
+    /// `repeat_answer_names_first_answerer_and_time`.
     pub(crate) async fn deliver_answer(
         &self,
         id: &ManagedSessionId,
@@ -413,14 +392,7 @@ impl SessionManager {
                 .send_line_to_pane(tmux_name, &pane, answer)
                 .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
         });
-        let Claim::Claimed { decision_id, .. } = claim else {
-            sent?;
-            let mut store = self.store.write().await;
-            let mut record = locked_get(&mut store, id).await?;
-            record.last_activity_at = Some(Utc::now());
-            store.upsert(record).await?;
-            return Ok(None);
-        };
+        let decision_id = claim.decision_id;
         let outcome = match sent {
             Ok(()) => AnswerOutcome::Delivered,
             Err(_) => AnswerOutcome::DeliveryFailed,
