@@ -30,6 +30,9 @@
 #                        fail-closed answer for a trigger block it cannot parse,
 #                        and that the live repo leaves no push-to-main workflow
 #                        unwatched by a red-main notifier (#5657).
+#   semver-checks.yml surface profile: step placement and gates, and the live
+#                        step's run body executed against a stub gate, so an
+#                        informational break stays green and a fault fails (#9278).
 #
 # Usage: bash scripts/check-ci-helpers-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
@@ -1325,13 +1328,106 @@ assert_eq "semver-checks gates its costly steps on there being work" "4" \
 # #5501: the CHEAP steps run on either trigger — a declared bump, or a change to
 # the gate's own machinery. Gating them on the bump alone skipped the self-tests
 # on every PR that changed the gate, which is every gate-fix PR (PR #5496 is the
-# observed case). The four: Install stable toolchain (two of the self-tests need
-# a `cargo` on PATH), SemVer gate selftest, Type-differ selftest, and the
-# build-acceleration selftest.
-assert_eq "semver-checks runs its self-tests when the gate itself changed" "4" \
+# observed case). The five: Install stable toolchain (two of the self-tests need
+# a `cargo` on PATH), SemVer gate selftest, Type-differ selftest, the
+# surface-profile selftest (#9278), and the build-acceleration selftest.
+assert_eq "semver-checks runs its self-tests when the gate itself changed" "5" \
   "$(grep -c "have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" .github/workflows/semver-checks.yml || true)"
 assert_eq "semver-checks classifies its own machinery from the diff" "1" \
   "$(grep -c 'bash scripts/detect-semver-gate-inputs.sh' .github/workflows/semver-checks.yml || true)"
+
+# ---------------------------------------------------------------------------
+# semver-checks.yml surface-profile steps (#9278)
+#
+# Two steps: the profile selftest, on the cheap selftest trigger, and the live
+# trusty-memory engine-nodefault run, informational, after Enforce. The live
+# step's run body is EXECUTED here against a stub check_semver.sh, so the
+# fail-closed arms are proven by exit status, not by matching their text: an
+# informational break stays green, and a fault or an unparsable verdict line
+# fails the step. SEMVER_WF lets a mutation proof point this at a scratch copy.
+# ---------------------------------------------------------------------------
+echo
+echo "semver-checks surface profile (#9278):"
+
+sv_wf="${SEMVER_WF:-.github/workflows/semver-checks.yml}"
+sv_gate="$(job_block "${sv_wf}" "semver-checks")"
+sv_selftest='Surface-profile selftest (an informational profile must still fail closed)'
+sv_live='SemVer surface profile — trusty-memory engine-nodefault (informational)'
+
+# step_after <step name>: the name of the next named step in the gate job.
+step_after() {
+  sed -n 's/^      - name: //p' <<<"${sv_gate}" | awk -v n="$1" 'prev == n { print; exit } { prev = $0 }'
+}
+# step_block <step name>: one step's lines, from its `- name:` to the next step.
+step_block() {
+  awk -v hdr="      - name: $1" '
+    $0 == hdr { inblk = 1; print; next }
+    inblk && /^      - / { exit }
+    inblk { print }
+  ' <<<"${sv_gate}"
+}
+# run_body (stdin: a step block): its `run: |` scalar, dedented. Ends at the
+# first non-blank line indented less than the scalar (a comment for the next
+# step is indented six).
+run_body() {
+  awk '
+    $0 == "        run: |" { inrun = 1; next }
+    inrun && $0 != "" && substr($0, 1, 10) != "          " { exit }
+    inrun { sub(/^          /, ""); print }
+  '
+}
+
+assert_eq "profile selftest runs right after the type-differ selftest" "${sv_selftest}" \
+  "$(step_after 'Type-differ selftest (must catch what the lints miss)')"
+assert_eq "profile selftest takes its siblings' have_work || machinery gate" \
+  "        if: steps.crate.outputs.have_work == 'true' || steps.machinery.outputs.semver_gate_inputs_changed == 'true'" \
+  "$(step_block "${sv_selftest}" | sed -n 2p)"
+assert_eq "profile selftest is invoked once, by that step" "1" \
+  "$(grep -c '^        run: bash scripts/check_semver_profile_selftest.sh$' <<<"${sv_gate}" || true)"
+assert_eq "live profile step runs right after Enforce" "${sv_live}" \
+  "$(step_after 'Enforce public-API SemVer against crates.io')"
+# have_work, because the toolchain, the pinned tool and the cache it needs are
+# gated on it; the space-padded contains() is an exact word match on the
+# selected crates/ directory names.
+assert_eq "live profile step runs on release work that selects trusty-memory" "1" \
+  "$(step_block "${sv_live}" | grep -cFx "        if: \${{ !cancelled() && steps.crate.outputs.have_work == 'true' && contains(format(' {0} ', steps.crate.outputs.crates), ' trusty-memory ') }}" || true)"
+# A continue-on-error would turn a profile fault (exit 3) into a green tick.
+assert_eq "semver-checks job has no continue-on-error" "0" \
+  "$(grep -cE '^ +continue-on-error:' <<<"${sv_gate}" || true)"
+
+SV_DIR="${STUB_DIR}/semver-profile"
+mkdir -p "${SV_DIR}/scripts"
+step_block "${sv_live}" | run_body >"${SV_DIR}/step.sh"
+# The stub gate: prints STUB_LINE (when set) and its own argv, exits STUB_RC.
+printf '%s\n' '#!/usr/bin/env bash' \
+  '[ -n "${STUB_LINE:-}" ] && printf "%s\n" "${STUB_LINE}"' \
+  'echo "stub-args: $*"' \
+  'exit "${STUB_RC:-0}"' >"${SV_DIR}/scripts/check_semver.sh"
+
+sv_pfx='semver-gate-profile: crate=trusty-memory profile=engine-nodefault mode=informational features=none baseline=0.35.0 baseline_source=auto release=minor'
+# sv_case <label> <stub rc> <stub line> <expected step exit> <expected annotation>
+# Runs the step body the way a runner runs a `run:` with no `shell:` (bash -e).
+sv_case() {
+  local out rc=0
+  : >"${SV_DIR}/summary.md"
+  out="$(cd "${SV_DIR}" && STUB_RC="$2" STUB_LINE="$3" RUNNER_TEMP="${SV_DIR}" \
+    GITHUB_STEP_SUMMARY="${SV_DIR}/summary.md" bash -e step.sh 2>&1)" || rc=$?
+  assert_eq "profile step, $1: exit status" "$4" "${rc}"
+  assert_eq "profile step, $1: annotation" "$5" \
+    "$(grep -oE '^::(notice|warning|error)' <<<"${out}" | sed 's/^:://' | paste -sd, -)"
+}
+sv_case "clean"                    0 "${sv_pfx} result=clean blocking=no"      0 notice
+sv_case "informational break"      0 "${sv_pfx} result=break blocking=no"      0 warning
+sv_case "fault (no verdict)"       3 "${sv_pfx} result=no-verdict blocking=no" 3 error
+sv_case "blocking break"           1 "${sv_pfx} result=break blocking=yes"     1 error
+sv_case "exit 0, no profile line"  0 ""                                        3 error
+sv_case "exit 0, unknown result"   0 "${sv_pfx} result=no-verdict blocking=no" 3 error
+assert_eq "profile step calls the gate with the trusty-memory profile" "1" \
+  "$(cd "${SV_DIR}" && STUB_RC=0 STUB_LINE="${sv_pfx} result=clean blocking=no" RUNNER_TEMP="${SV_DIR}" \
+    GITHUB_STEP_SUMMARY="${SV_DIR}/summary.md" bash -e step.sh 2>&1 |
+    grep -cFx 'stub-args: --crate trusty-memory --profile engine-nodefault' || true)"
+assert_eq "profile step writes the verdict line to the step summary" "1" \
+  "$(grep -cFx "${sv_pfx} result=clean blocking=no" "${SV_DIR}/summary.md" || true)"
 
 # ---------------------------------------------------------------------------
 # ci.yml top-level concurrency (#4179, #9189)
