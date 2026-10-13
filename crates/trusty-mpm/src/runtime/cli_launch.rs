@@ -70,6 +70,8 @@ pub struct CliLaunch<'a> {
     pub mcp_env: &'a [(String, String)],
     /// The composed session MCP file (#7422).
     pub scoped_mcp: Option<&'a Path>,
+    /// The owner `--settings` file the caller provisioned (#8988).
+    pub settings: Option<&'a Path>,
     /// Config `tmux.alternate_screen` (#8405).
     pub alternate_screen: bool,
 }
@@ -104,7 +106,7 @@ fn base(cwd: &Path, alternate_screen: bool) -> LaunchSpec {
 /// What: [`base`], then `CLAUDE_CONFIG_DIR`, the OAuth token, `mcp_env` and,
 /// for a PM, the #8992 trim variable, in that order; argv `[--model m]
 /// [--append-system-prompt-file p] --setting-sources … [--mcp-config f]
-/// [--disallowedTools …] --dangerously-skip-permissions`, every token unquoted
+/// [--settings s] [--disallowedTools …] --dangerously-skip-permissions`, every token unquoted
 /// because no shell parses it. The profile is the one `mcp_env`'s stamp names.
 /// Test: `isolated_spec_matches_the_shell_line_it_replaces`,
 /// `worst_case_cli_launch_line_is_short_and_carries_no_token`,
@@ -137,6 +139,11 @@ pub fn isolated_spec(cwd: &Path, launch: &CliLaunch<'_>) -> LaunchSpec {
     spec.args
         .extend(crate::core::session_mcp_scope::mcp_config_argv(
             launch.scoped_mcp,
+        ));
+    // #8988: the owner MCP policy, right after the file it filters.
+    spec.args
+        .extend(crate::core::launch_policy::carrier::settings_argv(
+            launch.settings,
         ));
     spec.args
         .extend(crate::core::pm_tool_trim::trim_args(profile));

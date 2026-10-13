@@ -138,6 +138,26 @@ pub fn record_last_good(
     trusty_common::atomic_file::write_atomic(&path, &bytes)
 }
 
+/// Remove `owner`'s last-good record, if one exists.
+///
+/// Why: df-D0e — a deleted owner file is the off switch, so the record it left
+/// must not be revived by a later bad file.
+/// What: `Ok` when the record is gone afterwards (absent counts); the I/O
+/// error otherwise.
+/// Test: `a_deleted_file_retires_the_last_good_so_a_later_bad_file_skips_the_layer`,
+/// `a_failed_retire_keeps_the_layer_off_and_says_why`.
+pub fn retire_last_good(state_root: &Path, owner: &str) -> std::io::Result<()> {
+    let path = last_good_path(state_root, owner);
+    if std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(());
+    }
+    crate::core::home_write_fence::check(&path); // #8545
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 #[path = "last_good_tests.rs"]
 mod tests;

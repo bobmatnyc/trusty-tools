@@ -72,6 +72,45 @@ trust grant required.
   mechanism exists to make. Composition runs before the `claude` binary is
   resolved, so the gate never depends on an earlier lookup succeeding.
 
+### Owner launch config (#8988)
+
+An operator-local file `<repos_root>/<owner>/.trusty-mpm-owner.toml` subtracts
+servers from every session under that owner. The owner is the first path
+segment under the repos root, else the owner the `origin` remote names.
+
+```toml
+extends = "bob-duetto"          # optional, one parent, at most 4 files
+[mcp]
+allow = ["apex"]                # user-scope servers that load; absent = all
+deny  = ["heygen"]              # applied after allow
+claude_ai_connectors = false    # turn the claude.ai connectors off
+```
+
+- **Carrier.** Each launch writes
+  `~/.trusty-tools/trusty-mpm/session-settings/<sha256 of the body>.json`
+  (mode `0600`) and passes it as `--settings <file>`. The name is the body's
+  hash, so a file is never rewritten with other contents: launches with
+  different policies get different files and identical policies share one.
+  The directory is bounded by the number of distinct policies and nothing
+  deletes a file (another live session may use it). It holds only
+  `deniedMcpServers` and `disableClaudeAiConnectors: true`. Claude Code
+  unions deny lists across scopes, so an operator or managed deny survives.
+  Nothing is written into a repository or into any `settings.json`.
+- **Deny set.** Every user-scope server in the `.claude.json` the launch
+  reads (the managed config dir when relocated, else `$CLAUDE_CONFIG_DIR` or
+  `~`) that `allow` does not name, plus every `deny` name. The trusty-*
+  builtins and `claude-in-chrome` are never named; a `deny` that names one is a
+  bad file. Names match exactly and case-sensitively, as Claude Code matches
+  `serverName`.
+- **No policy, no change.** No owner, no file, or a policy that subtracts
+  nothing adds no flag and writes no file.
+- **Fail open.** A bad file uses the last good policy (or none) with a loud
+  warning and an `owner_config` doctor `Fail`. An unreadable `.claude.json`
+  keeps the explicit denies. A settings file that cannot be written launches
+  without `--settings` and prints that the policy was NOT applied. Deleting the
+  file turns the layer off and retires its last-good record at the next
+  launch. None of these refuses a launch or resume.
+
 ## Plugins — still default-deny
 
 Claude Code has no per-project plugin approval. `enabledPlugins` is

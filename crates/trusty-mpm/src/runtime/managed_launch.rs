@@ -156,6 +156,8 @@ pub(super) struct ManagedLaunch<'a> {
     /// carried rather than re-derived so the `--mcp-config` token can never name
     /// a path under a different home than the one written.
     pub mcp_config: Option<&'a Path>,
+    /// #8988: the owner settings file this launch provisioned, carried the same way.
+    pub settings: Option<&'a Path>,
     /// #7685: whether trusty-memory answered at launch.
     pub memory_reachable: bool,
     /// #8405: config `tmux.alternate_screen`, read by the caller at launch.
@@ -220,7 +222,8 @@ impl ManagedLaunch<'_> {
     /// choice for `config_dir` (#4451 — `user` is the tier
     /// `CLAUDE_CONFIG_DIR/agents` relocates into), then the additive
     /// `--mcp-config` (#7892; no `--strict-mcp-config`, so the operator's
-    /// user-scope servers load beside tm's builtins), then the #8992
+    /// user-scope servers load beside tm's builtins), then the #8988 owner
+    /// `--settings <file>` when one was written, then the #8992
     /// [`crate::core::pm_tool_trim::trim_args`] for a PM, then
     /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] (#1269).
     ///
@@ -244,6 +247,10 @@ impl ManagedLaunch<'_> {
         // #8233: the provisioner's own answer, not a second home-derived one.
         args.extend(crate::core::session_mcp_scope::mcp_config_argv(
             self.mcp_config,
+        ));
+        // #8988: the owner MCP policy, right after the file it filters.
+        args.extend(crate::core::launch_policy::carrier::settings_argv(
+            self.settings,
         ));
         // #8992: a PM denies the optional built-ins it never calls.
         args.extend(crate::core::pm_tool_trim::trim_args(self.profile));

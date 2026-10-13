@@ -137,18 +137,86 @@ fn a_bad_file_never_overwrites_the_last_good_record() {
     }
 }
 
-/// A deleted file turns the layer off; the retained record is never used.
+/// A deleted file turns the layer off; the read-only resolve reports the
+/// retained record and never uses it.
 #[test]
 fn a_deleted_file_turns_the_layer_off_even_with_a_last_good() {
     let fx = Fx::new();
     fx.file("[mcp]\ndeny = [\"heygen\"]\n");
     resolve_and_record(&fx.inputs());
     fx.delete();
+    let resolution = resolve(&fx.inputs());
+    assert!(matches!(
+        resolution.outcome,
+        Outcome::NoFile {
+            retained: Some(_),
+            ..
+        }
+    ));
+    assert!(resolution.effective().is_none());
+}
+
+/// #8988 df-D0e: the launch retires a deleted file's record, so delete stays
+/// the off switch and a later bad file finds no last good to revive.
+#[test]
+fn a_deleted_file_retires_the_last_good_so_a_later_bad_file_skips_the_layer() {
+    let fx = Fx::new();
+    fx.file("[mcp]\ndeny = [\"heygen\"]\n");
+    resolve_and_record(&fx.inputs());
+    fx.delete();
+
     let resolution = resolve_and_record(&fx.inputs());
     assert!(matches!(
         resolution.outcome,
-        Outcome::NoFile { retained: Some(_) }
+        Outcome::NoFile {
+            retained: None,
+            retire_error: None
+        }
     ));
+    assert!(!last_good::last_good_path(&fx.state, "acme").exists());
+
+    fx.file("[mcp\n");
+    let resolution = resolve_and_record(&fx.inputs());
+    assert!(
+        matches!(
+            resolution.outcome,
+            Outcome::Skipped {
+                last_good_error: None,
+                ..
+            }
+        ),
+        "{:?}",
+        resolution.outcome
+    );
+    assert!(resolution.effective().is_none());
+}
+
+/// A record that cannot be removed keeps the layer off for this launch and
+/// names the failure; it is never used.
+#[cfg(unix)]
+#[test]
+fn a_failed_retire_keeps_the_layer_off_and_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    fx.file("[mcp]\ndeny = [\"heygen\"]\n");
+    resolve_and_record(&fx.inputs());
+    fx.delete();
+    let dir = fx.state.join(last_good::LAST_GOOD_DIR);
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let resolution = resolve_and_record(&fx.inputs());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(
+            resolution.outcome,
+            Outcome::NoFile {
+                retained: Some(_),
+                retire_error: Some(_)
+            }
+        ),
+        "{:?}",
+        resolution.outcome
+    );
     assert!(resolution.effective().is_none());
 }
 

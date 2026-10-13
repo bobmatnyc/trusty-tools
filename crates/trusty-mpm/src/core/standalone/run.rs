@@ -365,6 +365,11 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         // #8286: the stamp and the #8992 trim follow this one resolution.
         cli.profile,
     );
+    // #8988: the owner MCP policy for the `.claude.json` this launch reads.
+    cmd.args(
+        crate::core::launch_policy::provision_settings_default(&repo_path, Some(claude_config_dir))
+            .argv(),
+    );
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
     // the child, so mis-attributed consent prompts (media library, App-Data,
