@@ -129,8 +129,8 @@ Any other table, `[agents]` included, is an unknown key and so a bad file.
   unions the lists.
 - **Floors.** Compiled in, in `core/launch_policy/floor.rs`; no file changes
   them, and naming one is a bad file. MCP: the trusty-* builtins and
-  `claude-in-chrome`. Tools: `Agent`, `Task`, `SendMessage`, `Skill`,
-  `ToolSearch`, `TodoWrite`, `Read`, `Write`, `Edit`, `Bash`, `BashOutput`,
+  `claude-in-chrome`. Tools: `Agent`, `Task`, `SendMessage`, `TaskStop`,
+  `Skill`, `ToolSearch`, `TodoWrite`, `Read`, `Write`, `Edit`, `Bash`, `BashOutput`,
   `KillShell`, `Grep`, `Glob`, `WebSearch`, `WebFetch` and the `Cron*` tools,
   plus any `mcp__<floor server>` rule. Skills: every `tm-*` skill and every
   skill an agent preloads or a prompt loads by name. Tool and skill floors

@@ -9,8 +9,7 @@
 //! What: [`is_floor`] answers for [`BUILTIN_MANAGED_MCP_SERVERS`] plus
 //! [`EXTRA_FLOOR`]; [`is_tool_floor`] for [`TOOL_FLOOR`] and any
 //! `mcp__<floor server>[__…]` rule; [`is_skill_floor`] for every
-//! [`SKILL_FLOOR_PREFIX`] skill plus [`SKILL_FLOOR_EXACT`] and
-//! [`SKILL_FLOOR_HOST_COUPLED`]. Compiled in; no
+//! [`SKILL_FLOOR_PREFIX`] skill plus [`SKILL_FLOOR_EXACT`]. Compiled in; no
 //! file can change them.
 //! Test: `floor_tests.rs` — one drift test per source each floor must cover.
 
@@ -35,15 +34,18 @@ pub fn is_floor(name: &str) -> bool {
 ///
 /// Why: a `permissions.deny` from `--settings` may reach subagents, so the
 /// floor is written for that worst case: every built-in an agent `tools:` line
-/// grants, every tool the PM prompt delegates or plans with, and the `Cron*`
-/// tools session resume schedules through (`core/pm_tool_trim.rs`).
+/// grants, every tool the PM prompt delegates or plans with, `TaskStop`, and
+/// the `Cron*` tools session resume schedules through (`core/pm_tool_trim.rs`).
 /// What: exact Claude Code tool names.
 /// Test: `tool_floor_covers_every_agent_tools_builtin_grant`,
-/// `every_tool_floor_name_is_used_by_a_source`.
+/// `every_tool_floor_name_is_used_by_a_source`,
+/// `every_subagent_dispatch_and_stop_tool_is_in_the_tool_floor`.
 pub const TOOL_FLOOR: &[&str] = &[
     "Agent",
     "Task",
     "SendMessage",
+    // #8992: `TaskStop` cancels a subagent; its PostToolUse releases the tree claim.
+    "TaskStop",
     "Skill",
     "ToolSearch",
     "TodoWrite",
@@ -108,24 +110,12 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
     "testing-anti-patterns",
 ];
 
-/// Skills the host injects elsewhere when they are off, so no agent or prompt
-/// names them.
-///
-/// Why: with `workflow-authoring` off, Claude Code 2.1.296 inlines its 16.9 KB
-/// reference into the Workflow tool description, a net +6,185 first-turn tokens.
-/// What: exact skill names; exempt from the has-a-source drift test.
-/// Test: `skills_off_naming_workflow_authoring_is_a_bad_file`.
-// #8992: keeping it on is what lets a 30-skill off set cut the token count.
-pub const SKILL_FLOOR_HOST_COUPLED: &[&str] = &["workflow-authoring"];
-
 /// Whether `name` is a floor skill; case-insensitive, as [`is_tool_floor`].
 ///
 /// Test: `the_skill_floor_holds_the_prefix_and_the_exact_names`.
 pub fn is_skill_floor(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(SKILL_FLOOR_PREFIX)
-        || SKILL_FLOOR_EXACT.contains(&lower.as_str())
-        || SKILL_FLOOR_HOST_COUPLED.contains(&lower.as_str())
+    lower.starts_with(SKILL_FLOOR_PREFIX) || SKILL_FLOOR_EXACT.contains(&lower.as_str())
 }
 
 #[cfg(test)]

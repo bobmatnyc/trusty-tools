@@ -202,21 +202,6 @@ fn a_forbidden_skills_or_tools_value_is_a_bad_file_naming_its_key() {
     }
 }
 
-/// #8992: `workflow-authoring` is floored. With it off, Claude Code 2.1.296
-/// inlines its 16.9 KB reference into the Workflow tool description, which
-/// raised the first-turn count by 6,185 tokens (df-G01 spike).
-#[test]
-fn skills_off_naming_workflow_authoring_is_a_bad_file() {
-    for name in ["workflow-authoring", "Workflow-Authoring"] {
-        let body = format!("[skills]\noff = [{name:?}]\n");
-        let err = parse(&body).expect_err(&format!("{body:?} must be a bad file"));
-        assert!(
-            matches!(&err, OwnerPolicyError::Invalid { key, .. } if *key == "skills.off"),
-            "{body:?}: {err}"
-        );
-    }
-}
-
 /// #8992: `TaskStop` cancels a running subagent and its PostToolUse releases
 /// the tree claim (`delegation_tracker`), so denying it is a bad file.
 #[test]
