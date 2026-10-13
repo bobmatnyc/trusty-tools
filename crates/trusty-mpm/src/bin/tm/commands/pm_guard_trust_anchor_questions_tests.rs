@@ -87,13 +87,15 @@ fn anchor_denies_rm_and_replace_of_the_questions_lock() {
 }
 
 /// 🔴 #9815: a link or file planted at the torn-line path is denied; the
-/// daemon would append to it.
+/// daemon would append to it. The file does not exist yet, so no hard-link
+/// identity can catch it: only the guarded path does.
 #[test]
 fn anchor_denies_a_link_planted_at_the_torn_file() {
     let fx = with_table();
-    let env = architect_env(&fx);
-    denied(&fx, &env, &format!("ln -s ~/.zshrc {TORN}"));
-    denied(&fx, &env, &format!("echo x > {TORN}"));
+    for env in [pm_env(&fx), architect_env(&fx)] {
+        denied(&fx, &env, &format!("ln -s ~/.zshrc {TORN}"));
+        denied(&fx, &env, &format!("echo x > {TORN}"));
+    }
 }
 
 /// 🔴 #9815 (r-078): with no taint live, a write the guard cannot place
