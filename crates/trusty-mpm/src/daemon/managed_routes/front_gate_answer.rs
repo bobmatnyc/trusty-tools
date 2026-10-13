@@ -115,3 +115,7 @@ pub(crate) fn front_gate_verdict(answer: &str, proposed_default: Option<&str>) -
     let _ = (answer, proposed_default);
     FrontGateVerdict::Approve
 }
+
+#[cfg(test)]
+#[path = "front_gate_answer_tests.rs"]
+pub(crate) mod tests;

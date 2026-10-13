@@ -20,7 +20,7 @@ use super::summary::{record_to_json, record_to_summary};
 use crate::daemon::rpc::managed::outcome::{RouteBody, RouteOutcome};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::decision_tests::{AnswerDriver, seed_answerable};
-use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::{AnswerOutcome, ManagedSessionId, ManagedSessionState, SessionRecord};
 
 /// A daemon over an [`AnswerDriver`] with one answerable record.
 struct Harness {
@@ -52,8 +52,12 @@ impl Harness {
     }
 
     async fn ask(&self) {
+        self.ask_with(Some("no")).await;
+    }
+
+    async fn ask_with(&self, proposed_default: Option<&str>) {
         let mgr = self.state.session_manager().await;
-        mgr.set_pending_decision(&self.id, "run rm -rf build?", Some("no"))
+        mgr.set_pending_decision(&self.id, "run rm -rf build?", proposed_default)
             .await
             .expect("set_pending_decision");
     }
@@ -228,4 +232,230 @@ async fn list_exposes_pending_decision_id() {
     assert_eq!(out.status, 200, "{out:?}");
     let record = h.record().await;
     assert!(record_to_json(&record)["pending_decision_id"].is_null());
+}
+
+/// Count one launch and start nothing.
+async fn counted(launches: Arc<AtomicUsize>) -> Result<(), String> {
+    launches.fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+
+/// #9843 (AC-A): a deny to the front gate closes the decision, launches
+/// nothing, types nothing, and decommissions the session.
+#[tokio::test]
+async fn front_gate_deny_closes_the_decision_without_launch() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask_with(None).await;
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("deny"), move |_| counted(l)).await;
+
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        0,
+        "a deny launched: {out:?}"
+    );
+    assert_eq!(out.status, 200, "{out:?}");
+    assert!(h.driver.sends().is_empty(), "typed: {:?}", h.driver.sends());
+    let record = h.record().await;
+    assert!(record.pending_decision.is_none());
+    assert!(record.live_decision_id().is_none());
+    assert_eq!(
+        record.last_answer.as_ref().map(|a| a.outcome),
+        Some(AnswerOutcome::Denied)
+    );
+    assert_eq!(record.state, ManagedSessionState::Decommissioned);
+    let mgr = h.state.session_manager().await;
+    assert!(mgr.resume_inner(&h.id).await.is_err());
+}
+
+/// #9843 (AC-B): after a deny, any answer is a 409 that says it was denied,
+/// and nothing launches.
+#[tokio::test]
+async fn a_repeat_after_a_front_gate_deny_is_409_denied() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let first = h.answer(request("no"), move |_| counted(l)).await;
+    let l = Arc::clone(&launches);
+    let repeat = h.answer(request("yes"), move |_| counted(l)).await;
+
+    assert_eq!(repeat.status, 409, "{first:?} / {repeat:?}");
+    assert!(text(&repeat).contains("(denied)"), "{repeat:?}");
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+}
+
+/// #9843 (AC-C, FO-4): front-gate text that is neither an approve nor a
+/// deny is refused before the claim; the decision stays pending, same id.
+#[tokio::test]
+async fn an_unclear_front_gate_answer_is_refused_before_the_claim() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let before = h.record().await.live_decision_id();
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("maybe later"), move |_| counted(l)).await;
+
+    assert_eq!(out.status, 422, "{out:?}");
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    let record = h.record().await;
+    assert!(before.is_some());
+    assert_eq!(record.live_decision_id(), before);
+    assert!(record.last_answer.is_none(), "{:?}", record.last_answer);
+}
+
+/// #9843 (AC-D): "no" denies even when the proposed default is itself "no".
+#[tokio::test]
+async fn deny_word_wins_over_a_proposed_default_of_no() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request(" No "), move |_| counted(l)).await;
+
+    assert_eq!(launches.load(Ordering::SeqCst), 0, "{out:?}");
+    assert_eq!(h.record().await.state, ManagedSessionState::Decommissioned);
+}
+
+/// #9843 (AC-D guard): "yes", "approve" and the exact proposed default each
+/// launch the withheld runtime once.
+#[tokio::test]
+async fn front_gate_approve_and_proposed_default_still_launch() {
+    for answer in ["yes", "approve", "use cursor"] {
+        let h = Harness::new(ManagedSessionState::Provisioning).await;
+        h.ask_with(Some("use cursor")).await;
+        let launches = Arc::new(AtomicUsize::new(0));
+
+        let l = Arc::clone(&launches);
+        let out = h.answer(request(answer), move |_| counted(l)).await;
+
+        assert_eq!(out.status, 200, "{answer:?}: {out:?}");
+        assert_eq!(launches.load(Ordering::SeqCst), 1, "{answer:?}");
+        assert!(h.driver.sends().is_empty(), "{answer:?}");
+    }
+}
+
+/// #9843 (AC-E guard): on a live harness, "no" is still typed into the
+/// proven pane; only the front gate reads the text.
+#[tokio::test]
+async fn live_decision_deny_still_types_no() {
+    let h = Harness::new(ManagedSessionState::Active).await;
+    h.ask().await;
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("no"), move |_| counted(l)).await;
+
+    assert_eq!(out.status, 200, "{out:?}");
+    assert_eq!(h.driver.sends(), vec!["no".to_string()]);
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    assert_eq!(h.record().await.state, ManagedSessionState::Active);
+}
+
+/// #9843 (FO-3): a deny whose teardown fails is a 500, launches nothing, and
+/// leaves a record nothing can launch: a repeat is a 409 "(denied)", and a
+/// resume is refused even after the record is stopped.
+#[tokio::test]
+async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let mgr = h.state.session_manager().await;
+    // An Active sibling claiming the same workspace makes decommission refuse.
+    let ws = h.record().await.workspace_path.expect("workspace");
+    let other = seed_answerable(&mgr, &h._root, ManagedSessionState::Active).await;
+    mgr.set_workspace(&other, ws, ManagedSessionState::Active)
+        .await
+        .expect("sibling claim");
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("no"), move |_| counted(l)).await;
+
+    assert_eq!(launches.load(Ordering::SeqCst), 0, "{out:?}");
+    assert_eq!(out.status, 500, "{out:?}");
+    let l = Arc::clone(&launches);
+    let repeat = h.answer(request("yes"), move |_| counted(l)).await;
+    assert_eq!(repeat.status, 409, "{repeat:?}");
+    assert!(text(&repeat).contains("(denied)"), "{repeat:?}");
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    assert!(mgr.resume_inner(&h.id).await.is_err());
+
+    mgr.stop_reporting(&h.id, crate::session_manager::StopCause::Deliberate)
+        .await
+        .expect("stop");
+    let resumed = mgr.resume_inner(&h.id).await;
+    assert!(
+        resumed.is_err(),
+        "a denied task became resumable: {:?}",
+        resumed.map(|r| r.state)
+    );
+}
+
+/// #9843 (AC-F): a front-gate launch whose runtime never came up is a 500
+/// that settles `DeliveryFailed`, not `Delivered`. Takes the production
+/// verify budget (~5 s).
+#[tokio::test]
+async fn front_gate_runtime_that_never_started_settles_delivery_failed() {
+    use super::front_gate_answer::launch_withheld;
+    use super::front_gate_answer::tests::CountingAdapter;
+
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask_with(None).await;
+    h.driver.hooks.lock().unwrap().runtime_never_starts = true;
+    let spec = TempDir::new().unwrap();
+    let (mgr, spec_dir) = (h.state.session_manager().await, spec.path().to_path_buf());
+
+    let out = h
+        .answer(request("yes"), move |record| async move {
+            let adapter = CountingAdapter::default();
+            launch_withheld(&mgr, &record, &adapter, &[], Some(&spec_dir)).await
+        })
+        .await;
+
+    assert_eq!(out.status, 500, "{out:?}");
+    assert!(text(&out).contains("did not start"), "{out:?}");
+    let record = h.record().await;
+    assert_eq!(
+        record.last_answer.as_ref().map(|a| a.outcome),
+        Some(AnswerOutcome::DeliveryFailed)
+    );
+    assert_eq!(record.state, ManagedSessionState::Errored);
+}
+
+/// #9844: a restart while a front-gate decision is pending never makes the
+/// gated task resumable; the decision stays answerable.
+#[tokio::test]
+async fn a_restart_never_makes_a_pending_front_gate_decision_resumable() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let before = h.record().await;
+    let mgr = h.state.session_manager().await;
+    // The pane died with the daemon.
+    use crate::session_manager::ManagedTmuxDriver as _;
+    h.driver
+        .inner
+        .kill_session(&before.tmux_name)
+        .expect("kill pane");
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let resumed = mgr.resume_inner(&h.id).await;
+
+    assert!(
+        resumed.is_err(),
+        "resume launched a task its front gate holds: {:?}",
+        resumed.map(|r| r.state)
+    );
+    let after = h.record().await;
+    assert_eq!(after.live_decision_id(), before.live_decision_id());
+    assert_eq!(after.state, ManagedSessionState::Provisioning);
+    let launches = Arc::new(AtomicUsize::new(0));
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("no"), move |_| counted(l)).await;
+    assert_eq!(out.status, 200, "{out:?}");
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
 }
