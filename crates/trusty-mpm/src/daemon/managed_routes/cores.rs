@@ -261,6 +261,7 @@ pub(crate) async fn answer_core(
 /// open while a second answer races it; `spawn_runtime_for` launches a real
 /// runtime.
 /// What: parses the optional `decision_id`/`answered_by` (400 on a bad id),
+/// answers a repeat or stale answer with its 409 before anything else,
 /// proves a live session's pane BEFORE the claim (a refusal leaves the
 /// decision pending), then claims under the store guard
 /// (`SessionManager::claim_decision`). A front-gate claim calls `spawn` with
@@ -309,8 +310,12 @@ where
         })
     };
 
-    // See #9841: a live pane is proven before the claim. A `Provisioning`
-    // session (the FRONT gate, #1360) has no harness to prove yet.
+    // See #9841: a repeat is a 409 whatever the pane's state. A live pane is
+    // proven before the claim; a `Provisioning` session (the FRONT gate,
+    // #1360) has no harness to prove yet.
+    if let Some(conflict) = crate::session_manager::decision::early_conflict(&record, &claim) {
+        return RouteOutcome::text(409, conflict.to_string());
+    }
     let pane = if record.state == ManagedSessionState::Provisioning {
         None
     } else {

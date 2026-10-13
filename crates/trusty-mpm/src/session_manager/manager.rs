@@ -466,8 +466,12 @@ impl SessionManager {
         claim: &super::AnswerClaim,
     ) -> Result<Option<super::DecisionId>, ManagedError> {
         let record = self.get(id).await?;
-        // #9841: prove the pane BEFORE the claim, so a refusal leaves the
-        // decision pending; the send runs after the claim's guard is dropped.
+        // #9841: a repeat is a conflict whatever the pane's state. Then prove
+        // the pane BEFORE the claim, so a refusal leaves the decision pending;
+        // the send runs after the claim's guard is dropped.
+        if let Some(conflict) = super::decision::early_conflict(&record, claim) {
+            return Err(conflict);
+        }
         let pane = self.owned_pane(id, &record)?;
         let claimed = self.claim_decision(id, claim).await?;
         self.deliver_answer(id, &record.tmux_name, Ok(pane), answer, claimed)

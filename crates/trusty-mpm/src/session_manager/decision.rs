@@ -267,6 +267,32 @@ fn refuse_or_pass(record: &SessionRecord, claim: &AnswerClaim) -> Result<Claim, 
     }
 }
 
+/// Whether `claim` takes `record`'s pending decision: one is pending and the
+/// claim names it or names none.
+fn takes(record: &SessionRecord, claim: &AnswerClaim) -> bool {
+    record.pending_decision.is_some()
+        && claim
+            .decision_id
+            .is_none_or(|asked| record.pending_decision_id == Some(asked))
+}
+
+/// The conflict an answer meets before its pane is proven (#9841).
+///
+/// Why: a repeat must get the 409 naming the first answerer even when its
+/// pane can no longer be proven, as after a failed front-gate launch marks
+/// the record errored; the pane refusal hid it.
+/// What: the claim's own refusal, computed on a record the caller read;
+/// `None` when the claim would take the decision or pass the answer through.
+/// The claim re-checks under its guard, so this never grants a claim.
+/// Test: `repeat_answer_is_a_conflict_even_when_the_pane_is_gone`,
+/// `front_gate_launch_failure_closes_the_decision`.
+pub(crate) fn early_conflict(record: &SessionRecord, claim: &AnswerClaim) -> Option<ManagedError> {
+    if takes(record, claim) {
+        return None;
+    }
+    refuse_or_pass(record, claim).err()
+}
+
 /// Look `id` up through a held store guard, reloading first.
 ///
 /// Why: the claim must see another writer's latest record, and fail closed
@@ -307,11 +333,7 @@ impl SessionManager {
     ) -> Result<Claim, ManagedError> {
         let mut store = self.store.write().await;
         let mut record = locked_get(&mut store, id).await?;
-        let takes = record.pending_decision.is_some()
-            && claim
-                .decision_id
-                .is_none_or(|asked| record.pending_decision_id == Some(asked));
-        if !takes {
+        if !takes(&record, claim) {
             return refuse_or_pass(&record, claim);
         }
         let front_gate = record.state == ManagedSessionState::Provisioning;
