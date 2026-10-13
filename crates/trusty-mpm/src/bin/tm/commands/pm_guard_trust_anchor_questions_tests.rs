@@ -140,3 +140,110 @@ fn an_unresolvable_questions_log_denies_every_write() {
         denied(&fx, &env, "echo x > notes.md");
     }
 }
+
+/// The rows of `commands` whose verdict for `env` is not `want_denied`, with
+/// the verdict each got, so one run lists every mismatch.
+fn mismatches(fx: &Fixture, env: &HookEnv, commands: &[String], want_denied: bool) -> Vec<String> {
+    commands
+        .iter()
+        .filter_map(|command| {
+            let got = bash(fx, env, command);
+            (got.is_some() != want_denied).then(|| format!("{command} -> {got:?}"))
+        })
+        .collect()
+}
+
+/// 🔴 #9815 (Architect ruling (b)): with no taint live, the Architect may make
+/// routine writes whose possible file names cannot be one of the table's
+/// files or its last three directories.
+#[test]
+fn the_architect_may_make_routine_writes_that_cannot_name_the_table() {
+    let fx = with_table();
+    let home_name = fx.home.file_name().expect("home name").to_string_lossy();
+    let rows = [
+        "sed -i 's/a/b/' src/*.rs".to_owned(),
+        "sed -i 's/a/b/' crates/*/Cargo.toml".to_owned(),
+        "echo x > \"$OUT\"".to_owned(),
+        "echo x | tee \"$LOG\"".to_owned(),
+        "cp a.txt \"$DEST\"".to_owned(),
+        "cp a.txt \"${DEST}/\"".to_owned(),
+        "cd d && cp a.txt .".to_owned(),
+        "cd d && cp a.txt ..".to_owned(),
+        "echo x > \"$OUT.log\"".to_owned(),
+        "echo x > \"$D/notes.md\"".to_owned(),
+        format!("cp a.txt \"$DEST/{home_name}\""),
+        "cd d && rm -rf Users".to_owned(),
+    ];
+    let wrong = mismatches(&fx, &architect_env(&fx), &rows, false);
+    assert!(wrong.is_empty(), "denied:\n{}", wrong.join("\n"));
+}
+
+/// 🔴 #9815 (Architect ruling (b)): a target whose file name could still be
+/// one of the table's files, or one of its last three directories, stays
+/// denied to the Architect: a literal name behind an expansion, a glob or an
+/// expansion with literal text that could match, `.` or `..` written or
+/// deleted after a `cd`, a `~user` home, and a write `xargs` places.
+#[test]
+fn the_architect_is_denied_targets_that_could_name_the_table() {
+    let fx = with_table();
+    let rows = [
+        "echo x > \"$D/questions.jsonl\"",
+        "cp forged \"$D/QUESTIONS.JSONL.LOCK\"",
+        "echo x > \"${D}/questions.jsonl.torn\"",
+        "echo x > \"$D\"/questions.*",
+        "sed -i 's/a/b/' \"$D\"/*.jsonl",
+        "echo x > \"$D\"/questions.json[l]",
+        "echo x > \"$D/${NAME}.jsonl\"",
+        "echo x > \"$D/questions$EXT\"",
+        "echo x > \"$(printf questions.jsonl)\"",
+        "echo x > \"${D:-x}\"",
+        "mv forged \"$D/channels\"",
+        "rm -rf \"$D/trusty-mpm\"",
+        "rm -rf \"$D/.trusty-tools\"",
+        "cd d && rm -rf .",
+        "cd d && rm -rf ..",
+        "cd d && cp -r forged/ .",
+        "cd d && cp forged/questions.jsonl .",
+        "cp a.txt ~bob",
+        "ls | xargs cp a.txt",
+        "ls | xargs sed -i 's/a/b/'",
+    ]
+    .map(str::to_owned);
+    let wrong = mismatches(&fx, &architect_env(&fx), &rows, true);
+    assert!(wrong.is_empty(), "allowed:\n{}", wrong.join("\n"));
+    for row in &rows {
+        denied(&fx, &architect_env(&fx), row);
+    }
+}
+
+/// 🔴 #9815 (r-078): the table directory's resolved names count as well as
+/// its spelled ones, so a `.trusty-tools` that is a link is matched by the
+/// name it points at.
+#[test]
+fn a_linked_table_directory_is_matched_by_its_resolved_name() {
+    let fx = fixture();
+    let real = fx.home.join("real-tools");
+    std::fs::create_dir_all(real.join("trusty-mpm").join("channels")).expect("mkdir");
+    std::os::unix::fs::symlink(&real, fx.home.join(".trusty-tools")).expect("link");
+    let log = questions_path(&fx.home);
+    std::fs::write(&log, "").expect("log");
+    std::fs::write(lock_path(&log), "").expect("lock");
+    denied(&fx, &architect_env(&fx), "rm -rf \"$D/real-tools\"");
+}
+
+/// 🔴 #9815: the PM and agent rule is unchanged by the Architect's narrow
+/// table rule: every expansion or glob target is still denied by #8878.
+#[test]
+fn the_pm_keeps_the_broad_name_rule() {
+    let fx = with_table();
+    let home_name = fx.home.file_name().expect("home name").to_string_lossy();
+    for command in [
+        "echo x > \"$OUT\"".to_owned(),
+        "sed -i 's/a/b/' src/*.rs".to_owned(),
+        "cd d && cp a.txt .".to_owned(),
+        format!("cp a.txt \"$DEST/{home_name}\""),
+    ] {
+        let reason = bash(&fx, &pm_env(&fx), &command).unwrap_or_else(|| panic!("{command}"));
+        assert!(reason.contains("#8878"), "{command}: {reason}");
+    }
+}
