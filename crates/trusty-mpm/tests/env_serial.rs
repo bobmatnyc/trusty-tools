@@ -27,6 +27,8 @@ mod daemon_env_isolation;
 mod inproject_cold_start;
 mod inproject_git_failure;
 mod mcp_spawn_gate;
+// #8988: the owner_config doctor row, under a scratch $HOME.
+mod owner_config_8988;
 mod pane_launch_line_8233;
 mod prompt_refusal_before_post_8286;
 mod scratch_home_tmux_gate;
