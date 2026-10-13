@@ -879,7 +879,9 @@ exist until the helper's pid is granted. The helper-to-command hop is a file:
 2. It opens the file a second time, read-only, then unlinks it. Only after
    the name is gone does it write the 64-byte token through the first fd and
    close that fd.
-3. It removes the directory and clears close-on-exec on the read-only fd.
+3. It removes the directory, moves the read-only fd to the lowest free
+   number above 2 (a POSIX shell's `<&N` takes one digit), and clears
+   close-on-exec on it.
    Any failed step ends the helper with exit 1 before exec; it never falls
    back to a pipe.
 
