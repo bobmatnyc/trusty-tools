@@ -30,6 +30,10 @@ mod bridge_tests;
 #[path = "session_cache_tests.rs"]
 mod session_cache_tests;
 
+// #9071: S9, the tier-3 client; it shares this module's helpers.
+#[path = "granted_client_tests.rs"]
+mod granted_client_tests;
+
 /// The project vault of the fixture's `Acme/Web` remote.
 const PROJECT_VAULT: &str = "trusty/acme/web";
 /// A value whose text appears nowhere else in the crate.

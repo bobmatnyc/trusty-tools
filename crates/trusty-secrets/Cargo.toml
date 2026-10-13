@@ -26,7 +26,10 @@ readme = "README.md"
 # an `api`/`store` consumer opts out with `default-features = false`.
 [features]
 default = ["api", "store", "server"]
-api = ["dep:serde", "dep:thiserror"]
+# #9071 (Architect ruling D1): `api` also carries `granted`, the tier-3
+# client — serde_json for its frames, libc for its fd and socket checks. Both
+# were already optional; still no tokio, keyring, fd-lock or trusty-common.
+api = ["dep:serde", "dep:thiserror", "dep:serde_json", "dep:libc"]
 store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
 ancestry = ["dep:thiserror", "dep:libc"]
 server = ["store", "ancestry", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
@@ -81,6 +84,12 @@ required-features = ["server"]
 [[test]]
 name = "live_flag_peer"
 path = "tests/live_flag_peer.rs"
+required-features = ["server"]
+
+# #9071: S9 live check of the tier-3 client; spawns the real binary.
+[[test]]
+name = "granted_client_live"
+path = "tests/granted_client_live.rs"
 required-features = ["server"]
 
 # #9328: imports `store`, so an `api`-only test run must skip it.

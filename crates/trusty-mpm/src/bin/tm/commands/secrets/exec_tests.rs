@@ -143,6 +143,21 @@ fn token_check_refuses_short_and_padded_tokens() {
     }
 }
 
+/// Why: #9071 — tm sets the variable the trusty-secrets tier-3 client
+/// reads, so tm takes the name from trusty-secrets and defines no copy.
+/// Test: itself.
+#[test]
+fn exec_token_fd_env_is_the_shared_name() {
+    assert_eq!(TOKEN_FD_ENV, trusty_secrets::api::TOKEN_FD_ENV);
+    assert_eq!(TOKEN_FD_ENV, "TRUSTY_SECRETS_TOKEN_FD");
+    let source = include_str!("exec_wire.rs");
+    let literal = format!("\"{TOKEN_FD_ENV}\"");
+    assert!(
+        !source.contains(&literal),
+        "exec_wire.rs defines its own copy"
+    );
+}
+
 #[test]
 fn report_round_trips_and_a_cut_report_is_none() {
     let mut values = BTreeMap::new();

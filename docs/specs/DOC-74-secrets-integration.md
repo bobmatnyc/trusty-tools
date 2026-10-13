@@ -903,8 +903,13 @@ terminal output is not captured (§3 G-6).
   prune ([#9645](https://github.com/bobmatnyc/trusty-tools/pull/9645)) and
   the TTL remove the grant. The same holds for a grant that completes on the
   server after tm was stopped mid-grant.
-- The token fd is inherited by the command's descendants; they share its
-  grant, within the same keys.
+- The token fd is inherited by the command's descendants, within the same
+  keys, but the grant reaches a linear chain, not siblings (#9071). The token
+  is one pipe; a reader drains it and re-arms the fd number only in its own
+  process, so the reader and its own descendants can resolve. A sibling of an
+  earlier reader finds the shared pipe drained and fails closed with
+  `InvalidToken`; no value is exposed. In `sh -c 'migrate && serve'`, once
+  `migrate` has read the token, `serve` cannot resolve.
 - Ctrl-Z stops the command, not tm.
 - tm waits for end of stream on the scrubbed pipes, so a background process
   that keeps them open keeps tm waiting. The grant is revoked before that
@@ -1481,7 +1486,7 @@ Tier 3 must not widen the limit.
 
 | Language | Package | Dependencies |
 |---|---|---|
-| Rust | `trusty-secrets` with `api` only, plus the caller's own UDS client (no `client` feature, Df0) | None new |
+| Rust | `trusty-secrets` with `api` only: `trusty_secrets::granted`, blocking, Unix (no `client` feature, Df0; Architect ruling D1, 2026-10-12, #9071) | None new: `api` enables the already-optional `serde_json` and `libc` |
 | Python | `trusty-secrets` on PyPI | Standard library only (`socket`, `json`, `os`) |
 | JS/TS | `@trusty-tools/secrets` on npm | Node built-ins only (`node:net`) |
 | Go | Later | — |
@@ -1510,7 +1515,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S6+ | One PR per integration: 1Password, Vercel, GitHub Actions, Keeper | 4 each | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
-| S9 | Rust client: shape decided at S9, no `client` feature (Df0) | 4 | S8 |
+| S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only, token re-armed on its fd (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
 | S10 | Python and npm clients, plus their publish workflows | 3 each | S8 |
 
 ### 15.10 Child re-scope
