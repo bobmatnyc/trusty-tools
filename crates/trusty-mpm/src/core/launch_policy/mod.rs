@@ -23,6 +23,7 @@ pub mod floor;
 pub mod last_good;
 pub mod owner;
 pub mod schema;
+pub mod validate_tables;
 
 use std::path::{Path, PathBuf};
 

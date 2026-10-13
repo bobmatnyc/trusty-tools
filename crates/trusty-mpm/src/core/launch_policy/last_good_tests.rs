@@ -11,6 +11,7 @@ fn chain(deny: &[&str], sha: &str) -> ResolvedChain {
             allow: Some(BTreeSet::new()),
             deny: deny.iter().map(|s| (*s).to_string()).collect(),
             claude_ai_connectors: Some(false),
+            ..OwnerPolicy::default()
         },
         source_sha256: sha.to_string(),
     }
