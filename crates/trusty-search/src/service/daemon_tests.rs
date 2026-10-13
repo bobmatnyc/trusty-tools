@@ -904,6 +904,95 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
     .await;
 }
 
+/// #9736: requests a stop from inside `run_daemon`'s stale-port-file removal,
+/// the first thing it does once its socket is bound.
+///
+/// What: on the first "removed stale" event, connects to the socket, sends
+/// `true` on the stop channel, and records `(connected, stop_accepted)`.
+#[derive(Clone)]
+struct StopWhenBound {
+    socket: std::path::PathBuf,
+    stop: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    seen: std::sync::Arc<std::sync::Mutex<Option<(bool, bool)>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StopWhenBound {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        let mut seen = self.seen.lock().expect("hook lock");
+        if seen.is_none() && message.0.starts_with("removed stale") {
+            let connected = std::os::unix::net::UnixStream::connect(&self.socket).is_ok();
+            *seen = Some((connected, self.stop.send(true).is_ok()));
+        }
+    }
+}
+
+/// #9736: a stop requested once the socket accepts connections is never lost.
+///
+/// Why: clients and tests read a connectable socket as a ready daemon. The
+/// daemon bound its socket before it subscribed to the stop channel, and
+/// `watch::Sender::send` with no receiver drops the value. A stop sent in
+/// that window was lost and the daemon served on, so
+/// `a_normal_stop_leaves_every_corpus_openable_read_only` timed out at 20 s
+/// on a loaded CI shard.
+/// What: plants a stale port file so `run_daemon` logs its removal straight
+/// after the bind, and from that log event connects to the socket and sends
+/// the stop. The connect must succeed, the send must be accepted, and the
+/// daemon must return `Ok` within 10 s.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_stop_sent_once_the_socket_accepts_is_never_lost() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    with_isolated_daemon_paths(|_data_dir| async move {
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let stale_port = daemon_port_path().expect("isolated port path");
+        std::fs::write(&stale_port, "7878\n").unwrap();
+
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let hook = StopWhenBound {
+            socket: socket_path,
+            stop: state.shutdown_tx.clone(),
+            seen: Default::default(),
+        };
+        let seen = std::sync::Arc::clone(&hook.seen);
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(hook));
+        let mut handle = tokio::spawn(run_daemon(state, None).with_subscriber(dispatch));
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(10), &mut handle).await;
+        if exit.is_err() {
+            // The stop was lost; stop the daemon so the next serial test starts clean.
+            let _ = shutdown_tx.send(true);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+        }
+
+        let seen = *seen.lock().expect("hook lock");
+        assert_eq!(
+            seen,
+            Some((true, true)),
+            "#9736: once the socket accepts (left), a stop must find a receiver (right)"
+        );
+        assert!(
+            matches!(exit, Ok(Ok(Ok(())))),
+            "#9736: a stop sent once the socket accepts must stop the daemon: {exit:?}"
+        );
+    })
+    .await;
+}
+
 /// #9214: `start --socket` must not change the mode of a directory it did not
 /// create.
 ///
