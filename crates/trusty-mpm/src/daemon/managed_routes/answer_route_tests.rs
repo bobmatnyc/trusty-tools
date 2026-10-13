@@ -379,16 +379,11 @@ async fn a_pending_decision_off_the_front_gate_is_409_decommission() {
     }
 }
 
-/// #9843 (FO-3): a deny whose teardown fails is a 500, launches nothing, and
-/// leaves a record nothing can launch: a repeat is a 409 "(denied)", and a
-/// resume is refused even after the record is stopped.
-#[tokio::test]
-async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
-    let h = Harness::new(ManagedSessionState::Provisioning).await;
-    h.ask().await;
+/// Make a deny's teardown fail: an Active sibling claims `h`'s workspace,
+/// now OWNED, so decommission refuses (#9843 M3: an unowned one would not be
+/// checked).
+async fn block_deny_teardown(h: &Harness) {
     let mgr = h.state.session_manager().await;
-    // An Active sibling claiming the same OWNED workspace makes decommission
-    // refuse (#9843 M3: an unowned one would not be checked).
     let mut owned = h.record().await;
     owned.workspace_owned = true;
     mgr.store.write().await.upsert(owned).await.expect("own ws");
@@ -397,6 +392,17 @@ async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
     mgr.set_workspace(&other, ws, ManagedSessionState::Active)
         .await
         .expect("sibling claim");
+}
+
+/// #9843 (FO-3): a deny whose teardown fails is a 500, launches nothing, and
+/// leaves a record nothing can launch: a repeat is a 409 "(denied)", and a
+/// resume is refused even after the record is stopped.
+#[tokio::test]
+async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let mgr = h.state.session_manager().await;
+    block_deny_teardown(&h).await;
     let launches = Arc::new(AtomicUsize::new(0));
 
     let l = Arc::clone(&launches);
@@ -494,6 +500,106 @@ async fn a_restart_never_makes_a_pending_front_gate_decision_resumable() {
         .await
         .expect_err("resume launched a stopped task its front gate holds");
     assert!(err.to_string().contains("still pending"), "{err}");
+}
+
+/// #9850: a `Provisioning` record its front gate denied, whose teardown
+/// failed and whose pane is still live, is never made `Active` by either
+/// adoption path.
+///
+/// Why: boot reconcile re-adopted every live pane as `Active`, and the #9844
+/// hold covered only a pending decision, so a restart put the denied task
+/// back in the fleet as a running session.
+/// What: a deny with a blocked teardown leaves the record `Provisioning` with
+/// a `Denied` answer and a live pane; an explicit `adopt_existing` of that
+/// pane is refused, and `reconcile_on_boot` leaves the record `Provisioning`.
+/// Test: this test; the no-hold control is
+/// `reconcile_still_adopts_a_provisioning_record_its_front_gate_does_not_hold`.
+#[tokio::test]
+async fn reconcile_never_readopts_a_front_gate_denied_record_as_active() {
+    use crate::session_manager::{ManagedError, ManagedTmuxDriver as _};
+
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    block_deny_teardown(&h).await;
+    let out = h.answer(request("no"), |_| async { Ok(()) }).await;
+    assert_eq!(out.status, 500, "{out:?}");
+    let denied = h.record().await;
+    assert_eq!(denied.state, ManagedSessionState::Provisioning);
+    assert!(
+        denied.front_gate_hold().is_some(),
+        "{:?}",
+        denied.last_answer
+    );
+    assert!(
+        h.driver.inner.session_exists(&denied.tmux_name),
+        "pane gone"
+    );
+    let mgr = h.state.session_manager().await;
+
+    let adopted = mgr
+        .adopt_existing(
+            &denied.tmux_name,
+            denied.cwd.clone(),
+            String::new(),
+            crate::runtime::RuntimeKind::default(),
+            false,
+        )
+        .await;
+    assert!(
+        matches!(adopted, Err(ManagedError::AlreadyAdopted(_))),
+        "adopt_existing took the denied pane: {adopted:?}"
+    );
+    assert_eq!(h.record().await.state, ManagedSessionState::Provisioning);
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let after = h.record().await;
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Provisioning,
+        "reconcile re-adopted a front-gate-denied record with a live pane"
+    );
+    assert_eq!(
+        after.last_answer.as_ref().map(|a| a.outcome),
+        Some(AnswerOutcome::Denied)
+    );
+    assert!(mgr.resume_inner(&h.id).await.is_err());
+}
+
+/// #9850 (control): reconcile holds only a `Provisioning` record its front
+/// gate holds. With no decision, or with an approved one, a live pane still
+/// re-adopts `Active`; an off-gate `Active` record with a pending decision
+/// and a gone pane still goes `Stopped`.
+#[tokio::test]
+async fn reconcile_still_adopts_a_provisioning_record_its_front_gate_does_not_hold() {
+    use crate::session_manager::ManagedTmuxDriver as _;
+
+    let never_asked = Harness::new(ManagedSessionState::Provisioning).await;
+    let approved = Harness::new(ManagedSessionState::Provisioning).await;
+    approved.ask().await;
+    let out = approved.answer(request("yes"), |_| async { Ok(()) }).await;
+    assert_eq!(out.status, 200, "{out:?}");
+    assert!(approved.record().await.last_answer.is_some());
+    for h in [&never_asked, &approved] {
+        let before = h.record().await;
+        assert_eq!(before.state, ManagedSessionState::Provisioning);
+        assert!(before.front_gate_hold().is_none(), "{before:?}");
+        let mgr = h.state.session_manager().await;
+        mgr.reconcile_on_boot(false).await.expect("reconcile");
+        assert_eq!(h.record().await.state, ManagedSessionState::Active);
+    }
+
+    let off_gate = Harness::new(ManagedSessionState::Active).await;
+    off_gate.ask().await;
+    let name = off_gate.record().await.tmux_name;
+    off_gate
+        .driver
+        .inner
+        .kill_session(&name)
+        .expect("kill pane");
+    let mgr = off_gate.state.session_manager().await;
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+    assert_eq!(off_gate.record().await.state, ManagedSessionState::Stopped);
 }
 
 /// A relauncher that counts and starts nothing, for the auto-resume path.
