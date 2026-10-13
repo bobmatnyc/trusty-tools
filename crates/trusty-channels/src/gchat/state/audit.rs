@@ -174,9 +174,11 @@ impl AuditLog {
     /// with one `write_all` and one `sync_data`; an empty batch writes
     /// nothing. An encode or I/O failure returns the error and appends
     /// nothing it can avoid; an owner-only log cuts a failed batch back off.
-    /// A crash mid-write can still leave a torn last line.
+    /// A crash mid-write can still leave a torn last line; an owner-only
+    /// append then starts on a line of its own (#8433).
     /// Test: `record_all_appends_every_line`, `owner_only_log_creates_file_0600`,
-    /// `failed_owner_only_append_leaves_no_torn_line`.
+    /// `failed_owner_only_append_leaves_no_torn_line`,
+    /// `append_after_a_left_fragment_starts_on_a_new_line`.
     pub fn record_all(&self, records: &[AuditRecord]) -> Result<(), StateError> {
         if records.is_empty() {
             return Ok(());
@@ -209,6 +211,18 @@ fn append_owner_only(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
 }
 
 /// [`append_owner_only`], writing through `write` (a test's partial write).
+///
+/// Why: #8433: the tm daemon has more than one writer of one audit file; a
+/// failed append's cut-back must never erase another writer's record, and
+/// a torn last line must never swallow the next record.
+/// What: takes an exclusive `flock` right after the open and holds it
+/// through the length read, the write, the fsync and any cut-back; a lock
+/// error returns before anything is written. Under the lock, a non-empty
+/// file whose last byte is not `\n` gets `\n` written ahead of the batch;
+/// the cut-back target stays the length before that `\n`.
+/// Test: `failed_append_does_not_erase_a_concurrent_writers_record`,
+/// `append_after_a_left_fragment_starts_on_a_new_line`,
+/// `failed_owner_only_append_leaves_no_torn_line`.
 #[cfg(unix)]
 pub(crate) fn append_owner_only_with(
     path: &Path,
@@ -219,14 +233,27 @@ pub(crate) fn append_owner_only_with(
     let io = |e: std::io::Error| StateError::io(path, &e);
     let mut file = std::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .mode(0o600)
         .open(path)
         .map_err(io)?;
+    // #8433: hold the lock from the length read through the cut-back, so a
+    // failed append never truncates a concurrent writer's record. It is
+    // released when `file` drops.
+    file.lock().map_err(io)?;
     // #9832: narrow through the open handle, so a swapped path is not chmodded.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(io)?;
     let before = file.metadata().map_err(io)?.len();
+    // #8433: a torn last line keeps its own line; the batch starts on the next.
+    let joined;
+    let bytes = if ends_mid_line(&file, before).map_err(io)? {
+        joined = [b"\n".as_slice(), bytes].concat();
+        joined.as_slice()
+    } else {
+        bytes
+    };
     write(&mut file, bytes)
         .and_then(|()| file.sync_data())
         .map_err(|e| {
@@ -237,6 +264,19 @@ pub(crate) fn append_owner_only_with(
             }
             io(e)
         })
+}
+
+/// True when `file`, `len` bytes long, is non-empty and its last byte is
+/// not `\n` (a torn last line).
+#[cfg(unix)]
+fn ends_mid_line(file: &std::fs::File, len: u64) -> std::io::Result<bool> {
+    use std::os::unix::fs::FileExt as _;
+    let Some(last_at) = len.checked_sub(1) else {
+        return Ok(false);
+    };
+    let mut last = [0u8; 1];
+    file.read_exact_at(&mut last, last_at)?;
+    Ok(last[0] != b'\n')
 }
 
 /// Owner-only modes are a Unix notion; elsewhere this is a plain append.
