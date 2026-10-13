@@ -361,8 +361,9 @@ jobs:
             # #5682 — THIS CRATE DOES BUNDLE ORT. The line that used to sit here
             # ("No ORT bundling (no ONNX in the released binary)") was wrong, and
             # that error is the whole defect. trusty-memory depends on
-            # trusty-common with `features = [... "memory-core" ...]`, and
-            # trusty-common's `memory-core` implies `embedder-bundled-ort` ->
+            # trusty-common with `features = [... "embedder-bundled-ort" ...]`
+            # (named directly since #9271; before that it came through
+            # trusty-common's `memory-core`), and `embedder-bundled-ort` ->
             # `fastembed/ort-download-binaries-native-tls`, which links a
             # prebuilt ONNX Runtime static archive compiled against GNU
             # libstdc++. Under `cargo zigbuild` the link dies on
@@ -373,7 +374,7 @@ jobs:
             #
             # NATIVE_LINUX_LINK is set INDEPENDENTLY of AL2023_VARIANT: this
             # crate needs native GNU-ABI linking, but it exposes no
-            # `load-dynamic` feature path (memory-core hardcodes
+            # `load-dynamic` feature path (its trusty-common dependency hardcodes
             # embedder-bundled-ort), so there is no AL2023 load-dynamic build to
             # publish. Enabling AL2023_VARIANT here would fail the build.
             # An AL2023 variant is a separate follow-up requiring a crate-level
@@ -511,7 +512,7 @@ jobs:
           # Many workspace crates publish to crates.io as LIBRARIES ONLY and have
           # no standalone binary target this workflow can build/package/upload:
           #
-          #   trusty-common      — shared library (thiserror error types, memory-core, …)
+          #   trusty-common      — shared library (thiserror error types, embedder, …)
           #   trusty-embedderd   — binary ships INSIDE trusty-search (#1318)
           #   trusty-progress    — shared progress-reporting library
           #   trusty-agents-common — internal lib (publish=false)
