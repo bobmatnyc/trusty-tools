@@ -94,6 +94,7 @@ pub const DEFAULT_BRIDGE_TIMEOUT_SECS: u64 = 1800;
 /// Why: each arm is a distinct operator action (install kuzu-memory, stop the
 /// daemon, upgrade the store), so each gets its own variant and message.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum KuzuImportError {
     #[error("kuzu-memory interpreter not found: {0}")]
     InterpreterNotFound(String),
