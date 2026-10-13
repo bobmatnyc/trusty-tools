@@ -13,8 +13,6 @@
 //! Test: `cargo test -p trusty-memory --test
 //! kg_graph_tests`.
 
-#![cfg(feature = "memory-core")]
-
 use chrono::Utc;
 use tempfile::tempdir;
 use trusty_memory::engine::store::kg::{KgEdge, KnowledgeGraph, Triple};

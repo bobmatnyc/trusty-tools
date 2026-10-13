@@ -1664,7 +1664,8 @@ fn no_hnsw_insert_writes_to_stdout() {
     let out = std::process::Command::new(exe)
         .args([
             "--exact",
-            "memory_core::store::hnsw_store::tests::stdout_child_crosses_the_hnsw_print_period",
+            // #9271: the test's path in trusty-memory's lib binary.
+            "engine::store::hnsw_store::tests::stdout_child_crosses_the_hnsw_print_period",
             "--nocapture",
             "--test-threads=1",
         ])

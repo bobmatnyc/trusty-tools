@@ -61,8 +61,8 @@ pub fn write_format_1_palace_with(
         .context("write palace.json")?;
     std::fs::write(dir.join("identity.txt"), b"v1 identity").context("write identity.txt")?;
 
-    let db =
-        trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).context("create v1 kg.redb")?;
+    let db = trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb"))
+        .context("create v1 kg.redb")?;
     let wtx = db.begin_write()?;
     {
         let mut drawers = wtx.open_table(DRAWERS)?;

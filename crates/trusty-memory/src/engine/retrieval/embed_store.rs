@@ -9,7 +9,6 @@
 //! drawer has.
 //! Test: `embed_store_tests.rs`.
 
-use trusty_common::embedder::{ChunkTokenizer, TextChunk, chunk_text};
 use crate::engine::embed::Embedder;
 use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
 use crate::engine::timeouts;
@@ -17,6 +16,7 @@ use anyhow::{Context, Result};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+use trusty_common::embedder::{ChunkTokenizer, TextChunk, chunk_text};
 
 /// How one embedder splits drawer text: its window and its tokenizer.
 ///

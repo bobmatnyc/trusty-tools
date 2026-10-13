@@ -16,11 +16,11 @@ use super::palace_format::{
     KG_FILE, PALACE_FORMAT_SUPPORTED, check_format, read_mirror, refuse_foreign_record,
 };
 use super::palace_store::PalaceStoreError;
-use trusty_common::redb_cache::create_palace_db;
 use anyhow::{Context, Result};
 use redb::Database;
 use std::path::Path;
 use std::sync::Arc;
+use trusty_common::redb_cache::create_palace_db;
 
 /// Copy the live redb file at `path` and open the copy, read-only.
 ///

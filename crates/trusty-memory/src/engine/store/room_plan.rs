@@ -43,9 +43,7 @@ impl RoomPlanEntry {
     /// The label this room carries, or would be given.
     pub fn label(&self) -> String {
         match &self.action {
-            RoomPlanAction::Insert { room, .. } => {
-                crate::engine::room_identity::room_label(room)
-            }
+            RoomPlanAction::Insert { room, .. } => crate::engine::room_identity::room_label(room),
             RoomPlanAction::Registered { label, .. } => label.clone(),
         }
     }

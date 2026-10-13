@@ -412,8 +412,8 @@ fn lru_evicts_least_recently_used() {
 #[test]
 fn open_palace_follows_alias() {
     use crate::engine::palace::Palace;
-    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
+    use trusty_common::palace_alias::PalaceAliasStore;
 
     let dir = tempdir().unwrap();
     let data_root = dir.path();
@@ -480,8 +480,8 @@ fn open_palace_ignores_alias_when_target_missing() {
 #[test]
 fn open_palace_prefers_real_palace_over_alias() {
     use crate::engine::palace::Palace;
-    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
+    use trusty_common::palace_alias::PalaceAliasStore;
 
     let dir = tempdir().unwrap();
     let data_root = dir.path();
@@ -521,8 +521,8 @@ fn open_palace_prefers_real_palace_over_alias() {
 #[test]
 fn palace_create_refuses_a_live_alias_name() {
     use crate::engine::palace::Palace;
-    use trusty_common::palace_alias::{LiveAliasError, PalaceAliasStore};
     use chrono::Utc;
+    use trusty_common::palace_alias::{LiveAliasError, PalaceAliasStore};
 
     let dir = tempdir().unwrap();
     let data_root = dir.path();
@@ -1455,9 +1455,9 @@ fn open_error_is_not_absent_for_an_unstattable_palace_json() {
 #[test]
 fn open_error_is_not_absent_for_an_unstattable_alias_target() {
     use crate::engine::palace::Palace;
-    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
     use std::os::unix::fs::PermissionsExt;
+    use trusty_common::palace_alias::PalaceAliasStore;
 
     let dir = tempdir().unwrap();
     let data_root = dir.path();
@@ -1860,8 +1860,8 @@ fn a_writer_registry_never_hydrates_read_only() {
     }
 
     let kg_path = data_root.join(palace_id.as_str()).join("kg.redb");
-    let _holder =
-        trusty_common::redb_cache::create_palace_db(&kg_path).expect("another holder takes kg.redb");
+    let _holder = trusty_common::redb_cache::create_palace_db(&kg_path)
+        .expect("another holder takes kg.redb");
 
     // The daemon's construction today (trusty-mpm core/sm/memory.rs).
     let Ok(registry) = PalaceRegistry::open(data_root) else {

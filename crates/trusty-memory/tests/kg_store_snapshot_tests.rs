@@ -11,8 +11,6 @@
 //! Test: Run with `cargo test -p trusty-memory --test
 //! kg_store_snapshot_tests`.
 
-#![cfg(feature = "memory-core")]
-
 use tempfile::tempdir;
 use trusty_memory::engine::palace::Drawer;
 use trusty_memory::engine::store::kg::Triple;

@@ -13,8 +13,6 @@
 //! Test: `cargo test -p trusty-memory --test
 //! community_tests`.
 
-#![cfg(feature = "memory-core")]
-
 use chrono::Utc;
 use std::collections::HashSet;
 use tempfile::tempdir;

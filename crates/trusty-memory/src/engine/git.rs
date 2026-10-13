@@ -554,8 +554,8 @@ mod tests {
     fn extract_on_real_repo() {
         // Use this repository itself (3+ commits exist); #9298: the running
         // checkout, not the one that built this binary.
-        let repo_path =
-            trusty_common::test_harness::test_repo_root().expect("the running checkout's workspace root");
+        let repo_path = trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root");
         let extractor = GitExtractor::new(repo_path).unwrap();
         let facts = extractor.extract(None, 5).unwrap();
         assert!(!facts.is_empty(), "should extract at least 1 fact");

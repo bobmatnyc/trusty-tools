@@ -1,8 +1,8 @@
 //! Memory-owned image assets, scoped to a palace database and chat session (#7370).
 use super::{ChatMessage, ChatSessionStore};
-use trusty_common::chat_attachments::{Attachment, decode_image, validate_metadata};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
+use trusty_common::chat_attachments::{Attachment, decode_image, validate_metadata};
 
 // #9282: crate-visible so a palace snapshot can copy this table.
 pub(crate) const ASSETS: TableDefinition<&str, &[u8]> = TableDefinition::new("chat_image_assets");

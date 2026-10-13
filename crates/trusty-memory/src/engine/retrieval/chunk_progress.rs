@@ -10,12 +10,12 @@
 //! Test: `chunk_backfill_tests`.
 
 use super::embed_repair::EmbedHealth;
-use trusty_common::json_rmw;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use trusty_common::json_rmw;
 use uuid::Uuid;
 
 /// File name of the advisory marker inside a palace's data directory.

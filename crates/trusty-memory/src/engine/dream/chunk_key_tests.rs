@@ -282,7 +282,10 @@ impl crate::engine::embed::Embedder for SlowSecondCall {
     }
     fn chunking_tokenizer(
         &self,
-    ) -> Result<Option<Arc<trusty_common::embedder::ChunkTokenizer>>, trusty_common::embedder::ChunkError> {
+    ) -> Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
         self.inner.chunking_tokenizer()
     }
 }
@@ -301,8 +304,7 @@ async fn rebuild_index_keeps_every_chunk_of_a_long_drawer() {
     let before = (shape(&handle, long), shape(&handle, short));
     assert_eq!(before, (Some((k, (k - 1) as u32)), Some((1, 0))));
 
-    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
-        Arc::new(chunking_mock(&handle));
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> = Arc::new(chunking_mock(&handle));
     let rebuilt = super::helpers::rebuild_index_with(
         &handle,
         Some(&e),
@@ -432,7 +434,10 @@ impl crate::engine::embed::Embedder for BrokenTokenizer {
     }
     fn chunking_tokenizer(
         &self,
-    ) -> Result<Option<Arc<trusty_common::embedder::ChunkTokenizer>>, trusty_common::embedder::ChunkError> {
+    ) -> Result<
+        Option<Arc<trusty_common::embedder::ChunkTokenizer>>,
+        trusty_common::embedder::ChunkError,
+    > {
         Err(trusty_common::embedder::ChunkError::TokenizerMissing {
             path: "/nonexistent/tokenizer.json".into(),
         })
@@ -458,8 +463,7 @@ async fn a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest() {
     }
     assert_ne!(handle.drawers.read().last().map(|d| d.id), Some(bad));
 
-    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
-        Arc::new(chunking_mock(&handle));
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> = Arc::new(chunking_mock(&handle));
     let report = super::helpers::rebuild_index_with(
         &handle,
         Some(&e),

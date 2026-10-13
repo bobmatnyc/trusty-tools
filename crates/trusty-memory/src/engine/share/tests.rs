@@ -989,9 +989,9 @@ async fn an_embedder_failure_during_import_writes_nothing_durably() {
 /// Test: itself.
 #[tokio::test]
 async fn import_writes_chunk_rows_for_a_long_shared_record() {
-    use trusty_common::embedder::{MockEmbedder, chunk_text};
     use crate::engine::embed::Embedder;
     use crate::engine::share::import::import_palace_records_with_embedder;
+    use trusty_common::embedder::{MockEmbedder, chunk_text};
 
     let tmp = tempdir().unwrap();
     let src = open_palace(tmp.path(), "chunk-src");

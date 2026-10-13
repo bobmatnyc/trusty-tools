@@ -843,8 +843,8 @@ async fn a_cycle_that_fails_after_a_merge_still_calls_the_hook() {
 #[tokio::test]
 async fn dream_never_merges_a_split_part() {
     use super::helpers::{MERGE_MAX_BYTES, persist_merge};
-    use trusty_common::embedder::MockEmbedder;
     use crate::engine::retrieval::SliceBounds;
+    use trusty_common::embedder::MockEmbedder;
     let dir = tempdir().unwrap();
     let handle = open(&palace_in(&dir, "split-no-merge"));
     // 4097 chunks at the window-12 mock: four 1024-chunk parts and one tail

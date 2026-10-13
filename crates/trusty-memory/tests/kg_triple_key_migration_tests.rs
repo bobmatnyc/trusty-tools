@@ -11,8 +11,6 @@
 //! Test: `cargo test -p trusty-memory --test
 //! kg_triple_key_migration_tests -- --include-ignored`.
 
-#![cfg(feature = "memory-core")]
-
 use tempfile::tempdir;
 use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::engine::retrieval::PalaceHandle;

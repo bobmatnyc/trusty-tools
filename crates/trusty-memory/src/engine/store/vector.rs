@@ -746,10 +746,7 @@ impl UsearchStore {
 
     /// #9487 test hook; see [`HnswStore::set_op_park`].
     #[cfg(any(test, feature = "embedder-test-support"))]
-    pub fn set_hnsw_op_park(
-        &self,
-        park: Option<Arc<crate::engine::store::hnsw_store::OpPark>>,
-    ) {
+    pub fn set_hnsw_op_park(&self, park: Option<Arc<crate::engine::store::hnsw_store::OpPark>>) {
         self.inner.set_op_park(park);
     }
 

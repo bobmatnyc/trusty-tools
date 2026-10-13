@@ -45,14 +45,12 @@ mod tests {
     /// `SHARED_EMBEDDER` cell — run with `--include-ignored` in isolation.
     #[tokio::test]
     #[ignore = "mutates process-wide OnceCell; run in isolation with --include-ignored"]
-    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn timeout_fires_on_embedder_init_with_tiny_limit() {
         // #5937: the default-value readers in `timeouts.rs` hold this lock.
-        let _env = trusty_common::data_dir::ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // #9271: the lib target's one env lock, now trusty-memory's.
+        let _env = crate::env_test_lock::env_test_lock().lock().await;
         // Force a 0-second timeout so the init times out before it can succeed.
-        // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+        // SAFETY: serialised by `env_test_lock`, held above for the whole test.
         unsafe {
             std::env::set_var("TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS", "0");
         }
@@ -119,12 +117,10 @@ mod tests {
     /// `WriteTimeout::LockWait` (#8749).
     /// Test: itself.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn write_lock_timeout_returns_error_when_held() {
         // #5937: the default-value readers in `timeouts.rs` hold this lock.
-        let _env = trusty_common::data_dir::ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // #9271: the lib target's one env lock, now trusty-memory's.
+        let _env = crate::env_test_lock::env_test_lock().lock().await;
         crate::engine::retrieval::seed_shared_embedder_with_mock();
 
         let dir = tempdir().unwrap();

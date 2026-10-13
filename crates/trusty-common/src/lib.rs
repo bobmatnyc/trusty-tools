@@ -40,7 +40,7 @@
 //
 // Why: this crate declares `default = []`. The bare crate-scoped command that
 // CLAUDE.md prescribes as the per-crate check therefore runs 328 of the crate's
-// ~2062 tests and exits 0 — including when a file in `memory_core` does not
+// ~2062 tests and exits 0 — including when a feature-gated file does not
 // compile at all, which is how PR #4899 reported a green gate before the
 // correct code existed. CI only reaches those modules through `--workspace`
 // feature unification, so the local green is the one that lies.
@@ -51,18 +51,17 @@
 // visible choice and still builds.
 // Test: the `trusty_common_build_script_ran` guard below covers the one way
 // this could go quiet unnoticed — `build.rs` no longer running. The guard's own
-// behaviour is demonstrated by breaking a `memory_core` file and re-running both
+// behaviour is demonstrated by breaking a feature-gated file and re-running both
 // command forms (PR for #4901).
 #[cfg(all(test, trusty_common_no_features))]
 compile_error!(
     "`cargo test -p trusty-common` ran with NO features enabled, and this crate's \
      `default` feature set is empty. That build compiles none of the feature-gated \
-     modules (memory_core, embedder, uds, sld, symgraph, bm25, migrations, …): it \
+     modules (embedder, uds, sld, symgraph, bm25, migrations, …): it \
      runs 328 of the crate's ~2062 tests and reports success over the rest — \
-     including over a memory_core file that does not compile (#4901). \
+     including over a gated file that does not compile (#4901). \
      Name the gate you actually want: \
-     `--features memory-core,embedder-test-support` for memory_core, \
-     `--features <feature>` for any other gated module, or \
+     `--features <feature>` for a gated module, or \
      `--features unconditional-only` to test just the always-compiled surface."
 );
 
@@ -580,23 +579,8 @@ pub mod migrations;
 #[cfg(feature = "symgraph")]
 pub mod symgraph;
 
-/// Memory Palace storage engine (formerly the `trusty-memory-core` crate).
-///
-/// Why: Centralises the Memory Palace data model (`Palace` -> `Wing` ->
-/// `Room` -> `Drawer`; "closet" is the keyword -> drawer-ids inverted index,
-/// not a level — ADR-0027 D3), storage backends (usearch vector index + SQLite
-/// knowledge graph + chat-session log + payload store), retrieval handle,
-/// and the dream / decay / analytics / git-history surfaces so every
-/// trusty-* binary that talks to a palace reuses the same types. Absorbed
-/// into `trusty-common` (issue #5 phase 2d) so we ship one fewer published
-/// crate.
-/// What: Gated behind the `memory-core` feature because it pulls in heavy
-/// storage deps (`usearch`, `rusqlite`, `r2d2`, `git2`). Enables
-/// the embedder surface automatically (memory-core → embedder).
-/// Test: `cargo test -p trusty-common --features memory-core` exercises
-/// the full surface.
-#[cfg(feature = "memory-core")]
-pub mod memory_core;
+// #9271: the Memory Palace engine moved to `trusty_memory::engine`; the
+// `memory-core` feature is a no-op kept for compatibility.
 
 /// Unified ticketing MCP server (formerly the `trusty-tickets` crate).
 ///

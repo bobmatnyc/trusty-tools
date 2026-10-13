@@ -23,7 +23,9 @@ use crate::engine::palace_emptiness::{
 };
 use crate::engine::store::palace_format::mirror_to_preserve;
 use crate::engine::store::palace_store::PalaceStore;
-use trusty_common::palace_alias::{AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent};
+use trusty_common::palace_alias::{
+    AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent,
+};
 
 /// Default bound on waiting for an open-lock or for a cached handle to go idle.
 pub const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);

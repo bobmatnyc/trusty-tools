@@ -1,7 +1,6 @@
 use super::guard::CompactionGuard;
 use super::helpers::{MERGE_MAX_BYTES, char_safe_prefix, merged_drawer, now_secs};
 use super::*;
-use trusty_common::credentials::env_guard::EnvVarGuard;
 use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
 use crate::engine::store::vector::VectorStore;
@@ -11,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
+use trusty_common::credentials::env_guard::EnvVarGuard;
 use uuid::Uuid;
 
 /// Why: Lock the default config values so accidental changes are caught.
@@ -2338,9 +2338,7 @@ async fn remember_racing_dream_rebuild_never_loses_a_vector() {
 /// the only way to place them behind the age gate, and it uses the exact key
 /// shape `close_active_row` writes.
 fn seed_stale_history(handle: &Arc<PalaceHandle>, count: usize, age_days: i64) {
-    use crate::engine::store::kg_store::{
-        TRIPLES, TripleValue, encode_triple_key, encode_value,
-    };
+    use crate::engine::store::kg_store::{TRIPLES, TripleValue, encode_triple_key, encode_value};
 
     let closed_ms = Utc::now().timestamp_millis() - age_days * 86_400_000;
     let store = handle.kg.redb_store();

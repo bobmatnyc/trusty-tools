@@ -12,8 +12,8 @@
 //! `memory_core::store` re-exports — resolves exactly as before. There is no
 //! second implementation here; this file is the alias and nothing else.
 //!
-//! Test: the behaviour is pinned by `trusty_common::redb_open`'s tests, notably
-//! `classifier_pins_the_four_recoverable_arms`.
+//! Test: the behaviour is pinned by trusty-common's own tests, in
+//! `crates/trusty-common/src/redb_open.rs` (#9271: a separate crate now).
 
 // #5063: one classifier for the whole workspace. Adding an implementation back
 // into this file re-creates the duplication the issue closed.

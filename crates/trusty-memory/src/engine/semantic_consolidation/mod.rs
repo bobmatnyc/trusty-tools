@@ -29,9 +29,9 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trusty_common::credentials::env_guard::EnvVarGuard;
     use crate::engine::palace::Drawer;
     use std::sync::Arc;
+    use trusty_common::credentials::env_guard::EnvVarGuard;
     use uuid::Uuid;
 
     fn make_drawer(content: &str, importance: f32) -> Drawer {

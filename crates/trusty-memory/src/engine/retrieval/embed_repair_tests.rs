@@ -21,7 +21,6 @@ use super::embed_repair::{
 };
 use super::embedder::seed_shared_embedder_with_mock;
 use super::handle::PalaceHandle;
-use trusty_common::embedder::MockEmbedder;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, PalaceId};
 use crate::engine::store::embed_ledger::{self, EmbedFailure};
@@ -30,6 +29,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use trusty_common::embedder::MockEmbedder;
 use uuid::Uuid;
 
 /// Embedder that fails its first `fail_times` calls, then behaves like the

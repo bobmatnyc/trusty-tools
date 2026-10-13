@@ -51,12 +51,12 @@
 //! `concurrent_ledger_records_keep_every_row`,
 //! `concurrent_clear_and_record_do_not_lose_each_other`.
 
-use trusty_common::json_rmw;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use trusty_common::json_rmw;
 use uuid::Uuid;
 
 /// Ledger filename inside a palace's data directory.

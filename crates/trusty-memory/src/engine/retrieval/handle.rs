@@ -556,11 +556,7 @@ impl PalaceHandle {
             0
         };
         // #8732: `warn`, so the purge shows at the daemon's default filter.
-        crate::engine::maintenance_log::warn_removed(
-            &palace.id,
-            "open-time TTL purge",
-            pruned,
-        );
+        crate::engine::maintenance_log::warn_removed(&palace.id, "open-time TTL purge", pruned);
 
         // Surface orphaned vectors so operators can re-ingest if needed.
         // #9275: a chunked drawer's rows count once; see `entry_count`.

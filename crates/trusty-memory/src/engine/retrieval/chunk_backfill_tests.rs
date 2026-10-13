@@ -11,7 +11,6 @@ use super::chunk_health::{ChunkCheck, Sightings, first_sighting};
 use super::chunk_progress::{CHUNK_MARKER_FILE, ChunkMarker, ChunkState};
 use super::embed_store_tests::{Counting, DIM, NoTokenizer, handle, shape, words};
 use super::handle::PalaceHandle;
-use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, PalaceId};
 use crate::engine::store::embed_ledger::{self, EmbedFailure};
@@ -23,6 +22,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use uuid::Uuid;
 
 const WINDOW: usize = 12;
@@ -147,13 +147,6 @@ fn unexpiring() -> SliceBounds {
         budget: Duration::MAX,
         ..bounds()
     }
-}
-
-/// #9735: every env-mutating test here holds the lib target's one env lock.
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    trusty_common::data_dir::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn ledger_ids(dir: &std::path::Path) -> Vec<Uuid> {
@@ -699,8 +692,9 @@ async fn missing_vector_drawer_younger_than_two_minutes_is_skipped() {
 
 #[test]
 fn slice_bounds_read_their_env_overrides() {
-    let _env = env_lock();
-    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    // #9271: the lib target's one env lock (#9735), now trusty-memory's.
+    let _env = crate::env_test_lock::env_test_lock().blocking_lock();
+    // SAFETY: serialised by `env_test_lock`, held above for the whole test.
     unsafe {
         std::env::set_var("TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS", "7");
         std::env::set_var("TRUSTY_CHUNK_BACKFILL_EMBED_SECS", "not-a-number");
@@ -868,15 +862,15 @@ async fn backfill_embed_and_retry_sleeps_run_outside_write_mutex() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
 async fn backfill_lock_timeout_returns_an_error_naming_the_palace() {
-    let _env = env_lock();
+    // #9271: the lib target's one env lock (#9735), now trusty-memory's.
+    let _env = crate::env_test_lock::env_test_lock().lock().await;
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let id = legacy(&h, &words(100), 0.5).await;
     let m = h.write_mutex_for_test();
     let held = m.lock().await;
-    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    // SAFETY: serialised by `env_test_lock`, held above for the whole test.
     unsafe { std::env::set_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", "0") };
     let result = h
         .backfill_with(backfill_opts(1, Duration::ZERO), &chunking())
@@ -1035,9 +1029,9 @@ impl Embedder for NthGate {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
 async fn backfill_lock_timeout_clears_the_repaired_rows_first() {
-    let _env = env_lock();
+    // #9271: the lib target's one env lock (#9735), now trusty-memory's.
+    let _env = crate::env_test_lock::env_test_lock().lock().await;
     let dir = tempfile::tempdir().unwrap();
     let h = handle(dir.path());
     let ids = [
@@ -1056,7 +1050,7 @@ async fn backfill_lock_timeout_clears_the_repaired_rows_first() {
         release: release.clone(),
     });
     let m = h.write_mutex_for_test();
-    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    // SAFETY: serialised by `env_test_lock`, held above for the whole test.
     unsafe { std::env::set_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", "1") };
     let (result, _held) = tokio::join!(
         h.backfill_with(backfill_opts(1, Duration::ZERO), &e),

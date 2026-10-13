@@ -650,12 +650,12 @@ mod tests {
 
     /// Serialises tests that read the real env so they cannot interleave.
     ///
-    /// #5937: the crate-wide [`trusty_common::data_dir::ENV_LOCK`], so the writers in
+    /// #5937: the lib target's one env lock, so the writers in
     /// `retrieval/timeout_tests.rs` exclude these readers.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        trusty_common::data_dir::ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    // #9271: trusty-memory's `env_test_lock` (a tokio Mutex) replaces
+    // trusty-common's `data_dir::ENV_LOCK`; every caller is a sync `#[test]`.
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::env_test_lock::env_test_lock().blocking_lock()
     }
 
     /// Why: Guard that the default is 180 s when the env var is absent.

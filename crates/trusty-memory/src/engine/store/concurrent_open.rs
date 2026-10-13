@@ -24,11 +24,11 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
-use trusty_common::redb_cache::create_palace_db;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use trusty_common::redb_cache::create_palace_db;
 
 /// Whether the caller intends to write to the palace redb file.
 ///

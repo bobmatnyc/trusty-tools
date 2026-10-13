@@ -238,12 +238,16 @@ pub(crate) fn append(data_dir: &Path, rec: &MaintenanceDeletion, rotate_at: u64)
     let path = journal_path(data_dir);
     let mut line = serde_json::to_string(rec).context("serialize maintenance deletion")?;
     line.push('\n');
-    let locked = trusty_common::file_lock::with_exclusive_lock_timeout(&path, JOURNAL_LOCK_TIMEOUT, || {
-        if let Err(e) = rotate_if_due(data_dir, &path, rotate_at) {
-            tracing::warn!(palace = %rec.palace, "#8732: journal rotation failed; appending to the live file: {e:#}");
-        }
-        append_line(&path, &line)
-    });
+    let locked = trusty_common::file_lock::with_exclusive_lock_timeout(
+        &path,
+        JOURNAL_LOCK_TIMEOUT,
+        || {
+            if let Err(e) = rotate_if_due(data_dir, &path, rotate_at) {
+                tracing::warn!(palace = %rec.palace, "#8732: journal rotation failed; appending to the live file: {e:#}");
+            }
+            append_line(&path, &line)
+        },
+    );
     match locked {
         Ok(appended) => appended,
         Err(e) => {

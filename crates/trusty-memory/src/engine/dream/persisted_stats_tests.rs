@@ -47,7 +47,8 @@ fn failed_dream_stats_save_keeps_the_prior_snapshot() {
     let path = dir.path().join(PersistedDreamStats::FILE_NAME);
     snapshot(7).save(dir.path()).expect("seed save");
     let before = std::fs::read(&path).expect("read seed");
-    let Some(read_only) = trusty_common::atomic_file::test_support::ReadOnlyDir::new(dir.path()) else {
+    let Some(read_only) = trusty_common::atomic_file::test_support::ReadOnlyDir::new(dir.path())
+    else {
         return;
     };
 

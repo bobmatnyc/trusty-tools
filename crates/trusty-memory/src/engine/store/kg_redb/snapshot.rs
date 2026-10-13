@@ -24,9 +24,7 @@
 
 use super::copy_tables::{BYTE_TABLES, STR_TABLES, copy_all, copy_str_table, known_table_names};
 use super::store::KgStoreRedb;
-use crate::engine::maintenance_log::{
-    MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME,
-};
+use crate::engine::maintenance_log::{MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME};
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::chat_sessions::{CHAT_ASSETS_TABLE, ChatSessionStore};
 use crate::engine::store::kg_store::SESSIONS;
@@ -178,7 +176,8 @@ pub struct SnapshotManifest {
     pub palace: String,
     /// When the redb read transactions were opened.
     pub taken_at: DateTime<Utc>,
-    /// trusty-common version that wrote the snapshot.
+    /// trusty-memory version that wrote the snapshot (trusty-common's before
+    /// #9271 moved the engine).
     pub writer_version: String,
     /// `kg_schema.palace_format` of the copy; `None` for a fresh KG.
     pub palace_format: Option<u32>,
@@ -332,6 +331,7 @@ pub(crate) fn snapshot_palace(
         kind: SNAPSHOT_KIND.to_string(),
         palace,
         taken_at,
+        // #9271: now trusty-memory's version, the number `--version` prints.
         writer_version: env!("CARGO_PKG_VERSION").to_string(),
         palace_format,
         drawer_count: kg_tables.get("drawers").copied().unwrap_or(0),
@@ -378,7 +378,8 @@ fn snapshot_kg(
         .collect();
     let expected = table_counts(&rtx, &src, &names)?;
     hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
-    let copy = trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    let copy =
+        trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
     copy_all(&rtx, &copy, None).map_err(redb_err("copy into", dest))?;
     drop(rtx);
     let counts = verify_counts(&copy, dest, &names, &expected)?;
@@ -420,7 +421,8 @@ fn snapshot_chat(
     guard_tables(&rtx, &src, &names)?;
     let expected = table_counts(&rtx, &src, &names)?;
     hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
-    let copy = trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    let copy =
+        trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
     let mut counts = Default::default();
     for def in defs {
         copy_str_table(&rtx, &copy, def, &mut counts).map_err(redb_err("copy into", dest))?;

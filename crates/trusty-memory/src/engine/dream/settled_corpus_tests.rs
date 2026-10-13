@@ -15,7 +15,6 @@
 use super::config::DreamConfig;
 use super::dreamer::Dreamer;
 use super::settled;
-use trusty_common::embedder::MockEmbedder;
 use crate::engine::PalaceRegistry;
 use crate::engine::embed::{EMBED_DIM, Embedder};
 use crate::engine::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
@@ -33,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tempfile::tempdir;
+use trusty_common::embedder::MockEmbedder;
 
 /// An [`Embedder`] that counts its `embed_batch` calls.
 struct CountingEmbedder {

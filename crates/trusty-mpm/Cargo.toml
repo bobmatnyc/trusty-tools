@@ -232,7 +232,7 @@ slack = ["dep:tokio-tungstenite", "dep:futures-util"]
 bedrock = ["trusty-common/bedrock-client"]
 
 # `sm-memory` gates the Session Manager's dedicated memory palace (SM-4, DOC-14
-# §8). NOT in `default`: it turns on `trusty-common/memory-core`, which pulls the
+# §8). NOT in `default`: it turns on trusty-memory, which pulls the
 # heavy Memory Palace storage engine (usearch/hnsw_rs HNSW vector index, redb +
 # postcard stores, git2, and the bundled-ORT FastEmbedder). Keeping it opt-in
 # means a `--no-default-features` build — and even the default daemon build —
@@ -241,33 +241,43 @@ bedrock = ["trusty-common/bedrock-client"]
 # sm-memory`. The `core::sm::memory` module is compiled only under this flag.
 #
 # Production hygiene (SM-4 review): this feature deliberately does NOT enable
-# `trusty-common/embedder-test-support`. That test double (and its
+# the engine's `embedder-test-support`. That test double (and its
 # `seed_shared_embedder_with_mock` seam) must never link into a production
 # `--features sm-memory` build. The SM-4 unit tests still need the mock
-# embedder to run without the ONNX model, so the test-support feature is wired
-# in via `[dev-dependencies]` below — Cargo unifies dev-dependency features only
-# for test/bench/example builds, so `cargo test` gets the mock while a plain
-# `cargo build --features sm-memory` does not.
+# embedder to run without the ONNX model; `memory-test-support` below supplies
+# it.
 #
 # #9270: the code reaches the engine as `trusty_memory::engine`, so the feature
-# also turns on the optional `trusty-memory` edge (`dep:` keeps it from becoming
-# an implicit feature). `trusty-common/memory-core` stays listed so the feature
-# does not depend on trusty-memory enabling it transitively.
-sm-memory = ["trusty-common/memory-core", "dep:trusty-memory"]
+# turns on the optional `trusty-memory` edge (`dep:` keeps it from becoming an
+# implicit feature). #9271: the engine lives in trusty-memory now, so that edge
+# is the whole feature.
+sm-memory = ["dep:trusty-memory"]
 
 # `manager-memory` gates the Layer-3 `tm manager` PORTFOLIO memory palace (WI-5,
 # #2582, DOC-36 §3.4) — a single portfolio-scoped `trusty-memory` palace holding
 # digest history, escalation dispositions, and portfolio chat turns, distinct
 # from the SM palace and every per-project palace. Like `sm-memory` it is NOT in
-# `default`: it turns on `trusty-common/memory-core` (the heavy HNSW/ONNX Memory
-# Palace engine), so a default daemon build pays no ONNX/usearch cost. Without
+# `default`: it turns on trusty-memory (the heavy HNSW/ONNX Memory Palace
+# engine), so a default daemon build pays no ONNX/usearch cost. Without
 # this feature the portfolio palace reports "unavailable" and the manager surface
 # still works (DOC-36 §4 degrade bar). The `daemon::manager::memory` live binding
-# is compiled only under this flag. Build/test with `--features manager-memory`;
-# the `embedder-test-support` dev-dependency below supplies the mock embedder so
-# `cargo test --features manager-memory` runs without the ONNX model.
+# is compiled only under this flag. Build with `--features manager-memory`; test
+# with `--features manager-memory,memory-test-support` so the mock embedder
+# runs in place of the ONNX model.
 # #9270: the optional `trusty-memory` edge, as for `sm-memory` above.
-manager-memory = ["trusty-common/memory-core", "dep:trusty-memory"]
+manager-memory = ["dep:trusty-memory"]
+
+# #9271: the engine's test seams — the mock embedder
+# (`seed_shared_embedder_with_mock`) and the format-0/format-1 palace fixtures.
+# They used to arrive through trusty-common dev-dependency features; they are
+# trusty-memory features now, and a dev-dependency on trusty-memory would put
+# the engine and ONNX into a plain `cargo test -p trusty-mpm`. The `?` keeps
+# this feature from turning trusty-memory on by itself: pair it with
+# `sm-memory` and/or `manager-memory`, as CI does. Never in a production build.
+memory-test-support = [
+    "trusty-memory?/embedder-test-support",
+    "trusty-memory?/memory-core-test-support",
+]
 
 # ── Library ────────────────────────────────────────────────────────────────────
 [lib]
@@ -422,12 +432,12 @@ trusty-secrets = { workspace = true, features = ["server"] }
 # #8454 S2c: `tm doctor` loads the channel route policy read-only.
 trusty-channels = { workspace = true, optional = true }
 # #9270: the memory engine's stable path, `trusty_memory::engine`. OPTIONAL and
-# enabled only by `sm-memory` / `manager-memory`: trusty-memory always turns on
-# `trusty-common/memory-core` (usearch + ONNX Runtime), and a default trusty-mpm
+# enabled only by `sm-memory` / `manager-memory`: trusty-memory always carries
+# the engine (hnsw_rs + ONNX Runtime), and a default trusty-mpm
 # build must not compile it (owner ruling 2026-09-27). `default-features = false`
 # drops trusty-memory's `server` surface. `scripts/check_engine_import_path.sh
 # --dep-graph` proves both halves from the resolved graph.
-trusty-memory = { path = "../trusty-memory", version = "0.35", default-features = false, optional = true }
+trusty-memory = { path = "../trusty-memory", version = "0.36", default-features = false, optional = true }
 # #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
 # unrelated keys; already in this crate's graph through trusty-common.
 toml_edit.workspace = true
@@ -531,16 +541,11 @@ nix = { version = "0.29", features = ["fs", "signal", "user"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]
-# Re-declare trusty-common with `embedder-test-support` (SM-4 review): Cargo
-# merges dev-dependency features ONLY for test/bench/example builds, so this
-# turns on the mock-embedder seam (`seed_shared_embedder_with_mock`) for
-# `cargo test --features sm-memory` WITHOUT leaking it into a production
-# `cargo build --features sm-memory`. `memory-core` is NOT listed: it pulls
-# ONNX (ort/ort-sys), and a default `cargo test -p trusty-mpm` must not compile
-# it (owner ruling 2026-09-27). `embedder-test-support` alone compiles nothing;
-# the mock appears only once `sm-memory` / `manager-memory` add memory-core.
+# Re-declare trusty-common with test-only features: Cargo merges
+# dev-dependency features ONLY for test/bench/example builds, so none of them
+# leaks into a production build. #9271: the engine's mock embedder and palace
+# fixtures are `memory-test-support` above, not trusty-common features.
 trusty-common = { workspace = true, features = [
-    "embedder-test-support",
     # #2584 (DOC-36 §4): the hermetic manager CI suite drives the digest/chat
     # routes with `ScriptedAdapter` and, for real HTTP-client mechanics,
     # `test_support::MockInferenceServer` — the latter is gated behind
@@ -552,9 +557,6 @@ trusty-common = { workspace = true, features = [
     # #9123: the shared credential test sandbox; mutates the process
     # environment, so dev-only.
     "credential-test-sandbox",
-    # #9274: the format-0 palace fixture the SM and portfolio migration tests
-    # build; compiles nothing until `sm-memory` / `manager-memory` add memory-core.
-    "memory-core-test-support",
 ] }
 # #8341: the `trusty-review` dev-dependency was REMOVED. It existed for the
 # cross-gate AC-18 golden test (DOC-15 C5 / #1362), which now lives in

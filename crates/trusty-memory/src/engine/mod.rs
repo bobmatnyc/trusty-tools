@@ -1,17 +1,14 @@
 //! Memory Palace core types, storage, and retrieval (formerly the
-//! `trusty-memory-core` crate).
+//! `trusty-memory-core` crate, then `trusty_common::memory_core`).
 //!
 //! Why: Centralises the Memory Palace data model and storage abstractions
 //! so every binary (CLI, MCP server, embedded library) reuses the same
-//! types. Absorbed into `trusty-common` (issue #5 phase 2d) so the trusty-*
-//! toolchain links a single internal library and we ship one fewer
-//! published crate.
+//! types. #9271 moved it from trusty-common into trusty-memory, its owner.
 //! What: Re-exports the palace hierarchy (`Palace` -> `Wing` -> `Room` ->
 //! `Drawer`), the registry, and the retrieval handle. "Closet" is not a level
 //! in that hierarchy — it is the keyword -> drawer-ids inverted index on
-//! `PalaceHandle` (ADR-0027 D3). Gated behind the
-//! `memory-core` feature because it pulls in heavy storage deps
-//! (`usearch`, `redb`, `postcard`, `tiktoken-rs`, `git2`).
+//! `PalaceHandle` (ADR-0027 D3). Compiled under every trusty-memory feature
+//! set (ADR-0066 D1.4).
 //! Test: Each submodule keeps its existing unit tests; `cargo test -p
 //! trusty-memory` exercises the full surface.
 

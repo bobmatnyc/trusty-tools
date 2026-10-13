@@ -2445,8 +2445,8 @@ async fn unscoped_write_still_lands_in_the_default_wing() {
         .find(|d| d.id == id)
         .cloned()
         .expect("stored");
-    let scoped = crate::engine::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID)
-        .expect("scope");
+    let scoped =
+        crate::engine::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID).expect("scope");
     assert!(
         scoped.contains(&drawer.room_id),
         "a wing-less write must land in the default wing"

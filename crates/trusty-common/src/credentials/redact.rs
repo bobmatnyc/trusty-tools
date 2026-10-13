@@ -16,8 +16,8 @@
 //! fully masked (`…({N} chars)`, no head shown) rather than echoed in full —
 //! hardened per issue #2475, which caught the original implementation
 //! disclosing the entire value for any secret of 4 characters or fewer.
-//! Test: `redact_tests` (sibling file, this module) and
-//! `memory_core::filter_tests::redact_token_masks_tail` (format stability).
+//! Test: `redact_tests` (sibling file, this module), and format stability in
+//! trusty-memory's `crates/trusty-memory/src/engine/filter_tests.rs` (#9271).
 //!
 //! Two shapes live here, for two different jobs. [`redact_secret`] masks a
 //! value you are deliberately naming (`config keys list` printing which

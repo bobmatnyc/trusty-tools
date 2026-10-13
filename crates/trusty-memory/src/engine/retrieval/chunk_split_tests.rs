@@ -13,7 +13,6 @@ use super::chunk_backfill::{SliceBounds, SliceReport, SliceStop};
 use super::embed_store_tests::{Counting, DIM, chunks_at, handle, shape, words};
 use super::handle::PalaceHandle;
 use super::types::ForgetOutcome;
-use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use crate::engine::embed::Embedder;
 use crate::engine::maintenance_log::{DeletionReason, read_journal};
 use crate::engine::palace::{Drawer, Palace, PalaceId};
@@ -28,6 +27,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
 use uuid::Uuid;
 
 const WINDOW: usize = 12;

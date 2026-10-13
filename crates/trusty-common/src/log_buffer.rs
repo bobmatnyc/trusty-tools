@@ -129,7 +129,7 @@ impl LogBuffer {
     /// What: drains the deque under the same poison-tolerant lock as
     /// [`LogBuffer::push`].
     /// Test: `capture_logs_sees_events_from_the_body_only`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn take(&self) -> Vec<String> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -256,7 +256,7 @@ impl<S: tracing::Subscriber> Layer<S> for LogBufferLayer {
 /// the default of whichever thread reaches it first, so a test with no subscriber
 /// could cache "never" for a line the capturing test is about to assert on
 /// (#8284).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>, tracing::Dispatch)> =
     std::sync::LazyLock::new(|| {
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -281,8 +281,8 @@ static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>, tr
 /// ordinary assertion instead of something only a human reading logs would
 /// notice. It lives here, beside the buffer it drives, so the modules under test
 /// share one capture rather than each growing a copy.
-/// What: takes [`CAPTURE`]'s lock, empties its buffer, runs `body` with
-/// [`CAPTURE`]'s dispatcher as this thread's default, and returns `body`'s value
+/// What: takes `CAPTURE`'s lock, empties its buffer, runs `body` with
+/// `CAPTURE`'s dispatcher as this thread's default, and returns `body`'s value
 /// with everything the buffer collected, oldest first. Only the locked thread
 /// has that dispatcher as its default, so nothing another test logs concurrently
 /// reaches these lines. A panicking `body` poisons the lock and the next caller
@@ -292,8 +292,9 @@ static CAPTURE: std::sync::LazyLock<(tracing::Dispatch, LogBuffer, Mutex<()>, tr
 /// an_unrecoverable_refusal_still_warns,
 /// an_unanswered_create_the_registry_confirms_emits_no_warning}` and
 /// `search_index_confirm.rs::an_exhausted_confirm_deadline_is_still_a_warning`.
-#[cfg(test)]
-pub(crate) fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+// #9271: `test-support` exposes it to the engine's tests in trusty-memory.
+#[cfg(any(test, feature = "test-support"))]
+pub fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
     let (dispatch, buffer, lock, _companion) = &*CAPTURE;
     let _held = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // #8284: re-derive any interest another thread cached while `CAPTURE` was

@@ -3,8 +3,8 @@
 //!
 //! Why: #5937's hang was a race between a test that set an env var and a test
 //! that read it under a different lock. This crate's one env lock is
-//! `commands::env_test_lock()` (#7995); `messaging`'s `palace_env_lock()`
-//! wraps it. A `#[serial]` group or a private mutex excludes nothing of it.
+//! `env_test_lock::env_test_lock()` (#7995; out of `commands` since #9271,
+//! which re-exports it); `messaging`'s `palace_env_lock()` wraps it. A `#[serial]` group or a private mutex excludes nothing of it.
 //! What: over `src/**` test code, a file that calls `set_var`, `remove_var` or
 //! `set_current_dir` must call `env_test_lock()` through a path
 //! (`crate::commands::env_test_lock()`, `super::super::env_test_lock()`), or
@@ -34,6 +34,11 @@ const WRITERS_WITHOUT_ENV_TEST_LOCK: &[(&str, &str)] = &[
     ("src/test_daemon.rs", SKIP_ENFORCEMENT_1),
     ("src/tools/tests.rs", SKIP_ENFORCEMENT_1),
     ("src/transport/methods/health_tests.rs", SKIP_ENFORCEMENT_1),
+    // #9271: moved with the engine from trusty-common, whose ratchet listed it.
+    (
+        "src/engine/registry_tests.rs",
+        "TRUSTY_MEMORY_MAX_OPEN_PALACES",
+    ),
     (
         "src/startup_task_tests.rs",
         "HOME and TRUSTY_SKIP_PALACE_ENFORCEMENT; PR #8791 (fix/5937-pin-map-test-hang) \

@@ -153,7 +153,7 @@ fn rank_order(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering {
 /// Why: a missed fact looks identical whether it never entered the candidate
 /// set, entered but ranked below the cutoff, or was never queried for. Only the
 /// pre-truncation candidate list with its score components tells them apart, and
-/// nothing logged it. Its own target keeps `RUST_LOG=trusty_common=debug` from
+/// nothing logged it. Its own target keeps `RUST_LOG=trusty_memory=debug` from
 /// drowning in one line per candidate per recall while still letting an operator
 /// ask for exactly this with `RUST_LOG=memory_recall_rank=debug`.
 /// What: the `target:` string on the `tracing::debug!` that

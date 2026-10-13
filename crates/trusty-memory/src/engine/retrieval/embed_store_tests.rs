@@ -12,7 +12,6 @@ use super::embed_store::{
     expected_chunk_count, plan_chunks,
 };
 use super::handle::PalaceHandle;
-use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, PalaceId};
 use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
@@ -20,6 +19,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
 use uuid::Uuid;
 
 /// Dimension of every test vector.
@@ -330,9 +330,8 @@ async fn a_wedged_chunked_embed_ends_at_the_scaled_bound() {
 /// #9735 Q3: 4096 chunks at 30 s each was a 34 h ceiling.
 #[test]
 fn chunked_embed_timeout_is_clamped_at_the_cap() {
-    let cap = std::time::Duration::from_secs(
-        crate::engine::timeouts::DEFAULT_EMBED_CHUNKED_CAP_SECS,
-    );
+    let cap =
+        std::time::Duration::from_secs(crate::engine::timeouts::DEFAULT_EMBED_CHUNKED_CAP_SECS);
     let got = clamp_chunked_timeout(std::time::Duration::from_secs(30), 4096, cap);
     assert_eq!(got, std::time::Duration::from_secs(600));
     // Below the cap the scaled bound is unchanged.
@@ -352,10 +351,9 @@ fn chunked_embed_timeout_never_drops_below_the_operators_per_chunk() {
 /// #9735 Q3: the cap is `TRUSTY_EMBED_CHUNKED_CAP_SECS`, not a constant.
 #[test]
 fn chunked_embed_timeout_honours_the_cap_env() {
-    let _env = trusty_common::data_dir::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.
+    // #9271: the lib target's one env lock, now trusty-memory's.
+    let _env = crate::env_test_lock::env_test_lock().blocking_lock();
+    // SAFETY: serialised by `env_test_lock`, held above for the whole test.
     unsafe { std::env::set_var("TRUSTY_EMBED_CHUNKED_CAP_SECS", "60") };
     let got = chunked_embed_timeout(std::time::Duration::from_secs(30), 4096);
     unsafe { std::env::remove_var("TRUSTY_EMBED_CHUNKED_CAP_SECS") };
