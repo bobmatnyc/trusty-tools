@@ -117,14 +117,15 @@ fn questions_anchor_unknown_home_denies_every_write() {
 }
 
 /// 🔴 #9815 (r-078): a hard link to the log made before the rule is the log;
-/// a write through it is denied.
+/// a write through it is denied to a PM and to the Architect.
 #[test]
 fn a_hard_link_to_the_questions_log_is_an_anchor() {
     let fx = with_table();
     let alias = fx.cwd.join("alias.jsonl");
     std::fs::hard_link(questions_path(&fx.home), &alias).expect("hard link");
-    let env = architect_env(&fx);
-    denied(&fx, &env, &format!("echo x >> {}", alias.display()));
+    for env in [pm_env(&fx), architect_env(&fx)] {
+        denied(&fx, &env, &format!("echo x >> {}", alias.display()));
+    }
 }
 
 /// 🔴 #9815 (r-078): a log location that does not resolve (a link loop) is a

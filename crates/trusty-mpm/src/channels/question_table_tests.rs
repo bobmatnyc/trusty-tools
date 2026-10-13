@@ -1064,15 +1064,23 @@ fn seal_refuses_a_file_owned_by_another_user() {
     );
 }
 
-/// 🔴 #9815 (r-078): a symlink planted at the torn-line file is not
-/// followed: the open fails and the link's target is untouched.
-#[test]
-fn torn_file_symlink_is_not_followed() {
-    let fx = fixture();
+/// A table with one question and a torn final line, so the next open moves
+/// that line to the torn file; the log's bytes.
+fn table_with_torn_tail(fx: &Fixture) -> Vec<u8> {
     let table = open_at(&fx.path);
     ask(&table, bob_ask());
     drop(table);
     append_raw(&fx.path, "{\"v\":1,\"op\":\"res");
+    std::fs::read(&fx.path).expect("log")
+}
+
+/// 🔴 #9815 (r-078): a symlink planted at the torn-line file is refused by
+/// the seal, and the torn-line append itself does not follow one (a link
+/// swapped in after the seal check): the link's target is untouched.
+#[test]
+fn torn_file_symlink_is_not_followed() {
+    let fx = fixture();
+    let log = table_with_torn_tail(&fx);
     let outside = fx
         .path
         .parent()
@@ -1081,13 +1089,130 @@ fn torn_file_symlink_is_not_followed() {
         .expect("root")
         .join("outside");
     std::fs::write(&outside, "keep\n").expect("outside");
-    std::os::unix::fs::symlink(&outside, super::torn_path(&fx.path)).expect("symlink");
+    let torn = super::torn_path(&fx.path);
+    std::os::unix::fs::symlink(&outside, &torn).expect("symlink");
+    assert_eq!(
+        unsealed_reason(&fx.path, &torn),
+        "not a regular file (a symlink, directory or device)"
+    );
     assert!(
         matches!(
-            QuestionTable::open_at(&fx.path),
+            super::append_once(&torn, b"x\n"),
             Err(QuestionTableError::Io { .. })
         ),
-        "a table opened through a symlinked torn file"
+        "the torn-line append followed a symlink"
     );
     assert_eq!(std::fs::read(&outside).expect("outside"), b"keep\n");
+    assert_eq!(
+        std::fs::read(&fx.path).expect("log"),
+        log,
+        "the log was cut"
+    );
+}
+
+/// How long a FIFO test lets an open run before calling it blocked.
+const FIFO_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Make a 0600 FIFO at `path`: owned, one link, but not a regular file.
+fn mkfifo(path: &Path) {
+    use nix::sys::stat::Mode;
+    nix::unistd::mkfifo(path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+}
+
+/// Run `f` on its own thread and return its result, failing the test if it
+/// has not returned within [`FIFO_BOUND`]. On a timeout a reader is opened on
+/// `fifo`, which releases a writer blocked there, so the thread ends and the
+/// suite does not hang.
+fn bounded_on_fifo<T: Send + 'static>(fifo: &Path, f: impl FnOnce() -> T + Send + 'static) -> T {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(FIFO_BOUND) {
+        Ok(out) => out,
+        Err(_) => {
+            let _reader = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(fifo);
+            let _ = rx.recv_timeout(FIFO_BOUND);
+            panic!(
+                "the open blocked on the FIFO at {} for {FIFO_BOUND:?}",
+                fifo.display()
+            );
+        }
+    }
+}
+
+/// 🔴 #9815 (r-078): a FIFO at the torn-line file is refused by the seal,
+/// fast, and the log keeps its torn tail. Before the fix the open blocked
+/// forever: a FIFO with no reader blocks its writer.
+#[test]
+fn fifo_at_the_torn_file_refuses_to_open_without_blocking() {
+    let fx = fixture();
+    let log = table_with_torn_tail(&fx);
+    let torn = super::torn_path(&fx.path);
+    mkfifo(&torn);
+    let path = fx.path.clone();
+    let opened = bounded_on_fifo(&torn, move || QuestionTable::open_at(&path).map(drop));
+    match opened {
+        Err(QuestionTableError::Unsealed { path, reason }) => {
+            assert_eq!(path, torn, "the refusal names the torn file");
+            assert_eq!(
+                reason,
+                "not a regular file (a symlink, directory or device)"
+            );
+        }
+        other => panic!("expected Unsealed for the torn FIFO, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&fx.path).expect("log"),
+        log,
+        "the log was cut"
+    );
+}
+
+/// 🔴 #9815 (r-078): the torn-line append fails fast on a FIFO swapped in
+/// after the seal check, instead of blocking for a reader.
+#[test]
+fn torn_line_append_on_a_fifo_fails_fast() {
+    let fx = fixture();
+    let dir = make_dir(&fx);
+    let fifo = dir.join("questions.jsonl.torn");
+    mkfifo(&fifo);
+    let target = fifo.clone();
+    let appended = bounded_on_fifo(&fifo, move || super::append_once(&target, b"x\n"));
+    assert!(
+        matches!(appended, Err(QuestionTableError::Io { .. })),
+        "the torn-line append on a FIFO: {appended:?}"
+    );
+}
+
+/// 🔴 #9815 (r-078): an `lstat` that fails for a reason other than absence
+/// (here a `channels/` the daemon cannot search) is `Io`, never "absent".
+#[test]
+fn seal_reports_an_unreadable_directory_as_io() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Root reads through a mode-000 directory, so the lstat would succeed.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    /// Restores the directory's mode on every exit, so cleanup can run.
+    struct Restore(PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let fx = fixture();
+    drop(open_at(&fx.path));
+    let dir = fx.path.parent().expect("dir").to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let _restore = Restore(dir);
+    let checked = super::seal::check_path(&fx.path);
+    assert!(
+        matches!(&checked, Err(QuestionTableError::Io { path, .. }) if *path == fx.path),
+        "an unreadable directory: {checked:?}"
+    );
 }
