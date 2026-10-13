@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::fs;
 use tracing::{debug, warn};
 
+use super::decision::keep_newer_decision;
 use super::json_file;
 use super::record::{ManagedSessionId, SessionRecord};
 use super::store_integrity::{StoreIntegrity, validate};
@@ -381,12 +382,48 @@ impl SessionStore {
     /// applies this single-record mutation on top of the freshest disk state.
     /// What: reloads from disk if the file changed, inserts or replaces the
     /// record keyed by its UUID string, then saves the store to disk.
-    /// Test: `store_upsert_and_get`, `store_upsert_preserves_concurrent_write`.
-    pub async fn upsert(&mut self, record: SessionRecord) -> Result<(), StoreError> {
+    /// #9841: a record read before the stored decision fields last changed
+    /// keeps the stored ones ([`super::decision::keep_newer_decision`]), so a
+    /// whole-record writer cannot restore a claimed decision or erase a newer
+    /// one. Decision writers use [`Self::upsert_decision`] instead.
+    /// Test: `store_upsert_and_get`, `store_upsert_preserves_concurrent_write`,
+    /// `a_send_in_flight_cannot_restore_a_claimed_decision`.
+    pub async fn upsert(&mut self, mut record: SessionRecord) -> Result<(), StoreError> {
         self.reload_if_changed().await?;
         let key = record.id.to_string();
+        keep_newer_decision(&mut record, self.data.sessions.get(&key));
         self.data.sessions.insert(key, record);
         self.save().await
+    }
+
+    /// The decision writers' upsert: it writes the decision fields as given,
+    /// and a failed save leaves the in-memory map as it was (#9841).
+    ///
+    /// Why: [`Self::upsert`] keeps the stored decision fields against a stale
+    /// copy, so the writers that own those fields (set a decision, claim it,
+    /// settle it) need a path that writes them; each holds the store guard
+    /// from its read to this write. `upsert` also inserts before it saves, so
+    /// a failed save leaves memory ahead of disk; a claim that never reached
+    /// disk must not stick, or a retry is refused for an answer nobody
+    /// delivered.
+    /// What: reloads, inserts, saves; on a save error puts the prior entry (or
+    /// its absence) back and returns the error.
+    /// Test: `claim_persist_failure_sends_nothing_and_keeps_the_decision`.
+    pub(crate) async fn upsert_decision(
+        &mut self,
+        record: SessionRecord,
+    ) -> Result<(), StoreError> {
+        self.reload_if_changed().await?;
+        let key = record.id.to_string();
+        let prior = self.data.sessions.insert(key.clone(), record);
+        let saved = self.save().await;
+        if saved.is_err() {
+            match prior {
+                Some(prior) => self.data.sessions.insert(key, prior),
+                None => self.data.sessions.remove(&key),
+            };
+        }
+        saved
     }
 
     /// Insert or update many records in ONE reload + ONE save.
@@ -404,8 +441,10 @@ impl SessionStore {
             return Ok(());
         }
         self.reload_if_changed().await?;
-        for record in records {
-            self.data.sessions.insert(record.id.to_string(), record);
+        for mut record in records {
+            let key = record.id.to_string();
+            keep_newer_decision(&mut record, self.data.sessions.get(&key)); // #9841
+            self.data.sessions.insert(key, record);
         }
         self.save().await
     }
@@ -533,6 +572,8 @@ mod tests {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            pending_decision_id: None,
+            last_answer: None,
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,

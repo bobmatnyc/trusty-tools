@@ -284,6 +284,8 @@ fn architect_record(
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        pending_decision_id: None,
+        last_answer: None,
         correlation: Default::default(),
         runtime: crate::runtime::RuntimeKind::default(),
         ephemeral: false,

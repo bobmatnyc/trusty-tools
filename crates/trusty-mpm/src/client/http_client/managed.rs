@@ -181,8 +181,11 @@ impl DaemonClient {
     /// Answer a pending decision via `POST .../{id}/answer`.
     ///
     /// Why: unblock a harness waiting on an operator decision.
-    /// What: POSTs `{ answer }` and returns the [`ManagedAnswerResponse`].
-    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    /// What: POSTs `{ answer }` and returns the [`ManagedAnswerResponse`]. A
+    /// refusal keeps the daemon's text (#9841): the 409 "no pending decision"
+    /// and "already answered by X at T" reach `tm session answer`, `/approve`
+    /// and `/deny` instead of a bare status.
+    /// Test: `cli_answer_approve_and_deny_without_a_pending_decision_are_refused`.
     pub async fn answer_managed_session(
         &self,
         id: &str,
@@ -195,11 +198,8 @@ impl DaemonClient {
                 answer: answer.to_string(),
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
-        Ok(resp)
+        response_or_body_error(resp).await?.json().await
     }
 
     /// Inspect a session's activity via `GET .../{id}/activity`.

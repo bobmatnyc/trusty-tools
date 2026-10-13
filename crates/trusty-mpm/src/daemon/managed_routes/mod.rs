@@ -484,18 +484,26 @@ pub struct SendInputResponse {
 /// Request body for POST /api/v1/sessions/managed/{id}/answer.
 ///
 /// Why: the calling agentic process injects an answer to a pending decision.
-/// What: a single `answer` field.
-/// Test: answer handler test.
-#[derive(Debug, Deserialize)]
+/// What: the `answer` text, plus two optional #9841 fields: the decision the
+/// caller saw (D2) and a self-asserted answerer name (D5).
+/// Test: answer handler test; `answer_conflict_is_409_over_http_and_rpc`.
+#[derive(Debug, Default, Deserialize)]
 pub struct AnswerRequest {
     /// The answer text to inject for the pending decision.
     pub answer: String,
+    /// #9841: the decision being answered; absent takes the pending one.
+    #[serde(default)]
+    pub decision_id: Option<String>,
+    /// #9841: who answers; absent defaults to the transport (`http`/`rpc`).
+    #[serde(default)]
+    pub answered_by: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/answer.
 ///
 /// Why: confirms the answer was injected.
-/// What: injected flag and tmux_name.
+/// What: injected flag, tmux_name, and (#9841) the decision the answer took,
+/// `null` when none was pending.
 /// Test: answer handler test.
 #[derive(Debug, Serialize)]
 pub struct AnswerResponse {
@@ -503,6 +511,8 @@ pub struct AnswerResponse {
     pub injected: bool,
     /// tmux session name the answer was sent to.
     pub tmux_name: String,
+    /// #9841: the decision this answer took, if one was pending.
+    pub decision_id: Option<String>,
 }
 
 /// Response body for GET /api/v1/sessions/managed/{id}/attach-cmd.
@@ -657,7 +667,7 @@ pub async fn answer_session_decision(
     AxumPath(id_str): AxumPath<String>,
     Json(req): Json<AnswerRequest>,
 ) -> impl IntoResponse {
-    cores::answer_core(&state, &id_str, req).await // #6288
+    cores::answer_core(&state, &id_str, req, "http").await // #6288, #9841
 }
 
 /// GET /api/v1/sessions/managed/{id}/attach-cmd — return tmux attach command.
@@ -761,6 +771,8 @@ pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
     }
 }
 
+#[cfg(test)]
+mod answer_route_tests;
 #[cfg(test)]
 mod staleness_bench_tests;
 #[cfg(test)]

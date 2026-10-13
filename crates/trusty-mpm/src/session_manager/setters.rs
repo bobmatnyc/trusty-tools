@@ -11,13 +11,13 @@
 //! transitions; these cover incidental fields set alongside or after them).
 //! What: [`SessionManager::mark_errored`], [`SessionManager::set_workspace`],
 //! [`SessionManager::set_pending_decision`],
-//! [`SessionManager::set_source_id`], [`SessionManager::set_deliverable_id`],
-//! and [`SessionManager::clear_pending_decision`]. No behavior change — a pure
-//! relocation.
+//! [`SessionManager::set_source_id`] and [`SessionManager::set_deliverable_id`].
+//! #9841 removed `clear_pending_decision`: an answer now clears the decision
+//! by claiming it (`decision.rs`).
 //! Test: covered by handler_spawn_wires_provision_and_spawn (`mark_errored`,
-//! `set_workspace`), `front_gate_escalation_sets_pending_decision` and
-//! `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs
-//! (`set_pending_decision`, `clear_pending_decision`),
+//! `set_workspace`), `front_gate_escalation_sets_pending_decision` in
+//! tests/session_manager_mvp.rs and
+//! `set_pending_decision_mints_a_new_id_each_time` (`set_pending_decision`),
 //! `set_source_id_succeeds_first_try` /
 //! `set_source_id_returns_err_after_retries_for_missing_session` in
 //! `tests.rs` (`set_source_id`), `set_deliverable_id_persists` /
@@ -27,6 +27,7 @@
 use chrono::Utc;
 use tracing::{error, warn};
 
+use super::decision::{DecisionId, locked_get};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState};
 
@@ -118,23 +119,29 @@ impl SessionManager {
     /// `session_status`, the supervisor, and the `tm` CLI with zero new UI. The
     /// session is left NOT `Active` (the runtime never started) so it reads as
     /// awaiting approval until a human resolves it via `POST …/answer`.
-    /// What: looks up the record, sets `pending_decision`/`proposed_default`,
-    /// leaves the lifecycle state untouched (it stays `Provisioning` — the
-    /// runtime was withheld), and persists. No tmux input is sent (unlike
+    /// What: looks up the record, sets `pending_decision`/`proposed_default`
+    /// and (#9841) a freshly minted `pending_decision_id`, leaves the
+    /// lifecycle state untouched (it stays `Provisioning` — the runtime was
+    /// withheld), and persists, all under one held store guard so a racing
+    /// claim is never overwritten. No tmux input is sent (unlike
     /// `answer_decision`): the pane has no running harness to receive it yet.
     /// Test: `front_gate_escalation_sets_pending_decision` in
-    /// tests/session_manager_mvp.rs.
+    /// tests/session_manager_mvp.rs;
+    /// `set_pending_decision_mints_a_new_id_each_time`.
     pub async fn set_pending_decision(
         &self,
         id: &ManagedSessionId,
         decision: &str,
         proposed_default: Option<&str>,
     ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
+        let mut store = self.store.write().await;
+        let mut record = locked_get(&mut store, id).await?;
         record.pending_decision = Some(decision.to_string());
         record.proposed_default = proposed_default.map(str::to_string);
+        record.pending_decision_id = Some(DecisionId::new()); // See #9841
         record.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(record).await?;
+        // #9841: a decision writer; `upsert` would keep the old decision.
+        store.upsert_decision(record).await?;
         Ok(())
     }
 
@@ -231,26 +238,6 @@ impl SessionManager {
     ) -> Result<(), ManagedError> {
         let mut record = self.get(id).await?;
         record.deliverable_id = Some(deliverable_id);
-        self.store.write().await.upsert(record).await?;
-        Ok(())
-    }
-
-    /// Clear a pending decision WITHOUT injecting any text into the pane.
-    ///
-    /// Why: a FRONT-gate (#1360) escalation is resolved *before* a harness exists
-    /// — the session is still `Provisioning` with no runtime in the pane. Unlike
-    /// [`answer_decision`](Self::answer_decision) (which sends the answer to a
-    /// LIVE harness), the FRONT-gate answer path must clear the decision and then
-    /// LAUNCH the withheld runtime; sending the answer to a bare shell would be
-    /// meaningless. This method does the clear half only.
-    /// What: looks up the record, clears `pending_decision`/`proposed_default`,
-    /// updates `last_activity_at`, and persists. No tmux I/O.
-    /// Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs.
-    pub async fn clear_pending_decision(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.pending_decision = None;
-        record.proposed_default = None;
-        record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
     }

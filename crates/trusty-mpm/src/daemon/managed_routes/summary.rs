@@ -55,6 +55,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "attach_cmd": attach_cmd_for(&r.tmux_name),
         "runtime": r.runtime.as_str(),
         "pending_decision": r.pending_decision,
+        "pending_decision_id": r.live_decision_id().map(|d| d.to_string()), // See #9841
         "proposed_default": r.proposed_default,
         "source_id": r.source_id,
         "deliverable_id": r.deliverable_id.map(|id| id.to_string()),
@@ -114,6 +115,7 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         created_at: r.created_at.to_rfc3339(),
         last_activity_at: r.last_activity_at.map(|t| t.to_rfc3339()),
         pending_decision: r.pending_decision.clone(),
+        pending_decision_id: r.live_decision_id().map(|d| d.to_string()),
         proposed_default: r.proposed_default.clone(),
         source_id: r.source_id.clone(),
         task: Some(r.task.clone()),
@@ -291,6 +293,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         created_at: String::new(),
         last_activity_at: None,
         pending_decision: None,
+        pending_decision_id: None,
         proposed_default: None,
         source_id: None,
         task: None,

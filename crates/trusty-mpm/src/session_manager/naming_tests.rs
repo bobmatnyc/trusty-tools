@@ -698,6 +698,8 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        pending_decision_id: None,
+        last_answer: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,

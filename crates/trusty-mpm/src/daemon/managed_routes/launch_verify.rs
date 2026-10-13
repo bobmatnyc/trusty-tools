@@ -473,6 +473,8 @@ mod tests {
             workspace_path: None, repo_url: None,
             branch: None, pending_decision: None,
             proposed_default: None, correlation: Default::default(),
+            pending_decision_id: None,
+            last_answer: None,
             runtime,
             ephemeral: false, workspace_owned: false,
             source_id: None,
