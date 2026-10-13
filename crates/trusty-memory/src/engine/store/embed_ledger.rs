@@ -9,7 +9,7 @@
 //!
 //! What: `<data_dir>/embed_failures.json` — a JSON array of [`EmbedFailure`]
 //! rows keyed by drawer id. Every mutation goes through
-//! [`crate::json_rmw::update`], this workspace's single implementation of the
+//! [`trusty_common::json_rmw::update`], this workspace's single implementation of the
 //! locked load → mutate → publish-atomically critical section.
 //!
 //! Routing through `json_rmw` rather than an atomic rename alone is the fix for
@@ -51,7 +51,7 @@
 //! `concurrent_ledger_records_keep_every_row`,
 //! `concurrent_clear_and_record_do_not_lose_each_other`.
 
-use crate::json_rmw;
+use trusty_common::json_rmw;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

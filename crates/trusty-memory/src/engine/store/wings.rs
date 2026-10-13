@@ -27,10 +27,10 @@
 //!
 //! Test: `wings_tests.rs`.
 
-use crate::memory_core::room_identity::DEFAULT_WING_ID;
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
-use crate::memory_core::wing_identity::{
+use crate::engine::room_identity::DEFAULT_WING_ID;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::wing_identity::{
     DEFAULT_WING_LABEL, canonical_wing_key, default_wing_key, mint_wing_id,
 };
 use anyhow::{Context, Result, bail};

@@ -7,9 +7,9 @@
 //! Test: this file IS the tests.
 
 use super::*;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::l1_cache::L1Cache;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::l1_cache::L1Cache;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uuid::Uuid;

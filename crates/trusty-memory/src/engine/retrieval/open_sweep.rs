@@ -22,9 +22,9 @@
 //! `a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time`,
 //! `expired_tier_c_drawer_survives_the_open_time_sweep`.
 
-use crate::memory_core::maintenance_log::{self, DeletionReason, MaintenanceDeletion};
-use crate::memory_core::palace::PalaceId;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
+use crate::engine::maintenance_log::{self, DeletionReason, MaintenanceDeletion};
+use crate::engine::palace::PalaceId;
+use crate::engine::store::kg_redb::KgStoreRedb;
 use std::sync::Arc;
 // Aliased: the `redb_cache_bounds` scan reads any `Builder` constructor as a redb open.
 use std::thread::Builder as OpenWriteThread;

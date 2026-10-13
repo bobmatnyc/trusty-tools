@@ -35,7 +35,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use super::{HnswStore, HnswStoreError, Result};
-use crate::memory_core::timeouts::write_txn_deadline;
+use crate::engine::timeouts::write_txn_deadline;
 
 /// Environment variable overriding [`default_op_budget`], in whole seconds.
 pub const OP_BUDGET_ENV: &str = "TRUSTY_HNSW_OP_BUDGET_SECS";

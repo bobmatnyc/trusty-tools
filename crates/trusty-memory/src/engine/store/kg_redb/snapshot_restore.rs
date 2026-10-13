@@ -16,7 +16,7 @@ use super::{
     SnapshotManifest, StagingDir, check_counts, copy_verified, hash_file, io_err, no_fault,
     redb_err, table_counts,
 };
-use crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+use crate::engine::store::palace_format::PALACE_FORMAT_SUPPORTED;
 use redb::ReadableDatabase;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -167,7 +167,7 @@ fn verify_snapshot(dir: &Path, manifest: &SnapshotManifest) -> Result<()> {
 
 /// Open a snapshot database read-only and compare its counts with `expected`.
 fn recount(path: &Path, expected: &BTreeMap<String, u64>) -> Result<()> {
-    let db = crate::redb_cache::open_palace_db_read_only(path)
+    let db = trusty_common::redb_cache::open_palace_db_read_only(path)
         .map_err(redb_err("open read-only", path))?;
     let rtx = db.begin_read().map_err(redb_err("begin read", path))?;
     let names: Vec<&str> = expected.keys().map(String::as_str).collect();

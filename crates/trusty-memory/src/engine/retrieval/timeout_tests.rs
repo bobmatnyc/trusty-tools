@@ -20,7 +20,7 @@
 //! guarantee test isolation between `#[tokio::test]` tests in the same binary,
 //! so each test is annotated `#[ignore]` and driven individually:
 //!
-//!   cargo test -p trusty-common --features memory-core \
+//!   cargo test -p trusty-memory \
 //!     retrieval::timeout_tests::timeout_fires_on_embedder_init_with_tiny_limit \
 //!     -- --include-ignored
 //!
@@ -31,8 +31,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::memory_core::palace::{Palace, PalaceId};
-    use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
+    use crate::engine::palace::{Palace, PalaceId};
+    use crate::engine::retrieval::{PalaceHandle, shared_embedder};
     use tempfile::tempdir;
 
     /// Why: Verify that `shared_embedder()` returns an explicit error (not a
@@ -48,7 +48,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn timeout_fires_on_embedder_init_with_tiny_limit() {
         // #5937: the default-value readers in `timeouts.rs` hold this lock.
-        let _env = crate::data_dir::ENV_LOCK
+        let _env = trusty_common::data_dir::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Force a 0-second timeout so the init times out before it can succeed.
@@ -82,7 +82,7 @@ mod tests {
     #[tokio::test]
     async fn remember_succeeds_with_mock_embedder() {
         // Seed the shared cell with the mock so no ONNX download is attempted.
-        crate::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
 
         let dir = tempdir().unwrap();
         let palace = Palace {
@@ -98,7 +98,7 @@ mod tests {
         let result = handle
             .remember(
                 "bounded timeout green path".into(),
-                crate::memory_core::palace::RoomType::General,
+                crate::engine::palace::RoomType::General,
                 vec![],
                 0.5,
             )
@@ -122,10 +122,10 @@ mod tests {
     #[allow(clippy::await_holding_lock)] // current_thread runtime; nothing in it takes ENV_LOCK
     async fn write_lock_timeout_returns_error_when_held() {
         // #5937: the default-value readers in `timeouts.rs` hold this lock.
-        let _env = crate::data_dir::ENV_LOCK
+        let _env = trusty_common::data_dir::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
 
         let dir = tempdir().unwrap();
         let palace = Palace {
@@ -156,7 +156,7 @@ mod tests {
         let result = handle
             .remember(
                 "should time out on lock".into(),
-                crate::memory_core::palace::RoomType::General,
+                crate::engine::palace::RoomType::General,
                 vec![],
                 0.5,
             )
@@ -180,8 +180,8 @@ mod tests {
         // #8749: a waiter that gives up gets a typed timeout naming the palace.
         assert!(
             matches!(
-                err.downcast_ref::<crate::memory_core::timeouts::WriteTimeout>(),
-                Some(crate::memory_core::timeouts::WriteTimeout::LockWait { palace, .. })
+                err.downcast_ref::<crate::engine::timeouts::WriteTimeout>(),
+                Some(crate::engine::timeouts::WriteTimeout::LockWait { palace, .. })
                     if palace == "lock-timeout"
             ),
             "#8749: the lock-wait timeout must be typed: {msg}"

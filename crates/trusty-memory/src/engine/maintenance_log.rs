@@ -30,9 +30,9 @@
 //! `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
 //! `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 
-use crate::memory_core::content_hash::{ContentHash, memory_content_hash};
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::retrieval::{ForgetOutcome, PalaceHandle};
+use crate::engine::content_hash::{ContentHash, memory_content_hash};
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::retrieval::{ForgetOutcome, PalaceHandle};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -238,7 +238,7 @@ pub(crate) fn append(data_dir: &Path, rec: &MaintenanceDeletion, rotate_at: u64)
     let path = journal_path(data_dir);
     let mut line = serde_json::to_string(rec).context("serialize maintenance deletion")?;
     line.push('\n');
-    let locked = crate::file_lock::with_exclusive_lock_timeout(&path, JOURNAL_LOCK_TIMEOUT, || {
+    let locked = trusty_common::file_lock::with_exclusive_lock_timeout(&path, JOURNAL_LOCK_TIMEOUT, || {
         if let Err(e) = rotate_if_due(data_dir, &path, rotate_at) {
             tracing::warn!(palace = %rec.palace, "#8732: journal rotation failed; appending to the live file: {e:#}");
         }

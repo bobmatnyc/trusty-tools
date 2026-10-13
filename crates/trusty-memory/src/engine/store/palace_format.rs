@@ -228,7 +228,7 @@ pub(crate) fn read_marker_without_writing(kg_path: &Path) -> Result<KgMarker> {
     if let Ok(false) = kg_path.try_exists() {
         return Ok(KgMarker::Fresh);
     }
-    match crate::redb_cache::open_palace_db_read_only(kg_path) {
+    match trusty_common::redb_cache::open_palace_db_read_only(kg_path) {
         Ok(db) => read_marker(&db, kg_path),
         Err(e) => {
             tracing::debug!(path = %kg_path.display(), error = %e,

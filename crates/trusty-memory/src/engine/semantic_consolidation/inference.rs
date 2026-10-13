@@ -11,7 +11,7 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 
-use crate::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 
 use super::types::{
     ConsolidationAction, OpenAiChatResponse, build_consolidation_prompt,

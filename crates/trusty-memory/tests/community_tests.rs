@@ -10,7 +10,7 @@
 //! What: Builds small synthetic graphs via `KnowledgeGraph::assert`, runs
 //! `find_communities` / `partition` / `knowledge_gaps`, and asserts on
 //! the resulting structures.
-//! Test: `cargo test -p trusty-common --features memory-core --test
+//! Test: `cargo test -p trusty-memory --test
 //! community_tests`.
 
 #![cfg(feature = "memory-core")]
@@ -18,8 +18,8 @@
 use chrono::Utc;
 use std::collections::HashSet;
 use tempfile::tempdir;
-use trusty_common::memory_core::community::{find_communities, partition};
-use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
+use trusty_memory::engine::community::{find_communities, partition};
+use trusty_memory::engine::store::kg::{KnowledgeGraph, Triple};
 
 /// Why: Centralise triple construction so each test only restates the
 /// `(subject, predicate, object)` triple under exercise.

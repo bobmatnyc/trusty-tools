@@ -10,7 +10,7 @@
 //! cover serde + atomic writes; `registry_create_and_open` (in registry.rs)
 //! exercises the registry-level wiring.
 
-use crate::memory_core::palace::{Palace, PalaceId};
+use crate::engine::palace::{Palace, PalaceId};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

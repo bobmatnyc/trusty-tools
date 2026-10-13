@@ -8,13 +8,13 @@
 //! Test: this file.
 
 use super::*;
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::room_identity::{
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, default_wing_key, mint_room_id, room_label, room_to_uuid,
 };
-use crate::memory_core::store::kg::{KnowledgeGraph, Triple};
-use crate::memory_core::store::room_plan::{RoomPlanAction, plan_rooms};
-use crate::memory_core::store::rooms::{RoomRecord, rename_room, resolve_or_create_room_sync};
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
+use crate::engine::store::room_plan::{RoomPlanAction, plan_rooms};
+use crate::engine::store::rooms::{RoomRecord, rename_room, resolve_or_create_room_sync};
 use chrono::Utc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -250,7 +250,7 @@ fn backfill_stamps_schema_version_and_skips_marker_row() {
     backfill_rooms(&kg, &drawers).expect("backfill");
     assert_eq!(
         kg.store().room_schema_version().unwrap(),
-        Some(crate::memory_core::store::rooms::ROOM_SCHEMA_VERSION)
+        Some(crate::engine::store::rooms::ROOM_SCHEMA_VERSION)
     );
     // The marker must never appear as a room.
     let rooms = kg.store().list_rooms().unwrap();
@@ -377,7 +377,7 @@ fn filter_id_falls_back_to_legacy_fold() {
     let (_d, kg) = open_kg();
     for room in [RoomType::General, RoomType::Custom("nope".into())] {
         assert_eq!(
-            crate::memory_core::store::rooms::resolve_room_filter_id(&kg, &room),
+            crate::engine::store::rooms::resolve_room_filter_id(&kg, &room),
             room_to_uuid(&room),
             "{room:?}"
         );
@@ -394,7 +394,7 @@ fn filter_id_prefers_registered_room() {
     let minted = resolve_or_create_room_sync(&kg.store(), &room).expect("resolve");
     assert_ne!(minted, room_to_uuid(&room));
     assert_eq!(
-        crate::memory_core::store::rooms::resolve_room_filter_id(&kg, &room),
+        crate::engine::store::rooms::resolve_room_filter_id(&kg, &room),
         minted
     );
 }
@@ -408,7 +408,7 @@ fn filter_id_matches_write_path_after_backfill() {
     let drawer = seed_legacy_drawer(&kg, &room, "203 of these live in trusty-tools");
     backfill_rooms(&kg, std::slice::from_ref(&drawer)).expect("backfill");
     assert_eq!(
-        crate::memory_core::store::rooms::resolve_room_filter_id(&kg, &room),
+        crate::engine::store::rooms::resolve_room_filter_id(&kg, &room),
         drawer.room_id
     );
 }

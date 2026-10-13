@@ -270,7 +270,7 @@ mod tests {
 
         let wtx = kg.db().begin_write().unwrap();
         assert!(
-            wtx.delete_table(crate::memory_core::store::kg_store::ACTIVE_SUBJECT_COUNTS)
+            wtx.delete_table(crate::engine::store::kg_store::ACTIVE_SUBJECT_COUNTS)
                 .unwrap(),
             "the count table must have existed to be dropped"
         );
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn drawer_type_round_trips_through_redb() {
         // Issue #61: drawer_type + expires_at must survive a write/read.
-        use crate::memory_core::palace::DrawerType;
+        use crate::engine::palace::DrawerType;
         let (_d, kg) = open_kg();
         let room_id = Uuid::new_v4();
         let drawer =
@@ -354,7 +354,7 @@ mod tests {
     fn drawer_completed_at_round_trips_through_redb() {
         // spec-001: a Task drawer's type and optional completed_at timestamp
         // must survive a write/read through the new on-disk field.
-        use crate::memory_core::palace::DrawerType;
+        use crate::engine::palace::DrawerType;
         let (_d, kg) = open_kg();
         let mut drawer =
             Drawer::new(Uuid::new_v4(), "ship v2 milestone").with_type(DrawerType::Task);
@@ -380,8 +380,8 @@ mod tests {
         // through `PreTaskDrawerRecord` — see the fallback chain in
         // `read_ops.rs::load_drawers`. The migrated row must keep its
         // drawer_type / expires_at and default `completed_at` to `None`.
-        use crate::memory_core::palace::DrawerType;
-        use crate::memory_core::store::kg_store::{DRAWERS, encode_value};
+        use crate::engine::palace::DrawerType;
+        use crate::engine::store::kg_store::{DRAWERS, encode_value};
         use redb::Database;
 
         let dir = tempdir().unwrap();
@@ -412,9 +412,9 @@ mod tests {
                     .expect("insert legacy drawer");
             }
             // #9274: an old drawer row in a current-format KG (rows are not rewritten).
-            crate::memory_core::store::palace_format::stamp_format(
+            crate::engine::store::palace_format::stamp_format(
                 &wtx,
-                crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED,
+                crate::engine::store::palace_format::PALACE_FORMAT_SUPPORTED,
             )
             .expect("stamp");
             wtx.commit().expect("commit");
@@ -468,8 +468,8 @@ mod tests {
     /// finished task open again. No existing row is rewritten to add the field.
     #[test]
     fn pre_fact_key_drawer_row_migrates_fact_key_to_none() {
-        use crate::memory_core::palace::DrawerType;
-        use crate::memory_core::store::kg_store::{DRAWERS, encode_value};
+        use crate::engine::palace::DrawerType;
+        use crate::engine::store::kg_store::{DRAWERS, encode_value};
         use redb::Database;
 
         let dir = tempdir().unwrap();
@@ -499,9 +499,9 @@ mod tests {
                     .expect("insert pre-#4884 drawer");
             }
             // #9274: an old drawer row in a current-format KG (rows are not rewritten).
-            crate::memory_core::store::palace_format::stamp_format(
+            crate::engine::store::palace_format::stamp_format(
                 &wtx,
-                crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED,
+                crate::engine::store::palace_format::PALACE_FORMAT_SUPPORTED,
             )
             .expect("stamp");
             wtx.commit().expect("commit");
@@ -787,7 +787,7 @@ mod tests {
     /// Test ID: apply_batch_mixes_drawer_and_triple_ops.
     #[test]
     fn apply_batch_mixes_drawer_and_triple_ops() {
-        use crate::memory_core::palace::Drawer;
+        use crate::engine::palace::Drawer;
         let (_d, kg) = open_kg();
         let drawer = Drawer::new(Uuid::new_v4(), "hello world".to_string());
         let drawer_id = drawer.id;
@@ -870,7 +870,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn writer_intent_open_fails_loud_on_locked_file() {
-        use crate::memory_core::store::concurrent_open::OpenIntent;
+        use crate::engine::store::concurrent_open::OpenIntent;
         let dir = tempdir().unwrap();
         let path = dir.path().join("kg.redb");
         // Touch the file so it has the redb header, then expire the cache.
@@ -1324,7 +1324,7 @@ mod tests {
     /// format when the KG is created); a second open still reads its row.
     #[test]
     fn migration_stamps_schema_and_is_idempotent() {
-        use crate::memory_core::store::kg_store::{
+        use crate::engine::store::kg_store::{
             KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker,
             decode_value,
         };

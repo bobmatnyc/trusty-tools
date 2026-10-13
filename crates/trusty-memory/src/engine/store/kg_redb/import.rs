@@ -7,8 +7,8 @@
 //! Test: `apply_batch_groups_asserts_into_single_commit`,
 //! `apply_batch_empty_is_noop`, `apply_batch_mixes_drawer_and_triple_ops`.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_store::{
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT, TripleValue,
     decode_u64, decode_value, encode_object_index_key, encode_triple_key, encode_u64, encode_value,
 };

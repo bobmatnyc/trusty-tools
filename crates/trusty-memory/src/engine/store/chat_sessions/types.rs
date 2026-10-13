@@ -26,7 +26,7 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<crate::chat_attachments::StoredAttachment>,
+    pub attachments: Vec<trusty_common::chat_attachments::StoredAttachment>,
 }
 
 /// Wire-shape summary used by `list_sessions`.

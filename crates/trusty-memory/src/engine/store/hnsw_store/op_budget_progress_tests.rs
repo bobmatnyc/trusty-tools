@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::{OpBudgetError, op_budget_error};
-use crate::memory_core::store::hnsw_store::groups::index_pace;
-use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::engine::store::hnsw_store::groups::index_pace;
+use crate::engine::store::vector::{UsearchStore, VectorStore};
 
 const DIM: usize = 16;
 /// The budget every test but the at-cap one runs under.
@@ -338,7 +338,7 @@ async fn a_dropped_caller_of_a_slow_group_leaves_every_chunk_indexed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "#9728: minutes of HNSW work at 384 dims; rung-5 --include-ignored only"]
 async fn exactly_cap_group_completes_through_the_real_budget_path() {
-    use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
     const PROD_DIM: usize = 384;
     const PRELOAD_GROUPS: usize = 5;
     let (dir, store) = open_store(PROD_DIM);

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
-use crate::memory_core::store::kg_store::RECALL_LOG;
+use crate::engine::store::kg_store::RECALL_LOG;
 
 // ── Query normalization (NLP — no inference) ─────────────────────────────────
 

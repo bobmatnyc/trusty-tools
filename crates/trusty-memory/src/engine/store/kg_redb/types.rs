@@ -9,8 +9,8 @@
 //! multiple submodules.
 //! Test: Indirect — every submodule test exercises these types.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_store::DrawerRecord;
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_store::DrawerRecord;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use redb::Database;
@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use uuid::Uuid;
 
 use super::super::kg::Triple;
-use crate::memory_core::store::concurrent_open::{OpenMode, SnapshotGuard};
-use crate::memory_core::store::kg_store::TripleValue;
-use crate::memory_core::store::write_deadline::DeadlinedWrite;
+use crate::engine::store::concurrent_open::{OpenMode, SnapshotGuard};
+use crate::engine::store::kg_store::TripleValue;
+use crate::engine::store::write_deadline::DeadlinedWrite;
 
 /// Sentinel returned by every write method when the store is in snapshot
 /// (read-only) mode.
@@ -185,7 +185,7 @@ impl From<PreFactKeyDrawerRecord> for DrawerRecord {
 /// `pre_task_drawer_row_migrates_completed_at_to_none`,
 /// `drawer_type_round_trips_through_redb`.
 pub(super) fn decode_drawer_record(bytes: &[u8]) -> Result<DrawerRecord, postcard::Error> {
-    use crate::memory_core::store::kg_store::decode_value;
+    use crate::engine::store::kg_store::decode_value;
     if let Ok(r) = decode_value::<DrawerRecord>(bytes) {
         return Ok(r);
     }
@@ -238,8 +238,8 @@ pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
 /// every call site in this module names it.
 /// Test: Indirect via `drawer_type_round_trips_through_redb`;
 /// `palace::tests::drawer_type_tag_round_trips_every_variant` pins the projection.
-pub(super) fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace::DrawerType {
-    crate::memory_core::palace::DrawerType::from_tag(tag)
+pub(super) fn parse_drawer_type(tag: Option<&str>) -> crate::engine::palace::DrawerType {
+    crate::engine::palace::DrawerType::from_tag(tag)
 }
 
 /// Shared per-path state: the open `Database` plus its open mode and
@@ -423,7 +423,7 @@ impl GuardedWrite<'_> {
     ///
     /// #8749: past its deadline the transaction is aborted instead, and the
     /// caller gets a
-    /// [`WriteTxnError`](crate::memory_core::store::write_deadline::WriteTxnError)
+    /// [`WriteTxnError`](crate::engine::store::write_deadline::WriteTxnError)
     /// (downcastable through `anyhow`).
     /// Test: every write path in this module;
     /// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.

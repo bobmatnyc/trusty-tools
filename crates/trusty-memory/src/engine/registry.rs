@@ -12,14 +12,14 @@
 //! Test: `lru_evicts_least_recently_used`, `lru_evicted_handle_reopens`, and
 //! `registry_remove_clears_cached_handle` in this module.
 
-use crate::memory_core::community::KnowledgeGap;
-use crate::memory_core::maintenance_lease::MaintenanceLease;
-use crate::memory_core::palace::{Palace, PalaceId};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::hnsw_store::{HnswOp, OpWatch};
-use crate::memory_core::store::palace_store::{PalaceStore, PalaceStoreError};
-use crate::memory_core::timeouts::OpBudget;
+use crate::engine::community::KnowledgeGap;
+use crate::engine::maintenance_lease::MaintenanceLease;
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::hnsw_store::{HnswOp, OpWatch};
+use crate::engine::store::palace_store::{PalaceStore, PalaceStoreError};
+use crate::engine::timeouts::OpBudget;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use lru::LruCache;
@@ -147,7 +147,7 @@ pub struct PalaceRegistry {
     /// open always resolves quickly via the snapshot fallback (issue #59) and
     /// therefore never queues for long. So `open_palace` bounds this wait
     /// with a dedicated
-    /// [`crate::memory_core::timeouts::open_queue_timeout`] (issue #3992,
+    /// [`crate::engine::timeouts::open_queue_timeout`] (issue #3992,
     /// default 60 s, `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS`) -- a sibling of the
     /// established `write_lock_timeout` (issue #906) that governs the
     /// per-palace write mutex once a palace is already open, kept as its own
@@ -166,7 +166,7 @@ pub struct PalaceRegistry {
     open_locks: Arc<DashMap<PalaceId, Arc<Mutex<()>>>>,
     /// Bound applied to `open_lock.try_lock_for` in `open_palace` (issue
     /// #3992). Defaults to
-    /// [`crate::memory_core::timeouts::open_queue_timeout`] (process-wide env
+    /// [`crate::engine::timeouts::open_queue_timeout`] (process-wide env
     /// override) but is stored per-instance — rather than re-read from the
     /// environment on every call — so [`PalaceRegistry::with_open_queue_timeout`]
     /// can inject a short deadline in tests without mutating global process
@@ -241,7 +241,7 @@ impl PalaceRegistry {
             // daemon overrides this via `with_writer_intent` (issue #1487).
             open_intent: OpenIntent::ReadOnlyClient,
             open_locks: Arc::new(DashMap::new()),
-            open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
+            open_queue_timeout: crate::engine::timeouts::open_queue_timeout(),
             unopenable: Arc::new(DashMap::new()),
             maintenance: None,
             data_root: None,
@@ -603,14 +603,14 @@ impl PalaceRegistry {
     /// left on the open queue (issue #4002).
     ///
     /// Why: a `memory_remember` waits for the per-palace write mutex
-    /// ([`crate::memory_core::timeouts::write_lock_timeout`]) and only then
+    /// ([`crate::engine::timeouts::write_lock_timeout`]) and only then
     /// calls [`Self::open_palace`], which starts its own full
-    /// [`crate::memory_core::timeouts::open_queue_timeout`] window. Both legs
+    /// [`crate::engine::timeouts::open_queue_timeout`] window. Both legs
     /// were bounded, but their sum was not, so a caller that exhausted each
     /// waited 60 s + ~63 s before any error surfaced. Passing the operation's
     /// residual budget makes this leg spend what the earlier leg left.
     /// What: clamps the registry's configured `open_queue_timeout` with
-    /// [`crate::memory_core::timeouts::OpBudget::leg`], then runs the same open
+    /// [`crate::engine::timeouts::OpBudget::leg`], then runs the same open
     /// pipeline as [`Self::open_palace`]. The budget is a ceiling only — it
     /// never raises the configured bound, and an exhausted budget yields a
     /// non-blocking queue attempt, so an UNCONTENDED open still succeeds.
@@ -754,7 +754,7 @@ impl PalaceRegistry {
     /// `registry_tests::registry_create_and_open` opens through this path;
     /// `a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time`.
     fn backfill_rooms(handle: &PalaceHandle) {
-        use crate::memory_core::store::{room_backfill, wings};
+        use crate::engine::store::{room_backfill, wings};
         if handle.kg.is_read_only() {
             return;
         }
@@ -772,11 +772,11 @@ impl PalaceRegistry {
             // `DRAWERS`.
             wings::ensure_default_wing_fail_open(palace.as_str(), &kg);
         };
-        crate::memory_core::retrieval::open_sweep::run_open_write(
+        crate::engine::retrieval::open_sweep::run_open_write(
             &handle.kg.store(),
             &handle.id,
             "room_backfill_at_open",
-            crate::memory_core::retrieval::open_sweep::OPEN_WRITE_BUDGET,
+            crate::engine::retrieval::open_sweep::OPEN_WRITE_BUDGET,
             work,
         );
     }
@@ -786,16 +786,16 @@ impl PalaceRegistry {
     /// Read transactions only. A read error answers `true`, so the fail-open
     /// writers run and report it as they always have.
     fn open_writes_needed(
-        kg: &crate::memory_core::store::kg::KnowledgeGraph,
-        drawers: &[crate::memory_core::palace::Drawer],
+        kg: &crate::engine::store::kg::KnowledgeGraph,
+        drawers: &[crate::engine::palace::Drawer],
     ) -> bool {
-        let rooms_missing = crate::memory_core::store::plan_rooms(kg, drawers)
+        let rooms_missing = crate::engine::store::plan_rooms(kg, drawers)
             .map(|plan| plan.iter().any(|entry| entry.would_insert()))
             .unwrap_or(true);
         rooms_missing
             || kg
                 .store()
-                .get_wing(crate::memory_core::room_identity::DEFAULT_WING_ID)
+                .get_wing(crate::engine::room_identity::DEFAULT_WING_ID)
                 .map(|wing| wing.is_none())
                 .unwrap_or(true)
     }
@@ -811,7 +811,7 @@ impl PalaceRegistry {
     /// deleted palace (which would just fail load anyway, but this keeps the
     /// error message about the ORIGINAL id).
     /// What: delegates the whole rule to
-    /// [`crate::palace_alias::alias_target_if_absent`] (#5810) and adopts its
+    /// [`trusty_common::palace_alias::alias_target_if_absent`] (#5810) and adopts its
     /// answer: the target id when it names a redirect, `palace_id` unchanged
     /// otherwise, so the caller surfaces the normal "metadata missing" error.
     /// That function owns the presence probe, the alias-map read, and the
@@ -829,7 +829,7 @@ impl PalaceRegistry {
     fn resolve_palace_alias(data_root: &Path, palace_id: &PalaceId) -> PalaceId {
         // #5810: the rule above now lives in `palace_alias` so callers that only
         // want to NAME the palace they will reach read the same one.
-        match crate::palace_alias::alias_target_if_absent(data_root, palace_id.as_str()) {
+        match trusty_common::palace_alias::alias_target_if_absent(data_root, palace_id.as_str()) {
             Some(target) => PalaceId::new(target),
             None => palace_id.clone(),
         }
@@ -840,7 +840,7 @@ impl PalaceRegistry {
     /// Why: `palace new` saves metadata and immediately wants a working handle
     /// for further operations; combining the steps avoids a TOCTOU between
     /// save and open.
-    /// What: Refuses with [`crate::palace_alias::LiveAliasError`] when the id is
+    /// What: Refuses with [`trusty_common::palace_alias::LiveAliasError`] when the id is
     /// a live alias (#9544), since a new palace would shadow it, and fails when
     /// the alias file cannot be read. Otherwise
     /// computes `data_dir = data_root/<id>`, writes `palace.json`, and
@@ -858,10 +858,10 @@ impl PalaceRegistry {
         // #9544: a live alias name stays an alias; creating it would shadow it.
         // An unreadable alias file fails the create rather than skipping the check.
         if let Some(target) =
-            crate::palace_alias::try_alias_target_if_absent(data_root, palace.id.as_str())
+            trusty_common::palace_alias::try_alias_target_if_absent(data_root, palace.id.as_str())
                 .with_context(|| format!("check palace id {} against the alias map", palace.id))?
         {
-            return Err(crate::palace_alias::LiveAliasError {
+            return Err(trusty_common::palace_alias::LiveAliasError {
                 alias: palace.id.as_str().to_string(),
                 target,
             }

@@ -13,7 +13,7 @@
 //! Test: `canonical_key_is_case_insensitive`, `mint_room_id_is_stable`,
 //! `room_type_parts_round_trip`, `mint_room_id_avoids_fold_collisions`.
 
-use crate::memory_core::palace::RoomType;
+use crate::engine::palace::RoomType;
 use uuid::Uuid;
 
 /// Separator between the wing id and the normalised label in a canonical key.

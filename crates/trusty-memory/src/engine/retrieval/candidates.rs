@@ -30,10 +30,10 @@ use super::layers::{RANK_TRACE_TARGET, rank_score, uuid_prefix_eq};
 use super::refill::next_refill_window;
 use super::scope::scope_admits;
 use super::types::RecallResult;
-use crate::memory_core::decay::DecayConfig;
-use crate::memory_core::dream::MIN_KEYWORD_CHARS;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::vector::{VectorHit, VectorStore};
+use crate::engine::decay::DecayConfig;
+use crate::engine::dream::MIN_KEYWORD_CHARS;
+use crate::engine::palace::Drawer;
+use crate::engine::store::vector::{VectorHit, VectorStore};
 
 /// Closet tag boost: a query token names a closet keyword holding the drawer.
 const CLOSET_BOOST: f32 = 0.15;

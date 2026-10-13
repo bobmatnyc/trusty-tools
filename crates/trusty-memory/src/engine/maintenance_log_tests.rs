@@ -427,7 +427,7 @@ fn a_lock_or_rotation_failure_still_appends_the_record() {
     let dir = tempdir().unwrap();
     let palace = PalaceId::new("lock-fail");
     // A directory at the lock sidecar path makes the lock unobtainable.
-    let sidecar = crate::file_lock::lock_path(&journal_path(dir.path()));
+    let sidecar = trusty_common::file_lock::lock_path(&journal_path(dir.path()));
     std::fs::create_dir_all(&sidecar).unwrap();
     let first = MaintenanceDeletion::new(&palace, Uuid::new_v4(), DeletionReason::DreamPrune);
     append(dir.path(), &first, u64::MAX).unwrap();

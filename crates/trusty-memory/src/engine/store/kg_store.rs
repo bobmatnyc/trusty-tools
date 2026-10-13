@@ -101,7 +101,7 @@ pub const DRAWERS_BY_FACT_KEY: TableDefinition<&[u8], &[u8]> =
 /// one unit.
 /// What: Key = room uuid bytes (`[u8; 16]`); the nil uuid is reserved for the
 /// `RoomSchemaMarker` row. Value = postcard-encoded
-/// [`crate::memory_core::store::rooms::RoomRecord`].
+/// [`crate::engine::store::rooms::RoomRecord`].
 /// Test: `store::room_backfill::tests::room_insert_is_insert_only`.
 pub const ROOMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rooms");
 
@@ -122,7 +122,7 @@ pub const ROOM_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("room_k
 /// authoritatively describe wings whose rooms are gone.
 /// What: Key = wing uuid bytes (`[u8; 16]`); the nil uuid is reserved for the
 /// `WingSchemaMarker` row. Value = postcard-encoded
-/// [`crate::memory_core::store::wings::WingRecord`].
+/// [`crate::engine::store::wings::WingRecord`].
 /// Test: `store::wings::tests::default_wing_is_seeded_once`.
 pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
 
@@ -168,7 +168,7 @@ pub const RECALL_LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("recall
 ///      directly onto redb keys without re-hashing UUIDs.
 /// What: Key = `u64` vector_id, value = postcard-encoded `Vec<f32>` (the
 ///       embedding).
-/// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`.
+/// Test: Coverage lives in `crate::engine::store::hnsw_store::tests`.
 pub const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors");
 
 /// Vector key mapping: drawer UUID string → vector_id.
@@ -179,7 +179,7 @@ pub const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors")
 ///      compaction a redb scan rather than a session-only diff.
 /// What: Key = UUID string (drawer id), value = `u64` vector_id (the row
 ///       index into the `VECTORS` table).
-/// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`.
+/// Test: Coverage lives in `crate::engine::store::hnsw_store::tests`.
 pub const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector_keys");
 
 /// Tombstone table for soft-deleted vector_ids.
@@ -190,7 +190,7 @@ pub const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector
 ///      it out at search time. The tombstones are cleared on a full rebuild
 ///      (e.g. dream compaction).
 /// What: Key = `u64` vector_id (tombstoned), value = empty `&[u8]`.
-/// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`
+/// Test: Coverage lives in `crate::engine::store::hnsw_store::tests`
 ///       (`delete_filters_results`).
 pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("deleted_vectors");
 
@@ -200,7 +200,7 @@ pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("d
 ///      `AtomicU64` seeded at open from `max(VECTORS, VECTOR_KEYS) + 1`. Two
 ///      live stores over the same database — which the in-process vector-db
 ///      cache deliberately supports, see
-///      `crate::memory_core::store::vector::open_or_get_cached_db` — each
+///      `crate::engine::store::vector::open_or_get_cached_db` — each
 ///      seeded their own counter from the same high-water mark and then handed
 ///      out the same ids, so `VECTOR_KEYS` aliased several drawers onto one
 ///      `vector_id` and `VECTORS` overwrote in place. Keeping the reservation
@@ -208,7 +208,7 @@ pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("d
 ///      makes allocation serialisable with every other writer on the file.
 /// What: Single-row table. Key = [`NEXT_VECTOR_ID`], value = the next
 ///       unissued `u64` vector_id.
-/// Test: `crate::memory_core::store::hnsw_store::tests::
+/// Test: `crate::engine::store::hnsw_store::tests::
 ///       two_live_stores_over_one_file_never_alias_ids` and
 ///       `old_palace_without_a_seq_row_is_seeded_on_open`.
 pub const VECTOR_ID_SEQ: TableDefinition<&str, u64> = TableDefinition::new("vector_id_seq");
@@ -326,7 +326,7 @@ pub fn is_functional_predicate(predicate: &str) -> bool {
 /// What: Key = session id (UTF-8 bytes, typically a UUID).
 ///       Value = postcard-encoded `ChatSessionRecord` (title, created_at,
 ///       updated_at, JSON-encoded history string).
-/// Test: Round-trips via `crate::memory_core::store::chat_sessions::tests`.
+/// Test: Round-trips via `crate::engine::store::chat_sessions::tests`.
 pub const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("chat_sessions");
 
 // ── Value types (postcard-serializable) ──────────────────────────────────

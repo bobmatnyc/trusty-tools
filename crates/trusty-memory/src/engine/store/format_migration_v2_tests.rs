@@ -14,18 +14,18 @@ use super::tests::{
     Fixture, build_v0, build_v1, build_v1_with, hash_tree, interrupt_after, marker, mirror, open,
 };
 use super::{Seams, migrate};
-use crate::memory_core::palace::{Drawer, Palace, PalaceId};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::format_backup::ensure_format_backup;
-use crate::memory_core::store::kg_redb::migrate::migrate_kg_to_format;
-use crate::memory_core::store::kg_store::{
+use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::format_backup::ensure_format_backup;
+use crate::engine::store::kg_redb::migrate::migrate_kg_to_format;
+use crate::engine::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, encode_value,
 };
-use crate::memory_core::store::palace_format::{
+use crate::engine::store::palace_format::{
     FormatState, KG_SCHEMA_PALACE_FORMAT, MIGRATION_RECORD, classify_with, is_format_refusal,
 };
-use crate::memory_core::store::palace_store::PalaceStoreError;
+use crate::engine::store::palace_store::PalaceStoreError;
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -143,7 +143,7 @@ type SchemaRow = (&'static str, Vec<u8>);
 
 /// A bare KG whose `kg_schema` holds `rows` (absent rows are not written).
 fn kg_with(dir: &Path, rows: &[SchemaRow]) -> redb::Database {
-    let db = crate::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg");
+    let db = trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).expect("kg");
     let wtx = db.begin_write().expect("txn");
     {
         let mut t = wtx.open_table(KG_SCHEMA).expect("kg_schema");
@@ -308,14 +308,14 @@ fn chunk_rows(handle: &PalaceHandle) -> usize {
 
 /// Write one drawer long enough to need chunk rows, with every chunk.
 async fn put_long_drawer(handle: &PalaceHandle) {
-    let e = crate::embedder::MockEmbedder::new(handle.vector_store.dim()).with_chunking(12);
+    let e = trusty_common::embedder::MockEmbedder::new(handle.vector_store.dim()).with_chunking(12);
     let text = (0..100)
         .map(|i| format!("w{i}"))
         .collect::<Vec<_>>()
         .join(" ");
     let d = Drawer::new(uuid::Uuid::new_v4(), &text);
     handle.kg.upsert_drawer(&d).await.expect("drawer");
-    let vecs = crate::memory_core::retrieval::embed_chunks(&e, &text)
+    let vecs = crate::engine::retrieval::embed_chunks(&e, &text)
         .await
         .expect("embed");
     assert!(vecs.len() > 1, "{} chunks", vecs.len());

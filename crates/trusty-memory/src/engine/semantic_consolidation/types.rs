@@ -14,7 +14,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 
 // ─── Public config ──────────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ pub fn resolve_openrouter_api_key(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
-    std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
+    std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
 }
 
 // ─── Gate: is inference available? ─────────────────────────────────────────
@@ -190,7 +190,7 @@ pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) 
     }
     // Fall back to env var (daemon callers that didn't thread the config
     // through to this level yet).
-    let env_key = std::env::var(crate::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
+    let env_key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
     !env_key.trim().is_empty()
 }
 

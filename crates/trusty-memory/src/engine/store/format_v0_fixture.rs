@@ -77,7 +77,7 @@ pub fn write_format_0_palace_with(
     std::fs::write(dir.join("identity.txt"), b"v0 identity").context("write identity.txt")?;
 
     let db =
-        crate::redb_cache::create_palace_db(&dir.join("kg.redb")).context("create v0 kg.redb")?;
+        trusty_common::redb_cache::create_palace_db(&dir.join("kg.redb")).context("create v0 kg.redb")?;
     let wtx = db.begin_write()?;
     {
         let mut drawers = wtx.open_table(DRAWERS)?;

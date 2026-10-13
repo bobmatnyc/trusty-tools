@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::memory_core::store::kg_store::{PAYLOADS, encode_payload_key, segment_prefix};
+use crate::engine::store::kg_store::{PAYLOADS, encode_payload_key, segment_prefix};
 
 use super::types::{
     PayloadRecord, PayloadRow, PayloadStoreError, Result, RowBytes, decode_row, resolve_redb_path,

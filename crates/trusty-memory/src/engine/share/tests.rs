@@ -8,7 +8,7 @@
 //! What: two independent on-disk palaces standing in for two machines, driven
 //! through `export_palace_jsonl` / `import_palace_jsonl`.
 //! Test: this file IS the tests — run with:
-//!   cargo test -p trusty-common --features memory-core,embedder-test-support share::
+//!   cargo test -p trusty-memory share::
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,11 +18,11 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 use super::*;
-use crate::memory_core::content_hash::{
+use crate::engine::content_hash::{
     CONTENT_HASH_VERSION, ContentHash, memory_content_hash, normalize_for_hash,
 };
-use crate::memory_core::palace::{DrawerType, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{
+use crate::engine::palace::{DrawerType, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{
     PalaceHandle, RememberOptions, recall_with_default_embedder, seed_shared_embedder_with_mock,
 };
 
@@ -112,7 +112,7 @@ fn bodies(handle: &PalaceHandle) -> Vec<String> {
 
 #[test]
 fn record_round_trips_through_json() {
-    let drawer = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "a stable fact");
+    let drawer = crate::engine::palace::Drawer::new(Uuid::new_v4(), "a stable fact");
     let rec = SharedMemoryRecord::from_drawer(&drawer, "backend");
     let line = serde_json::to_string(&rec).unwrap();
     // The digest travels as readable hex, so a committed file stays greppable.
@@ -124,7 +124,7 @@ fn record_round_trips_through_json() {
 
 #[test]
 fn verify_accepts_a_round_tripped_record() {
-    let drawer = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "verified");
+    let drawer = crate::engine::palace::Drawer::new(Uuid::new_v4(), "verified");
     let rec = SharedMemoryRecord::from_drawer(&drawer, "general");
     assert_eq!(rec.verify().unwrap(), memory_content_hash("verified"));
 }
@@ -136,7 +136,7 @@ fn verify_accepts_a_round_tripped_record() {
 /// Test: This test.
 #[test]
 fn verify_rejects_a_forged_digest() {
-    let drawer = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "the real body");
+    let drawer = crate::engine::palace::Drawer::new(Uuid::new_v4(), "the real body");
     let mut rec = SharedMemoryRecord::from_drawer(&drawer, "general");
     rec.content_hash = memory_content_hash("something else entirely");
     match rec.verify() {
@@ -147,7 +147,7 @@ fn verify_rejects_a_forged_digest() {
 
 #[test]
 fn verify_rejects_an_unknown_format_version() {
-    let drawer = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "body");
+    let drawer = crate::engine::palace::Drawer::new(Uuid::new_v4(), "body");
     let mut rec = SharedMemoryRecord::from_drawer(&drawer, "general");
     rec.format_version = SHARE_FORMAT_VERSION + 1;
     match rec.verify() {
@@ -165,7 +165,7 @@ fn verify_rejects_an_unknown_format_version() {
 /// Test: This test.
 #[test]
 fn verify_rejects_an_unknown_hash_version() {
-    let drawer = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "body");
+    let drawer = crate::engine::palace::Drawer::new(Uuid::new_v4(), "body");
     let mut rec = SharedMemoryRecord::from_drawer(&drawer, "general");
     rec.hash_version = CONTENT_HASH_VERSION + 1;
     match rec.verify() {
@@ -703,7 +703,7 @@ async fn import_skips_a_bad_line_and_keeps_the_rest() {
     let mut text = std::fs::read_to_string(&file).unwrap();
     text.push_str("<<<<<<< HEAD\n");
     let forged = {
-        let d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "a forged fact");
+        let d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "a forged fact");
         let mut r = SharedMemoryRecord::from_drawer(&d, "general");
         r.content_hash = memory_content_hash("a different body");
         serde_json::to_string(&r).unwrap()
@@ -722,7 +722,7 @@ async fn import_skips_a_bad_line_and_keeps_the_rest() {
 async fn import_of_an_unknown_drawer_type_falls_back_to_unknown() {
     let tmp = tempdir().unwrap();
     let dst = open_palace(tmp.path(), "type-dst");
-    let d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "from the future");
+    let d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "from the future");
     let mut rec = SharedMemoryRecord::from_drawer(&d, "general");
     rec.drawer_type = "SomethingNewerThanThisBuild".to_string();
 
@@ -741,21 +741,21 @@ async fn import_of_an_unknown_drawer_type_falls_back_to_unknown() {
 #[test]
 fn merge_records_converges_two_machines_exports() {
     let old = {
-        let mut d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "shared");
+        let mut d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "shared");
         d.created_at = Utc::now() - Duration::days(50);
         d.tags = vec!["a".to_string()];
         d.importance = 0.2;
         SharedMemoryRecord::from_drawer(&d, "general")
     };
     let new = {
-        let mut d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "shared");
+        let mut d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "shared");
         d.created_at = Utc::now();
         d.tags = vec!["b".to_string()];
         d.importance = 0.7;
         SharedMemoryRecord::from_drawer(&d, "general")
     };
     let only_new = {
-        let d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), "unique to the second set");
+        let d = crate::engine::palace::Drawer::new(Uuid::new_v4(), "unique to the second set");
         SharedMemoryRecord::from_drawer(&d, "general")
     };
 
@@ -841,8 +841,8 @@ async fn supersede_mints_a_new_hash_and_links_the_original() {
 /// Test: This test.
 #[tokio::test]
 async fn assert_superseded_by_fails_loud_on_an_unwritable_kg() {
-    use crate::memory_core::store::kg::KnowledgeGraph;
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::kg_redb::KgStoreRedb;
 
     let dir = tempdir().unwrap();
     let kg_path = dir.path().join("kg.redb");
@@ -928,9 +928,9 @@ async fn supersede_leaves_the_original_intact_when_the_replacement_cannot_be_wri
 /// Test: This test.
 #[tokio::test]
 async fn an_embedder_failure_during_import_writes_nothing_durably() {
-    use crate::memory_core::embed::Embedder;
-    use crate::memory_core::retrieval::embed_repair_tests::DeadEmbedder;
-    use crate::memory_core::share::import::import_palace_records_with_embedder;
+    use crate::engine::embed::Embedder;
+    use crate::engine::retrieval::embed_repair_tests::DeadEmbedder;
+    use crate::engine::share::import::import_palace_records_with_embedder;
 
     let tmp = tempdir().unwrap();
     let src = open_palace(tmp.path(), "embed-fail-src");
@@ -989,9 +989,9 @@ async fn an_embedder_failure_during_import_writes_nothing_durably() {
 /// Test: itself.
 #[tokio::test]
 async fn import_writes_chunk_rows_for_a_long_shared_record() {
-    use crate::embedder::{MockEmbedder, chunk_text};
-    use crate::memory_core::embed::Embedder;
-    use crate::memory_core::share::import::import_palace_records_with_embedder;
+    use trusty_common::embedder::{MockEmbedder, chunk_text};
+    use crate::engine::embed::Embedder;
+    use crate::engine::share::import::import_palace_records_with_embedder;
 
     let tmp = tempdir().unwrap();
     let src = open_palace(tmp.path(), "chunk-src");

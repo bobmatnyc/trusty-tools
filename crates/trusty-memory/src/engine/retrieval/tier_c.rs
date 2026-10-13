@@ -34,9 +34,9 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use super::tier_c_verify::{VerifyNotStored, close_retired_verify_command, record_verify_command};
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::share::assert_superseded_by;
-use crate::memory_core::store::kg::KnowledgeGraph;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::share::assert_superseded_by;
+use crate::engine::store::kg::KnowledgeGraph;
 
 /// Default Tier C lifetime when the writer names a slot but no `expires_at`
 /// (ADR-0028 D4, retirement condition 3).
@@ -244,7 +244,7 @@ pub fn admit_tier_c(
 pub(super) fn apply_admission(
     drawer: &mut Drawer,
     opts: &super::types::RememberOptions,
-    palace: &crate::memory_core::palace::PalaceId,
+    palace: &crate::engine::palace::PalaceId,
 ) {
     match admit_tier_c(opts.fact_key.as_deref(), opts.expires_at, Utc::now()) {
         TierCAdmission::Admitted {

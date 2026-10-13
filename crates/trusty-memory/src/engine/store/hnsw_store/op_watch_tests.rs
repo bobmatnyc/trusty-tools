@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{HnswOpKind, OpPark, OpWatch};
-use crate::memory_core::store::hnsw_store::HnswStore;
-use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::engine::store::hnsw_store::HnswStore;
+use crate::engine::store::vector::{UsearchStore, VectorStore};
 
 /// Upper bound on any wait for a parked call to arrive; never a sync sleep.
 const ENTER_BOUND: Duration = Duration::from_secs(30);

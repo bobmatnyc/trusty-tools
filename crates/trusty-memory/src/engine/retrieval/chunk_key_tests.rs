@@ -12,8 +12,8 @@ use super::embedder::seed_shared_embedder_with_mock;
 use super::handle::PalaceHandle;
 use super::layers::recall;
 use super::types::ForgetOutcome;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use std::sync::Arc;
 use uuid::Uuid;
 

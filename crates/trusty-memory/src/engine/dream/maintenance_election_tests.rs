@@ -7,11 +7,11 @@
 
 use super::config::{DreamConfig, PersistedDreamStats};
 use super::dreamer::Dreamer;
-use crate::memory_core::PalaceRegistry;
-use crate::memory_core::maintenance_lease::MaintenanceLease;
-use crate::memory_core::palace::{Palace, PalaceId};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
+use crate::engine::PalaceRegistry;
+use crate::engine::maintenance_lease::MaintenanceLease;
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::semantic_consolidation::SemanticConsolidationConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

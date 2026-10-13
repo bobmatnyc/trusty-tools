@@ -13,7 +13,7 @@
 //! Test: `cargo test -p trusty-memory-core palace::` constructs each type and
 //! verifies serde round-trips.
 
-use crate::memory_core::content_hash::{ContentHash, memory_content_hash};
+use crate::engine::content_hash::{ContentHash, memory_content_hash};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -458,7 +458,7 @@ impl Drawer {
     /// imported JSONL record — must derive it rather than trust what it read.
     /// That covers three cases with one call: a legacy row that has no digest
     /// (decodes to [`ContentHash::UNSET`]), a snapshot written by an older
-    /// binary under a different [`crate::memory_core::content_hash::CONTENT_HASH_VERSION`],
+    /// binary under a different [`crate::engine::content_hash::CONTENT_HASH_VERSION`],
     /// and a hostile or corrupt file asserting a digest its body does not have.
     /// What: unconditionally sets the digest to the hash of the current content.
     /// Cheap enough to call per row on a cold open — a SHA-256 over a few
@@ -543,7 +543,7 @@ impl Drawer {
     /// computed boost so `DecayConfig::effective_importance` stays pure.
     /// What: `(access_count * config.access_boost).min(config.access_boost_cap)`
     /// Test: See `decay::tests::drawer_accumulated_boost`.
-    pub fn accumulated_boost(&self, config: &crate::memory_core::decay::DecayConfig) -> f32 {
+    pub fn accumulated_boost(&self, config: &crate::engine::decay::DecayConfig) -> f32 {
         (self.access_count as f32 * config.access_boost).min(config.access_boost_cap)
     }
 

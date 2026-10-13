@@ -18,7 +18,7 @@
 //! `settled_corpus_tests::enabling_semantic_consolidation_makes_the_next_cycle_run`.
 
 use super::config::DreamConfig;
-use crate::memory_core::retrieval::PalaceHandle;
+use crate::engine::retrieval::PalaceHandle;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -125,7 +125,7 @@ pub(super) fn record_settled(data_dir: &Path, fingerprint: &str) -> Result<()> {
     };
     let raw = serde_json::to_string_pretty(&marker).context("serialize dream settled marker")?;
     let path = data_dir.join(FILE_NAME);
-    crate::atomic_file::write_atomic(&path, raw.as_bytes())
+    trusty_common::atomic_file::write_atomic(&path, raw.as_bytes())
         .with_context(|| format!("write {}", path.display()))
 }
 

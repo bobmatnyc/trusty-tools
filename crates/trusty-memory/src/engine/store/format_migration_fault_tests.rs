@@ -9,11 +9,11 @@
 
 use super::tests::{assert_migrated, build_v1, complete_backups, hash_tree, marker, mirror};
 use super::{Seams, Step, open_gate_with};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::format_backup::{self, backup_data_root};
-use crate::memory_core::store::palace_format::MIGRATION_RECORD;
-use crate::memory_core::store::palace_store::PalaceStoreError;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::format_backup::{self, backup_data_root};
+use crate::engine::store::palace_format::MIGRATION_RECORD;
+use crate::engine::store::palace_store::PalaceStoreError;
 use std::cell::Cell;
 use std::path::Path;
 

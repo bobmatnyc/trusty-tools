@@ -8,16 +8,16 @@
 //! holding the redb file lock with a raw `Database::create`, then asserts that
 //! every write method returns an error containing the canonical read-only
 //! sentinel message, while read methods continue to succeed.
-//! Test: Run with `cargo test -p trusty-common --features memory-core --test
+//! Test: Run with `cargo test -p trusty-memory --test
 //! kg_store_snapshot_tests`.
 
 #![cfg(feature = "memory-core")]
 
 use tempfile::tempdir;
-use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::kg::Triple;
-use trusty_common::memory_core::store::kg_redb::{KgStoreRedb, READ_ONLY_ERROR_MSG};
-use trusty_common::memory_core::store::vector::{UsearchStore, VectorStore};
+use trusty_memory::engine::palace::Drawer;
+use trusty_memory::engine::store::kg::Triple;
+use trusty_memory::engine::store::kg_redb::{KgStoreRedb, READ_ONLY_ERROR_MSG};
+use trusty_memory::engine::store::vector::{UsearchStore, VectorStore};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------

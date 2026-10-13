@@ -11,9 +11,9 @@
 
 use super::tests::{assert_migrated, build_v1, complete_backups, hash_tree};
 use super::{MigrationRecord, Seams, Step, open_gate, open_gate_with, tmp_path, write_record};
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::palace_format::MIGRATION_RECORD;
-use crate::memory_core::store::palace_store::PalaceStoreError;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::palace_format::MIGRATION_RECORD;
+use crate::engine::store::palace_store::PalaceStoreError;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;

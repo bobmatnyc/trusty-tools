@@ -30,15 +30,15 @@ use async_trait::async_trait;
 use redb::Database;
 use uuid::Uuid;
 
-use crate::memory_core::store::concurrent_open::{
+use crate::engine::store::concurrent_open::{
     OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, is_incompatible_format_refusal,
     try_open_or_snapshot,
 };
-use crate::memory_core::store::hnsw_store::HnswStore;
-use crate::memory_core::store::hnsw_store::op_budget::OpBreaker;
-use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
-use crate::memory_core::store::vector_key;
-use crate::memory_core::store::write_deadline::palace_label;
+use crate::engine::store::hnsw_store::HnswStore;
+use crate::engine::store::hnsw_store::op_budget::OpBreaker;
+use crate::engine::store::kg_redb::READ_ONLY_ERROR_MSG;
+use crate::engine::store::vector_key;
+use crate::engine::store::write_deadline::palace_label;
 
 /// Bundle of state shared between every `UsearchStore` clone that points
 /// at the same canonical path.
@@ -592,7 +592,7 @@ impl UsearchStore {
     /// group whose keys did not parse shrank to nothing, so `is_clean()`
     /// answered true over a real collision and `repair_aliases` returned
     /// `Clean` without touching it. The keys are carried now, and
-    /// [`AliasAudit::is_clean`](crate::memory_core::retrieval::AliasAudit::is_clean) consults the row-vs-distinct arithmetic rather
+    /// [`AliasAudit::is_clean`](crate::engine::retrieval::AliasAudit::is_clean) consults the row-vs-distinct arithmetic rather
     /// than the id list alone.
     /// What: delegates to `HnswStore::audit_aliases` and splits each collision
     /// group's keys into drawer ids and unnameable leftovers, alongside the two
@@ -638,7 +638,7 @@ impl UsearchStore {
     /// collision on one chunk row frees every row of that drawer (#9275), in
     /// the same transaction, so no drawer is left half-present. The freed
     /// drawers then read as ordinary "missing" to `embed_health`. Callers should route
-    /// through [`PalaceHandle::repair_aliases`](crate::memory_core::PalaceHandle::repair_aliases), which adds the dry run and the
+    /// through [`PalaceHandle::repair_aliases`](crate::engine::PalaceHandle::repair_aliases), which adds the dry run and the
     /// post-repair verification; this is the raw primitive.
     /// Test: `unalias_marks_the_whole_group_for_reembed`,
     /// `repair_aliases_never_reports_success_over_a_partial_repair`,
@@ -733,14 +733,14 @@ impl UsearchStore {
     }
 
     /// #9487: the longest-running in-flight graph call; see [`HnswStore::oldest_op`].
-    pub fn oldest_hnsw_op(&self) -> Option<crate::memory_core::store::hnsw_store::HnswOp> {
+    pub fn oldest_hnsw_op(&self) -> Option<crate::engine::store::hnsw_store::HnswOp> {
         self.inner.oldest_op()
     }
 
     /// #9487: a `Weak` to the graph's in-flight registry; see [`HnswStore::op_watch`].
     pub(crate) fn hnsw_op_watch(
         &self,
-    ) -> std::sync::Weak<crate::memory_core::store::hnsw_store::OpWatch> {
+    ) -> std::sync::Weak<crate::engine::store::hnsw_store::OpWatch> {
         self.inner.op_watch()
     }
 
@@ -748,7 +748,7 @@ impl UsearchStore {
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub fn set_hnsw_op_park(
         &self,
-        park: Option<Arc<crate::memory_core::store::hnsw_store::OpPark>>,
+        park: Option<Arc<crate::engine::store::hnsw_store::OpPark>>,
     ) {
         self.inner.set_op_park(park);
     }

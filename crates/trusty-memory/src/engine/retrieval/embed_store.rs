@@ -9,10 +9,10 @@
 //! drawer has.
 //! Test: `embed_store_tests.rs`.
 
-use crate::embedder::{ChunkTokenizer, TextChunk, chunk_text};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
-use crate::memory_core::timeouts;
+use trusty_common::embedder::{ChunkTokenizer, TextChunk, chunk_text};
+use crate::engine::embed::Embedder;
+use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use std::ops::Range;
 use std::sync::Arc;

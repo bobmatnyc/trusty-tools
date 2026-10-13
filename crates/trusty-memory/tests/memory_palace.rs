@@ -16,9 +16,9 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use std::sync::Arc;
 use tempfile::tempdir;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer};
-use trusty_common::memory_core::palace::{DrawerType, Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
+use trusty_memory::engine::dream::{DreamConfig, Dreamer};
+use trusty_memory::engine::palace::{DrawerType, Palace, PalaceId, RoomType};
+use trusty_memory::engine::retrieval::{
     PalaceHandle, RememberOptions, seed_shared_embedder_with_mock,
 };
 

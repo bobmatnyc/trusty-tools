@@ -10,9 +10,9 @@
 //! Test: this file.
 
 use super::*;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::room_identity::parse_room_preserving_case;
-use crate::memory_core::store::kg::KnowledgeGraph;
+use crate::engine::palace::Drawer;
+use crate::engine::room_identity::parse_room_preserving_case;
+use crate::engine::store::kg::KnowledgeGraph;
 use tempfile::TempDir;
 
 fn open_kg() -> (TempDir, KnowledgeGraph) {
@@ -89,7 +89,7 @@ fn create_room_reuses_a_backfilled_legacy_id() {
     let (_d, kg) = open_kg();
     let legacy = RoomType::Custom("status".to_string());
     let drawers = vec![seed_legacy_drawer(&kg, &legacy, "legacy row")];
-    crate::memory_core::store::room_backfill::backfill_rooms(&kg, &drawers).expect("backfill");
+    crate::engine::store::room_backfill::backfill_rooms(&kg, &drawers).expect("backfill");
 
     let store = kg.store();
     let (summary, created) = create_room(&store, &legacy, None).expect("create");
@@ -117,7 +117,7 @@ fn rename_changes_no_drawer_rows() {
         seed_legacy_drawer(&kg, &unnamed, "orphan two"),
         seed_legacy_drawer(&kg, &RoomType::General, "general one"),
     ];
-    crate::memory_core::store::room_backfill::backfill_rooms(&kg, &drawers).expect("backfill");
+    crate::engine::store::room_backfill::backfill_rooms(&kg, &drawers).expect("backfill");
 
     let store = kg.store();
     let id = room_to_uuid(&unnamed);

@@ -17,11 +17,11 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::memory_core::palace::{Palace, PalaceId, RoomType};
-    use crate::memory_core::retrieval::{PalaceHandle, RememberOptions};
-    use crate::memory_core::store::concurrent_open::OpenIntent;
-    use crate::memory_core::store::kg::KnowledgeGraph;
-    use crate::memory_core::store::vector::UsearchStore;
+    use crate::engine::palace::{Palace, PalaceId, RoomType};
+    use crate::engine::retrieval::{PalaceHandle, RememberOptions};
+    use crate::engine::store::concurrent_open::OpenIntent;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::vector::UsearchStore;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -327,7 +327,7 @@ mod tests {
     }
 
     /// How many drawers in `rows` still carry `SLOT` as a live claim.
-    fn claimants(rows: &[crate::memory_core::palace::Drawer]) -> usize {
+    fn claimants(rows: &[crate::engine::palace::Drawer]) -> usize {
         rows.iter()
             .filter(|d| d.fact_key.as_deref() == Some(SLOT))
             .count()
@@ -465,8 +465,8 @@ mod tests {
     /// Test: itself.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_abandoned_commit_still_leaves_one_claimant_for_the_slot() {
-        use crate::memory_core::palace::Drawer;
-        use crate::memory_core::retrieval::tier_c;
+        use crate::engine::palace::Drawer;
+        use crate::engine::retrieval::tier_c;
 
         let (_dir, handle) = palace().await;
 
@@ -663,7 +663,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        let (outcome, lines) = crate::log_buffer::capture_logs(|| {
+        let (outcome, lines) = trusty_common::log_buffer::capture_logs(|| {
             rt.block_on(async {
                 let (dir, handle) = palace().await;
                 let committed = handle
@@ -825,7 +825,7 @@ mod tests {
         Arc<std::sync::atomic::AtomicBool>,
         Arc<std::sync::atomic::AtomicBool>,
     ) {
-        use crate::memory_core::store::kg_redb::BatchWriteOp;
+        use crate::engine::store::kg_redb::BatchWriteOp;
         use std::sync::atomic::{AtomicBool, Ordering};
         let store = handle.kg.redb_store();
         *store.test_hooks().txn_budget.lock().expect("hook lock") = Some(TXN_BUDGET);
@@ -869,7 +869,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn a_stalled_commit_rolls_back_and_its_writer_gets_the_typed_deadline_error() {
-        use crate::memory_core::store::write_deadline::WriteTxnError;
+        use crate::engine::store::write_deadline::WriteTxnError;
         const STALLED: &str = "a write whose own commit stalls";
         const NEXT: &str = "a write queued behind the stalled one";
 
@@ -945,7 +945,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn a_writer_behind_a_stalled_commit_times_out_with_a_typed_error() {
-        use crate::memory_core::timeouts::WriteTimeout;
+        use crate::engine::timeouts::WriteTimeout;
         use std::sync::atomic::Ordering;
         const STALLED: &str = "a write whose detached commit stalls";
         const WAITER: &str = "a write that gives up waiting behind it";

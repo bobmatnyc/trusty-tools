@@ -11,8 +11,8 @@
 //! Test: this file IS the test.
 
 use super::*;
-use crate::memory_core::store::kg_writer::KgWriter;
-use crate::memory_core::store::write_deadline::WriteTxnError;
+use crate::engine::store::kg_writer::KgWriter;
+use crate::engine::store::write_deadline::WriteTxnError;
 use chrono::Utc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -162,7 +162,7 @@ fn a_stalled_commit_is_logged_with_the_palace_and_the_lock_hold() {
         }));
 
     let (outcome, lines) =
-        crate::log_buffer::capture_logs(|| kg.apply_batch(&[assert_op("logged")]));
+        trusty_common::log_buffer::capture_logs(|| kg.apply_batch(&[assert_op("logged")]));
     let err = outcome.expect_err("#8749: the stalled batch must not commit");
     assert!(deadline_error(&err).is_some(), "{err:#}");
     let warn = lines

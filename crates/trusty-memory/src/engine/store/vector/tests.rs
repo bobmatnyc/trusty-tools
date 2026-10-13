@@ -176,7 +176,7 @@ async fn try_index_size_surfaces_a_read_error_where_index_size_reports_zero() {
     {
         let wtx = store.db_state.db.begin_write().unwrap();
         assert!(
-            wtx.delete_table(crate::memory_core::store::kg_store::VECTORS)
+            wtx.delete_table(crate::engine::store::kg_store::VECTORS)
                 .unwrap(),
             "VECTORS table should have existed before this test deleted it"
         );
@@ -444,7 +444,7 @@ async fn a_reopen_behind_a_stuck_vector_write_still_reads() {
     );
 }
 
-use crate::memory_core::store::kg_store::VECTOR_KEYS as VECTOR_KEYS_FOR_TEST;
+use crate::engine::store::kg_store::VECTOR_KEYS as VECTOR_KEYS_FOR_TEST;
 
 // #9275: `{uuid}#n` chunk rows read as one drawer.
 #[path = "chunk_tests.rs"]

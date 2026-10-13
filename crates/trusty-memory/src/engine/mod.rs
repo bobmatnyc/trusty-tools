@@ -13,7 +13,7 @@
 //! `memory-core` feature because it pulls in heavy storage deps
 //! (`usearch`, `redb`, `postcard`, `tiktoken-rs`, `git2`).
 //! Test: Each submodule keeps its existing unit tests; `cargo test -p
-//! trusty-common --features memory-core` exercises the full surface.
+//! trusty-memory` exercises the full surface.
 
 pub mod analytics;
 pub mod community;

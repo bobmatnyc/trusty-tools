@@ -13,13 +13,13 @@
 use super::helpers::{
     build_closet_index, is_low_quality_content, persist_merge, rebuild_index_from_drawers,
 };
-use crate::memory_core::decay::DecayConfig;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::maintenance_log::DeletionReason;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
-use crate::memory_core::store::vector::VectorStore;
-use crate::memory_core::timeouts;
+use crate::engine::decay::DecayConfig;
+use crate::engine::embed::Embedder;
+use crate::engine::maintenance_log::DeletionReason;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::{PalaceHandle, shared_embedder};
+use crate::engine::store::vector::VectorStore;
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -559,16 +559,16 @@ pub(super) mod merge_seam {
     use std::sync::{Arc, LazyLock, Mutex};
 
     /// What the hook returns: the pause the merging cycle awaits.
-    pub(in crate::memory_core::dream) type Pause = Pin<Box<dyn Future<Output = ()> + Send>>;
+    pub(in crate::engine::dream) type Pause = Pin<Box<dyn Future<Output = ()> + Send>>;
     /// A hook, called once per persisted merge.
-    pub(in crate::memory_core::dream) type Hook = Arc<dyn Fn() -> Pause + Send + Sync>;
+    pub(in crate::engine::dream) type Hook = Arc<dyn Fn() -> Pause + Send + Sync>;
 
     /// Hooks keyed by palace id, so parallel tests on other palaces are unaffected.
-    pub(in crate::memory_core::dream) static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
+    pub(in crate::engine::dream) static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
         LazyLock::new(Default::default);
 
     /// Palaces whose next persisted merge ends the dedup pass with an error.
-    pub(in crate::memory_core::dream) static FAIL_AFTER_MERGE: LazyLock<Mutex<HashSet<String>>> =
+    pub(in crate::engine::dream) static FAIL_AFTER_MERGE: LazyLock<Mutex<HashSet<String>>> =
         LazyLock::new(Default::default);
 
     pub(super) async fn after_merge_persisted(palace: &str) -> anyhow::Result<()> {

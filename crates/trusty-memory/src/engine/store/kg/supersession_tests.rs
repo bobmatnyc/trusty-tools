@@ -7,8 +7,8 @@
 //! What: one behaviour test over every edge shape the store can hold, an
 //! empty-input test, and `kg_supersession_latency_profile`, a no-op unless
 //! `TRUSTY_KG_SUPERSESSION_PROFILE` is set. Run the profile in release:
-//! `TRUSTY_KG_SUPERSESSION_PROFILE=1 cargo test -p trusty-common --release
-//! --features memory-core --lib kg_supersession_latency_profile -- --nocapture`.
+//! `TRUSTY_KG_SUPERSESSION_PROFILE=1 cargo test -p trusty-memory --release
+//! --lib kg_supersession_latency_profile -- --nocapture`.
 //! Test: this IS the test module.
 
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::graph::KnowledgeGraph;
 use super::types::Triple;
-use crate::memory_core::share::{SUPERSEDED_BY, assert_superseded_by};
+use crate::engine::share::{SUPERSEDED_BY, assert_superseded_by};
 
 fn triple(subject: String, predicate: &str, object: String) -> Triple {
     Triple {

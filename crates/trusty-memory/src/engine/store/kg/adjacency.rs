@@ -15,8 +15,8 @@ use petgraph::stable_graph::StableGraph;
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 
-use crate::memory_core::store::kg_redb::KgStoreRedb;
-use crate::memory_core::store::kg_store::is_functional_predicate;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg_store::is_functional_predicate;
 
 /// In-memory adjacency cache backing the public graph API.
 ///

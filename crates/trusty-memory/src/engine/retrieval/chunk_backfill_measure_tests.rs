@@ -9,7 +9,7 @@
 //! of legacy drawers, and query-embed p50/p95/max in both phases. It asserts
 //! only that the real slice repairs every drawer; the numbers are a report.
 //! Run alone, so the shared embedder is the real one:
-//! `cargo test -p trusty-common --features memory-core --lib -- --ignored
+//! `cargo test -p trusty-memory --lib -- --ignored
 //! --exact memory_core::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured
 //! --nocapture`.
 //! Test: this file IS the test.
@@ -18,9 +18,9 @@ use super::chunk_backfill::SliceBounds;
 use super::embed_store::{embed_planned, plan_chunks};
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

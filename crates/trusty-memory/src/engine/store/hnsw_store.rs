@@ -26,9 +26,9 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
-use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
-use crate::memory_core::store::write_deadline::{DeadlinedWrite, WriteTxnError};
-use crate::memory_core::timeouts;
+use crate::engine::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
+use crate::engine::store::write_deadline::{DeadlinedWrite, WriteTxnError};
+use crate::engine::timeouts;
 
 mod exhaustive;
 use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};

@@ -2109,7 +2109,7 @@ const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
     ("#5043", "Utf8Error::validUpTo"),
     ("#5043", "std::str::Utf8Error::to_str"),
     ("#5043", "PalaceHandle::remember_with_options"),
-    ("#5043", "trusty_common::memory_core::Sha1Hash::as_ref"),
+    ("#5043", "trusty_memory::engine::Sha1Hash::as_ref"),
     ("#5043", "Base64Decoder::decodeInto2Buffers"),
     ("#5043", "Http2Client::sendRequestV3"),
     // #5043 review round 2: two-letter module names cannot reach the word floor

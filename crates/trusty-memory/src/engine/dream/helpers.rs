@@ -6,13 +6,13 @@
 //! `merged_drawer`, `pick_survivor`, `persist_merge`, `rebuild_index_from_drawers`, content blocklist, stop-words.
 //! Test: Indirectly via dream cycle and closet tests.
 
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::retrieval::chunk_split::is_split_part;
-use crate::memory_core::retrieval::{
+use crate::engine::embed::Embedder;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::chunk_split::is_split_part;
+use crate::engine::retrieval::{
     ChunkPlanner, PalaceHandle, embed_chunks_within, embed_planned_within, shared_embedder,
 };
-use crate::memory_core::timeouts;
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,7 +90,7 @@ pub fn extract_keywords(content: &str) -> Vec<String> {
 /// via `str::contains` (substring-anywhere), which could retroactively prune
 /// a drawer that merely QUOTED an auto-capture phrase mid-prose — thinning
 /// the recall surface the same way the write-path over-match did. Now
-/// delegates to [`crate::memory_core::filter::blocklist_match`], the single
+/// delegates to [`crate::engine::filter::blocklist_match`], the single
 /// prefix-anchored source of truth shared with the write path.
 /// What: Trims leading whitespace, then returns true iff the trimmed content
 /// is FRAMED by a known blocklist pattern (see `blocklist_match`), OR the
@@ -101,7 +101,7 @@ pub fn extract_keywords(content: &str) -> Vec<String> {
 /// `dream_content_prune_drops_short_drawer`,
 /// `dream_content_prune_keeps_good_drawer`.
 pub(crate) fn is_low_quality_content(content: &str, min_words: usize) -> bool {
-    if crate::memory_core::filter::blocklist_match(content).is_some() {
+    if crate::engine::filter::blocklist_match(content).is_some() {
         return true;
     }
     let word_count = content.split_whitespace().count();

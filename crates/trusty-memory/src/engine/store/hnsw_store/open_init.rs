@@ -18,7 +18,7 @@
 use redb::{Database, ReadableDatabase, ReadableTable, TableError};
 
 use super::Result;
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
 };
 

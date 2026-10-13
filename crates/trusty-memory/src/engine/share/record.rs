@@ -11,8 +11,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::memory_core::content_hash::{CONTENT_HASH_VERSION, ContentHash, memory_content_hash};
-use crate::memory_core::palace::{Drawer, DrawerType};
+use crate::engine::content_hash::{CONTENT_HASH_VERSION, ContentHash, memory_content_hash};
+use crate::engine::palace::{Drawer, DrawerType};
 
 /// Version of the JSONL record shape.
 ///

@@ -17,13 +17,13 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use super::PalaceRegistry;
-use crate::memory_core::palace::PalaceId;
-use crate::memory_core::palace_emptiness::{
+use crate::engine::palace::PalaceId;
+use crate::engine::palace_emptiness::{
     LegacyProbe, PalaceNotEmpty, check_palace_empty, conservative_legacy_probe,
 };
-use crate::memory_core::store::palace_format::mirror_to_preserve;
-use crate::memory_core::store::palace_store::PalaceStore;
-use crate::palace_alias::{AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent};
+use crate::engine::store::palace_format::mirror_to_preserve;
+use crate::engine::store::palace_store::PalaceStore;
+use trusty_common::palace_alias::{AliasChange, AliasUndo, PalaceAliasStore, try_alias_target_if_absent};
 
 /// Default bound on waiting for an open-lock or for a cached handle to go idle.
 pub const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);
@@ -250,7 +250,7 @@ impl PalaceRegistry {
         if old == new {
             return Err(invalid(new, "it is the palace's current id"));
         }
-        if !crate::palace_id_is_valid(new) {
+        if !trusty_common::palace_id_is_valid(new) {
             return Err(invalid(
                 new,
                 "not a valid palace id ([a-z0-9][a-z0-9-]{0,62})",

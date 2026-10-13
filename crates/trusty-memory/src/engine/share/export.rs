@@ -18,8 +18,8 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use super::record::SharedMemoryRecord;
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::rooms::list_room_summaries;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::rooms::list_room_summaries;
 
 /// Every shareable memory in `handle`, as records, ordered by content hash.
 ///

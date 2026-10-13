@@ -8,7 +8,7 @@
 //! `<data_dir>/l1_cache.json` plus an `is_stale` mtime helper.
 //! Test: `l1_cache_roundtrip` and `l1_cache_stale` in this module.
 
-use crate::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
@@ -121,7 +121,7 @@ impl L1Cache {
         let mut sorted: Vec<Drawer> = drawers.to_vec();
         // #4836: shares the listers' comparator so a restart restores the
         // newest of an importance tie, not the lowest-UUID of it.
-        sorted.sort_by(crate::memory_core::palace::drawer_listing_order);
+        sorted.sort_by(crate::engine::palace::drawer_listing_order);
         sorted.truncate(L1_SNAPSHOT_CAP);
 
         let bytes = serde_json::to_vec_pretty(&sorted)

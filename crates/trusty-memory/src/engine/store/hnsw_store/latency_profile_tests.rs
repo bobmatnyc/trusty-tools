@@ -11,7 +11,7 @@
 //! arm alone (`graph_nearest` plus the stranded merge). Prints p50/p95 per
 //! row, and how many queries' top 10 differ between two opens. #9174: also
 //! times `upsert` and, alone, the evicted-point re-check it now runs. A no-op unless `TRUSTY_HNSW_LATENCY_PROFILE` is set; run it in release:
-//! `TRUSTY_HNSW_LATENCY_PROFILE=1 cargo test -p trusty-common --release --lib
+//! `TRUSTY_HNSW_LATENCY_PROFILE=1 cargo test -p trusty-memory --release --lib
 //! hnsw_latency_profile -- --nocapture`. `TRUSTY_HNSW_LATENCY_SIZES` overrides
 //! the size list (comma-separated row counts).
 //! Test: this file is the profile; it asserts nothing about timing.

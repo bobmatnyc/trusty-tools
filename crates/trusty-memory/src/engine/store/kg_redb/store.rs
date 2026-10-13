@@ -6,19 +6,19 @@
 //! and `check_writable`.
 //! Test: `open_then_reopen_persists_state`, `write_on_snapshot_returns_read_only_error`.
 
-use crate::memory_core::store::concurrent_open::{
+use crate::engine::store::concurrent_open::{
     OpenIntent, OpenMode, backoff_sleep_ms, is_incompatible_format_refusal,
     try_open_primary_or_snapshot,
 };
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
-use crate::memory_core::store::palace_format::{
+use crate::engine::store::palace_format::{
     PALACE_FORMAT_SUPPORTED, gate_kg_post_open, gate_kg_pre_open, is_format_refusal, stamp_format,
 };
-use crate::memory_core::store::write_deadline::{DeadlinedWrite, palace_label};
-use crate::memory_core::timeouts;
+use crate::engine::store::write_deadline::{DeadlinedWrite, palace_label};
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use redb::Database;
 use std::path::{Path, PathBuf};

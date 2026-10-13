@@ -8,18 +8,18 @@
 //! What: writes a palace in the pre-#4810 key shape with no schema marker,
 //! checks a direct `KnowledgeGraph` open and a writer-intent `PalaceHandle`
 //! open both refuse it, and that `kg.redb` and the backup root are untouched.
-//! Test: `cargo test -p trusty-common --features memory-core --test
+//! Test: `cargo test -p trusty-memory --test
 //! kg_triple_key_migration_tests -- --include-ignored`.
 
 #![cfg(feature = "memory-core")]
 
 use tempfile::tempdir;
-use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::PalaceHandle;
-use trusty_common::memory_core::store::OpenIntent;
-use trusty_common::memory_core::store::format_backup::backup_root;
-use trusty_common::memory_core::store::kg::KnowledgeGraph;
-use trusty_common::memory_core::store::kg_store::{
+use trusty_memory::engine::palace::{Palace, PalaceId};
+use trusty_memory::engine::retrieval::PalaceHandle;
+use trusty_memory::engine::store::OpenIntent;
+use trusty_memory::engine::store::format_backup::backup_root;
+use trusty_memory::engine::store::kg::KnowledgeGraph;
+use trusty_memory::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, TRIPLES, TripleValue, encode_u64, encode_value,
 };
 

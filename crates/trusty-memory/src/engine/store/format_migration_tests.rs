@@ -10,22 +10,22 @@
 //! `KgStoreRedb`) and reads the result through raw redb and JSON.
 //! Test: this file.
 
-use crate::memory_core::palace::{Palace, PalaceId};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
-pub(super) use crate::memory_core::store::format_v0_fixture::{
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::format_backup::{MANIFEST, backup_root, ensure_format_backup};
+pub(super) use crate::engine::store::format_v0_fixture::{
     legacy_triple_key, write_format_0_palace_with,
 };
-use crate::memory_core::store::format_v1_fixture::{
+use crate::engine::store::format_v1_fixture::{
     FORMAT_1_TRIPLES as ROWS, write_format_1_palace_with,
 };
-use crate::memory_core::store::kg_redb::KgStoreRedb;
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KgSchemaMarker, TRIPLES, decode_value, encode_value,
 };
-use crate::memory_core::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, is_format_refusal};
-use crate::memory_core::store::palace_store::PalaceStoreError;
+use crate::engine::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, is_format_refusal};
+use crate::engine::store::palace_store::PalaceStoreError;
 use redb::ReadableDatabase;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -118,7 +118,7 @@ pub(super) fn mirror(dir: &Path) -> Option<u64> {
 
 /// A `kg_schema` row's version, read without writing; `None` when absent.
 pub(super) fn schema_row(kg: &Path, key: &str) -> Option<u32> {
-    let db = crate::redb_cache::open_palace_db_read_only(kg).expect("read-only kg");
+    let db = trusty_common::redb_cache::open_palace_db_read_only(kg).expect("read-only kg");
     let rtx = db.begin_read().expect("read txn");
     let table = match rtx.open_table(KG_SCHEMA) {
         Ok(t) => t,
@@ -140,7 +140,7 @@ pub(super) fn marker(kg: &Path) -> Option<u32> {
 
 /// Whether TRIPLES holds `key`, read without writing.
 pub(super) fn has_triple_key(kg: &Path, key: &[u8]) -> bool {
-    let db = crate::redb_cache::open_palace_db_read_only(kg).expect("read-only kg");
+    let db = trusty_common::redb_cache::open_palace_db_read_only(kg).expect("read-only kg");
     let rtx = db.begin_read().expect("read txn");
     let t = rtx.open_table(TRIPLES).expect("triples");
     t.get(key).expect("get").is_some()
@@ -296,7 +296,7 @@ pub(super) fn set_mirror(dir: &Path, format: u32) {
 
 /// Stamp the `palace_format` marker in `kg` at `format`.
 pub(super) fn set_marker(kg: &Path, format: u32) {
-    let db = crate::redb_cache::create_palace_db(kg).expect("kg");
+    let db = trusty_common::redb_cache::create_palace_db(kg).expect("kg");
     let wtx = db.begin_write().expect("txn");
     {
         let mut schema = wtx.open_table(KG_SCHEMA).expect("schema");

@@ -1,10 +1,10 @@
 use super::guard::CompactionGuard;
 use super::helpers::{MERGE_MAX_BYTES, char_safe_prefix, merged_drawer, now_secs};
 use super::*;
-use crate::credentials::env_guard::EnvVarGuard;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::store::vector::VectorStore;
+use trusty_common::credentials::env_guard::EnvVarGuard;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::vector::VectorStore;
 use chrono::{Duration as ChronoDuration, Utc};
 use serial_test::serial;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ async fn open_test_handle(name: &str) -> Arc<PalaceHandle> {
 /// Test: `dedup_only_config_ignores_an_ambient_openrouter_key`.
 fn dedup_only_config() -> DreamConfig {
     DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: false,
             ..Default::default()
         },
@@ -242,7 +242,7 @@ async fn dreamer_shutdown_terminates_loop() {
     let handle = open_test_handle("dream-shutdown").await;
     // The unpinned dream loop resolves the handle from a registry each cycle.
     let id = handle.id.clone();
-    let registry = crate::memory_core::PalaceRegistry::new();
+    let registry = crate::engine::PalaceRegistry::new();
     registry.register_arc(handle);
     let dreamer = Arc::new(Dreamer::new(DreamConfig {
         idle_secs: 10,
@@ -285,7 +285,7 @@ async fn dream_loop_does_not_pin_palace_handle() {
     let handle = open_test_handle("dream-unpin").await;
     let id = handle.id.clone();
     let weak = Arc::downgrade(&handle);
-    let registry = crate::memory_core::PalaceRegistry::new();
+    let registry = crate::engine::PalaceRegistry::new();
     registry.register_arc(handle); // registry now holds the ONLY strong ref
 
     // Long idle interval: the loop's first action is a `sleep(3600s)`, so it
@@ -546,7 +546,7 @@ async fn dream_content_prune_drops_blocklist_drawer() {
             RoomType::General,
             vec![],
             0.5,
-            crate::memory_core::retrieval::RememberOptions::forced(),
+            crate::engine::retrieval::RememberOptions::forced(),
         )
         .await
         .unwrap();
@@ -589,7 +589,7 @@ async fn dream_content_prune_drops_short_drawer() {
             RoomType::General,
             vec![],
             0.5,
-            crate::memory_core::retrieval::RememberOptions::forced(),
+            crate::engine::retrieval::RememberOptions::forced(),
         )
         .await
         .unwrap();
@@ -659,7 +659,7 @@ async fn dream_content_prune_keeps_good_drawer() {
 /// Test: This test itself.
 #[tokio::test]
 async fn dream_cycle_semantic_consolidation_with_mock() {
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::semantic_consolidation::{
         ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
 
@@ -759,9 +759,9 @@ async fn dream_cycle_semantic_consolidation_with_mock() {
 /// Test: This test itself.
 #[tokio::test]
 async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
-    use crate::memory_core::palace::DrawerType;
-    use crate::memory_core::retrieval::RememberOptions;
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::palace::DrawerType;
+    use crate::engine::retrieval::RememberOptions;
+    use crate::engine::semantic_consolidation::{
         ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
 
@@ -868,7 +868,7 @@ async fn dream_cycle_semantic_consolidation_no_inference() {
         .unwrap();
 
     let dreamer = Dreamer::new(DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             ..Default::default()
         },
@@ -928,7 +928,7 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
     // #5188 gates: the phase enabled, the local backend permitted, and the
     // model explicitly asking for that backend.
     let dreamer = Dreamer::new(DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             model: "ollama/anthropic/claude-haiku-4-5".to_string(),
             ..Default::default()
@@ -985,7 +985,7 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
 async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
     let _host = EnvVarGuard::set(
-        crate::memory_core::semantic_consolidation::LOCAL_HOST_ENV,
+        crate::engine::semantic_consolidation::LOCAL_HOST_ENV,
         &format!("http://127.0.0.1:{}", closed_loopback_port()),
     );
 
@@ -1001,7 +1001,7 @@ async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
         .unwrap();
 
     let dreamer = Dreamer::new(DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             model: "ollama/llama3.1".to_string(),
             ..Default::default()
@@ -1064,7 +1064,7 @@ fn closed_loopback_port() -> u16 {
 #[tokio::test]
 #[serial(dotenv_credential_env)]
 async fn dream_semantic_no_provider_parks_without_local_fallback() {
-    crate::credentials::load_env_local_once();
+    trusty_common::credentials::load_env_local_once();
     let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
     // A real listener, so a fallback would COMPLETE its connect and be counted
@@ -1076,7 +1076,7 @@ async fn dream_semantic_no_provider_parks_without_local_fallback() {
         .set_nonblocking(true)
         .expect("listener can be polled without blocking");
     let _host = EnvVarGuard::set(
-        crate::memory_core::semantic_consolidation::LOCAL_HOST_ENV,
+        crate::engine::semantic_consolidation::LOCAL_HOST_ENV,
         &format!("http://{addr}"),
     );
 
@@ -1092,7 +1092,7 @@ async fn dream_semantic_no_provider_parks_without_local_fallback() {
         .unwrap();
 
     let dreamer = Dreamer::new(DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             model: "llama3.2".to_string(),
             ..Default::default()
@@ -1142,7 +1142,7 @@ async fn dream_semantic_no_provider_parks_without_local_fallback() {
 #[test]
 #[serial(dotenv_credential_env)]
 fn dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing() {
-    crate::credentials::load_env_local_once();
+    trusty_common::credentials::load_env_local_once();
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
     assert!(
@@ -1160,7 +1160,7 @@ fn dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing() {
 /// Test: This test itself.
 #[tokio::test]
 async fn dream_cycle_semantic_consolidation_disabled_by_config() {
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::semantic_consolidation::{
         MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
 
@@ -1608,7 +1608,7 @@ async fn dream_cycle_recall_benchmark_disabled() {
 /// Test: this function.
 #[tokio::test]
 async fn consolidate_scoped_filters_by_room() {
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::semantic_consolidation::{
         ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
     use std::sync::atomic::Ordering;
@@ -1703,9 +1703,9 @@ async fn consolidate_scoped_filters_by_room() {
 /// Test: this function.
 #[tokio::test]
 async fn consolidate_scoped_skips_task_drawers() {
-    use crate::memory_core::palace::DrawerType;
-    use crate::memory_core::retrieval::RememberOptions;
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::palace::DrawerType;
+    use crate::engine::retrieval::RememberOptions;
+    use crate::engine::semantic_consolidation::{
         ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
     use std::sync::atomic::Ordering;
@@ -1825,7 +1825,7 @@ async fn consolidate_scoped_invalid_model_returns_err() {
         .await
         .unwrap();
     let cfg = DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             model: "ollama/anthropic/claude-haiku-4-5".to_string(),
             ..Default::default()
@@ -1857,7 +1857,7 @@ async fn consolidate_scoped_invalid_model_returns_err() {
 /// Test: this function.
 #[tokio::test]
 async fn consolidate_scoped_non_positive_age_is_noop() {
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::semantic_consolidation::{
         ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
     };
 
@@ -1943,9 +1943,9 @@ async fn consolidate_scoped_non_positive_age_is_noop() {
 #[tokio::test]
 async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
     use super::semantic::record_provenance_and_collect_superseded;
-    use crate::memory_core::store::kg::KnowledgeGraph;
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
-    use crate::memory_core::store::vector::UsearchStore;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::vector::UsearchStore;
 
     let dir = tempdir().unwrap();
     let kg_path = dir.path().join("kg.redb");
@@ -2020,7 +2020,7 @@ fn dedup_only_config_ignores_an_ambient_openrouter_key() {
     );
 
     let semantic_on = DreamConfig {
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: true,
             ..Default::default()
         },
@@ -2136,7 +2136,7 @@ fn char_safe_prefix_stops_below_a_multibyte_char() {
 /// Test: This test.
 #[tokio::test]
 async fn merge_into_keeps_the_content_hash_in_step() {
-    use crate::memory_core::content_hash::memory_content_hash;
+    use crate::engine::content_hash::memory_content_hash;
 
     seed_shared_embedder_with_mock();
     let dir = tempdir().unwrap();
@@ -2338,7 +2338,7 @@ async fn remember_racing_dream_rebuild_never_loses_a_vector() {
 /// the only way to place them behind the age gate, and it uses the exact key
 /// shape `close_active_row` writes.
 fn seed_stale_history(handle: &Arc<PalaceHandle>, count: usize, age_days: i64) {
-    use crate::memory_core::store::kg_store::{
+    use crate::engine::store::kg_store::{
         TRIPLES, TripleValue, encode_triple_key, encode_value,
     };
 

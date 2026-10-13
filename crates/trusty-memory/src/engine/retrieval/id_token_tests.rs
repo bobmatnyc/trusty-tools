@@ -7,7 +7,7 @@
 //! Test: this file is the test.
 
 use super::*;
-use crate::memory_core::dream::extract_keywords;
+use crate::engine::dream::extract_keywords;
 
 /// Why (#9279 AC2): tokens shorter than three characters are kept.
 /// What: ids of two characters survive, in any case and with punctuation;

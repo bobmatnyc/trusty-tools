@@ -21,7 +21,7 @@ use parking_lot::{Mutex, RwLock};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 use super::Result;
-use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_KEYS};
+use crate::engine::store::kg_store::{DELETED_VECTORS, VECTOR_KEYS};
 
 /// One consistent read of `VECTOR_KEYS` (inverted) and `DELETED_VECTORS`.
 pub(super) struct KeyMap {

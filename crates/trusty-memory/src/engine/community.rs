@@ -12,12 +12,12 @@
 //! communities into super-nodes; iterate until Q stabilises), then
 //! classifies each community as a `KnowledgeGap` when its internal density
 //! is below 0.2 AND its outgoing bridge count does not exceed its size.
-//! Test: `crates/trusty-common/tests/community_tests.rs` covers two-cluster
+//! Test: `crates/trusty-memory/tests/community_tests.rs` covers two-cluster
 //! detection, gap classification on a sparse star graph, dense-clique
 //! rejection, full-node coverage of the partition, and the convenience
 //! `KnowledgeGraph::knowledge_gaps` shim.
 
-use crate::memory_core::store::kg::KnowledgeGraph;
+use crate::engine::store::kg::KnowledgeGraph;
 use std::collections::HashMap;
 
 /// A community whose internal density is low enough to flag for further

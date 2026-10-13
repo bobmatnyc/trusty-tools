@@ -21,7 +21,7 @@
 //! `id_token_boost_matches_whole_normalized_tokens`,
 //! `an_id_most_candidates_hold_is_not_rare`.
 
-use crate::memory_core::dream::normalize_keyword;
+use crate::engine::dream::normalize_keyword;
 
 /// Score added to a candidate whose content holds a query id token (#9279).
 ///

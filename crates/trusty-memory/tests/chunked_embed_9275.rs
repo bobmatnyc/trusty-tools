@@ -13,13 +13,13 @@ use chrono::Utc;
 use std::sync::Arc;
 use tempfile::tempdir;
 use trusty_common::embedder::{MockEmbedder, chunk_text};
-use trusty_common::memory_core::embed::Embedder;
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
+use trusty_memory::engine::embed::Embedder;
+use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
+use trusty_memory::engine::retrieval::{
     ChunkCheck, PalaceHandle, RememberOptions, VectorBackfillOptions, embed_chunks,
     recall_with_default_embedder, seed_shared_embedder_with, shared_embedder,
 };
-use trusty_common::memory_core::store::VectorStore;
+use trusty_memory::engine::store::VectorStore;
 use uuid::Uuid;
 
 /// Window of the seeded mock: 30 words per chunk after `[CLS]`/`[SEP]`.

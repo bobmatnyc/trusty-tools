@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use super::tier_c::CommitCtx;
 use super::types::RememberOptions;
-use crate::memory_core::filter::check_secret;
-use crate::memory_core::store::kg::Triple;
-use crate::memory_core::store::kg_store::VERIFY_WITH;
+use crate::engine::filter::check_secret;
+use crate::engine::store::kg::Triple;
+use crate::engine::store::kg_store::VERIFY_WITH;
 
 /// Provenance stamped on a `verify_with` triple.
 const VERIFY_PROVENANCE: &str = "tier_c:verify-on-write";

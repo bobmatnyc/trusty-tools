@@ -16,7 +16,7 @@ use super::palace_format::{
     KG_FILE, PALACE_FORMAT_SUPPORTED, check_format, read_mirror, refuse_foreign_record,
 };
 use super::palace_store::PalaceStoreError;
-use crate::redb_cache::create_palace_db;
+use trusty_common::redb_cache::create_palace_db;
 use anyhow::{Context, Result};
 use redb::Database;
 use std::path::Path;
@@ -110,8 +110,8 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_core::store::concurrent_open::{OpenIntent, try_open_or_snapshot};
-    use crate::memory_core::store::palace_format::MIGRATION_RECORD;
+    use crate::engine::store::concurrent_open::{OpenIntent, try_open_or_snapshot};
+    use crate::engine::store::palace_format::MIGRATION_RECORD;
     use redb::ReadableDatabase;
 
     /// #9659: an observer open copies even when nothing holds the file, so a

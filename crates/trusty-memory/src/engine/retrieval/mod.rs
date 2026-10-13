@@ -7,7 +7,7 @@
 //! whole memory store into context.
 //! What: Thin re-export facade over submodules after the 830-SLOC (#607)
 //! split. All logic lives in `embedder`, `types`, `handle`, and `layers`.
-//! Test: `cargo test -p trusty-common --features memory-core retrieval::`
+//! Test: `cargo test -p trusty-memory retrieval::`
 //! exercises L0/L1 cache and L2 vector retrieval end-to-end.
 
 // #4906: the deferred-embed lane (retry + durable failure ledger) and the

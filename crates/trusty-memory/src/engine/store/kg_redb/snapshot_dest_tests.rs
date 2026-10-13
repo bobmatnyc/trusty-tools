@@ -14,9 +14,9 @@
 use super::dest::manual_backup_root;
 use super::tests::{PALACE, fixture, listing};
 use super::{SnapshotError, SnapshotStep, check_backup_name, no_fault, snapshot_palace};
-use crate::memory_core::palace::{Palace, PalaceId};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::store::palace_store::PalaceStore;
+use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::palace_store::PalaceStore;
 use chrono::Utc;
 use std::io;
 use std::path::{Path, PathBuf};

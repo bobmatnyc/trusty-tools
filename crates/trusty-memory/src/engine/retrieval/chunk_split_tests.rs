@@ -13,14 +13,14 @@ use super::chunk_backfill::{SliceBounds, SliceReport, SliceStop};
 use super::embed_store_tests::{Counting, DIM, chunks_at, handle, shape, words};
 use super::handle::PalaceHandle;
 use super::types::ForgetOutcome;
-use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::maintenance_log::{DeletionReason, read_journal};
-use crate::memory_core::palace::{Drawer, Palace, PalaceId};
-use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::kg::Triple;
-use crate::memory_core::store::kg_redb::BatchWriteOp;
-use crate::memory_core::store::vector::VectorStore;
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
+use crate::engine::embed::Embedder;
+use crate::engine::maintenance_log::{DeletionReason, read_journal};
+use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::store::embed_ledger::{self, EmbedFailure};
+use crate::engine::store::kg::Triple;
+use crate::engine::store::kg_redb::BatchWriteOp;
+use crate::engine::store::vector::VectorStore;
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -237,7 +237,7 @@ async fn a_needle_at_every_seam_is_recalled_at_rank_1() {
         .iter()
         .map(|d| d.content().to_string())
         .collect();
-    let chunks = crate::embedder::chunk_text(&tok, &text, WINDOW).unwrap();
+    let chunks = trusty_common::embedder::chunk_text(&tok, &text, WINDOW).unwrap();
     for c in &chunks {
         assert!(
             parts.iter().any(|p| p.contains(c.text)),

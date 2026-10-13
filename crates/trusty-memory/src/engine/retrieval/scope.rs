@@ -22,10 +22,10 @@
 //! `wing_scope_returns_only_that_wings_drawers`,
 //! `same_named_rooms_in_two_wings_stay_distinct`.
 
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::rooms::resolve_room_filter_id;
-use crate::memory_core::store::wings::rooms_in_wing;
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::rooms::resolve_room_filter_id;
+use crate::engine::store::wings::rooms_in_wing;
 use std::collections::HashSet;
 use uuid::Uuid;
 

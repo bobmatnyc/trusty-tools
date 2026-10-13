@@ -24,13 +24,13 @@
 
 use super::copy_tables::{BYTE_TABLES, STR_TABLES, copy_all, copy_str_table, known_table_names};
 use super::store::KgStoreRedb;
-use crate::memory_core::maintenance_log::{
+use crate::engine::maintenance_log::{
     MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME,
 };
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::chat_sessions::{CHAT_ASSETS_TABLE, ChatSessionStore};
-use crate::memory_core::store::kg_store::SESSIONS;
-use crate::memory_core::store::palace_format::{KgMarker, read_marker};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::chat_sessions::{CHAT_ASSETS_TABLE, ChatSessionStore};
+use crate::engine::store::kg_store::SESSIONS;
+use crate::engine::store::palace_format::{KgMarker, read_marker};
 use chrono::{DateTime, Utc};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTableMetadata, TableHandle};
 use serde::{Deserialize, Serialize};
@@ -378,7 +378,7 @@ fn snapshot_kg(
         .collect();
     let expected = table_counts(&rtx, &src, &names)?;
     hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
-    let copy = crate::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    let copy = trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
     copy_all(&rtx, &copy, None).map_err(redb_err("copy into", dest))?;
     drop(rtx);
     let counts = verify_counts(&copy, dest, &names, &expected)?;
@@ -409,7 +409,7 @@ fn snapshot_chat(
             if !src.try_exists().map_err(io_err("stat", &src))? {
                 return Ok(BTreeMap::new());
             }
-            crate::redb_cache::open_palace_db_read_only(&src)
+            trusty_common::redb_cache::open_palace_db_read_only(&src)
                 .map_err(redb_err("open read-only", &src))?
                 .begin_read()
                 .map_err(redb_err("begin read", &src))?
@@ -420,7 +420,7 @@ fn snapshot_chat(
     guard_tables(&rtx, &src, &names)?;
     let expected = table_counts(&rtx, &src, &names)?;
     hook(SnapshotStep::CopyDb, dest).map_err(io_err("copy into", dest))?;
-    let copy = crate::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
+    let copy = trusty_common::redb_cache::create_palace_db(dest).map_err(redb_err("create", dest))?;
     let mut counts = Default::default();
     for def in defs {
         copy_str_table(&rtx, &copy, def, &mut counts).map_err(redb_err("copy into", dest))?;

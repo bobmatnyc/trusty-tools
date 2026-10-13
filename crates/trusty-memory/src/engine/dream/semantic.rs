@@ -18,12 +18,12 @@
 use super::concurrency::acquire_dream_permit_within;
 use super::config::DreamConfig;
 use super::helpers::char_safe_prefix;
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::semantic_consolidation::{
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::semantic_consolidation::{
     SemanticConsolidator, resolve_consolidation_provider, validate_ollama_model,
 };
-use crate::memory_core::timeouts;
+use crate::engine::timeouts;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -77,12 +77,12 @@ pub(super) fn build_consolidator_from_config(
     if !config.semantic.enabled {
         return Ok(None);
     }
-    use crate::memory_core::semantic_consolidation::{
+    use crate::engine::semantic_consolidation::{
         ConsolidationProvider, OllamaInference, OpenRouterInference,
     };
     // #5188: the model id selects the backend — a local endpoint is never a
     // fallback for a missing key.
-    let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
+    let backend: Arc<dyn crate::engine::semantic_consolidation::Inference> =
         match resolve_consolidation_provider(
             &config.semantic.model,
             &config.openrouter_api_key,
@@ -121,7 +121,7 @@ pub(super) fn build_consolidator_from_config(
 /// `apply_consolidation_result_keeps_original_when_kg_write_fails`.
 async fn apply_consolidation_result(
     handle: &Arc<PalaceHandle>,
-    result: &crate::memory_core::semantic_consolidation::ConsolidationResult,
+    result: &crate::engine::semantic_consolidation::ConsolidationResult,
 ) -> (usize, Vec<Uuid>) {
     let mut canonical_count = 0usize;
     let mut superseded_ids: Vec<Uuid> = Vec::new();
@@ -193,7 +193,7 @@ pub(super) async fn record_provenance_and_collect_superseded(
         // assert the same edge with the same shape. The #1713 rule — an original
         // joins `superseded_ids` only on a durable write — stays here, because
         // only this caller evicts.
-        match crate::memory_core::share::assert_superseded_by(
+        match crate::engine::share::assert_superseded_by(
             &handle.kg,
             orig_id,
             canonical_id,
@@ -226,10 +226,10 @@ pub(super) async fn record_provenance_and_collect_superseded(
 /// and `consolidate_scoped_*`.
 async fn apply_alias_and_flag_passes(
     handle: &Arc<PalaceHandle>,
-    result: &crate::memory_core::semantic_consolidation::ConsolidationResult,
+    result: &crate::engine::semantic_consolidation::ConsolidationResult,
 ) {
     for (from, to) in &result.aliases {
-        let triple = crate::memory_core::store::kg::Triple {
+        let triple = crate::engine::store::kg::Triple {
             subject: from.clone(),
             predicate: "alias_of".to_string(),
             object: to.clone(),
@@ -556,7 +556,7 @@ pub(super) async fn consolidate_scoped_within(
         // #5231: a superseded id that is no longer in the drawer table was not
         // evicted by this pass and must not be counted as one.
         // #8732: recorded; the canonical id is the KG `superseded_by` edge.
-        let reason = crate::memory_core::maintenance_log::DeletionReason::SemanticConsolidation;
+        let reason = crate::engine::maintenance_log::DeletionReason::SemanticConsolidation;
         match handle.forget_for_maintenance(id, reason, None).await {
             Ok(outcome) if outcome.is_deleted() => evicted += 1,
             Ok(_) => tracing::warn!(?id, "dream_consolidate_room: superseded id not in palace"),
@@ -567,7 +567,7 @@ pub(super) async fn consolidate_scoped_within(
     if let Err(e) = handle.flush() {
         tracing::warn!(palace = %handle.id, "dream_consolidate_room flush failed: {e:#}");
     }
-    crate::memory_core::maintenance_log::warn_removed(&handle.id, "room consolidation", evicted);
+    crate::engine::maintenance_log::warn_removed(&handle.id, "room consolidation", evicted);
 
     Ok(RoomConsolidationStats {
         summary_facts_created,

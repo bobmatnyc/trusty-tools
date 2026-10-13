@@ -4,12 +4,12 @@
 //! 500-line allowlist budget after adding similarity-ranking tests.
 //! What: All test items from retrieval.rs plus the new issue-#633 ranking tests.
 //! Test: This file IS the tests — run with:
-//!   cargo test -p trusty-common --features memory-core retrieval::tests
+//!   cargo test -p trusty-memory retrieval::tests
 
 use super::*;
-use crate::memory_core::analytics::RecallLog;
-use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore, vector::VectorStore};
+use crate::engine::analytics::RecallLog;
+use crate::engine::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore, vector::VectorStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -105,8 +105,8 @@ async fn l2_room_filter_excludes_other_rooms() {
     let handle = make_handle(dir.path());
     let embedder = shared_embedder().await.unwrap();
 
-    let backend_room_id = crate::memory_core::room_identity::room_to_uuid(&RoomType::Backend);
-    let frontend_room_id = crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend);
+    let backend_room_id = crate::engine::room_identity::room_to_uuid(&RoomType::Backend);
+    let frontend_room_id = crate::engine::room_identity::room_to_uuid(&RoomType::Frontend);
 
     let backend_drawer = Drawer::new(backend_room_id, "Rust is a systems programming language");
     let backend_id = backend_drawer.id;
@@ -444,8 +444,8 @@ async fn forgotten_drawer_is_not_served_by_l0_l1_after_reopen() {
 /// Test: this test.
 #[test]
 fn drawer_load_degraded_true_on_corrupt_table_false_when_empty() {
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
-    use crate::memory_core::store::kg_store::DRAWERS;
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_store::DRAWERS;
     use redb::Database;
 
     let dir = tempdir().unwrap();
@@ -517,8 +517,8 @@ fn drawer_load_degraded_true_on_corrupt_table_false_when_empty() {
 /// Test: this test.
 #[test]
 fn drawer_load_degraded_true_on_partial_row_corruption() {
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
-    use crate::memory_core::store::kg_store::DRAWERS;
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_store::DRAWERS;
     use redb::Database;
 
     let dir = tempdir().unwrap();
@@ -1185,11 +1185,11 @@ async fn recall_across_palaces_merges_results() {
 /// which is a real per-palace recall failure after a successful open.
 struct FailFirstEmbedder {
     calls: std::sync::atomic::AtomicUsize,
-    inner: crate::embedder::MockEmbedder,
+    inner: trusty_common::embedder::MockEmbedder,
 }
 
 #[async_trait::async_trait]
-impl crate::memory_core::embed::Embedder for FailFirstEmbedder {
+impl crate::engine::embed::Embedder for FailFirstEmbedder {
     async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             return Ok(texts.iter().map(|_| vec![1.0; 8]).collect());
@@ -1233,10 +1233,10 @@ async fn recall_across_palaces_reporting_names_a_failed_palace() {
             .unwrap();
         handles.push(handle);
     }
-    let embedder: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+    let embedder: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
         Arc::new(FailFirstEmbedder {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            inner: crate::embedder::MockEmbedder::new(384),
+            inner: trusty_common::embedder::MockEmbedder::new(384),
         });
 
     let recall = recall_across_palaces_reporting(&handles, &embedder, "rust build", 10, false)
@@ -1756,7 +1756,7 @@ fn rescore_l1_by_similarity_patches_scores() {
     let mut identity_drawer = Drawer::new(Uuid::nil(), "identity");
     identity_drawer.id = Uuid::nil();
     identity_drawer.importance = 1.0;
-    identity_drawer.drawer_type = crate::memory_core::palace::DrawerType::UserFact;
+    identity_drawer.drawer_type = crate::engine::palace::DrawerType::UserFact;
 
     // L1 drawer that appears in the similarity map.
     let mut matched = Drawer::new(room_id, "matched drawer");
@@ -1888,16 +1888,16 @@ async fn recall_top_k_caps_result_count() {
 /// the outcome.
 async fn seed_two_rooms(
     handle: &PalaceHandle,
-    embedder: &dyn crate::memory_core::embed::Embedder,
+    embedder: &dyn crate::engine::embed::Embedder,
 ) -> (Uuid, Uuid) {
     // The legacy fold ids: these drawers are never persisted, so the palace
     // has no ROOMS row and `resolve_room_filter_id` falls back to the fold.
     let backend = Drawer::new(
-        crate::memory_core::room_identity::room_to_uuid(&RoomType::Backend),
+        crate::engine::room_identity::room_to_uuid(&RoomType::Backend),
         "Rust is a systems programming language",
     );
     let frontend = Drawer::new(
-        crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend),
+        crate::engine::room_identity::room_to_uuid(&RoomType::Frontend),
         "Rust is a systems programming toolkit",
     );
     let (backend_id, frontend_id) = (backend.id, frontend.id);
@@ -1971,7 +1971,7 @@ async fn l3_without_a_room_filter_returns_every_room() {
     let embedder = shared_embedder().await.unwrap();
 
     let drawer = Drawer::new(
-        crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend),
+        crate::engine::room_identity::room_to_uuid(&RoomType::Frontend),
         "React uses a virtual DOM for rendering",
     );
     let drawer_id = drawer.id;
@@ -2073,9 +2073,9 @@ async fn recall_deep_in_room_scopes_l3_hits() {
 // above is that harness. Duplicating it next to `scope.rs` would fork the
 // fixture.
 
-use crate::memory_core::room_identity::DEFAULT_WING_ID;
-use crate::memory_core::store::rooms::resolve_or_create_room_in_wing_sync;
-use crate::memory_core::store::wings::{ensure_default_wing, resolve_or_create_wing_sync};
+use crate::engine::room_identity::DEFAULT_WING_ID;
+use crate::engine::store::rooms::resolve_or_create_room_in_wing_sync;
+use crate::engine::store::wings::{ensure_default_wing, resolve_or_create_wing_sync};
 
 /// Seed the default wing plus a named one, and return `(wing_id, room_id)`
 /// for a room called `label` inside it.
@@ -2445,7 +2445,7 @@ async fn unscoped_write_still_lands_in_the_default_wing() {
         .find(|d| d.id == id)
         .cloned()
         .expect("stored");
-    let scoped = crate::memory_core::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID)
+    let scoped = crate::engine::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID)
         .expect("scope");
     assert!(
         scoped.contains(&drawer.room_id),

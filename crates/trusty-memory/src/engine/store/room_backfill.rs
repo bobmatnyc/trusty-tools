@@ -28,13 +28,13 @@
 //! `backfill_inverts_short_custom_labels`, `backfill_uses_kg_dictionary`,
 //! `backfill_falls_back_to_unresolved`.
 
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::room_identity::{
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, fold_debug_repr, room_label,
 };
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::room_plan::{RoomPlanAction, plan_rooms};
-use crate::memory_core::store::rooms::RoomRecord;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::room_plan::{RoomPlanAction, plan_rooms};
+use crate::engine::store::rooms::RoomRecord;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
@@ -277,7 +277,7 @@ fn match_dictionary(id: Uuid, subjects: &[String]) -> Option<RoomType> {
     for label in subjects {
         for candidate in [
             RoomType::Custom(label.clone()),
-            crate::memory_core::room_identity::room_type_from_parts(label, label),
+            crate::engine::room_identity::room_type_from_parts(label, label),
         ] {
             if fold_debug_repr(&format!("{candidate:?}")) == id {
                 return Some(candidate);

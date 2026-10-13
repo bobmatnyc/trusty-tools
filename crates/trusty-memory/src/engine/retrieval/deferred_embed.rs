@@ -25,11 +25,11 @@
 
 use super::embed_store::{chunked_embed_timeout, embed_planned, plan_chunks};
 use super::embedder::shared_embedder;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::vector::UsearchStore;
-use crate::memory_core::timeouts;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::embed_ledger::{self, EmbedFailure};
+use crate::engine::store::vector::UsearchStore;
+use crate::engine::timeouts;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;

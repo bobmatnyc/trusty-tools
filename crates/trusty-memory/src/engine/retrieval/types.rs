@@ -7,8 +7,8 @@
 //! Test: Types are exercised by retrieval::tests and callers throughout the
 //! workspace.
 
-use crate::memory_core::filter::FilterConfig;
-use crate::memory_core::palace::{Drawer, DrawerType, PalaceId};
+use crate::engine::filter::FilterConfig;
+use crate::engine::palace::{Drawer, DrawerType, PalaceId};
 use anyhow::Result;
 use std::path::Path;
 
@@ -81,8 +81,8 @@ pub(super) const L1_CAP: usize = 15;
 ///
 /// The definition lives next to `Drawer` in `memory_core::palace` because
 /// `store::l1_cache` needs the same comparator and must not depend upward on
-/// `retrieval`. See [`crate::memory_core::palace::drawer_listing_order`].
-pub(super) use crate::memory_core::palace::drawer_listing_order;
+/// `retrieval`. See [`crate::engine::palace::drawer_listing_order`].
+pub(super) use crate::engine::palace::drawer_listing_order;
 
 /// Options for `PalaceHandle::remember_with_options` (issue #61).
 ///
@@ -126,7 +126,7 @@ pub struct RememberOptions {
     /// persist secret-shaped content (rare; e.g. a redacted example that
     /// still matches the credential heuristic) has to opt in explicitly.
     /// What: when `false` (the default), `remember_with_options` runs
-    /// [`crate::memory_core::filter::check_secret`] even when `force` is
+    /// [`crate::engine::filter::check_secret`] even when `force` is
     /// `true`, and returns `Err` on a hit. When `true`, the secret gate is
     /// skipped entirely (in addition to whatever `force` already skips).
     /// Has no effect when `force` is `false` — in that case the secret gate
@@ -159,7 +159,7 @@ pub struct RememberOptions {
     /// so the one enforcement point, `remember_with_options`, sees it.
     /// What: `None` (the default) is not a Tier C request at all. `Some(key)`
     /// runs the fail-closed admission gate
-    /// ([`crate::memory_core::retrieval::admit_tier_c`]): the key must match
+    /// ([`crate::engine::retrieval::admit_tier_c`]): the key must match
     /// `<domain>:<id>/<aspect>` and resolve a retirement condition, or the
     /// drawer is written as an ordinary Tier E drawer with no slot.
     /// Test: `tier_c_write_retires_the_prior_slot_occupant`,

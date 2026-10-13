@@ -14,10 +14,10 @@
 //! `the_1_to_2_step_commits_nothing_when_the_stored_format_is_not_1`,
 //! `a_format_1_palace_migrates_to_2_at_first_writer_open`.
 
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker, decode_value,
 };
-use crate::memory_core::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, stamp_format};
+use crate::engine::store::palace_format::{KG_SCHEMA_PALACE_FORMAT, stamp_format};
 use anyhow::{Context, Result, bail};
 use redb::{Database, ReadableTable};
 

@@ -10,7 +10,7 @@
 //! Test: this file IS the tests.
 
 use super::*;
-use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+use crate::engine::store::kg_store::{VECTOR_KEYS, VECTORS};
 
 const DIM: usize = 8;
 
@@ -438,8 +438,8 @@ async fn upsert_chunks_with_one_bad_dimension_changes_nothing() {
 /// happens before any insert, so it costs no graph work.
 #[tokio::test]
 async fn upsert_chunks_rejects_empty_and_over_cap() {
-    use crate::memory_core::store::hnsw_store::op_budget::OpProgress;
-    use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    use crate::engine::store::hnsw_store::op_budget::OpProgress;
+    use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
     const CAP: usize = 32;
     let dir = tempdir().unwrap();
     let store = open(dir.path());

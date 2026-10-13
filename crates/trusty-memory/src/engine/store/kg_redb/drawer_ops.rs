@@ -13,8 +13,8 @@
 //! `clearing_a_fact_key_drops_the_index_entry`,
 //! `deleting_a_drawer_that_lost_its_slot_leaves_the_new_owner_indexed`.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_store::encode_value;
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_store::encode_value;
 use anyhow::{Context, Result};
 use redb::ReadableTable;
 use uuid::Uuid;

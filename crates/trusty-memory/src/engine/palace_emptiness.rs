@@ -23,9 +23,9 @@ use std::path::Path;
 use redb::{ReadableDatabase, ReadableTableMetadata, TableError};
 use uuid::Uuid;
 
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::kg_store::SESSIONS;
-use crate::redb_open::INCOMPATIBLE_SUFFIX;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::kg_store::SESSIONS;
+use trusty_common::redb_open::INCOMPATIBLE_SUFFIX;
 
 /// Reports legacy data the live store has not absorbed, given the palace
 /// directory and the drawer ids the live store holds. `Some(reason)` makes the
@@ -147,7 +147,7 @@ pub fn count_chat_sessions(data_dir: &Path) -> Result<u64, String> {
         Err(e) => return Err(format!("{} could not be checked: {e}", path.display())),
     }
     let fail = |e: &dyn std::fmt::Display| format!("{} could not be read: {e}", path.display());
-    let db = crate::redb_cache::open_palace_db_read_only(&path).map_err(|e| fail(&e))?;
+    let db = trusty_common::redb_cache::open_palace_db_read_only(&path).map_err(|e| fail(&e))?;
     let rtx = db.begin_read().map_err(|e| fail(&e))?;
     match rtx.open_table(SESSIONS) {
         Ok(table) => table.len().map_err(|e| fail(&e)),
@@ -159,7 +159,7 @@ pub fn count_chat_sessions(data_dir: &Path) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_core::store::chat_sessions::ChatSessionStore;
+    use crate::engine::store::chat_sessions::ChatSessionStore;
 
     /// Why (#9544): chat history alone must make a palace non-empty.
     /// Test: itself.

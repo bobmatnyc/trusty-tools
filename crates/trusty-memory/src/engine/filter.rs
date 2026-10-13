@@ -11,7 +11,7 @@
 //! Test: Unit tests in this module cover token counting, every reject
 //! pattern, and classifier outcomes.
 
-use crate::memory_core::palace::DrawerType;
+use crate::engine::palace::DrawerType;
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;

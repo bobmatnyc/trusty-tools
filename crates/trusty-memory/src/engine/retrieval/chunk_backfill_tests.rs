@@ -11,12 +11,12 @@ use super::chunk_health::{ChunkCheck, Sightings, first_sighting};
 use super::chunk_progress::{CHUNK_MARKER_FILE, ChunkMarker, ChunkState};
 use super::embed_store_tests::{Counting, DIM, NoTokenizer, handle, shape, words};
 use super::handle::PalaceHandle;
-use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::hnsw_store::HnswStore;
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder};
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::embed_ledger::{self, EmbedFailure};
+use crate::engine::store::hnsw_store::HnswStore;
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -151,7 +151,7 @@ fn unexpiring() -> SliceBounds {
 
 /// #9735: every env-mutating test here holds the lib target's one env lock.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    crate::data_dir::ENV_LOCK
+    trusty_common::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

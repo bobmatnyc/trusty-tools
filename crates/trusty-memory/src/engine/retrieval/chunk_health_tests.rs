@@ -10,8 +10,8 @@ use super::chunk_health::ChunkCheck;
 use super::deferred_embed::{RetryPolicy, embed_and_store};
 use super::embed_repair::VectorBackfillOptions;
 use super::embed_store_tests::{Counting, DIM, add, chunks_at, handle, shape, words};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::store::embed_ledger;
+use crate::engine::embed::Embedder;
+use crate::engine::store::embed_ledger;
 use std::sync::Arc;
 use uuid::Uuid;
 

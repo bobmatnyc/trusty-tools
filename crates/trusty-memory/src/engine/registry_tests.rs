@@ -1,6 +1,6 @@
 use super::*;
-use crate::memory_core::retrieval::seed_shared_embedder_with_mock;
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::retrieval::seed_shared_embedder_with_mock;
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use tempfile::tempdir;
 
 fn make_handle(id: &str, dir: &std::path::Path) -> PalaceHandle {
@@ -66,7 +66,7 @@ fn registry_remove_clears_cached_handle() {
 
 #[test]
 fn registry_create_and_open() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -89,7 +89,7 @@ fn registry_create_and_open() {
         assert_eq!(handle.id, PalaceId::new("alpha"));
         // Persist a tiny identity directly (PalaceHandle.identity is set
         // at open time so we mutate via PalaceStore for the test).
-        crate::memory_core::store::palace_store::PalaceStore::save_identity(
+        crate::engine::store::palace_store::PalaceStore::save_identity(
             &handle.id,
             "I am Alpha",
             handle.data_dir.as_ref().expect("data_dir set"),
@@ -139,7 +139,7 @@ fn registry_create_and_open() {
 /// Test: this is the test.
 #[test]
 fn open_keeps_an_unopenable_palace_observable() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     seed_shared_embedder_with_mock();
@@ -220,7 +220,7 @@ fn open_keeps_an_unopenable_palace_observable() {
 /// Test: this test itself.
 #[test]
 fn record_unopenable_is_cleared_by_a_later_success() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     seed_shared_embedder_with_mock();
@@ -273,7 +273,7 @@ fn record_unopenable_is_cleared_by_a_later_success() {
 async fn palace_payloads_survive_registry_restart() {
     // Pre-seed mock embedder so no HuggingFace download is attempted. Issue #850.
     seed_shared_embedder_with_mock();
-    use crate::memory_core::palace::{Palace, RoomType};
+    use crate::engine::palace::{Palace, RoomType};
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -322,7 +322,7 @@ async fn palace_payloads_survive_registry_restart() {
 
 #[test]
 fn gaps_cache_round_trip() {
-    use crate::memory_core::community::KnowledgeGap;
+    use crate::engine::community::KnowledgeGap;
 
     let reg = PalaceRegistry::new();
     let pid = PalaceId::new("gap-cache");
@@ -411,8 +411,8 @@ fn lru_evicts_least_recently_used() {
 /// Test: this test itself (issue #1939 regression guard).
 #[test]
 fn open_palace_follows_alias() {
-    use crate::memory_core::palace::Palace;
-    use crate::palace_alias::PalaceAliasStore;
+    use crate::engine::palace::Palace;
+    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -456,7 +456,7 @@ fn open_palace_follows_alias() {
 /// Test: this test itself.
 #[test]
 fn open_palace_ignores_alias_when_target_missing() {
-    use crate::palace_alias::PalaceAliasStore;
+    use trusty_common::palace_alias::PalaceAliasStore;
 
     let dir = tempdir().unwrap();
     let data_root = dir.path();
@@ -479,8 +479,8 @@ fn open_palace_ignores_alias_when_target_missing() {
 /// Test: this test itself.
 #[test]
 fn open_palace_prefers_real_palace_over_alias() {
-    use crate::memory_core::palace::Palace;
-    use crate::palace_alias::PalaceAliasStore;
+    use crate::engine::palace::Palace;
+    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -520,8 +520,8 @@ fn open_palace_prefers_real_palace_over_alias() {
 /// Test: this test itself.
 #[test]
 fn palace_create_refuses_a_live_alias_name() {
-    use crate::memory_core::palace::Palace;
-    use crate::palace_alias::{LiveAliasError, PalaceAliasStore};
+    use crate::engine::palace::Palace;
+    use trusty_common::palace_alias::{LiveAliasError, PalaceAliasStore};
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -572,7 +572,7 @@ fn palace_create_refuses_a_live_alias_name() {
 /// Test: this test itself.
 #[test]
 fn palace_create_fails_when_the_alias_file_is_unreadable() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -651,7 +651,7 @@ fn lru_get_promotes_to_mru() {
 /// Test: This test itself (issue #463 regression guard).
 #[test]
 fn lru_evicted_handle_reopens() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -839,7 +839,7 @@ fn evict_idle_skips_recent_and_respects_zero_threshold() {
 /// Test: this test itself.
 #[test]
 fn open_does_not_reset_idle_clock() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -881,7 +881,7 @@ fn open_does_not_reset_idle_clock() {
 /// Test: this test itself.
 #[test]
 fn touch_after_open_makes_handle_recent() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -995,8 +995,8 @@ async fn touch_suppressed_inside_without_idle_touch() {
 #[tokio::test]
 async fn evict_idle_then_reopen_preserves_recall() {
     seed_shared_embedder_with_mock();
-    use crate::memory_core::palace::{Palace, RoomType};
-    use crate::memory_core::retrieval::recall_with_default_embedder;
+    use crate::engine::palace::{Palace, RoomType};
+    use crate::engine::retrieval::recall_with_default_embedder;
     use chrono::Utc;
 
     let dir = tempdir().unwrap();
@@ -1097,7 +1097,7 @@ async fn evict_idle_then_reopen_preserves_recall() {
 /// Test: this test.
 #[test]
 fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
     use redb::Database;
 
@@ -1120,7 +1120,7 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
         created_at: Utc::now(),
         data_dir: palace_dir.clone(),
     };
-    crate::memory_core::store::palace_store::PalaceStore::save_palace(&palace)
+    crate::engine::store::palace_store::PalaceStore::save_palace(&palace)
         .expect("save palace metadata");
 
     // Hold a REAL, permanent flock conflict on the actual redb file for the
@@ -1212,8 +1212,8 @@ fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
 /// Test: this test.
 #[test]
 fn open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace() {
-    use crate::memory_core::palace::Palace;
-    use crate::memory_core::timeouts::OpBudget;
+    use crate::engine::palace::Palace;
+    use crate::engine::timeouts::OpBudget;
     use chrono::Utc;
 
     seed_shared_embedder_with_mock();
@@ -1252,7 +1252,7 @@ fn open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace() {
 /// Test: this test.
 #[test]
 fn open_palace_within_does_not_extend_the_configured_queue_bound() {
-    use crate::memory_core::timeouts::OpBudget;
+    use crate::engine::timeouts::OpBudget;
 
     let configured = std::time::Duration::from_millis(100);
     let generous = OpBudget::start(std::time::Duration::from_secs(600));
@@ -1298,7 +1298,7 @@ impl Drop for RestoreMode {
 #[cfg(unix)]
 #[test]
 fn open_error_is_absent_only_for_a_genuine_absence() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1380,7 +1380,7 @@ fn open_error_is_absent_only_for_a_genuine_absence() {
 #[cfg(unix)]
 #[test]
 fn open_error_is_not_absent_for_an_unstattable_palace_json() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1454,8 +1454,8 @@ fn open_error_is_not_absent_for_an_unstattable_palace_json() {
 #[cfg(unix)]
 #[test]
 fn open_error_is_not_absent_for_an_unstattable_alias_target() {
-    use crate::memory_core::palace::Palace;
-    use crate::palace_alias::PalaceAliasStore;
+    use crate::engine::palace::Palace;
+    use trusty_common::palace_alias::PalaceAliasStore;
     use chrono::Utc;
     use std::os::unix::fs::PermissionsExt;
 
@@ -1571,7 +1571,7 @@ fn release_if_unreferenced_skips_a_referenced_handle() {
 /// Test: itself.
 #[test]
 fn a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time() {
-    use crate::memory_core::palace::{Drawer, Palace};
+    use crate::engine::palace::{Drawer, Palace};
     use std::sync::Arc;
 
     for missing_room in [false, true] {
@@ -1645,7 +1645,7 @@ fn a_writer_reopen_behind_a_stuck_kg_write_answers_in_bounded_time() {
 /// already deleted it.
 #[test]
 fn a_non_maintainer_open_deletes_no_expired_row() {
-    use crate::memory_core::palace::Drawer;
+    use crate::engine::palace::Drawer;
     let root = tempdir().unwrap();
     let data_dir = root.path().join("ttl-palace");
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -1768,7 +1768,7 @@ fn a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir() {
 
 /// Releases an [`OpPark`] on drop, so a failed assertion cannot leave a
 /// blocking thread held and hang the runtime's shutdown (#9487).
-struct ReleaseOnDrop(Arc<crate::memory_core::store::hnsw_store::OpPark>);
+struct ReleaseOnDrop(Arc<crate::engine::store::hnsw_store::OpPark>);
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -1785,8 +1785,8 @@ impl Drop for ReleaseOnDrop {
 /// Test: this test.
 #[tokio::test]
 async fn a_blocked_hnsw_op_stays_reported_on_every_eviction_path() {
-    use crate::memory_core::store::hnsw_store::{HnswOpKind, OpPark};
-    use crate::memory_core::store::vector::VectorStore;
+    use crate::engine::store::hnsw_store::{HnswOpKind, OpPark};
+    use crate::engine::store::vector::VectorStore;
     for path in ["lru-cap", "remove", "release-if-unreferenced"] {
         let dir = tempdir().unwrap();
         let reg = PalaceRegistry::with_max_open(1);
@@ -1838,7 +1838,7 @@ async fn a_blocked_hnsw_op_stays_reported_on_every_eviction_path() {
 /// Test: this is the test.
 #[test]
 fn a_writer_registry_never_hydrates_read_only() {
-    use crate::memory_core::palace::Palace;
+    use crate::engine::palace::Palace;
     use chrono::Utc;
 
     seed_shared_embedder_with_mock();
@@ -1861,7 +1861,7 @@ fn a_writer_registry_never_hydrates_read_only() {
 
     let kg_path = data_root.join(palace_id.as_str()).join("kg.redb");
     let _holder =
-        crate::redb_cache::create_palace_db(&kg_path).expect("another holder takes kg.redb");
+        trusty_common::redb_cache::create_palace_db(&kg_path).expect("another holder takes kg.redb");
 
     // The daemon's construction today (trusty-mpm core/sm/memory.rs).
     let Ok(registry) = PalaceRegistry::open(data_root) else {

@@ -3,11 +3,11 @@
 //! Why: Extracted from store/kg.rs (#607 split). Tests the open/assert/retract
 //! lifecycle, drawer persistence, triple listing, and graph statistics.
 //! What: Tokio async tests for every public method on `KnowledgeGraph`.
-//! Test: Run with `cargo test -p trusty-common --features memory-core`.
+//! Test: Run with `cargo test -p trusty-memory`.
 
 use super::graph::KnowledgeGraph;
 use super::types::Triple;
-use crate::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 use chrono::Utc;
 use std::path::PathBuf;
 use tempfile::tempdir;

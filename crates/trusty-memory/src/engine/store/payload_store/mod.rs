@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn try_for_each_row_streams_lazily() {
-        use crate::memory_core::store::kg_store::{PAYLOADS, encode_payload_key};
+        use crate::engine::store::kg_store::{PAYLOADS, encode_payload_key};
         use std::ops::ControlFlow;
 
         let dir = tempdir().unwrap();

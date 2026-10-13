@@ -22,12 +22,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::config::{COMPACT_MIN_RECLAIM_PERCENT, DreamConfig};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::kg_redb::copy_swap::{
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::kg_redb::copy_swap::{
     self, CompactFaultHook, CompactPlan, PreparedCompaction,
 };
-use crate::memory_core::store::kg_redb::stats::{KgRedbStats, history_cutoff_ms};
-use crate::memory_core::timeouts;
+use crate::engine::store::kg_redb::stats::{KgRedbStats, history_cutoff_ms};
+use crate::engine::timeouts;
 
 /// What the phase measured, decided, and did.
 ///

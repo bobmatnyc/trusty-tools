@@ -29,9 +29,9 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::memory_core::palace::RoomType;
-use crate::memory_core::retrieval::{PalaceHandle, RememberOptions};
-use crate::memory_core::store::kg::{KnowledgeGraph, Triple};
+use crate::engine::palace::RoomType;
+use crate::engine::retrieval::{PalaceHandle, RememberOptions};
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
 
 /// The predicate every supersession edge uses.
 ///

@@ -9,9 +9,9 @@
 //! Test: `assert_then_query_returns_triple`, `list_subjects_returns_distinct_active_subjects`,
 //! `count_active_triples_returns_live_only`, `upsert_drawer_then_load_drawers_round_trips`.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::share::SUPERSEDED_BY;
-use crate::memory_core::store::kg_store::{
+use crate::engine::palace::Drawer;
+use crate::engine::share::SUPERSEDED_BY;
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TripleValue, VERIFY_WITH,
     decode_triple_key, decode_u64, decode_value, prefix_range_end, subject_predicate_prefix,
     subject_prefix,

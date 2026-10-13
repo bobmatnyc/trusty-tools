@@ -15,7 +15,7 @@
 //! Test: `unknown_table_aborts_the_compaction`,
 //! `compaction_preserves_every_live_row`.
 
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, TripleValue, WING_KEYS, WINGS, decode_value,
 };

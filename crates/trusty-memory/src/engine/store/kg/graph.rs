@@ -10,9 +10,9 @@
 
 use super::adjacency::{Adjacency, hydrate_adjacency};
 use super::types::{AdjacencyDesync, KgEdge, Triple, UndirectedSnapshot};
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
-use crate::memory_core::store::kg_writer::KgWriter;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg_writer::KgWriter;
 use anyhow::{Context, Result};
 use petgraph::algo::{astar, dijkstra};
 use petgraph::graph::NodeIndex;
@@ -112,7 +112,7 @@ fn redb_path_for(input: &Path) -> std::path::PathBuf {
 /// future migration hooks can slot in without touching the caller.
 /// What: Immediately returns `Ok(())`.
 /// Test: Call site compiles and the function is unreachable dead code —
-/// verified by `cargo check -p trusty-common --features memory-core`.
+/// verified by `cargo check -p trusty-memory`.
 fn migrate_from_sqlite_if_needed(_data_dir: &Path, _redb_store: &KgStoreRedb) -> Result<()> {
     Ok(())
 }

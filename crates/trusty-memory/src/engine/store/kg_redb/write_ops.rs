@@ -14,8 +14,8 @@
 //! `assert_functional_predicate_still_supersedes`,
 //! `cascade_delete_removes_triples_for_subject`.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_store::{
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT, TripleValue,
     decode_triple_key, decode_u64, decode_value, encode_object_index_key, encode_triple_key,
     encode_u64, encode_value, is_functional_predicate, prefix_range_end, subject_predicate_prefix,

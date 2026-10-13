@@ -10,7 +10,7 @@
 //!       parsing, file-path classification, importance scoring, entity extraction,
 //!       and end-to-end extraction against the trusty-memory repo itself.
 
-use crate::memory_core::palace::{Drawer, RoomType};
+use crate::engine::palace::{Drawer, RoomType};
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use regex::Regex;
@@ -555,7 +555,7 @@ mod tests {
         // Use this repository itself (3+ commits exist); #9298: the running
         // checkout, not the one that built this binary.
         let repo_path =
-            crate::test_harness::test_repo_root().expect("the running checkout's workspace root");
+            trusty_common::test_harness::test_repo_root().expect("the running checkout's workspace root");
         let extractor = GitExtractor::new(repo_path).unwrap();
         let facts = extractor.extract(None, 5).unwrap();
         assert!(!facts.is_empty(), "should extract at least 1 fact");

@@ -9,9 +9,9 @@
 //! Test: this file IS the tests.
 
 use super::cycle::compact_pass;
-use crate::memory_core::palace::{Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+use crate::engine::palace::{Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::kg_store::{VECTOR_KEYS, VECTORS};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing_subscriber::fmt::MakeWriter;
@@ -227,7 +227,7 @@ async fn remember_forced(handle: &PalaceHandle, text: &str) -> Uuid {
             RoomType::General,
             vec![],
             0.5,
-            crate::memory_core::retrieval::RememberOptions::forced(),
+            crate::engine::retrieval::RememberOptions::forced(),
         )
         .await
         .unwrap()
@@ -240,15 +240,15 @@ fn words(n: usize, tag: &str) -> String {
         .join(" ")
 }
 
-fn chunking_mock(handle: &PalaceHandle) -> crate::embedder::MockEmbedder {
-    crate::embedder::MockEmbedder::new(handle.vector_store.dim()).with_chunking(WINDOW)
+fn chunking_mock(handle: &PalaceHandle) -> trusty_common::embedder::MockEmbedder {
+    trusty_common::embedder::MockEmbedder::new(handle.vector_store.dim()).with_chunking(WINDOW)
 }
 
 /// Chunk count of `text` at [`WINDOW`], from `chunk_text` directly.
 fn chunks_at(handle: &PalaceHandle, text: &str) -> usize {
-    use crate::memory_core::embed::Embedder;
+    use crate::engine::embed::Embedder;
     let tok = chunking_mock(handle).chunking_tokenizer().unwrap().unwrap();
-    crate::embedder::chunk_text(&tok, text, WINDOW)
+    trusty_common::embedder::chunk_text(&tok, text, WINDOW)
         .unwrap()
         .len()
 }
@@ -260,13 +260,13 @@ fn shape(handle: &PalaceHandle, id: Uuid) -> Option<(usize, u32)> {
 
 /// Embedder whose second call sleeps past the rebuild budget.
 struct SlowSecondCall {
-    inner: crate::embedder::MockEmbedder,
+    inner: trusty_common::embedder::MockEmbedder,
     calls: std::sync::atomic::AtomicUsize,
     stall: Duration,
 }
 
 #[async_trait::async_trait]
-impl crate::memory_core::embed::Embedder for SlowSecondCall {
+impl crate::engine::embed::Embedder for SlowSecondCall {
     async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n == 1 {
@@ -282,7 +282,7 @@ impl crate::memory_core::embed::Embedder for SlowSecondCall {
     }
     fn chunking_tokenizer(
         &self,
-    ) -> Result<Option<Arc<crate::embedder::ChunkTokenizer>>, crate::embedder::ChunkError> {
+    ) -> Result<Option<Arc<trusty_common::embedder::ChunkTokenizer>>, trusty_common::embedder::ChunkError> {
         self.inner.chunking_tokenizer()
     }
 }
@@ -301,7 +301,7 @@ async fn rebuild_index_keeps_every_chunk_of_a_long_drawer() {
     let before = (shape(&handle, long), shape(&handle, short));
     assert_eq!(before, (Some((k, (k - 1) as u32)), Some((1, 0))));
 
-    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
         Arc::new(chunking_mock(&handle));
     let rebuilt = super::helpers::rebuild_index_with(
         &handle,
@@ -324,7 +324,7 @@ async fn rebuild_stopping_at_the_budget_leaves_only_complete_groups() {
         ids.push(remember_forced(&handle, &words(100, tag)).await);
     }
     let k = chunks_at(&handle, &words(100, "a"));
-    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> = Arc::new(SlowSecondCall {
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> = Arc::new(SlowSecondCall {
         inner: chunking_mock(&handle),
         calls: std::sync::atomic::AtomicUsize::new(0),
         stall: Duration::from_secs(2),
@@ -347,13 +347,13 @@ async fn put_embedded(
     handle: &Arc<PalaceHandle>,
     text: &str,
     age_days: i64,
-    e: &crate::embedder::MockEmbedder,
+    e: &trusty_common::embedder::MockEmbedder,
 ) -> Uuid {
-    let mut d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), text);
+    let mut d = crate::engine::palace::Drawer::new(Uuid::new_v4(), text);
     d.created_at = chrono::Utc::now() - chrono::Duration::days(age_days);
     let id = d.id;
     handle.kg.upsert_drawer(&d).await.unwrap();
-    let vecs = crate::memory_core::retrieval::embed_chunks(e, text)
+    let vecs = crate::engine::retrieval::embed_chunks(e, text)
         .await
         .unwrap();
     handle.vector_store.upsert_chunks(id, vecs).await.unwrap();
@@ -363,7 +363,7 @@ async fn put_embedded(
 
 /// Drawer `text` in redb and the table, with no vector.
 async fn put_bare(handle: &Arc<PalaceHandle>, text: &str) -> Uuid {
-    let d = crate::memory_core::palace::Drawer::new(Uuid::new_v4(), text);
+    let d = crate::engine::palace::Drawer::new(Uuid::new_v4(), text);
     let id = d.id;
     handle.kg.upsert_drawer(&d).await.unwrap();
     handle.add_drawer(d);
@@ -375,8 +375,8 @@ async fn put_bare(handle: &Arc<PalaceHandle>, text: &str) -> Uuid {
 /// findable by vector search.
 #[tokio::test]
 async fn a_dedup_merge_reembeds_the_survivor_as_a_full_chunk_group() {
-    use crate::memory_core::embed::Embedder;
-    use crate::memory_core::store::vector::VectorStore;
+    use crate::engine::embed::Embedder;
+    use crate::engine::store::vector::VectorStore;
     let dir = tempfile::tempdir().unwrap();
     let handle = open_handle(dir.path(), "merge-chunks");
     let e = chunking_mock(&handle);
@@ -417,10 +417,10 @@ async fn a_dedup_merge_reembeds_the_survivor_as_a_full_chunk_group() {
 }
 
 /// A chunking window with a tokenizer that will not load.
-struct BrokenTokenizer(crate::embedder::MockEmbedder);
+struct BrokenTokenizer(trusty_common::embedder::MockEmbedder);
 
 #[async_trait::async_trait]
-impl crate::memory_core::embed::Embedder for BrokenTokenizer {
+impl crate::engine::embed::Embedder for BrokenTokenizer {
     async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         self.0.embed_batch(texts).await
     }
@@ -432,8 +432,8 @@ impl crate::memory_core::embed::Embedder for BrokenTokenizer {
     }
     fn chunking_tokenizer(
         &self,
-    ) -> Result<Option<Arc<crate::embedder::ChunkTokenizer>>, crate::embedder::ChunkError> {
-        Err(crate::embedder::ChunkError::TokenizerMissing {
+    ) -> Result<Option<Arc<trusty_common::embedder::ChunkTokenizer>>, trusty_common::embedder::ChunkError> {
+        Err(trusty_common::embedder::ChunkError::TokenizerMissing {
             path: "/nonexistent/tokenizer.json".into(),
         })
     }
@@ -443,7 +443,7 @@ impl crate::memory_core::embed::Embedder for BrokenTokenizer {
 /// rebuild after `reset()`, so every later drawer lost its vectors.
 #[tokio::test]
 async fn a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest() {
-    use crate::memory_core::store::vector_key::MAX_CHUNKS_PER_DRAWER;
+    use crate::engine::store::vector_key::MAX_CHUNKS_PER_DRAWER;
     let dir = tempfile::tempdir().unwrap();
     let handle = open_handle(dir.path(), "rebuild-skip");
     // Ten words per chunk: one chunk past the per-drawer cap.
@@ -458,7 +458,7 @@ async fn a_rebuild_skips_a_drawer_that_will_not_split_and_rebuilds_the_rest() {
     }
     assert_ne!(handle.drawers.read().last().map(|d| d.id), Some(bad));
 
-    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
         Arc::new(chunking_mock(&handle));
     let report = super::helpers::rebuild_index_with(
         &handle,
@@ -489,7 +489,7 @@ async fn a_rebuild_whose_planner_cannot_be_built_leaves_the_index_untouched() {
     let before: Vec<_> = ids.iter().map(|id| shape(&handle, *id)).collect();
     assert!(before.iter().all(Option::is_some));
 
-    let e: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+    let e: Arc<dyn crate::engine::embed::Embedder + Send + Sync> =
         Arc::new(BrokenTokenizer(chunking_mock(&handle)));
     let err = super::helpers::rebuild_index_with(
         &handle,

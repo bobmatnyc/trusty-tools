@@ -17,7 +17,7 @@
 //! `a_verified_backup_is_byte_identical_and_reused`.
 
 use super::palace_store::PalaceStoreError;
-use crate::memory_core::maintenance_log::{
+use crate::engine::maintenance_log::{
     MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME,
 };
 use serde::{Deserialize, Serialize};

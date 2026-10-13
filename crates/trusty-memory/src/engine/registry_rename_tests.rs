@@ -8,8 +8,8 @@
 //! Test: this file.
 
 use super::*;
-use crate::memory_core::palace::{Drawer, Palace};
-use crate::memory_core::store::chat_sessions::ChatSessionStore;
+use crate::engine::palace::{Drawer, Palace};
+use crate::engine::store::chat_sessions::ChatSessionStore;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -22,7 +22,7 @@ fn opts() -> RenameOptions<'static> {
 }
 
 /// Create palace `id` under `root` (its handle is dropped, so it is idle).
-fn create(reg: &PalaceRegistry, root: &Path, id: &str) -> Arc<crate::memory_core::PalaceHandle> {
+fn create(reg: &PalaceRegistry, root: &Path, id: &str) -> Arc<crate::engine::PalaceHandle> {
     let palace = Palace {
         id: PalaceId::new(id),
         name: id.to_string(),
@@ -322,7 +322,7 @@ fn rename_palace_resumes_after_dir_moved_but_id_unwritten() {
 /// Test: itself.
 #[test]
 fn rename_palace_refuses_a_newer_format_source_and_changes_nothing() {
-    use crate::memory_core::store::palace_format::PALACE_FORMAT_SUPPORTED;
+    use crate::engine::store::palace_format::PALACE_FORMAT_SUPPORTED;
     let tmp = tempdir().unwrap();
     let root = tmp.path();
     let reg = PalaceRegistry::new();

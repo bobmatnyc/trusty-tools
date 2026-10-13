@@ -16,12 +16,12 @@
 use super::chunk_backfill::{SliceReport, SliceStop};
 use super::embed_store::{ChunkPlanner, TooManyChunks};
 use super::handle::PalaceHandle;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::maintenance_log::{self, DeletionReason, MaintenanceDeletion};
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::embed_ledger;
-use crate::memory_core::store::vector::VectorStore;
-use crate::memory_core::timeouts;
+use crate::engine::embed::Embedder;
+use crate::engine::maintenance_log::{self, DeletionReason, MaintenanceDeletion};
+use crate::engine::palace::Drawer;
+use crate::engine::store::embed_ledger;
+use crate::engine::store::vector::VectorStore;
+use crate::engine::timeouts;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::ops::Range;

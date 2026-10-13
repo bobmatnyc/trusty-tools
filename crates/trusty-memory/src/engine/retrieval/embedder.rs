@@ -7,8 +7,8 @@
 //! `seed_shared_embedder_with_mock()` test helper.
 //! Test: `shared_embedder_is_singleton` in retrieval::tests.
 
-use crate::memory_core::embed::{Embedder, FastEmbedder};
-use crate::memory_core::timeouts;
+use crate::engine::embed::{Embedder, FastEmbedder};
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -45,7 +45,7 @@ pub(super) static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> =
 /// (e.g. each ~5-minute dream cycle) would otherwise leak one more
 /// permanently blocked blocking-pool thread per retry. The fix lives one
 /// layer down, in `FastEmbedder::try_new_bounded`
-/// (`crate::embedder::fast_embedder`): it bounds the CoreML attempt itself
+/// (`trusty_common::embedder::fast_embedder`): it bounds the CoreML attempt itself
 /// (default 60 s, well inside this function's 180 s default) and
 /// auto-falls-back to CPU, remembering the hang process-wide via
 /// `COREML_KNOWN_BAD` so CoreML is never attempted again this process. That
@@ -115,7 +115,7 @@ pub fn shared_embedder_initialized() -> bool {
 /// the start of their body; `shared_embedder_is_singleton` verifies ptr-eq.
 #[cfg(any(test, feature = "embedder-test-support"))]
 pub fn seed_shared_embedder_with_mock() {
-    use crate::embedder::MockEmbedder;
+    use trusty_common::embedder::MockEmbedder;
     let mock: Arc<dyn Embedder + Send + Sync> = Arc::new(MockEmbedder::new(384));
     // `set` returns Err if already initialised — that is the desired no-op.
     let _ = SHARED_EMBEDDER.set(mock);

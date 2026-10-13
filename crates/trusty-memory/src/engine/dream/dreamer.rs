@@ -19,11 +19,11 @@ use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
 use super::semantic::{SemanticPassOutcome, semantic_consolidation_pass};
 use super::settled;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::PalaceId;
-use crate::memory_core::registry::PalaceRegistry;
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::semantic_consolidation::SemanticConsolidator;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::PalaceId;
+use crate::engine::registry::PalaceRegistry;
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::semantic_consolidation::SemanticConsolidator;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -426,7 +426,7 @@ impl Dreamer {
         stats.update_compression_ratio();
         // #8732: the full stats line below `log_cycle_outcome` is `info`; a cycle
         // that deleted drawers must also show at the daemon's default filter.
-        crate::memory_core::maintenance_log::warn_removed(
+        crate::engine::maintenance_log::warn_removed(
             &handle.id,
             "dream cycle",
             stats.merged + stats.pruned + stats.content_pruned,

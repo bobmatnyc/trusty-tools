@@ -22,9 +22,9 @@
 //! Test: `default_wing_is_seeded_once`, `wing_rename_survives_reseed`,
 //! `wing_insert_is_insert_only` (all in `store::wings::tests`).
 
-use crate::memory_core::store::kg_store::{WING_KEYS, WINGS, decode_value, encode_value};
-use crate::memory_core::store::wings::{WING_SCHEMA_VERSION, WingRecord, WingSchemaMarker};
-use crate::memory_core::wing_identity::canonical_wing_key;
+use crate::engine::store::kg_store::{WING_KEYS, WINGS, decode_value, encode_value};
+use crate::engine::store::wings::{WING_SCHEMA_VERSION, WingRecord, WingSchemaMarker};
+use crate::engine::wing_identity::canonical_wing_key;
 use anyhow::{Context, Result, bail};
 use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;

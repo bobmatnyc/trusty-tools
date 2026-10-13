@@ -9,13 +9,13 @@
 //! Test: this file.
 
 use super::*;
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::room_identity::room_to_uuid;
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::kg_store::{decode_value, encode_value};
-use crate::memory_core::store::room_backfill::backfill_rooms;
-use crate::memory_core::store::rooms::{RoomRecord, resolve_or_create_room_sync};
-use crate::memory_core::wing_identity::mint_wing_id;
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::room_identity::room_to_uuid;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::kg_store::{decode_value, encode_value};
+use crate::engine::store::room_backfill::backfill_rooms;
+use crate::engine::store::rooms::{RoomRecord, resolve_or_create_room_sync};
+use crate::engine::wing_identity::mint_wing_id;
 use tempfile::TempDir;
 
 fn open_kg() -> (TempDir, KnowledgeGraph) {
@@ -475,12 +475,12 @@ fn rooms_in_wing_separates_same_named_rooms() {
     let (engineer, _) = resolve_or_create_wing_sync(&store, "engineer").expect("w1");
     let (pm, _) = resolve_or_create_wing_sync(&store, "pm").expect("w2");
 
-    let key_e = crate::memory_core::room_identity::canonical_room_key(engineer, "Planning");
-    let key_p = crate::memory_core::room_identity::canonical_room_key(pm, "Planning");
+    let key_e = crate::engine::room_identity::canonical_room_key(engineer, "Planning");
+    let key_p = crate::engine::room_identity::canonical_room_key(pm, "Planning");
     assert_ne!(key_e, key_p, "the wing id is part of the room key");
 
-    let id_e = crate::memory_core::room_identity::mint_room_id(&key_e);
-    let id_p = crate::memory_core::room_identity::mint_room_id(&key_p);
+    let id_e = crate::engine::room_identity::mint_room_id(&key_e);
+    let id_p = crate::engine::room_identity::mint_room_id(&key_p);
     assert_ne!(id_e, id_p, "same label, different wings, different rooms");
 
     let mut rec_e = RoomRecord::new(&RoomType::Planning, 1, true);

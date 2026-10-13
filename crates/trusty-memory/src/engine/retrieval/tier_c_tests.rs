@@ -10,11 +10,11 @@
 //! store, asserting on both the durable rows (`kg.load_drawers`,
 //! `kg.drawer_id_for_fact_key`) and the in-memory mirror.
 //! Test: this file IS the tests — run with:
-//!   cargo test -p trusty-common --features memory-core,embedder-test-support tier_c
+//!   cargo test -p trusty-memory tier_c
 
 use super::*;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use chrono::{DateTime, Duration, DurationRound, Utc};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -626,8 +626,8 @@ fn seed_slot_then_edit_row(
     dir: &std::path::Path,
     mutate: impl FnOnce(Uuid, &mut redb::Table<'_, &[u8], &[u8]>),
 ) -> Uuid {
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
-    use crate::memory_core::store::kg_store::DRAWERS;
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_store::DRAWERS;
     use redb::Database;
 
     let kg_path = dir.join("kg.redb");
@@ -835,7 +835,7 @@ async fn an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_sec
 
 /// The active `superseded_by` objects of `drawer:<id>`, read from redb.
 async fn superseded_by_edges(kg: &KnowledgeGraph, id: Uuid) -> Vec<String> {
-    use crate::memory_core::share::SUPERSEDED_BY;
+    use crate::engine::share::SUPERSEDED_BY;
     kg.query_active(&format!("drawer:{id}"))
         .await
         .expect("query_active")
@@ -974,7 +974,7 @@ async fn re_running_a_retirement_keeps_one_active_edge() {
 /// Test: this test.
 #[tokio::test]
 async fn a_failed_retirement_commit_writes_no_edge() {
-    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::kg_redb::KgStoreRedb;
 
     let dir = tempdir().unwrap();
     let kg_path = dir.path().join("kg.redb");
@@ -1024,7 +1024,7 @@ async fn a_failed_retirement_commit_writes_no_edge() {
 #[tokio::test]
 async fn a_failed_edge_write_still_lands_the_remember_and_warns() {
     use super::recall_log_tests::Capture;
-    use crate::memory_core::store::kg::{Triple, tests::poison_adjacency};
+    use crate::engine::store::kg::{Triple, tests::poison_adjacency};
 
     let cap = Capture::default();
     let subscriber = tracing_subscriber::fmt()

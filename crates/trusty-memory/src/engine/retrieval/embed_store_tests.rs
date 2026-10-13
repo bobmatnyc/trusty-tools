@@ -12,10 +12,10 @@ use super::embed_store::{
     expected_chunk_count, plan_chunks,
 };
 use super::handle::PalaceHandle;
-use crate::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use trusty_common::embedder::{ChunkError, ChunkTokenizer, MockEmbedder, chunk_text};
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use anyhow::Result;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -331,7 +331,7 @@ async fn a_wedged_chunked_embed_ends_at_the_scaled_bound() {
 #[test]
 fn chunked_embed_timeout_is_clamped_at_the_cap() {
     let cap = std::time::Duration::from_secs(
-        crate::memory_core::timeouts::DEFAULT_EMBED_CHUNKED_CAP_SECS,
+        crate::engine::timeouts::DEFAULT_EMBED_CHUNKED_CAP_SECS,
     );
     let got = clamp_chunked_timeout(std::time::Duration::from_secs(30), 4096, cap);
     assert_eq!(got, std::time::Duration::from_secs(600));
@@ -352,7 +352,7 @@ fn chunked_embed_timeout_never_drops_below_the_operators_per_chunk() {
 /// #9735 Q3: the cap is `TRUSTY_EMBED_CHUNKED_CAP_SECS`, not a constant.
 #[test]
 fn chunked_embed_timeout_honours_the_cap_env() {
-    let _env = crate::data_dir::ENV_LOCK
+    let _env = trusty_common::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: serialised by `ENV_LOCK`, held above for the whole test.

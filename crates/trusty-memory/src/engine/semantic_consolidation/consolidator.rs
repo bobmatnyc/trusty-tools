@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::memory_core::palace::Drawer;
+use crate::engine::palace::Drawer;
 
 use super::inference::Inference;
 use super::types::ConsolidationAction;

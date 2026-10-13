@@ -7,8 +7,8 @@
 //! Test: this file IS the tests.
 
 use super::*;
-use crate::memory_core::palace::{PalaceId, RoomType};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::palace::{PalaceId, RoomType};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use tempfile::tempdir;
 use uuid::Uuid;
 

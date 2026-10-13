@@ -14,8 +14,8 @@
 
 use super::graph::KnowledgeGraph;
 use super::types::Triple;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_redb::KgStoreRedb;
 use anyhow::{Context, Result};
 use petgraph::visit::EdgeRef;
 use uuid::Uuid;
@@ -184,7 +184,7 @@ impl KnowledgeGraph {
         {
             return count;
         }
-        let count = crate::memory_core::community::partition(self)
+        let count = crate::engine::community::partition(self)
             .iter()
             .filter(|c| !c.is_empty())
             .count();
@@ -219,7 +219,7 @@ impl KnowledgeGraph {
     /// second handle across the swap.
     /// What: `&self.store`.
     /// Test: `compaction_swaps_the_live_handle_in_place`.
-    pub fn redb_store(&self) -> &crate::memory_core::store::kg_redb::KgStoreRedb {
+    pub fn redb_store(&self) -> &crate::engine::store::kg_redb::KgStoreRedb {
         &self.store
     }
 
@@ -269,7 +269,7 @@ impl KnowledgeGraph {
     /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
     /// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
     pub async fn upsert_drawers_atomic(&self, drawers: Vec<Drawer>) -> Result<()> {
-        use crate::memory_core::store::kg_redb::BatchWriteOp;
+        use crate::engine::store::kg_redb::BatchWriteOp;
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
             let ops: Vec<BatchWriteOp> = drawers
@@ -374,8 +374,8 @@ impl KnowledgeGraph {
     /// `community` module just to get gap suggestions.
     /// What: Delegates to `community::find_communities(self)`.
     /// Test: `community_tests::knowledge_gaps_on_sparse_graph`.
-    pub fn knowledge_gaps(&self) -> Vec<crate::memory_core::community::KnowledgeGap> {
-        crate::memory_core::community::find_communities(self)
+    pub fn knowledge_gaps(&self) -> Vec<crate::engine::community::KnowledgeGap> {
+        crate::engine::community::find_communities(self)
     }
 
     /// Whether this KG was opened against a read-only snapshot of a redb
@@ -456,9 +456,9 @@ impl KnowledgeGraph {
     ///
     /// The commit is durable before the adjacency update runs, so a failure of
     /// that second step means the row IS closed and only the derived index
-    /// disagrees (#5424). It returns [`AdjacencyDesync::CommittedButStale`](crate::memory_core::store::kg::AdjacencyDesync::CommittedButStale)
+    /// disagrees (#5424). It returns [`AdjacencyDesync::CommittedButStale`](crate::engine::store::kg::AdjacencyDesync::CommittedButStale)
     /// naming the closed row instead of a bare lock error, and every later
-    /// mutation on the handle returns [`AdjacencyDesync::HandleStale`](crate::memory_core::store::kg::AdjacencyDesync::HandleStale) — a
+    /// mutation on the handle returns [`AdjacencyDesync::HandleStale`](crate::engine::store::kg::AdjacencyDesync::HandleStale) — a
     /// retry can no longer read `Ok(0)` and conclude the fact was never there.
     /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`,
     /// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`,

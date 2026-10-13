@@ -11,7 +11,7 @@
 use super::super::private_key::{PEM_BEGIN, PEM_END, PEM_PRIVATE_KEY, private_key_blocks};
 use super::super::*;
 use super::{SecretRule, SecretSpan, classify_token, find_secret_spans};
-use crate::memory_core::filter::{GIT_SHA_MAX_LEN, GIT_SHA_MIN_LEN};
+use crate::engine::filter::{GIT_SHA_MAX_LEN, GIT_SHA_MIN_LEN};
 
 const GHP: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"; // pragma: allowlist secret
 const AWS: &str = "AKIAIOSFODNN7EXAMPLE"; // pragma: allowlist secret

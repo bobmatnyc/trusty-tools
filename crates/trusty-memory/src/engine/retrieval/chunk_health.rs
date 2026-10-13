@@ -9,9 +9,9 @@
 //! Test: `chunk_health_tests.rs`.
 
 use super::embed_store::{ChunkPlanner, TooManyChunks, expected_chunk_count};
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::vector::ChunkShape;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::Drawer;
+use crate::engine::store::vector::ChunkShape;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;

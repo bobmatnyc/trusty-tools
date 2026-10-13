@@ -19,9 +19,9 @@
 //! `dream_recall_benchmark_returns_score_with_drawers`, and
 //! `dream_recall_benchmark_compression_ratio_math` in `dream::tests`.
 
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
-use crate::memory_core::store::vector::VectorStore;
+use crate::engine::embed::Embedder;
+use crate::engine::retrieval::{PalaceHandle, shared_embedder};
+use crate::engine::store::vector::VectorStore;
 use std::sync::Arc;
 
 /// Fixed set of representative recall queries used to measure retrieval

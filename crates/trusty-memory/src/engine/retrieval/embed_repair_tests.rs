@@ -11,7 +11,7 @@
 //! claims — transient failure retried, permanent failure marked, backfill
 //! repairing a marked drawer, backfill being a no-op on a healthy palace.
 //! Test: this file IS the tests. Run with
-//!   `cargo test -p trusty-common --features memory-core,embedder-test-support embed_repair`
+//!   `cargo test -p trusty-memory embed_repair`
 
 use super::deferred_embed::{
     EmbedLoss, RetryPolicy, embed_and_store, embed_store_or_record, record_loss,
@@ -21,11 +21,11 @@ use super::embed_repair::{
 };
 use super::embedder::seed_shared_embedder_with_mock;
 use super::handle::PalaceHandle;
-use crate::embedder::MockEmbedder;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use trusty_common::embedder::MockEmbedder;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::embed_ledger::{self, EmbedFailure};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -391,7 +391,7 @@ async fn backfill_is_a_noop_on_a_healthy_palace() {
     handle
         .remember(
             "a fact that embeds normally".to_string(),
-            crate::memory_core::palace::RoomType::Custom("t".into()),
+            crate::engine::palace::RoomType::Custom("t".into()),
             vec![],
             0.5,
         )
@@ -455,7 +455,7 @@ async fn health_reports_the_drawer_with_no_vector() {
     handle
         .remember(
             "an embedded fact about caching".to_string(),
-            crate::memory_core::palace::RoomType::Custom("t".into()),
+            crate::engine::palace::RoomType::Custom("t".into()),
             vec![],
             0.5,
         )
@@ -753,7 +753,7 @@ fn concurrent_clear_and_record_do_not_lose_each_other() {
 /// `shared_id` and a `VECTOR_KEYS` row per uuid pointing at it.
 /// Test: used by `alias_audit_surfaces_a_collision`.
 fn seed_aliased_vector_file(dir: &std::path::Path, shared_id: u64, uuids: &[Uuid]) {
-    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use crate::engine::store::kg_store::{VECTOR_KEYS, VECTORS};
     use redb::Database;
     let db = Database::create(dir.join("idx.usearch.redb")).expect("create vector redb");
     let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode");
@@ -1137,7 +1137,7 @@ fn repair_aliases_frees_the_group_and_verifies_it() {
 /// `repaired` and fails every assertion here.
 #[test]
 fn repair_aliases_never_reports_success_over_a_partial_repair() {
-    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use crate::engine::store::kg_store::{VECTOR_KEYS, VECTORS};
     use redb::Database;
 
     let dir = tempfile::tempdir().unwrap();
@@ -1354,7 +1354,7 @@ async fn repair_aliases_then_reembed_makes_a_lost_drawer_retrievable() {
 /// `clean` and fails here.
 #[test]
 fn a_collision_whose_keys_do_not_parse_is_never_clean() {
-    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use crate::engine::store::kg_store::{VECTOR_KEYS, VECTORS};
     use redb::Database;
 
     let dir = tempfile::tempdir().unwrap();
@@ -1438,7 +1438,7 @@ fn a_collision_whose_keys_do_not_parse_is_never_clean() {
 /// check reports success over an unverified destructive write.
 #[test]
 fn classify_refuses_to_call_an_unverified_write_repaired() {
-    use crate::memory_core::store::vector::UnaliasOutcome;
+    use crate::engine::store::vector::UnaliasOutcome;
     let id = Uuid::new_v4();
     let freed = UnaliasOutcome {
         freed: vec![id],
@@ -1480,7 +1480,7 @@ fn classify_refuses_to_call_an_unverified_write_repaired() {
 /// the second case report `repaired`.
 #[test]
 fn classify_reports_partial_when_the_verification_still_finds_a_collision() {
-    use crate::memory_core::store::vector::UnaliasOutcome;
+    use crate::engine::store::vector::UnaliasOutcome;
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
 

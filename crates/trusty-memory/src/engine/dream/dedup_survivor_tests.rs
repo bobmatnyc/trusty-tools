@@ -10,11 +10,11 @@
 //! Test: itself.
 
 use super::cycle::dedup_pass_with_embedder;
-use crate::memory_core::embed::{EMBED_DIM, Embedder};
-use crate::memory_core::maintenance_log::{DeletionReason, read_journal};
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{ForgetOutcome, PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::store::vector::VectorStore;
+use crate::engine::embed::{EMBED_DIM, Embedder};
+use crate::engine::maintenance_log::{DeletionReason, read_journal};
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{ForgetOutcome, PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::vector::VectorStore;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -274,7 +274,7 @@ async fn a_slot_holder_or_ruling_outlives_a_more_important_duplicate() {
 /// drawer table and in redb, and the pass must report no merge.
 #[tokio::test]
 async fn a_failed_merge_persist_keeps_the_duplicate() {
-    use crate::memory_core::store::kg_redb::BatchWriteOp;
+    use crate::engine::store::kg_redb::BatchWriteOp;
     let dir = tempdir().unwrap();
     let handle = open(&palace_in(&dir, "persist-fails"));
     let keep = put(
@@ -463,7 +463,7 @@ async fn a_failed_merge_reembed_commits_nothing() {
 /// vector at 0.0, both far outside the bound.
 #[tokio::test]
 async fn a_failed_merge_persist_restores_the_survivor_vectors() {
-    use crate::memory_core::store::kg_redb::BatchWriteOp;
+    use crate::engine::store::kg_redb::BatchWriteOp;
     let (survivor, loser) = (
         "Dream dedup keeps the survivor's vectors on a failed write",
         "A failed dedup write keeps the survivor vector group",
@@ -615,7 +615,7 @@ async fn a_merge_past_the_byte_bound_keeps_both_drawers() {
 
 /// The vector the process-wide mock embedder gives `text` in a dream cycle.
 async fn mock_vector(text: &str) -> Vec<f32> {
-    let mock = crate::embedder::MockEmbedder::new(EMBED_DIM);
+    let mock = trusty_common::embedder::MockEmbedder::new(EMBED_DIM);
     mock.embed_batch(&[text.to_string()])
         .await
         .unwrap()
@@ -704,7 +704,7 @@ async fn a_second_dream_cycle_on_a_dreaming_palace_loses_no_text() {
         dedup_threshold: 0.9,
         recall_benchmark_enabled: false,
         compact: false,
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: false,
             ..Default::default()
         },
@@ -799,7 +799,7 @@ async fn a_cycle_that_fails_after_a_merge_still_calls_the_hook() {
         dedup_threshold: 0.9,
         recall_benchmark_enabled: false,
         compact: false,
-        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
             enabled: false,
             ..Default::default()
         },
@@ -843,8 +843,8 @@ async fn a_cycle_that_fails_after_a_merge_still_calls_the_hook() {
 #[tokio::test]
 async fn dream_never_merges_a_split_part() {
     use super::helpers::{MERGE_MAX_BYTES, persist_merge};
-    use crate::embedder::MockEmbedder;
-    use crate::memory_core::retrieval::SliceBounds;
+    use trusty_common::embedder::MockEmbedder;
+    use crate::engine::retrieval::SliceBounds;
     let dir = tempdir().unwrap();
     let handle = open(&palace_in(&dir, "split-no-merge"));
     // 4097 chunks at the window-12 mock: four 1024-chunk parts and one tail

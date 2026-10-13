@@ -16,16 +16,16 @@ use super::{
     CHAT_FILE, DRAWER_COUNTS_FILE, KG_FILE, PalaceSnapshot, SNAPSHOT_MANIFEST, SnapshotError,
     SnapshotStep, complete_lines, no_fault, restore_palace_snapshot, snapshot_palace, table_counts,
 };
-use crate::memory_core::maintenance_log::{
+use crate::engine::maintenance_log::{
     MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTATED_FILENAME,
 };
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::store::chat_sessions::ChatSessionStore;
-use crate::memory_core::store::kg::Triple;
-use crate::memory_core::store::kg_redb::{BatchWriteOp, KgStoreRedb};
-use crate::memory_core::store::palace_store::PalaceStore;
-use crate::memory_core::store::rooms::resolve_or_create_room_sync;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::chat_sessions::ChatSessionStore;
+use crate::engine::store::kg::Triple;
+use crate::engine::store::kg_redb::{BatchWriteOp, KgStoreRedb};
+use crate::engine::store::palace_store::PalaceStore;
+use crate::engine::store::rooms::resolve_or_create_room_sync;
 use chrono::Utc;
 use redb::ReadableDatabase;
 use std::io;
@@ -185,7 +185,7 @@ fn snapshot_under_writer(fx: &Fixture) -> (PalaceSnapshot, u64, u64) {
 }
 
 fn counts_of(path: &Path, names: &[String]) -> std::collections::BTreeMap<String, u64> {
-    let db = crate::redb_cache::open_palace_db_read_only(path).expect("open copy read-only");
+    let db = trusty_common::redb_cache::open_palace_db_read_only(path).expect("open copy read-only");
     let rtx = db.begin_read().expect("read");
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     table_counts(&rtx, path, &names).expect("counts")

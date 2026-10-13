@@ -10,14 +10,14 @@
 //! What: Builds a `KnowledgeGraph` in a temp dir, drives the public
 //! `assert` / `retract` API, then asserts on `neighbors` / `shortest_path`
 //! results and (for hydration) the cumulative count of returned edges.
-//! Test: `cargo test -p trusty-common --features memory-core --test
+//! Test: `cargo test -p trusty-memory --test
 //! kg_graph_tests`.
 
 #![cfg(feature = "memory-core")]
 
 use chrono::Utc;
 use tempfile::tempdir;
-use trusty_common::memory_core::store::kg::{KgEdge, KnowledgeGraph, Triple};
+use trusty_memory::engine::store::kg::{KgEdge, KnowledgeGraph, Triple};
 
 /// Why: Centralise triple construction so each test only restates the
 /// `(subject, predicate, object)` triple under exercise.

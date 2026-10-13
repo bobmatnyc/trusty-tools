@@ -16,8 +16,8 @@ use super::{
     OpBudgetError, abandoned_ops_in_flight, budget_from, op_budget_error,
     op_budget_for_txn_deadline,
 };
-use crate::memory_core::store::hnsw_store::{HnswStore, HnswStoreError};
-use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::engine::store::hnsw_store::{HnswStore, HnswStoreError};
+use crate::engine::store::vector::{UsearchStore, VectorStore};
 
 const DIM: usize = 16;
 /// Small enough to reach in a test, large enough to be unambiguous.

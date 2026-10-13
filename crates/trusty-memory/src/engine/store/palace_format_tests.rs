@@ -9,12 +9,12 @@
 //! Test: this file.
 
 use super::*;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId};
-use crate::memory_core::retrieval::PalaceHandle;
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
-use crate::memory_core::store::kg_store::encode_value;
-use crate::memory_core::store::palace_store::PalaceStore;
+use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::retrieval::PalaceHandle;
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg_store::encode_value;
+use crate::engine::store::palace_store::PalaceStore;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ fn populate(palace: &Palace) {
 
 /// Write raw bytes as the `palace_format` row, bypassing every gate.
 fn stamp_marker_bytes(kg_path: &Path, bytes: &[u8]) {
-    let db = crate::redb_cache::create_palace_db(kg_path).expect("open kg.redb to stamp");
+    let db = trusty_common::redb_cache::create_palace_db(kg_path).expect("open kg.redb to stamp");
     let wtx = db.begin_write().expect("begin stamp txn");
     {
         let mut t = wtx.open_table(KG_SCHEMA).expect("open kg_schema");
@@ -321,7 +321,7 @@ fn a_held_kg_is_checked_after_open_and_refused() {
     populate(&palace);
     stamp_marker(&palace.data_dir, PALACE_FORMAT_SUPPORTED + 1);
     let kg = palace.data_dir.join(KG_FILE);
-    let _holder = crate::redb_cache::create_palace_db(&kg).expect("hold kg.redb");
+    let _holder = trusty_common::redb_cache::create_palace_db(&kg).expect("hold kg.redb");
 
     assert_eq!(
         read_marker_without_writing(&kg).expect("read"),
@@ -497,7 +497,7 @@ fn save_palace_keeps_the_format_mirror_and_refuses_a_newer_one() {
 /// still a `PalaceStoreError` through `is_format_refusal`.
 #[test]
 fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
-    use crate::memory_core::store::chat_sessions::ChatSessionStore;
+    use crate::engine::store::chat_sessions::ChatSessionStore;
 
     let root = tempdir().expect("tempdir");
     let palace = saved_palace(root.path(), "chat-newer");
@@ -542,7 +542,7 @@ fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
 /// the file) and the open; the open must still refuse it before writing.
 #[test]
 fn the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker() {
-    use crate::memory_core::store::kg_redb::AFTER_PRE_OPEN;
+    use crate::engine::store::kg_redb::AFTER_PRE_OPEN;
     let root = tempdir().expect("tempdir");
     let palace = saved_palace(root.path(), "post-open");
     populate(&palace);
@@ -617,7 +617,7 @@ fn status_reports_a_held_kg_as_unverified() {
     let palace = saved_palace(root.path(), "held-status");
     populate(&palace);
     let kg = palace.data_dir.join(KG_FILE);
-    let holder = crate::redb_cache::create_palace_db(&kg).expect("hold kg.redb");
+    let holder = trusty_common::redb_cache::create_palace_db(&kg).expect("hold kg.redb");
     let before = hash_tree(&palace.data_dir);
     assert_eq!(
         palace_format_status(&palace.data_dir).expect("status"),

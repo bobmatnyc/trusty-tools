@@ -22,7 +22,7 @@ use super::{
     DELETED_VECTORS, HnswStore, HnswStoreError, Result, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
     allocate_vector_id, op_watch,
 };
-use crate::memory_core::store::vector_key::{self, MAX_CHUNKS_PER_DRAWER};
+use crate::engine::store::vector_key::{self, MAX_CHUNKS_PER_DRAWER};
 
 #[cfg(test)]
 #[path = "index_pace.rs"]

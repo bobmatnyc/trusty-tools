@@ -58,5 +58,5 @@ pub use types::{BatchOpResult, BatchWriteOp, READ_ONLY_ERROR_MSG};
 // Re-export the core domain types so tests (via `use super::*`) and
 // downstream callers can access them without reaching through multiple
 // module paths.
-pub use crate::memory_core::palace::Drawer;
-pub use crate::memory_core::store::kg::Triple;
+pub use crate::engine::palace::Drawer;
+pub use crate::engine::store::kg::Triple;

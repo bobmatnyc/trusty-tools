@@ -12,8 +12,8 @@
 
 use super::drawer_ops::batch_upsert_drawer;
 use super::store::KgStoreRedb;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg_store::{
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg_store::{
     DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, KgSchemaMarker, encode_value,
 };
 use anyhow::{Context, Result};

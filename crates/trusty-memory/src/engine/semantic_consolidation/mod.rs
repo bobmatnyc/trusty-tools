@@ -10,7 +10,7 @@
 //! `SemanticConsolidator` that clusters near-duplicate drawers and delegates
 //! canonicalization to the configured provider. Gracefully degrades to a no-op
 //! when no inference backend is available.
-//! Test: `cargo test -p trusty-common --features memory-core
+//! Test: `cargo test -p trusty-memory
 //!        semantic_consolidation::tests::`.
 
 mod consolidator;
@@ -29,8 +29,8 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credentials::env_guard::EnvVarGuard;
-    use crate::memory_core::palace::Drawer;
+    use trusty_common::credentials::env_guard::EnvVarGuard;
+    use crate::engine::palace::Drawer;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -121,7 +121,7 @@ mod tests {
     /// exports a real `OPENROUTER_API_KEY` — which is every developer who has
     /// configured one, and was the observed cause on a CI runner whose shell had
     /// it set. Reproduced deterministically: `OPENROUTER_API_KEY=sk-… cargo test
-    /// -p trusty-common --features memory-core --lib semantic_consolidation`
+    /// -p trusty-memory --lib semantic_consolidation`
     /// failed on `main` at `assertion failed: !inference_available("", false)`.
     ///
     /// Fixed by CLEARING the var for the body rather than assuming it is clear.
@@ -139,7 +139,7 @@ mod tests {
         // were the one inside `inference_available` below, it could re-populate
         // the very var this test just cleared, mid-assertion (the #3464
         // mechanism). Forcing it now makes the clear below the last word.
-        crate::credentials::load_env_local_once();
+        trusty_common::credentials::load_env_local_once();
         let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
         assert!(!inference_available("", false));
         assert!(!inference_available("   ", false));
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     #[serial_test::serial(dotenv_credential_env)]
     fn resolve_provider_unprefixed_model_without_key_is_unavailable() {
-        crate::credentials::load_env_local_once();
+        trusty_common::credentials::load_env_local_once();
         let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
         let resolved = resolve_consolidation_provider("anthropic/claude-haiku-4-5", "", true);
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     #[serial_test::serial(dotenv_credential_env)]
     fn resolve_provider_local_requires_explicit_prefix() {
-        crate::credentials::load_env_local_once();
+        trusty_common::credentials::load_env_local_once();
         let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
         assert!(matches!(
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     #[serial_test::serial(dotenv_credential_env)]
     fn resolve_provider_local_prefix_vetoed_when_disabled() {
-        crate::credentials::load_env_local_once();
+        trusty_common::credentials::load_env_local_once();
         let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
         match resolve_consolidation_provider("ollama/llama3.2", "", false) {
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     #[serial_test::serial(dotenv_credential_env)]
     fn resolve_provider_local_honours_the_host_override() {
-        crate::credentials::load_env_local_once();
+        trusty_common::credentials::load_env_local_once();
         let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
         let _host = EnvVarGuard::set(LOCAL_HOST_ENV, "http://192.0.2.1:9/");
 

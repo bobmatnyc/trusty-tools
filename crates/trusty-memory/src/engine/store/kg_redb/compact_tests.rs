@@ -13,7 +13,7 @@
 use super::copy_swap::{self, CompactPlan, CompactStep};
 use super::stats::{HISTORY_KEY_PREFIX, KgRedbStats, history_close_ms, history_cutoff_ms};
 use super::*;
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::kg_store::{
     TRIPLES, TRIPLES_BY_PREDICATE, TripleValue, encode_triple_key, encode_value,
 };
 use chrono::Utc;
@@ -618,7 +618,7 @@ fn unknown_table_aborts_the_compaction() {
 /// Test: this is the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kg_writer_commit_inside_the_swap_window_is_never_dropped() {
-    use crate::memory_core::store::kg::KnowledgeGraph;
+    use crate::engine::store::kg::KnowledgeGraph;
 
     let (_d, path) = palace_with_history(4, 40, 400);
     let kg = KnowledgeGraph::open(&path).expect("open KnowledgeGraph");

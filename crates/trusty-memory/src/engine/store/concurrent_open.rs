@@ -24,7 +24,7 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
-use crate::redb_cache::create_palace_db;
+use trusty_common::redb_cache::create_palace_db;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
 use std::path::{Path, PathBuf};
@@ -671,7 +671,7 @@ impl ReadOnlyRedb {
             anyhow::bail!("no redb file at {}", path.display());
         }
         // #7106: bounded page cache on the read-only measurement path too.
-        match crate::redb_cache::open_palace_db_read_only(path) {
+        match trusty_common::redb_cache::open_palace_db_read_only(path) {
             Ok(db) => Ok(Self::Live(db)),
             Err(DatabaseError::DatabaseAlreadyOpen) => {
                 let snap = snapshot_path_for(path);

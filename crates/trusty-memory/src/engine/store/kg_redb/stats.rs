@@ -18,8 +18,8 @@
 //! `stats_history_split_tracks_the_cutoff`,
 //! `measure_writes_nothing_to_the_live_file`.
 
-use crate::memory_core::store::concurrent_open::ReadOnlyRedb;
-use crate::memory_core::store::kg_store::{
+use crate::engine::store::concurrent_open::ReadOnlyRedb;
+use crate::engine::store::kg_store::{
     TRIPLES, TRIPLES_BY_PREDICATE, TripleValue, decode_triple_key, decode_value,
 };
 use anyhow::{Context, Result};

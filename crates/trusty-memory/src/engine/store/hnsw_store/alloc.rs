@@ -12,7 +12,7 @@
 use redb::{ReadableTable, Table};
 
 use super::{HnswStoreError, MAX_ALLOC_PROBES, Result};
-use crate::memory_core::store::kg_store::NEXT_VECTOR_ID;
+use crate::engine::store::kg_store::NEXT_VECTOR_ID;
 
 /// Reserve the next free `vector_id`, inside the caller's write transaction.
 ///

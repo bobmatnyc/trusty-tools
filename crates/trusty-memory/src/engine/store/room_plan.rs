@@ -13,9 +13,9 @@
 //! `plan_reports_registered_rooms_as_untouched`,
 //! `plan_matches_what_backfill_inserts`.
 
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::room_backfill::{LabelSource, resolve_room_label};
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::room_backfill::{LabelSource, resolve_room_label};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -44,7 +44,7 @@ impl RoomPlanEntry {
     pub fn label(&self) -> String {
         match &self.action {
             RoomPlanAction::Insert { room, .. } => {
-                crate::memory_core::room_identity::room_label(room)
+                crate::engine::room_identity::room_label(room)
             }
             RoomPlanAction::Registered { label, .. } => label.clone(),
         }

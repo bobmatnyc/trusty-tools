@@ -15,16 +15,16 @@
 use super::config::DreamConfig;
 use super::dreamer::Dreamer;
 use super::settled;
-use crate::embedder::MockEmbedder;
-use crate::memory_core::PalaceRegistry;
-use crate::memory_core::embed::{EMBED_DIM, Embedder};
-use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::semantic_consolidation::{
+use trusty_common::embedder::MockEmbedder;
+use crate::engine::PalaceRegistry;
+use crate::engine::embed::{EMBED_DIM, Embedder};
+use crate::engine::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::semantic_consolidation::{
     ConsolidationAction, Inference, MockInference, SemanticConsolidationConfig,
     SemanticConsolidator,
 };
-use crate::memory_core::store::kg_redb::BatchWriteOp;
+use crate::engine::store::kg_redb::BatchWriteOp;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;

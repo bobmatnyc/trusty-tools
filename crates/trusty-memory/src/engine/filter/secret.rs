@@ -111,7 +111,7 @@ pub fn find_secret_token(content: &str) -> Option<String> {
 /// writer that always passes `force: true` (e.g. trusty-code's per-turn
 /// recorder) would persist raw credentials with zero screening. Extracting
 /// this single-purpose check out of
-/// [`crate::memory_core::filter::FilterConfig::apply`] lets
+/// [`crate::engine::filter::FilterConfig::apply`] lets
 /// `PalaceHandle::remember_with_options` call it on its own when `force` is
 /// set but the caller has NOT also set the explicit `allow_secret_like`
 /// opt-in.
@@ -1682,5 +1682,5 @@ pub(crate) fn is_plausible_credential_charset(token: &str) -> bool {
 /// implementation itself is tested in
 /// `credentials::redact::tests`.
 pub(crate) fn redact_token(token: &str) -> String {
-    crate::credentials::redact_secret(token)
+    trusty_common::credentials::redact_secret(token)
 }

@@ -20,8 +20,8 @@
 //! `rename_rejects_a_key_owned_by_another_room` (in
 //! `store::rooms::surface_tests`).
 
-use crate::memory_core::store::kg_store::{ROOM_KEYS, ROOMS, decode_value, encode_value};
-use crate::memory_core::store::rooms::{ROOM_SCHEMA_VERSION, RoomRecord, RoomSchemaMarker};
+use crate::engine::store::kg_store::{ROOM_KEYS, ROOMS, decode_value, encode_value};
+use crate::engine::store::rooms::{ROOM_SCHEMA_VERSION, RoomRecord, RoomSchemaMarker};
 use anyhow::{Context, Result};
 use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;
@@ -304,7 +304,7 @@ impl KgStoreRedb {
     /// Test: `backfill_changes_no_drawer_rows`.
     #[cfg(test)]
     pub(crate) fn raw_drawer_rows(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        use crate::memory_core::store::kg_store::DRAWERS;
+        use crate::engine::store::kg_store::DRAWERS;
         let rtx = self
             .db()
             .begin_read()

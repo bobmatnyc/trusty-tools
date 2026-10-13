@@ -10,7 +10,7 @@
 //! Test: `chunk_backfill_tests`.
 
 use super::embed_repair::EmbedHealth;
-use crate::json_rmw;
+use trusty_common::json_rmw;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;

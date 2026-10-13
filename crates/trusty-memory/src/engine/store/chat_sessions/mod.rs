@@ -49,7 +49,7 @@ mod tests {
     /// this test module is a descendant of `chat_sessions`, so it can reach the
     /// `pub(super)` `db` field and `ChatSessionRecord`).
     fn write_corrupt_row(store: &ChatSessionStore, id: &str, title: &str) {
-        use crate::memory_core::store::kg_store::SESSIONS;
+        use crate::engine::store::kg_store::SESSIONS;
         let now = chrono::Utc::now().to_rfc3339();
         let record = super::types::ChatSessionRecord {
             title: Some(title.to_string()),
@@ -71,7 +71,7 @@ mod tests {
     /// #6196 fail-closed path leaves a corrupt row byte-identical — untouched,
     /// not merely still-unparseable.
     fn read_raw_row(store: &ChatSessionStore, id: &str) -> Option<Vec<u8>> {
-        use crate::memory_core::store::kg_store::SESSIONS;
+        use crate::engine::store::kg_store::SESSIONS;
         use redb::ReadableDatabase;
         let rtx = store.db.begin_read().unwrap();
         let table = rtx.open_table(SESSIONS).unwrap();

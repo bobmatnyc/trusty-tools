@@ -8,7 +8,7 @@
 //! resolves through, and the UUIDv5 minted for a key that has no row yet.
 //! What: `WING_NAMESPACE`, `DEFAULT_WING_LABEL`, `canonical_wing_key`,
 //! `default_wing_key`, `mint_wing_id`. Deliberately mirrors
-//! [`crate::memory_core::room_identity`] so the two axes have one shape, not
+//! [`crate::engine::room_identity`] so the two axes have one shape, not
 //! two. No I/O, no redb — every function here is pure and total.
 //!
 //! [`DEFAULT_WING_ID`] itself lives in `room_identity` because `RoomRecord`
@@ -21,7 +21,7 @@
 
 use uuid::Uuid;
 
-pub use crate::memory_core::room_identity::DEFAULT_WING_ID;
+pub use crate::engine::room_identity::DEFAULT_WING_ID;
 
 /// UUIDv5 namespace for wing ids.
 ///
@@ -110,7 +110,7 @@ mod tests {
     fn wing_namespace_differs_from_room_namespace() {
         assert_ne!(
             WING_NAMESPACE,
-            crate::memory_core::room_identity::ROOM_NAMESPACE,
+            crate::engine::room_identity::ROOM_NAMESPACE,
             "a wing and a room sharing a label must never mint the same id"
         );
     }

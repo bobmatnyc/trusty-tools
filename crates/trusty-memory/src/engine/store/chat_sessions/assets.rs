@@ -1,6 +1,6 @@
 //! Memory-owned image assets, scoped to a palace database and chat session (#7370).
 use super::{ChatMessage, ChatSessionStore};
-use crate::chat_attachments::{Attachment, decode_image, validate_metadata};
+use trusty_common::chat_attachments::{Attachment, decode_image, validate_metadata};
 use redb::{ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -92,7 +92,7 @@ impl ChatSessionStore {
                         .decode(&stored.data_base64)?
                         .len();
                     anyhow::ensure!(
-                        total <= crate::chat_attachments::MAX_TOTAL_BYTES,
+                        total <= trusty_common::chat_attachments::MAX_TOTAL_BYTES,
                         "Chat turn images exceed 10 MiB"
                     );
                     anyhow::ensure!(
@@ -135,7 +135,7 @@ mod tests {
             attachments: vec![Attachment::Image {
                 name: "test.png".into(),
                 mime_type: "image/png".into(),
-                image: crate::chat_attachments::ImageRef {
+                image: trusty_common::chat_attachments::ImageRef {
                     asset_id: id.clone(),
                 },
             }],

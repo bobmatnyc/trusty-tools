@@ -8,7 +8,7 @@
 //! `dream::tests::dream_stats_persisted_after_cycle`.
 
 use super::fading::{FadingMemory, FadingParams};
-use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
+use crate::engine::semantic_consolidation::SemanticConsolidationConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -393,7 +393,7 @@ impl PersistedDreamStats {
     /// Why: `load` runs concurrently from the dashboard and other processes; a
     /// truncate-then-write lets it read an empty or partial file (#8733). The
     /// idle loop and a `memory.dream_run` RPC can also save at the same time.
-    /// What: delegates to [`crate::atomic_file::write_atomic`] — a per-call
+    /// What: delegates to [`trusty_common::atomic_file::write_atomic`] — a per-call
     /// sibling temp file, `fsync`, rename. On `Err` the prior snapshot is
     /// unchanged; concurrent saves each publish a complete file.
     /// Test: `failed_dream_stats_save_keeps_the_prior_snapshot`,
@@ -403,7 +403,7 @@ impl PersistedDreamStats {
         let path = data_dir.join(Self::FILE_NAME);
         let raw = serde_json::to_string_pretty(self).context("serialize dream stats")?;
         // #8733: rename-publish so a concurrent reader never sees a truncated file.
-        crate::atomic_file::write_atomic(&path, raw.as_bytes())
+        trusty_common::atomic_file::write_atomic(&path, raw.as_bytes())
             .with_context(|| format!("write {}", path.display()))
     }
 }

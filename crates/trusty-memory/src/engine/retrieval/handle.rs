@@ -14,17 +14,17 @@ use super::deferred_embed;
 use super::types::{ForgetOutcome, RememberOptions};
 // #6366: the bounded write critical section this handle's `remember` runs in.
 use super::write_pipeline;
-use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
-use crate::memory_core::decay::DecayConfig;
-use crate::memory_core::dream::extract_keywords;
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::store::concurrent_open::OpenIntent;
-use crate::memory_core::store::format_migration;
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::l1_cache::L1Cache;
-use crate::memory_core::store::palace_store::PalaceStore;
-use crate::memory_core::store::vector::{CompactionResult, UsearchStore, VectorStore};
-use crate::memory_core::timeouts;
+use crate::engine::analytics::{RecallEvent, RecallLog, query_hash};
+use crate::engine::decay::DecayConfig;
+use crate::engine::dream::extract_keywords;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::store::concurrent_open::OpenIntent;
+use crate::engine::store::format_migration;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::l1_cache::L1Cache;
+use crate::engine::store::palace_store::PalaceStore;
+use crate::engine::store::vector::{CompactionResult, UsearchStore, VectorStore};
+use crate::engine::timeouts;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -556,7 +556,7 @@ impl PalaceHandle {
             0
         };
         // #8732: `warn`, so the purge shows at the daemon's default filter.
-        crate::memory_core::maintenance_log::warn_removed(
+        crate::engine::maintenance_log::warn_removed(
             &palace.id,
             "open-time TTL purge",
             pruned,
@@ -722,7 +722,7 @@ impl PalaceHandle {
     /// `RememberOptions::allow_secret_like` opt-in bypasses the secret gate.
     /// What: Applies the supplied `FilterConfig` (skipping it entirely when
     /// `force == true`), THEN — unless `allow_secret_like == true` — always
-    /// runs [`crate::memory_core::filter::check_secret`] regardless of
+    /// runs [`crate::engine::filter::check_secret`] regardless of
     /// `force`, classifies the content, sets the appropriate TTL when the
     /// result is a `SessionEvent`, then
     /// runs the original embed/upsert/persist pipeline under the default
@@ -925,7 +925,7 @@ impl PalaceHandle {
         // #9283: every user forget is journalled, hash only (#9172: a dedup
         // survivor keeps its copy).
         if let Some(drawer) = &removed {
-            crate::memory_core::maintenance_log::record_user_forget(self, drawer);
+            crate::engine::maintenance_log::record_user_forget(self, drawer);
         }
         // #9735: a split head takes every part with it, each journalled.
         let parts = self.forget_split_parts(id).await;
@@ -1051,7 +1051,7 @@ impl PalaceHandle {
         // (`remember` / `forget` take `drawers.write()`) for its duration.
         let target_room_id = room
             .as_ref()
-            .map(|r| crate::memory_core::store::rooms::resolve_room_filter_id(&self.kg, r));
+            .map(|r| crate::engine::store::rooms::resolve_room_filter_id(&self.kg, r));
         let drawers = self.drawers.read();
         let mut filtered: Vec<Drawer> = drawers
             .iter()
@@ -1111,14 +1111,14 @@ impl PalaceHandle {
         let mut count = 0usize;
         for id in expired_ids {
             // #8732: recorded as a maintenance deletion, summarised at `warn`.
-            let reason = crate::memory_core::maintenance_log::DeletionReason::ExpiredPurge;
+            let reason = crate::engine::maintenance_log::DeletionReason::ExpiredPurge;
             match self.forget_for_maintenance(id, reason, None).await {
                 Ok(outcome) if outcome.is_deleted() => count += 1,
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?id, "purge_expired: forget failed: {e:#}"),
             }
         }
-        crate::memory_core::maintenance_log::warn_removed(&self.id, "TTL purge", count);
+        crate::engine::maintenance_log::warn_removed(&self.id, "TTL purge", count);
         Ok(count)
     }
 

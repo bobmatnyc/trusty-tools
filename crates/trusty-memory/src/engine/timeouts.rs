@@ -22,7 +22,7 @@
 //! `parse_secs_with_falls_back_on_bad_value`,
 //! `parse_secs_with_reads_custom_value`, `parse_secs_with_uses_default_when_absent`
 //! (unit tests at the bottom of this file; run with
-//! `cargo test -p trusty-common --features memory-core`).
+//! `cargo test -p trusty-memory`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -650,10 +650,10 @@ mod tests {
 
     /// Serialises tests that read the real env so they cannot interleave.
     ///
-    /// #5937: the crate-wide [`crate::data_dir::ENV_LOCK`], so the writers in
+    /// #5937: the crate-wide [`trusty_common::data_dir::ENV_LOCK`], so the writers in
     /// `retrieval/timeout_tests.rs` exclude these readers.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::data_dir::ENV_LOCK
+        trusty_common::data_dir::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }

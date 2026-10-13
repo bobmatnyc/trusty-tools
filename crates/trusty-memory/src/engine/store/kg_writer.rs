@@ -39,10 +39,10 @@
 //! (`kg_redb::tests`) pins that the always-`apply_batch` path described
 //! above and the bypass/fallback single-op path stay identical.
 
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::kg::Triple;
-use crate::memory_core::store::kg_redb::{BatchOpResult, BatchWriteOp, KgStoreRedb};
-use crate::memory_core::store::write_deadline::WriteTxnError;
+use crate::engine::palace::Drawer;
+use crate::engine::store::kg::Triple;
+use crate::engine::store::kg_redb::{BatchOpResult, BatchWriteOp, KgStoreRedb};
+use crate::engine::store::write_deadline::WriteTxnError;
 use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};

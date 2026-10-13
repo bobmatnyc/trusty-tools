@@ -9,9 +9,9 @@
 
 use super::types::RecallResult;
 use super::*;
-use crate::memory_core::analytics::RecallLog;
-use crate::memory_core::palace::{Drawer, PalaceId};
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::engine::analytics::RecallLog;
+use crate::engine::palace::{Drawer, PalaceId};
+use crate::engine::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

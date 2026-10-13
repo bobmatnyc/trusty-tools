@@ -18,8 +18,8 @@ use super::types::{
     ChatMessage, ChatSession, ChatSessionMeta, ChatSessionRecord, ChatSessionStoreError, Result,
     parse_timestamp,
 };
-use crate::memory_core::store::kg_store::SESSIONS;
-use crate::memory_core::store::palace_format;
+use crate::engine::store::kg_store::SESSIONS;
+use crate::engine::store::palace_format;
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
 use std::cmp::Reverse;

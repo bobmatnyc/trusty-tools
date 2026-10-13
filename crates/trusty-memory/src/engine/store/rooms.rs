@@ -17,13 +17,13 @@
 //! plus the T6 surface in `surface_tests` (`create_room_is_idempotent`,
 //! `rename_changes_no_drawer_rows`).
 
-use crate::memory_core::palace::RoomType;
-use crate::memory_core::room_identity::{
+use crate::engine::palace::RoomType;
+use crate::engine::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, default_wing_key, mint_room_id, room_label, room_to_uuid,
     room_type_from_parts, room_type_tag,
 };
-use crate::memory_core::store::kg::KnowledgeGraph;
-use crate::memory_core::store::kg_redb::KgStoreRedb;
+use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::kg_redb::KgStoreRedb;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -375,7 +375,7 @@ mod surface_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_core::store::kg_store::{decode_value, encode_value};
+    use crate::engine::store::kg_store::{decode_value, encode_value};
 
     /// Simulates the NEXT schema revision: same fields, one appended
     /// trailing optional. Proves the `DrawerRecord` evolution pattern applies.

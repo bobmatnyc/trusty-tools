@@ -17,11 +17,11 @@ use super::config::DreamConfig;
 use super::cycle::{DREAM_EMBED_CHUNK, dedup_pass_with_embedder};
 use super::dreamer::Dreamer;
 use super::semantic::consolidate_scoped_within;
-use crate::embedder::MockEmbedder;
-use crate::memory_core::embed::{EMBED_DIM, Embedder};
-use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
-use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
+use trusty_common::embedder::MockEmbedder;
+use crate::engine::embed::{EMBED_DIM, Embedder};
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::semantic_consolidation::SemanticConsolidationConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -494,7 +494,7 @@ async fn a_dream_loop_waits_its_stagger_before_the_first_cycle() {
         .clone()
         .expect("palace handle has a data dir");
     let id = handle.id.clone();
-    let registry = crate::memory_core::PalaceRegistry::new();
+    let registry = crate::engine::PalaceRegistry::new();
     registry.register_arc(handle);
 
     let dreamer = Arc::new(Dreamer::new(DreamConfig {

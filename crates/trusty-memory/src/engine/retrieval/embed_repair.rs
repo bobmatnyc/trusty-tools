@@ -29,9 +29,9 @@ use super::chunk_health::{ChunkCheck, short_chunk_ids};
 use super::deferred_embed::RetryPolicy;
 use super::embedder::{SHARED_EMBEDDER, shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
-use crate::memory_core::store::vector::{AliasScan, UnaliasOutcome};
+use crate::engine::embed::Embedder;
+use crate::engine::store::embed_ledger::{self, EmbedFailure};
+use crate::engine::store::vector::{AliasScan, UnaliasOutcome};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -489,7 +489,7 @@ pub(crate) fn classify_repair(
 
 impl PalaceHandle {
     /// Free every drawer caught in a vector-id collision so a re-embed can
-    /// repair it — the operator surface for [`UsearchStore::unalias`](crate::memory_core::store::vector::UsearchStore::unalias).
+    /// repair it — the operator surface for [`UsearchStore::unalias`](crate::engine::store::vector::UsearchStore::unalias).
     ///
     /// Why (#5005): stopping new aliasing does not repair the drawers already
     /// destroyed by it, and those are what block #4834. `unalias` existed but
@@ -768,7 +768,7 @@ impl PalaceHandle {
                 continue;
             };
             // #9735 Q5: embed with no lock; recheck and upsert under write_mutex.
-            let wait = crate::memory_core::timeouts::write_lock_timeout();
+            let wait = crate::engine::timeouts::write_lock_timeout();
             match self
                 .repair_one(embedder, id, &content, &opts.retry, wait)
                 .await

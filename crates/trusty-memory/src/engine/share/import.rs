@@ -21,13 +21,13 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::record::SharedMemoryRecord;
-use crate::memory_core::content_hash::ContentHash;
-use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::{Drawer, RoomType};
-use crate::memory_core::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
-use crate::memory_core::room_identity::DEFAULT_WING_ID;
-use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
-use crate::memory_core::timeouts;
+use crate::engine::content_hash::ContentHash;
+use crate::engine::embed::Embedder;
+use crate::engine::palace::{Drawer, RoomType};
+use crate::engine::retrieval::{PalaceHandle, embed_chunks, shared_embedder};
+use crate::engine::room_identity::DEFAULT_WING_ID;
+use crate::engine::store::rooms::resolve_or_create_room_in_wing;
+use crate::engine::timeouts;
 
 /// What one record's import did.
 ///

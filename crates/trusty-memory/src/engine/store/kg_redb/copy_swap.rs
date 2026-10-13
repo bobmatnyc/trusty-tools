@@ -209,7 +209,7 @@ pub fn prepare(
 
     // #7106: the compaction target is a palace-scoped database — bound its page
     // cache the same way the live file's is bounded.
-    let replacement = crate::redb_cache::create_palace_db(&tmp_path)
+    let replacement = trusty_common::redb_cache::create_palace_db(&tmp_path)
         .with_context(|| format!("create compaction target {}", tmp_path.display()))?;
 
     // Build the guard NOW, before anything that can fail. Every error below
@@ -419,7 +419,7 @@ fn fingerprint_of(rtx: &redb::ReadTransaction) -> Result<Fingerprint> {
 /// tables must be absent.
 /// Test: `compaction_preserves_every_live_row`.
 fn verify_copy(dest: &Database, source: &Fingerprint, counts: CopyCounts) -> Result<()> {
-    use crate::memory_core::store::kg_store::TRIPLES;
+    use crate::engine::store::kg_store::TRIPLES;
     let rtx = dest.begin_read().context("begin copy-verify read")?;
     let copy = fingerprint_of(&rtx)?;
     let dropped = super::copy_tables::DROPPED_TABLES;

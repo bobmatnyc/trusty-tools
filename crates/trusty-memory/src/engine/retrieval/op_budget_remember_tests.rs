@@ -16,10 +16,10 @@
 mod tests {
     use std::time::Duration;
 
-    use crate::memory_core::palace::{Palace, PalaceId, RoomType};
-    use crate::memory_core::retrieval::{PalaceHandle, RememberOptions};
-    use crate::memory_core::store::concurrent_open::OpenIntent;
-    use crate::memory_core::store::hnsw_store::op_budget::{OpBudgetError, op_budget_error};
+    use crate::engine::palace::{Palace, PalaceId, RoomType};
+    use crate::engine::retrieval::{PalaceHandle, RememberOptions};
+    use crate::engine::store::concurrent_open::OpenIntent;
+    use crate::engine::store::hnsw_store::op_budget::{OpBudgetError, op_budget_error};
 
     /// Pipeline ceiling well above the op budget, so the op budget fires first.
     const PIPELINE: Duration = Duration::from_secs(10);
@@ -51,7 +51,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // #9487: parking the gate is the point
     async fn a_remember_whose_vector_step_exceeds_its_budget_commits_nothing() {
-        crate::memory_core::retrieval::seed_shared_embedder_with_mock();
+        crate::engine::retrieval::seed_shared_embedder_with_mock();
         let dir = tempfile::tempdir().expect("tempdir");
         let palace = Palace {
             id: PalaceId::new("op-budget-test"),

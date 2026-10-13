@@ -15,9 +15,9 @@
 //! and locks the per-palace `DecayConfig` override wiring
 //! (`rank_fading_honours_custom_half_life_override`).
 
-use crate::memory_core::decay::DecayConfig;
-use crate::memory_core::palace::Drawer;
-use crate::memory_core::retrieval::PalaceHandle;
+use crate::engine::decay::DecayConfig;
+use crate::engine::palace::Drawer;
+use crate::engine::retrieval::PalaceHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -194,7 +194,7 @@ pub fn detect_fading(handle: &Arc<PalaceHandle>, params: &FadingParams) -> Vec<F
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory_core::palace::DrawerType;
+    use crate::engine::palace::DrawerType;
 
     /// Build a drawer with an explicit importance and created-at age in days.
     fn aged_drawer(importance: f32, age_days: i64) -> Drawer {
