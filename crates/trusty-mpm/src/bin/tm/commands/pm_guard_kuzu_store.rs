@@ -15,8 +15,9 @@
 //! What: a Bash command naming both `trusty-memory` and `kuzu` outside a
 //! quoted text slot denies first (owner ruling D5b,
 //! `pm_guard_kuzu_import::trusty_memory_kuzu_text`), unless it is one of the
-//! #9794 dry-run or review forms; a `--python` there denies on its own
-//! (label `kuzu-import-python`). Then, like the #7266
+//! #9794 import, dry-run or review forms (owner ruling D61 allows the import
+//! itself for every caller); a `--python` there denies on its own (label
+//! `kuzu-import-python`). Then, like the #7266
 //! rule, the NAME decides, not the verb: a Bash segment denies when any word
 //! names a deny item (`pm_guard_kuzu_names`) or when it runs `kuzu-memory`
 //! (`pm_guard_kuzu_import`). The only exemptions are a metadata verb
@@ -73,7 +74,8 @@ const KUZU_SAFE_VERBS: &[&str] = &["ls", "stat", "test", "["];
 /// Test: `denies_every_tool_shape_naming_a_store`,
 /// `denies_bash_reads_of_a_store`, `denies_the_formerly_sanctioned_import`,
 /// `denies_a_bash_call_from_inside_a_store_directory`,
-/// `the_allow_keeps_the_by_name_store_deny`.
+/// `the_allow_keeps_the_by_name_store_deny`,
+/// `allows_the_apply_forms_for_every_caller`.
 pub(crate) fn evaluate_kuzu_store_access(
     tool_name: &str,
     tool_input: Option<&Value>,
@@ -87,7 +89,7 @@ pub(crate) fn evaluate_kuzu_store_access(
             // #9794: the narrowed exception lifts the D5b text rule only.
             let text_rule = || match kuzu_import_exception(command, dirs::home_dir().as_deref()) {
                 ImportException::Allow => None,
-                ImportException::DenyPython(reason) => Some(reason),
+                ImportException::Deny(reason) => Some(reason),
                 ImportException::NoMatch => trusty_memory_kuzu_text(command),
             };
             cwd_verdict(cwd)

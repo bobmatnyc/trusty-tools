@@ -6,9 +6,10 @@
 //! What: the #8878 harness — `tm hook --pm-guard` with a scratch `$HOME`,
 //! run as a PM, as a subagent, under each bypass, and as the recorded
 //! Architect's main thread. The scratch home carries an import venv shaped
-//! like the host one. #9794 narrowed the 2026-10-12 re-scope: the dry-run
-//! forms allow for every caller, while an apply form and any `--python`
-//! (slug `kuzu-import-python`) still deny.
+//! like the host one. #9794 narrowed the 2026-10-12 re-scope: the import,
+//! dry-run and review forms allow for every caller (owner ruling D61 for the
+//! import itself), while a store name and any `--python` (slug
+//! `kuzu-import-python`) still deny.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_kuzu_store_8625::`.
 
 use std::os::unix::fs::symlink;
@@ -97,12 +98,22 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
             ),
             "kuzu-import-python",
         ),
-        // #9794 Q5: an apply form (no `--dry-run`) keeps the D5b deny.
+        // #9794 D61: an allowed apply form naming a store denies by name.
         (
             bash_payload(
                 fx,
-                "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover \
-                 --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl",
+                &format!(
+                    "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {s} \
+                     --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"
+                ),
+            ),
+            "kuzu-store-read",
+        ),
+        // #9794: a second command beside an apply form denies.
+        (
+            bash_payload(
+                fx,
+                &format!("trusty-memory import kuzu --discover && cat {s}"),
             ),
             "kuzu-store-read",
         ),

@@ -1,23 +1,27 @@
 //! `tm hook --pm-guard` — the one narrowed exception to the #8625 D5b text
-//! rule: `trusty-memory import kuzu` in its dry-run, export-refusals and
-//! review forms (#9794).
+//! rule: `trusty-memory import kuzu` in its import, dry-run, export-refusals
+//! and review forms (#9794).
 //!
 //! Why: the D5b rule denies every Bash call naming both `trusty-memory` and
 //! `kuzu`, so the `tm-memory-import` skill had no sanctioned path. Architect
 //! answers (2026-10-12): Q1 any `--python` denies under its own slug; Q2 the
 //! allow binds every caller, like the deny; Q3 the `review` subcommands
 //! allow; Q4 the only tail is `| tee` into the review root or the session
-//! scratchpad; Q5 a form that applies the import stays denied.
+//! scratchpad. Owner ruling D61 replaced Q5: "Allow apply for every caller",
+//! so the import without `--dry-run`, `--review-ledger` included, allows too.
 //! What: [`kuzu_import_exception`] is a positive, whole-command match on the
-//! RAW command text. Anything it does not match falls through to the D5b
-//! rule. An allow lifts only that rule: the by-name store deny
+//! RAW command text. A command whose words do not open with the import
+//! falls through to the D5b rule; one that does and breaks the grammar
+//! denies here. An allow lifts only the D5b rule: the by-name store deny
 //! (`pm_guard_kuzu_store::evaluate_command`) still runs on every word.
 //! Residual (D5b, mistakes only): with `--python` absent the importer takes
 //! its interpreter from the `kuzu-memory` launcher on PATH.
 //! Test: `pm_guard_kuzu_store_tests.rs` — `the_exception_cannot_widen`,
 //! `allows_the_dry_run_export_and_review_forms`,
+//! `allows_the_apply_forms_for_every_caller`,
 //! `denies_any_python_flag_with_its_own_slug`,
-//! `the_allow_keeps_the_by_name_store_deny`.
+//! `the_allow_keeps_the_by_name_store_deny`,
+//! `a_malformed_import_denies_in_the_exception_itself`.
 
 use std::path::Path;
 
@@ -29,9 +33,10 @@ pub(crate) const KUZU_IMPORT_PYTHON_RULE: &str = "kuzu-import-python";
 pub(crate) enum ImportException {
     /// A sanctioned form: skip the D5b text rule, nothing else.
     Allow,
-    /// The import form with `--python`: deny with this reason.
-    DenyPython(String),
-    /// Not the exception: the D5b text rule decides.
+    /// The words open with the import, but `--python` or a break in the
+    /// grammar denies, with this reason.
+    Deny(String),
+    /// The words do not open with the import: the D5b text rule decides.
     NoMatch,
 }
 
@@ -95,43 +100,69 @@ const SCRATCH_ROOTS: [&str; 2] = ["/private/tmp/claude-", "/tmp/claude-"];
 /// home, for the absolute spelling of the review root.
 ///
 /// Why: see the module doc; default-deny, so an evasion cannot match it.
+/// What: a command whose space-split words do not open with an optional
+/// [`PREFIX`] and the [`PROGRAM`] words is [`ImportException::NoMatch`].
+/// Otherwise [`import_verdict`] decides, and every way it fails denies.
+/// Test: `the_exception_cannot_widen`,
+/// `allows_the_dry_run_export_and_review_forms`,
+/// `allows_the_apply_forms_for_every_caller`,
+/// `denies_any_python_flag_with_its_own_slug`,
+/// `a_malformed_import_denies_in_the_exception_itself`.
+pub(crate) fn kuzu_import_exception(command: &str, home: Option<&Path>) -> ImportException {
+    if !opens_with_the_import(command) {
+        return ImportException::NoMatch;
+    }
+    // #9794 fail-open check: past this point no failure falls through.
+    match import_verdict(command, home) {
+        Ok(()) => ImportException::Allow,
+        Err(reason) => ImportException::Deny(reason),
+    }
+}
+
+/// Whether `command`'s space-split words open with the import.
+fn opens_with_the_import(command: &str) -> bool {
+    let words: Vec<&str> = command.split(' ').collect();
+    let words = words.strip_prefix(PREFIX.as_slice()).unwrap_or(&words);
+    words.starts_with(PROGRAM.as_slice())
+}
+
+/// `Ok` for a sanctioned import call, else the deny reason.
+///
 /// What: an optional `| tee <path>` tail, then an optional ` 2>&1`, are cut
 /// off; the body must hold no [`BANNED`] character and split on single
 /// spaces into an optional [`PREFIX`], the [`PROGRAM`] words, and either
-/// `review record|status|finish` with its flags or the import flags with
-/// `--dry-run` present. Any `--python` word there denies. Every value is one
-/// word that does not start with `-`, so no flag can swallow `--dry-run`.
-/// Test: `the_exception_cannot_widen`,
-/// `allows_the_dry_run_export_and_review_forms`,
-/// `denies_any_python_flag_with_its_own_slug`.
-pub(crate) fn kuzu_import_exception(command: &str, home: Option<&Path>) -> ImportException {
+/// `review record|status|finish` with its flags or the import flags (with
+/// or without `--dry-run`, ruling D61). Any `--python` word there denies.
+/// Every value is one word that does not start with `-`, so no flag can
+/// swallow another.
+fn import_verdict(command: &str, home: Option<&Path>) -> Result<(), String> {
     let (body, tee) = match command.split_once(TEE_TAIL) {
         Some((body, path)) => (body, Some(path)),
         None => (command, None),
     };
     let body = body.strip_suffix(STDERR_TAIL).unwrap_or(body);
     if body.contains(BANNED) || tee.is_some_and(|path| !tee_path_allowed(path, home)) {
-        return ImportException::NoMatch;
+        return Err(grammar_reason());
     }
     let words: Vec<&str> = body.split(' ').collect();
     let words = words.strip_prefix(PREFIX.as_slice()).unwrap_or(&words);
     let Some(args) = words.strip_prefix(PROGRAM.as_slice()) else {
-        return ImportException::NoMatch;
+        return Err(grammar_reason());
     };
     if args
         .iter()
         .any(|w| *w == "--python" || w.starts_with("--python="))
     {
-        return ImportException::DenyPython(python_reason());
+        return Err(python_reason());
     }
     let sanctioned = match args {
         ["review", sub, rest @ ..] => review_form(sub, rest),
-        _ => args.contains(&"--dry-run") && flags_match(args, IMPORT_SWITCHES, IMPORT_VALUED),
+        _ => flags_match(args, IMPORT_SWITCHES, IMPORT_VALUED),
     };
     if sanctioned {
-        ImportException::Allow
+        Ok(())
     } else {
-        ImportException::NoMatch
+        Err(grammar_reason())
     }
 }
 
@@ -227,6 +258,17 @@ fn plain_components(rest: &str) -> bool {
 /// A path component that is non-empty and neither `.` nor `..`.
 fn plain(component: &str) -> bool {
     !component.is_empty() && component != "." && component != ".."
+}
+
+/// The deny text for an import call outside the grammar (#9794).
+fn grammar_reason() -> String {
+    "kuzu-store-read: this `trusty-memory import kuzu` call is outside the one form the \
+     guard allows (#9794): a single line of plain words, an optional `env -u \
+     TRUSTY_MEMORY_PALACE`, then the import flags or `review record|status|finish` with \
+     theirs, and at most a `2>&1 | tee <path>` into `~/.trusty-tools/kuzu-review/` or the \
+     session scratchpad. No quote, `$`, `\\`, `;`, `&&`, redirection, second command or \
+     unknown flag."
+        .to_string()
 }
 
 /// The deny text for an import call carrying `--python` (answer Q1).

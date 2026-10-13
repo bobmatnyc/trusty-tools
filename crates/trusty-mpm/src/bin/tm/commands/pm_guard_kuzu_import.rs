@@ -7,7 +7,8 @@
 //! 2026-10-12 15:42Z: every `trusty-memory import kuzu` denies under the
 //! guard; ruling Q8 keeps the `migrate kuzu-data` and `migrate kuzu-memory`
 //! aliases denied. Owner ruling D5b replaced the argv parser for those calls
-//! with one text rule. #9794 narrows it: `pm_guard_kuzu_exception`.
+//! with one text rule. #9794 narrows it: `pm_guard_kuzu_exception`, where
+//! owner ruling D61 allows the import itself for every caller.
 //! What: [`runs_kuzu_memory`] reads one argv. [`trusty_memory_kuzu_text`]
 //! reads the whole Bash command as text.
 //! Test: `pm_guard_kuzu_store_tests.rs` — `denies_running_kuzu_memory`,
@@ -205,9 +206,10 @@ fn closing_quote(command: &str, open: usize) -> Option<usize> {
 /// The deny text for the D5b rule.
 fn text_rule_reason() -> String {
     "kuzu-store-read: this Bash call names both `trusty-memory` and `kuzu` outside a quoted \
-     `--body`, `--title`, `--message`, `--note` or `-m` value (#8625, D5b). `trusty-memory \
-     import kuzu` and its `migrate kuzu-*` aliases open kuzu-memory stores; the operator runs \
-     them outside the guard. To write about the call, quote it in one of those flags, or use \
-     `--body-file` with a file the Write tool made."
+     `--body`, `--title`, `--message`, `--note` or `-m` value (#8625, D5b). The guard allows \
+     `trusty-memory import kuzu` only as one line of plain words (#9794); a wrapped, quoted, \
+     redirected or fed spelling, and the `migrate kuzu-*` aliases, stay denied. To write about \
+     the call, quote it in one of those flags, or use `--body-file` with a file the Write tool \
+     made."
         .to_string()
 }

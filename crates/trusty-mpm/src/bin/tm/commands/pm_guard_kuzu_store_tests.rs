@@ -441,12 +441,12 @@ fn the_gated_decision_labels_a_kuzu_deny_and_binds_the_architect() {
             ),
             "kuzu-import-python",
         ),
-        // #9794: an apply form keeps the D5b deny for the Architect too.
+        // #9794: a break in the import grammar denies the Architect too.
         (
             payload(
                 &fx,
                 "Bash",
-                json!({ "command": "trusty-memory import kuzu --discover" }),
+                json!({ "command": "trusty-memory import kuzu --discover --help" }),
             ),
             KUZU_STORE_RULE,
         ),
@@ -495,7 +495,8 @@ fn denies_file_dash_f_on_a_store_path() {
 }
 
 // #8625 re-scope (Architect ruling 2026-10-12): every `trusty-memory import
-// kuzu` denies under the guard, whatever surrounds it.
+// kuzu` denies under the guard, whatever surrounds it. #9794 D61 allows the
+// one `env -u TRUSTY_MEMORY_PALACE` prefix: `allows_the_apply_forms_for_every_caller`.
 
 #[test]
 fn denies_an_import_kuzu_after_an_environment_prefix() {
@@ -507,7 +508,6 @@ fn denies_an_import_kuzu_after_an_environment_prefix() {
             "PATH=/tmp/x:$PATH trusty-memory import kuzu --root ~/p",
             "export PYTHONPATH=/tmp/x; trusty-memory import kuzu --discover",
             "export PYTHONPATH=/tmp/x && trusty-memory import kuzu --discover",
-            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover",
             "nice --bogus trusty-memory import kuzu --discover",
         ]),
         "kuzu-store-read",
@@ -713,9 +713,10 @@ fn the_text_rule_denies_a_call_naming_both_outside_a_slot() {
     );
 }
 
-// #9794: the narrowed exception. Answers Q1-Q5 (Architect, 2026-10-12): the
+// #9794: the narrowed exception. Answers Q1-Q4 (Architect, 2026-10-12): the
 // dry-run, export-refusals and review forms allow; `--python` denies with its
-// own slug; the apply forms, and everything else, keep the D5b deny.
+// own slug. Owner ruling D61 replaced Q5: the apply forms allow too. Every
+// other spelling keeps a `kuzu-store-read` deny.
 
 /// A session scratchpad path, in the macOS `/private/tmp` spelling.
 const SCRATCH: &str = "/private/tmp/claude-502/-Users-masa-p/f6b52bfc-73b3/scratchpad";
@@ -997,22 +998,114 @@ fn the_exception_cannot_widen() {
         format!("{ok} 2>&1|tee {review}/r.txt"),
         format!("{ok}|tee {review}/r.txt"),
         format!("{ok} | tee {review}/r.txt 2>&1"),
-        // An apply form: no `--dry-run`, or a flag swallowing it as a value.
-        "trusty-memory import kuzu --discover".into(),
-        "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover --root ~/p".into(),
-        "trusty-memory import kuzu --discover --update".into(),
-        "trusty-memory import kuzu --from ~/p --palace x".into(),
-        format!(
-            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover --review-ledger {review}/R/ledger.jsonl"
-        ),
-        "trusty-memory import kuzu --export-refusals --discover".into(),
-        format!("trusty-memory import kuzu --discover 2>&1 | tee {review}/r.txt"),
+        // A flag swallowing another as its value, or a value-less flag.
         "trusty-memory import kuzu --discover --palace --dry-run".into(),
         "trusty-memory import kuzu --discover --root --dry-run".into(),
         "trusty-memory import kuzu --from ~/p --review-ledger --dry-run".into(),
         "trusty-memory import kuzu --discover --dry-run=false".into(),
+        "trusty-memory import kuzu --discover --review-ledger".into(),
+        "trusty-memory import kuzu --from".into(),
     ];
     assert_denied(&fx, &rows, "kuzu-store-read");
+}
+
+// #9794 D61: an allowed apply form opens no path to a store name, and no
+// second command rides along with it.
+#[test]
+fn the_apply_forms_keep_the_by_name_store_deny() {
+    let fx = Fx::new();
+    let store = fx.store();
+    let p = fx.project.display();
+    let apply = "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu";
+    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl";
+    let rows: Vec<String> = vec![
+        // The grammar allows each of these; the store name denies it.
+        format!("{apply} --from {store}"),
+        format!("{apply} --from {p}/.kuzu-memory {ledger}"),
+        format!("{apply} --from {p}/.kuzu-memory --palace x"),
+        format!("{apply} --discover --root {p}/.kuzu-memory {ledger}"),
+        format!("{apply} --discover --review-ledger {p}/.kuzu-memory/ledger.jsonl"),
+        format!("{apply} --discover --root ~/.trusty-tools/kuzu-import-venv"),
+        format!("{apply} --discover --root /tmp/trusty-kuzu-import-ab12CD"),
+        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/memories.db"),
+        // A second command beside the apply form.
+        format!("{apply} --discover {ledger}; cat {store}"),
+        format!("{apply} --discover {ledger} && cat {store}"),
+        format!("{apply} --discover {ledger} && ls"),
+        format!("{apply} --discover {ledger} || true"),
+        format!("{apply} --discover {ledger} | cat"),
+        format!("{apply} --discover {ledger} | tee ~/.trusty-tools/kuzu-review/r.txt | sh"),
+        format!("{apply} --discover --root $(cat {store})"),
+        format!("{apply} --discover --root `id`"),
+        format!("{apply} --discover {ledger} & cat {store}"),
+        format!("{apply} --discover {ledger}\ncat {store}"),
+        format!("cat {store}; {apply} --discover {ledger}"),
+        format!("{apply} --discover {ledger} > {p}/.kuzu-memory/memories.db"),
+        format!("{apply} --discover {ledger} --python {}", fx.venv("python")),
+    ];
+    for row in &rows {
+        let deny = bash(&fx, row);
+        assert!(
+            deny.as_deref().is_some_and(|r| r.starts_with("kuzu-")),
+            "{row:?} -> {deny:?}"
+        );
+    }
+    let python = rows.last().expect("the --python row");
+    let deny = bash(&fx, python).unwrap_or_default();
+    assert!(deny.starts_with("kuzu-import-python"), "{deny}");
+    assert_denied(&fx, &rows[..rows.len() - 1], "kuzu-store-read");
+}
+
+// #9794 fail-open check: once the words open with the import, every break in
+// the grammar is a deny from the exception itself, never a fall-through.
+#[test]
+fn a_malformed_import_denies_in_the_exception_itself() {
+    let fx = Fx::new();
+    let ok = "trusty-memory import kuzu --discover";
+    let review = "~/.trusty-tools/kuzu-review";
+    let rows: Vec<String> = vec![
+        format!("{ok} --help"),
+        format!("{ok} --unknown"),
+        format!("{ok} --root"),
+        format!("{ok} --root --update"),
+        format!("{ok} --dry-run=false"),
+        format!("{ok} extra"),
+        format!("{ok}  --update"),
+        format!("{ok} "),
+        "trusty-memory import kuzu review".into(),
+        "trusty-memory import kuzu review delete --run R".into(),
+        "trusty-memory import kuzu review status --run".into(),
+        format!("{ok}; ls"),
+        format!("{ok} && ls"),
+        format!("{ok} | cat"),
+        format!("{ok} --root $(id)"),
+        format!("{ok} --root 'a'"),
+        format!("{ok}\tls"),
+        format!("{ok} 2>/dev/null"),
+        format!("{ok} | tee /etc/r.txt"),
+        format!("{ok} | tee {review}/R/ledger.jsonl"),
+        format!("env -u TRUSTY_MEMORY_PALACE {ok} --bogus"),
+    ];
+    for row in &rows {
+        match kuzu_import_exception(row, Some(&fx.home)) {
+            ImportException::Deny(reason) => {
+                assert!(reason.starts_with("kuzu-store-read"), "{row:?}: {reason}")
+            }
+            other => panic!("{row:?} must deny in the exception, got {other:?}"),
+        }
+    }
+    assert_denied(&fx, &rows, "kuzu-store-read");
+    // Words that do not open with the import are the D5b rule's to judge.
+    for row in [
+        "nice trusty-memory import kuzu --discover",
+        "trusty-memory import kuzu;ls",
+    ] {
+        assert_eq!(
+            kuzu_import_exception(row, Some(&fx.home)),
+            ImportException::NoMatch,
+            "{row:?}"
+        );
+    }
 }
 
 /// The `tm-memory-import` skill, embedded at compile time.
