@@ -4,10 +4,12 @@
 //! fail-closed view of it that every channel path reads.
 //! What: [`crate::channels::snapshot`] — the policy snapshot;
 //! [`crate::channels::readiness`] — the egress guard's inline load (#9741);
-//! [`crate::channels::question_table`] — the durable question table (#8433 P2).
+//! [`crate::channels::question_table`] — the durable question table (#8433 P2);
+//! [`crate::channels::audit_log`] — the route-change and channel audit (#9832).
 //! Test: `snapshot_tests.rs`, `bin/tm/commands/egress_guard_policy_tests.rs`,
-//! `question_table_tests.rs`.
+//! `question_table_tests.rs`, `audit_log_tests.rs`.
 
+pub mod audit_log;
 pub mod question_table;
 pub mod readiness;
 pub mod snapshot;

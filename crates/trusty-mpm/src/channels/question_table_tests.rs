@@ -905,7 +905,7 @@ fn resolve_is_durable_before_it_returns() {
 struct TwoRoutes(PathBuf);
 
 impl crate::channels::snapshot::PolicySource for TwoRoutes {
-    fn refresh(&mut self) -> trusty_channels::policy::LoadReport {
+    fn refresh(&mut self) -> Option<trusty_channels::policy::LoadReport> {
         use trusty_channels::policy::{ProjectInput, merge_for, parse_host, parse_project_file};
         let home = &self.0;
         let dir = home.join("proj");
@@ -920,7 +920,7 @@ impl crate::channels::snapshot::PolicySource for TwoRoutes {
              app_ref: slack-app }}\n    projects: [\"{}\"]\n",
             dir.display()
         );
-        merge_for(
+        Some(merge_for(
             parse_host(&host, Some(home)),
             vec![ProjectInput {
                 file: dir.join(".trusty-channels/routes.toml"),
@@ -928,7 +928,7 @@ impl crate::channels::snapshot::PolicySource for TwoRoutes {
                 parsed: parse_project_file(&routes, Some(home)),
             }],
             &[Channel::Slack, Channel::Telegram],
-        )
+        ))
     }
 }
 

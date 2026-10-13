@@ -342,6 +342,8 @@ impl PolicyLoader {
             for s in &mut report.per_file {
                 if stale.contains(&s.file) && matches!(s.state, FileState::Effective { .. }) {
                     s.state = FileState::Stale;
+                    // #9832: last-good routes; no commit of this load vouches for them.
+                    s.verified_commit = None;
                 }
             }
             // #8454 Q3: the refusal stays visible beside the Stale finding.

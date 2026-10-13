@@ -9,6 +9,7 @@
 //! denies all; a project-file fault refuses that project only.
 //! Test: `src/policy/tests/load.rs`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -103,6 +104,9 @@ pub(crate) struct PreparedProject {
     pub(crate) parsed: Option<Result<ProjectFile, ProjectFileError>>,
     /// #9808: the bytes the gate and the parse saw; `None` when never read.
     pub(crate) read: Option<FileRead>,
+    /// #9832: the commit the gate verified those bytes at; `None` when the
+    /// gate did not pass.
+    pub(crate) commit: Option<String>,
 }
 
 /// Everything a load read, before the merge.
@@ -175,16 +179,17 @@ fn prepare_until(req: &LoadRequest, deadline: Option<Instant>) -> Prepared {
         .into_iter()
         .map(|dir| {
             let file = routes_path(&dir);
-            let (read, parsed) = match deadline {
+            let (read, parsed, commit) = match deadline {
                 // #8454: past the deadline, a project not yet loaded is refused.
                 // #9808: it was never read, so `read` is `None`.
                 Some(d) if Instant::now() >= d => (
                     None,
                     Some(Err(gate_error(GateError::GitTimedOut { step: "load" }))),
+                    None,
                 ),
                 _ => {
-                    let (read, parsed) = with_deadline(deadline, || read_gated(&dir, home));
-                    (Some(read), parsed)
+                    let gated = with_deadline(deadline, || read_gated(&dir, home));
+                    (Some(gated.read), gated.parsed, gated.commit)
                 }
             };
             PreparedProject {
@@ -192,6 +197,7 @@ fn prepare_until(req: &LoadRequest, deadline: Option<Instant>) -> Prepared {
                 file,
                 parsed,
                 read,
+                commit,
             }
         })
         .collect();
@@ -247,26 +253,45 @@ pub(crate) fn check_canonical(host: &HostCeiling) -> Result<(), HostError> {
     Ok(())
 }
 
+/// One project file after [`read_gated`].
+struct Gated {
+    /// #9808: the read, for the fingerprint.
+    read: FileRead,
+    /// The parse; `None` when the file is missing.
+    parsed: Option<Result<ProjectFile, ProjectFileError>>,
+    /// #9832: the commit the gate verified the bytes at.
+    commit: Option<String>,
+}
+
 /// Read one project's file, run the Db1 gate on the bytes read, then parse
-/// those bytes. Returns the read (#9808) and the parse, `None` when the
-/// file is missing.
-fn read_gated(
-    dir: &Path,
-    home: &Path,
-) -> (FileRead, Option<Result<ProjectFile, ProjectFileError>>) {
+/// those bytes.
+fn read_gated(dir: &Path, home: &Path) -> Gated {
+    let fault = |read, parsed| Gated {
+        read,
+        parsed,
+        commit: None,
+    };
     let bytes = match read_project(dir) {
-        Ok(ProjectRead::Missing) => return (Ok(None), None),
+        Ok(ProjectRead::Missing) => return fault(Ok(None), None),
         Ok(ProjectRead::Bytes(b)) => b,
-        Err(e) => return (Err(e.to_string()), Some(Err(e))),
+        Err(e) => return fault(Err(e.to_string()), Some(Err(e))),
     };
     // #8454 Db1: gate and parse see the same bytes.
-    let parsed = match check_default_branch(dir, &bytes) {
-        Err(error) => Err(gate_error(error)),
-        Ok(_) => std::str::from_utf8(&bytes)
-            .map_err(|_| ProjectFileError::NotUtf8)
-            .and_then(|text| parse_project_file(text, Some(home))),
+    let (parsed, commit) = match check_default_branch(dir, &bytes) {
+        Err(error) => (Err(gate_error(error)), None),
+        Ok(state) => (
+            std::str::from_utf8(&bytes)
+                .map_err(|_| ProjectFileError::NotUtf8)
+                .and_then(|text| parse_project_file(text, Some(home))),
+            // #9832: the commit these bytes were verified at, not a re-read.
+            Some(state.commit),
+        ),
     };
-    (Ok(Some(bytes)), Some(parsed))
+    Gated {
+        read: Ok(Some(bytes)),
+        parsed: Some(parsed),
+        commit,
+    }
 }
 
 fn gate_error(error: GateError) -> ProjectFileError {
@@ -285,6 +310,11 @@ pub(crate) fn assemble(prepared: Prepared, channels: &[Channel]) -> LoadReport {
     let order: Vec<(PathBuf, PathBuf, bool)> = projects
         .iter()
         .map(|p| (p.dir.clone(), p.file.clone(), p.parsed.is_none()))
+        .collect();
+    // #9832: each file's verified commit, copied onto its status below.
+    let commits: HashMap<PathBuf, String> = projects
+        .iter()
+        .filter_map(|p| Some((p.file.clone(), p.commit.clone()?)))
         .collect();
     let inputs = projects
         .into_iter()
@@ -309,5 +339,11 @@ pub(crate) fn assemble(prepared: Prepared, channels: &[Channel]) -> LoadReport {
         })
         .collect();
     report.findings.extend(findings);
+    // #9832: only a file whose routes are in effect names its commit.
+    for s in &mut report.per_file {
+        if matches!(s.state, FileState::Effective { .. }) {
+            s.verified_commit = commits.get(&s.file).cloned();
+        }
+    }
     report
 }

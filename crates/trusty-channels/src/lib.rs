@@ -12,7 +12,7 @@
 //! [`slack`], [`telegram`], and [`gchat`] — the Google Chat API layer, its
 //! routes, egress gate, question ledger, and the `gchat-mcp` server (#9448).
 //! [`policy`] is the channel-neutral route table, checks and rate limiter
-//! (#8454).
+//! (#8454). [`audit`] is the shared channel audit record and log (#9832).
 //! Test: `cargo test -p trusty-channels` covers each channel's client, MCP
 //! handshake, and tool registry.
 
@@ -22,6 +22,7 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod audit;
 pub mod gchat;
 pub mod policy;
 pub mod slack;
