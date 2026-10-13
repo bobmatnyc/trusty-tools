@@ -1415,7 +1415,8 @@ async fn absent_palace_stays_not_found_at_the_service_when_listing_fails() {
     crate::engine::palace_not_found_tests::seed_unlistable_palace(&state.data_root);
     let open = match svc.open_handle("ghost-palace") {
         Err(ServiceError::NotFound(message)) => message,
-        other => panic!("a missing palace must be NotFound, got {other:?}"),
+        Err(other) => panic!("a missing palace must be NotFound, got {other:?}"),
+        Ok(_) => panic!("a missing palace must not open"),
     };
     crate::engine::palace_not_found_tests::assert_unlisted_absence(
         &open,
