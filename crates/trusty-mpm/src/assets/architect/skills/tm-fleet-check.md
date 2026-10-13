@@ -33,7 +33,7 @@ its `CLAUDE.md`.
    a stopped one, and it never lists this session. Native tmux decides what
    runs. Note a disagreement in `records/actions.md`; it is not evidence that
    a session failed.
-2. **Read the alerts.** The poller, `tm architect poll`, runs in the tmux
+2. **Read the alerts.** The poller, `scripts/fleet-poll.py`, runs in the tmux
    session named after this one plus `-poll`. It appends each new alert as one
    JSON line to `inbox/alerts.jsonl` and types a one-line pointer into this
    pane. Read the lines newer than `last_alert_ts` in `records/state.md`; each

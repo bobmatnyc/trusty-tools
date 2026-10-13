@@ -39,7 +39,7 @@ alerts.
 | --- | --- |
 | `CLAUDE.md` | This file. |
 | `.trusty-mpm.toml` | `profile = "supervisor"`. |
-| `scripts/` | The deterministic poller and its helpers. `scripts/start-fleet-poll.sh` starts the poller, `tm architect poll`, in tmux session `<this session>-poll` (`tm fleet status --json` names this session); `tm architect input-state` classifies a pane's input box. |
+| `scripts/` | The deterministic poller and its helpers. `scripts/start-fleet-poll.sh` starts `scripts/fleet-poll.py` in tmux session `<this session>-poll` (`tm fleet status --json` names this session); `tm architect input-state` classifies a pane's input box. |
 | `.claude/skills/` | `tm-fleet-check` and `tm-context-refresh`. |
 | `inbox/` | Poller runtime, not tracked: `alerts.jsonl`, `poll-state.json`, `poll.log`, and `events.jsonl` once the watched projects' hooks write it. |
 | `records/` | Your records, tracked by this project's local git repository. |

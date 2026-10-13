@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# start-fleet-poll.sh — run the fleet poller, `tm architect poll`, in its own
-# tmux session.
+# start-fleet-poll.sh — run fleet-poll.py in its own tmux session.
 # Why: the deterministic poller must outlive Architect restarts and keep
 # watching while the Architect's session is busy or waiting on the user.
 # Idempotent: does nothing if the session already exists (one poller only).
 # Extra arguments pass through to the poller, e.g. --interval 30.
-# TM_BIN names the tm binary (`tm fleet init` sets it); default `tm` on PATH.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The poller's own session; ARCHITECT_* config passes through to the poller.
@@ -20,7 +18,7 @@ done
 T=(tmux ${TMUX_SOCKET:+-S "$TMUX_SOCKET"})
 if "${T[@]}" has-session -t "=$S" 2>/dev/null; then echo "running: $S"; exit 0; fi
 if ! "${T[@]}" new-session -d -s "$S" -c "$ROOT" ${E[@]+"${E[@]}"} \
-  "'${TM_BIN:-tm}' architect poll $*"; then
+  "python3 '$ROOT/scripts/fleet-poll.py' $*"; then
   echo "failed to start: $S" >&2; exit 1
 fi
 echo "started: $S"
