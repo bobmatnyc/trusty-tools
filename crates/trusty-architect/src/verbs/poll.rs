@@ -3,8 +3,8 @@
 //! Why: `start-fleet-poll.sh` runs the poller in its own tmux session with
 //! `fleet-poll.py [--once] [--interval N] [--dry-run]` (#9822).
 //! What: [`poll_config`] builds the poller [`Config`] from the environment,
-//! with the shipped scripts' names: `ARCHITECT_INBOX_DIR` as the fallback
-//! for `SUPERVISOR_INBOX_DIR`, `ARCHITECT_QUIET_SESSIONS_FILE` for the quiet
+//! with the shipped scripts' names: `ARCHITECT_INBOX_DIR` (which outranks
+//! `SUPERVISOR_INBOX_DIR`, as in the script), `ARCHITECT_QUIET_SESSIONS_FILE` for the quiet
 //! list, `ARCHITECT_SESSION` (default `tm-architect`) for the one pane the
 //! poller wakes and `ARCHITECT_POLL_SESSION` (default `<that>-poll`) for its
 //! own session; `tm fleet init --session` sets both. [`poll`] runs the
@@ -57,9 +57,9 @@ pub fn poll_config(
             )));
         }
     }
-    // #9822: the shipped scripts name the inbox ARCHITECT_INBOX_DIR.
     let lookup = |name: &str| match name {
-        "SUPERVISOR_INBOX_DIR" => set(name).or_else(|| set("ARCHITECT_INBOX_DIR")),
+        // #9822: fleet-poll.py reads only ARCHITECT_INBOX_DIR, so it wins.
+        "SUPERVISOR_INBOX_DIR" => set("ARCHITECT_INBOX_DIR").or_else(|| set(name)),
         _ => get(name),
     };
     let mut config =

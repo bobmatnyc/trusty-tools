@@ -16,7 +16,8 @@
 //! `Config::problems` entry with the sensor it turned off. A dry run takes no lock, writes no
 //! file, sends no keys and runs one cycle. No signal handler (A3 ruling Q8).
 //! [`Runner::run_single`] is `--once`: the same start, one cycle, no sleep,
-//! and an error for a skipped or unsaved cycle (#9822).
+//! and an error for a skipped or unsaved cycle, or for any `Config::problems`
+//! entry, which the loop only logs (#9822).
 //! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/verbs_poll.rs`.
 
 use std::fs;
@@ -283,9 +284,21 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
     /// # Errors
     /// As [`Runner::run_loop`] before the cycle; then the cycle's own error,
     /// or [`RunError::Incomplete`] when tmux could not list panes or the
-    /// state could not be read and so was not saved.
+    /// state could not be read and so was not saved. [`RunError::BadConfig`]
+    /// (before the lock or any file) when `Config::problems` is not empty.
     pub fn run_single(&self, interval: &str) -> Result<CycleSummary, RunError> {
         let every = parse_interval(interval)?;
+        // #9822: a bad variable turns a sensor off; a single run refuses to
+        // report that as success. The loop keeps running with the sensor off.
+        if !self.config.problems.is_empty() {
+            let list: Vec<String> = self
+                .config
+                .problems
+                .iter()
+                .map(|p| format!("{p}; {} would be off", sensor_off(p.name)))
+                .collect();
+            return Err(RunError::BadConfig(list.join("; ")));
+        }
         let (_lock, mut session) = self.start(every)?;
         let summary = self.run_once(&mut session)?;
         if let Some(why) = &summary.skipped {

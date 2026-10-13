@@ -53,7 +53,7 @@ alias `opus` as its model.
 7. **Launch.** It starts the Architect's session detached, as tmux session
    `tm-architect` on the `opus` alias, and records the Architect launch
    stamp on that session. Attach with `tmux attach -t =tm-architect`.
-   It then starts the poller, `scripts/fleet-poll.py`, in tmux session
+   It then starts the poller, `tm architect poll`, in tmux session
    `tm-architect-poll` unless it already runs; a poller that cannot start
    fails the command. `--no-launch` sets up the files and the grant without
    starting either. The session is not registered with the daemon, so `tm ls`
