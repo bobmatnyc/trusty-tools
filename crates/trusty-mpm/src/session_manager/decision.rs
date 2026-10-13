@@ -308,7 +308,7 @@ fn takes(record: &SessionRecord, claim: &AnswerClaim) -> bool {
 pub(crate) fn not_at_front_gate(record: &SessionRecord) -> ManagedError {
     ManagedError::DecisionConflict(format!(
         "session {} holds a front-gate decision but is {}, not waiting at its front gate; \
-         nothing was typed or launched. Decommission the session",
+         nothing was typed or launched; decommission the session",
         record.id, record.state
     ))
 }
