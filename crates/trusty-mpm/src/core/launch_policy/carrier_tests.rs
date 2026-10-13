@@ -256,3 +256,38 @@ fn shell_words_quote_the_path() {
     );
     assert_eq!(LaunchSettings::default().shell_words(), "");
 }
+
+// #8988: two launches in one cwd that read different `.claude.json` files get
+// different allow-subtractions; neither may overwrite the other's file.
+#[test]
+fn launches_in_one_cwd_with_different_claude_json_get_different_files() {
+    let fx = Fx::new(&["apex", "heygen"]);
+    fx.owner("[mcp]\nallow = [\"apex\"]\n");
+    let first = fx.provision();
+    let first_body = body_of(&first);
+    assert_eq!(first_body, json!({"deniedMcpServers": [{"serverName": "heygen"}]}));
+
+    // A second launch whose `claude` reads a `.claude.json` with other servers.
+    std::fs::write(
+        fx.claude.join(".claude.json"),
+        json!({ "mcpServers": { "apex": {}, "slack": {} } }).to_string(),
+    )
+    .unwrap();
+    let second = fx.provision();
+
+    assert_ne!(first.file, second.file, "one name for two policies");
+    assert_eq!(
+        body_of(&second),
+        json!({"deniedMcpServers": [{"serverName": "slack"}]})
+    );
+    // The first launch's file still holds the first launch's policy.
+    assert_eq!(body_of(&first), first_body);
+}
+
+#[test]
+fn identical_policies_in_one_cwd_share_one_file() {
+    let fx = Fx::new(USER);
+    fx.owner("[mcp]\nallow = [\"apex\"]\n");
+    assert_eq!(fx.provision().file, fx.provision().file);
+    assert_eq!(std::fs::read_dir(fx.settings_dir()).unwrap().count(), 1);
+}
