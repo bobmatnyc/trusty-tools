@@ -1114,16 +1114,15 @@ const SKILL: &str = include_str!(concat!(
     "/../../content/skills/tm-memory-import.md"
 ));
 
-/// Every line of a ```bash fence in the skill's steps 1-4 (the steps a PM
-/// runs), with the `<RUN>`, `<KEY>` and `<i>` placeholders filled in.
+/// Every line of every fenced block in the skill, steps 1-5 (#9794 D61: the
+/// guard allows the step-5 import too), with the `<RUN>`, `<KEY>` and `<i>`
+/// placeholders filled in. A fence may be indented or spelled `~~~`.
 fn skill_pm_commands() -> Vec<String> {
-    let (pm_steps, _operator) = SKILL
-        .split_once("## 5. The Import")
-        .expect("step 5 heading");
     let mut in_fence = false;
     let mut commands = Vec::new();
-    for line in pm_steps.lines() {
-        if line.starts_with("```") {
+    for line in SKILL.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
         } else if in_fence {
             commands.push(
@@ -1140,8 +1139,9 @@ fn skill_pm_commands() -> Vec<String> {
 fn every_command_the_skill_tells_a_pm_to_run_is_allowed() {
     let fx = Fx::new();
     let commands = skill_pm_commands();
-    // Steps 1, 2 and 4 (one line each), three `review record`, status, finish.
-    assert_eq!(commands.len(), 8, "{commands:#?}");
+    // Steps 1, 2, 4 and 5 (one line each), three `review record`, status,
+    // finish.
+    assert_eq!(commands.len(), 9, "{commands:#?}");
     for command in &commands {
         assert!(
             !command.ends_with('\\') && !command.contains('['),

@@ -51,14 +51,16 @@ from the installed binary, the operator reports it and the run stops.
 6. Never stop the trusty-memory daemon before GO. Every step up to the ledger
    preview is a dry run and runs beside a live daemon.
 
-The pm-guard enforces these rules (#8625, #9794). It allows only these
-`trusty-memory import kuzu` forms: the dry runs of steps 1, 2 and 4 (each
-with `--dry-run`), and `review record`, `review status` and `review finish`.
-Write each one on a single line of plain words, with no quotes, `$`, `\`,
-`;`, `&&` or redirection. The only allowed tail is `2>&1 | tee <path>` into
-`~/.trusty-tools/kuzu-review/` or the session scratchpad. Any `--python` is
-denied, so omit it. Every other form stays denied, `--help` and the step-5
-import (no `--dry-run`) included; the operator runs those outside the guard.
+The pm-guard enforces these rules (#8625, #9794). It allows the
+`trusty-memory import kuzu` forms below for every caller: the dry runs of
+steps 1, 2 and 4, `review record`, `review status` and `review finish`, and
+the step-5 import (owner ruling D61). Write each one on a single line of
+plain words, with no quotes, `$`, `\`, `;`, `&&` or redirection. The only
+allowed tail is `2>&1 | tee <path>` into `~/.trusty-tools/kuzu-review/` or
+the session scratchpad. Any `--python` is denied, so omit it. A store path
+(`--from` a `.kuzu-memory` directory or its `memories.db`) is denied by name,
+so the single-store form is the operator's. Every other form stays denied,
+`--help` included.
 
 ## 1. The Runbook Dry Run
 
@@ -185,17 +187,20 @@ This skill does not authorize stopping the daemon. GO does.
 
 ## 5. The Import (after GO)
 
-The operator runs this step outside the guard, which denies every form
-without `--dry-run`. The PM does not run it.
+The assigned agent runs this step after GO only. The guard allows the
+command for every caller (owner ruling D61), so GO is the only thing that
+holds it back. Do not run it before GO.
 
 Follow the runbook's stop, backup, import, check, restart and smoke steps. The
-import step is the step-1 command without `--dry-run`, plus the sealed ledger:
+import step is the step-4 command without `--dry-run`:
 
 ```bash
-env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu \
-  --discover [--root PATH]... [--python PATH] [--bridge-timeout-secs SECS] \
-  --review-ledger ~/.trusty-tools/kuzu-review/<RUN>/ledger.jsonl
+env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover --review-ledger ~/.trusty-tools/kuzu-review/<RUN>/ledger.jsonl
 ```
+
+Add `--root PATH` and `--bridge-timeout-secs SECS` after `--discover` as in
+step 1. If the runbook needs `--python`, the operator runs the import outside
+the guard.
 
 A real run refuses to start while a daemon is running. The runbook names the
 stop command: `trusty-memory service stop` for a launchd-managed daemon,
