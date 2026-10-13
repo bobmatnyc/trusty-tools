@@ -540,6 +540,28 @@ mod slack_bot_tests {
             classify(200, r#"{"ok":false,"error":"channel_not_found"}"#),
             Err(SendFailure::Rejected("channel_not_found".into()))
         );
+        // Slack's server-side error states: the post may have partly landed.
+        for code in [
+            "fatal_error",
+            "internal_error",
+            "service_unavailable",
+            "request_timeout",
+        ] {
+            let body = format!(r#"{{"ok":false,"error":"{code}"}}"#);
+            assert_eq!(
+                classify(200, &body),
+                Err(SendFailure::Unknown(code.into())),
+                "{code}"
+            );
+        }
+        for code in ["not_authed", "invalid_auth", "user_not_found"] {
+            let body = format!(r#"{{"ok":false,"error":"{code}"}}"#);
+            assert_eq!(
+                classify(200, &body),
+                Err(SendFailure::Rejected(code.into())),
+                "{code}"
+            );
+        }
         let channel = r#"{"ok":true,"channel":"C0PUBLIC","ts":"1.2"}"#;
         assert!(matches!(
             classify(200, channel),

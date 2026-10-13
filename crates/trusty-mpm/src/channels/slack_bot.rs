@@ -124,8 +124,10 @@ impl SlackPost for SlackBot {
 /// The outcome of one `chat.postMessage` reply.
 ///
 /// What: a 5xx or an undecodable 200 is `Unknown`; 429 and every other
-/// non-200 is `Rejected` naming the status; `ok: false` is `Rejected` with
-/// Slack's error code; `ok: true` is `Posted` only with a `D…` channel and a
+/// non-200 is `Rejected` naming the status; `ok: false` is `Unknown` for
+/// Slack's server-side codes (`fatal_error`, `internal_error`,
+/// `service_unavailable`, `request_timeout`) and `Rejected` with Slack's
+/// error code for every other; `ok: true` is `Posted` only with a `D…` channel and a
 /// `ts`, else `Unrecorded`.
 /// Test: `classify_maps_status_and_body`.
 pub fn classify(status: u16, body: &str) -> Result<Posted, SendFailure> {
@@ -143,6 +145,11 @@ pub fn classify(status: u16, body: &str) -> Result<Posted, SendFailure> {
             .get("error")
             .and_then(serde_json::Value::as_str)
             .map_or_else(|| "not_ok".to_owned(), code_of);
+        // #9856: Slack's server-side error states may follow a partly
+        // successful post, so they must not read as "not sent".
+        if UNKNOWN_OUTCOME_CODES.contains(&code.as_str()) {
+            return Err(SendFailure::Unknown(code));
+        }
         return Err(SendFailure::Rejected(code));
     }
     let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
@@ -155,6 +162,14 @@ pub fn classify(status: u16, body: &str) -> Result<Posted, SendFailure> {
         ts: ts.to_owned(),
     })
 }
+
+/// Slack `ok: false` codes after which the post may have partly succeeded.
+const UNKNOWN_OUTCOME_CODES: [&str; 4] = [
+    "fatal_error",
+    "internal_error",
+    "service_unavailable",
+    "request_timeout",
+];
 
 /// Slack's error code, kept to `[a-z0-9_]` and 64 chars.
 fn code_of(raw: &str) -> String {
