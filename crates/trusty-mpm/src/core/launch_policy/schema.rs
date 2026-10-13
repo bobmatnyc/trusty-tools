@@ -146,7 +146,8 @@ pub fn is_owner_name(name: &str) -> bool {
 ///
 /// Why: the one place a file becomes an [`OwnerFile`], so every caller gets the
 /// same strictness.
-/// What: `Ok(None)` when the file is absent; `Err` for an unreadable file, bad
+/// What: `Ok(None)` when the path has no directory entry (a dangling symlink
+/// is `Unreadable`); `Err` for an unreadable file, bad
 /// TOML, an unknown key, a wildcard or empty server name, a floor server in
 /// `deny`, or an `extends` value that is not an owner name. On success also
 /// returns the raw bytes, for the last-good sha.
@@ -154,7 +155,15 @@ pub fn is_owner_name(name: &str) -> bool {
 pub fn parse_owner_file(path: &Path) -> Result<Option<(OwnerFile, Vec<u8>)>, OwnerPolicyError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // #8988: `read` follows symlinks, so NotFound also covers a dangling
+        // symlink. Only a path with no directory entry at all is "absent".
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(path)
+                    .is_err_and(|m| m.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
         Err(source) => {
             return Err(OwnerPolicyError::Unreadable {
                 path: path.to_path_buf(),
