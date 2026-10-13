@@ -67,6 +67,8 @@ mod router;
 // #9793: the sandbox consent override and backend refusal.
 mod sandbox;
 pub mod settings;
+// #9069: `copy` to a write-only sync target.
+mod sync_target;
 mod tools;
 
 pub use ancestry::{

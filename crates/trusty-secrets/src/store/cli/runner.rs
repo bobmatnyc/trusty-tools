@@ -77,6 +77,8 @@ pub struct CliCommand {
     program: OsString,
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
+    /// Inherited variables the child never sees, removed before the overlay.
+    removed: Vec<OsString>,
     /// Secrets refused in argv and the overlay besides the stdin value.
     hidden: Vec<SecretValue>,
     timeout: Duration,
@@ -92,6 +94,7 @@ impl fmt::Debug for CliCommand {
             .field("program", &self.program)
             .field("args", &self.args)
             .field("env_keys", &env_keys)
+            .field("env_removed", &self.removed)
             .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
@@ -105,6 +108,7 @@ impl CliCommand {
             program: OsString::from(spec.program),
             args: Vec::new(),
             envs: Vec::new(),
+            removed: Vec::new(),
             hidden: Vec::new(),
             timeout: spec.timeout,
             vault: NO_TARGET.to_string(),
@@ -143,6 +147,19 @@ impl CliCommand {
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Remove `key` from the environment the child inherits.
+    ///
+    /// Why: #9069 D7 — a server keeps its first spawner's environment for
+    /// life, so an inherited token or host variable would pick the identity
+    /// and the destination of a push. Removal happens before the overlay, so
+    /// an overlay of the same name still reaches the child.
+    /// Test: `runner_env_remove_drops_an_inherited_variable`.
+    #[must_use]
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
+        self.removed.push(key.as_ref().to_os_string());
         self
     }
 
@@ -287,6 +304,10 @@ impl CliCommand {
             .stderr(Stdio::piped())
             // #7519: its own group, so a kill reaches every grandchild too.
             .process_group(0);
+        // #9069: inherited first, so the overlay below always wins.
+        for key in &self.removed {
+            command.env_remove(key);
+        }
         for (key, value) in &self.envs {
             command.env(key, value);
         }

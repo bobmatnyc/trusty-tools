@@ -1254,8 +1254,34 @@ owner-scope key maps to the team's shared environment. Targets default to
 development values are readable (default taken 2026-10-01).
 
 **Order.** Keychain ships first, end to end through the console page (S1–S4).
-Then one PR per integration: 1Password, Vercel, GitHub Actions, Keeper (S6+).
+Then one PR per integration: 1Password, GitHub Actions, Vercel, Keeper (S6+;
+GitHub Actions before Vercel by owner ruling D63, 2026-10-13).
 Every CLI-backed integration needs the stdin-capable CLI runner (§8.2) first.
+
+**Push (amendment 2026-10-13, #9069, owner ruling D63).** A sync target is
+reached only through `secrets.copy` with `to_backend` set to
+`github-actions` or `vercel`; there is no `push` method. The rules:
+
+- The key list is required; an empty list is `invalid_params`.
+- A caller with a Claude Code ancestor is refused with `agent_use_refused`,
+  whatever the key's "agents may use" flag says; a bridge call is judged on
+  the console's verdict. A pushed value is readable by any workflow or
+  deployment a repository writer adds, a wider release than §15.8's flag.
+- The destination comes from the checkout's `origin` remote
+  (`github.com/<owner>/<repo>`), never from a vault name. A Vercel project
+  mapping lives only in the account's machine config, keyed by
+  `<owner>/<repo>`. A tracked project file's `github_actions:` or `vercel:`
+  section is refused.
+- Each CLI uses its own stored login. Every inherited `GH_*` and `VERCEL_*`
+  variable, and `GITHUB_TOKEN`, is removed from the child's environment.
+- The value goes on the CLI's stdin. A key counts as copied only after a
+  post-write metadata read shows the write (GitHub: `updated_at` advanced);
+  exit 0 alone never counts.
+- A sync target is never a configured backend, never read back, never swept
+  by `delete`, and never written to the names-only index. A sandboxed server
+  opens none.
+- Deferred: owner-scope pushes (GitHub org secrets, Vercel team shared
+  environment) and Vercel `development`.
 
 ### 15.5 Lazy resolution
 
@@ -1512,7 +1538,7 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S3b | Tailnet gate (§15.7); closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for secrets routes | 5 | S3a |
 | S4 | `/tools/secrets/` page, including the "agents may use" toggle | 6 | S3a; tailnet access waits on S3b |
 | S5 | `secrets-manager` agent and `tm-secrets` skill text: `set`, console path | 3 | S4 |
-| S6+ | One PR per integration: 1Password, Vercel, GitHub Actions, Keeper | 4 each | Stdin CLI runner (§8.2) |
+| S6+ | One PR per integration: 1Password, GitHub Actions, Vercel, Keeper | 4 each; 5 for GitHub Actions and Vercel (values leave the machine, #9069) | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
 | S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only, token re-armed on its fd (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
