@@ -503,6 +503,94 @@ fn unknown_channel_or_gchat_row_fails_the_open() {
     }
 }
 
+/// `row` with `edit` applied.
+fn edited(row: &serde_json::Value, edit: impl FnOnce(&mut serde_json::Value)) -> serde_json::Value {
+    let mut row = row.clone();
+    edit(&mut row);
+    row
+}
+
+/// Replace the log with `rows`, each newline-terminated.
+fn write_log(path: &Path, rows: &[serde_json::Value]) {
+    let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(path, text).expect("write log");
+}
+
+// #8433 r-078: each case goes red when its `Book::apply` check is removed.
+#[test]
+fn reopen_or_reused_reserve_in_log_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    drop(table);
+    let log = log_lines(&fx.path);
+    let ops: Vec<_> = log.iter().map(|r| r["op"].clone()).collect();
+    assert_eq!(ops, ["reserve", "open", "resolve"]);
+    let (reserve, open, resolve) = (&log[0], &log[1], &log[2]);
+    let reserve_id = |n: u64| edited(reserve, |r| r["id"] = n.into());
+    // Each bad row sits mid-file: a row valid after it follows.
+    let cases = [
+        (
+            vec![
+                reserve.clone(),
+                open.clone(),
+                resolve.clone(),
+                open.clone(),
+                reserve_id(id + 1),
+            ],
+            4,
+            "second open of an answered id",
+        ),
+        (
+            vec![reserve_id(7), reserve_id(5), reserve_id(8)],
+            2,
+            "reserve below the next id",
+        ),
+    ];
+    for (rows, line, what) in cases {
+        write_log(&fx.path, &rows);
+        assert_corrupt(&fx.path, line, what);
+    }
+}
+
+// #8433 r-078: each case goes red when replay's `validate` or `decode`'s
+// version check is removed.
+#[test]
+fn invalid_ask_or_unknown_version_in_log_fails_the_open() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_ask());
+    table.reserve().expect("reserve");
+    drop(table);
+    let log = log_lines(&fx.path);
+    let ops: Vec<_> = log.iter().map(|r| r["op"].clone()).collect();
+    assert_eq!(ops, ["reserve", "open", "reserve"]);
+    let (reserve, open, after) = (&log[0], &log[1], &log[2]);
+    let cases = [
+        (
+            edited(open, |o| {
+                o["question"]["conversation"]["thread_ts"] = "".into();
+            }),
+            "empty thread_ts",
+        ),
+        (
+            edited(open, |o| {
+                o["question"]["asker_managed_session"] = "../x".into()
+            }),
+            "path in asker session id",
+        ),
+        (edited(open, |o| o["v"] = 2.into()), "record version 2"),
+    ];
+    for (bad, what) in cases {
+        write_log(&fx.path, &[reserve.clone(), bad, after.clone()]);
+        assert_corrupt(&fx.path, 2, what);
+    }
+}
+
 #[test]
 fn unknown_question_id_refuses() {
     let fx = fixture();
