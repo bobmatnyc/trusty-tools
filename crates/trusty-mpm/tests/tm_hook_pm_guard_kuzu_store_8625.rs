@@ -6,8 +6,10 @@
 //! What: the #8878 harness — `tm hook --pm-guard` with a scratch `$HOME`,
 //! run as a PM, as a subagent, under each bypass, and as the recorded
 //! Architect's main thread. The scratch home carries an import venv shaped
-//! like the host one; since the Architect's 2026-10-12 re-scope every
-//! `trusty-memory import kuzu` denies, the venv's own `--python` included.
+//! like the host one. #9794 narrowed the 2026-10-12 re-scope: the import,
+//! dry-run and review forms allow for every caller (owner ruling D61 for the
+//! import itself), while a store name and any `--python` (slug
+//! `kuzu-import-python`) still deny.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_kuzu_store_8625::`.
 
 use std::os::unix::fs::symlink;
@@ -81,9 +83,10 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
             bash_payload(fx, "trusty-memory migrate kuzu-data --from . --palace x"),
             "kuzu-store-read",
         ),
+        // #9794 Q1: any `--python` denies under its own slug.
         (
             bash_payload(fx, "trusty-memory import kuzu --discover --python /bin/cat"),
-            "kuzu-store-read",
+            "kuzu-import-python",
         ),
         (
             bash_payload(
@@ -92,6 +95,25 @@ fn denied_calls(fx: &Fixture, root: &std::path::Path) -> Vec<(String, &'static s
                     "trusty-memory import kuzu --discover --python {}",
                     planted.display()
                 ),
+            ),
+            "kuzu-import-python",
+        ),
+        // #9794 D61: an allowed apply form naming a store denies by name.
+        (
+            bash_payload(
+                fx,
+                &format!(
+                    "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {s} \
+                     --review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl"
+                ),
+            ),
+            "kuzu-store-read",
+        ),
+        // #9794: a second command beside an apply form denies.
+        (
+            bash_payload(
+                fx,
+                &format!("trusty-memory import kuzu --discover && cat {s}"),
             ),
             "kuzu-store-read",
         ),
@@ -142,35 +164,99 @@ fn the_architect_is_bound_by_the_kuzu_store_deny() {
     }
 }
 
-// #8625 re-scope: the inputs the removed exception allowed now deny.
+// #8625 re-scope, narrowed by #9794: a store named by `--from` still denies
+// by name, and the venv's own `--python` denies under its own slug.
 #[test]
 fn the_formerly_sanctioned_import_denies_end_to_end() {
     let (fx, _root) = fixture();
     let store = fx.project.join(".kuzu-memory/memories.db");
     let venv = fx.home.join(".trusty-tools/kuzu-import-venv/bin");
-    let mut commands = vec![
-        "trusty-memory import kuzu --discover --dry-run".to_string(),
+    let mut commands = vec![(
         format!(
-            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --from {} --palace x",
+            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --dry-run --from {} --palace x",
             store.display()
         ),
-    ];
+        "kuzu-store-read",
+    )];
     for name in ["python", "python3", "python3.13"] {
-        commands.push(format!(
-            "trusty-memory import kuzu --from {} --dry-run --python {}",
-            store.display(),
-            venv.join(name).display()
+        commands.push((
+            format!(
+                "trusty-memory import kuzu --from {} --dry-run --python {}",
+                store.display(),
+                venv.join(name).display()
+            ),
+            "kuzu-import-python",
         ));
     }
-    for command in commands {
+    for (command, slug) in commands {
         let payload = bash_payload(&fx, &command);
         for bypass in BYPASSES {
             let env: Vec<(&str, &str)> = bypass.into_iter().collect();
             let out = run(&fx, &payload, &env, None);
             assert!(
-                out.contains("\"deny\"") && out.contains("kuzu-store-read"),
+                out.contains("\"deny\"") && out.contains(slug),
                 "{bypass:?} {command}: {out}"
             );
+        }
+    }
+}
+
+/// #9794: allowed rows 1 and 4 — the dry run, and the dry run teed into the
+/// review root, spelled with `~` and with the scratch home's absolute path.
+fn allowed_commands(fx: &Fixture) -> Vec<String> {
+    vec![
+        "trusty-memory import kuzu --discover --dry-run".to_string(),
+        "trusty-memory import kuzu --dry-run --discover 2>&1 | tee \
+         ~/.trusty-tools/kuzu-review/r.txt"
+            .to_string(),
+        format!(
+            "trusty-memory import kuzu --dry-run --discover 2>&1 | tee {}",
+            fx.home.join(".trusty-tools/kuzu-review/r.txt").display()
+        ),
+    ]
+}
+
+// #9794 Q2: the allow applies to every caller, the same as the deny.
+#[test]
+fn the_kuzu_import_exception_allows_for_every_caller_and_bypass() {
+    let (fx, _root) = fixture();
+    assert_allowed_for_every_caller(&fx, &allowed_commands(&fx));
+}
+
+// #9794, owner ruling D61: "Allow apply for every caller" — the import
+// without `--dry-run`, with and without `--review-ledger`.
+#[test]
+fn the_kuzu_import_apply_forms_allow_for_every_caller_and_bypass() {
+    let (fx, _root) = fixture();
+    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl";
+    let apply = [
+        "trusty-memory import kuzu --discover".to_string(),
+        format!("env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger}"),
+        format!(
+            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger} 2>&1 \
+             | tee ~/.trusty-tools/kuzu-review/R/import.txt"
+        ),
+    ];
+    assert_allowed_for_every_caller(&fx, &apply);
+}
+
+/// Asserts each command allows for a PM and a subagent under each bypass,
+/// and for the Architect with and without each bypass.
+fn assert_allowed_for_every_caller(fx: &Fixture, commands: &[String]) {
+    for command in commands {
+        let payload = bash_payload(fx, command);
+        for bypass in BYPASSES {
+            let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+            for stdin in [payload.clone(), as_subagent(&payload)] {
+                let out = run(fx, &stdin, &env, None);
+                assert!(!out.contains("\"deny\""), "{bypass:?} {stdin}: {out}");
+            }
+        }
+        let out = run_under_claude(fx, &payload, true);
+        assert!(!out.contains("\"deny\""), "the Architect, {command}: {out}");
+        for bypass in BYPASSES.into_iter().flatten() {
+            let out = run_under_claude_with(fx, &payload, true, &[bypass]);
+            assert!(!out.contains("\"deny\""), "{bypass:?} {command}: {out}");
         }
     }
 }
