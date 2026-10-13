@@ -291,6 +291,9 @@ mod runtime_exit_reconcile_tests;
 mod reload_error_tests;
 
 #[cfg(test)]
+pub(crate) mod decision_tests;
+
+#[cfg(test)]
 mod pane_scoped_tests;
 
 #[cfg(test)]

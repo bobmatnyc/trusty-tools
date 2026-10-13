@@ -772,6 +772,8 @@ pub(crate) fn dirt_policy(force: bool) -> ProvisioningDirt {
 }
 
 #[cfg(test)]
+mod answer_route_tests;
+#[cfg(test)]
 mod staleness_bench_tests;
 #[cfg(test)]
 mod tests;
