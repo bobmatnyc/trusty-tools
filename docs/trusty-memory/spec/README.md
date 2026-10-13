@@ -3,6 +3,7 @@
 > **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-06-01
 > **Derived from:** code/docs/tickets audit (v0.14.0)
+> **Path note (2026-10-12, #9271):** the storage engine this document places in trusty-common's `memory_core` module (`memory-core` feature) is now trusty-memory's own `engine` module, `crates/trusty-memory/src/engine/`. Path citations were repointed where the new file exists; prose about the trusty-common split describes the earlier layout.
 
 This set is retained as a dated design snapshot. Use the
 [behavior-contract catalog](../../specs/README.md), current crate README, and

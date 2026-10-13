@@ -3,6 +3,7 @@
 > **Status:** Historical baseline · not a current behavior contract
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+> **Path note (2026-10-12, #9271):** the memory-palace engine described here (`memory_core`, `memory-core` feature) moved to trusty-memory as `crates/trusty-memory/src/engine/`, and `memory-core` is now a no-op. Path citations were repointed; prose and feature tables describe the earlier layout.
 
 This document predates later package extractions and consolidations. See the
 [behavior-contract catalog](../../specs/README.md) and current crate README.
@@ -234,13 +235,13 @@ parentheses.
   JSON-RPC (`index`/`search`/`delete`); end-to-end coverage in
   `trusty-bm25-daemon` (`src/bm25_client.rs`).
 
-### 4.8 Memory-palace engine (`memory-core` — `src/memory_core/`)
+### 4.8 Memory-palace engine (`memory-core` — `crates/trusty-memory/src/engine/`)
 
 **FR-MEM-1 — Palace data model + storage + retrieval** ✅
 - *Vision:* the entire Memory-Palace storage engine, consumed by `trusty-memory`,
   living behind one feature so chat/MCP-only consumers pay nothing (#5 phase 2d).
 - *Current:* the 4-level hierarchy (`Palace` → `Wing` → `Room` → `Drawer`,
-  `src/memory_core/palace.rs`), `PalaceRegistry`, `PalaceHandle` 4-layer
+  `crates/trusty-memory/src/engine/palace.rs`), `PalaceRegistry`, `PalaceHandle` 4-layer
   progressive retrieval (L0 identity → L1 essential → L2 vector → L3 deep,
   `retrieval.rs`), the storage backends (HNSW vector store, redb KG, payload
   store, chat-session store, L1 cache — `store/`), and dream/decay/analytics/

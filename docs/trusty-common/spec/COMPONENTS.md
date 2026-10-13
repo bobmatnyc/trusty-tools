@@ -3,6 +3,7 @@
 > **Status:** Historical baseline · not a current component map
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+> **Path note (2026-10-12, #9271):** the memory-palace engine described here (`memory_core`, `memory-core` feature) moved to trusty-memory as `crates/trusty-memory/src/engine/`, and `memory-core` is now a no-op. Path citations were repointed; prose and feature tables describe the earlier layout.
 
 This document predates later package extractions and consolidations. See the
 [behavior-contract catalog](../../specs/README.md) and current crate README.
@@ -198,7 +199,7 @@ client (the dream subprocess calls it directly).
 
 ---
 
-## 10. Memory-palace engine — `src/memory_core/` *(`memory-core` + sub-features)*
+## 10. Memory-palace engine — `crates/trusty-memory/src/engine/` *(`memory-core` + sub-features)*
 
 **Responsibility.** The complete Memory-Palace storage engine consumed by
 `trusty-memory` — data model, layered stores, progressive retrieval, and the
