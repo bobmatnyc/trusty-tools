@@ -22,8 +22,8 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use crate::engine::store::kg_redb::KgStoreRedb;
 use crate::engine::store::OpenIntent;
+use crate::engine::store::kg_redb::KgStoreRedb;
 use anyhow::{Context, Result};
 
 /// Filename of a palace's KG store.

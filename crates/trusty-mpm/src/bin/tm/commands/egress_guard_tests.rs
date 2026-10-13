@@ -149,17 +149,24 @@ fn egress_config_patterns_add_and_never_remove() {
 }
 
 /// 🔴 #8454 S2 (drift guard): the registered timeout exceeds S1's worst case —
-/// the gateway probe, the stdin budget and the audit POST. A hook killed at its
-/// timeout is non-blocking, an allow, so lowering the timeout or raising any
-/// budget past it trips this test.
+/// the gateway probe, the stdin budget, the daemon verdict query and the
+/// inline policy load it falls back to (#8454 VC, R2), and the audit POST. A
+/// hook killed at its timeout is non-blocking, an allow, so lowering the
+/// timeout or raising any budget past it trips this test.
 #[test]
 fn egress_hook_timeout_exceeds_the_guard_budget() {
+    use crate::commands::egress_verdict_client::VERDICT_QUERY_TIMEOUT;
     use crate::commands::hook_stdin::PM_GUARD_STDIN_TIMEOUT;
     use crate::commands::pm_guard_deny_log::AUDIT_POST_TIMEOUT;
+    use trusty_mpm::core::channels_readiness::HOOK_LOAD_LIMIT;
     use trusty_mpm::core::discovery::GATEWAY_PROBE_TIMEOUT;
     use trusty_mpm::core::standalone::hooks::egress::EGRESS_GUARD_TIMEOUT_SECS;
 
-    let budget = GATEWAY_PROBE_TIMEOUT + PM_GUARD_STDIN_TIMEOUT + AUDIT_POST_TIMEOUT;
+    let budget = GATEWAY_PROBE_TIMEOUT
+        + PM_GUARD_STDIN_TIMEOUT
+        + VERDICT_QUERY_TIMEOUT
+        + HOOK_LOAD_LIMIT
+        + AUDIT_POST_TIMEOUT;
     let registered = std::time::Duration::from_secs(EGRESS_GUARD_TIMEOUT_SECS);
     assert!(
         registered > budget,

@@ -11,7 +11,7 @@
 //! names appear in the merged list; `every_tool_has_scopes` in `openrpc::tests`
 //! verifies scopes are declared.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build the three room tool schemas conditioned on whether a default palace
 /// is configured.

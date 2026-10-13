@@ -106,7 +106,7 @@ fn serve_http_and_stdio_together_is_error() {
 // Transport selection (#5267) — the behavior change, not just the parse.
 // ---------------------------------------------------------------------------
 
-use super::{serve_mode, ServeMode};
+use super::{ServeMode, serve_mode};
 
 /// Parse an argv and return the transport it selects.
 ///

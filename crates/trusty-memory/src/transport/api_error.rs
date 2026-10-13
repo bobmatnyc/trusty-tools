@@ -16,12 +16,12 @@
 //! Test: `api_error_kind_maps_to_its_rpc_code`,
 //! `api_error_message_survives_the_conversion`.
 
+use crate::engine::PalaceRegistry;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::palace_format::is_format_refusal;
-use crate::engine::PalaceRegistry;
 #[cfg_attr(not(test), allow(unused_imports))]
 use trusty_common::uds::server::{
-    RpcError, CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND,
+    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcError,
 };
 
 use crate::AppState;

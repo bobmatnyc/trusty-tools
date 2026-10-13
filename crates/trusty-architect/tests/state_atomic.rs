@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use trusty_architect::StateError;
 use trusty_architect::classify::{Alert, DedupState, PaneState, alert, dedup};
 use trusty_architect::poller::{
-    PollState, SaveStep, append_alerts, load_state, save_state, save_state_with,
+    PollState, SaveStep, StoredCount, append_alerts, load_state, save_state, save_state_with,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -29,7 +29,7 @@ fn sample(n: u64) -> PollState {
             errors: Some(vec![]),
         },
     );
-    st.other.insert("wake_pending".to_owned(), json!(n));
+    st.wake_pending = Some(StoredCount::Count(n));
     st
 }
 

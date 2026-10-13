@@ -21,10 +21,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 
-use super::{daemon_pids_in, stop_daemons_in, ProcInfo};
+use super::{ProcInfo, daemon_pids_in, stop_daemons_in};
 
 /// How long the ownership probe may take to connect to the override's socket.
 const OWNER_PROBE_TIMEOUT: Duration = Duration::from_millis(500);

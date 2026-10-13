@@ -14,7 +14,7 @@
 //!
 //! Test: this *is* the test file.
 
-use trusty_memory::bm25_backfill::{backfill_palace, BackfillStatus, PalaceDocs};
+use trusty_memory::bm25_backfill::{BackfillStatus, PalaceDocs, backfill_palace};
 use trusty_memory::bm25_index::SNAPSHOT_FILENAME;
 use trusty_memory::bm25_lane::Bm25Lane;
 
@@ -72,11 +72,13 @@ async fn a_corpus_survives_a_full_lane_restart() {
     assert_eq!(beta[0].doc_id, "drawer-2");
 
     // And the corpora stayed separate across the restart.
-    assert!(restarted
-        .search("alpha", "postmortem", 5)
-        .await
-        .expect("cross-palace search")
-        .is_empty());
+    assert!(
+        restarted
+            .search("alpha", "postmortem", 5)
+            .await
+            .expect("cross-palace search")
+            .is_empty()
+    );
 
     restarted.shutdown().await;
 }

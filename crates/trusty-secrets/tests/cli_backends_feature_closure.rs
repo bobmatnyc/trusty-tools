@@ -308,3 +308,18 @@ fn closure_check_refuses_each_widening_mutation() {
         assert!(refused.contains(named), "{what}: {refused}");
     }
 }
+
+/// Why: #9071, Architect ruling D1 — the tier-3 client lives under `api`
+/// and may widen it by serde_json and libc only, both already optional
+/// dependencies. trusty-console links `api`, so tokio, keyring, fd-lock or
+/// trusty-common here would reach it (Df0).
+/// Test: itself.
+#[test]
+fn api_feature_reaches_serde_thiserror_serde_json_libc_only() {
+    let manifest = manifest();
+    let reached = reached_deps(&features(&manifest), &dependencies(&manifest), "api");
+    let expected: BTreeSet<String> = ["serde", "thiserror", "serde_json", "libc"]
+        .map(String::from)
+        .into();
+    assert_eq!(reached, expected);
+}

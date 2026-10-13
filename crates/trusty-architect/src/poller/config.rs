@@ -6,20 +6,23 @@
 //! port reads the environment once through a caller-supplied lookup (#9171 A3a).
 //! What: [`Config::from_env`] builds every path and threshold the A3a sensors
 //! use. Paths fall back like `os.environ.get(X) or default`; numbers parse like
-//! Python's `float()`/`int()`. A bad `LOAD_FACTOR` is a [`ConfigError`]: the
-//! prototype's `host_alerts` raises on it each cycle and the cycle fails. A bad
-//! `PANE_CTX_WINDOW`, `SELF_CTX_WINDOW` or `SELF_CTX_THRESHOLD` builds the
-//! config anyway, turns only the sensor that reads it off (the field is
-//! `None`) and lands in [`Config::problems`] for the caller to log; the
-//! prototype catches `ValueError` inside those two sensors. A bad `BAND_*`
-//! value falls back to its default (the prototype's `_env_float`).
+//! Python's `float()`/`int()`. A bad `LOAD_FACTOR`, `PANE_CTX_WINDOW`,
+//! `SELF_CTX_WINDOW` or `SELF_CTX_THRESHOLD` builds the config anyway, turns
+//! only the sensor that reads it off (the field is `None`) and lands in
+//! [`Config::problems`] for the caller to log. For the ctx variables that is
+//! the prototype's behaviour; for `LOAD_FACTOR` it is Architect ruling Q4
+//! (#9171 A3b-2): the prototype's `host_alerts` raises on it and aborts the
+//! whole cycle, the port turns off host alerts only. A bad `BAND_*` value
+//! falls back to its default (the prototype's `_env_float`).
 //! Test: `config_reads_env_once_like_the_prototype`,
-//! `bad_ctx_variables_switch_off_their_sensor_and_are_reported`.
+//! `bad_ctx_variables_switch_off_their_sensor_and_are_reported`,
+//! `bad_load_factor_disables_host_alerts_only`.
 
 use std::path::{Path, PathBuf};
 
 use super::band::BandConfig;
 use super::pyfmt::{py_float, py_int};
+use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
 use crate::self_ctx::{default_dir, projects_dir};
 
@@ -43,8 +46,8 @@ pub struct Config {
     pub self_ctx_dir: PathBuf,
     /// `TMUX_SOCKET`, when set and non-empty.
     pub tmux_socket: Option<PathBuf>,
-    /// `LOAD_FACTOR`.
-    pub load_factor: f64,
+    /// `LOAD_FACTOR`. `None` when bad: host alerts are then off (ruling Q4).
+    pub load_factor: Option<f64>,
     /// `PANE_CTX_WINDOW`: the window a PM pane's transcript tokens divide by.
     /// `None` when the value is not an integer: pane ctx is then off.
     pub pane_ctx_window: Option<i64>,
@@ -57,6 +60,14 @@ pub struct Config {
     pub problems: Vec<ConfigError>,
     /// The builder-band lines (`BAND_*`).
     pub band: BandConfig,
+    /// `<root>/local/quiet-sessions.txt`: sessions whose `idle` alerts drop.
+    pub quiet_sessions: PathBuf,
+    /// The Architect's session: the one pane the poller wakes. [`SUPERVISOR`]
+    /// here; `tm architect poll` sets `ARCHITECT_SESSION` (#9822).
+    pub supervisor: String,
+    /// The poller's own session, never watched: `tm-architect-poll` here;
+    /// `tm architect poll` sets `ARCHITECT_POLL_SESSION` (#9822).
+    pub poll_session: String,
 }
 
 impl Config {
@@ -64,8 +75,8 @@ impl Config {
     /// `root` is the Architect project directory; `home` is the user's home.
     ///
     /// # Errors
-    /// [`ConfigError`] for a `LOAD_FACTOR` Python's `float()` rejects. A bad ctx
-    /// variable is not an error here; see [`Config::problems`].
+    /// None today: every bad value lands in [`Config::problems`]. The
+    /// `Result` stays for a value that cannot fall back.
     pub fn from_env(
         root: &Path,
         home: &Path,
@@ -76,15 +87,19 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .map_or(default, PathBuf::from)
         };
-        let float = |name: &'static str, default: f64| match get(name) {
-            None => Ok(default),
-            Some(v) => py_float(&v).ok_or(ConfigError {
-                name,
-                value: v,
-                want: "number",
+        let mut problems = Vec::new();
+        // #9171 A3b-2 ruling Q4: a bad LOAD_FACTOR turns off host alerts only.
+        let load_factor = match get("LOAD_FACTOR") {
+            None => Some(LOAD_FACTOR_DEFAULT),
+            Some(v) => py_float(&v).or_else(|| {
+                problems.push(ConfigError {
+                    name: "LOAD_FACTOR",
+                    value: v,
+                    want: "number",
+                });
+                None
             }),
         };
-        let mut problems = Vec::new();
         let mut int = |name: &'static str, default: i64| match get(name) {
             None => Some(default),
             Some(v) => py_int(&v).or_else(|| {
@@ -101,7 +116,6 @@ impl Config {
         let lenient =
             |name: &str, default: f64| get(name).and_then(|v| py_float(&v)).unwrap_or(default);
         let root_text = root.to_string_lossy();
-        let load_factor = float("LOAD_FACTOR", LOAD_FACTOR_DEFAULT)?;
         let pane_ctx_window = int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
         let self_ctx_window = int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
         let self_ctx_threshold = int("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT);
@@ -133,7 +147,20 @@ impl Config {
                     band_default.stop_mem_free_pct,
                 ),
             },
+            quiet_sessions: root.join("local").join("quiet-sessions.txt"),
+            supervisor: SUPERVISOR.to_owned(),
+            poll_session: format!("{SUPERVISOR}-poll"),
         })
+    }
+
+    /// True for a session the poller never watches and whose events it drops:
+    /// [`SKIP_SESSIONS`], plus this config's supervisor and poller sessions.
+    ///
+    /// Test: `a_configured_supervisor_is_skipped_and_the_only_pane_woken`.
+    pub fn skips(&self, session: &str) -> bool {
+        SKIP_SESSIONS.contains(&session)
+            || session == self.supervisor
+            || session == self.poll_session
     }
 
     /// `<inbox>/events.jsonl`: hook events the poller turns into alerts.
@@ -155,6 +182,11 @@ impl Config {
     pub fn log(&self) -> PathBuf {
         self.inbox.join("poll.log")
     }
+
+    /// `<inbox>/poll.lock`: held by the one running poller (#9171 A3b-2).
+    pub fn lock(&self) -> PathBuf {
+        self.inbox.join("poll.lock")
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +207,12 @@ mod tests {
             c.self_ctx_dir,
             Path::new("/home/u/.trusty-tools/trusty-mpm/claude-config/projects/-arch")
         );
-        assert_eq!((c.load_factor, c.self_ctx_threshold), (1.5, Some(25)));
+        assert_eq!((c.load_factor, c.self_ctx_threshold), (Some(1.5), Some(25)));
+        assert_eq!(
+            c.quiet_sessions,
+            Path::new("/arch/local/quiet-sessions.txt")
+        );
+        assert_eq!(c.lock(), Path::new("/arch/inbox/poll.lock"));
         assert_eq!(c.band, BandConfig::default());
         assert_eq!(c.tmux_socket, None);
 
@@ -193,16 +230,17 @@ mod tests {
         let c = Config::from_env(Path::new("/arch"), Path::new("/h"), &set)?;
         assert_eq!(c.inbox, Path::new("/arch/inbox"), "empty falls back");
         assert_eq!(c.tmux_socket.as_deref(), Some(Path::new("/s")));
-        assert_eq!(c.load_factor, 2.0);
+        assert_eq!(c.load_factor, Some(2.0));
         assert_eq!(c.band.stop_free_gib, 100.0, "_env_float falls back");
         assert_eq!(c.band.hold_free_gib, 150.0);
 
+        // #9171 ruling Q4: host alerts off, the config still builds.
         let bad = |k: &str| (k == "LOAD_FACTOR").then(|| "lots".to_owned());
-        let err = Config::from_env(Path::new("/a"), Path::new("/h"), &bad);
+        let c = Config::from_env(Path::new("/a"), Path::new("/h"), &bad)?;
+        assert_eq!(c.load_factor, None);
         assert_eq!(
-            err.err().map(|e| e.name),
-            Some("LOAD_FACTOR"),
-            "Python's float() raises in host_alerts each cycle"
+            c.problems.iter().map(|p| p.name).collect::<Vec<_>>(),
+            ["LOAD_FACTOR"]
         );
         Ok(())
     }
@@ -221,7 +259,7 @@ mod tests {
             (c.pane_ctx_window, c.self_ctx_window, c.self_ctx_threshold),
             (None, None, None)
         );
-        assert_eq!(c.load_factor, 2.0, "the other variables still apply");
+        assert_eq!(c.load_factor, Some(2.0), "the other variables still apply");
         let names: Vec<_> = c
             .problems
             .iter()

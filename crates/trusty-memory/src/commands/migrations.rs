@@ -59,7 +59,7 @@ pub fn migrate_default_palace_name(registry_root: &Path) -> Result<()> {
         Err(PalaceStoreError::NotFound(_)) => return Ok(()),
         Err(e) => {
             return Err(e)
-                .with_context(|| format!("load palace metadata at {}", palace_dir.display()))
+                .with_context(|| format!("load palace metadata at {}", palace_dir.display()));
         }
     };
 

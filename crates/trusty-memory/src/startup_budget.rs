@@ -30,12 +30,12 @@
 //! [`release_after_sweep`]: crate::startup_budget::release_after_sweep
 //! [`DEFAULT_KEEP_RECENT_SECS`]: crate::startup_budget::DEFAULT_KEEP_RECENT_SECS
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::engine::palace::PalaceId;
 use crate::engine::PalaceRegistry;
+use crate::engine::palace::PalaceId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Environment variable overriding [`DEFAULT_STARTUP_OPEN_LIMIT`].

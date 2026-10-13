@@ -18,12 +18,12 @@ use std::time::Duration;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::{Drawer, PalaceRegistry};
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::core::MemoryService;
-use crate::tools::dispatch_tool;
 use crate::AppState;
+use crate::tools::dispatch_tool;
 
 /// A ready state rooted at `root`, with the mock embedder seeded.
 async fn ready_state(root: &Path) -> AppState {
@@ -554,7 +554,7 @@ impl crate::engine::embed::Embedder for FailFirstEmbedder {
 /// Test: this test.
 #[tokio::test]
 async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
-    use super::recall_stream::{recall_all_scoped, RecallAllScope};
+    use super::recall_stream::{RecallAllScope, recall_all_scoped};
     use crate::engine::embed::Embedder;
     use crate::engine::retrieval::recall_across_palaces_reporting;
     use std::sync::Arc;

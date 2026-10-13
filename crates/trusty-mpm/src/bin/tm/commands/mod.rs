@@ -18,6 +18,8 @@
 // tree whose owning session or agent is provably dead.
 pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
+// #9822: `tm architect <verb>`, daemon-less.
+pub(crate) mod architect;
 pub(crate) mod auth;
 // #6274: `tm` in a plain directory initializes a repository there instead of
 // refusing; both the guided default and `tm launch` call it before detection.
@@ -45,6 +47,8 @@ pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
+// #8454 VC: the egress guard's daemon verdict client.
+pub(crate) mod egress_verdict_client;
 // #4230: the client-side orphan-daemon check — the daemon's own `run_doctor`
 // cannot detect that the process answering it is the unsupervised one.
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn

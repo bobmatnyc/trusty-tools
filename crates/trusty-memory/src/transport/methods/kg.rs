@@ -12,13 +12,13 @@
 
 use crate::engine::store::kg::ExpandDirection;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use crate::AppState;
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::transport::api_error::ApiError;
-use crate::AppState;
 
-use super::{to_value, NoParams, PalaceParams};
+use super::{NoParams, PalaceParams, to_value};
 
 pub use crate::service::{DreamStatusPayload, KgGraphPayload, KgNeighborsPayload, KgSeedPayload};
 
@@ -166,7 +166,7 @@ pub async fn kg_graph_neighbors(
         other => {
             return Err(ApiError::bad_request(format!(
                 "direction must be in|out|both, got {other:?}"
-            )))
+            )));
         }
     };
     let max_hops = params.max_hops.clamp(1, MAX_KG_NEIGHBOR_HOPS);
@@ -283,12 +283,12 @@ pub async fn kg_delete_triple(
             return Err(ApiError::bad_request(
                 "triple id names only (subject, predicate) — it must encode \
                  base64url(subject\\0predicate\\0object) so the delete targets one triple",
-            ))
+            ));
         }
         Err(TripleIdError::Malformed) => {
             return Err(ApiError::not_found(
                 "invalid triple id — expected base64url(subject\\0predicate\\0object)",
-            ))
+            ));
         }
     };
     let closed = crate::service::MemoryService::new(state.clone())

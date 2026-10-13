@@ -15,7 +15,8 @@
 //! read as permission to run a family tool.
 //! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
 //! trust-anchor floor ([`verdict`]), [`decide`]s, applies the channel-taint
-//! arm with its policy readiness gate ([`with_taint`], #8433, #9741), and on
+//! arm with its policy readiness gate ([`with_taint_async`], #8433, #9741;
+//! the daemon's verdict first, #8454 VC), and on
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
@@ -34,6 +35,7 @@ use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::egress_guard_taint::{
     POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
 };
+use crate::commands::egress_verdict_client::cached_policy_ready;
 use crate::commands::hook_stdin::{
     HookStdinError, PM_GUARD_STDIN_TIMEOUT, exit_after_decision, read_stdin_hook_payload_strict,
 };
@@ -231,6 +233,45 @@ pub(crate) fn verdict(
     decide(read, table)
 }
 
+/// Where the channel-taint arm stands before the policy readiness gate.
+enum TaintStep<'a> {
+    /// The verdict is settled; readiness is not read.
+    Done(Verdict),
+    /// A tainted gated call: readiness decides which deny it gets.
+    Policy {
+        payload: &'a serde_json::Value,
+        taint: String,
+    },
+}
+
+/// The taint arm up to the readiness gate: a deny stands, an allow of a
+/// readable payload that [`taint_verdict`] refuses needs the policy.
+fn taint_step<'a>(
+    first: Verdict,
+    read: &'a Result<serde_json::Value, HookStdinError>,
+    home: Option<&std::path::Path>,
+) -> TaintStep<'a> {
+    match (first, read) {
+        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home) {
+            None => TaintStep::Done(Verdict::Allow),
+            Some(taint) => TaintStep::Policy { payload, taint },
+        },
+        (first, _) => TaintStep::Done(first),
+    }
+}
+
+/// The deny for a tainted gated call, given its policy readiness.
+fn taint_deny(payload: &serde_json::Value, taint: String, ready: Result<(), NotReady>) -> Verdict {
+    // #9741: readiness runs before the taint deny; both arms deny.
+    match ready {
+        Ok(()) => deny(TAINT_CHECK, taint),
+        Err(not_ready) => deny(
+            POLICY_CHECK,
+            policy_not_ready_reason(payload, &not_ready, &taint),
+        ),
+    }
+}
+
 /// [`verdict`], then the channel-taint arm for a call it allowed (#8433),
 /// with the policy readiness gate ahead of the taint deny (#9741).
 ///
@@ -239,28 +280,44 @@ pub(crate) fn verdict(
 /// What: a deny stands. An allow of a readable payload that [`taint_verdict`]
 /// refuses runs `ready`: not ready is a [`POLICY_CHECK`] deny naming the
 /// branch, ready is the [`TAINT_CHECK`] deny. `ready` runs for no other call.
+/// #8454 VC: the guard runs [`with_taint_async`]; this synchronous form,
+/// over the same steps, drives the S4 tests.
 /// Test: `with_taint_denies_an_allowed_gated_call_of_a_tainted_session`,
 /// `config_missing_denies_a_gated_call`, `ready_policy_falls_through_to_taint_deny`,
 /// `untainted_session_never_reads_the_policy`.
+#[cfg(test)]
 pub(crate) fn with_taint(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
     ready: impl FnOnce() -> Result<(), NotReady>,
 ) -> Verdict {
-    match (first, read) {
-        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home) {
-            None => Verdict::Allow,
-            // #9741: readiness runs before the taint deny; both arms deny.
-            Some(taint) => match ready() {
-                Ok(()) => deny(TAINT_CHECK, taint),
-                Err(not_ready) => deny(
-                    POLICY_CHECK,
-                    policy_not_ready_reason(payload, &not_ready, &taint),
-                ),
-            },
-        },
-        (first, _) => first,
+    match taint_step(first, read, home) {
+        TaintStep::Done(verdict) => verdict,
+        TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready()),
+    }
+}
+
+/// `with_taint` with an async readiness gate (#8454 VC).
+///
+/// Why: the readiness may come from the daemon's verdict, which is a
+/// network query; an untainted session must still never read the policy.
+/// What: the same steps as `with_taint`; `ready` is called and awaited
+/// only for a tainted gated call.
+/// Test: `untainted_session_never_queries_the_daemon`,
+/// `daemon_unreachable_falls_back_to_inline_load_never_allow`.
+pub(crate) async fn with_taint_async<F>(
+    first: Verdict,
+    read: &Result<serde_json::Value, HookStdinError>,
+    home: Option<&std::path::Path>,
+    ready: impl FnOnce() -> F,
+) -> Verdict
+where
+    F: std::future::Future<Output = Result<(), NotReady>>,
+{
+    match taint_step(first, read, home) {
+        TaintStep::Done(verdict) => verdict,
+        TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready().await),
     }
 }
 
@@ -297,8 +354,9 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     let first = verdict(&read, &FamilyTable::builtin(), anchor);
     let home = env.home.as_deref();
     // #9741: the policy loads under the same home the taint is read from.
-    let ready = || policy_ready(home);
-    let Verdict::Deny { check, reason } = with_taint(first, &read, home, ready) else {
+    // #8454 VC: the daemon's verdict first; the inline load where none is served.
+    let ready = || cached_policy_ready(url, home, || policy_ready(home));
+    let Verdict::Deny { check, reason } = with_taint_async(first, &read, home, ready).await else {
         return None;
     };
     // An unreadable payload names nothing: audit it with every field empty.
@@ -315,8 +373,8 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
 /// What: [`guard_once`] under [`deny_on_panic`]. A deny is printed as the one
 /// stdout object and the process exits 0 at once, so a stdin that never
 /// closed cannot hold the runtime's shutdown past Claude Code's hook timeout.
-/// An allow returns `Ok(())` with nothing printed. `url` is used only for the
-/// audit POST.
+/// An allow returns `Ok(())` with nothing printed. `url` is the daemon the
+/// taint arm asks for its policy verdict (#8454 VC) and the audit POST goes to.
 /// Test: `tests/tm_hook_egress_guard_8454.rs`.
 pub(crate) async fn egress_guard(url: &str) -> anyhow::Result<()> {
     if let Some(response) = deny_on_panic(guard_once(url)).await {

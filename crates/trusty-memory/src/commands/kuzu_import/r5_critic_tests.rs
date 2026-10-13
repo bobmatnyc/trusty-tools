@@ -15,7 +15,7 @@ use super::apply::HandleSink;
 use super::palace_io::open_palace_for_write;
 use super::report::{format_report, format_totals};
 use super::retract::Retraction;
-use super::screen::{screen, tally, SecretRule};
+use super::screen::{SecretRule, screen, tally};
 use super::tests::{export_of, fixture, memory_row, palace, write_run};
 use super::*;
 

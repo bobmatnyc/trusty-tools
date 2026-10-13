@@ -22,12 +22,12 @@ use std::time::Duration;
 
 use crate::engine::palace::Palace;
 use crate::engine::retrieval::PalaceHandle;
-use crate::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
-use crate::engine::store::kg_redb::{check_backup_name, restore_palace_snapshot, SnapshotManifest};
 use crate::engine::store::OpenIntent;
+use crate::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST;
+use crate::engine::store::kg_redb::{SnapshotManifest, check_backup_name, restore_palace_snapshot};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
-use trusty_common::uds::{probe_socket_verdict, SocketVerdict};
+use serde_json::{Value, json};
+use trusty_common::uds::{SocketVerdict, probe_socket_verdict};
 
 use crate::tools::palace_backup::snapshot_json;
 

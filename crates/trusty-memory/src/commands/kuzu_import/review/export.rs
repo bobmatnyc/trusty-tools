@@ -14,14 +14,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::engine::filter::{
-    classify_secret, find_secret_spans, mask_content, MaskError, SecretRule, SecretSpan,
-    SECRET_FILTER_VERSION,
+    MaskError, SECRET_FILTER_VERSION, SecretRule, SecretSpan, classify_secret, find_secret_spans,
+    mask_content,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::super::bridge::KuzuMemoryRow;
-use super::super::mapping::{map_memory, MappedMemory};
+use super::super::mapping::{MappedMemory, map_memory};
 use super::super::screen::screen;
 use super::ReviewError;
 

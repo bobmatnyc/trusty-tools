@@ -25,9 +25,9 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use trusty_common::memory_rpc::call_memory_tool_at_with_timeout;
 use trusty_common::monitor::memory_client::MemoryClient;
-use trusty_memory::engine::palace::{Palace, PalaceId};
-use trusty_memory::engine::PalaceRegistry;
 use trusty_memory::AppState;
+use trusty_memory::engine::PalaceRegistry;
+use trusty_memory::engine::palace::{Palace, PalaceId};
 
 /// Palaces to seed. Larger than one poll's worth of rows and small enough that
 /// the whole estate is created in well under a second.

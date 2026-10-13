@@ -16,7 +16,7 @@
 //! Test: `tool_definitions_lists_all_tools` in `tools::tests` verifies the
 //! names appear in the merged list.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Build the chat-session + dream/consolidation tool schemas conditioned on
 /// whether a default palace is configured.

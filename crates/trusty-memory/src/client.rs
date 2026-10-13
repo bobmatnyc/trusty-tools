@@ -25,8 +25,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context as _, Result};
-use serde_json::{json, Value};
+use anyhow::{Context as _, Result, anyhow};
+use serde_json::{Value, json};
 use trusty_common::uds::send_framed_request_capped;
 use trusty_common::uds::server::RpcResponse;
 
@@ -186,9 +186,9 @@ mod tests {
             + Send
             + 'static,
     {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
-        use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
 
         let status_calls = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&status_calls);

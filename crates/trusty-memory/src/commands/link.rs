@@ -22,8 +22,8 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 
 use crate::project_root::{
-    find_project_root, project_slug_from_basename, read_project_pin, write_project_pin, ProjectPin,
-    PIN_FILE_REL,
+    PIN_FILE_REL, ProjectPin, find_project_root, project_slug_from_basename, read_project_pin,
+    write_project_pin,
 };
 
 /// Entry point for `trusty-memory link [--path <dir>] [--slug <slug>]

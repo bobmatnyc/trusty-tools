@@ -24,8 +24,8 @@ use crate::engine::retrieval::{shared_embedder, shared_embedder_initialized};
 use sha2::{Digest, Sha256};
 
 use super::bridge::{KuzuExport, SystemRunner};
-use super::discovery::{resolve_from, DiscoveredStore, STORE_DB_NAME, STORE_DIR_NAME};
-use super::tests::{args_for, FakeDaemon};
+use super::discovery::{DiscoveredStore, STORE_DB_NAME, STORE_DIR_NAME, resolve_from};
+use super::tests::{FakeDaemon, args_for};
 use super::*;
 
 /// Names an interpreter that can `import kuzu` and `import kuzu_memory`.
@@ -224,15 +224,17 @@ fn assert_rows(export: &KuzuExport, full: bool, case: &str) {
         .iter()
         .find(|m| m.id.as_deref() == Some("m0"))
         .expect("m0");
-    assert!(m0
-        .content
-        .as_deref()
-        .is_some_and(|c| c.starts_with("synthetic memory 0 about widget 0.")));
+    assert!(
+        m0.content
+            .as_deref()
+            .is_some_and(|c| c.starts_with("synthetic memory 0 about widget 0."))
+    );
     assert_eq!(m0.memory_type.as_deref(), Some("semantic"));
-    assert!(m0
-        .created_at
-        .as_deref()
-        .is_some_and(|c| c.starts_with("2025-01-02")));
+    assert!(
+        m0.created_at
+            .as_deref()
+            .is_some_and(|c| c.starts_with("2025-01-02"))
+    );
     let has_hash = export.memory_columns.iter().any(|c| c == "content_hash");
     assert_eq!(has_hash, full, "[{case}] content_hash column");
     assert_eq!(m0.content_hash.as_deref(), full.then_some("hash0"));

@@ -19,8 +19,8 @@ use anyhow::{Context, Result};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard upper bound on rows retained in the activity log.
 ///
@@ -539,20 +539,20 @@ fn entry_matches(entry: &ActivityEntry, filter: &ActivityFilter) -> bool {
             _ => return false,
         }
     }
-    if let Some(s) = filter.source {
-        if entry.source != s {
-            return false;
-        }
+    if let Some(s) = filter.source
+        && entry.source != s
+    {
+        return false;
     }
-    if let Some(t) = filter.since {
-        if entry.timestamp < t {
-            return false;
-        }
+    if let Some(t) = filter.since
+        && entry.timestamp < t
+    {
+        return false;
     }
-    if let Some(t) = filter.until {
-        if entry.timestamp > t {
-            return false;
-        }
+    if let Some(t) = filter.until
+        && entry.timestamp > t
+    {
+        return false;
     }
     true
 }
@@ -742,9 +742,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(alpha.len(), 2);
-        assert!(alpha
-            .iter()
-            .all(|e| e.palace_id.as_deref() == Some("alpha")));
+        assert!(
+            alpha
+                .iter()
+                .all(|e| e.palace_id.as_deref() == Some("alpha"))
+        );
 
         // Time filter: until in the past must filter everything out.
         let none = log

@@ -17,13 +17,13 @@ use crate::engine::store::kg::{ExpandDirection, Triple};
 use crate::engine::store::palace_format::is_format_refusal;
 use crate::engine::{PalaceHandle, PalaceRegistry};
 
+use super::MemoryService;
 use super::core::KG_GRAPH_MAX_TRIPLES;
 use super::helpers::{list_palaces_blocking, refresh_gaps_cache};
 use super::types::{
     DreamStatusPayload, KgAssertBody, KgGraphPayload, KgNeighborsPayload, KgNodeView,
     KgSeedPayload, ServiceError, ServiceResult,
 };
-use super::MemoryService;
 
 /// The three adjacency-derived graph counts, computed on the blocking pool.
 ///
@@ -78,8 +78,7 @@ pub(crate) const MAX_KG_LIST_LIMIT: usize = 200;
 
 /// #8733: why every maintenance entry point (`dream_run`, the MCP dream and
 /// compact tools) refuses in a process that does not hold the lease.
-pub(crate) const MAINTENANCE_LEASE_NOT_HELD: &str =
-    "this process does not hold this data root's maintenance lease (another \
+pub(crate) const MAINTENANCE_LEASE_NOT_HELD: &str = "this process does not hold this data root's maintenance lease (another \
      process holds it, or maintenance.lock could not be opened); see the pid in \
      maintenance.lock (#8733)";
 

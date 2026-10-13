@@ -8,7 +8,7 @@
 //! Test: `tool_definitions_lists_all_tools` counts it; `tests/generated_docs.rs`
 //! pins its README row.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// JSON schema descriptor for the `console_metrics` MCP tool.
 ///

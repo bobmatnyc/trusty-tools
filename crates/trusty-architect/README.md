@@ -52,6 +52,12 @@ are ported by name in `tests/classify_ported.rs`, `tests/quiet_ported.rs` and
   and the box reads `empty` or `suggestion`; it presses Enter only when the
   box text equals the pointer, and erases only its own trailing text.
   `dispatch_wake` keeps the pending count until a send succeeds.
+  A3b-2 adds the cycle and loop: `Runner::run_once` senses, dedups, appends
+  to `alerts.jsonl`, wakes and saves, committing nothing before the alerts
+  are written; `Runner::run_loop` holds `poll.lock` and sleeps once per
+  cycle. `PollSession` never saves over a state file it cannot read.
+  Nothing in this crate starts the loop yet; the Python poller stays the
+  live one.
 - `Clock` (`SystemClock`, `FakeClock`) and `ScriptedTmux`: the time and tmux
   seams the wake tests script.
 

@@ -15,8 +15,8 @@
 
 use serde_json::json;
 use tempfile::TempDir;
-use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
+use trusty_memory::tools::dispatch_tool;
 
 /// Build a ready `AppState` plus two tempdirs: the palace data root and a
 /// marker-free "project" dir used as the validation cwd.

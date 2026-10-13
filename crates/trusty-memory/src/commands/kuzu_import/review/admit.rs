@@ -12,14 +12,14 @@
 //! the row as it was, so the import refuses it as before.
 //! Test: `review::admit_tests`.
 
-use crate::engine::filter::{find_secret_spans, SECRET_FILTER_VERSION};
+use crate::engine::filter::{SECRET_FILTER_VERSION, find_secret_spans};
 
 use super::super::apply::StorePlan;
 use super::super::ledger::MemoryPlan;
 use super::super::mapping::OVERRIDE_TAG;
 use super::super::screen::screen;
 use super::carve_out::row_admissible;
-use super::export::{classify_mapped, MaskedRecord, RowVerdict};
+use super::export::{MaskedRecord, RowVerdict, classify_mapped};
 use super::ledger::{Lookup, ReviewLedger};
 use super::ops::apply_ops;
 use super::verdict::Verdict;

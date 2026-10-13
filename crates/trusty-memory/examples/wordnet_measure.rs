@@ -13,7 +13,7 @@
 //! Run: `SKIP_UI_BUILD=1 cargo run --release -p trusty-memory --example wordnet_measure`
 
 use std::time::Instant;
-use trusty_memory::kg_extract::{extract_triples, ExtractInput};
+use trusty_memory::kg_extract::{ExtractInput, extract_triples};
 use trusty_memory::wordnet_pos::WordNetPos;
 use uuid::Uuid;
 

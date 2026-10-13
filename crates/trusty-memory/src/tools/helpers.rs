@@ -11,15 +11,15 @@
 //! tests in `tools::tests`.
 
 use super::bm25::bm25_index_enqueue;
-use crate::attribution::{session_tag_from_tags, CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
+use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME, session_tag_from_tags};
 use crate::engine::filter::{FilterConfig, MCP_MIN_TOKENS};
 use crate::engine::palace::{DrawerType, PalaceId, RoomType};
-use crate::engine::retrieval::{admit_tier_c, RememberOptions, TierCAdmission, VerifyNotStored};
+use crate::engine::retrieval::{RememberOptions, TierCAdmission, VerifyNotStored, admit_tier_c};
 use crate::engine::timeouts::{self, OpBudget};
-use crate::kg_extract::{extract_triples, ExtractInput};
+use crate::kg_extract::{ExtractInput, extract_triples};
 use crate::{ActivitySource, AppState, DaemonEvent};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,

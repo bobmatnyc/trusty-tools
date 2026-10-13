@@ -19,8 +19,8 @@
 
 use crate::engine::palace::Palace;
 use crate::engine::retrieval::PalaceHandle;
-use crate::engine::store::room_plan::{plan_rooms, RoomPlanAction, RoomPlanEntry};
-use crate::engine::store::{backfill_rooms, OpenIntent};
+use crate::engine::store::room_plan::{RoomPlanAction, RoomPlanEntry, plan_rooms};
+use crate::engine::store::{OpenIntent, backfill_rooms};
 use crate::engine::{MaintenanceLease, PalaceRegistry};
 use anyhow::{Context, Result};
 

@@ -179,8 +179,8 @@ pub fn spawn_idle_evict_ticker_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
     use serial_test::serial;
     use std::sync::atomic::Ordering;
 

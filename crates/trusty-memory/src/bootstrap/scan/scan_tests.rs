@@ -70,12 +70,16 @@ resolver = "2"
     );
     let (triples, _summary, subject) = scan_project(&root, "fallback").expect("scan_project");
     assert_eq!(subject, "trusty-tools");
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_workspace_member" && t.object == "crates/foo"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_workspace_member" && t.object == "crates/bar"));
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_workspace_member" && t.object == "crates/foo")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_workspace_member" && t.object == "crates/bar")
+    );
 }
 
 /// Why: package.json is the JS/TS entry point; pin name/version + a
@@ -97,18 +101,26 @@ fn scan_project_extracts_package_json() {
     );
     let (triples, _summary, subject) = scan_project(tmp.path(), "fb").expect("scan");
     assert_eq!(subject, "my-app");
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_language" && t.object == "JavaScript"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_version" && t.object == "0.5.0"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_dependency" && t.object == "react"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_dependency" && t.object == "lodash"));
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_language" && t.object == "JavaScript")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_version" && t.object == "0.5.0")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_dependency" && t.object == "react")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_dependency" && t.object == "lodash")
+    );
 }
 
 /// Why: pyproject.toml uses PEP-621 `[project]` table; confirm
@@ -128,15 +140,21 @@ requires-python = ">=3.10"
     );
     let (triples, _summary, subject) = scan_project(tmp.path(), "fb").expect("scan");
     assert_eq!(subject, "pydemo");
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_language" && t.object == "Python"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_version" && t.object == "2.0.1"));
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "requires_python" && t.object == ">=3.10"));
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_language" && t.object == "Python")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_version" && t.object == "2.0.1")
+    );
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "requires_python" && t.object == ">=3.10")
+    );
 }
 
 /// Why: Go modules name themselves in `go.mod`; confirm module-name
@@ -151,9 +169,11 @@ fn scan_project_extracts_go_mod() {
     );
     let (triples, _summary, subject) = scan_project(tmp.path(), "fb").expect("scan");
     assert_eq!(subject, "github.com/example/widget");
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "has_language" && t.object == "Go"));
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "has_language" && t.object == "Go")
+    );
 }
 
 /// Why: CLAUDE.md's first H1 becomes the project description; pin the
@@ -201,9 +221,11 @@ version = "0.1.0"
         "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:example/demo.git\n",
     );
     let (triples, _summary, _) = scan_project(tmp.path(), "fb").expect("scan");
-    assert!(triples
-        .iter()
-        .any(|t| t.predicate == "source_repo" && t.object == "git@github.com:example/demo.git"));
+    assert!(
+        triples
+            .iter()
+            .any(|t| t.predicate == "source_repo" && t.object == "git@github.com:example/demo.git")
+    );
 }
 
 /// Why: When no manifest matches, the fallback subject (palace id) must

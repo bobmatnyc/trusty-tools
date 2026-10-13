@@ -89,7 +89,7 @@ digit or `_`.
 
 | Feature | Default | What it adds |
 |---|---|---|
-| `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`. No store code. |
+| `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`, and on Unix the tier-3 client `granted`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
 | `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`) and the Keeper backend (`store::keeper`). Unix only. Implies `store`. |
@@ -334,6 +334,38 @@ before its next key. A refusal is still answered with its own error. To turn the
 the machine config `~/.trusty-tools/trusty-common/config.yaml`. A project's
 tracked `.trusty-tools/trusty-secrets.yaml` cannot do this: `audit: false`
 there is refused with `tracked_audit_refused`.
+
+## Reading a value inside `tm secrets exec`
+
+A program that `tm secrets exec` started holds an exec grant. The `granted`
+module (Unix, `api` feature) reads one granted value with one blocking call:
+
+```toml
+trusty-secrets = { version = "0.2", default-features = false, features = ["api"] }
+```
+
+```rust,no_run
+use trusty_secrets::SecretKey;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let value = trusty_secrets::granted::resolve(&SecretKey::new("API_KEY")?)?;
+    assert!(!value.is_empty());
+    Ok(())
+}
+```
+
+The client reads the grant token from the fd named by
+`TRUSTY_SECRETS_TOKEN_FD` and puts it back on the same fd number, so the
+reading process and its own descendants can resolve too. The grant reaches a
+linear chain, not siblings: the token is one pipe, and the first reader drains
+it for every process that shares it. A sibling of an earlier reader (the second
+command in `sh -c 'migrate && serve'`) finds the pipe drained and fails closed
+with `GrantedError::InvalidToken`; no value is exposed. It dials `~/.trusty-tools/trusty-secrets/secrets.sock`
+only after checking the directory is 0700 and the socket 0600, both owned by
+you, and waits up to 135 s. It resolves only: it never grants, revokes or
+starts the server. Every failure is a `GrantedError`; a server refusal
+carries the wire code and kind. An async caller wraps the call in
+`spawn_blocking`.
 
 ## Library example
 

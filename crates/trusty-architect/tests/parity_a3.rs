@@ -271,6 +271,49 @@ struct EventRow<'a> {
     events_offset: Option<u64>,
 }
 
+/// #9171 A3b-2 ruling Q2: the one events case where the port holds its
+/// offset at the last newline and the prototype moves past a partial line.
+const EVENTS_RULED: &str = "truncated_last_line_then_completed";
+
+/// The ruled case, as the port must read it: the partial line is held, then
+/// read whole once completed (the prototype loses it and stops at 115).
+fn assert_events_ruling(rows: &[String]) -> TestResult {
+    let ruled: Vec<Value> = rows
+        .iter()
+        .map(|r| serde_json::from_str::<Value>(r))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|v| v["case"] == EVENTS_RULED)
+        .collect();
+    let details = |v: &Value| -> Vec<String> {
+        arr(&v["alerts"])
+            .iter()
+            .map(|a| s(&a["detail"]).to_owned())
+            .collect()
+    };
+    assert_eq!(ruled.len(), 2);
+    assert_eq!(details(&ruled[0]), ["whole"]);
+    assert_eq!(ruled[0]["events_offset"], 95, "held after the whole line");
+    assert_eq!(details(&ruled[1]), ["agent_needs_input", "next"]);
+    assert_eq!(ruled[1]["events_offset"], 264);
+    Ok(())
+}
+
+/// `assert_golden` over every row but the [`EVENTS_RULED`] case's.
+fn assert_events_golden(rows: &[String]) -> TestResult {
+    let golden = fs::read_to_string(fixture_dir().join("events.jsonl"))?;
+    let keep = |r: &&str| !r.contains(&format!("\"case\": \"{EVENTS_RULED}\""));
+    let want: Vec<&str> = golden.lines().filter(keep).collect();
+    let got: Vec<&str> = rows.iter().map(String::as_str).filter(keep).collect();
+    assert_eq!(got, want, "events.jsonl outside the ruled case");
+    assert_eq!(
+        golden.lines().count() - want.len(),
+        2,
+        "the ruled case is in the golden"
+    );
+    assert_events_ruling(rows)
+}
+
 #[test]
 fn read_events_matches_python_goldens() -> TestResult {
     let c = corpus()?;
@@ -306,7 +349,7 @@ fn read_events_matches_python_goldens() -> TestResult {
             rows.push(to_python_json(&row, false)?);
         }
     }
-    assert_golden("events.jsonl", &rows)
+    assert_events_golden(&rows)
 }
 
 fn materialize(dir: &Path, files: &[Value]) -> io::Result<()> {

@@ -6,10 +6,10 @@
 //! What: [`handle_message`].
 //! Test: `lib_tests` (initialize, tools/list, tools/call, notifications).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use trusty_mcp::initialize_response;
 
-use crate::{openrpc, tools, AppState};
+use crate::{AppState, openrpc, tools};
 
 /// Handle a single MCP JSON-RPC message and produce its response.
 ///

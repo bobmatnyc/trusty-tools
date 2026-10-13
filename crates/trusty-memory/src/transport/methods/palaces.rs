@@ -21,12 +21,12 @@
 //! `rpc_palace_get_*`, `rpc_palaces_list_*`.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::transport::api_error::ApiError;
 use crate::{ActivitySource, AppState};
 
-use super::{to_value, CallerParams, NoParams, PalaceParams};
+use super::{CallerParams, NoParams, PalaceParams, to_value};
 
 pub use crate::service::StatusPayload;
 

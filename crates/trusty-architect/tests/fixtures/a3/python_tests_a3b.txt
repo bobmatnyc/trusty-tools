@@ -1,9 +1,8 @@
 # #9171 A3b: every prototype test this phase owns, by Python name.
 # tests/ported_names.rs fails when one has no Rust test of the same name
 # preceded by a `// Python: <name>` line. Source files at Architect 988152c.
-# A3b-1 (the send path) owns plan cases 1-10 below; A3b-2 appends cases 11-19
-# (quiet/exited, windows, architect_busy) and raises the count in
-# ported_names.rs.
+# A3b-1 (the send path) owns plan cases 1-10; A3b-2 owns cases 11-19
+# (quiet/exited, windows, architect_busy).
 # tests/test_fleet_poll.py: wake(), dispatch_wake(), send_to_supervisor()
 test_wake_reports_no_input_box_found_not_a_misleading_box_state
 test_wake_reports_input_typed_when_a_real_box_holds_a_draft
@@ -15,3 +14,15 @@ test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once
 test_dispatch_wake_carries_pending_on_a_failed_confirm
 test_dispatch_wake_none_when_nothing_pending
 test_send_refuses_any_pane_outside_tm_supervisor
+# tests/test_fleet_poll.py: cycle-level quiet-sessions and exited suppression
+test_quiet_session_suppresses_idle_but_not_ctx
+test_quiet_sessions_file_missing_means_nothing_is_quiet
+test_exited_suppressed_for_a_fixture_shell_pane_but_not_a_real_one
+test_exited_suppressed_for_a_vanished_fixture_session_but_not_a_real_one
+# scripts/test_fleet_poll_windows.py
+test_mismatch_is_planned_and_match_is_left_alone
+test_non_tm_sessions_are_ignored
+test_runner_renames_with_exact_target_and_no_send_keys
+# scripts/test_fleet_poll_watchdog.py:203,211 (Architect ruling Q3)
+test_architect_busy_reads_spinner
+test_architect_busy_completed_turn_is_idle

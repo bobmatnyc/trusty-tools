@@ -11,12 +11,12 @@
 //! service-layer unit tests live here too (1500-SLOC test cap applies).
 //! Test: `drawer_*`, `recall_entry_*`, and `list_drawers_*` in `service::tests`.
 
+use crate::AppState;
+use crate::engine::PalaceHandle;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::retrieval::RecallResult;
-use crate::engine::PalaceHandle;
-use crate::AppState;
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -536,12 +536,12 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
 /// Test: indirectly via `kg_gaps_endpoint_returns_cached_gaps`.
 pub async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
     let mut gaps = handle.kg.knowledge_gaps();
-    if let Ok(api_key) = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY) {
-        if !api_key.is_empty() {
-            for gap in gaps.iter_mut() {
-                if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
-                    gap.suggested_exploration = enriched;
-                }
+    if let Ok(api_key) = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
+        && !api_key.is_empty()
+    {
+        for gap in gaps.iter_mut() {
+            if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
+                gap.suggested_exploration = enriched;
             }
         }
     }

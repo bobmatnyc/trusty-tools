@@ -9,7 +9,9 @@
 //! - `api` — validated names ([`SecretKey`], [`VaultName`], …), the
 //!   [`SecretRef`] grammar, the redacting [`SecretValue`], the `secrets.*`
 //!   method request/response types, [`api::mask_secret`], the console
-//!   bridge's [`api::BridgeAssertion`] (#9066), and [`SecretsError`].
+//!   bridge's [`api::BridgeAssertion`] (#9066), and [`SecretsError`]. On
+//!   Unix it also carries `granted`, the blocking tier-3 client a process
+//!   `tm secrets exec` granted uses to resolve a value (S9, #9071).
 //! - `store` — the [`store::SecretBackend`] trait and its Keychain
 //!   implementation, the names-only [`store::NamesIndex`], scope resolution,
 //!   config resolution, and the in-process
@@ -66,6 +68,10 @@ pub mod ancestry;
 mod ancestry_fakes;
 #[cfg(feature = "api")]
 pub mod api;
+// #9071: S9, the tier-3 client for exec-granted processes. Top level, not in
+// `api`, because it touches the filesystem and a socket.
+#[cfg(all(unix, feature = "api"))]
+pub mod granted;
 #[cfg(feature = "store")]
 pub mod store;
 // #9065: S2 — the on-demand socket. trusty-common's UDS stack is Unix-only.

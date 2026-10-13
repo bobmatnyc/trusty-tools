@@ -51,9 +51,9 @@ use anyhow::Result;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-use crate::hook_emit::{post_hook_event, HookEventPayload};
+use crate::hook_emit::{HookEventPayload, post_hook_event};
 use crate::prompt_log::{PromptLogEntry, PromptLogger, RecallQueryShape};
-use crate::{hook_prompt_excerpt, HookType, InjectionKind};
+use crate::{HookType, InjectionKind, hook_prompt_excerpt};
 
 use crate::engine::retrieval::DEFAULT_RELEVANCE_FLOOR;
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};
@@ -621,10 +621,10 @@ fn parse_user_prompt(stdin_payload: &str) -> String {
     if stdin_payload.trim().is_empty() {
         return String::new();
     }
-    if let Ok(value) = serde_json::from_str::<Value>(stdin_payload) {
-        if let Some(p) = value.get("prompt").and_then(|v| v.as_str()) {
-            return p.trim().to_string();
-        }
+    if let Ok(value) = serde_json::from_str::<Value>(stdin_payload)
+        && let Some(p) = value.get("prompt").and_then(|v| v.as_str())
+    {
+        return p.trim().to_string();
     }
     stdin_payload.trim().to_string()
 }

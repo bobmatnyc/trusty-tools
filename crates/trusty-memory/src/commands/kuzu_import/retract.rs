@@ -15,8 +15,8 @@ use std::collections::HashSet;
 use crate::engine::store::Triple;
 use uuid::Uuid;
 
-use super::apply::{fail, PalaceSink, PalaceView, StoreCounts};
-use super::mapping::{drawer_subject, ORIGIN_TAG};
+use super::apply::{PalaceSink, PalaceView, StoreCounts, fail};
+use super::mapping::{ORIGIN_TAG, drawer_subject};
 
 /// One closed edge: the memory whose drawer it hung from, and its predicate
 /// family (`mentions` or `relates_to`) — never the object.
@@ -65,11 +65,11 @@ pub async fn retract_stale(
             if keep.contains(&(t.subject.clone(), t.predicate.clone(), t.object.clone())) {
                 continue;
             }
-            if let Some(s) = sink {
-                if let Err(e) = s.retract_triple(&t).await {
-                    fail(c, "retract triple", &e);
-                    continue;
-                }
+            if let Some(s) = sink
+                && let Err(e) = s.retract_triple(&t).await
+            {
+                fail(c, "retract triple", &e);
+                continue;
             }
             tracing::info!(%memory_id, family, "kuzu import: retracted an edge the source no longer has");
             c.retracted.push(Retraction {

@@ -14,19 +14,19 @@
 //! `dispatch_room_rename_leaves_drawers_in_place`,
 //! `dispatch_room_rename_rejects_a_taken_name` in `tools::tests`.
 
-use crate::engine::room_identity::{parse_room_preserving_case, room_type_tag, DEFAULT_WING_ID};
+use crate::engine::room_identity::{DEFAULT_WING_ID, parse_room_preserving_case, room_type_tag};
 use crate::engine::store::rooms::{
-    create_room, list_room_summaries, rename_room, resolve_room_selector, RoomSummary,
+    RoomSummary, create_room, list_room_summaries, rename_room, resolve_room_selector,
 };
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
 // #6318: `room_list` reads, so it falls back to a palace index; `room_create`
 // and `room_rename` write, so they keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 use crate::AppState;
 
 /// Validate the reserved `wing` argument.

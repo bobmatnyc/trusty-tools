@@ -33,10 +33,10 @@ use trusty_memory::tools::dispatch_tool;
 /// Test: used by the test below.
 async fn poll_corpus_for(lane: &Bm25Lane, palace: &str, query: &str) -> Vec<String> {
     for _ in 0..100 {
-        if let Ok(hits) = lane.search(palace, query, 10).await {
-            if !hits.is_empty() {
-                return hits.into_iter().map(|h| h.doc_id).collect();
-            }
+        if let Ok(hits) = lane.search(palace, query, 10).await
+            && !hits.is_empty()
+        {
+            return hits.into_iter().map(|h| h.doc_id).collect();
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

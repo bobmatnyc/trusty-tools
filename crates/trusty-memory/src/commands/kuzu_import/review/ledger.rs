@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::export::FILE_MODE;
-use super::verdict::{sha256_hex, LedgerEntry, LEDGER_SCHEMA};
 use super::ReviewError;
+use super::export::FILE_MODE;
+use super::verdict::{LEDGER_SCHEMA, LedgerEntry, sha256_hex};
 
 /// The ledger file inside a run directory.
 pub(crate) const LEDGER_FILE: &str = "ledger.jsonl";
@@ -321,7 +321,7 @@ pub(crate) fn load_sealed(path: &Path) -> Result<ReviewLedger, LedgerError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(LedgerError::Unsealed {
                 path: path.to_path_buf(),
-            })
+            });
         }
         Err(e) => return Err(io_err("read", &seal_path)(e)),
     };

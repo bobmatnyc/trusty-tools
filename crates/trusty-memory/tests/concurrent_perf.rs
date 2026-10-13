@@ -32,7 +32,7 @@
 //!   `cargo test -p trusty-memory --test concurrent_perf -- --include-ignored --nocapture`.
 
 use futures::future::join_all;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -114,7 +114,7 @@ impl Probe {
         id: usize,
         method: &'static str,
         call: F,
-    ) -> impl Future<Output = F::Output> {
+    ) -> impl Future<Output = F::Output> + use<F> {
         let in_flight = Arc::clone(&self.in_flight);
         in_flight
             .lock()
@@ -902,7 +902,9 @@ async fn burst_body(probe: Probe) {
     println!();
     println!("=== test_burst (daemon v{version}) ===");
     println!("  n={n}  wall={total_elapsed:?}  throughput={throughput:.1} req/s");
-    println!("  errors={errors} (transport={transport_errors} rpc={rpc_errors})  error_rate={error_rate:.2}%");
+    println!(
+        "  errors={errors} (transport={transport_errors} rpc={rpc_errors})  error_rate={error_rate:.2}%"
+    );
     for s in &sample_errors {
         println!("    sample: {s}");
     }

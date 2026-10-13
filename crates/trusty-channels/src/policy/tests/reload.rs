@@ -346,6 +346,45 @@ fn host_fault_on_an_unserved_entry_denies_all_on_refresh() {
     assert!(filtered.report().denied);
 }
 
+/// 🔴 #8454 VC (R1): a loader stamps a nonzero digest of its source
+/// fingerprint; a no-op refresh keeps it and a reload moves it, so a cache
+/// keyed on it sees every reload.
+#[test]
+fn loader_report_carries_a_fingerprint_that_follows_its_sources() {
+    let (repo, home, mut loader) = loaded();
+    let first = loader.report().fingerprint;
+    assert_ne!(first, 0, "a loader report must carry a fingerprint");
+    assert!(!loader.refresh(), "nothing changed");
+    assert_eq!(
+        loader.report().fingerprint,
+        first,
+        "a no-op refresh moved it"
+    );
+    repo.commit_routes(&bob_and_eve());
+    assert!(loader.refresh());
+    let second = loader.report().fingerprint;
+    assert_ne!(second, 0);
+    assert_ne!(second, first, "a reviewed change kept the old fingerprint");
+    // A host fault is a reload too: the denied report is stamped as well.
+    home.write_host("channels:\n  version: 1\n  surprise: true\n");
+    assert!(loader.refresh());
+    assert!(loader.report().denied);
+    assert_ne!(loader.report().fingerprint, 0);
+    assert_ne!(loader.report().fingerprint, second);
+}
+
+/// 🔴 #8454 VC (R1): a one-shot load has no loader fingerprint, so it is 0,
+/// the value a cache must never key on.
+#[test]
+fn one_shot_load_has_no_fingerprint() {
+    let repo = Repo::init("main");
+    repo.commit_routes(&bob());
+    let home = Home::listing(&[repo.dir()]);
+    let report = load_effective(&home.request());
+    assert_eq!(names(&report), ["bob-dm"]);
+    assert_eq!(report.fingerprint, 0);
+}
+
 // ── #9808: the fingerprint describes the bytes the load read ──
 
 /// A read that sees a change the sources drop again before the next
@@ -564,4 +603,41 @@ fn persistent_change_during_load_reloads_once_then_settles() {
     );
     assert_eq!(names(loader.report()), ["bob-dm", "eve-dm"]);
     assert!(!loader.refresh(), "the kept change never settled");
+}
+
+/// 🔴 #8454 VC: a load that did not settle reports fingerprint 0, the value
+/// the egress verdict route never serves, on both apply paths; a settled
+/// load reports the digest of the fingerprint it kept.
+#[test]
+fn unsettled_load_reports_fingerprint_zero() {
+    let (repo, home, mut loader) = loaded();
+    let settled = loader.report().fingerprint;
+    assert_ne!(settled, 0, "a settled load must carry a fingerprint");
+    assert_eq!(loader.kept_digest(), Some(settled), "not the kept digest");
+    // The project path: eve's route appears and is reverted inside the read.
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "unrelated"]);
+    assert!(loader.refresh_with(eve_then_back(&repo)));
+    assert_eq!(loader.kept_digest(), None, "the flipped load settled");
+    assert_eq!(
+        loader.report().fingerprint,
+        0,
+        "#8454 VC: an unsettled load was stamped"
+    );
+    assert!(loader.refresh());
+    let resettled = loader.report().fingerprint;
+    assert_ne!(resettled, 0);
+    assert_eq!(loader.kept_digest(), Some(resettled));
+    // The host-fault path: the load reads a faulty host file, then it is fixed.
+    let good = host_yaml(&[repo.dir()]);
+    loader.reload_with(flip_during_load(
+        || home.write_host("channels:\n  version: 1\n  surprise: true\n"),
+        || home.write_host(&good),
+    ));
+    assert!(loader.report().denied, "the load did not read the fault");
+    assert_eq!(loader.kept_digest(), None, "the flipped host load settled");
+    assert_eq!(
+        loader.report().fingerprint,
+        0,
+        "#8454 VC: an unsettled denied load was stamped"
+    );
 }
