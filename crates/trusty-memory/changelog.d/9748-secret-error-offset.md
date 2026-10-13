@@ -1,0 +1,2 @@
+Changed
+- `FilterReject::PotentialSecret` now carries `offset` (the byte offset of the hit in the caller's content) and `rule` (a `SecretRule`) instead of `token`, a preview holding the first four characters and the length of the flagged value. The error message names the offset and the rule label, and each refusal logs one WARN line with the same two fields; neither carries any part of the value or its length ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))

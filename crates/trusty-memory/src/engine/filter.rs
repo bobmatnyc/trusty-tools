@@ -180,18 +180,23 @@ pub enum FilterReject {
     ///
     /// Why (issue #1481): the content gate must keep blocking genuine
     /// credentials so they never land in palace storage, while NOT blocking
-    /// the safe case of git-SHA-shaped hex tokens. This variant names the
-    /// offending token (truncated) so the caller can identify and remediate
-    /// exactly what tripped the gate instead of seeing an opaque "blocked
+    /// the safe case of git-SHA-shaped hex tokens. The caller must be able to
+    /// find what tripped the gate instead of seeing an opaque "blocked
     /// pattern".
-    /// What: carries a short, redacted preview of the triggering token.
-    /// Test: `reject_messages_are_actionable`, `secret_token_is_blocked`.
+    /// #9748: the variant used to carry a redacted preview — the first four
+    /// characters and the length — which put part of the value in every error
+    /// and log line. It now names where the hit starts and which rule fired.
+    /// What: `offset` is the byte offset of the hit in the screened content;
+    /// `rule` is the detector rule, printed by its label.
+    /// Test: `reject_messages_are_actionable`, `secret_token_is_blocked`,
+    /// `potential_secret_error_names_offset_and_rule_only_after_9748`.
     #[error(
-        "Content rejected: contains a likely secret/credential token \
-         (`{token}`). Remove or redact the secret before storing; git commit \
-         SHAs are allowed and will not trigger this."
+        "Content rejected: contains a likely secret/credential token at byte \
+         offset {offset} (rule: {label}). Remove or redact the secret before \
+         storing; git commit SHAs are allowed and will not trigger this.",
+        label = .rule.label()
     )]
-    PotentialSecret { token: String },
+    PotentialSecret { offset: usize, rule: SecretRule },
 }
 
 /// Tunable gate configuration.
@@ -299,7 +304,16 @@ impl FilterConfig {
         // [`check_secret`] so the two-tier `force` design in
         // `PalaceHandle::remember_with_options` can run this exact check on
         // its own, independent of the quality gates below.
-        check_secret(trimmed)?;
+        // #9748: shift the offset so it indexes the caller's content, not the
+        // trimmed view. Every refusal stays a refusal.
+        let lead = content.len() - content.trim_start().len();
+        check_secret(trimmed).map_err(|reject| match reject {
+            FilterReject::PotentialSecret { offset, rule } => FilterReject::PotentialSecret {
+                offset: offset + lead,
+                rule,
+            },
+            other => other,
+        })?;
         let tokens = count_meaningful_tokens(content);
         if enforce_min_tokens && tokens < self.min_tokens as usize {
             return Err(FilterReject::TooShort { tokens });
