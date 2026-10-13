@@ -389,6 +389,33 @@ impl SessionStore {
         self.save().await
     }
 
+    /// [`Self::upsert`], except a failed save leaves the in-memory map as it
+    /// was (#9841).
+    ///
+    /// Why: `upsert` inserts before it saves, so a failed save leaves memory
+    /// ahead of disk, and an unchanged file is never reloaded. A decision claim
+    /// that never reached disk must not stick, or a retry is refused as
+    /// "already answered" for an answer nobody delivered.
+    /// What: reloads, inserts, saves; on a save error puts the prior entry (or
+    /// its absence) back and returns the error.
+    /// Test: `claim_persist_failure_sends_nothing_and_keeps_the_decision`.
+    pub(crate) async fn upsert_or_restore(
+        &mut self,
+        record: SessionRecord,
+    ) -> Result<(), StoreError> {
+        self.reload_if_changed().await?;
+        let key = record.id.to_string();
+        let prior = self.data.sessions.insert(key.clone(), record);
+        let saved = self.save().await;
+        if saved.is_err() {
+            match prior {
+                Some(prior) => self.data.sessions.insert(key, prior),
+                None => self.data.sessions.remove(&key),
+            };
+        }
+        saved
+    }
+
     /// Insert or update many records in ONE reload + ONE save.
     ///
     /// Why: the retention sweep stamps `terminal_at` on every legacy terminal

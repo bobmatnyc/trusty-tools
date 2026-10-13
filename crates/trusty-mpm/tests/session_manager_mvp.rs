@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use trusty_mpm::provisioner::FakeGitBackend;
 use trusty_mpm::session_manager::pane_identity::PaneIdentity;
 use trusty_mpm::session_manager::{
-    ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
+    AnswerClaim, Claim, ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
 
 // ── RAII HOME guard (#3965) ─────────────────────────────────────────────────
@@ -536,7 +536,8 @@ async fn front_gate_escalation_sets_pending_decision() {
 /// Why: a FRONT-gate escalation is answered BEFORE a harness exists; clearing the
 /// decision must not send text to the bare pane — the spawn happens separately
 /// (AC-15). This isolates the clear half.
-/// What: sets then clears a pending decision; asserts both fields are `None` and
+/// What: sets a pending decision, then (#9841) claims it as the answer route
+/// does; asserts the claim is a front-gate one, both fields are `None`, and
 /// nothing was sent to tmux.
 /// Test: this IS the test.
 #[tokio::test]
@@ -562,7 +563,20 @@ async fn front_gate_clear_pending_decision_no_injection() {
     mgr.set_pending_decision(&record.id, "divergence", Some("use cursor"))
         .await
         .expect("set");
-    mgr.clear_pending_decision(&record.id).await.expect("clear");
+    let claimed = mgr
+        .claim_decision(&record.id, &AnswerClaim::by("test"))
+        .await
+        .expect("claim");
+    assert!(
+        matches!(
+            claimed,
+            Claim::Claimed {
+                front_gate: true,
+                ..
+            }
+        ),
+        "{claimed:?}"
+    );
 
     let after = mgr.get(&record.id).await.expect("get");
     assert!(after.pending_decision.is_none());
@@ -1519,8 +1533,10 @@ async fn front_gate_answer_unblocks_spawn() {
     let before = mgr.get(&record.id).await.expect("get");
     assert_eq!(before.state, ManagedSessionState::Provisioning);
 
-    // Human approves → clear decision + launch the withheld runtime.
-    mgr.clear_pending_decision(&record.id).await.expect("clear");
+    // Human approves → claim the decision (#9841) + launch the withheld runtime.
+    mgr.claim_decision(&record.id, &AnswerClaim::by("test"))
+        .await
+        .expect("claim");
     // Re-fetch after clearing so we spawn from the fresh, post-clear snapshot
     // (mirrors the answer-route fix; #1360 review).
     let fresh = mgr.get(&record.id).await.expect("get fresh");

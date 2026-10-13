@@ -177,6 +177,8 @@ pub struct ActivityResponse {
     pub classification: Option<String>,
     /// A pending decision question, if surfaced by a previous activity check.
     pub pending_decision: Option<String>,
+    /// #9841: the pending decision's id, to quote back on `/answer`.
+    pub pending_decision_id: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
 }
@@ -295,6 +297,7 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         total_input_tokens: result.tally.total_input_tokens,
         total_output_tokens: result.tally.total_output_tokens,
         classification,
+        pending_decision_id: record.live_decision_id().map(|d| d.to_string()),
         pending_decision: record.pending_decision,
         proposed_default: record.proposed_default,
     })

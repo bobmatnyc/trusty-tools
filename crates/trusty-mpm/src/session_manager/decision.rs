@@ -6,14 +6,27 @@
 //! What: [`DecisionId`] names one pending decision; [`DecisionAnswer`] records
 //! who answered it, when, and whether the answer arrived; [`AnswerClaim`] is
 //! what a caller brings; [`Claim`] is what the claim step hands back.
-//! Test: `decision_tests.rs`.
+//! [`SessionManager::claim_decision`] takes the decision under the store's
+//! write guard; the caller performs the effect after the guard is dropped and
+//! reports it with [`SessionManager::settle_answer`].
+//!
+//! Residual (D9): the guard is in-process, so "exactly once" holds within one
+//! daemon. Another process that writes back a whole record it read before the
+//! claim (the supervisor, #1219) can restore a claimed decision.
+//! Test: `decision_tests.rs`; the route arms in
+//! `managed_routes::answer_route_tests`.
 
 use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
+
+use super::manager::{ManagedError, SessionManager};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::store::{SessionStore, StoreError};
 
 /// The most characters of a self-asserted `answered_by` that are kept.
 const ANSWERED_BY_MAX_CHARS: usize = 64;
@@ -184,4 +197,245 @@ pub enum Claim {
     },
     /// No decision was pending: type the answer into the live pane as before.
     Unclaimed,
+}
+
+impl DecisionAnswer {
+    /// Whether this answer refuses a later answer that names no decision.
+    ///
+    /// Why: with D1 not ruled, a session whose front-gate answer launched its
+    /// runtime goes back to live-pane answering. Every other answer keeps
+    /// refusing repeats, so a duplicate never types into the pane.
+    fn refuses_repeats(&self) -> bool {
+        !(self.front_gate && self.outcome == AnswerOutcome::Delivered)
+    }
+}
+
+impl SessionRecord {
+    /// The pending decision's id, only while a decision is pending (#9841).
+    ///
+    /// Why: a teardown clears `pending_decision` and leaves the id behind; a
+    /// reader must not show an id for a decision that is gone.
+    pub fn live_decision_id(&self) -> Option<DecisionId> {
+        self.pending_decision.as_ref().and(self.pending_decision_id)
+    }
+}
+
+/// `decision <id>`, or a name for a decision set before #9841.
+fn decision_label(decision_id: Option<DecisionId>, session: &ManagedSessionId) -> String {
+    match decision_id {
+        Some(d) => format!("decision {d}"),
+        None => format!("the decision on session {session}"),
+    }
+}
+
+/// The 409 text for an answer to a decision that `last` already took.
+fn already_answered(last: &DecisionAnswer, session: &ManagedSessionId) -> ManagedError {
+    let how = match last.outcome {
+        AnswerOutcome::Claimed => " (delivery unconfirmed)",
+        AnswerOutcome::Delivered => "",
+        AnswerOutcome::DeliveryFailed => " (delivery failed)",
+    };
+    ManagedError::DecisionConflict(format!(
+        "{} already answered by {} at {}{how}",
+        decision_label(last.decision_id, session),
+        last.answered_by,
+        last.answered_at.to_rfc3339(),
+    ))
+}
+
+/// The claim's answer when there is no decision for `claim` to take.
+///
+/// Why: a repeat and a stale id are conflicts; an answer with nothing pending
+/// and nothing answered keeps today's live-pane behaviour.
+/// What: an id the last answer took is "already answered"; any other id is
+/// "not pending"; no id is "already answered" while the last answer refuses
+/// repeats, else [`Claim::Unclaimed`].
+fn refuse_or_pass(record: &SessionRecord, claim: &AnswerClaim) -> Result<Claim, ManagedError> {
+    let last = record.last_answer.as_ref();
+    match (claim.decision_id, last) {
+        (Some(asked), Some(last)) if last.decision_id == Some(asked) => {
+            Err(already_answered(last, &record.id))
+        }
+        (Some(asked), _) => Err(ManagedError::DecisionConflict(format!(
+            "decision {asked} is not pending on session {}",
+            record.id
+        ))),
+        (None, Some(last)) if last.refuses_repeats() => Err(already_answered(last, &record.id)),
+        // #9841 D1 is not ruled: nothing pending, so the answer is a live-pane
+        // `/approve`, `/deny` or `/answer` and types into the pane as before.
+        (None, _) => Ok(Claim::Unclaimed),
+    }
+}
+
+/// Look `id` up through a held store guard, reloading first.
+///
+/// Why: the claim must see another writer's latest record, and fail closed
+/// when it cannot read it rather than fall back to a cached copy.
+pub(super) async fn locked_get(
+    store: &mut SessionStore,
+    id: &ManagedSessionId,
+) -> Result<SessionRecord, ManagedError> {
+    store.get(id).await.map_err(|e| match e {
+        StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
+        other => ManagedError::Store(other),
+    })
+}
+
+impl SessionManager {
+    /// Take the session's pending decision for `claim`, once (#9841).
+    ///
+    /// Why: the old answer path tested the decision with no lock, so two
+    /// answers both passed the test and both typed into the pane or both
+    /// launched the runtime.
+    /// What: under one held store write guard (the `adopt.rs` pattern):
+    /// reload, test, clear `pending_decision`, record a `Claimed`
+    /// [`DecisionAnswer`], and persist. Every claim of a session is ordered by
+    /// that guard, and the first one clears the decision before the guard is
+    /// released, so at most one caller gets [`Claim::Claimed`]. No tmux call
+    /// runs while the guard is held (#3698). A store error fails closed: the
+    /// in-memory record is restored and nothing is claimed.
+    /// Residual (D9): the guard is in-process; the guarantee is within one
+    /// daemon.
+    /// Test: `two_concurrent_answers_reach_the_pane_once`,
+    /// `stale_decision_id_conflicts`,
+    /// `claim_persist_failure_sends_nothing_and_keeps_the_decision`,
+    /// `two_concurrent_front_gate_answers_spawn_once`.
+    pub async fn claim_decision(
+        &self,
+        id: &ManagedSessionId,
+        claim: &AnswerClaim,
+    ) -> Result<Claim, ManagedError> {
+        let mut store = self.store.write().await;
+        let mut record = locked_get(&mut store, id).await?;
+        let takes = record.pending_decision.is_some()
+            && claim
+                .decision_id
+                .is_none_or(|asked| record.pending_decision_id == Some(asked));
+        if !takes {
+            return refuse_or_pass(&record, claim);
+        }
+        let front_gate = record.state == ManagedSessionState::Provisioning;
+        let decision_id = record.pending_decision_id.take();
+        let now = Utc::now();
+        record.pending_decision = None;
+        record.proposed_default = None;
+        record.last_activity_at = Some(now);
+        record.last_answer = Some(DecisionAnswer {
+            decision_id,
+            answered_by: claim.answered_by.clone(),
+            answered_at: now,
+            outcome: AnswerOutcome::Claimed,
+            front_gate,
+        });
+        store.upsert_or_restore(record).await?;
+        Ok(Claim::Claimed {
+            decision_id,
+            front_gate,
+        })
+    }
+
+    /// Record how a claimed answer ended (#9841).
+    ///
+    /// Why: a repeat's conflict says whether the first answer arrived.
+    /// What: under the store guard, sets the outcome only if the record's last
+    /// answer is still this claim, so a later decision is never touched. A
+    /// write error is logged and swallowed: the effect already happened, and
+    /// the record keeps `Claimed` ("delivery unconfirmed").
+    /// Test: `settle_failure_still_reports_the_delivered_answer`,
+    /// `send_failure_after_claim_closes_decision_as_failed`.
+    pub(crate) async fn settle_answer(
+        &self,
+        id: &ManagedSessionId,
+        decision_id: Option<DecisionId>,
+        outcome: AnswerOutcome,
+    ) {
+        let mut store = self.store.write().await;
+        let settled = match locked_get(&mut store, id).await {
+            Ok(mut record) => match record.last_answer.as_mut() {
+                Some(last)
+                    if last.decision_id == decision_id
+                        && last.outcome == AnswerOutcome::Claimed =>
+                {
+                    last.outcome = outcome;
+                    store.upsert_or_restore(record).await.map_err(Into::into)
+                }
+                _ => Ok(()),
+            },
+            Err(e) => Err(e),
+        };
+        if let Err(e) = settled {
+            warn!(id = %id, ?outcome, "answer settled but not recorded; it reads as unconfirmed: {e}");
+        }
+    }
+
+    /// Type a claimed (or unclaimed) answer into the session's proven pane.
+    ///
+    /// Why: the effect runs after the claim's guard is dropped, and its
+    /// failure must close the decision rather than reopen it (D4).
+    /// What: sends `answer` to `pane`. Unclaimed: a send error returns as
+    /// before, and a success stamps `last_activity_at`. Claimed: settles
+    /// `Delivered` or `DeliveryFailed`, and a failure (including a pane that
+    /// could not be proven) returns [`ManagedError::DeliveryFailed`].
+    /// Test: `send_failure_after_claim_closes_decision_as_failed`,
+    /// `answers_with_no_decision_keep_typing_into_the_pane`.
+    pub(crate) async fn deliver_answer(
+        &self,
+        id: &ManagedSessionId,
+        tmux_name: &str,
+        pane: Result<String, ManagedError>,
+        answer: &str,
+        claim: Claim,
+    ) -> Result<Option<DecisionId>, ManagedError> {
+        let sent = pane.and_then(|pane| {
+            self.tmux
+                .send_line_to_pane(tmux_name, &pane, answer)
+                .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+        });
+        let Claim::Claimed { decision_id, .. } = claim else {
+            sent?;
+            let mut store = self.store.write().await;
+            let mut record = locked_get(&mut store, id).await?;
+            record.last_activity_at = Some(Utc::now());
+            store.upsert(record).await?;
+            return Ok(None);
+        };
+        let outcome = match sent {
+            Ok(()) => AnswerOutcome::Delivered,
+            Err(_) => AnswerOutcome::DeliveryFailed,
+        };
+        self.settle_answer(id, decision_id, outcome).await;
+        sent.map_err(|e| {
+            ManagedError::DeliveryFailed(format!(
+                "answer to {} claimed but not delivered: {e}; the decision is closed",
+                decision_label(decision_id, id)
+            ))
+        })?;
+        Ok(decision_id)
+    }
+
+    /// Settle a front-gate claim by its runtime launch (#9841, D4, D6).
+    ///
+    /// Why: a launch that failed may have typed part of its launch line, so
+    /// the decision closes either way.
+    /// What: settles `Delivered` or `DeliveryFailed`; an error becomes the
+    /// route's 500 text.
+    /// Test: `front_gate_launch_failure_closes_the_decision`.
+    pub(crate) async fn settle_launch(
+        &self,
+        id: &ManagedSessionId,
+        decision_id: Option<DecisionId>,
+        launched: Result<(), String>,
+    ) -> Result<Option<DecisionId>, String> {
+        let outcome = match launched {
+            Ok(()) => AnswerOutcome::Delivered,
+            Err(_) => AnswerOutcome::DeliveryFailed,
+        };
+        self.settle_answer(id, decision_id, outcome).await;
+        launched.map(|()| decision_id).map_err(|e| {
+            format!(
+                "answer to {} claimed but the runtime did not start: {e}; the decision is closed",
+                decision_label(decision_id, id)
+            )
+        })
+    }
 }
