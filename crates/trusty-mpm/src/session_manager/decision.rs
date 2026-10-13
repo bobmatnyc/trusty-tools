@@ -225,7 +225,8 @@ impl SessionRecord {
     /// `pending_decision`, so a pending decision is an unanswered gate; a
     /// last answer `Denied` (#9843) is a launch that must never run.
     /// Test: `a_restart_never_makes_a_pending_front_gate_decision_resumable`,
-    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
+    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`,
+    /// `reconcile_never_readopts_a_front_gate_denied_record_as_active`.
     pub fn front_gate_hold(&self) -> Option<&'static str> {
         if self.pending_decision.is_some() {
             Some("its front-gate decision is still pending; answer it, or decommission the session")

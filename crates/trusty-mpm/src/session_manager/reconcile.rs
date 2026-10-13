@@ -138,7 +138,10 @@ impl SessionManager {
     /// `reconcile_refuses_to_adopt_a_reserved_test_session`,
     /// `reconcile_tombstones_an_adopted_reserved_record_whose_tmux_is_gone`,
     /// `a_live_leaked_test_pane_is_never_readopted_or_recreated`
-    /// (#6116) in `naming_tests.rs`.
+    /// (#6116) in `naming_tests.rs`;
+    /// `reconcile_never_readopts_a_front_gate_denied_record_as_active`,
+    /// `reconcile_still_adopts_a_provisioning_record_its_front_gate_does_not_hold`
+    /// (#9850) in `answer_route_tests.rs`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -276,8 +279,11 @@ impl SessionManager {
             // #9844: a record held at its front gate stays `Provisioning`, the
             // state the answer route reads as the gate, so its decision stays
             // answerable; resume refuses it (`front_gate_hold`).
+            // #9850: a gate answered Denied holds it too — a failed or
+            // interrupted deny teardown leaves it Provisioning, and a live
+            // pane must not re-adopt it as Active.
             if record.state == ManagedSessionState::Provisioning
-                && record.pending_decision.is_some()
+                && record.front_gate_hold().is_some()
             {
                 continue;
             }
