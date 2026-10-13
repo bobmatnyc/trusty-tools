@@ -45,6 +45,7 @@ use crate::commands::pm_guard_architect_reason::with_identity;
 use crate::commands::pm_guard_bash::evaluate_credential_print_command;
 use crate::commands::pm_guard_deny_log::{AUDIT_POST_TIMEOUT, DenyContext};
 use crate::commands::pm_guard_floor::{ArchitectGate, FloorDeny};
+use crate::commands::pm_guard_kuzu_exception::KUZU_IMPORT_PYTHON_RULE;
 use crate::commands::pm_guard_kuzu_store::{KUZU_STORE_RULE, evaluate_kuzu_store_access};
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
@@ -160,10 +161,13 @@ pub(crate) fn evaluate_secret_file_read_gated(
     // keeps its own label.
     let kuzu = || {
         let reason = evaluate_kuzu_store_access(tool_name, tool_input, hook_cwd)?;
-        Some(FloorDeny {
-            rule: KUZU_STORE_RULE,
-            reason,
-        })
+        // #9794 Q1: a `--python` deny audits under its own label.
+        let rule = if reason.starts_with(KUZU_IMPORT_PYTHON_RULE) {
+            KUZU_IMPORT_PYTHON_RULE
+        } else {
+            KUZU_STORE_RULE
+        };
+        Some(FloorDeny { rule, reason })
     };
     // 2. The #7266 file rule. Its entry point re-runs the Bash value rules,
     // which step 1 has already cleared, so only the file rule can answer.
