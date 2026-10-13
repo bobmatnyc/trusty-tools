@@ -47,7 +47,8 @@ pub(crate) fn relocate_config_dir(workspace: &Path, home: Option<&Path>) -> Opti
 /// What: `provision_for_spawn_at` under `FrameworkPaths::under(home)`; with no
 /// home it keeps `provision_for_spawn`, which reports the unresolvable home.
 /// Then [`trusty_mpm::core::launch_policy::provision_settings`] under the same
-/// root, which never fails the launch.
+/// root, which never fails the launch; `profile` is the launch's resolved
+/// profile, which decides whether the #8992 skill and tool parts apply.
 /// Test: `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`,
 /// `launch_files_add_no_settings_without_an_owner`; the `--settings` token
 /// itself: `isolated_spec_carries_the_owner_settings_after_the_mcp_config`.
@@ -55,6 +56,7 @@ pub(crate) fn launch_files(
     workspace: &Path,
     config_dir: Option<&Path>,
     home: Option<&Path>,
+    profile: trusty_mpm::core::session_profile::SessionProfile,
 ) -> anyhow::Result<trusty_mpm::core::launch_policy::LaunchFiles> {
     use trusty_mpm::core::launch_policy::{provision_settings, provision_settings_default};
     use trusty_mpm::core::session_mcp_scope::{provision_for_spawn, provision_for_spawn_at};
@@ -66,9 +68,10 @@ pub(crate) fn launch_files(
     let mcp_config = provisioned
         .map_err(|err| anyhow::anyhow!("failed to compose the session-scoped MCP config: {err}"))?;
     // #8988: the owner MCP policy; a failure is a printed notice, never a refusal.
+    // #8992: plus the skill and tool parts for a PM `profile`.
     let settings = match &root {
-        Some(root) => provision_settings(root, workspace, config_dir),
-        None => provision_settings_default(workspace, config_dir),
+        Some(root) => provision_settings(root, workspace, config_dir, profile),
+        None => provision_settings_default(workspace, config_dir, profile),
     };
     Ok(trusty_mpm::core::launch_policy::LaunchFiles {
         mcp_config,
@@ -96,7 +99,8 @@ mod tests {
         let home = crate::test_support::hermetic_temp_dir();
         let workspace = crate::test_support::hermetic_temp_dir();
         let config = home.path().join("cfg");
-        let files = super::launch_files(workspace.path(), Some(&config), Some(home.path()))
+        let pm = trusty_mpm::core::session_profile::SessionProfile::Pm;
+        let files = super::launch_files(workspace.path(), Some(&config), Some(home.path()), pm)
             .expect("the session-MCP file is writable under a temp home");
         assert!(files.mcp_config.is_some());
         assert_eq!(files.settings, None);

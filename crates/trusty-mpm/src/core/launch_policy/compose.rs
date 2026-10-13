@@ -5,7 +5,8 @@
 //! What: [`resolve_chain`] reads `<repos_root>/<owner>/.trusty-mpm-owner.toml`
 //! and each parent it `extends`, at most [`MAX_CHAIN`] files, and merges them
 //! root-first: `deny` is the union, a child `allow` replaces its parent's, a
-//! child `claude_ai_connectors` wins. A cycle, a missing parent, an over-long
+//! child `claude_ai_connectors` wins. #8992: `[skills] off` and `[tools] deny`
+//! are unions too, so a child can never remove a parent's entry. A cycle, a missing parent, an over-long
 //! chain or a bad parent makes the child a bad file.
 //! Test: `compose_tests.rs`.
 
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::floor::is_floor;
+use super::floor::{is_floor, is_skill_floor, is_tool_floor};
 use super::schema::{MAX_CHAIN, OWNER_FILE, OwnerFile, OwnerPolicyError, parse_owner_file};
 
 /// The effective policy of one owner after its chain is merged.
@@ -29,6 +30,13 @@ pub struct OwnerPolicy {
     pub deny: BTreeSet<String>,
     /// `Some(false)` turns the claude.ai connectors off.
     pub claude_ai_connectors: Option<bool>,
+    /// Skills turned off (#8992). `default` so a v1 last-good record without
+    /// the field still loads.
+    #[serde(default)]
+    pub skills_off: BTreeSet<String>,
+    /// Tools denied (#8992); `default` as `skills_off`.
+    #[serde(default)]
+    pub tools_deny: BTreeSet<String>,
 }
 
 impl OwnerPolicy {
@@ -43,16 +51,29 @@ impl OwnerPolicy {
                 self.claude_ai_connectors = mcp.claude_ai_connectors;
             }
         }
+        // #8992: unions, as `deny` — there is no key that removes an entry.
+        if let Some(skills) = &file.skills {
+            self.skills_off.extend(skills.off.iter().flatten().cloned());
+        }
+        if let Some(tools) = &file.tools {
+            self.tools_deny.extend(tools.deny.iter().flatten().cloned());
+        }
         self
     }
 
-    /// Re-apply the never-deny floor: drop every floor server from `deny`.
+    /// Re-apply the never-deny floors: drop every floor server from `deny`,
+    /// every floor skill from `skills_off` and every floor tool from
+    /// `tools_deny`.
     ///
     /// Why: Q2 — every compose path, the last-good record included, must keep
     /// the floor, and a stored record could predate a floor addition.
-    /// Test: `a_last_good_policy_has_the_floor_reapplied`.
+    /// Test: `a_last_good_policy_has_the_floor_reapplied`,
+    /// `a_last_good_tools_deny_naming_a_later_added_floor_tool_is_dropped`.
     pub fn with_floor(mut self) -> Self {
         self.deny.retain(|name| !is_floor(name));
+        // #8992: the tool and skill floors, for a record that predates them.
+        self.skills_off.retain(|name| !is_skill_floor(name));
+        self.tools_deny.retain(|rule| !is_tool_floor(rule));
         self
     }
 }

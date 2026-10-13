@@ -7,8 +7,10 @@
 //! What: [`provision_settings_at`] resolves the owner layer
 //! ([`super::resolve_and_record`]), turns its policy into a deny set
 //! ([`deny_set`]: allow applied, then deny, the floor never named), and writes
-//! `{"deniedMcpServers":[…],"disableClaudeAiConnectors":true}` (each key only
-//! when it has something to say) to
+//! `{"deniedMcpServers":[…],"disableClaudeAiConnectors":true}` plus, for a PM
+//! launch (#8992), `"skillOverrides":{"<skill>":"off"}` and
+//! `"permissions":{"deny":[…]}` ([`SettingsParts`]; each key only when it has
+//! something to say; an Architect launch gets the MCP keys only, Q-B) to
 //! `<state_root>/session-settings/<sha256 of the body>.json`, mode `0600`. The
 //! name is the body's hash, so a file once written is never rewritten with other
 //! contents: two launches in one cwd that read different `.claude.json` files
@@ -22,7 +24,8 @@
 //! Claude Code matches `serverName`, so a differently-cased entry can neither
 //! deny a floor server nor be dropped as one.
 //! Fail-open: a bad owner file uses the last good policy; an unreadable
-//! `.claude.json` keeps the explicit denies; an unwritable settings file
+//! `.claude.json` keeps the explicit denies and every skill and tool part
+//! (none reads the user scope); an unwritable settings file
 //! launches with NO `--settings` and a notice that says the policy was not
 //! applied. Every arm prints its notice; none refuses the launch.
 //! Test: `carrier_tests.rs`, `tests/owner_launch_config_8988.rs`.
@@ -35,6 +38,8 @@ use serde_json::{Value, json};
 use super::compose::OwnerPolicy;
 use super::floor::is_floor;
 use super::{Outcome, OwnerInputs, OwnerResolution, resolve_and_record};
+use crate::core::session_profile::SessionProfile;
+use crate::core::skill_overrides::{OFF, SKILL_OVERRIDES_KEY};
 
 /// Directory under the state root holding every per-session settings file.
 pub const SESSION_SETTINGS_DIR: &str = "session-settings";
@@ -109,6 +114,55 @@ pub struct CarrierInputs<'a> {
     /// The directory whose `.claude.json` this launch's `claude` reads; `None`
     /// when it cannot be located.
     pub claude_json_dir: Option<&'a Path>,
+    /// The profile this launch runs (#8992): an Architect gets the `[mcp]`
+    /// part only.
+    pub profile: SessionProfile,
+}
+
+/// The subtractive parts one launch's settings file can carry (#8992).
+///
+/// Why: the MCP deny depends on the user scope; the skill and tool parts do
+/// not, so a failed `.claude.json` read must not drop them.
+/// What: `mcp_deny` → `deniedMcpServers`, `connectors_off` →
+/// `disableClaudeAiConnectors: true`, `skills_off` → `skillOverrides` (each
+/// `"off"`), `tools_deny` → `permissions.deny`.
+/// Test: `the_settings_body_carries_only_subtractive_keys`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettingsParts {
+    /// Servers to deny.
+    pub mcp_deny: BTreeSet<String>,
+    /// Turn the claude.ai connectors off.
+    pub connectors_off: bool,
+    /// Skills to turn off.
+    pub skills_off: BTreeSet<String>,
+    /// Tools to deny.
+    pub tools_deny: BTreeSet<String>,
+}
+
+impl SettingsParts {
+    /// The parts `policy` gives a launch of `profile`, with the MCP deny set
+    /// composed against `user_scope` ([`deny_set`]).
+    ///
+    /// Why: Architect ruling Q-B — the Architect keeps every tool and skill, as
+    /// [`crate::core::pm_tool_trim`] leaves it every tool.
+    /// Test: `an_architect_launch_gets_the_mcp_part_only`.
+    pub fn for_launch(
+        policy: &OwnerPolicy,
+        user_scope: Option<&[String]>,
+        profile: SessionProfile,
+    ) -> Self {
+        let mut parts = Self {
+            mcp_deny: deny_set(policy, user_scope),
+            connectors_off: policy.claude_ai_connectors == Some(false),
+            ..Self::default()
+        };
+        // #8992 Q-B: the skill and tool parts are for a PM launch only.
+        if !profile.is_architect() {
+            parts.skills_off.clone_from(&policy.skills_off);
+            parts.tools_deny.clone_from(&policy.tools_deny);
+        }
+        parts
+    }
 }
 
 /// The servers to deny: `allow` applied to `user_scope`, then `deny`.
@@ -127,21 +181,42 @@ pub fn deny_set(policy: &OwnerPolicy, user_scope: Option<&[String]>) -> BTreeSet
     deny
 }
 
-/// The settings JSON for a deny set, or `None` when it subtracts nothing.
+/// The settings JSON for `parts`, or `None` when it subtracts nothing.
 ///
-/// What: `deniedMcpServers` (sorted `{"serverName": …}` entries) when `deny`
-/// is non-empty, `"disableClaudeAiConnectors": true` when `connectors_off`.
-/// Never an allow-type key and never `disableClaudeAiConnectors: false`
-/// (#7422 trust gate: tm only subtracts).
-/// Test: `the_settings_body_carries_only_subtractive_keys`.
-pub fn settings_body(deny: &BTreeSet<String>, connectors_off: bool) -> Option<String> {
+/// What: `deniedMcpServers` (sorted `{"serverName": …}` entries),
+/// `"disableClaudeAiConnectors": true`, `skillOverrides` (sorted, every value
+/// `"off"`) and `permissions.deny` (sorted), each only when non-empty or set.
+/// Never an allow-type key, never `"on"`, never `ask`, and never
+/// `disableClaudeAiConnectors: false` (#7422 trust gate: tm only subtracts).
+/// Test: `the_settings_body_carries_only_subtractive_keys`,
+/// `the_settings_file_never_carries_an_allow_on_or_ask`.
+pub fn settings_body(parts: &SettingsParts) -> Option<String> {
     let mut map = serde_json::Map::new();
-    if !deny.is_empty() {
-        let entries = deny.iter().map(|n| json!({ "serverName": n })).collect();
+    if !parts.mcp_deny.is_empty() {
+        let entries = parts
+            .mcp_deny
+            .iter()
+            .map(|n| json!({ "serverName": n }))
+            .collect();
         map.insert("deniedMcpServers".to_owned(), Value::Array(entries));
     }
-    if connectors_off {
+    if parts.connectors_off {
         map.insert("disableClaudeAiConnectors".to_owned(), Value::Bool(true));
+    }
+    // #8992 Q-A: an owner only turns skills off, so the one value is "off".
+    if !parts.skills_off.is_empty() {
+        let off = parts
+            .skills_off
+            .iter()
+            .map(|n| (n.clone(), json!(OFF)))
+            .collect();
+        map.insert(SKILL_OVERRIDES_KEY.to_owned(), Value::Object(off));
+    }
+    if !parts.tools_deny.is_empty() {
+        map.insert(
+            "permissions".to_owned(),
+            json!({ "deny": parts.tools_deny.iter().collect::<Vec<_>>() }),
+        );
     }
     (!map.is_empty()).then(|| format!("{:#}", Value::Object(map)))
 }
@@ -215,16 +290,18 @@ fn write_policy(
         }
         Err(_) => None,
     };
-    let deny = deny_set(policy, user.as_deref());
-    let body = settings_body(&deny, policy.claude_ai_connectors == Some(false))?;
+    // #8992: the skill and tool parts never depend on the user-scope read.
+    let parts = SettingsParts::for_launch(policy, user.as_deref(), inputs.profile);
+    let body = settings_body(&parts)?;
     let path = settings_path_at(inputs.state_root, &body);
     match write_owner_only(&path, body.as_bytes()) {
         Ok(()) => Some(path),
         // #8988 Fail-Open Check: launch without the flag, and say so.
         Err(err) => {
+            // #8992: the notice names the whole launch policy, not only MCP.
             notices.push(format!(
-                "owner MCP policy NOT applied: could not write {}: {err}; this session \
-                 loads every user-scope MCP server",
+                "owner launch policy NOT applied: could not write {}: {err}; this session \
+                 runs without the owner's MCP, skill and tool subtractions",
                 path.display()
             ));
             None
@@ -301,12 +378,14 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// What: the repos root from [`crate::core::repo_paths::repos_root`]; the
 /// `.claude.json` directory is `config_dir` for a relocated launch, else the
 /// one an unrelocated `claude` reads: `$CLAUDE_CONFIG_DIR` when set, else the
-/// home directory (`~/.claude.json`).
+/// home directory (`~/.claude.json`). `profile` is the launch's resolved
+/// profile (#8992).
 /// Test: `an_unrelocated_launch_reads_the_operators_claude_json`.
 pub fn provision_settings(
     state_root: &Path,
     cwd: &Path,
     config_dir: Option<&Path>,
+    profile: SessionProfile,
 ) -> LaunchSettings {
     let repos_root = crate::core::repo_paths::repos_root();
     let claude_json_dir = claude_json_dir(config_dir);
@@ -315,14 +394,19 @@ pub fn provision_settings(
         repos_root: &repos_root,
         state_root,
         claude_json_dir: claude_json_dir.as_deref(),
+        profile,
     })
 }
 
 /// [`provision_settings`] under the process home's state root; nothing when
 /// no home resolves.
-pub fn provision_settings_default(cwd: &Path, config_dir: Option<&Path>) -> LaunchSettings {
+pub fn provision_settings_default(
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    profile: SessionProfile,
+) -> LaunchSettings {
     super::state_root()
-        .map(|root| provision_settings(&root, cwd, config_dir))
+        .map(|root| provision_settings(&root, cwd, config_dir, profile))
         .unwrap_or_default()
 }
 

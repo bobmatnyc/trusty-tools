@@ -91,7 +91,7 @@ fn a_missing_parent_is_a_bad_file() {
 fn an_invalid_parent_is_a_bad_file() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "a", "extends = \"b\"\n");
-    write(tmp.path(), "b", "[tools]\n");
+    write(tmp.path(), "b", "[agents]\n");
     let err = resolve_chain(tmp.path(), "a").unwrap_err();
     assert!(
         matches!(err, OwnerPolicyError::InvalidParent { .. }),
@@ -140,12 +140,17 @@ fn the_source_sha_tracks_every_file_in_the_chain() {
 }
 
 #[test]
-fn with_floor_drops_floor_servers_from_deny() {
+fn with_floor_drops_floor_servers_skills_and_tools() {
     let policy = OwnerPolicy {
         allow: None,
         deny: set(&["heygen", "trusty-search", "claude-in-chrome"]),
         claude_ai_connectors: None,
+        skills_off: set(&["xlsx", "tm-workflow", "git-workflow"]),
+        tools_deny: set(&["NotebookEdit", "Bash", "mcp__trusty-mpm__x"]),
     }
     .with_floor();
     assert_eq!(policy.deny, set(&["heygen"]));
+    // #8992: the tool and skill floors are re-applied the same way.
+    assert_eq!(policy.skills_off, set(&["xlsx"]));
+    assert_eq!(policy.tools_deny, set(&["NotebookEdit"]));
 }
