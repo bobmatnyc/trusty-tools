@@ -10,8 +10,10 @@
 //! own. One `std::sync::Mutex` covers each operation's check, append and
 //! apply. A lifetime `flock` on `questions.jsonl.lock` refuses a second table
 //! on the same path. Any append error poisons the table until it is reopened,
-//! and the replay then decides. Ids are the policy's `u64` [`QuestionId`];
-//! P5 writes the decimal form into the taint record's `question_id` string.
+//! and the replay then decides. A poisoned or dropped table releases its
+//! `flock` explicitly, so the reopen never waits on a stale holder (#8433).
+//! Ids are the policy's `u64` [`QuestionId`]; P5 writes the decimal form
+//! into the taint record's `question_id` string.
 //! Test: `question_table_tests.rs`.
 
 use std::fs::{File, OpenOptions};
@@ -198,6 +200,8 @@ struct State {
     poisoned: bool,
     #[cfg(test)]
     fault: Option<Fault>,
+    #[cfg(test)]
+    unlock_fails: bool,
 }
 
 /// Test seam: an append fails before or after its bytes reach the file.
@@ -222,7 +226,7 @@ pub struct QuestionTable {
     path: PathBuf,
     state: Mutex<State>,
     quarantined: Option<usize>,
-    _lock: File,
+    flock: Flock,
 }
 
 impl QuestionTable {
@@ -324,12 +328,14 @@ impl QuestionTable {
             poisoned: false,
             #[cfg(test)]
             fault: None,
+            #[cfg(test)]
+            unlock_fails: false,
         };
         Ok(Self {
             path: path.to_path_buf(),
             state: Mutex::new(state),
             quarantined,
-            _lock: lock,
+            flock: lock,
         })
     }
 
@@ -449,7 +455,14 @@ impl QuestionTable {
 
     /// True once an append failed or the lock was poisoned.
     pub fn is_poisoned(&self) -> bool {
-        self.state.lock().map_or(true, |state| state.poisoned)
+        // #8433: a poisoned mutex refuses for good, so its flock can go.
+        self.state.lock().map_or_else(
+            |_| {
+                self.flock.release("mutex poisoned");
+                true
+            },
+            |state| state.poisoned,
+        )
     }
 
     /// The byte length of a torn final line [`Self::open_at`] moved aside.
@@ -461,10 +474,11 @@ impl QuestionTable {
     fn lock(&self) -> Result<MutexGuard<'_, State>, QuestionTableError> {
         // #8433 r6: a poisoned mutex refuses; its state is never recovered
         // with `into_inner`, because a panic may have left it mid-update.
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| QuestionTableError::Poisoned)?;
+        let state = self.state.lock().map_err(|_| {
+            // #8433: a poisoned mutex refuses for good, so its flock can go.
+            self.flock.release("mutex poisoned");
+            QuestionTableError::Poisoned
+        })?;
         if state.poisoned {
             return Err(QuestionTableError::Poisoned);
         }
@@ -482,7 +496,7 @@ impl QuestionTable {
     /// `failed_resolve_leaves_question_open_in_memory_only_if_log_agrees`.
     fn commit(&self, state: &mut State, record: Record) -> Result<(), QuestionTableError> {
         if let Err(source) = append(state, &record) {
-            state.poisoned = true;
+            self.poison(state);
             tracing::error!(
                 path = %self.path.display(),
                 error = %source,
@@ -491,13 +505,81 @@ impl QuestionTable {
             return Err(io_err(&self.path)(source));
         }
         state.book.apply(record).map_err(|reason| {
-            state.poisoned = true;
+            self.poison(state);
             QuestionTableError::Corrupt {
                 path: self.path.clone(),
                 line: 0,
                 reason,
             }
         })
+    }
+
+    /// Poison `state`, then release the table's flock.
+    ///
+    /// Why: #8433: the daemon replaces a poisoned table while stale `Arc`
+    /// holders still run; with the flock held, its reopen saw `Locked`.
+    /// What: sets the poison flag first, so every later operation refuses
+    /// (`lock` checks it) and the reopened table is the only writer; then
+    /// unlocks. A failed unlock is logged and the table stays poisoned: the
+    /// reopen then sees `Locked` until the last holder drops it.
+    /// Test: `poisoned_table_releases_its_flock_while_arc_held`,
+    /// `failed_unlock_at_poison_keeps_the_table_refusing_and_locked`.
+    fn poison(&self, state: &mut State) {
+        state.poisoned = true;
+        #[cfg(test)]
+        if state.unlock_fails {
+            let injected = std::io::Error::other("injected unlock failure");
+            self.flock.settle(Err(injected), "poisoned");
+            return;
+        }
+        self.flock.release("poisoned");
+    }
+}
+
+/// The table's lifetime `flock`, released explicitly (#8433).
+///
+/// Why: a flock belongs to the open file description. A child forked
+/// before it execs shares that description, and a poisoned table's stale
+/// `Arc` holders keep the descriptor open, so closing it alone left the
+/// lock held for those windows.
+/// What: [`Self::release`] calls `File::unlock` (`LOCK_UN` on the shared
+/// description), which ends the lock for every copy. `Drop` releases it, so
+/// a dropped table and an `open_at` that fails after the lock both free it.
+/// A live table never releases it, so a second opener is still refused.
+/// Test: `dropped_table_releases_its_flock_despite_a_forked_child`,
+/// `second_table_on_same_path_is_refused_while_first_lives`.
+#[derive(Debug)]
+struct Flock {
+    file: File,
+    path: PathBuf,
+}
+
+impl Flock {
+    /// Unlock; a failure is logged, never returned.
+    fn release(&self, why: &'static str) {
+        self.settle(self.file.unlock(), why);
+    }
+
+    /// Log a failed unlock. The lock then holds until every copy of the
+    /// descriptor closes: the old behaviour, which refuses a reopen
+    /// (`Locked`) and never lets two tables write.
+    fn settle(&self, unlocked: std::io::Result<()>, why: &'static str) {
+        if let Err(error) = unlocked {
+            tracing::error!(
+                path = %self.path.display(),
+                %error,
+                why,
+                "question table flock release failed; it holds until its descriptor closes"
+            );
+        }
+    }
+}
+
+impl Drop for Flock {
+    fn drop(&mut self) {
+        // #8433: the descriptor closes next, which releases too, unless a
+        // forked child holds a copy; the unlock covers that copy.
+        self.release("dropped");
     }
 }
 
@@ -522,7 +604,7 @@ fn append(state: &mut State, record: &Record) -> std::io::Result<()> {
 }
 
 /// Open (creating, 0600) and exclusively `flock` `path` without waiting.
-fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
+fn take_lock(path: &Path) -> Result<Flock, QuestionTableError> {
     // #9815: a lock changed outside the trust-anchor seal is never taken.
     seal::check_path(path)?;
     let file = OpenOptions::new()
@@ -533,7 +615,10 @@ fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
         .open(path)
         .map_err(io_err(path))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(Flock {
+            file,
+            path: path.to_path_buf(),
+        }),
         Err(std::fs::TryLockError::WouldBlock) => Err(QuestionTableError::Locked {
             path: path.to_path_buf(),
         }),
