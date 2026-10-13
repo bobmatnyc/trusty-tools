@@ -943,3 +943,53 @@ async fn rebind_still_moves_a_record_whose_front_gate_approved() {
     );
     assert_eq!(binding(&mgr, &verb).await.3, ManagedSessionState::Active);
 }
+
+/// #9850: boot reconcile's live arm keeps a `Stopped` record its front gate
+/// denied `Stopped`, after a tmux server replacement restored its session
+/// name on the new server.
+///
+/// Why: the automatic rebind skips the record, but the live arm a few lines
+/// later matched it by name and wrote `Active`, so a daemon restart listed
+/// the denied task as running.
+/// Test: this test; the no-hold control is
+/// `boot_reconcile_still_readopts_a_stopped_record_whose_front_gate_approved`.
+#[tokio::test]
+async fn boot_reconcile_keeps_a_stopped_front_gate_denied_record_stopped() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-denied"], &[("%1", NEW, "tm-denied")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-denied", true).await;
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        binding(&mgr, &id).await.3,
+        ManagedSessionState::Stopped,
+        "boot reconcile re-adopted a front-gate-denied record: {report:?}"
+    );
+}
+
+/// #9850 (control): an approved front-gate answer is not a hold, so the
+/// live arm still re-adopts a `Stopped` record carrying one as `Active`. The
+/// record names the live server, so the automatic rebind leaves it to the
+/// live arm.
+#[tokio::test]
+async fn boot_reconcile_still_readopts_a_stopped_record_whose_front_gate_approved() {
+    let tmux = Arc::new(RebindTmux::new(
+        &["tm-approved"],
+        &[("%1", NEW, "tm-approved")],
+    ));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = answered_then_stopped(&mgr, "tm-approved", false).await;
+    let mut record = mgr.get(&id).await.expect("record");
+    record.tmux_server = Some(NEW.into());
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("live server");
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(binding(&mgr, &id).await.3, ManagedSessionState::Active);
+}
