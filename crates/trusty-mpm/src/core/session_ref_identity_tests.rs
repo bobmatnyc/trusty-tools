@@ -383,8 +383,17 @@ fn session_ref_identity_errors_never_carry_a_token() {
         };
         let refused = fx.resolve(&no_map, &refuse);
         refused.log(&fx.repo, "fetch");
+        // #9160: a request carrying the pinned vars must not Debug the token.
+        let snapshot = fx.repo.join("snapshot.md");
+        let request = crate::core::session_ref_publish::SessionRefRequest {
+            repo: &fx.repo,
+            session_id: "s1",
+            snapshot_path: &snapshot,
+            timestamp: chrono::Utc::now(),
+            git_env: pinned.vars(),
+        };
         format!(
-            "{pinned:?}\n{refused:?}\n{}\n{}",
+            "{pinned:?}\n{refused:?}\n{}\n{}\n{request:?}",
             pinned.annotate("x"),
             refused.annotate("x")
         )
@@ -396,6 +405,70 @@ fn session_ref_identity_errors_never_carry_a_token() {
         log.contains("fixture refusal"),
         "the refusal must be logged: {log}"
     );
+}
+
+/// 🔴 #9160 (Fail-Open Check): an origin git cannot read cannot say "unpinned";
+/// the resolver refuses, injects nothing and proves nothing.
+/// Test: itself.
+#[test]
+fn an_unreadable_origin_refuses_without_proving() {
+    let fx = Fixture::new(ORIGIN);
+    fx.pin(r#""gh_account":"octo-pinned""#);
+    std::fs::write(
+        fx.repo.join(".git/config"),
+        "[remote \"origin\"\n\turl = ???\n",
+    )
+    .expect("corrupt config");
+    let asked = RefCell::new(Vec::new());
+    let env = fx.resolve(&no_map, &proving(&asked));
+    let reason = env.refusal().expect("an unreadable origin must refuse");
+    assert!(reason.contains("could not be read"), "{reason}");
+    assert!(env.vars().is_empty(), "{env:?}");
+    assert!(asked.borrow().is_empty(), "nothing may be proven");
+}
+
+/// 🔴 #9160 (Fail-Open Check): an `[accounts]` table that fails to load cannot
+/// say "no org mapped"; the resolver refuses and proves nothing.
+/// Test: itself.
+#[test]
+fn a_broken_accounts_table_refuses_without_proving() {
+    let fx = Fixture::new(ORIGIN);
+    let load = || {
+        OrgAccounts::from_toml(
+            "[accounts]\nacme-9160 = 5\n",
+            Path::new("/home/u/.trusty-mpm/config.toml"),
+        )
+    };
+    assert!(load().is_err(), "the fixture table must fail to load");
+    let asked = RefCell::new(Vec::new());
+    let env = fx.resolve(&load, &proving(&asked));
+    let reason = env.refusal().expect("a broken org map must refuse");
+    assert!(
+        reason.contains("no session-ref network call was made"),
+        "{reason}"
+    );
+    assert!(env.vars().is_empty(), "{env:?}");
+    assert!(asked.borrow().is_empty(), "nothing may be proven");
+}
+
+/// 🔴 #9160 (Fail-Open Check): a proven account-only pin whose gh host cannot
+/// be derived is a refusal, not a pin with no credential-helper pin. The
+/// prover has already run by then; the refusal drops the proven token.
+/// Test: itself.
+#[test]
+fn a_host_that_cannot_be_derived_refuses_and_drops_the_token() {
+    let vars = vec![
+        ("GH_TOKEN".to_string(), TOKEN.to_string()),
+        ("GH_USER".to_string(), "octo-pinned".to_string()),
+    ];
+    let env = super::pinned_env(vars, "https://github.com/", &SshHostAliases::empty());
+    let reason = env.refusal().expect("an undecidable host must refuse");
+    assert!(
+        reason.contains("no session-ref network call was made"),
+        "{reason}"
+    );
+    assert!(!reason.contains(TOKEN), "{reason}");
+    assert!(env.vars().is_empty(), "{env:?}");
 }
 
 /// 🔴 #9160: a second catch-up inside the proof TTL asks neither gh nor

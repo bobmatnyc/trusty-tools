@@ -106,8 +106,9 @@ pub enum RefPublishError {
 /// snapshot's absolute path, the pause timestamp (which also becomes the
 /// commit's author/committer date, so the chain is ordered by pause time rather
 /// than by push time), and the env the network calls run under.
-/// Test: every test in `session_ref_publish_tests.rs`.
-#[derive(Debug, Clone)]
+/// Test: every test in `session_ref_publish_tests.rs`; `Debug` redacts `git_env`
+/// tokens (`session_ref_identity_errors_never_carry_a_token`).
+#[derive(Clone)]
 pub struct SessionRefRequest<'a> {
     /// The project checkout the pause happened in.
     pub repo: &'a Path,
@@ -120,6 +121,22 @@ pub struct SessionRefRequest<'a> {
     /// #9160: env for the three network calls (ls-remote, fetch, push) — the
     /// project's pinned gh identity, or empty for the ambient credential.
     pub git_env: &'a [(String, String)],
+}
+
+// #9160: `git_env` holds a real token for a pinned request, so `Debug` redacts it.
+impl std::fmt::Debug for SessionRefRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRefRequest")
+            .field("repo", &self.repo)
+            .field("session_id", &self.session_id)
+            .field("snapshot_path", &self.snapshot_path)
+            .field("timestamp", &self.timestamp)
+            .field(
+                "git_env",
+                &crate::core::gh_identity::RedactedVars(self.git_env),
+            )
+            .finish()
+    }
 }
 
 /// One appended session-ref commit.
