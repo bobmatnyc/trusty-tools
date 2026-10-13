@@ -718,6 +718,58 @@ async fn exec_argv_never_carries_a_value_or_token() {
     assert_eq!(fx.read("out.tok"), TOKEN, "tier 3: the fd yields the token");
 }
 
+/// Set in a re-run of this test binary: act as a tier-3 client, not a test.
+const CLIENT_ROLE: &str = "TM_EXEC_GRANTED_CLIENT";
+
+/// Why: #9071 S10 AC7 — in `tm secrets exec -- sh -c 'a && b'`, where `a`
+/// and `b` are both tier-3 clients, both resolve on the one token fd the
+/// stub handed down, and the stub's private token directory is gone. Red on
+/// the S9 pipe: `a` drains it and `b` fails with `InvalidToken`.
+/// What: `a` and `b` are this test binary re-run in [`CLIENT_ROLE`]; each
+/// resolves `GH_TOKEN` with `trusty_secrets::granted::GrantedClient`
+/// against the fake, under a scratch `TMPDIR`.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_siblings_resolve_on_one_token() {
+    if std::env::var_os(CLIENT_ROLE).is_some() {
+        let key = trusty_secrets::SecretKey::new("GH_TOKEN").expect("key");
+        let resolved = tokio::task::spawn_blocking(move || {
+            trusty_secrets::granted::GrantedClient::from_env().and_then(|c| c.resolve(&key))
+        })
+        .await
+        .expect("join the client");
+        let value = resolved.expect("the client resolved");
+        assert!(value.expose() == VALUE, "the client got another value");
+        return;
+    }
+    let fx = Fixture::new(Script::new()).await;
+    let tmp = fx.path("tmp");
+    std::fs::create_dir(&tmp).expect("tmp");
+    let (_, path) = module_path!().split_once("::").expect("crate prefix");
+    let name = format!("{path}::exec_siblings_resolve_on_one_token");
+    let client = r#""$ME" "$NAME" --exact --nocapture --test-threads=1"#;
+    let script = format!(r#"{client} && {client} && echo both > "$OUT""#);
+    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "sh", "-c", &script]);
+    cmd.env("ME", std::env::current_exe().expect("test binary"))
+        .env("NAME", &name)
+        .env(CLIENT_ROLE, "1")
+        .env("TMPDIR", &tmp);
+    let child = cmd.spawn().expect("spawn tm");
+    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("tm finished in 60 s")
+        .expect("tm output");
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert_eq!(fx.read("out"), "both\n", "{stdout}{stderr}");
+    assert_eq!(stdout.matches("1 passed").count(), 2, "{stdout}");
+    assert_eq!(fx.seen().resolves, ["GH_TOKEN"; 3], "the stub, a and b");
+    let left: Vec<_> = std::fs::read_dir(&tmp)
+        .expect("read tmp")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert!(left.is_empty(), "the token directory was left: {left:?}");
+}
+
 /// Why: on a terminal nothing is scrubbed (Architect ruling Q3).
 /// What: tm's stdout is a pty slave; a thread reads the master until the
 /// first line, and that line carries the value.

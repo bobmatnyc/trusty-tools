@@ -172,6 +172,8 @@ fn exec_spec(
 #[cfg(all(test, unix))]
 mod exec_tests;
 #[cfg(all(test, unix))]
+mod exec_token_tests;
+#[cfg(all(test, unix))]
 mod paste_tests;
 #[cfg(all(test, unix))]
 mod tests;
