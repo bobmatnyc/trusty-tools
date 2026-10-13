@@ -1,13 +1,18 @@
 //! `audit.jsonl`: one line per refused send, dropped or rate-limited inbound
-//! message, or quarantined ledger line.
+//! message, quarantined ledger line, or route change.
 //!
 //! Why: a refused send and a dropped reply are the events an operator needs
 //! to see, but the audit log must never become a copy of the conversation
-//! (#9448 ruling 4).
+//! (#9448 ruling 4). #9832 shares the record with the tm daemon's channel
+//! audit, through [`crate::audit`].
 //! What: [`AuditRecord`] has no text field at all: it records time, event,
-//! a fixed reason code, the route/sender/space identifiers, and the text
-//! length in bytes. [`AuditLog::record`] appends one line.
-//! Test: `audit_lines_never_contain_message_text`.
+//! a fixed reason code, the route/sender/space identifiers, the text length
+//! in bytes, and for a route change the project, commit, author and time.
+//! [`AuditLog::record`] appends one line; [`AuditLog::record_all`] appends a
+//! batch with one write.
+//! Test: `audit_lines_never_contain_message_text`,
+//! `audit_record_keys_are_the_allowlist`, `record_all_appends_every_line`,
+//! `owner_only_log_creates_file_0600`.
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +27,7 @@ const MAX_FIELD_CHARS: usize = 254;
 /// What happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AuditEvent {
     /// The egress gate refused an outbound message.
     SendRefused,
@@ -34,10 +40,13 @@ pub enum AuditEvent {
     /// An inbound message was dropped over its rate limit (#8454); one line
     /// per bucket per window.
     RateLimited,
+    /// #9832: the routes in effect changed, or were loaded for the first time.
+    RouteChanged,
 }
 
 /// One audit line. It has no field that can hold message text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct AuditRecord {
     /// RFC 3339 time.
     pub ts: String,
@@ -45,6 +54,9 @@ pub struct AuditRecord {
     pub event: AuditEvent,
     /// A fixed reason code, e.g. `no_route` or `no_open_question`.
     pub reason: &'static str,
+    /// The channel, e.g. `slack` (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<&'static str>,
     /// The route involved, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
@@ -66,6 +78,21 @@ pub struct AuditRecord {
     /// Text length in bytes, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub length: Option<usize>,
+    /// The project directory whose routes changed (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// The commit the changed routes were verified at (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Who changed the routes, always marked `(inferred)` (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// When that change was committed, RFC 3339 (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committed_at: Option<String>,
+    /// How many routes the file contributes now (#9832).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routes: Option<usize>,
 }
 
 impl AuditRecord {
@@ -75,6 +102,7 @@ impl AuditRecord {
             ts: now_rfc3339(),
             event,
             reason,
+            channel: None,
             route: None,
             kind: None,
             to: None,
@@ -82,12 +110,17 @@ impl AuditRecord {
             space: None,
             message_id: None,
             length: None,
+            project: None,
+            commit: None,
+            author: None,
+            committed_at: None,
+            routes: None,
         }
     }
 }
 
-/// Clip an identifier copied into an audit line.
-pub(crate) fn clip(s: &str) -> String {
+/// Clip an identifier copied into an audit line to 254 characters.
+pub fn clip(s: &str) -> String {
     s.chars().take(MAX_FIELD_CHARS).collect()
 }
 
@@ -95,6 +128,8 @@ pub(crate) fn clip(s: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct AuditLog {
     path: PathBuf,
+    /// #9832: create the file 0600 and narrow an existing one.
+    owner_only: bool,
 }
 
 impl AuditLog {
@@ -102,7 +137,19 @@ impl AuditLog {
     pub fn new(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
+            owner_only: false,
         }
+    }
+
+    /// A log at `path` readable and writable by its owner only.
+    ///
+    /// Why: #9832 (A3): the tm daemon's channel audit names projects,
+    /// commits and authors; other local users must not read it. gchat's
+    /// state files keep the mode they are created with ([`AuditLog::new`]).
+    /// What: seam; see the implementation commit.
+    /// Test: `owner_only_log_creates_file_0600`.
+    pub fn owner_only(path: &Path) -> Self {
+        Self::new(path)
     }
 
     /// The log path.
@@ -113,5 +160,16 @@ impl AuditLog {
     /// Append `record`.
     pub fn record(&self, record: &AuditRecord) -> Result<(), StateError> {
         append_line(&self.path, record)
+    }
+
+    /// Append every record in `records`.
+    ///
+    /// Why: #9832: a route change is durable before the routes go live, so
+    /// one batch is one write and one fsync.
+    /// What: seam; see the implementation commit.
+    /// Test: `record_all_appends_every_line`.
+    pub fn record_all(&self, records: &[AuditRecord]) -> Result<(), StateError> {
+        let _ = (records, self.owner_only);
+        Ok(())
     }
 }

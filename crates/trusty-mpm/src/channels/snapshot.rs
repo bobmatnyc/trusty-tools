@@ -24,6 +24,8 @@ use trusty_channels::policy::{
     ProjectFileError, QuestionId, QuestionState, Route,
 };
 
+use crate::channels::audit_log::RouteAudit;
+
 /// The least time between two refresh attempts (#8454 S2c Q4).
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -87,13 +89,17 @@ pub enum Refusal<R> {
 ///
 /// Why: the snapshot's timing and fail-closed rules are tested without git;
 /// the daemon plugs in [`LoaderSource`].
-/// What: `refresh` reloads as needed and returns the report now in effect.
-/// It may panic; the snapshot catches the panic and counts it as a failed
-/// refresh, so `refresh` must leave `self` usable after a panic.
-/// Test: `refresh_within_interval_spawns_no_git`.
+/// What: `refresh` reloads as needed and returns the report now in effect,
+/// or `None` when the refresh failed and the last report must stay (#9832:
+/// a route change that could not be recorded). It may panic; the snapshot
+/// counts a panic or `None` as a failed refresh, so `refresh` must leave
+/// `self` usable after either.
+/// Test: `refresh_within_interval_spawns_no_git`,
+/// `audit_write_failure_keeps_old_loader_and_fingerprint`.
 pub trait PolicySource: Send {
-    /// Reload as needed and return the report now in effect.
-    fn refresh(&mut self) -> LoadReport;
+    /// Reload as needed and return the report now in effect; `None` on a
+    /// failed refresh.
+    fn refresh(&mut self) -> Option<LoadReport>;
 }
 
 /// The daemon's source: a trusty-channels `PolicyLoader`.
@@ -112,17 +118,30 @@ pub trait PolicySource: Send {
 pub struct LoaderSource {
     req: LoadRequest,
     loader: Option<PolicyLoader>,
+    // #9832: where a route change is recorded before it goes live.
+    audit: RouteAudit,
 }
 
 impl LoaderSource {
-    /// A source for `req`; nothing is read until the first refresh.
+    /// A source for `req`, recording route changes under its home;
+    /// nothing is read until the first refresh.
     pub fn new(req: LoadRequest) -> Self {
-        Self { req, loader: None }
+        let audit = RouteAudit::for_home(req.home.as_deref());
+        Self::with_audit(req, audit)
+    }
+
+    /// [`Self::new`] with its own route-change audit (#9832 test seam).
+    pub(crate) fn with_audit(req: LoadRequest, audit: RouteAudit) -> Self {
+        Self {
+            req,
+            loader: None,
+            audit,
+        }
     }
 }
 
 impl PolicySource for LoaderSource {
-    fn refresh(&mut self) -> LoadReport {
+    fn refresh(&mut self) -> Option<LoadReport> {
         // #8454: work on a copy; a panic leaves `self.loader` as it was.
         let next = match &self.loader {
             Some(loader) => {
@@ -134,7 +153,7 @@ impl PolicySource for LoaderSource {
         };
         let report = next.report().clone();
         self.loader = Some(next);
-        report
+        Some(report)
     }
 }
 
@@ -382,7 +401,7 @@ where
 
 impl<S: PolicySource, C> Inner<S, C> {
     /// One source refresh, outside every lock a check takes: the report and
-    /// whether it is fresh, or `None` when the refresh panicked.
+    /// whether it is fresh, or `None` when the refresh panicked or failed.
     fn load(&self) -> Option<(Arc<LoadReport>, bool)> {
         // #9777: the guard lives only inside the catch, so a refresh panic
         // never poisons the lock; a poisoned one fails the refresh.
@@ -394,7 +413,9 @@ impl<S: PolicySource, C> Inner<S, C> {
             catch_unwind(AssertUnwindSafe(|| source.refresh()))
         };
         let report = match caught {
-            Ok(report) => report,
+            Ok(Some(report)) => report,
+            // #9832: the source logged why; the last report stays.
+            Ok(None) => return None,
             Err(_) => {
                 // #8454: a panic counts toward max age; the last report stays.
                 tracing::error!("channel policy refresh panicked; last report kept until max age");

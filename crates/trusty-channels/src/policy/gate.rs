@@ -280,6 +280,38 @@ pub fn check_default_branch(project_dir: &Path, bytes: &[u8]) -> Result<BranchSt
     Ok(state)
 }
 
+/// Who last changed the route file at a commit, and when, as git records it.
+///
+/// Why: #9832: the route-change audit names who changed the routes. git's
+/// author is self-asserted, so a caller marks it inferred.
+/// What: the author name (`%an`) and the commit time in Unix seconds (`%ct`).
+/// Test: `commit_author_reads_author_and_time_of_last_routes_commit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CommitAuthor {
+    /// The author name, as git printed it.
+    pub name: String,
+    /// The committer time, Unix seconds.
+    pub time: i64,
+}
+
+/// The author and time of the last commit at or before `commit` that
+/// changed [`ROUTES_REL_PATH`] in `project_dir`'s repo.
+///
+/// Why: #9832 (A1, A2): the gate verified the bytes at `commit`; the author
+/// of that commit's last route change is who changed the routes, not
+/// whoever authored the branch tip.
+/// What: seam; see the implementation commit.
+/// Test: `commit_author_reads_author_and_time_of_last_routes_commit`,
+/// `commit_author_refuses_non_hex_commit`, `missing_commit_object_refuses`.
+pub fn commit_author(project_dir: &Path, commit: &str) -> Result<CommitAuthor, GateError> {
+    let _ = (project_dir, commit);
+    Ok(CommitAuthor {
+        name: String::new(),
+        time: 0,
+    })
+}
+
 /// The default branch, resolved locally (Architect G2): `origin/HEAD`'s
 /// target with `origin/` stripped; else exactly one of `main`, `master`.
 /// `init.defaultBranch` is not read. No remote is contacted.

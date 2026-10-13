@@ -304,6 +304,10 @@ pub struct FileStatus {
     pub gchat_connection: Option<Connection>,
     /// Effective gchat route name to `spaces/{id}`, for space routes.
     pub gchat_spaces: BTreeMap<String, String>,
+    /// #9832: the default-branch commit the gate verified these bytes
+    /// against. `Some` only while the file is `Effective`; the route-change
+    /// audit looks the author up at this commit.
+    pub verified_commit: Option<String>,
 }
 
 impl FileStatus {
@@ -314,6 +318,7 @@ impl FileStatus {
             state,
             gchat_connection: None,
             gchat_spaces: BTreeMap::new(),
+            verified_commit: None,
         }
     }
 }
