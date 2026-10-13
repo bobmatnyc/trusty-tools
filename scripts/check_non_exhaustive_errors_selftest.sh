@@ -12,7 +12,9 @@
 #   status and, where it matters, the message. Failing cases pin each way an
 #   enum counts as an error enum (a bare, path-qualified and multi-line
 #   `derive(Error)`, an `...Error` name, a hand-written `impl Error for`) and
-#   an attribute that must not leak from the item above. Passing cases pin the
+#   an attribute that must not leak from the item above, a `[` inside an
+#   attribute string, and a `non_exhaustive` that is not the real attribute
+#   (`cfg_attr`, a doc string). Passing cases pin the
 #   marked forms, a non-error enum, a `pub(crate)` enum, test files and a file
 #   outside the scan root. The scan floor and a bad argument close the set.
 #
@@ -100,6 +102,13 @@ one_file name_only 1 'a.rs:2: pub enum ParseError' \
   '#[derive(Debug)]\npub enum ParseError {\n    A,\n}\n'
 one_file attr_no_leak 1 'a.rs:4: pub enum Gone' \
   '#[non_exhaustive]\npub struct S;\n#[derive(Debug, Error)]\npub enum Gone {\n    A,\n}\n'
+
+one_file bracket_in_string 1 'a.rs:8: pub enum BadError' \
+  '#[derive(Debug, Error)]\n#[non_exhaustive]\npub enum Gone {\n    #[error("expected [ here")]\n    A,\n    B,\n}\npub enum BadError {\n    A,\n}\n'
+one_file cfg_attr_only 1 'a.rs:3: pub enum Gone' \
+  '#[derive(Debug, Error)]\n#[cfg_attr(test, non_exhaustive)]\npub enum Gone {\n    A,\n}\n'
+one_file doc_mentions_it 1 'a.rs:3: pub enum Gone' \
+  '#[derive(Debug, Error)]\n#[doc = "never non_exhaustive"]\npub enum Gone {\n    A,\n}\n'
 
 d="$(new_fixture manual_impl)"
 printf '#[derive(Debug)]\npub enum Refused {\n    A,\n}\n' > "$d/$SRC/a.rs"

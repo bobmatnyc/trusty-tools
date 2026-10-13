@@ -97,13 +97,15 @@ offending="$(awk '
   FNR == 1 { attrs = ""; in_attr = 0 }
   {
     t = $0; sub(/^[ \t]+/, "", t)
+    # Count brackets outside string literals: `#[error("a [ b")]` is balanced.
+    u = t; gsub(/"([^"\\]|\\.)*"/, "", u)
     if (in_attr) {
-      attrs = attrs " " t; depth += gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
+      attrs = attrs " " t; depth += gsub(/\[/, "[", u) - gsub(/\]/, "]", u)
       if (depth <= 0) in_attr = 0
       next
     }
     if (t ~ /^#\[/) {
-      attrs = attrs " " t; depth = gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
+      attrs = attrs " " t; depth = gsub(/\[/, "[", u) - gsub(/\]/, "]", u)
       if (depth > 0) in_attr = 1
       next
     }
@@ -112,7 +114,7 @@ offending="$(awk '
       name = t; sub(/^pub enum /, "", name); sub(/[^A-Za-z0-9_].*/, "", name)
       is_err = (name ~ /Error$/) || (name in manual) ||
                (attrs ~ /derive\(([^)]*[^A-Za-z0-9_])?Error[^A-Za-z0-9_]/)
-      if (is_err && attrs !~ /non_exhaustive/) print FILENAME ":" FNR ": pub enum " name
+      if (is_err && attrs !~ /#\[[ \t]*non_exhaustive[ \t]*\]/) print FILENAME ":" FNR ": pub enum " name
     }
     attrs = ""
   }' $files $files)"
