@@ -448,10 +448,10 @@ pub struct DaemonState {
     /// [`crate::daemon::state::pending_stops`] for the whole rationale.
     /// Test: `out_of_order_subagent_stop_resolves_when_its_post_tool_use_lands`.
     pub(super) pending_stops: super::pending_stops::PendingStops,
-    /// #8454: the channel route-policy snapshot, built on first use; see
+    /// #8433: the channel holds (policy snapshot, question table); see
     /// [`Self::channel_policy`].
     #[cfg(feature = "channels")]
-    pub(super) channel_policy: std::sync::OnceLock<crate::channels::snapshot::DaemonPolicySnapshot>,
+    pub(super) channels: super::channel_policy::ChannelHold,
 }
 
 impl Default for DaemonState {
@@ -563,7 +563,7 @@ impl DaemonState {
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
             #[cfg(feature = "channels")]
-            channel_policy: std::sync::OnceLock::new(),
+            channels: Default::default(),
         }
     }
 
@@ -649,7 +649,7 @@ impl DaemonState {
             dispatch_record: parking_lot::Mutex::new(()),
             pending_stops: super::pending_stops::PendingStops::default(),
             #[cfg(feature = "channels")]
-            channel_policy: std::sync::OnceLock::new(),
+            channels: Default::default(),
         }
     }
 
