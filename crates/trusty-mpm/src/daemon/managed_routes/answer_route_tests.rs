@@ -129,17 +129,23 @@ async fn two_concurrent_front_gate_answers_spawn_once() {
 }
 
 /// #9841 (D4): a failed launch closes the decision; a repeat is a 409 that
-/// says so, and launches nothing.
+/// says so, and launches nothing. The failing launch marks the record errored,
+/// as `spawn_runtime_for` does, so the repeat meets a session whose pane
+/// cannot be proven: the conflict must still be the answer.
 #[tokio::test]
 async fn front_gate_launch_failure_closes_the_decision() {
     let h = Harness::new(ManagedSessionState::Provisioning).await;
     h.ask().await;
     let launches = Arc::new(AtomicUsize::new(0));
+    *h.driver.inner.pane_exists_override.lock().unwrap() = Some(false);
 
-    let l = Arc::clone(&launches);
+    let (l, m) = (Arc::clone(&launches), h.state.session_manager().await);
     let failed = h
-        .answer(request("yes"), move |_| async move {
+        .answer(request("yes"), move |record| async move {
             l.fetch_add(1, Ordering::SeqCst);
+            m.mark_errored(&record.id, "spawn failed: fake")
+                .await
+                .map_err(|e| e.to_string())?;
             Err("fake: claude binary not found".to_string())
         })
         .await;

@@ -397,6 +397,21 @@ async fn settle_failure_still_reports_the_delivered_answer() {
     assert!(text.contains("(delivery unconfirmed)"), "{text}");
 }
 
+/// #9841: a repeat answer is the conflict even when the pane is gone; the
+/// pane refusal must not hide who answered.
+#[tokio::test]
+async fn repeat_answer_is_a_conflict_even_when_the_pane_is_gone() {
+    let f = fixture(ManagedSessionState::Active).await;
+    f.ask("merge or rebase?").await;
+    f.answer("merge", AnswerClaim::by("alice"))
+        .await
+        .expect("first answer");
+    *f.driver.inner.pane_exists_override.lock().unwrap() = Some(false);
+
+    let text = conflict_text(f.answer("merge", AnswerClaim::by("bob")).await);
+    assert!(text.contains("already answered by alice"), "{text}");
+}
+
 /// #9841: the pane is proven before the claim, so a refused pane leaves the
 /// decision pending for a retry.
 #[tokio::test]
