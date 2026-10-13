@@ -1,0 +1,4 @@
+Fixed
+- `tm sessions activity` now accepts a managed session's name or unique name prefix, not only its id, and reads that session's activity by its canonical id. An ambiguous prefix is an error naming every matching session (#9834).
+- `tm sessions pause`, `events` and `run` on a managed session now fail with an error saying the verb is not supported for managed sessions and naming the command to use instead (`stop`, `activity` or `output`, `send`). They no longer send the request to the project-session route, where a managed session read as "not found". When a managed and a project session share a name, the managed session wins, as for `stop` and `resume` (#9834).
+- When the managed session list cannot be read, `tm sessions pause`, `events`, `run` and `activity` report `could not list managed sessions to resolve '<target>'` with the cause, instead of falling back to the project route or reporting "not found" (#9834).

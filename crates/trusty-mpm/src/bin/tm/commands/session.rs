@@ -23,6 +23,8 @@ pub(crate) mod catchup;
 pub(crate) mod instructions;
 mod output;
 mod start;
+// #9834: managed-session resolution for pause/events/run/activity.
+mod target;
 
 use instructions::{compose_session_instructions, print_excluded_scope};
 
@@ -44,7 +46,8 @@ use crate::types::{EventRow, SessionRow};
 /// route to the managed runtime-stop/resume endpoints when the id/name
 /// resolves to a managed session, falling back to the project-session path
 /// otherwise; `Info` resolves a session by id or friendly name; `List` and
-/// `Clean` scope to the project directory.
+/// `Clean` scope to the project directory. `Pause`/`Events`/`Run` refuse a
+/// managed target and `Activity` resolves one, via [`target`] (#9834).
 /// Test: `cli_parses_session_start`, `cli_parses_session_stop`,
 /// `cli_parses_session_list`, `cli_parses_session_clean`,
 /// `cli_parses_session_info`.
@@ -219,6 +222,9 @@ pub(crate) async fn session(
             }
         }
         SessionAction::Events { id_or_name } => {
+            // #9834: a managed target is refused before the project lookup.
+            let ambiguous =
+                target::project_only(daemon, &id_or_name, target::ProjectVerb::Events).await?;
             let id = match crate::commands::managed_route::resolve_project_session_id(
                 daemon,
                 &id_or_name,
@@ -226,9 +232,7 @@ pub(crate) async fn session(
             .await?
             {
                 Some(id) => id,
-                None => {
-                    anyhow::bail!("session '{id_or_name}' not found");
-                }
+                None => return Err(target::not_found(&id_or_name, ambiguous)),
             };
             #[derive(Deserialize)]
             struct Body {
@@ -308,13 +312,16 @@ pub(crate) async fn session(
             }
         }
         SessionAction::Pause { id_or_name, note } => {
+            // #9834: a managed target is refused; no project request is sent.
+            let ambiguous =
+                target::project_only(daemon, &id_or_name, target::ProjectVerb::Pause).await?;
             let resp = daemon
                 .post(format!("/sessions/{id_or_name}/pause"))
                 .json(&serde_json::json!({ "summary": note }))
                 .send()
                 .await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                anyhow::bail!("session '{id_or_name}' not found");
+                return Err(target::not_found(&id_or_name, ambiguous));
             }
             let body: serde_json::Value = resp.error_for_status()?.json().await?;
             let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
@@ -353,6 +360,9 @@ pub(crate) async fn session(
             command,
             summarize,
         } => {
+            // #9834: a managed target is refused; no project request is sent.
+            let ambiguous =
+                target::project_only(daemon, &id_or_name, target::ProjectVerb::Run).await?;
             let mut req = daemon.post(format!("/sessions/{id_or_name}/command"));
             if summarize {
                 req = req.query(&[("compress", "summarise")]);
@@ -363,7 +373,7 @@ pub(crate) async fn session(
                 .await?;
             match resp.status() {
                 reqwest::StatusCode::NOT_FOUND => {
-                    anyhow::bail!("session '{id_or_name}' not found");
+                    return Err(target::not_found(&id_or_name, ambiguous));
                 }
                 reqwest::StatusCode::CONFLICT => {
                     println!("session '{id_or_name}' is stopped");
@@ -423,9 +433,8 @@ pub(crate) async fn session(
         // `activity` stays on the raw path: its CLI output carries confidence,
         // token, cache, and latency detail that `CommandResult::ManagedActivity`
         // does not model, so routing it through chat-core would regress output.
-        SessionAction::Activity { id } => {
-            crate::commands::managed::session_activity(daemon, id).await?
-        }
+        // #9834: resolves a managed name or prefix to its canonical id first.
+        SessionAction::Activity { id } => target::activity(daemon, id).await?,
         SessionAction::PruneIdle { dry_run, json } => {
             crate::commands::prune::prune_idle(daemon, dry_run, json).await?
         }
