@@ -316,6 +316,8 @@ impl SessionManager {
             branch,
             pending_decision: None,
             proposed_default: None,
+            pending_decision_id: None,
+            last_answer: None,
             correlation,
             runtime,
             ephemeral,
