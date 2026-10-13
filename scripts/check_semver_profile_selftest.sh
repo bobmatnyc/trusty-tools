@@ -270,6 +270,7 @@ args_seen() {
 # ===========================================================================
 # Library cases: the table and its parser, without the gate.
 # ===========================================================================
+# shellcheck disable=SC1090 # the path is resolved at run time
 if [[ -f "$LIB" ]] && . "$LIB"; then
   rc=0
   out="$(semver_profile_validate "$REAL_PROFILES" 2>&1)" || rc=$?
@@ -390,7 +391,7 @@ while IFS='|' read -r name bad; do
   table="${WORK}/bad.tsv"
   {
     printf 'stub-engine\tengine-nodefault\t-\tinformational\tauto\treason\n'
-    printf "${bad}\n"
+    printf '%b\n' "$bad"
   } > "$table"
   rc=0
   out="$(PROFILES="$table" run_gate "$IDX" clean.out 0 "${P[@]}" engine-nodefault)" || rc=$?

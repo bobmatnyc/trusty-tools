@@ -56,6 +56,9 @@
 #     scripts/test-data/preflight-check5/       and the library and captured
 #       break-lints.out                         break its self-test cases replay
 #                                               (#8372)
+#     scripts/lib/semver_profile.sh             the surface-profile arm the gate
+#     scripts/semver-surface-profiles.tsv       sources with --profile, its table
+#     scripts/check_semver_profile_selftest.sh  and its self-test (#9278)
 #
 #   `scripts/preflight-publish.sh` is deliberately NOT here. It runs the same
 #   check_semver.sh at publish time and has its own self-test
@@ -100,6 +103,9 @@ is_gate_input() {
     scripts/semver_ci_accept.sh) return 0 ;;
     scripts/lib/semver_accepted_breaks.sh) return 0 ;;
     scripts/test-data/preflight-check5/break-lints.out) return 0 ;;
+    scripts/lib/semver_profile.sh) return 0 ;;
+    scripts/semver-surface-profiles.tsv) return 0 ;;
+    scripts/check_semver_profile_selftest.sh) return 0 ;;
   esac
   return 1
 }

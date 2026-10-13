@@ -1,0 +1,8 @@
+# SemVer surface profiles for scripts/check_semver.sh --profile (#9278).
+# Columns (TAB-separated): crate  profile  features  mode  baseline  reason
+#   features  `-` = none (the --no-default-features build), else a,b,c
+#   mode      informational (a computed break exits 0) | blocking (exit 1)
+#   baseline  auto (greatest stable release below the declared version) | X.Y.Z
+# Every fault still exits 3 in either mode. Format, pin step and rules:
+# docs/reference/semver-gate.md, "Surface profiles".
+trusty-memory	engine-nodefault	-	informational	auto	ADR-0066 D1.4 frozen surface: trusty_memory::engine::* built with --no-default-features. Informational against the greatest stable release below (Architect D4, 2026-10-13) until the first release that carries the audited surface is pinned here.
