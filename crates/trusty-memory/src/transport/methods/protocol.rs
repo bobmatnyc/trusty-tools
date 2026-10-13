@@ -17,8 +17,8 @@ use serde_json::Value;
 use trusty_common::memory_rpc::MemoryProtocolInfo;
 
 use super::NoParams;
-use crate::transport::api_error::ApiError;
 use crate::AppState;
+use crate::transport::api_error::ApiError;
 
 /// The daemon's wire protocol version (#9288).
 ///

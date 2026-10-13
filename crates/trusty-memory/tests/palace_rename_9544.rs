@@ -12,12 +12,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use trusty_memory::AppState;
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::transport::{dispatch, JsonRpcRequest};
-use trusty_memory::AppState;
+use trusty_memory::transport::{JsonRpcRequest, dispatch};
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -165,10 +165,10 @@ async fn rename_concurrent_remember_loses_and_duplicates_nothing() {
                         json!({"palace": "race-src", "text": note(i), "force": true}),
                     )
                     .await;
-                if let Ok(out) = out {
-                    if let Some(id) = out["drawer_id"].as_str() {
-                        acked.push(id.to_string());
-                    }
+                if let Ok(out) = out
+                    && let Some(id) = out["drawer_id"].as_str()
+                {
+                    acked.push(id.to_string());
                 }
             }
             acked

@@ -13,7 +13,7 @@
 mod recall_support;
 
 use chrono::{Duration, Utc};
-use recall_support::{rank_of, recall_on, remember, state_with, Surface};
+use recall_support::{Surface, rank_of, recall_on, remember, state_with};
 use serde_json::json;
 use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::tools::dispatch_tool;

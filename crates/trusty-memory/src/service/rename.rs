@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use crate::engine::palace::PalaceId;
 use crate::engine::registry::{
-    PalaceRenameError, RenameOptions, RenameOutcome, DEFAULT_RENAME_BUSY_WAIT,
+    DEFAULT_RENAME_BUSY_WAIT, PalaceRenameError, RenameOptions, RenameOutcome,
 };
 use crate::engine::store::{PalaceStore, PalaceStoreError};
 use crate::engine::timeouts;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use trusty_common::palace_alias::canonical_palace_id;
 

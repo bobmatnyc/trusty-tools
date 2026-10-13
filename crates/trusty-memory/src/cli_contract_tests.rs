@@ -371,10 +371,11 @@ fn arg_matches(g: &ArgRecord, c: &ArgRecord) -> bool {
 
 fn compare_arg(g: &ArgRecord, c: &ArgRecord, breaks: &mut Vec<String>) {
     let at = format!("`{}` of `{}`", g.key, g.command);
-    if let Some(short) = g.short {
-        if c.short != Some(short) && !c.short_aliases.contains(&short) {
-            breaks.push(format!("{at} lost its short alias `-{short}`"));
-        }
+    if let Some(short) = g.short
+        && c.short != Some(short)
+        && !c.short_aliases.contains(&short)
+    {
+        breaks.push(format!("{at} lost its short alias `-{short}`"));
     }
     let longs: BTreeSet<&str> = c
         .key

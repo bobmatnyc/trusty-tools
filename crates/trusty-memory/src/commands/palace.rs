@@ -20,11 +20,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engine::dream::{kg_compact_pass, DreamConfig};
+use crate::engine::dream::{DreamConfig, kg_compact_pass};
 use crate::engine::palace::Palace;
 use crate::engine::retrieval::PalaceHandle;
-use crate::engine::store::kg_redb::KgRedbStats;
 use crate::engine::store::OpenIntent;
+use crate::engine::store::kg_redb::KgRedbStats;
 use crate::engine::{MaintenanceLease, PalaceRegistry};
 use anyhow::{Context, Result};
 use clap::Subcommand;

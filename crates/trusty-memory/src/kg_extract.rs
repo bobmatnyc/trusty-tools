@@ -976,12 +976,16 @@ mod tests {
             room: Some("Backend"),
         });
         let object = drawer_subject(id);
-        assert!(triples
-            .iter()
-            .any(|t| t.subject == "tag:rust" && t.predicate == "tags" && t.object == object));
-        assert!(triples
-            .iter()
-            .any(|t| t.subject == "tag:design" && t.predicate == "tags" && t.object == object));
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.subject == "tag:rust" && t.predicate == "tags" && t.object == object)
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.subject == "tag:design" && t.predicate == "tags" && t.object == object)
+        );
         assert!(triples.iter().any(|t| t.subject == "room:Backend"
             && t.predicate == "contains"
             && t.object == object));
@@ -1032,9 +1036,11 @@ mod tests {
             tags: &[],
             room: None,
         });
-        assert!(triples
-            .iter()
-            .any(|t| t.subject == "rustc" && t.predicate == "is-a" && t.object == "compiler"));
+        assert!(
+            triples
+                .iter()
+                .any(|t| t.subject == "rustc" && t.predicate == "is-a" && t.object == "compiler")
+        );
     }
 
     /// Why: Confidence and provenance are guard-rails — extracted triples

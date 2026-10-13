@@ -337,9 +337,11 @@ fn a_ticker_that_stops_beating_reports_degraded() {
     let t0 = Instant::now();
     assert!(tracker.degraded_at(t0 + Duration::from_secs(60)).is_none());
     tracker.beat(t0, Duration::from_millis(10));
-    assert!(tracker
-        .degraded_at(t0 + Duration::from_millis(30))
-        .is_none());
+    assert!(
+        tracker
+            .degraded_at(t0 + Duration::from_millis(30))
+            .is_none()
+    );
     let reason = tracker
         .degraded_at(t0 + Duration::from_millis(31))
         .expect("a silent ticker is degraded");

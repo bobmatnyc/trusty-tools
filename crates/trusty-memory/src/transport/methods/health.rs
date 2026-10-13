@@ -55,7 +55,7 @@ pub(crate) const PROBE_SENTINEL_PREFIX: &str = "__trusty_memory_health_sentinel_
 
 use crate::AppState;
 
-use super::{to_value, HEALTH_PROBE_PALACE};
+use super::{HEALTH_PROBE_PALACE, to_value};
 use crate::transport::api_error::ApiError;
 
 /// Query parameters for `GET /health`.
@@ -847,8 +847,8 @@ pub(crate) async fn run_health_round_trip_inner<F, Fut>(
 where
     F: FnOnce(std::sync::Arc<crate::engine::PalaceHandle>, String) -> Fut,
     Fut: std::future::Future<
-        Output = Result<Vec<crate::engine::retrieval::RecallResult>, HealthProbeError>,
-    >,
+            Output = Result<Vec<crate::engine::retrieval::RecallResult>, HealthProbeError>,
+        >,
 {
     // Content-unique probe phrase. `__trusty_memory_healthcheck__` makes the
     // probe identifiable in logs / drawer dumps if a forget step is ever

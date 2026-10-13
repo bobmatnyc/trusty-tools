@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use trusty_memory::AppState;
 use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::engine::retrieval::PalaceHandle;
-use trusty_memory::engine::store::hnsw_store::op_budget::{op_budget_error, OpBudgetError};
+use trusty_memory::engine::store::hnsw_store::op_budget::{OpBudgetError, op_budget_error};
 use trusty_memory::engine::store::kg::KnowledgeGraph;
 use trusty_memory::engine::store::vector::UsearchStore;
-use trusty_memory::transport::methods::health::{health, HealthQuery};
-use trusty_memory::AppState;
+use trusty_memory::transport::methods::health::{HealthQuery, health};
 
 const BUDGET: Duration = Duration::from_millis(200);
 const WATCHDOG: Duration = Duration::from_secs(20);

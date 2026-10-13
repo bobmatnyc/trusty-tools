@@ -21,7 +21,7 @@
 //! daemon verifies the version-check path without triggering an install.
 
 use anyhow::Result;
-use trusty_common::update::{check_crates_io, upgrade_and_restart, UpdateInfo};
+use trusty_common::update::{UpdateInfo, check_crates_io, upgrade_and_restart};
 
 /// Handle `trusty-memory upgrade [--check] [--yes]`.
 ///

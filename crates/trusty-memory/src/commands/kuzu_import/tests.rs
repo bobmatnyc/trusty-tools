@@ -15,14 +15,14 @@ use crate::engine::palace::{Drawer, Palace, PalaceId};
 use crate::engine::store::Triple;
 use crate::engine::{PalaceHandle, PalaceRegistry};
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::apply::{HandleSink, PalaceSink, PalaceView, StoreCounts};
-use super::bridge::{export_store, resolve_python, CommandRunner, KuzuExport, RunOutput};
-use super::discovery::{discover, resolve_from, DiscoveredStore};
+use super::bridge::{CommandRunner, KuzuExport, RunOutput, export_store, resolve_python};
+use super::discovery::{DiscoveredStore, discover, resolve_from};
 use super::ledger::{Ledger, MemoryPlan};
-use super::mapping::{kuzu_content_hash, map_memory, relates_to_predicate, MappedMemory};
+use super::mapping::{MappedMemory, kuzu_content_hash, map_memory, relates_to_predicate};
 use super::palace_io::DaemonProbe;
 use super::*;
 
@@ -262,10 +262,12 @@ fn discovery_finds_nested_stores_and_reports_unreadable() {
         })
         .collect();
     assert_eq!(names, vec!["alpha", "beta/nested/deeper"], "{found:?}");
-    assert!(found
-        .skipped
-        .iter()
-        .any(|s| s.path.ends_with("gamma/.kuzu-memory")));
+    assert!(
+        found
+            .skipped
+            .iter()
+            .any(|s| s.path.ends_with("gamma/.kuzu-memory"))
+    );
     // Running as root can read a 000 directory; the report is only owed when
     // the read actually fails.
     if std::fs::read_dir(&locked).is_ok() && !is_root() {
@@ -886,7 +888,7 @@ fn deprecated_kuzu_data_forwards_to_import() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_memory_rewrites_the_whole_chunk_group() {
     use crate::engine::embed::Embedder as _;
-    use trusty_common::embedder::{chunk_text, MockEmbedder};
+    use trusty_common::embedder::{MockEmbedder, chunk_text};
     let tmp = tempfile::tempdir().expect("tmp");
     let sink = HandleSink {
         handle: palace(tmp.path(), "kuzu-chunks"),

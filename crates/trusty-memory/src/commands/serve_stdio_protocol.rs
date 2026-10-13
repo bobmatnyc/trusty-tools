@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use trusty_mcp::{error_codes, Request, Response};
+use trusty_mcp::{Request, Response, error_codes};
 
 /// Budget for one protocol check; a callable verdict is then reused briefly.
 const PROTOCOL_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,9 +50,9 @@ pub(crate) async fn protocol_refusal(req: &Request, socket: &Path) -> Option<Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use trusty_common::memory_rpc::{METHOD_PROTOCOL, SUPPORTED_MEMORY_PROTOCOLS};
-    use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
+    use trusty_common::uds::server::{RpcRouter, RpcServeOptions, serve_until};
 
     fn request(method: &str, id: Option<Value>) -> Request {
         Request {

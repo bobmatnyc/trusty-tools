@@ -20,10 +20,10 @@
 
 use serde_json::json;
 use std::path::Path;
-use trusty_memory::engine::palace::{Palace, PalaceId};
-use trusty_memory::engine::PalaceRegistry;
-use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
+use trusty_memory::engine::PalaceRegistry;
+use trusty_memory::engine::palace::{Palace, PalaceId};
+use trusty_memory::tools::dispatch_tool;
 
 /// Palaces to seed: wider than `RECALL_PALACE_BATCH` (8) so the batch loop
 /// actually iterates, and wider than one batch's worth of residue.

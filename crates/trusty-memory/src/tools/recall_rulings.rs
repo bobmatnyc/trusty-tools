@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::engine::embed::Embedder;
 use crate::engine::palace::PalaceId;
 use crate::engine::registry::PalaceRegistry;
-use crate::engine::retrieval::{expand_query, retrieve_l2_scoped, RecallResult, RecallScope};
+use crate::engine::retrieval::{RecallResult, RecallScope, expand_query, retrieve_l2_scoped};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -37,9 +37,9 @@ use super::bm25::{bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 use super::recall_rank::is_ruling;
 use super::recall_rulings_floor::ruling_answers_query;
-use super::recall_supersede::{supersessions_for_within, Supersessions, LOOKUP_BUDGET};
-use crate::commands::prompt_context::BODY_DEADLINE;
+use super::recall_supersede::{LOOKUP_BUDGET, Supersessions, supersessions_for_within};
 use crate::AppState;
+use crate::commands::prompt_context::BODY_DEADLINE;
 
 /// Environment variable naming the user-scope rulings palaces.
 ///
@@ -225,10 +225,10 @@ impl RulingsLeg {
         if oldest.is_some_and(|started| started.elapsed() >= self.timeout) {
             return Err((DegradedReason::InFlight, false));
         }
-        if let Some((at, reason)) = state.failure {
-            if at.elapsed() < RULINGS_RETRY_AFTER {
-                return Err((reason, true));
-            }
+        if let Some((at, reason)) = state.failure
+            && at.elapsed() < RULINGS_RETRY_AFTER
+        {
+            return Err((reason, true));
         }
         state.generation += 1;
         state.running.insert(state.generation, Instant::now());

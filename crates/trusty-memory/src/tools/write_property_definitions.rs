@@ -9,7 +9,7 @@
 //! `memory_remember_schema_advertises_the_verify_argument`,
 //! `write_schemas_advertise_the_text_content_alias`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Insert the spliced write-tool properties into `tools`.
 ///

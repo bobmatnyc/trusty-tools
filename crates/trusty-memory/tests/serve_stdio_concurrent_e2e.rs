@@ -46,7 +46,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
@@ -385,7 +385,7 @@ async fn stdio_bridge_exits_on_stdin_eof_and_never_orphans_a_daemon() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()); // suppress error output in test runs
-                                // #7085: see `spawn_raw_bridge`.
+    // #7085: see `spawn_raw_bridge`.
     trusty_common::parent_death::exit_with_parent_tokio(&mut cmd);
 
     let mut child = cmd.spawn().expect("spawn bridge");

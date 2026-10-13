@@ -5,7 +5,7 @@
 //! test spawned.
 
 use super::*;
-use sandbox::{refuse_live_unit_under_override, stop_target, StopTarget};
+use sandbox::{StopTarget, refuse_live_unit_under_override, stop_target};
 use std::cell::Cell;
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 
@@ -220,7 +220,7 @@ fn service_stop_is_refused_under_a_data_dir_override() {
 /// `handle_service` calls, never `launchctl`.
 #[test]
 fn service_install_start_and_stop_are_refused_under_a_data_dir_override() {
-    use crate::commands::service::{refuse_live_unit_action, ServiceAction};
+    use crate::commands::service::{ServiceAction, refuse_live_unit_action};
     let _env = crate::commands::env_test_lock().blocking_lock();
     let data = tempfile::tempdir().expect("tempdir");
     let _override = OverrideGuard::set(Some(data.path().as_os_str()));

@@ -13,7 +13,7 @@
 //! Test: round-trip via the unit test in `messaging::tests`; the HTTP
 //! handler is itself covered by `web::tests::messages_post_then_get_unread`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use std::time::Duration;
 

@@ -394,10 +394,11 @@ impl Bm25Lane {
             return false;
         };
         let dir_present = matches!(self.data_root.join(palace).try_exists(), Ok(true));
-        if idx.is_dirty() && dir_present {
-            if let Err(e) = idx.flush() {
-                tracing::warn!(palace = %palace, "bm25 flush before eviction failed: {e:#}");
-            }
+        if idx.is_dirty()
+            && dir_present
+            && let Err(e) = idx.flush()
+        {
+            tracing::warn!(palace = %palace, "bm25 flush before eviction failed: {e:#}");
         }
         let dropped_unflushed = idx.is_dirty();
         resident.pop(palace);

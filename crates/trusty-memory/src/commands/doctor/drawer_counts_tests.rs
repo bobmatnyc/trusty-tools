@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::commands::doctor::CheckStatus;
-use crate::drawer_counts::{take_snapshot, CountLine, CountSource};
-use crate::engine::maintenance_log::{record, DeletionReason, MaintenanceDeletion};
+use crate::drawer_counts::{CountLine, CountSource, take_snapshot};
+use crate::engine::maintenance_log::{DeletionReason, MaintenanceDeletion, record};
 use crate::engine::{Palace, PalaceId, PalaceRegistry};
 use chrono::Duration;
 use uuid::Uuid;
@@ -437,8 +437,10 @@ fn doctor_drawer_flags_parse() {
     assert_eq!(a.args.ack_drop.as_deref(), Some("p"));
     assert!(Cli::try_parse_from(["doctor", "--ack-drop", "p"]).is_err());
     assert!(Cli::try_parse_from(["doctor", "--json"]).is_err());
-    assert!(!Cli::try_parse_from(["doctor"])
-        .expect("bare")
-        .args
-        .is_mode());
+    assert!(
+        !Cli::try_parse_from(["doctor"])
+            .expect("bare")
+            .args
+            .is_mode()
+    );
 }

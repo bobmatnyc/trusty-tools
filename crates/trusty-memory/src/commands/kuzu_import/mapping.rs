@@ -20,7 +20,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use super::bridge::{KuzuEntityRow, KuzuMemoryRow};
-use super::screen::{screen, SecretRule};
+use super::screen::{SecretRule, screen};
 
 /// Prefix of the identity tag every imported drawer carries.
 pub const SOURCE_TAG_PREFIX: &str = "source:kuzu-memory/";

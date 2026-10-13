@@ -29,10 +29,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use redb::Database;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
-use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
+use trusty_memory::tools::dispatch_tool;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -442,11 +442,13 @@ async fn memory_forget_removes_drawer() {
     )
     .await
     .expect("recall pre-forget");
-    assert!(before["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["content"].as_str().unwrap_or("").contains("Capybaras")));
+    assert!(
+        before["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["content"].as_str().unwrap_or("").contains("Capybaras"))
+    );
 
     let forget = dispatch_tool(
         fx.state(),
@@ -501,11 +503,13 @@ async fn round_trip_remember_recall_forget_recall_empty() {
     )
     .await
     .unwrap();
-    assert!(hit["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["content"].as_str().unwrap_or("").contains("octopus")));
+    assert!(
+        hit["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["content"].as_str().unwrap_or("").contains("octopus"))
+    );
 
     dispatch_tool(
         fx.state(),

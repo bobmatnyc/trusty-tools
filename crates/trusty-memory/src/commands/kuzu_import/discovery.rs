@@ -167,17 +167,17 @@ fn store_in_dir(dir: &Path) -> Option<DiscoveredStore> {
 /// [`KuzuImportError::NotAStore`].
 /// Test: `resolve_from_accepts_dir_or_db`.
 pub fn resolve_from(from: &Path) -> Result<DiscoveredStore, KuzuImportError> {
-    if from.file_name().is_some_and(|n| n == STORE_DB_NAME) && from.exists() {
-        if let Some(parent) = from.parent() {
-            if let Some(store) = store_in_dir(parent) {
-                return Ok(store);
-            }
-        }
+    if from.file_name().is_some_and(|n| n == STORE_DB_NAME)
+        && from.exists()
+        && let Some(parent) = from.parent()
+        && let Some(store) = store_in_dir(parent)
+    {
+        return Ok(store);
     }
-    if from.is_dir() {
-        if let Some(store) = store_in_dir(from) {
-            return Ok(store);
-        }
+    if from.is_dir()
+        && let Some(store) = store_in_dir(from)
+    {
+        return Ok(store);
     }
     Err(KuzuImportError::NotAStore(from.to_path_buf()))
 }

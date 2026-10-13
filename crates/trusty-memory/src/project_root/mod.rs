@@ -28,11 +28,10 @@ mod detection;
 mod pin_file;
 mod validation;
 
-pub use detection::{find_project_root, PERSONAL_PALACE, PROJECT_MARKERS, TRUSTY_TOOLS_DIR};
+pub use detection::{PERSONAL_PALACE, PROJECT_MARKERS, TRUSTY_TOOLS_DIR, find_project_root};
 pub use pin_file::{
-    pinned_slug_at, project_slug, project_slug_at, project_slug_at_readonly,
-    project_slug_from_basename, read_project_pin, write_project_pin, ProjectPin, PIN_FILE_REL,
-    PIN_SCHEMA_VERSION,
+    PIN_FILE_REL, PIN_SCHEMA_VERSION, ProjectPin, pinned_slug_at, project_slug, project_slug_at,
+    project_slug_at_readonly, project_slug_from_basename, read_project_pin, write_project_pin,
 };
 pub use validation::validate_palace_name;
 

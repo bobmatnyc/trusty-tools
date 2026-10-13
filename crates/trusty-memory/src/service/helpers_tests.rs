@@ -10,7 +10,7 @@
 use crate::engine::retrieval::RecallResult;
 use uuid::Uuid;
 
-use crate::service::{drawer_content_preview, recall_entry_json, DRAWER_PREVIEW_MAX_CHARS};
+use crate::service::{DRAWER_PREVIEW_MAX_CHARS, drawer_content_preview, recall_entry_json};
 
 /// Why: `drawer_content_preview` is what every recall listing renders, so its
 /// contract — collapse whitespace, truncate long content, leave short content

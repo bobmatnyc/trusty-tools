@@ -131,11 +131,12 @@ async fn palaces_do_not_share_a_corpus() {
     lane.index("beta", "shared-id", "platypus").await.unwrap();
 
     assert_eq!(lane.search("alpha", "kangaroo", 5).await.unwrap().len(), 1);
-    assert!(lane
-        .search("alpha", "platypus", 5)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        lane.search("alpha", "platypus", 5)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(lane.search("beta", "platypus", 5).await.unwrap().len(), 1);
     assert!(lane.search("beta", "kangaroo", 5).await.unwrap().is_empty());
     lane.shutdown().await;
@@ -149,11 +150,12 @@ async fn delete_removes_the_document() {
     assert_eq!(lane.search("alpha", "ephemeral", 5).await.unwrap().len(), 1);
 
     lane.delete("alpha", "d1").await.unwrap();
-    assert!(lane
-        .search("alpha", "ephemeral", 5)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        lane.search("alpha", "ephemeral", 5)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     // Idempotent — deleting an absent id is not an error.
     lane.delete("alpha", "never-existed").await.unwrap();
     lane.shutdown().await;
@@ -193,12 +195,13 @@ async fn missing_docs_answers_by_identity() {
     assert_eq!(cov.missing, vec!["b".to_string()]);
 
     lane.index("alpha", "b", "beta").await.unwrap();
-    assert!(lane
-        .missing_docs("alpha", &asked)
-        .await
-        .unwrap()
-        .missing
-        .is_empty());
+    assert!(
+        lane.missing_docs("alpha", &asked)
+            .await
+            .unwrap()
+            .missing
+            .is_empty()
+    );
     lane.shutdown().await;
 }
 

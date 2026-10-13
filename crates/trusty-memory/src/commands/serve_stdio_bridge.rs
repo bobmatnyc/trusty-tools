@@ -61,7 +61,7 @@
 //!
 //! Test: unit tests below; `tests/serve_stdio_e2e.rs` for the full e2e path.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 use std::time::Duration;
 use trusty_mcp::{DaemonBridgeJsonRpc, UdsBridgeConfig};
@@ -424,15 +424,15 @@ fn inject_caller_context(
         params
     };
 
-    if let Some(ws) = workstream {
-        if args.get("workstream").is_none() {
-            args["workstream"] = serde_json::Value::String(ws.to_string());
-        }
+    if let Some(ws) = workstream
+        && args.get("workstream").is_none()
+    {
+        args["workstream"] = serde_json::Value::String(ws.to_string());
     }
-    if let Some(c) = cwd {
-        if args.get("cwd").is_none() {
-            args["cwd"] = serde_json::Value::String(c.to_string());
-        }
+    if let Some(c) = cwd
+        && args.get("cwd").is_none()
+    {
+        args["cwd"] = serde_json::Value::String(c.to_string());
     }
 
     req

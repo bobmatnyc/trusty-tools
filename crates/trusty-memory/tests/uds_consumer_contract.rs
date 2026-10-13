@@ -34,7 +34,7 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::sync::oneshot;
 use trusty_common::memory_rpc::{
-    call_memory_tool_at, call_memory_tool_at_with_timeout, MemoryRpcError,
+    MemoryRpcError, call_memory_tool_at, call_memory_tool_at_with_timeout,
 };
 use trusty_memory::AppState;
 
