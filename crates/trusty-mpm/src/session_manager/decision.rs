@@ -225,7 +225,8 @@ impl SessionRecord {
     /// `pending_decision`, so a pending decision is an unanswered gate; a
     /// last answer `Denied` (#9843) is a launch that must never run.
     /// Test: `a_restart_never_makes_a_pending_front_gate_decision_resumable`,
-    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
+    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`,
+    /// `reconcile_never_readopts_a_front_gate_denied_record_as_active`.
     pub fn front_gate_hold(&self) -> Option<&'static str> {
         if self.pending_decision.is_some() {
             Some("its front-gate decision is still pending; answer it, or decommission the session")
@@ -237,6 +238,25 @@ impl SessionRecord {
             Some("its front gate denied the launch; decommission the session")
         } else {
             None
+        }
+    }
+
+    /// Refuse `verb` on a record its front gate holds (#9850).
+    ///
+    /// Why: reactivate and rebind each write `Active` (resume relaunches), and
+    /// a task its front gate holds or denied must stay down whichever verb
+    /// asks; one refusal keeps their wording and test from drifting apart.
+    /// What: `Err(InvalidState)` naming `verb` and [`Self::front_gate_hold`]'s
+    /// reason when it holds, else `Ok(())`.
+    /// Test: `mark_reactivated_refuses_a_record_its_front_gate_holds`,
+    /// `the_manual_rebind_refuses_a_record_its_front_gate_denied`.
+    pub(crate) fn refuse_front_gate_hold(&self, verb: &str) -> Result<(), ManagedError> {
+        match self.front_gate_hold() {
+            Some(why) => Err(ManagedError::InvalidState(
+                self.id.to_string(),
+                format!("cannot {verb} session {} at its front gate: {why}", self.id),
+            )),
+            None => Ok(()),
         }
     }
 }

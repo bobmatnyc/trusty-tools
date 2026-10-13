@@ -76,13 +76,14 @@ impl RebindOutcome {
     }
 }
 
-/// Whether a record in `state` may be rebound: only `Active` and `Stopped`
-/// records describe a session tm would list as running.
-fn rebindable(state: &ManagedSessionState) -> bool {
+/// Whether `record` may be rebound: only `Active` and `Stopped` records
+/// describe a session tm would list as running, and (#9850) a rebind writes
+/// `Active`, so never one its front gate holds or denied.
+fn rebindable(record: &SessionRecord) -> bool {
     matches!(
-        state,
+        record.state,
         ManagedSessionState::Active | ManagedSessionState::Stopped
-    )
+    ) && record.front_gate_hold().is_none()
 }
 
 /// The identity of `pane`, accepted only when tmux echoes that pane in
@@ -216,8 +217,9 @@ impl SessionManager {
     /// Why: an operator repairs a record the automatic pass will not touch:
     /// a renamed session (`--tmux` names the live one), or a same-server
     /// relaunch, which the automatic pass leaves to an explicit decision.
-    /// What: `InvalidState` unless the record is `Active` or `Stopped`, and
-    /// for a `tmux` name tm cannot target. `NoMatch` when the session is gone
+    /// What: `InvalidState` for a record its front gate holds (#9850), unless
+    /// the record is `Active` or `Stopped`, and for a `tmux` name tm cannot
+    /// target. `NoMatch` when the session is gone
     /// or lists no pane, `Ambiguous` when it holds two or more panes or
     /// another non-terminal record claims the pane or the name, `Current`
     /// when the record already names the pane on the live server, whatever
@@ -233,7 +235,9 @@ impl SessionManager {
     /// `two_panes_in_the_session_refuse_the_rebind`,
     /// `a_tmux_error_in_the_manual_verb_changes_nothing`,
     /// `a_stopped_record_already_on_its_live_pane_is_not_reactivated`,
-    /// `a_store_write_failure_leaves_the_record_unchanged`.
+    /// `a_store_write_failure_leaves_the_record_unchanged`,
+    /// `the_manual_rebind_refuses_a_record_its_front_gate_denied`,
+    /// `rebind_still_moves_a_record_whose_front_gate_approved`.
     pub async fn rebind_session(
         &self,
         id: &ManagedSessionId,
@@ -270,7 +274,9 @@ impl SessionManager {
         replaced_only: bool,
     ) -> Result<RebindOutcome, ManagedError> {
         let record = self.get(id).await?;
-        if !rebindable(&record.state) {
+        // #9850: refused first, so the error names the front gate.
+        record.refuse_front_gate_hold("rebind")?;
+        if !rebindable(&record) {
             return Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!(
@@ -327,6 +333,7 @@ impl SessionManager {
     /// Why: after a tmux server replacement every hand-relaunched session
     /// would otherwise list `stopped` until an operator rebinds it.
     /// What: one `list-sessions`. Then, for each `Active` or `Stopped` record
+    /// its front gate does not hold (#9850)
     /// whose `tmux_name` is live and that captured a `tmux_server`: when the
     /// live server differs from the recorded one, rebind it to the session's
     /// single pane as [`Self::rebind_session`] does, but only when that
@@ -342,7 +349,9 @@ impl SessionManager {
     /// `a_pane_list_error_leaves_that_record_unchanged_and_rebinds_the_rest`,
     /// `a_pane_identity_error_in_the_automatic_pass_changes_nothing`,
     /// `a_pane_in_another_project_is_not_rebound_automatically`,
-    /// `boot_reconcile_rebinds_and_lists_the_session_active_without_a_launch_or_kill`.
+    /// `boot_reconcile_rebinds_and_lists_the_session_active_without_a_launch_or_kill`,
+    /// `the_automatic_rebind_skips_a_record_its_front_gate_denied`,
+    /// `rebind_still_moves_a_record_whose_front_gate_approved`.
     pub async fn rebind_stale_panes(&self) -> Vec<(ManagedSessionId, RebindOutcome)> {
         let live: HashSet<String> = match self.tmux.list_sessions() {
             Ok(names) => names.into_iter().collect(),
@@ -357,7 +366,8 @@ impl SessionManager {
             let Some(recorded) = record.tmux_server.as_deref() else {
                 continue;
             };
-            if !rebindable(&record.state) || !live.contains(&record.tmux_name) {
+            // #9850: `rebindable` skips a record its front gate holds.
+            if !rebindable(&record) || !live.contains(&record.tmux_name) {
                 continue;
             }
             if live_server.as_deref() == Some(recorded) {
