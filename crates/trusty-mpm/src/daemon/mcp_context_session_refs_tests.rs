@@ -141,6 +141,75 @@ async fn an_unproven_pin_never_falls_back_to_the_ambient_credential() {
     );
 }
 
+/// A pause snapshot written into the fixture checkout's store.
+fn pause(fx: &Remote) -> trusty_common::catchup::pause::PauseSnapshotOutcome {
+    let snapshot_path = fx
+        .repo
+        .join(".trusty-mpm/sessions/s-9160/session-20261013-100000.md");
+    std::fs::create_dir_all(snapshot_path.parent().expect("parent")).expect("store");
+    std::fs::write(&snapshot_path, "# Session Pause\n\n## Summary\n9160.\n").expect("snapshot");
+    trusty_common::catchup::pause::PauseSnapshotOutcome {
+        snapshot_path,
+        timestamp: chrono::Utc::now(),
+    }
+}
+
+/// Session refs on the bare remote.
+fn remote_session_refs(fx: &Remote) -> Vec<String> {
+    git(
+        &fx.bare,
+        &["for-each-ref", "--format=%(refname)", "refs/tm/sessions/"],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
+/// 🔴 #9160: a proven pin's env reaches the pause's ls-remote and push; the
+/// ref key is still the ambient user id (Q3), never the pin's login.
+/// Test: itself.
+#[tokio::test]
+async fn a_pinned_env_reaches_the_pause_publish() {
+    let fx = Remote::new();
+    let outcome = pause(&fx);
+    let env = fx.pinned();
+    let receipt = publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, move |_| env).await;
+    assert!(receipt.published, "{receipt:?}");
+    let expected = crate::core::session_ref_publish::session_ref_for(&fx.repo, "s-9160");
+    assert_eq!(receipt.ref_name, expected, "{receipt:?}");
+    let ref_name = expected.expect("a ref name resolves");
+    assert!(
+        remote_session_refs(&fx).contains(&ref_name),
+        "{:?}",
+        remote_session_refs(&fx)
+    );
+}
+
+/// 🔴 #9160 (Fail-Open Check): an unproven pin publishes nothing, even when
+/// the ambient credential could push — the receipt carries the refusal and
+/// the remote gains no ref.
+/// Test: itself.
+#[tokio::test]
+async fn an_unproven_pin_never_publishes_with_the_ambient_credential() {
+    let fx = Remote::new();
+    fx.make_ambient_readable();
+    let outcome = pause(&fx);
+    let receipt = publish_session_ref_with(&fx.repo, "s-9160", &outcome, true, |_| {
+        SessionRefGitEnv::Refused {
+            reason: "fixture: gh account 'octo-fixture' is not proven".to_string(),
+        }
+    })
+    .await;
+    assert!(!receipt.published, "{receipt:?}");
+    let error = receipt.error.as_deref().unwrap_or_default();
+    assert!(error.contains("is not proven"), "{receipt:?}");
+    assert_eq!(
+        remote_session_refs(&fx),
+        ["refs/tm/sessions/someone/s-9160"],
+        "a refused pin pushed a ref"
+    );
+}
+
 /// 🔴 #9160: a pinned fetch that fails names the identity it ran as.
 /// Test: itself.
 #[tokio::test]

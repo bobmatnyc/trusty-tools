@@ -1781,6 +1781,7 @@ mod tests {
                 session_id: "s-hydrate",
                 snapshot_path: &snapshot_path,
                 timestamp: chrono::Utc::now(),
+                git_env: &[],
             },
             true,
         );

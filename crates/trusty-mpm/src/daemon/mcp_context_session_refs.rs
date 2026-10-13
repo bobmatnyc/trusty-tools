@@ -155,31 +155,62 @@ fn session_ref_target(
 /// names the project, the ref and the error.
 /// What: runs [`crate::core::session_ref_publish::publish_receipt`] on a
 /// blocking thread — it shells out to git and touches the network — under the
-/// `enabled` its caller resolved from `[session_refs]`. A join failure is
-/// itself a receipt, never a pause failure.
+/// `enabled` its caller resolved from `[session_refs]`. #9160: the ls-remote,
+/// fetch and push run as the project's pinned gh identity; a pin that cannot
+/// be proven publishes nothing and makes no network call, and the receipt
+/// says why. A join failure is itself a receipt, never a pause failure.
 /// Test: `a_failed_ref_publish_is_reported_and_never_fails_the_pause`,
-/// `core::session_ref_publish::tests::a_disabled_section_publishes_nothing`.
+/// `core::session_ref_publish::tests::a_disabled_section_publishes_nothing`,
+/// `a_pinned_env_reaches_the_pause_publish`,
+/// `an_unproven_pin_never_publishes_with_the_ambient_credential`.
 pub(crate) async fn publish_session_ref(
     project_path: &Path,
     session_id: &str,
     outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
     enabled: bool,
 ) -> crate::core::session_ref_publish::SessionRefReceipt {
-    use crate::core::session_ref_publish::{SessionRefReceipt, SessionRefRequest, publish_receipt};
+    publish_session_ref_with(
+        project_path,
+        session_id,
+        outcome,
+        enabled,
+        session_ref_git_env,
+    )
+    .await
+}
+
+/// [`publish_session_ref`] with the identity resolver given (#9160).
+pub(crate) async fn publish_session_ref_with(
+    project_path: &Path,
+    session_id: &str,
+    outcome: &trusty_common::catchup::pause::PauseSnapshotOutcome,
+    enabled: bool,
+    resolve: impl FnOnce(&Path) -> SessionRefGitEnv + Send + 'static,
+) -> crate::core::session_ref_publish::SessionRefReceipt {
+    use crate::core::session_ref_publish::{
+        SessionRefReceipt, SessionRefRequest, publish_receipt, session_ref_for,
+    };
 
     let repo = project_path.to_path_buf();
     let session = session_id.to_string();
     let snapshot = outcome.snapshot_path.clone();
     let timestamp = outcome.timestamp;
     tokio::task::spawn_blocking(move || {
+        if !enabled {
+            return SessionRefReceipt::default();
+        }
+        // RED STUB (#9160): the pre-fix publish, with no identity resolved.
+        drop(resolve);
+        let _ = session_ref_for;
         publish_receipt(
             &SessionRefRequest {
                 repo: &repo,
                 session_id: &session,
                 snapshot_path: &snapshot,
                 timestamp,
+                git_env: &[],
             },
-            enabled,
+            true,
         )
     })
     .await
