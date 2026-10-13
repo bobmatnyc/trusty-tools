@@ -859,15 +859,44 @@ Architect rulings Q1–Q4). This PR ships tier 1 of §15.8 — `--env NAME=KEY` 
    that pipe, so it cannot resolve or exec before the grant exists.
 4. The helper calls `secrets.resolve` once per key; its socket peer pid is
    the granted pid. It sends every value back to tm on the report pipe (for
-   the scrubber), puts the token on a fresh pipe whose fd number goes in
-   `TRUSTY_SECRETS_TOKEN_FD`, and execs the command in place with each
-   `--env` value set. The pid, and so the grant, does not change.
+   the scrubber), hands the token on as a read-only fd on an unlinked file
+   (below), puts that fd's number in `TRUSTY_SECRETS_TOKEN_FD`, and execs
+   the command in place with each `--env` value set. The pid, and so the
+   grant, does not change.
 5. tm writes the `--stdin` value to the command's stdin and closes it, then
    waits for the command.
 6. tm calls `secrets.revoke` and exits with the command's status, or 128 +
    the signal that ended it.
 
 Each key is resolved once and leaves one audit record.
+
+**Token hand-down** (#9071 S10, Option B; Bob D64 and Architect rulings,
+2026-10-13). The tm-to-helper hop stays a pipe, because the token does not
+exist until the helper's pid is granted. The helper-to-command hop is a file:
+
+1. The helper creates `<temp dir>/tm-grant-<random>/`, mode 0700, and in it
+   an empty file, `O_EXCL`, mode 0600.
+2. It opens the file a second time, read-only, then unlinks it. Only after
+   the name is gone does it write the 64-byte token through the first fd and
+   close that fd.
+3. It removes the directory and clears close-on-exec on the read-only fd.
+   Any failed step ends the helper with exit 1 before exec; it never falls
+   back to a pipe.
+
+A client reads the token with `pread` at offset 0, which consumes nothing,
+so the command, its siblings and its descendants all resolve on the one
+grant: in `sh -c 'migrate && serve'`, both commands resolve. A descendant
+holds a read-only fd, so it cannot rewrite the token for the others. A
+client refuses an fd that is not read-only, not a regular file, still named
+by a path, or not exactly 64 bytes. The grant stays reusable, as before:
+the server spends only a one-shot grant, and tm asks for none.
+
+A helper killed between create and unlink leaves its directory: a 0600 file
+in a 0700 directory, holding a token that is already dead (tm revokes on
+the helper's exit, and the server refuses a pid that is gone). Before it
+spawns the helper, `tm secrets exec` removes this user's `tm-grant-*`
+directories in the temp dir that are mode 0700 and older than the 3600 s
+grant TTL, by `lstat`, never following a link.
 
 **Fails closed.** A refused grant (including `agent_use_refused`), a missing
 or malformed token, a helper that dies before exec, and any key that does
@@ -903,13 +932,12 @@ terminal output is not captured (§3 G-6).
   prune ([#9645](https://github.com/bobmatnyc/trusty-tools/pull/9645)) and
   the TTL remove the grant. The same holds for a grant that completes on the
   server after tm was stopped mid-grant.
-- The token fd is inherited by the command's descendants, within the same
-  keys, but the grant reaches a linear chain, not siblings (#9071). The token
-  is one pipe; a reader drains it and re-arms the fd number only in its own
-  process, so the reader and its own descendants can resolve. A sibling of an
-  earlier reader finds the shared pipe drained and fails closed with
-  `InvalidToken`; no value is exposed. In `sh -c 'migrate && serve'`, once
-  `migrate` has read the token, `serve` cannot resolve.
+- The token fd is inherited by every descendant of the command, siblings
+  included, within the same keys, until revoke or the TTL. A process that
+  is no longer a descendant (daemonized, reparented) is refused by the
+  server's ancestry check, whatever token it holds. A program that closes
+  inherited fds before it spawns a child (Python's `subprocess` default)
+  must pass the fd on for that child to resolve.
 - Ctrl-Z stops the command, not tm.
 - tm waits for end of stream on the scrubbed pipes, so a background process
   that keeps them open keeps tm waiting. The grant is revoked before that
@@ -1425,8 +1453,10 @@ steps: spawn the child, call `secrets.grant` for it, pass the token to the
 child over an inherited pipe, then exec the command
 ([#9621](https://github.com/bobmatnyc/trusty-tools/issues/9621), §10.5).
 The token never goes in an argv or an environment: the command inherits a
-second pipe that holds it, and only that pipe's fd number goes in
-`TRUSTY_SECRETS_TOKEN_FD` (Architect ruling 2026-10-10). Any
+read-only fd on an unlinked file that holds it (§10.5, "Token hand-down"),
+and only that fd's number goes in `TRUSTY_SECRETS_TOKEN_FD` (Architect
+ruling 2026-10-10; file form #9071 S10). Every client reads it with `pread`
+at offset 0 and accepts no other fd shape. Any
 same-uid process may call `secrets.grant`. While any grant is unexpired, the
 60 s idle exit (ruling 31) waits; `secrets.revoke` removes a grant early.
 `secrets.resolve` answers only when all three hold:
@@ -1515,8 +1545,9 @@ Owner ruling 30 makes this S-series the master sequence for milestone 123.
 | S6+ | One PR per integration: 1Password, Vercel, GitHub Actions, Keeper | 4 each | Stdin CLI runner (§8.2) |
 | S7 | `tm secrets exec --dotenv` | 5 | Inside [#7525](https://github.com/bobmatnyc/trusty-tools/issues/7525)'s scope |
 | S8 | `secrets.grant`, `secrets.resolve`, `secrets.revoke`, the grant registry, the ancestry check | 5 | S2 (the #7524 gate was dropped, Architect ruling 2026-10-10) |
-| S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only, token re-armed on its fd (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
-| S10 | Python and npm clients, plus their publish workflows | 3 each | S8 |
+| S9 | Rust client: `trusty_secrets::granted` under `api`, resolve only (Architect rulings D1-D7, 2026-10-12, #9071) | 4 | S8 |
+| S10 PR 1 | Token hand-down as a read-only fd on an unlinked file, read with `pread` (§10.5); the Rust client drops its pipe read and `GrantedError::Rearm`; `tm secrets exec` sweeps stale `tm-grant-*` directories (#9071, #9072) | 5 | S9 |
+| S10 | Python and npm clients, plus their publish workflows | 3 each | S10 PR 1 |
 
 ### 15.10 Child re-scope
 

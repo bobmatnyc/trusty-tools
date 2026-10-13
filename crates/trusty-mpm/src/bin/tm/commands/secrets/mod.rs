@@ -33,6 +33,9 @@ mod exec_proc;
 mod exec_scrub;
 #[cfg(unix)]
 mod exec_stub;
+// #9071 S10: the stub's token file and the sweep of stale token directories.
+#[cfg(unix)]
+mod exec_token;
 #[cfg(unix)]
 mod exec_wire;
 #[cfg(unix)]

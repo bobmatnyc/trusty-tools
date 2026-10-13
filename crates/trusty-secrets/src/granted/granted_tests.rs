@@ -1,4 +1,4 @@
-//! The tier-3 client against fake servers and real pipes (#9071).
+//! The tier-3 client against fake servers and real token files (#9071).
 //!
 //! Every socket is under a `TempDir`; no real server, home or Keychain is
 //! touched. A fake server accepts one connection, reads the request to the
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::token::{parse_token_fd, take_inherited};
+use super::token::{check_shape, parse_token_fd, read_at_start, read_inherited};
 use super::wire::MAX_FRAME_BYTES;
 use super::*;
 
@@ -55,7 +55,7 @@ fn token_file(bytes: &[u8]) -> OwnedFd {
 }
 
 fn client_for(socket: &Path) -> GrantedClient {
-    GrantedClient::from_token_fd(pipe_with(TOKEN.as_bytes()))
+    GrantedClient::from_token_fd(token_file(TOKEN.as_bytes()))
         .unwrap()
         .with_socket(socket)
 }
@@ -324,13 +324,13 @@ fn granted_client_reads_the_token_at_any_offset() {
     let mut file = fs::File::from(token_file(TOKEN.as_bytes()));
     for offset in [SeekFrom::Start(10), SeekFrom::End(0)] {
         let at = file.seek(offset).unwrap();
-        let token = take_inherited(file.as_raw_fd()).unwrap();
+        let token = read_inherited(file.as_raw_fd()).unwrap();
         assert_eq!(token.expose(), TOKEN);
         assert_eq!(file.stream_position().unwrap(), at, "the read moved it");
     }
 }
 
-/// Why: AC5 — only a decimal fd number above stderr names a token pipe;
+/// Why: AC5 — only a decimal fd number above stderr names a token fd;
 /// anything else is `NoGrant`.
 /// Test: itself.
 #[test]
@@ -367,50 +367,78 @@ fn parse_token_fd_refuses_unset_garbage_and_stdio() {
     assert_eq!(parse_token_fd(Some(OsStr::new("17"))).unwrap(), 17);
 }
 
-/// Why: Fail-Open Check — an fd that is not open, not a pipe, or a pipe
-/// whose open writer has sent nothing or half a token is `TokenUnreadable`
-/// at once; no read blocks. A whole token behind an open writer is read.
+/// Why: Fail-Open Check — an fd number that is not open is
+/// `TokenUnreadable`, and so is a pipe whose open writer has sent nothing or
+/// a whole token: the shape check refuses a pipe before any read, so none
+/// blocks (S9 polled instead).
 /// Test: itself.
 #[test]
 fn granted_client_token_fd_errors_never_block() {
-    let file = tempfile::tempfile().unwrap();
-    let error = GrantedClient::from_token_fd(OwnedFd::from(file)).unwrap_err();
-    assert!(
-        matches!(error, GrantedError::TokenUnreadable(_)),
-        "{error:?}"
-    );
-
-    let (reader, writer) = io::pipe().unwrap();
-    let started = Instant::now();
-    let error = GrantedClient::from_token_fd(OwnedFd::from(reader)).unwrap_err();
-    assert!(
-        matches!(error, GrantedError::TokenUnreadable(_)),
-        "{error:?}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the read blocked"
-    );
-    drop(writer);
-
-    // A whole token with the writer still open (a concurrent fork can hold
-    // a copy until its exec) is read without waiting for EOF; half a token
-    // is not.
-    let (reader, mut writer) = io::pipe().unwrap();
-    writer.write_all(TOKEN.as_bytes()).unwrap();
-    let client = GrantedClient::from_token_fd(OwnedFd::from(reader)).unwrap();
-    assert!(format!("{client:?}").contains("<redacted>"));
-    let (reader, mut held) = io::pipe().unwrap();
-    held.write_all(&TOKEN.as_bytes()[..32]).unwrap();
-    let error = GrantedClient::from_token_fd(OwnedFd::from(reader)).unwrap_err();
-    assert!(
-        matches!(error, GrantedError::TokenUnreadable(_)),
-        "{error:?}"
-    );
-    drop((writer, held));
-
     // No process holds this many descriptors, so the number is not open.
-    let error = take_inherited(RawFd::MAX).unwrap_err();
+    let error = read_inherited(RawFd::MAX).unwrap_err();
+    assert!(
+        matches!(&error, GrantedError::TokenUnreadable(e) if e.raw_os_error() == Some(libc::EBADF)),
+        "{error:?}"
+    );
+    let (empty, held_empty) = io::pipe().unwrap();
+    let (full, mut held_full) = io::pipe().unwrap();
+    held_full.write_all(TOKEN.as_bytes()).unwrap();
+    for reader in [empty, full] {
+        let started = Instant::now();
+        let error = GrantedClient::from_token_fd(OwnedFd::from(reader)).unwrap_err();
+        assert!(
+            matches!(error, GrantedError::TokenUnreadable(_)),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the read blocked"
+        );
+    }
+    drop((held_empty, held_full));
+}
+
+/// A named temp file holding `bytes`, open read-only.
+fn named_file(tmp: &TempDir, bytes: &[u8]) -> fs::File {
+    let path = tmp.path().join(format!("f{}", bytes.len()));
+    fs::write(&path, bytes).unwrap();
+    fs::File::open(&path).unwrap()
+}
+
+/// Why: Fail-Open Check, S10 — each arm of the token read refuses on its
+/// own, so a later change to one cannot lean on another: the size check
+/// refuses 63 and 65 bytes before any read, and the `pread` loop refuses a
+/// short or long file (EOF before 64 bytes, or a 65th byte) and a read
+/// error. Red when either arm truncates, pads or falls through.
+/// Test: itself.
+#[test]
+fn granted_token_read_refuses_a_short_or_long_file() {
+    for bytes in [
+        TOKEN.as_bytes()[..63].to_vec(),
+        format!("{TOKEN}0").into_bytes(),
+    ] {
+        let error = check_shape(&fs::File::from(token_file(&bytes))).unwrap_err();
+        assert!(matches!(error, GrantedError::InvalidToken), "{error:?}");
+    }
+    assert!(check_shape(&fs::File::from(token_file(TOKEN.as_bytes()))).is_ok());
+
+    let tmp = TempDir::new().unwrap();
+    for bytes in [
+        Vec::new(),
+        TOKEN.as_bytes()[..63].to_vec(),
+        format!("{TOKEN}0").into_bytes(),
+    ] {
+        let error = read_at_start(&named_file(&tmp, &bytes)).unwrap_err();
+        assert!(
+            matches!(error, GrantedError::InvalidToken),
+            "{} bytes: {error:?}",
+            bytes.len()
+        );
+    }
+    let token = read_at_start(&named_file(&tmp, TOKEN.as_bytes())).unwrap();
+    assert_eq!(token.expose(), TOKEN);
+    // `pread` on a directory fails (EISDIR): an error, never an empty token.
+    let error = read_at_start(&fs::File::open(tmp.path()).unwrap()).unwrap_err();
     assert!(
         matches!(error, GrantedError::TokenUnreadable(_)),
         "{error:?}"
@@ -651,19 +679,21 @@ fn granted_module_has_no_grant_or_spawn_entry_point() {
     }
 }
 
-/// Why: D3, DOC-74 §10.5 — reading the token puts it back on the same fd
-/// number, not close-on-exec. A second reader of that fd (here this
-/// process again, as a grandchild would) gets the token and re-arms it in
-/// turn, and a child spawned afterwards reads the same token.
+/// Why: DOC-74 §10.5, S10 — reading the token changes nothing about the
+/// fd: it stays open, its flags are as they were (no client mutates fd
+/// flags; S9's `dup2` re-arm cleared close-on-exec), a second read gets the
+/// same token, and a child spawned afterwards reads it too.
 /// Test: itself.
 #[test]
-fn granted_client_rearms_the_token_for_a_child() {
-    let fd = pipe_with(TOKEN.as_bytes()).into_raw_fd();
-    assert_eq!(take_inherited(fd).unwrap().expose(), TOKEN);
-    assert_eq!(take_inherited(fd).unwrap().expose(), TOKEN);
+fn granted_client_read_leaves_the_fd_for_a_child() {
+    let fd = token_file(TOKEN.as_bytes()).into_raw_fd();
+    // SAFETY: `F_SETFD` and `F_GETFD` on an fd this test owns.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, 0) }, 0);
+    assert_eq!(read_inherited(fd).unwrap().expose(), TOKEN);
+    assert_eq!(read_inherited(fd).unwrap().expose(), TOKEN);
     // SAFETY: `F_GETFD` reads the flags of an fd this test owns.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    assert!(flags >= 0 && flags & libc::FD_CLOEXEC == 0, "flags {flags}");
+    assert_eq!(flags, 0, "the read changed the fd's flags");
     let out = Command::new("cat")
         .arg(format!("/dev/fd/{fd}"))
         .output()
@@ -747,9 +777,60 @@ fn granted_client_siblings_both_resolve() {
     }
 }
 
-/// Why: Fail-Open Check — when the process-wide client failed to build,
-/// every later call returns that first error, without reading the drained
-/// pipe again.
+/// Why: S10 AC8 — the client caches no value: each resolve is one frame
+/// and the server's answer at that moment, so once the grant is revoked a
+/// resolve through the same token is refused. Red when a value is cached.
+/// Test: itself.
+#[test]
+fn granted_client_never_caches_a_value() {
+    let refused = frame(&json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32082,
+        "message": "refused", "data": {"kind": "grant_refused"}}}));
+    let (spot, server) = serve_each(vec![ok_answer("API_KEY", VALUE), refused]);
+    let client = client_for(&spot.socket);
+    assert_eq!(client.resolve(&key("API_KEY")).unwrap().expose(), VALUE);
+    match client.resolve(&key("API_KEY")) {
+        Err(GrantedError::Refused(refusal)) => {
+            assert_eq!(refusal.kind.as_deref(), Some("grant_refused"));
+        }
+        other => panic!("a revoked grant answered: {}", other.is_ok()),
+    }
+    assert_eq!(server.join().unwrap().len(), 2);
+}
+
+/// Why: S10 AC10 — the docs no longer state S9's pipe limit (a linear
+/// chain, a sibling finding the pipe empty, the re-arm). Red when the code
+/// changes and these files keep the old text.
+/// Test: itself.
+#[test]
+fn granted_docs_drop_the_pipe_limit() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let files = [
+        crate_dir.join("README.md"),
+        crate_dir.join("src/granted/token.rs"),
+        crate_dir.join("src/granted/mod.rs"),
+        crate_dir.join("changelog.d/9071-granted-client.md"),
+        crate_dir.join("../../docs/specs/DOC-74-secrets-integration.md"),
+    ];
+    for file in files {
+        let text = fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+            .to_lowercase();
+        for stale in [
+            "linear chain",
+            "drained",
+            "drains",
+            "re-arm",
+            "puts it back",
+            "puts the token back",
+        ] {
+            assert!(!text.contains(stale), "{}: {stale:?}", file.display());
+        }
+    }
+}
+
+/// Why: Fail-Open Check, decision 10 — when the process-wide client failed
+/// to build, every later call returns that first error and never re-reads
+/// the fd, so a retry cannot hide the first cause.
 /// Test: itself.
 #[test]
 fn granted_resolve_replays_the_first_init_error() {
