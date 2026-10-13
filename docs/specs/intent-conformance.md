@@ -567,7 +567,7 @@ token-resolver seam** (mirroring review's `IssueTokenResolver`,
 - **AC-14** Planned method diverges from an explicit ticket/spec method →
   `Disposition::Escalate`, `adapter.spawn` is **not** called, `pending_decision` is set, and
   the session is `AwaitingApproval`.
-- **AC-15** A human `POST …/answer` clears `pending_decision` and unblocks the spawn.
+- **AC-15** A human `POST …/answer` to a front-gate decision is read as approve, deny, or unclear. An approve (`yes`, `approve`, `proceed`, `ok`, or the exact proposed default) clears `pending_decision` and launches the withheld runtime. A deny (`no`, `deny`, `reject`, `cancel`, `abort`; a deny word wins over a proposed default) closes the decision without launch and decommissions the session; a repeat answer is a 409 naming it denied. Any other text is refused with a 422 before the decision is taken, and the decision stays pending. A session whose front-gate decision is pending or denied is never resumable (#9843, #9844).
 - **AC-16** Stricter-wins composition: a T4/destructive action still escalates even when
   conformance would auto-accept; conformance never lowers a tier escalation.
 - **AC-17** Non-ticketed work → `AutoAccept` (no gate); ISR failure → `AutoAccept` (fail-open).

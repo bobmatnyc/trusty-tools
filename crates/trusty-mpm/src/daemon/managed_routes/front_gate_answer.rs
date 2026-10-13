@@ -6,7 +6,8 @@
 //! explicit launch-spec directory (#9843). Moved out of `lifecycle.rs`, which
 //! is at its line-cap ceiling.
 //! What: [`spawn_runtime_for`] builds the production adapter and calls
-//! [`launch_withheld`], the testable body.
+//! [`launch_withheld`], the testable body. [`front_gate_verdict`] reads the
+//! answer text; [`deny_front_gate`] closes a denied decision without launch.
 //! Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs;
 //! this file's `tests` module.
 
@@ -17,7 +18,10 @@ use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::{RuntimeAdapter, build_adapter};
-use crate::session_manager::{ManagedSessionState, SessionManager, SessionRecord};
+use crate::session_manager::decommission_force::ProvisioningDirt;
+use crate::session_manager::{
+    AnswerOutcome, DecisionId, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
+};
 
 /// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
 ///
@@ -58,8 +62,12 @@ fn launch_workspace(record: &SessionRecord) -> std::path::PathBuf {
 /// whose runtime never comes up, without the production launch-spec root.
 /// What: marks the record `Active` with its workspace, spawns the runtime
 /// (marking the record errored on a spawn error), then runs the post-send
-/// launch check against `spec_dir`.
-/// Test: `spawn_runtime_errs_when_the_runtime_never_came_up`.
+/// launch check against `spec_dir`. A failed state write, a spawn error, or a
+/// runtime the check saw never come up is `Err`, which the answer route
+/// settles as `DeliveryFailed`.
+/// Test: `spawn_runtime_errs_when_the_runtime_never_came_up`,
+/// `spawn_runtime_refuses_to_launch_when_the_state_write_fails`,
+/// `front_gate_runtime_that_never_started_settles_delivery_failed`.
 pub(crate) async fn launch_withheld(
     mgr: &SessionManager,
     record: &SessionRecord,
@@ -72,7 +80,10 @@ pub(crate) async fn launch_withheld(
         .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
         .await
     {
+        // #9843 (FO-2): never launch behind a record that still reads
+        // `Provisioning`.
         warn!(id = %record.id, "spawn_runtime_for: set_workspace failed: {e}");
+        return Err(format!("the session could not be marked active: {e}"));
     }
 
     if let Err(e) = adapter.spawn(
@@ -94,8 +105,12 @@ pub(crate) async fn launch_withheld(
     }
     // #8233: an accepted keystroke is not a started runtime.
     let tmux = mgr.tmux_driver();
-    super::launch_verify::record_spawn_outcome_in(mgr, tmux.as_ref(), record, spec_dir).await;
-    Ok(())
+    // #9843: a runtime that never came up is a failed launch, not a delivered one.
+    match super::launch_verify::record_spawn_outcome_in(mgr, tmux.as_ref(), record, spec_dir).await
+    {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
 }
 
 /// What a front-gate answer's text asks for (#9843).
@@ -109,11 +124,84 @@ pub(crate) enum FrontGateVerdict {
     Unclear,
 }
 
-/// Classify a front-gate answer (#9843 seam: the pre-fix behaviour, under
-/// which the text is never read and every answer launches).
+/// Answers that deny a front-gate launch, after [`fold`].
+const DENY_WORDS: [&str; 7] = ["no", "n", "deny", "denied", "reject", "cancel", "abort"];
+
+/// Answers that approve a front-gate launch, after [`fold`].
+const APPROVE_WORDS: [&str; 6] = ["yes", "y", "approve", "approved", "proceed", "ok"];
+
+/// Trim, drop one leading `/` (a typed `/deny`), and lowercase.
+fn fold(answer: &str) -> String {
+    let trimmed = answer.trim();
+    trimmed
+        .strip_prefix('/')
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase()
+}
+
+/// Classify a front-gate answer (#9843, Q2).
+///
+/// Why: every transport (`/deny`, `tm session answer`, the TUI) carries only
+/// the answer text, and the front gate launched on any text, so "no" ran a
+/// task the gate had escalated.
+/// What: a deny word first, so it wins even over a proposed default of "no";
+/// then an approve word or the exact proposed default; anything else is
+/// [`FrontGateVerdict::Unclear`], which never launches.
+/// Test: `front_gate_verdict_matrix`.
 pub(crate) fn front_gate_verdict(answer: &str, proposed_default: Option<&str>) -> FrontGateVerdict {
-    let _ = (answer, proposed_default);
-    FrontGateVerdict::Approve
+    let folded = fold(answer);
+    if DENY_WORDS.contains(&folded.as_str()) {
+        FrontGateVerdict::Deny
+    } else if APPROVE_WORDS.contains(&folded.as_str())
+        || proposed_default.is_some_and(|d| !d.trim().is_empty() && d.trim() == answer.trim())
+    {
+        FrontGateVerdict::Approve
+    } else {
+        FrontGateVerdict::Unclear
+    }
+}
+
+/// The 422 text for front-gate answer text that is neither approve nor deny.
+pub(crate) fn unclear_front_gate_answer(id: &ManagedSessionId) -> String {
+    format!(
+        "session {id} is waiting at its front gate; answer {} or the proposed default to \
+         launch it, or {} to close it without launch. Nothing was changed and the decision \
+         is still pending",
+        APPROVE_WORDS.join("/"),
+        DENY_WORDS.join("/")
+    )
+}
+
+/// Close a claimed front-gate decision without launching (#9843, Q1, Q3).
+///
+/// Why: a denied task must never run, and `Stopped`/`Errored` are both
+/// resumable, so the session ends `Decommissioned`.
+/// What: settles the claim `Denied` first, so a crash or a failed teardown
+/// still leaves a record resume refuses, then decommissions with
+/// [`ProvisioningDirt::Refuse`]. A teardown error is `Err` (the route's 500);
+/// the decision stays closed and nothing launches.
+/// Test: `front_gate_deny_closes_the_decision_without_launch`,
+/// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
+pub(crate) async fn deny_front_gate(
+    mgr: &SessionManager,
+    id: &ManagedSessionId,
+    decision_id: Option<DecisionId>,
+) -> Result<Option<DecisionId>, String> {
+    mgr.settle_answer(id, decision_id, AnswerOutcome::Denied)
+        .await;
+    let report = mgr
+        .decommission_reporting(id, None, ProvisioningDirt::Refuse)
+        .await
+        .map_err(|e| {
+            format!(
+                "the front-gate launch of session {id} was denied and will not run, but \
+                 its teardown failed: {e}; decommission it once that is addressed"
+            )
+        })?;
+    if let Some(why) = report.workspace_kept_reason {
+        warn!(id = %id, "front gate denied; workspace kept: {why}");
+    }
+    Ok(decision_id)
 }
 
 #[cfg(test)]

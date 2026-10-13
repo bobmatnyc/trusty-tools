@@ -18,6 +18,9 @@ use std::sync::Arc;
 
 use tracing::warn;
 
+use super::front_gate_answer::{
+    FrontGateVerdict, deny_front_gate, front_gate_verdict, unclear_front_gate_answer,
+};
 use super::route_outcome_http::outcome_from_response;
 use super::*;
 use crate::daemon::rpc::managed::outcome::{CODE_PANE_GONE, CODE_WORKSPACE_GONE, RouteOutcome};
@@ -265,14 +268,19 @@ pub(crate) async fn answer_core(
 /// with its 409 before anything else,
 /// proves a live session's pane BEFORE the claim (a refusal leaves the
 /// decision pending), then claims under the store guard
-/// (`SessionManager::claim_decision`). A front-gate claim calls `spawn` with
-/// the re-read record; any other answer types into the pane. A conflict is a
+/// (`SessionManager::claim_decision`). On the front gate (#9843) the text
+/// is classified first: unclear text is a 422 before the claim, an approve
+/// calls `spawn` with the re-read record, and a deny decommissions without
+/// launch. Any other answer types into the pane. A conflict is a
 /// 409 whose text names the first answerer and time, on both transports; an
 /// effect that fails after the claim is a 500 and the decision stays closed.
 /// Test: `two_concurrent_front_gate_answers_spawn_once`,
 /// `front_gate_launch_failure_closes_the_decision`,
 /// `a_malformed_decision_id_is_400`, `answer_conflict_is_409_over_http_and_rpc`,
-/// `answer_with_no_pending_decision_refused`.
+/// `answer_with_no_pending_decision_refused`,
+/// `front_gate_deny_closes_the_decision_without_launch`,
+/// `an_unclear_front_gate_answer_is_refused_before_the_claim`,
+/// `live_decision_deny_still_types_no`.
 pub(crate) async fn answer_core_with<F, Fut>(
     state: &Arc<DaemonState>,
     id_str: &str,
@@ -304,9 +312,9 @@ where
         Err(_) => return not_found(id_str),
     };
     let tmux_name = record.tmux_name.clone();
-    let answered = |decision_id: Option<crate::session_manager::DecisionId>| {
+    let answered = |decision_id: Option<crate::session_manager::DecisionId>, injected: bool| {
         RouteOutcome::ok(&AnswerResponse {
-            injected: true,
+            injected,
             tmux_name: tmux_name.clone(),
             decision_id: decision_id.map(|d| d.to_string()),
         })
@@ -317,6 +325,11 @@ where
     // #1360) has no harness to prove yet.
     if let Some(conflict) = crate::session_manager::decision::early_conflict(&record, &claim) {
         return RouteOutcome::text(409, conflict.to_string());
+    }
+    // #9843: the front gate reads the text; unclear text is refused unclaimed.
+    let verdict = front_gate_verdict(&req.answer, record.proposed_default.as_deref());
+    if record.state == ManagedSessionState::Provisioning && verdict == FrontGateVerdict::Unclear {
+        return RouteOutcome::text(422, unclear_front_gate_answer(&id));
     }
     let pane = if record.state == ManagedSessionState::Provisioning {
         None
@@ -342,12 +355,20 @@ where
         front_gate: true,
     } = claimed
     {
+        // #9843: only an approve launches; a deny, or unclear text that raced
+        // a state change (fail closed), closes the gate without launch.
+        if verdict != FrontGateVerdict::Approve {
+            return match deny_front_gate(&mgr, &id, decision_id).await {
+                Ok(decision_id) => answered(decision_id, false),
+                Err(msg) => RouteOutcome::text(500, msg),
+            };
+        }
         let launched = match mgr.get(&id).await {
             Ok(fresh) => spawn(fresh).await,
             Err(e) => Err(e.to_string()),
         };
         return match mgr.settle_launch(&id, decision_id, launched).await {
-            Ok(decision_id) => answered(decision_id),
+            Ok(decision_id) => answered(decision_id, true),
             Err(msg) => RouteOutcome::text(500, msg),
         };
     }
@@ -356,7 +377,7 @@ where
         .deliver_answer(&id, &tmux_name, pane, &req.answer, claimed)
         .await
     {
-        Ok(decision_id) => answered(decision_id),
+        Ok(decision_id) => answered(decision_id, true),
         Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }

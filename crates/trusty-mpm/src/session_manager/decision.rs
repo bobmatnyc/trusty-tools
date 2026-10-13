@@ -211,6 +211,29 @@ impl SessionRecord {
     pub fn live_decision_id(&self) -> Option<DecisionId> {
         self.pending_decision.as_ref().and(self.pending_decision_id)
     }
+
+    /// Why this record's front gate withholds its launch, if it does.
+    ///
+    /// Why: a restart (#9844) or a stop turned a gated `Provisioning` record
+    /// into a resumable one, and resume launched the task nobody approved.
+    /// What: the front gate is the only production writer of
+    /// `pending_decision`, so a pending decision is an unanswered gate; a
+    /// last answer `Denied` (#9843) is a launch that must never run.
+    /// Test: `a_restart_never_makes_a_pending_front_gate_decision_resumable`,
+    /// `front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable`.
+    pub fn front_gate_hold(&self) -> Option<&'static str> {
+        if self.pending_decision.is_some() {
+            Some("its front-gate decision is still pending; answer it, or decommission the session")
+        } else if self
+            .last_answer
+            .as_ref()
+            .is_some_and(|a| a.outcome == AnswerOutcome::Denied)
+        {
+            Some("its front gate denied the launch; decommission the session")
+        } else {
+            None
+        }
+    }
 }
 
 /// `decision <id>`, or a name for a decision set before #9841.
