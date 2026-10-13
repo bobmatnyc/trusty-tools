@@ -538,6 +538,34 @@ async fn rpc_palace_get_reports_not_found_for_an_unknown_id() {
     daemon.shutdown().await;
 }
 
+/// Why (#9751): the former REST methods answered a missing palace with the
+/// daemon's own path (`palace metadata missing at <root>/…/palace.json`). On the
+/// wire the refusal names the id and the existing palace ids, capped at 20 with
+/// a count, and no path — for a palace-scoped read (`memory.drawers_list`) and
+/// for the palace lookup itself (`memory.palace_get`).
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_missing_palace_is_named_with_existing_palaces_and_no_path() {
+    let state = test_state();
+    let root = state.data_root.clone();
+    crate::engine::palace_not_found_tests::seed_listed_palaces(&root, 25);
+    let daemon = Daemon::start(state).await;
+    for method in ["memory.drawers_list", "memory.palace_get"] {
+        let response = daemon
+            .call(method, json!({"palace_id": "ghost-palace"}))
+            .await;
+        let error = response.error.expect("an absent palace must be refused");
+        assert_eq!(error.code, crate::transport::CODE_NOT_FOUND, "{method}");
+        crate::engine::palace_not_found_tests::assert_listed_absence(
+            &format!("[{method}] {}", error.message),
+            &root,
+            "ghost-palace",
+            25,
+        );
+    }
+    daemon.shutdown().await;
+}
+
 /// Why: `memory.palaces_list` is what replaces the monitor's N-call
 /// `memory.palace_get` fan-out, so it has to answer one row per palace WITH
 /// real counts — not the placeholder zeros the retired `GET /api/v1/palaces`

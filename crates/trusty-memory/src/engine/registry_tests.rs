@@ -1292,7 +1292,8 @@ impl Drop for RestoreMode {
 /// callers would be exactly where they started.
 /// What: creates a palace, evicts its cached handle so the next open reads
 /// disk, strips `palace.json` to mode 000, and asserts the resulting open error
-/// is NOT classified as absence — then asserts an id that was never created IS.
+/// is NOT classified as absence — then asserts an id that was never created IS,
+/// and (#9751) that its error names the id and no path under the palace root.
 /// Panics rather than passing vacuously if the denial does not take hold.
 /// Test: this test itself.
 #[cfg(unix)]
@@ -1364,6 +1365,11 @@ fn open_error_is_absent_only_for_a_genuine_absence() {
         "a genuinely absent palace must still classify as absence, or every 404 the callers \
          owe becomes a 500: {missing:#}"
     );
+    // #9751: the absence is the error every caller relays, so its whole chain
+    // names the id and never the palace root.
+    let text = format!("{missing:#}");
+    assert!(text.contains("never-created"), "{text}");
+    crate::engine::palace_not_found_tests::assert_no_path(&text, data_root);
 }
 
 /// Why (#5549, #5574): the sibling test above locks the FILE, so the stat

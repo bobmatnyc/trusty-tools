@@ -300,6 +300,32 @@ mod tests {
         );
     }
 
+    /// Why (#9751): `open_handle` answered a missing palace with
+    /// `palace not found: X (… palace metadata missing at <root>/X/palace.json)`.
+    /// The folded chat methods relay that message verbatim, so it must name
+    /// the id and the existing palace ids, and no path; when the ids cannot be
+    /// listed it is still `NotFound`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn absent_palace_at_open_handle_names_existing_palaces_and_no_path() {
+        use crate::engine::palace_not_found_tests as fixture;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(tmp.path().to_path_buf());
+        fixture::seed_listed_palaces(&state.data_root, 3);
+        let listed = open_handle(&state, "ghost-palace")
+            .err()
+            .expect("an absent palace cannot be opened");
+        assert_eq!(listed.kind, ErrorKind::NotFound, "{}", listed.message);
+        fixture::assert_listed_absence(&listed.message, &state.data_root, "ghost-palace", 3);
+
+        fixture::seed_unlistable_palace(&state.data_root);
+        let unlisted = open_handle(&state, "ghost-palace")
+            .err()
+            .expect("an absent palace cannot be opened");
+        assert_eq!(unlisted.kind, ErrorKind::NotFound, "{}", unlisted.message);
+        fixture::assert_unlisted_absence(&unlisted.message, &state.data_root, "ghost-palace");
+    }
+
     /// Why (#9274): a palace written by a newer release is refused, and a
     /// client told "internal" would retry what no retry can fix.
     /// What: saves a palace whose `palace.json` mirror names a newer format,

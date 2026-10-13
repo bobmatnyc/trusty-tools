@@ -1357,3 +1357,69 @@ async fn create_palace_for_a_live_alias_is_a_conflict() {
         "no palace.json may be written for the alias"
     );
 }
+
+/// The `NotFound` message every service entry point gives for palace `id`,
+/// panicking on any other answer.
+async fn not_found_messages(svc: &MemoryService, id: &str) -> Vec<(&'static str, String)> {
+    let answers = [
+        ("open_handle", svc.open_handle(id).err()),
+        ("delete_palace", svc.delete_palace(id, false).await.err()),
+        ("get_palace", svc.get_palace(id).await.err()),
+        (
+            "update_palace_name_typed",
+            svc.update_palace_name_typed(id, "any name").await.err(),
+        ),
+        (
+            "dream_status_for_palace",
+            svc.dream_status_for_palace(id).await.err(),
+        ),
+    ];
+    answers
+        .into_iter()
+        .map(|(site, answer)| match answer {
+            Some(ServiceError::NotFound(message)) => (site, message),
+            other => panic!("{site}: a missing palace must be NotFound, got {other:?}"),
+        })
+        .collect()
+}
+
+/// Why (#9751): a service `NotFound` for a palace carried the daemon's path
+/// (`open_handle`, `update_palace_name_typed`) or nothing a caller could act on
+/// (`delete_palace`, `get_palace`, `dream_status_for_palace`). Every service
+/// entry point now names the id and the capped list of existing palace ids.
+/// What: 25 palaces exist; each entry point is asked for one that does not.
+/// Test: itself.
+#[tokio::test]
+async fn absent_palace_is_named_with_existing_palaces_and_no_path_at_every_service_site() {
+    let (svc, state) = service();
+    crate::engine::palace_not_found_tests::seed_listed_palaces(&state.data_root, 25);
+    for (site, message) in not_found_messages(&svc, "ghost-palace").await {
+        // The site prefix only labels a failure; it names no palace or path.
+        crate::engine::palace_not_found_tests::assert_listed_absence(
+            &format!("[{site}] {message}"),
+            &state.data_root,
+            "ghost-palace",
+            25,
+        );
+    }
+}
+
+/// Why (#9751 fail-open check): a listing that fails must leave the answer a
+/// `NotFound` naming the id with no path, the list omitted — never a success,
+/// never `Internal`.
+/// Test: itself.
+#[tokio::test]
+async fn absent_palace_stays_not_found_at_the_service_when_listing_fails() {
+    let (svc, state) = service();
+    crate::engine::palace_not_found_tests::seed_listed_palaces(&state.data_root, 2);
+    crate::engine::palace_not_found_tests::seed_unlistable_palace(&state.data_root);
+    let open = match svc.open_handle("ghost-palace") {
+        Err(ServiceError::NotFound(message)) => message,
+        other => panic!("a missing palace must be NotFound, got {other:?}"),
+    };
+    crate::engine::palace_not_found_tests::assert_unlisted_absence(
+        &open,
+        &state.data_root,
+        "ghost-palace",
+    );
+}
