@@ -1418,7 +1418,8 @@ sv_case() {
 }
 sv_case "clean"                    0 "${sv_pfx} result=clean blocking=no"      0 notice
 sv_case "informational break"      0 "${sv_pfx} result=break blocking=no"      0 warning
-sv_case "fault (no verdict)"       3 "${sv_pfx} result=no-verdict blocking=no" 3 error
+sv_case "fault (no verdict)"       3 "${sv_pfx} result=clean blocking=no"      3 error
+sv_case "usage, line says break"   2 "${sv_pfx} result=break blocking=no"      2 error
 sv_case "blocking break"           1 "${sv_pfx} result=break blocking=yes"     1 error
 sv_case "exit 0, no profile line"  0 ""                                        3 error
 sv_case "exit 0, unknown result"   0 "${sv_pfx} result=no-verdict blocking=no" 3 error
