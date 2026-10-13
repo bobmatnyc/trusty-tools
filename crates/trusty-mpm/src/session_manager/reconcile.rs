@@ -141,7 +141,10 @@ impl SessionManager {
     /// (#6116) in `naming_tests.rs`;
     /// `reconcile_never_readopts_a_front_gate_denied_record_as_active`,
     /// `reconcile_still_adopts_a_provisioning_record_its_front_gate_does_not_hold`
-    /// (#9850) in `answer_route_tests.rs`.
+    /// (#9850) in `answer_route_tests.rs`;
+    /// `boot_reconcile_keeps_a_stopped_front_gate_denied_record_stopped`,
+    /// `boot_reconcile_still_readopts_a_stopped_record_whose_front_gate_approved`
+    /// (#9850, the live arm) in `pane_rebind_tests.rs`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -298,6 +301,12 @@ impl SessionManager {
             };
 
             if live_names.contains(&record.tmux_name) {
+                // #9850: a live name is not a launch approval — a held Stopped
+                // or Errored record keeps its state (the rebind pass skips it
+                // too).
+                if record.front_gate_hold().is_some() {
+                    continue;
+                }
                 // Session is alive — re-adopt as Active.
                 record.state = ManagedSessionState::Active;
                 // #6194: it is running, so whatever stopped it last no longer
