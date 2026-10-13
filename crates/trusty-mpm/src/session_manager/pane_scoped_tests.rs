@@ -23,6 +23,7 @@ use tempfile::TempDir;
 
 use crate::core::sm::control::Submit;
 
+use super::AnswerClaim;
 use super::manager::ManagedError;
 use super::record::ManagedSessionState;
 use super::tests::make_manager;
@@ -175,12 +176,24 @@ async fn inject_refuses_a_legacy_record_without_pane_id() {
 
 // ── answer_decision: pane-scoped-when-known / refuse-when-gone / legacy-fallback ──
 
+/// #9841 (D1): an answer needs a pending decision, so these pane tests seed
+/// one; without it the answer is refused before the pane is looked at.
+async fn seed_decision(
+    mgr: &super::manager::SessionManager,
+    record: &super::record::SessionRecord,
+) {
+    mgr.set_pending_decision(&record.id, "merge or rebase?", Some("merge"))
+        .await
+        .expect("seed a pending decision");
+}
+
 #[tokio::test]
 async fn answer_decision_targets_pane_when_pane_id_known() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    seed_decision(&mgr, &record).await;
 
-    mgr.answer_decision(&record.id, "rebase")
+    mgr.answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect("answer_decision");
 
@@ -202,10 +215,11 @@ async fn answer_decision_targets_pane_when_pane_id_known() {
 async fn answer_decision_refuses_when_stored_pane_gone() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, Some("%6015")).await;
+    seed_decision(&mgr, &record).await;
     *fake.pane_exists_override.lock().unwrap() = Some(false);
 
     let err = mgr
-        .answer_decision(&record.id, "rebase")
+        .answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect_err("a confirmed-gone recorded pane must refuse, not fall back");
 
@@ -228,9 +242,10 @@ async fn answer_decision_refuses_when_stored_pane_gone() {
 async fn answer_decision_refuses_a_legacy_record_without_pane_id() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake, record) = make_active_session(&dir, None).await;
+    seed_decision(&mgr, &record).await;
 
     let err = mgr
-        .answer_decision(&record.id, "rebase")
+        .answer_decision(&record.id, "rebase", &AnswerClaim::by("test"))
         .await
         .expect_err("a legacy record must refuse");
 

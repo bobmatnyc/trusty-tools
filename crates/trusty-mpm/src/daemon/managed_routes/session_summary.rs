@@ -72,6 +72,8 @@ pub struct SessionSummary {
     pub last_activity_at: Option<String>,
     /// A pending decision question, if surfaced.
     pub pending_decision: Option<String>,
+    /// #9841: the pending decision's id, to quote back on `/answer`.
+    pub pending_decision_id: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
     /// Source project identity (`owner/repo`) for in-project sessions (#1707).

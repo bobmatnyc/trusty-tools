@@ -210,6 +210,7 @@ pub enum TrustyCommand {
     /// Why: the correctness-correct decision path — unblocks a harness waiting
     /// on an operator decision via the real `.../answer` endpoint, NOT a
     /// synthetic hook. `/approve`/`/deny` on a managed session resolve here.
+    /// With no pending decision the daemon refuses it (409, #9841).
     /// What: the target session and the answer text to inject.
     ManagedAnswer {
         /// Managed session id or friendly name.

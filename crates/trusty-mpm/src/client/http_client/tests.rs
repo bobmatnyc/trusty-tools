@@ -219,6 +219,8 @@ async fn decommission_conflict_surfaces_the_guard_reason() {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            pending_decision_id: None,
+            last_answer: None,
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,

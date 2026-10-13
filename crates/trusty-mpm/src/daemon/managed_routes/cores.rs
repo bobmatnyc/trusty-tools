@@ -21,6 +21,7 @@ use tracing::warn;
 use super::route_outcome_http::outcome_from_response;
 use super::*;
 use crate::daemon::rpc::managed::outcome::{CODE_PANE_GONE, CODE_WORKSPACE_GONE, RouteOutcome};
+use crate::session_manager::SessionRecord;
 
 /// Parse a managed-session id, or the 400 the HTTP route answers with.
 fn parse_id_neutral(id_str: &str) -> Result<ManagedSessionId, RouteOutcome> {
@@ -239,15 +240,63 @@ pub(crate) async fn send_core(
 }
 
 /// `POST /api/v1/sessions/managed/{id}/answer` — see
-/// [`super::answer_session_decision`].
+/// [`super::answer_session_decision`]. `transport` (`http`/`rpc`) is the
+/// answerer name when the request gives none (#9841, D5).
 pub(crate) async fn answer_core(
     state: &Arc<DaemonState>,
     id_str: &str,
     req: AnswerRequest,
+    transport: &str,
 ) -> RouteOutcome {
+    let st = Arc::clone(state);
+    let spawn = move |record: SessionRecord| async move { spawn_runtime_for(&st, &record).await };
+    answer_core_with(state, id_str, req, transport, spawn).await
+}
+
+/// [`answer_core`] with the front gate's runtime launch injected (#9841).
+///
+/// Why: two concurrent answers both typed into the pane, and two concurrent
+/// front-gate answers both launched the runtime, because the decision was
+/// tested with no lock. A test must also count launches and hold the first
+/// open while a second answer races it; `spawn_runtime_for` launches a real
+/// runtime.
+/// What: parses the optional `decision_id`/`answered_by` (400 on a bad id),
+/// answers a repeat, a stale id, or (D1) an answer with no pending decision
+/// with its 409 before anything else,
+/// proves a live session's pane BEFORE the claim (a refusal leaves the
+/// decision pending), then claims under the store guard
+/// (`SessionManager::claim_decision`). A front-gate claim calls `spawn` with
+/// the re-read record; any other answer types into the pane. A conflict is a
+/// 409 whose text names the first answerer and time, on both transports; an
+/// effect that fails after the claim is a 500 and the decision stays closed.
+/// Test: `two_concurrent_front_gate_answers_spawn_once`,
+/// `front_gate_launch_failure_closes_the_decision`,
+/// `a_malformed_decision_id_is_400`, `answer_conflict_is_409_over_http_and_rpc`,
+/// `answer_with_no_pending_decision_refused`.
+pub(crate) async fn answer_core_with<F, Fut>(
+    state: &Arc<DaemonState>,
+    id_str: &str,
+    req: AnswerRequest,
+    transport: &str,
+    spawn: F,
+) -> RouteOutcome
+where
+    F: FnOnce(SessionRecord) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    use crate::session_manager::{AnswerClaim, Claim, ManagedError, ManagedSessionState};
+
     let id = match parse_id_neutral(id_str) {
         Ok(id) => id,
         Err(refusal) => return refusal,
+    };
+    let claim = match AnswerClaim::from_wire(
+        req.decision_id.as_deref(),
+        req.answered_by.as_deref(),
+        transport,
+    ) {
+        Ok(claim) => claim,
+        Err(msg) => return RouteOutcome::text(400, msg),
     };
     let mgr = state.session_manager().await;
     let record = match mgr.get(&id).await {
@@ -255,40 +304,60 @@ pub(crate) async fn answer_core(
         Err(_) => return not_found(id_str),
     };
     let tmux_name = record.tmux_name.clone();
+    let answered = |decision_id: Option<crate::session_manager::DecisionId>| {
+        RouteOutcome::ok(&AnswerResponse {
+            injected: true,
+            tmux_name: tmux_name.clone(),
+            decision_id: decision_id.map(|d| d.to_string()),
+        })
+    };
 
-    // FRONT-gate (#1360) path: a session escalated *before* spawn sits in
-    // `Provisioning` with a `pending_decision` and NO running harness.
-    // Answering it must clear the decision AND launch the withheld runtime
-    // (AC-15) — not inject the answer into a bare pane.
-    let is_front_gate_escalation = record.state
-        == crate::session_manager::ManagedSessionState::Provisioning
-        && record.pending_decision.is_some();
-
-    if is_front_gate_escalation {
-        if let Err(e) = mgr.clear_pending_decision(&id).await {
-            return RouteOutcome::text(500, e.to_string());
-        }
-        // Re-fetch AFTER clearing: `clear_pending_decision` upserts a new
-        // record version, so the `record` captured above is now stale.
-        let fresh = match mgr.get(&id).await {
-            Ok(r) => r,
-            Err(_) => return not_found(id_str),
-        };
-        match spawn_runtime_for(state, &fresh).await {
-            Ok(()) => RouteOutcome::ok(&AnswerResponse {
-                injected: true,
-                tmux_name,
-            }),
-            Err(e) => RouteOutcome::text(500, e),
-        }
+    // See #9841: a repeat is a 409 whatever the pane's state. A live pane is
+    // proven before the claim; a `Provisioning` session (the FRONT gate,
+    // #1360) has no harness to prove yet.
+    if let Some(conflict) = crate::session_manager::decision::early_conflict(&record, &claim) {
+        return RouteOutcome::text(409, conflict.to_string());
+    }
+    let pane = if record.state == ManagedSessionState::Provisioning {
+        None
     } else {
-        match mgr.answer_decision(&id, &req.answer).await {
-            Ok(()) => RouteOutcome::ok(&AnswerResponse {
-                injected: true,
-                tmux_name,
-            }),
-            Err(e) => RouteOutcome::text(500, e.to_string()),
+        match mgr.owned_pane(&id, &record) {
+            Ok(pane) => Some(pane),
+            Err(e) => return RouteOutcome::text(500, e.to_string()),
         }
+    };
+    let claimed = match mgr.claim_decision(&id, &claim).await {
+        Ok(claimed) => claimed,
+        Err(e @ (ManagedError::DecisionConflict(_) | ManagedError::NoPendingDecision(_))) => {
+            return RouteOutcome::text(409, e.to_string());
+        }
+        Err(ManagedError::SessionNotFound(_)) => return not_found(id_str),
+        Err(e) => return RouteOutcome::text(500, e.to_string()),
+    };
+
+    // FRONT gate (AC-15): the claim cleared the decision; launch the withheld
+    // runtime from the re-read record, never type the answer into a bare pane.
+    if let Claim {
+        decision_id,
+        front_gate: true,
+    } = claimed
+    {
+        let launched = match mgr.get(&id).await {
+            Ok(fresh) => spawn(fresh).await,
+            Err(e) => Err(e.to_string()),
+        };
+        return match mgr.settle_launch(&id, decision_id, launched).await {
+            Ok(decision_id) => answered(decision_id),
+            Err(msg) => RouteOutcome::text(500, msg),
+        };
+    }
+    let pane = pane.map_or_else(|| mgr.owned_pane(&id, &record), Ok);
+    match mgr
+        .deliver_answer(&id, &tmux_name, pane, &req.answer, claimed)
+        .await
+    {
+        Ok(decision_id) => answered(decision_id),
+        Err(e) => RouteOutcome::text(500, e.to_string()),
     }
 }
 
@@ -517,6 +586,8 @@ mod cores_tests {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            pending_decision_id: None,
+            last_answer: None,
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,

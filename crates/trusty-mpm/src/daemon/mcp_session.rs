@@ -274,6 +274,7 @@ pub async fn session_activity(
         "raw_pane": raw_pane,
         "lines": lines,
         "runtime_active": runtime_active,
+        "pending_decision_id": record.live_decision_id().map(|d| d.to_string()), // #9841
         "pending_decision": record.pending_decision,
         "proposed_default": record.proposed_default,
     }))

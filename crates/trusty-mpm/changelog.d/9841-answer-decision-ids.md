@@ -1,0 +1,2 @@
+Added
+- Each pending decision now has an id. The managed list, the activity response and the MCP session status show it as `pending_decision_id`. `/answer` and `mpm.managed.answer` accept two optional fields: `decision_id` (an answer naming a decision that is no longer pending gets a 409) and `answered_by` (who the conflict text names; it defaults to `http` or `rpc`). The answer response carries the `decision_id` it took. Sessions saved before this change load unchanged (Refs #9841).

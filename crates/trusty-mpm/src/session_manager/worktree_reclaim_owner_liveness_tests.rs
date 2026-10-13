@@ -79,6 +79,8 @@ fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        pending_decision_id: None,
+        last_answer: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,

@@ -330,6 +330,19 @@ pub struct SessionRecord {
     pub pending_decision: Option<String>,
     /// The harness's proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// The id of `pending_decision`, minted when it is set (#9841).
+    ///
+    /// `#[serde(default)]` loads a pre-#9841 record as `None`; such a decision
+    /// is answerable by an answer that names no id. Skipped when `None`, so a
+    /// record without a decision serializes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_decision_id: Option<super::DecisionId>,
+    /// The most recent claimed answer, kept after the decision clears (#9841).
+    ///
+    /// Why: a repeat answer's conflict names who answered first, and when.
+    /// `#[serde(default)]` and skipped when `None`, as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_answer: Option<super::DecisionAnswer>,
     /// Session ↔ artifact correlation: links this session to its worktree,
     /// branch, PR, and/or issue so the driver's autonomy policy can validate
     /// that generated work stays in-scope before auto-accepting.

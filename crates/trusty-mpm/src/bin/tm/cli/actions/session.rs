@@ -281,7 +281,9 @@ pub(crate) enum SessionAction {
     /// Answer a managed session's pending decision.
     ///
     /// Why: resolve a decision the harness is blocked on.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/answer`.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/answer`. A session with no
+    /// pending decision refuses it (409, #9841); `tm session send` types into
+    /// the pane.
     /// Test: `cli_parses_session_answer`.
     Answer {
         /// Managed session id.

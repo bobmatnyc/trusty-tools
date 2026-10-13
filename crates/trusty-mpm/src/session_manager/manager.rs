@@ -12,9 +12,9 @@
 //! the sibling `reactivate.rs`, `reconcile_on_boot` lives in the sibling
 //! `reconcile.rs` (#2379), and the post-creation field setters
 //! (`mark_errored`, `set_workspace`, `set_pending_decision`, `set_source_id`,
-//! `set_deliverable_id`, `clear_pending_decision`) live in the sibling
-//! `setters.rs` (#7087) — all extracted to keep this file under the 500-SLOC
-//! cap.
+//! `set_deliverable_id`) live in the sibling `setters.rs` (#7087), and the
+//! decision claim behind `answer_decision` lives in `decision.rs` (#9841) —
+//! all extracted to keep this file under the 500-SLOC cap.
 //! [`ReconcileReport`] describes what the reconciliation pass found.
 //! [`ManagedError`] is the module's error type.
 //! Test: `manager_create_record`, `manager_stop_keeps_workspace`,
@@ -101,6 +101,38 @@ pub enum ManagedError {
     /// Test: `a_second_concurrent_resume_of_one_session_is_refused`.
     #[error("a resume is already in flight for session {0}; not starting a second one")]
     ResumeInFlight(String),
+
+    /// The answer's decision was already answered, or is not the pending one
+    /// (#9841).
+    ///
+    /// Why: a repeat or stale answer must not reach the pane; the caller needs
+    /// to learn who answered and when. The routes answer it with a 409.
+    /// What: carries the full text, e.g. `decision <id> already answered by
+    /// <X> at <T>`.
+    /// Test: `repeat_answer_names_first_answerer_and_time`,
+    /// `stale_decision_id_conflicts`.
+    #[error("{0}")]
+    DecisionConflict(String),
+
+    /// An answer took its decision, and its effect then failed (#9841, D4).
+    ///
+    /// Why: the send may have typed part of the answer, so the decision closes
+    /// rather than reopening; the routes answer it with a 500.
+    /// What: carries the text naming the decision and the effect's error.
+    /// Test: `send_failure_after_claim_closes_decision_as_failed`.
+    #[error("{0}")]
+    DeliveryFailed(String),
+
+    /// An answer reached a session with no pending decision (#9841, D1).
+    ///
+    /// Why: the D73 ruling is strict: an answer types into a pane only to
+    /// resolve a record-backed decision. The routes answer it with a 409 that
+    /// points at `tm session send`.
+    /// What: carries the full text, `no pending decision on session <id>; …`.
+    /// Test: `answer_with_no_pending_decision_refused`,
+    /// `answer_decision_without_a_pending_decision_is_refused`.
+    #[error("{0}")]
+    NoPendingDecision(String),
 
     /// An auto-resume failed AND has already recorded the failure (#8233).
     ///
@@ -424,9 +456,16 @@ impl SessionManager {
     /// pending decision was raised in.
     /// What: looks up the record, proves its pane with [`Self::owned_pane`]
     /// (#9101: a record with no pane id or no matching tmux server is
-    /// refused), sends the answer text via `send_line_to_pane`, clears the
-    /// pending fields, and persists.
+    /// refused), then (#9841) claims the pending decision for `claim` under
+    /// the store guard, and only then sends the answer text via
+    /// `send_line_to_pane`. A repeat or stale answer is a
+    /// [`ManagedError::DecisionConflict`]; with nothing pending and nothing
+    /// answered it is a [`ManagedError::NoPendingDecision`] (D1); a send that
+    /// fails after the claim is a [`ManagedError::DeliveryFailed`] and the
+    /// decision stays closed. Returns the decision taken.
     /// Test: `manager_answer_decision` in tests;
+    /// `two_concurrent_answers_reach_the_pane_once`,
+    /// `repeat_answer_names_first_answerer_and_time` in `decision_tests.rs`;
     /// `answer_decision_targets_pane_when_pane_id_known`,
     /// `answer_decision_refuses_when_stored_pane_gone`,
     /// `answer_decision_refuses_a_legacy_record_without_pane_id`
@@ -435,17 +474,19 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
         answer: &str,
-    ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
+        claim: &super::AnswerClaim,
+    ) -> Result<Option<super::DecisionId>, ManagedError> {
+        let record = self.get(id).await?;
+        // #9841: a repeat is a conflict whatever the pane's state. Then prove
+        // the pane BEFORE the claim, so a refusal leaves the decision pending;
+        // the send runs after the claim's guard is dropped.
+        if let Some(conflict) = super::decision::early_conflict(&record, claim) {
+            return Err(conflict);
+        }
         let pane = self.owned_pane(id, &record)?;
-        self.tmux
-            .send_line_to_pane(&record.tmux_name, &pane, answer)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
-        record.pending_decision = None;
-        record.proposed_default = None;
-        record.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(record).await?;
-        Ok(())
+        let claimed = self.claim_decision(id, claim).await?;
+        self.deliver_answer(id, &record.tmux_name, Ok(pane), answer, claimed)
+            .await
     }
 
     /// Look up a session by its managed id.

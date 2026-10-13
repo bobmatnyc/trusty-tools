@@ -108,6 +108,12 @@ pub struct AnswerParams {
     pub id: String,
     /// The answer to the pending decision.
     pub answer: String,
+    /// #9841: the decision being answered; absent takes the pending one.
+    #[serde(default)]
+    pub decision_id: Option<String>,
+    /// #9841: who answers; absent defaults to `rpc`.
+    #[serde(default)]
+    pub answered_by: Option<String>,
 }
 
 /// `mpm.managed.rename` parameters: the id plus the HTTP body.
@@ -375,7 +381,12 @@ fn register_per_session(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRoute
         .typed("mpm.managed.answer", move |req: AnswerParams| {
             let state = Arc::clone(&ans_s);
             async move {
-                cores::answer_core(&state, &req.id, AnswerRequest { answer: req.answer })
+                let body = AnswerRequest {
+                    answer: req.answer,
+                    decision_id: req.decision_id,
+                    answered_by: req.answered_by,
+                };
+                cores::answer_core(&state, &req.id, body, "rpc")
                     .await
                     .into_rpc()
             }
