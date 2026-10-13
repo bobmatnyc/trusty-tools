@@ -86,6 +86,21 @@ Proposed ──► Accepted ──► Superseded by linked NNNN
 
 See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick reference for vetting.
 
+## Path moves
+
+Accepted ADRs keep the paths that were true when they were decided. When code
+moves after acceptance, the move is recorded here instead of in each ADR body.
+To follow an old citation, replace the old prefix with the new one.
+
+| Old prefix | New prefix | Issue | Date |
+|---|---|---|---|
+| `crates/trusty-common/src/memory_core/` (module `trusty_common::memory_core`, feature `memory-core`) | `crates/trusty-memory/src/engine/` (module `trusty_memory::engine`) | #9271 | 2026-10-12 |
+
+The `memory-core` feature of trusty-common still exists as a no-op. Some old
+citations were already stale before the move because a file became a
+directory: `memory_core/dream.rs` is now `engine/dream/mod.rs`, and
+`memory_core/retrieval.rs` is now `engine/retrieval/mod.rs`.
+
 ## Index
 
 See [`INDEX.md`](./INDEX.md) for the complete, machine-readable index of all ADRs
