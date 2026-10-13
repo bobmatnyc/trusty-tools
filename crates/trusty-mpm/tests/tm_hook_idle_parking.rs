@@ -20,19 +20,14 @@ use crate::common;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Run `tm hook` with the given stdin JSON, returning `(exit_ok, stderr)`.
+/// Feed `stdin_json` to an already-configured `tm hook` command and wait for
+/// it, returning `(exit_ok, stderr)`.
 ///
-/// #7278: `config_dir` becomes the child's `CLAUDE_CONFIG_DIR`, which is the
-/// boundary the parking detector screens `transcript_path` against. Set on the
-/// spawned process, never on this one — a `std::env::set_var` here would leak
-/// into every other test in the binary. It is chained AFTER
-/// `common::tm_command`, whose scrub would otherwise clear it (#7568).
-fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String) {
-    let mut child = common::tm_command()
-        .args(["--url", "http://127.0.0.1:1", "hook"])
-        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
-        .env_remove("CLAUDE_MPM_SUB_AGENT")
-        .env("CLAUDE_CONFIG_DIR", config_dir)
+/// The one spawn/stdin/wait body behind [`run_hook_in`] and
+/// [`run_hook_with_home`]; the two differ only in how the child's
+/// environment names the Claude config directory.
+fn spawn_hook(mut cmd: Command, stdin_json: &str) -> (bool, String) {
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -53,8 +48,39 @@ fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String)
     )
 }
 
-/// Run `tm hook` until its stderr contains `want`, or a generous deadline
-/// expires; returns the stderr that satisfied the condition.
+/// `tm --url <unreachable> hook` with hooks enabled, on top of `cmd`.
+fn hook_args(mut cmd: Command) -> Command {
+    cmd.args(["--url", "http://127.0.0.1:1", "hook"])
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT");
+    cmd
+}
+
+/// Run `tm hook` with the given stdin JSON, returning `(exit_ok, stderr)`.
+///
+/// #7278: `config_dir` becomes the child's `CLAUDE_CONFIG_DIR`, which is the
+/// boundary the parking detector screens `transcript_path` against. Set on the
+/// spawned process, never on this one — a `std::env::set_var` here would leak
+/// into every other test in the binary. It is chained AFTER
+/// `common::tm_command`, whose scrub would otherwise clear it (#7568).
+fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String) {
+    let mut cmd = hook_args(common::tm_command());
+    cmd.env("CLAUDE_CONFIG_DIR", config_dir);
+    spawn_hook(cmd, stdin_json)
+}
+
+/// Run `tm hook` with `$HOME` = `home` and `CLAUDE_CONFIG_DIR` unset.
+///
+/// #9847: with no `CLAUDE_CONFIG_DIR` the boundary falls back to the default
+/// Claude config directory under `$HOME`. `common::tm_command_in` sets the
+/// child's `HOME` and strips `CLAUDE_CONFIG_DIR` from the child only, so this
+/// process's environment is never touched (#5544).
+fn run_hook_with_home(stdin_json: &str, home: &std::path::Path) -> (bool, String) {
+    spawn_hook(hook_args(common::tm_command_in(home)), stdin_json)
+}
+
+/// Run `tm hook` (via `run`) until its stderr contains `want`, or a generous
+/// deadline expires; returns the stderr that satisfied the condition.
 ///
 /// Why (#6161): `tm hook` bounds its own work with two fail-open internal
 /// timeouts so it can never block the user's prompt — a 500ms stdin read
@@ -68,19 +94,17 @@ fn run_hook_in(stdin_json: &str, config_dir: &std::path::Path) -> (bool, String)
 /// `exit 0` invariant on every attempt (that one must hold unconditionally, so
 /// it is never retried past). Deadline expiry panics with the attempt count and
 /// the last stderr observed, so a genuine regression still fails loudly rather
-/// than looping.
-/// Test: used by `hook_flags_idle_parking_final_message_on_subagent_stop` and
-/// `hook_flags_idle_parking_on_main_stop`.
-fn run_hook_until_stderr_contains(
-    stdin_json: &str,
-    config_dir: &std::path::Path,
-    want: &str,
-) -> String {
+/// than looping. `run` is [`run_hook_in`] or [`run_hook_with_home`] bound to
+/// its payload and directory.
+/// Test: used by `hook_flags_idle_parking_final_message_on_subagent_stop`,
+/// `hook_flags_idle_parking_on_main_stop` and
+/// `hook_reads_a_transcript_under_dot_claude_when_config_dir_is_unset`.
+fn run_hook_until_stderr_contains(run: impl Fn() -> (bool, String), want: &str) -> String {
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
     let start = std::time::Instant::now();
     let mut attempts = 0usize;
     loop {
-        let (ok, stderr) = run_hook_in(stdin_json, config_dir);
+        let (ok, stderr) = run();
         attempts += 1;
         assert!(
             ok,
@@ -140,9 +164,9 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
     );
     // #6161: poll for the warning rather than racing the hook's fail-open
     // internal timeouts — see `run_hook_until_stderr_contains`.
+    let stdin = payload("SubagentStop", &tf.transcript);
     let stderr = run_hook_until_stderr_contains(
-        &payload("SubagentStop", &tf.transcript),
-        tf.dir.path(),
+        || run_hook_in(&stdin, tf.dir.path()),
         "IDLE-PARKING WARNING (#2610)",
     );
     assert!(
@@ -155,9 +179,9 @@ fn hook_flags_idle_parking_final_message_on_subagent_stop() {
 fn hook_flags_idle_parking_on_main_stop() {
     let tf = transcript_with_assistant("Standing by for the CI run to complete.");
     // #6161: same fail-open-timeout race as the SubagentStop case above.
+    let stdin = payload("Stop", &tf.transcript);
     let _stderr = run_hook_until_stderr_contains(
-        &payload("Stop", &tf.transcript),
-        tf.dir.path(),
+        || run_hook_in(&stdin, tf.dir.path()),
         "IDLE-PARKING WARNING (#2610)",
     );
 }
@@ -211,6 +235,67 @@ fn hook_refuses_a_transcript_outside_the_config_dir() {
     assert!(
         !stderr.contains("IDLE-PARKING WARNING"),
         "a transcript outside CLAUDE_CONFIG_DIR must never be read, got: {stderr:?}"
+    );
+}
+
+/// Write the parking-language transcript line used across this file at an
+/// arbitrary `path`, creating its parents.
+fn write_parking_transcript(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().expect("transcript parent")).expect("mkdir");
+    let line = serde_json::json!({
+        "type": "assistant",
+        "message": { "content": [{ "type": "text", "text":
+            "I've started a background polling monitor for the checks and will report back once green." }] }
+    });
+    std::fs::write(path, format!("{line}\n")).expect("write transcript");
+}
+
+/// #9847: with `CLAUDE_CONFIG_DIR` unset, the boundary is `~/.claude`, not
+/// `$HOME`. A transcript full of parking language at `$HOME/notes.jsonl` sits
+/// under `$HOME` but outside `~/.claude`, so it is never opened and no warning
+/// appears.
+///
+/// `~/.claude` is created so the run exercises the boundary itself, not the
+/// "boundary does not resolve" arm. The paired positive case is
+/// `hook_reads_a_transcript_under_dot_claude_when_config_dir_is_unset`. A single
+/// run (not the polling helper) because a negative cannot be polled for; the
+/// hook's fail-open timeouts can only make this pass falsely, never fail.
+#[test]
+fn hook_refuses_a_transcript_under_home_outside_dot_claude_when_config_dir_is_unset() {
+    let home = tempfile::tempdir().expect("create temp home");
+    std::fs::create_dir_all(home.path().join(".claude")).expect("mkdir ~/.claude");
+    let transcript = home.path().join("notes.jsonl");
+    write_parking_transcript(&transcript);
+
+    let (ok, stderr) = run_hook_with_home(&payload("SubagentStop", &transcript), home.path());
+
+    assert!(ok, "hook must exit 0 (fail-open), stderr={stderr}");
+    assert!(
+        !stderr.contains("IDLE-PARKING WARNING"),
+        "a transcript under $HOME but outside ~/.claude must never be read (#9847), \
+         got: {stderr:?}"
+    );
+}
+
+/// #9847 positive control: with `CLAUDE_CONFIG_DIR` unset, a real Claude Code
+/// transcript under `~/.claude/projects/` is still read and warned on. Without
+/// it, the refusal above would also be satisfied by a default boundary that
+/// admitted nothing.
+#[test]
+fn hook_reads_a_transcript_under_dot_claude_when_config_dir_is_unset() {
+    let home = tempfile::tempdir().expect("create temp home");
+    let transcript = home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("p")
+        .join("s.jsonl");
+    write_parking_transcript(&transcript);
+
+    let stdin = payload("SubagentStop", &transcript);
+    let _stderr = run_hook_until_stderr_contains(
+        || run_hook_with_home(&stdin, home.path()),
+        "IDLE-PARKING WARNING (#2610)",
     );
 }
 

@@ -192,23 +192,40 @@ pub fn contained_transcript_file(claude_config_dir: &Path, candidate: &Path) -> 
 /// [`FrameworkPaths::under`](crate::core::paths::FrameworkPaths::under) over an
 /// explicit `dirs::home_dir()?` is what makes "no home" a `None` the caller
 /// must handle.
-/// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` via
-/// `FrameworkPaths::under(dirs::home_dir()?).claude_home_dir()`. `None` when
-/// neither resolves, and every caller then refuses the path outright — that is
-/// what makes the screen fail closed.
+/// What: `CLAUDE_CONFIG_DIR` when set and non-blank, else `~/.claude` from
+/// [`default_claude_config_dir_under`] over `dirs::home_dir()?`. `None` when
+/// neither resolves, and every caller then refuses the path outright. A
+/// `~/.claude` that does not exist refuses every path too, because the screen
+/// cannot canonicalize it — both are what make the screen fail closed.
 /// Test: `the_containment_screen_never_leans_on_frameworkpaths_default` pins
-/// the #7290 rule this resolver exists to keep; the `~/.claude` fallback shape
-/// has its own coverage in `claude_home_dir_matches_default_home`. The env-var
-/// branch is exercised end to end by `tm_hook_idle_parking`, which points
-/// `CLAUDE_CONFIG_DIR` at its fixture directory rather than mutating this
-/// process's environment.
+/// the #7290 rule; `the_default_boundary_is_dot_claude_under_home` pins the
+/// fallback shape; `rejects_every_transcript_path_when_the_config_dir_does_not_exist`
+/// the missing-boundary arm. Both branches run end to end in
+/// `tm_hook_idle_parking`: `hook_refuses_a_transcript_outside_the_config_dir`
+/// points `CLAUDE_CONFIG_DIR` at a fixture, and
+/// `hook_refuses_a_transcript_under_home_outside_dot_claude_when_config_dir_is_unset`
+/// leaves it unset — on the child, never this process's environment.
 pub fn claude_config_dir() -> Option<PathBuf> {
     match claude_config_dir_override() {
         Some(dir) => Some(dir),
-        None => {
-            Some(crate::core::paths::FrameworkPaths::under(dirs::home_dir()?).claude_home_dir())
-        }
+        None => Some(default_claude_config_dir_under(&dirs::home_dir()?)),
     }
+}
+
+/// `~/.claude` under an explicit home — the boundary when `CLAUDE_CONFIG_DIR`
+/// is unset.
+///
+/// Why (#9847): `claude_home_dir()` is the BASE that holds `.claude`, i.e.
+/// `$HOME` itself, so using it bare made every file under `$HOME` pass the
+/// containment screen. Taking `&Path` (not `Option`) keeps the no-home case in
+/// [`claude_config_dir`], where it is a `None`.
+/// What: `FrameworkPaths::under(home).claude_home_dir().join(".claude")`.
+/// Test: `the_default_boundary_is_dot_claude_under_home`.
+pub fn default_claude_config_dir_under(home: &Path) -> PathBuf {
+    // #9847: claude_home_dir() is the base ($HOME), not ~/.claude.
+    crate::core::paths::FrameworkPaths::under(home)
+        .claude_home_dir()
+        .join(".claude")
 }
 
 /// `CLAUDE_CONFIG_DIR` when set and non-blank, else `None`.
