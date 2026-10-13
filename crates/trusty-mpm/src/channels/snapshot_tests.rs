@@ -1115,3 +1115,7 @@ async fn daemon_state_holds_snapshot_under_its_user_home() {
         "one snapshot per daemon"
     );
 }
+
+// #9832: the route-change audit arms, over these helpers.
+#[path = "snapshot_audit_tests.rs"]
+mod audit;

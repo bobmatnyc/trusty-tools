@@ -150,3 +150,7 @@ impl ChannelAudit {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "audit_log_tests.rs"]
+mod tests;
