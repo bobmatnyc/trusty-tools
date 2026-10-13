@@ -38,9 +38,11 @@ pub(crate) async fn session_output(
 /// sessions first; Output now does too.
 /// What: lists the managed sessions and classifies `id_or_name` against them
 /// (id, exact name, unique prefix). A match reads
-/// `GET /api/v1/sessions/managed/{id}/output`; an ambiguous prefix is an error
-/// naming the candidates; no match falls through to the project route. A list
-/// failure is returned as that failure, never as "not found", and a refused
+/// `GET /api/v1/sessions/managed/{id}/output`; no match falls through to the
+/// project route. An ambiguous prefix tries the project route first (an exact
+/// project session name wins, as for Stop and Resume) and is an error naming
+/// the candidates only when that route answers 404; any other project-route
+/// failure is returned as itself. A list failure is returned as that failure, never as "not found", and a refused
 /// managed read is returned with the daemon's reason.
 /// Test: `output_tests.rs`.
 pub(crate) async fn fetch_output(
@@ -56,14 +58,15 @@ pub(crate) async fn fetch_output(
     let managed = daemon.list_managed_sessions().await.map_err(|e| {
         anyhow::anyhow!("could not list managed sessions to resolve '{id_or_name}': {e}")
     })?;
+    // #9162: an ambiguous managed prefix may still be an exact project session
+    // name, so it tries the project route and reports ambiguity only on a 404.
+    let mut ambiguous: Option<String> = None;
     let path = match classify_target(&managed, id_or_name) {
         TargetMatch::Found(m) => format!("/api/v1/sessions/managed/{}/output", m.id),
         TargetMatch::Ambiguous(all) => {
             let names: Vec<&str> = all.iter().map(|m| m.name.as_str()).collect();
-            anyhow::bail!(
-                "session '{id_or_name}' is ambiguous: it matches {}; use a full name or id",
-                names.join(", ")
-            );
+            ambiguous = Some(names.join(", "));
+            format!("/sessions/{id_or_name}/output")
         }
         TargetMatch::NotFound => format!("/sessions/{id_or_name}/output"),
     };
@@ -80,6 +83,11 @@ pub(crate) async fn fetch_output(
         anyhow::bail!("session '{id_or_name}' output refused ({status}): {reason}");
     }
     if status == reqwest::StatusCode::NOT_FOUND {
+        if let Some(names) = ambiguous {
+            anyhow::bail!(
+                "session '{id_or_name}' is ambiguous: it matches {names}; use a full name or id"
+            );
+        }
         anyhow::bail!("session '{id_or_name}' not found");
     }
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
