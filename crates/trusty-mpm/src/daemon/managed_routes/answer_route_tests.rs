@@ -389,11 +389,8 @@ async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
         .await
         .expect("stop");
     let resumed = mgr.resume_inner(&h.id).await;
-    assert!(
-        resumed.is_err(),
-        "a denied task became resumable: {:?}",
-        resumed.map(|r| r.state)
-    );
+    let err = resumed.expect_err("a denied task became resumable");
+    assert!(err.to_string().contains("denied the launch"), "{err}");
 }
 
 /// #9843 (AC-F): a front-gate launch whose runtime never came up is a 500
@@ -428,15 +425,17 @@ async fn front_gate_runtime_that_never_started_settles_delivery_failed() {
 }
 
 /// #9844: a restart while a front-gate decision is pending never makes the
-/// gated task resumable; the decision stays answerable.
+/// gated task resumable; the decision stays answerable. A stop does not
+/// either: resume itself refuses a record whose gate is still pending.
 #[tokio::test]
 async fn a_restart_never_makes_a_pending_front_gate_decision_resumable() {
+    use crate::session_manager::ManagedTmuxDriver as _;
+
     let h = Harness::new(ManagedSessionState::Provisioning).await;
     h.ask().await;
     let before = h.record().await;
     let mgr = h.state.session_manager().await;
     // The pane died with the daemon.
-    use crate::session_manager::ManagedTmuxDriver as _;
     h.driver
         .inner
         .kill_session(&before.tmux_name)
@@ -444,18 +443,29 @@ async fn a_restart_never_makes_a_pending_front_gate_decision_resumable() {
     mgr.reconcile_on_boot(false).await.expect("reconcile");
 
     let resumed = mgr.resume_inner(&h.id).await;
-
+    let after = h.record().await;
     assert!(
         resumed.is_err(),
         "resume launched a task its front gate holds: {:?}",
-        resumed.map(|r| r.state)
+        after.state
     );
-    let after = h.record().await;
-    assert_eq!(after.live_decision_id(), before.live_decision_id());
     assert_eq!(after.state, ManagedSessionState::Provisioning);
+    assert_eq!(after.live_decision_id(), before.live_decision_id());
     let launches = Arc::new(AtomicUsize::new(0));
     let l = Arc::clone(&launches);
     let out = h.answer(request("no"), move |_| counted(l)).await;
     assert_eq!(out.status, 200, "{out:?}");
     assert_eq!(launches.load(Ordering::SeqCst), 0);
+
+    let stopped = Harness::new(ManagedSessionState::Provisioning).await;
+    stopped.ask().await;
+    let mgr = stopped.state.session_manager().await;
+    mgr.stop_reporting(&stopped.id, crate::session_manager::StopCause::Deliberate)
+        .await
+        .expect("stop");
+    let err = mgr
+        .resume_inner(&stopped.id)
+        .await
+        .expect_err("resume launched a stopped task its front gate holds");
+    assert!(err.to_string().contains("still pending"), "{err}");
 }
