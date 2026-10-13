@@ -918,66 +918,6 @@ pub(super) async fn spawn_managed_inproject(
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
-/// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
-///
-/// Why: when the FRONT gate escalates (#1360), the spawn is WITHHELD and the
-/// session sits in `Provisioning` with a `pending_decision`. After a human
-/// resolves it via `POST …/answer`, the runtime must actually start — otherwise
-/// the answer clears the decision but the agent never launches (AC-15). This is
-/// the exact Step 3 from [`spawn_managed`], lifted so the answer path can invoke
-/// it on demand.
-/// What: transitions the record to `Active` (persisting the workspace), builds
-/// the runtime adapter, and spawns the harness in the pane — marking the record
-/// errored on spawn failure (non-fatal, mirroring `spawn_managed`). Idempotent
-/// guard: callers should only invoke this for a session still in `Provisioning`
-/// (never spawned), so an already-live session is not double-spawned.
-/// Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs.
-pub async fn spawn_runtime_for(
-    state: &Arc<DaemonState>,
-    record: &SessionRecord,
-) -> Result<(), String> {
-    let mgr = state.session_manager().await;
-    let workspace = record
-        .workspace_path
-        .clone()
-        .unwrap_or_else(|| record.cwd.clone());
-
-    if let Err(e) = mgr
-        .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
-        .await
-    {
-        warn!(id = %record.id, "spawn_runtime_for: set_workspace failed: {e}");
-    }
-
-    let tmux_arc = mgr.tmux_driver();
-    // #8233: the post-send launch check needs the driver after the adapter takes
-    // ownership of its Arc.
-    let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, None, state.framework_root());
-    let gh_env = resolve_gh_env(state, &workspace).await;
-    if let Err(e) = adapter.spawn(
-        &record.tmux_name,
-        &workspace,
-        &record.task,
-        &record.id.to_string(),
-        &gh_env,
-    ) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            "spawn_runtime_for: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("spawn failed: {e}"))
-            .await;
-        return Err(e.to_string());
-    }
-    // #8233: same post-send check as the in-project path — an accepted
-    // keystroke is not a started runtime.
-    super::launch_verify::record_spawn_outcome(&mgr, tmux_driver.as_ref(), record).await;
-    Ok(())
-}
-
 /// Run the intent-conformance FRONT gate for a freshly-created session record.
 ///
 /// Why: factored out of [`spawn_managed`] so the gate's escalate-vs-proceed

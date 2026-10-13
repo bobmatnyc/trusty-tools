@@ -42,6 +42,8 @@ pub(crate) struct SendHooks {
     /// Park a send of exactly this text until [`AnswerDriver::release`]
     /// (bounded by [`PARK_LIMIT`]), so a test can land a claim mid-send.
     pub(crate) park_text: Option<String>,
+    /// #9843: the pane stays a bare shell; `runtime_ready` never reports up.
+    pub(crate) runtime_never_starts: bool,
 }
 
 /// The longest a parked send waits for [`AnswerDriver::release`].
@@ -161,6 +163,10 @@ impl ManagedTmuxDriver for AnswerDriver {
 
     fn pane_identity(&self, pane_id: &str) -> Result<PaneIdentity, ManagedError> {
         self.inner.pane_identity(pane_id)
+    }
+
+    fn runtime_ready(&self, name: &str) -> bool {
+        !self.hooks.lock().unwrap().runtime_never_starts && self.inner.runtime_ready(name)
     }
 
     fn send_line_to_pane(&self, _name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {

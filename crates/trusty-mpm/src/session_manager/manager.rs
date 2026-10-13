@@ -1007,6 +1007,10 @@ impl SessionManager {
                 ));
             }
         }
+        // #9844: never launch a task its front gate holds or denied.
+        if let Some(why) = record.front_gate_hold() {
+            return Err(ManagedError::InvalidState(id.to_string(), why.to_owned()));
+        }
         // #8942: the Architect is relaunched by `tm fleet init`, never here.
         super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Resume)?;
 

@@ -273,6 +273,15 @@ impl SessionManager {
                 continue;
             }
 
+            // #9844: a record held at its front gate stays `Provisioning`, the
+            // state the answer route reads as the gate, so its decision stays
+            // answerable; resume refuses it (`front_gate_hold`).
+            if record.state == ManagedSessionState::Provisioning
+                && record.pending_decision.is_some()
+            {
+                continue;
+            }
+
             // #5856: without an observed live set there is no evidence either
             // way, so the record keeps whatever state it already has. The
             // pre-#5856 code fell through to the `else` arm here and marked

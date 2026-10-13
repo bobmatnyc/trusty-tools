@@ -776,11 +776,10 @@ async fn managed_answer_parity() {
 }
 
 /// #9841: a repeat answer is the same 409 on both transports, and its text
-/// names the first answerer and the time.
+/// names the first answerer and the time. #9843: the decision is a front
+/// gate's, answered with a deny, which launches nothing.
 #[tokio::test]
 async fn answer_conflict_is_409_over_http_and_rpc() {
-    use crate::session_manager::ManagedSessionState;
-
     let (state, dir) = test_state().await;
     let mgr = state.session_manager().await;
     let id = crate::session_manager::ManagedSessionId::new();
@@ -791,7 +790,7 @@ async fn answer_conflict_is_409_over_http_and_rpc() {
         "answer parity".to_string(),
         Some(ws.clone()),
         None,
-        Some(ws.clone()),
+        Some(ws),
         None,
         None,
         crate::runtime::RuntimeKind::default(),
@@ -800,15 +799,12 @@ async fn answer_conflict_is_409_over_http_and_rpc() {
     )
     .await
     .expect("seed");
-    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
-        .await
-        .expect("active");
     mgr.set_pending_decision(&id, "merge or rebase?", Some("merge"))
         .await
         .expect("pending");
 
     let uri = format!("/api/v1/sessions/managed/{id}/answer");
-    let body = || Some(json!({"answer": "merge"}));
+    let body = || Some(json!({"answer": "no"}));
     let first = http_call(http_router(Arc::clone(&state)), Method::POST, &uri, body()).await;
     assert_eq!(first.status, 200, "{}", first.text);
     let http = http_call(http_router(Arc::clone(&state)), Method::POST, &uri, body()).await;
@@ -818,7 +814,7 @@ async fn answer_conflict_is_409_over_http_and_rpc() {
         "{}",
         http.text
     );
-    let params = json!({"id": id.to_string(), "answer": "merge"});
+    let params = json!({"id": id.to_string(), "answer": "no"});
     let rpc = rpc_call(&rpc_router(&state), "mpm.managed.answer", params).await;
     assert_parity("mpm.managed.answer conflict", &http, &rpc);
 }

@@ -39,6 +39,8 @@ pub mod files;
 pub mod fleet;
 mod foreign_harness;
 pub mod front_gate;
+// #9843: the FRONT gate's answer — launch or deny the withheld runtime.
+mod front_gate_answer;
 pub mod inproject;
 pub mod inproject_cold_start;
 pub mod inproject_hygiene;
@@ -92,9 +94,8 @@ pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_rout
 pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
-pub use lifecycle::{
-    SpawnParams, is_local_workdir, resume_managed, spawn_managed, spawn_runtime_for, write_task_md,
-};
+pub use front_gate_answer::spawn_runtime_for;
+pub use lifecycle::{SpawnParams, is_local_workdir, resume_managed, spawn_managed, write_task_md};
 pub use project_registry_routes::{
     PatchProjectBody, ProjectsListResponse, RegisterProjectBody, get_project_registry_route,
     list_projects_registry_route, patch_project_registry_route, register_project_registry_route,
