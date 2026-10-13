@@ -186,6 +186,8 @@ async fn http_route_refuses_ask_owner_as_unproven() {
         .expect("body");
     let v: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON body");
     assert_eq!(v["error"], "asker_unproven", "{v}");
+    let message = v["message"].as_str().expect("message");
+    assert!(message.contains("daemon socket"), "{message}");
     let audit = std::fs::read_to_string(audit_path(&home)).expect("one audit line");
     assert_eq!(audit.lines().count(), 1, "{audit}");
     assert!(audit.contains("asker_unproven"), "{audit}");

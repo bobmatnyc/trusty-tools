@@ -45,9 +45,18 @@ pub fn router() -> Router<Arc<DaemonState>> {
         ASK_OWNER_ROUTE,
         post(
             |State(state): State<Arc<DaemonState>>, Json(req): Json<AskOwnerRequest>| async move {
-                reply(ask_owner_op(&state, RepairPeer::http(), req).await)
+                reply(ask_owner_op(&state, http_peer(), req).await)
             },
         ),
+    )
+}
+
+/// The peer of an HTTP request: never proven (#9856 Q1).
+fn http_peer() -> RepairPeer {
+    RepairPeer::Unproven(
+        "the request came over HTTP, which carries no kernel-verified caller; ask_owner \
+         proves its asker only over the daemon socket (the `ask_owner` MCP tool)"
+            .to_owned(),
     )
 }
 
