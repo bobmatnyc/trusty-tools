@@ -137,3 +137,39 @@ async fn pid_forwarder_survives_a_zero_gap_and_follows_the_respawn() {
         "search.health must report embedderd_rss_mb after a respawn: {after_respawn}"
     );
 }
+
+/// Why: with no stop at 0, shutdown must end the forwarder itself.
+/// What: install a slot, stop the forwarder, then move the slot; the handle
+/// is gone, the task has finished, and the state keeps reporting no sidecar.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn pid_forwarder_stops_on_shutdown() {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let slot = Arc::new(AtomicU32::new(4242));
+    state.install_embedderd_pid_slot(Arc::clone(&slot)).await;
+    let task = state
+        .embedderd_pid_forwarder_handle
+        .lock()
+        .await
+        .clone()
+        .expect("install records the forwarder");
+    state.stop_embedderd_pid_forwarder().await;
+    slot.store(4343, Ordering::Release);
+    let finished = tokio::time::timeout(WAIT_CEILING, async {
+        while !task.is_finished() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert!(finished, "the forwarder survived shutdown");
+    assert!(state.embedderd_pid_forwarder_handle.lock().await.is_none());
+    assert_eq!(
+        state.current_embedderd_pid(),
+        None,
+        "a stopped forwarder must not copy a later pid"
+    );
+}
