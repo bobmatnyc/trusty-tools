@@ -82,7 +82,8 @@ pub(crate) async fn fetch_output(
     if status == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("session '{id_or_name}' not found");
     }
-    Ok(resp.error_for_status()?.json().await?)
+    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    Ok(body)
 }
 
 #[cfg(test)]
