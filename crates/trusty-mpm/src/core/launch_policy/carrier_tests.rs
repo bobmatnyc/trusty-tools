@@ -52,11 +52,19 @@ impl Fx {
         self.provision_with(Some(&self.claude))
     }
     fn provision_with(&self, claude_json_dir: Option<&Path>) -> LaunchSettings {
+        self.provision_as(claude_json_dir, SessionProfile::Pm)
+    }
+    fn provision_as(
+        &self,
+        claude_json_dir: Option<&Path>,
+        profile: SessionProfile,
+    ) -> LaunchSettings {
         provision_settings_at(&CarrierInputs {
             cwd: &self.project,
             repos_root: &self.repos,
             state_root: &self.state,
             claude_json_dir,
+            profile,
         })
     }
     /// Plant `acme`'s last-good record as raw JSON, as an older tm wrote it.
@@ -164,20 +172,75 @@ fn a_differently_cased_name_is_another_server() {
 
 #[test]
 fn the_settings_body_carries_only_subtractive_keys() {
-    let deny: BTreeSet<String> = names(&["heygen"]).into_iter().collect();
-    for (deny, off) in [(&deny, true), (&deny, false), (&BTreeSet::new(), true)] {
-        let body = settings_body(deny, off).expect("something to subtract");
+    let set = |list: &[&str]| -> BTreeSet<String> { names(list).into_iter().collect() };
+    let cases = [
+        SettingsParts {
+            mcp_deny: set(&["heygen"]),
+            connectors_off: true,
+            ..SettingsParts::default()
+        },
+        SettingsParts {
+            mcp_deny: set(&["heygen"]),
+            ..SettingsParts::default()
+        },
+        SettingsParts {
+            connectors_off: true,
+            ..SettingsParts::default()
+        },
+        // #8992: the skill and tool parts alone.
+        SettingsParts {
+            skills_off: set(&["xlsx"]),
+            ..SettingsParts::default()
+        },
+        SettingsParts {
+            tools_deny: set(&["NotebookEdit"]),
+            ..SettingsParts::default()
+        },
+    ];
+    let allowed = [
+        "deniedMcpServers",
+        "disableClaudeAiConnectors",
+        "skillOverrides",
+        "permissions",
+    ];
+    for parts in &cases {
+        let body = settings_body(parts).expect("something to subtract");
         let value: Value = serde_json::from_str(&body).unwrap();
-        let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
-        for key in keys {
-            assert!(
-                key == "deniedMcpServers" || key == "disableClaudeAiConnectors",
-                "{key}"
-            );
+        for key in value.as_object().unwrap().keys() {
+            assert!(allowed.contains(&key.as_str()), "{key}");
         }
         assert_ne!(value["disableClaudeAiConnectors"], json!(false));
+        if let Some(permissions) = value.get("permissions") {
+            let keys: Vec<&String> = permissions.as_object().unwrap().keys().collect();
+            assert_eq!(keys, vec!["deny"], "{body}");
+        }
     }
-    assert_eq!(settings_body(&BTreeSet::new(), false), None);
+    assert_eq!(settings_body(&SettingsParts::default()), None);
+}
+
+/// #8992 Q-B: an Architect launch gets the `[mcp]` part exactly as a PM does,
+/// and neither the skill nor the tool part; a skills/tools-only policy writes
+/// no file for it at all.
+#[test]
+fn an_architect_launch_gets_the_mcp_part_only() {
+    let fx = Fx::new(USER);
+    fx.owner("[mcp]\ndeny = [\"heygen\"]\n[skills]\noff = [\"xlsx\"]\n[tools]\ndeny = [\"NotebookEdit\"]\n");
+    let architect = fx.provision_as(Some(&fx.claude), SessionProfile::Architect);
+    assert_eq!(
+        body_of(&architect),
+        json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
+    fx.owner("[skills]\noff = [\"xlsx\"]\n[tools]\ndeny = [\"NotebookEdit\"]\n");
+    let architect = fx.provision_as(Some(&fx.claude), SessionProfile::Architect);
+    assert_eq!(architect.file, None);
+    assert_eq!(architect.notice, None);
+    // The validator and floors still run for the Architect: the file is shared.
+    fx.owner("[tools]\ndeny = [\"Bash\"]\n");
+    let architect = fx.provision_as(Some(&fx.claude), SessionProfile::Architect);
+    let notice = architect
+        .notice
+        .expect("a bad file is a notice for every profile");
+    assert!(notice.contains("tools.deny"), "{notice}");
 }
 
 #[test]

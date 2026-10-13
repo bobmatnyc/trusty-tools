@@ -365,9 +365,11 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         // #8286: the stamp and the #8992 trim follow this one resolution.
         cli.profile,
     );
-    // #8988: the owner MCP policy for the `.claude.json` this launch reads.
+    // #8988: the owner MCP policy for the `.claude.json` this launch reads;
+    // #8992: `cli.profile` decides whether the skill and tool parts apply.
+    let config_dir = Some(claude_config_dir);
     cmd.args(
-        crate::core::launch_policy::provision_settings_default(&repo_path, Some(claude_config_dir))
+        crate::core::launch_policy::provision_settings_default(&repo_path, config_dir, cli.profile)
             .argv(),
     );
     // Routed through the disclaim-aware spawn (issue #2997) rather than

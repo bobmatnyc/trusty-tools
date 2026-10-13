@@ -72,11 +72,12 @@ trust grant required.
   mechanism exists to make. Composition runs before the `claude` binary is
   resolved, so the gate never depends on an earlier lookup succeeding.
 
-### Owner launch config (#8988)
+### Owner launch config (#8988, #8992)
 
 An operator-local file `<repos_root>/<owner>/.trusty-mpm-owner.toml` subtracts
-servers from every session under that owner. The owner is the first path
-segment under the repos root, else the owner the `origin` remote names.
+servers, skills and tools from every session under that owner. The owner is
+the first path segment under the repos root, else the owner the `origin`
+remote names.
 
 ```toml
 extends = "bob-duetto"          # optional, one parent, at most 4 files
@@ -84,7 +85,13 @@ extends = "bob-duetto"          # optional, one parent, at most 4 files
 allow = ["apex"]                # user-scope servers that load; absent = all
 deny  = ["heygen"]              # applied after allow
 claude_ai_connectors = false    # turn the claude.ai connectors off
+[skills]
+off = ["xlsx", "breeze:voice"]  # exact skill names; there is no `on`
+[tools]
+deny = ["NotebookEdit", "mcp__heygen"]  # bare tool names only
 ```
+
+Any other table, `[agents]` included, is an unknown key and so a bad file.
 
 - **Carrier.** Each launch writes
   `~/.trusty-tools/trusty-mpm/session-settings/<sha256 of the body>.json`
@@ -93,20 +100,54 @@ claude_ai_connectors = false    # turn the claude.ai connectors off
   different policies get different files and identical policies share one.
   The directory is bounded by the number of distinct policies and nothing
   deletes a file (another live session may use it). It holds only
-  `deniedMcpServers` and `disableClaudeAiConnectors: true`. Claude Code
-  unions deny lists across scopes, so an operator or managed deny survives.
-  Nothing is written into a repository or into any `settings.json`.
+  subtractive keys: `deniedMcpServers`, `disableClaudeAiConnectors: true`,
+  `skillOverrides` with every value `"off"`, and `permissions.deny`. It never
+  holds `permissions.allow`, `ask` or an `"on"`. Claude Code unions deny lists
+  across scopes, so an operator or managed deny survives, and the PM's own
+  `--disallowedTools Workflow,DesignSync` is untouched. Nothing is written into
+  a repository or into any `settings.json`.
 - **Deny set.** Every user-scope server in the `.claude.json` the launch
   reads (the managed config dir when relocated, else `$CLAUDE_CONFIG_DIR` or
   `~`) that `allow` does not name, plus every `deny` name. The trusty-*
   builtins and `claude-in-chrome` are never named; a `deny` that names one is a
   bad file. Names match exactly and case-sensitively, as Claude Code matches
   `serverName`.
+- **`[skills] off`.** Each name is written as `"off"` in `skillOverrides`,
+  which removes the skill from the listing. Exact names only: no wildcard;
+  ASCII letters, digits and `. _ : -` (`plugin:skill` is allowed). An owner can
+  only turn skills off. The `--settings` key beats the project tier's
+  `skillOverrides` (#7751), so an owner `off` hides a skill the project lists
+  `"on"`, and nothing here can re-list a skill the project tier turned off.
+  The owner off is re-sent at every launch and ends when the file is deleted;
+  the project tier's off is sticky. `extends` unions the lists, so a child
+  cannot remove a parent's entry. The doctor row warns on a name that matches
+  no skill under the managed config dir's `skills/` or the project's
+  `.claude/skills/`.
+- **`[tools] deny`.** Each name goes into `permissions.deny`: a built-in tool
+  name, `mcp__<server>` or `mcp__<server>__<tool>`. A parenthesised rule
+  (`Bash(rm:*)`, `Agent(engineer)`) or a wildcard is a bad file. `extends`
+  unions the lists.
+- **Floors.** Compiled in, in `core/launch_policy/floor.rs`; no file changes
+  them, and naming one is a bad file. MCP: the trusty-* builtins and
+  `claude-in-chrome`. Tools: `Agent`, `Task`, `SendMessage`, `Skill`,
+  `ToolSearch`, `TodoWrite`, `Read`, `Write`, `Edit`, `Bash`, `BashOutput`,
+  `KillShell`, `Grep`, `Glob`, `WebSearch`, `WebFetch` and the `Cron*` tools,
+  plus any `mcp__<floor server>` rule. Skills: every `tm-*` skill and every
+  skill an agent preloads or a prompt loads by name. Tool and skill floors
+  compare case-insensitively. Drift tests fail when an agent grant or a
+  prompt `Skill()` load falls outside a floor. A last-good record that names a
+  floor entry added later has it dropped.
+- **Architect launches.** An Architect (supervisor) launch gets the `[mcp]`
+  part exactly as a PM does, and neither `[skills]` nor `[tools]`: it keeps
+  every skill and tool, as the PM tool trim already leaves it every tool. The
+  validator and floors still run for it, because the file is shared.
 - **No policy, no change.** No owner, no file, or a policy that subtracts
   nothing adds no flag and writes no file.
 - **Fail open.** A bad file uses the last good policy (or none) with a loud
   warning and an `owner_config` doctor `Fail`. An unreadable `.claude.json`
-  keeps the explicit denies. A settings file that cannot be written launches
+  keeps the explicit denies and every skill and tool part, which never read
+  it. A last-good record from before #8992 still loads. A settings file that
+  cannot be written launches
   without `--settings` and prints that the policy was NOT applied. Deleting the
   file turns the layer off and retires its last-good record at the next
   launch. None of these refuses a launch or resume.
