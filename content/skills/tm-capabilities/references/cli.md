@@ -2,11 +2,17 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-68 top-level commands.
+69 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
+- `architect` — The Architect's deterministic commands: the poller and its readers
+  - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
+  - `input-state` — Classify each pane's input box (`input-state.py`)
+  - `poll` — The deterministic fleet poller (`fleet-poll.py`)
+  - `quiet` — Print the quiet-session list, sorted, one name per line
+  - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present

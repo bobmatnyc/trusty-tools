@@ -16,6 +16,8 @@
 //! still exercises these types through the same `crate::cli::<Type>` paths.
 
 mod agent;
+// #9822: `tm architect` — the Rust stand-ins for the Architect's scripts.
+mod architect;
 mod auth;
 mod catalog;
 // #8378 PR-C: `tm content install|update|status` (ADR-0064).
@@ -54,6 +56,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
+pub(crate) use architect::ArchitectAction;
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
 pub(crate) use content::ContentAction;

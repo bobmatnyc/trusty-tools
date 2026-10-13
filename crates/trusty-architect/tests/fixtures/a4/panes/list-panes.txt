@@ -1,0 +1,9 @@
+tm-architect-poll	%1	python3	11	/srv/work/tm-architect-poll	0
+tm-channels-01	%2	claude	11	/srv/work/tm-channels-01	0
+tm-dogfood	%3	claude	11	/srv/work/tm-dogfood	0
+tm-memory-01	%4	claude	11	/srv/work/tm-memory-01	0
+tm-mpm-utils-01	%5	claude	11	/srv/work/tm-mpm-utils-01	0
+tm-review-01	%6	claude	11	/srv/work/tm-review-01	0
+tm-search-01	%7	claude	11	/srv/work/tm-search-01	0
+tm-secrets-01	%8	claude	11	/srv/work/tm-secrets-01	0
+tm-things-01	%9	claude	11	/srv/work/tm-things-01	0

@@ -110,9 +110,12 @@ $cargo
 EOF
 fi
 
+# #9822: match the sub-project's path, not the bare name: the Rust crate
+# crates/trusty-architect is a workspace member and a dependency by design.
+MEMBER_RE='python/trusty-architect|"python(/|")'
 if [ -f "$ROOT/Cargo.toml" ] &&
-   grep -nE 'trusty-architect|"python(/|")' "$ROOT/Cargo.toml" >/dev/null; then
-  report WORKSPACE_MEMBER "Cargo.toml: $(grep -nE 'trusty-architect|"python(/|")' \
+   grep -nE "$MEMBER_RE" "$ROOT/Cargo.toml" >/dev/null; then
+  report WORKSPACE_MEMBER "Cargo.toml: $(grep -nE "$MEMBER_RE" \
     "$ROOT/Cargo.toml" | head -1)"
 fi
 

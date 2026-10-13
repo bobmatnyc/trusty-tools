@@ -39,7 +39,9 @@ pub(crate) struct Owned {
 /// Reads the pane's live session and returns [`Owned`] only when it is
 /// exactly `owner` (the prototype's `send_to_supervisor` check).
 ///
-/// `owner` is [`crate::poller::SUPERVISOR`] on every production path ([`crate::poller::Waker::wake`]);
+/// `owner` is the config's supervisor session on every production path
+/// ([`crate::poller::Waker::dispatch_as`]; [`crate::poller::SUPERVISOR`] unless
+/// `ARCHITECT_SESSION` names another, #9822);
 /// only the scratch-server live test passes its own throwaway session.
 ///
 /// # Errors

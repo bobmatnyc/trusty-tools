@@ -13,6 +13,8 @@
 #   clean tree, plants one violation, and asserts exit 1 plus the expected
 #   "FAIL <CLASS>" text. The clean tree holds every pair the gate lists
 #   (`--list-pairs`), and each shipped copy gets its own planted-drift case.
+#   Near misses must pass: a root Cargo.toml that names the Rust crate
+#   crates/trusty-architect is not a sub-project membership (#9822).
 #   Token-shaped strings are assembled at run time so this file carries no
 #   literal credential shape.
 #
@@ -74,6 +76,11 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     shipped-missing) rm "$t/$SKILL_DST" ;;
     unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/skills/extra.md" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
+    # #9822: the Rust crate crates/trusty-architect is not the sub-project.
+    crate-dependency)
+      printf '[workspace]\nmembers = ["crates/*"]\ndefault-members = ["crates/trusty-architect"]\n%s\n%s\n' \
+        '[workspace.dependencies]' \
+        'trusty-architect = { path = "crates/trusty-architect", version = "0.1" }' >"$t/Cargo.toml" ;;
   esac
 }
 
@@ -132,6 +139,22 @@ while IFS="$TAB" read -r name class; do
 done <<EOF
 $CASES
 EOF
+
+# Planted trees that must stay clean (exit 0): a near miss the gate once
+# reported (#9822: a root Cargo.toml naming the crate, not the sub-project).
+for name in crate-dependency; do
+  cp -R "$clean" "$WORK/$(case_dir "$name")"
+  plant "$name"
+  rc=0
+  out="$("$GATE" --root "$WORK/$(case_dir "$name")" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: $name -> exit $rc (expected 0)" >&2
+    printf '%s\n' "$out" | sed 's/^/       /' >&2
+    fail=1
+  else
+    pass=$((pass + 1))
+  fi
+done
 
 if [ "$fail" -ne 0 ]; then
   echo "check_architect_subproject selftest: FAILED ($pass cases passed)" >&2

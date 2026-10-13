@@ -18,6 +18,8 @@
 // tree whose owning session or agent is provably dead.
 pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
+// #9822: `tm architect <verb>`, daemon-less.
+pub(crate) mod architect;
 pub(crate) mod auth;
 // #6274: `tm` in a plain directory initializes a repository there instead of
 // refusing; both the guided default and `tm launch` call it before detection.

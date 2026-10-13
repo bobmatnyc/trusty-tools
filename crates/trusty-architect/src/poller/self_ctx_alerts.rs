@@ -3,13 +3,13 @@
 //! Why: the Architect's pane has no `ctx N%` field, and an Architect past its
 //! refresh bar loses the fleet's thread (ruling b7: 25% of a 1M window).
 //! What: [`self_ctx_alerts`] is the prototype's `self_ctx_alerts`: one
-//! `self_ctx` alert for [`SUPERVISOR`], fingerprinted by the threshold, when
+//! `self_ctx` alert for the configured supervisor
+//! ([`crate::poller::SUPERVISOR`] by default, #9822), fingerprinted by the threshold, when
 //! the newest interactive transcript's tokens reach `SELF_CTX_THRESHOLD`% of
 //! `SELF_CTX_WINDOW` (#9171 A3a).
 //! Test: `test_self_ctx_alerts_only_when_over_threshold`,
 //! `self_ctx_alerts_match_python_goldens`.
 
-use super::SUPERVISOR;
 use super::config::Config;
 use crate::classify::{Alert, alert};
 use crate::error::SelfCtxError;
@@ -42,7 +42,7 @@ pub fn self_ctx_alerts(cfg: &Config, now: f64) -> Result<Vec<Alert>, SelfCtxErro
         "self_ctx",
         &threshold.to_string(),
         &detail,
-        SUPERVISOR,
+        &cfg.supervisor,
         "",
         now,
     )])

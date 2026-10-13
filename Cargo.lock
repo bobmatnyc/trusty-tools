@@ -11639,6 +11639,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trusty-agents-common",
+ "trusty-architect",
  "trusty-channels",
  "trusty-common",
  "trusty-mcp",

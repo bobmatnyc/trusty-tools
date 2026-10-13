@@ -483,6 +483,9 @@ which.workspace = true
 # in the guided `tm` on-ramp so first-run clone/provisioning is no longer a
 # silent multi-minute hang (issue #1904).
 trusty-progress = { workspace = true }
+# #9822: `tm architect poll|classify|input-state|quiet|self-ctx`, the Rust
+# stand-ins for the Architect's Python scripts. A leaf crate (#9171).
+trusty-architect = { workspace = true }
 # rusqlite: formerly a direct dep for the claude-mpm session-registry reader
 # (DOC-28 cutover bridge, #1762). Now consumed transitively via
 # trusty-common/catchup feature — removed from direct deps (PR1, refs #1762).

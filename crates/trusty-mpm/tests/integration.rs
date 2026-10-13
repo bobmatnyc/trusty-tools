@@ -57,6 +57,8 @@ mod tm_cli_socket;
 mod tm_compress_pipe;
 mod tm_doctor_network;
 mod tm_doctor_standalone;
+// #9822: `tm architect <verb>` against the Python goldens, fake tmux.
+mod tm_architect_verbs;
 // #8436: `tm fleet init|status` through the binary.
 mod tm_fleet;
 mod tm_guided_default_explicit_url;

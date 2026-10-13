@@ -872,6 +872,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: FleetAction,
     },
+    /// The Architect's deterministic commands: the poller and its readers.
+    ///
+    /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
+    /// Architect's Python scripts with the same arguments and output.
+    // #9822. Test: `cli_parses_architect_verbs`.
+    Architect {
+        /// Architect action to perform.
+        #[command(subcommand)]
+        action: ArchitectAction,
+    },
     /// Edit a dotenv file without printing a value: `set` and `keys`.
     ///
     /// Only the bound Architect may run either verb.

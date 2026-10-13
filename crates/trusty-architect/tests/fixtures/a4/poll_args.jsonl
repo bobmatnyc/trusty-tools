@@ -1,0 +1,5 @@
+[["--interval", "x"], 2]
+[["--interval"], 2]
+[["--bogus"], 2]
+[["--once", "extra"], 2]
+[["--interval", "1.5"], 2]

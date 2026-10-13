@@ -1,0 +1,8 @@
+  tm-channels-01 %2 cmd=claude box=empty agents=1 busy=True dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-dogfood %3 cmd=claude box=empty agents=0 busy=False dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-memory-01 %4 cmd=claude box=empty agents=1 busy=True dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-mpm-utils-01 %5 cmd=claude box=empty agents=1 busy=True dialog=False ctx=19 plan=None/None q=False alerts=-
+  tm-review-01 %6 cmd=claude box=empty agents=0 busy=False dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-search-01 %7 cmd=claude box=empty agents=0 busy=False dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-secrets-01 %8 cmd=claude box=empty agents=0 busy=False dialog=False ctx=None plan=None/None q=False alerts=-
+  tm-things-01 %9 cmd=claude box=suggestion agents=0 busy=False dialog=False ctx=None plan=None/None q=False alerts=-
