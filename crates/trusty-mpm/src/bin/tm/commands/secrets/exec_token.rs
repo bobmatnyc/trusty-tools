@@ -19,7 +19,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -51,13 +51,15 @@ pub(super) enum Step {
     Write,
     /// Remove the now-empty directory.
     RemoveDir,
+    /// Move the read-only fd to the lowest free number above stderr.
+    Renumber,
     /// Clear close-on-exec on the read-only fd.
     ClearCloexec,
 }
 
 /// Every step, in order.
 #[cfg(test)]
-pub(super) const STEPS: [Step; 9] = [
+pub(super) const STEPS: [Step; 10] = [
     Step::Mkdir,
     Step::ChmodDir,
     Step::Create,
@@ -66,6 +68,7 @@ pub(super) const STEPS: [Step; 9] = [
     Step::Unlink,
     Step::Write,
     Step::RemoveDir,
+    Step::Renumber,
     Step::ClearCloexec,
 ];
 
@@ -86,7 +89,8 @@ fn run<T>(step: Step, fail: Option<Step>, op: impl FnOnce() -> io::Result<T>) ->
 /// chmod'ed to exactly 0700: create `token` empty (`O_EXCL`, `O_NOFOLLOW`,
 /// 0600, chmod'ed to exactly 0600), open it again read-only, unlink it,
 /// write the token through the writable fd and close that fd, remove the
-/// directory, then clear close-on-exec on the read-only fd. `fail` makes
+/// directory, move the read-only fd to the lowest free number above 2, then
+/// clear close-on-exec on it. `fail` makes
 /// one step fail instead of running (tests only; production passes `None`).
 ///
 /// # Errors
@@ -131,10 +135,31 @@ pub(super) fn token_file(base: &Path, token: &str, fail: Option<Step>) -> io::Re
     run(Step::Write, fail, || writer.write_all(token.as_bytes()))?;
     drop(writer);
     run(Step::RemoveDir, fail, || fs::remove_dir(dir.path()))?;
+    let reader = run(Step::Renumber, fail, || lowest(OwnedFd::from(reader)))?;
     run(Step::ClearCloexec, fail, || {
         clear_cloexec(reader.as_raw_fd())
     })?;
-    Ok(OwnedFd::from(reader))
+    Ok(reader)
+}
+
+/// `fd` moved to the lowest free number above stderr, when that is lower.
+///
+/// Why: a POSIX shell redirects from a single-digit fd only (dash refuses
+/// `<&10`), and the read-only fd opens one number above the writable one,
+/// which is closed by now.
+fn lowest(fd: OwnedFd) -> io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD` reads no caller memory; it fails or returns a new fd.
+    let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, 3) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `copy` is a descriptor this call just created and owns alone.
+    let copy = unsafe { OwnedFd::from_raw_fd(copy) };
+    Ok(if copy.as_raw_fd() < fd.as_raw_fd() {
+        copy
+    } else {
+        fd
+    })
 }
 
 /// Remove this user's `tm-grant-*` directories in `base` older than `ttl`;
