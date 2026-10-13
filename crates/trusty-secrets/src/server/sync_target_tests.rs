@@ -336,6 +336,123 @@ async fn server_copy_to_sync_target_with_unwritable_audit_spawns_nothing() {
     );
 }
 
+/// Set in the child process that [`server_copy_to_sync_target_stops_after_a_key_whose_record_cannot_be_appended`]
+/// spawns; names the one test body that may run there.
+#[cfg(unix)]
+const FSIZE_CHILD: &str = "TRUSTY_SECRETS_TEST_9069_FSIZE_CHILD";
+/// The child's file-size limit, and its pre-filled audit log's size.
+#[cfg(unix)]
+const FSIZE_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// Why: C-7.7a for the push loop — `push` has its own loop beside
+/// `methods::copy`'s, so a push whose record cannot be appended after the
+/// target took the value must stop before the next key and answer
+/// `audit_unavailable`. Red when `push` drops the `?` on `Gate::record_key`.
+/// What: the audit log can fail only after it opened, which needs
+/// `RLIMIT_FSIZE`, a limit for the whole process. So this test re-runs the
+/// test binary on [`fsize_limited_push_child`] and checks that it passed.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn server_copy_to_sync_target_stops_after_a_key_whose_record_cannot_be_appended() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "fsize_limited_push_child",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(FSIZE_CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "child failed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("1 passed"), "child did not run:\n{stdout}");
+}
+
+/// The body of the re-run above; a no-op outside that child.
+/// Test: `server_copy_to_sync_target_stops_after_a_key_whose_record_cannot_be_appended`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fsize_limited_push_child() {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if std::env::var_os(FSIZE_CHILD).is_none() {
+        return;
+    }
+    // SAFETY: plain values and pointers to live locals; the effect is on
+    // this child process alone.
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        let mut current = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut current), 0);
+        let limit = libc::rlimit {
+            rlim_cur: FSIZE_LIMIT as libc::rlim_t,
+            rlim_max: current.rlim_max,
+        };
+        assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+    }
+    let mut fx = fixture();
+    // Rotation is off, so open never renames the full log.
+    fx.settings.audit_max_bytes = u64::MAX;
+    let log = fx.settings.audit_log.clone();
+    let dir = log.parent().unwrap();
+    std::fs::create_dir(dir).unwrap();
+    set_mode(dir, 0o700);
+    // A sparse 0600 log of exactly the limit, ending in `\n`: it opens and
+    // checks clean, and its first append fails with `EFBIG`.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&log)
+        .unwrap();
+    file.set_len(FSIZE_LIMIT - 1).unwrap();
+    file.seek(SeekFrom::End(0)).unwrap();
+    std::io::Write::write_all(&mut file, b"\n").unwrap();
+    drop(file);
+    for name in ["A", "B", "C"] {
+        seed(&fx, name, SENTINEL_VALUE, false);
+    }
+    let (state, _grants) = state_with(&fx, procs_with_me());
+    let (state, target, _opens) = with_fake_target(state);
+    let server = fx.start_state(state).await;
+    let push = |keys: &[&str]| {
+        call(
+            &fx.settings.socket,
+            method::COPY,
+            push_params(&fx, GITHUB, keys),
+        )
+    };
+    // The last key: only `record_key`'s own result can refuse it.
+    let last = push(&["A"]).await;
+    // Two keys: `Gate::ready` or `record_key` must stop before key 2.
+    let two = push(&["B", "C"]).await;
+    server.stop().await;
+
+    for refused in [&last, &two] {
+        assert_eq!(
+            fixed_error(refused, method::COPY),
+            ErrorKind::AuditUnavailable
+        );
+        assert_no_value(refused);
+    }
+    let names: Vec<_> = target
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p.0.clone())
+        .collect();
+    assert_eq!(names, ["A", "B"], "each call pushed key 1; C never started");
+    assert_eq!(std::fs::metadata(&log).unwrap().len(), FSIZE_LIMIT);
+}
+
 /// Every file under the fixture's index directory, by path, with its bytes.
 fn index_snapshot(fx: &Fixture) -> BTreeSet<(PathBuf, Vec<u8>)> {
     std::fs::read_dir(&fx.settings.index_root)
