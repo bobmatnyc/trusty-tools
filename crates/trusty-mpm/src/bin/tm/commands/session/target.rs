@@ -130,6 +130,42 @@ pub(crate) async fn activity(daemon: &DaemonClient, id_or_name: String) -> anyho
     crate::commands::managed::session_activity(daemon, id).await
 }
 
+/// SCAFFOLD (#9862 red commit): the pre-fix `Info` arm body, moved verbatim
+/// so the red tests can call it and read the returned JSON. The fix commit
+/// replaces it.
+pub(crate) async fn info(
+    daemon: &DaemonClient,
+    id_or_name: &str,
+) -> anyhow::Result<serde_json::Value> {
+    #[derive(serde::Deserialize)]
+    struct Body {
+        sessions: Vec<serde_json::Value>,
+    }
+    let body: Body = daemon
+        .get("/sessions")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let found = body.sessions.iter().find(|s| {
+        let id_match = s
+            .get("id")
+            .and_then(|v| v.get("0"))
+            .and_then(|v| v.as_str())
+            == Some(id_or_name);
+        let name_match = s.get("tmux_name").and_then(|v| v.as_str()) == Some(id_or_name);
+        id_match || name_match
+    });
+    match found {
+        Some(s) => Ok(s.clone()),
+        None => match super::info_from_managed_store(daemon, id_or_name).await {
+            Some(val) => Ok(val),
+            None => anyhow::bail!("session '{id_or_name}' not found"),
+        },
+    }
+}
+
 #[cfg(test)]
 #[path = "target_tests.rs"]
 mod target_tests;

@@ -144,42 +144,8 @@ pub(crate) async fn session(
             println!("reaped {removed} dead session(s)");
         }
         SessionAction::Info { id_or_name } => {
-            #[derive(Deserialize)]
-            struct Body {
-                sessions: Vec<serde_json::Value>,
-            }
-            let body: Body = daemon
-                .get("/sessions")
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let found = body.sessions.iter().find(|s| {
-                let id_match = s
-                    .get("id")
-                    .and_then(|v| v.get("0"))
-                    .and_then(|v| v.as_str())
-                    == Some(id_or_name.as_str());
-                let name_match =
-                    s.get("tmux_name").and_then(|v| v.as_str()) == Some(id_or_name.as_str());
-                id_match || name_match
-            });
-            match found {
-                Some(s) => println!("{}", serde_json::to_string_pretty(s)?),
-                None => {
-                    // Fall back: the id/name may belong to a MANAGED session
-                    // (SM sessions live in the managed store, not the project-session
-                    // store). Fetch the managed list and search there too before
-                    // giving up. This fixes the gap where `tm session info <uuid>`
-                    // printed "not found" for sessions visible in `tm session ls`.
-                    let managed = info_from_managed_store(daemon, &id_or_name).await;
-                    match managed {
-                        Some(val) => println!("{}", serde_json::to_string_pretty(&val)?),
-                        None => anyhow::bail!("session '{id_or_name}' not found"),
-                    }
-                }
-            }
+            let found = target::info(daemon, &id_or_name).await?;
+            println!("{}", serde_json::to_string_pretty(&found)?);
         }
         SessionAction::Instructions { dir } => {
             // Pure local computation — no daemon round-trip needed.
