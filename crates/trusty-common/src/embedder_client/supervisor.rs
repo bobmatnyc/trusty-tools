@@ -43,6 +43,12 @@
 //! child itself, clears the PID slot, and returns *without* ever entering the
 //! crash-restart path — the intentional stop can never be misclassified.
 //!
+//! Graceful recycle (#9828): a fourth `select!` branch ticks every
+//! `RecycleConfig::check_interval` and asks `supervisor_recycle` whether the
+//! live sidecar crossed its footprint ceiling, maximum age, or maximum call
+//! count. A recycle spawns the replacement first, swaps it in, then drains and
+//! stops the old child; it never touches the crash counters or the back-off.
+//!
 //! Test: `supervisor_shutdown_kills_child`,
 //! `supervisor_shutdown_handle_is_reachable_and_stops_child`,
 //! `supervisor_intentional_shutdown_does_not_respawn`,
@@ -72,6 +78,20 @@ mod supervisor_config;
 pub use supervisor_config::{
     DEFAULT_CUDA_SIDECAR_BATCH_CAP, SupervisorConfig, cuda_sidecar_batch_cap, sidecar_batch_size,
 };
+
+// #9828: binary discovery moved out to keep this file under the 500-SLOC cap.
+#[path = "supervisor_locate.rs"]
+mod supervisor_locate;
+pub use supervisor_locate::locate_embedderd_binary;
+
+// #9828: graceful recycle by footprint / age / call count.
+#[path = "supervisor_recycle.rs"]
+mod supervisor_recycle;
+pub use supervisor_recycle::{
+    FootprintSampler, RecycleClock, RecycleConfig, RecycleHooks, RecycleSnapshot, RecycleStats,
+    RecycleTrigger, process_recycle_stats,
+};
+use supervisor_recycle::{RecycleCtx, RecycleWatch, TrackedClient, perform_recycle};
 
 // ── Supervisor ───────────────────────────────────────────────────────────────
 
@@ -119,6 +139,10 @@ pub struct EmbedderSupervisor {
     /// distinct from `child_pid_slot` reading `0`.
     terminated: Arc<std::sync::atomic::AtomicBool>,
     config: SupervisorConfig,
+    /// The live client with its call / in-flight counters (#9828).
+    tracked: Arc<TrackedClient>,
+    /// Footprint sampler, clock and counters for the recycle triggers (#9828).
+    recycle_hooks: RecycleHooks,
 }
 
 impl EmbedderSupervisor {
@@ -150,14 +174,15 @@ impl EmbedderSupervisor {
         // into the `Arc<dyn EmbedderClient>` trait object below — the trait
         // itself has no notion of reader health, only `StdioEmbedderClient`
         // does.
-        let unhealthy_signal = client.unhealthy_signal();
+        let tracked = TrackedClient::new(client);
+        let unhealthy_signal = tracked.unhealthy_signal();
 
         // Capture the initial PID before moving `child` into the Arc<Mutex>.
         let initial_pid: u32 = child.id().unwrap_or(0);
         let child_pid_slot = Arc::new(AtomicU32::new(initial_pid));
 
         let client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>> =
-            Arc::new(RwLock::new(Arc::new(client)));
+            Arc::new(RwLock::new(Arc::clone(&tracked) as Arc<dyn EmbedderClient>));
         let client_slot_clone = Arc::clone(&client_slot);
         let child_pid_slot_clone = Arc::clone(&child_pid_slot);
 
@@ -169,9 +194,22 @@ impl EmbedderSupervisor {
             unhealthy_signal,
             terminated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config,
+            tracked,
+            recycle_hooks: RecycleHooks::default(),
         };
 
         Ok((supervisor, client_slot_clone, child_pid_slot_clone))
+    }
+
+    /// Replace the recycle footprint sampler, clock and counters (#9828).
+    ///
+    /// Why: tests feed a footprint and move time without a real leak or wait.
+    /// What: must be called before [`Self::start_supervisor_task`].
+    /// Test: `recycle_on_max_age_uses_the_injected_clock`.
+    #[must_use]
+    pub fn with_recycle_hooks(mut self, hooks: RecycleHooks) -> Self {
+        self.recycle_hooks = hooks;
+        self
     }
 
     /// Clone the definitive "gave up permanently" signal — must be called
@@ -245,6 +283,10 @@ impl EmbedderSupervisor {
             self.config,
             shutdown_rx,
             gave_up_tx,
+            self.tracked,
+            // The generation's age starts here, not when the task first runs.
+            RecycleWatch::new(&self.recycle_hooks),
+            self.recycle_hooks,
         ));
         SupervisorHandle {
             shutdown_tx,
@@ -366,7 +408,7 @@ impl SupervisorHandle {
 /// What: delegates command construction and the bounded ETXTBSY retry (#3570)
 /// to `spawn_retry::spawn_embedderd`, then runs the startup probe.
 /// Test: called by `spawn_stdio` and the supervision loop.
-async fn spawn_child(
+pub(super) async fn spawn_child(
     binary_path: &Path,
     config: &SupervisorConfig,
 ) -> Result<(Child, StdioEmbedderClient)> {
@@ -469,6 +511,9 @@ enum RestartTrigger {
     /// `Unhealthy` branch's kill does. So an empty slot here can only mean
     /// "the last respawn failed"; treat it as one more crash-cycle instead.
     RespawnFailed,
+    /// #9828: a recycle trigger crossed. Never a failure: handled before the
+    /// crash counters and back-off are touched.
+    Recycle(RecycleTrigger),
 }
 
 // ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
@@ -571,8 +616,12 @@ fn should_give_up(
 /// (#3023); `unhealthy_signal` re-reads `has_changed()` each iteration
 /// (#3026), because it is swapped for the new client's receiver on every
 /// respawn and must start being watched again.
+/// A recycle tick (#9828) that finds a trigger crossed is handled before the
+/// crash counters: `perform_recycle` swaps in a fresh sidecar and the loop
+/// continues, so a recycle can never escalate toward `max_restarts`.
 /// Test: `supervisor_restarts_on_crash`,
 /// `supervisor_intentional_shutdown_does_not_respawn`,
+/// `recycle_on_footprint_ceiling_keeps_inflight_call_and_counts_no_failure`,
 /// `supervisor_closed_unhealthy_signal_does_not_busy_spin`,
 /// `supervisor_health_branch_is_live_again_after_respawn`.
 /// Test-only iteration counter (issue #3023 regression test): bumped once per
@@ -602,6 +651,9 @@ async fn supervision_loop(
     config: SupervisorConfig,
     mut shutdown_rx: watch::Receiver<bool>,
     gave_up_tx: watch::Sender<bool>,
+    mut tracked: Arc<TrackedClient>,
+    mut watch: RecycleWatch,
+    hooks: RecycleHooks,
 ) {
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
@@ -621,6 +673,11 @@ async fn supervision_loop(
     // shutdown branches below are permanently excluded from the `select!` —
     // supervision continues via `child.wait()` / `unhealthy_signal` only.
     let mut shutdown_closed = false;
+    // #9828: recycle check cadence; off when every trigger is 0.
+    let recycle_on = config.recycle.enabled();
+    let every = config.recycle.check_interval;
+    let mut recycle_tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    recycle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         #[cfg(test)]
@@ -728,6 +785,13 @@ async fn supervision_loop(
                             child_pid_slot.store(0, AtomicOrdering::Release);
                             return;
                         }
+                        _ = recycle_tick.tick(), if recycle_on => {
+                            let pid = child_pid_slot.load(AtomicOrdering::Acquire);
+                            match watch.due(&config.recycle, &hooks, pid, &tracked) {
+                                Some(reason) => RestartTrigger::Recycle(reason),
+                                None => continue,
+                            }
+                        }
                     }
                 }
                 None => {
@@ -745,6 +809,29 @@ async fn supervision_loop(
                 }
             }
         };
+
+        // #9828: a recycle swaps in a fresh sidecar first, then drains and
+        // stops the old one. It never touches the crash counters or back-off.
+        if let RestartTrigger::Recycle(reason) = trigger {
+            let ctx = RecycleCtx {
+                binary_path: &binary_path,
+                config: &config,
+                hooks: &hooks,
+                child_slot: &child_slot,
+                client_slot: &client_slot,
+                child_pid_slot: &child_pid_slot,
+                shutdown_rx: &shutdown_rx,
+            };
+            tracked = match perform_recycle(ctx, reason, tracked).await {
+                Ok(fresh) => {
+                    unhealthy_signal = fresh.unhealthy_signal();
+                    watch.reset(&hooks);
+                    fresh
+                }
+                Err(kept) => kept,
+            };
+            continue;
+        }
 
         // Issue #3635: apply the SAME sustained-health gate to the
         // crash-storm counter that `wedge_counter_should_reset` already
@@ -833,6 +920,8 @@ async fn supervision_loop(
                 drop(guard);
                 child_pid_slot.store(0, AtomicOrdering::Release);
             }
+            // Handled (and `continue`d) above.
+            RestartTrigger::Recycle(_) => continue,
             RestartTrigger::RespawnFailed => {
                 tracing::warn!(
                     "EmbedderSupervisor: previous respawn attempt failed with no live \
@@ -943,7 +1032,8 @@ async fn supervision_loop(
                 // Capture the new client's health signal (#1448/#1450) before
                 // erasing it into the trait object below, and start watching
                 // it on the next loop iteration.
-                unhealthy_signal = new_client.unhealthy_signal();
+                let fresh = TrackedClient::new(new_client);
+                unhealthy_signal = fresh.unhealthy_signal();
 
                 // Swap the live client so subsequent embed calls use the new
                 // sidecar. Callers hold `Arc<RwLock<Arc<dyn EmbedderClient>>>`;
@@ -951,8 +1041,11 @@ async fn supervision_loop(
                 // this write is seen by the very next embed call.
                 {
                     let mut client_guard = client_slot.write().await;
-                    *client_guard = Arc::new(new_client);
+                    *client_guard = Arc::clone(&fresh) as Arc<dyn EmbedderClient>;
                 }
+                // #9828: a crash respawn also starts a new recycle generation.
+                tracked = fresh;
+                watch.reset(&hooks);
 
                 // Store the new child in the slot.
                 {
@@ -982,81 +1075,6 @@ async fn supervision_loop(
             }
         }
     }
-}
-
-/// Locate the `trusty-embedderd` binary for the current build profile.
-///
-/// Why: the default auto-spawn path needs to find the binary without requiring
-/// the operator to set `TRUSTY_EMBEDDERD_BIN`. The search order is:
-///   1. `TRUSTY_EMBEDDERD_BIN` env var (explicit override)
-///   2. Sibling of `current_exe()` (release build: both binaries are in
-///      `target/release/`)
-///   3. `trusty-embedderd` on `PATH`
-///
-/// What: returns the first path at which the file exists and is executable.
-/// Returns `Err` if none is found.
-///
-/// Test: unit test `locate_embedderd_binary_prefers_sibling` (mocked via the
-/// explicit override path).
-pub fn locate_embedderd_binary() -> Result<PathBuf> {
-    // Env override takes precedence over all discovery.
-    if let Ok(explicit) = std::env::var("TRUSTY_EMBEDDERD_BIN") {
-        let p = PathBuf::from(&explicit);
-        if p.is_file() {
-            return Ok(p);
-        }
-        anyhow::bail!("TRUSTY_EMBEDDERD_BIN={explicit:?} does not point to an existing file");
-    }
-
-    // Sibling of current_exe (works for both `cargo run` and installed binaries).
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let sibling = dir.join("trusty-embedderd");
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
-        // Windows
-        let sibling_exe = dir.join("trusty-embedderd.exe");
-        if sibling_exe.is_file() {
-            return Ok(sibling_exe);
-        }
-    }
-
-    // PATH lookup.
-    if let Ok(path) = which_embedderd() {
-        return Ok(path);
-    }
-
-    anyhow::bail!(
-        "could not locate trusty-embedderd binary. \
-         Set TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd or ensure it is on PATH."
-    )
-}
-
-/// Minimal `which`-style PATH search for `trusty-embedderd`.
-///
-/// Why: avoids adding a `which` crate dependency just for this one lookup.
-/// What: splits `PATH` by OS separator, appends `trusty-embedderd` (+ `.exe`
-/// on Windows), returns the first path that is_file().
-/// Test: tested implicitly when the sibling-path lookup fails.
-fn which_embedderd() -> Result<PathBuf> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let sep = if cfg!(windows) { ';' } else { ':' };
-    for dir in path_var.split(sep) {
-        let candidate = PathBuf::from(dir).join("trusty-embedderd");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate_exe = PathBuf::from(dir).join("trusty-embedderd.exe");
-            if candidate_exe.is_file() {
-                return Ok(candidate_exe);
-            }
-        }
-    }
-    anyhow::bail!("trusty-embedderd not found on PATH")
 }
 
 // Tests are in a sibling file to keep this file under its allowlist budget.

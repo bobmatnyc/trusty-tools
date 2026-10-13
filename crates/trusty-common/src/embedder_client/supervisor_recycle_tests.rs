@@ -306,8 +306,12 @@ fn recycle_config_from_env_defaults_and_overrides() {
         "TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS",
         "TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS",
     ];
+    // The shared env lock (#7253): `serial` alone excludes nothing outside it.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let saved: Vec<_> = VARS.iter().map(|v| std::env::var(v).ok()).collect();
-    // SAFETY: test-only; `serial` keeps env mutation single-threaded.
+    // SAFETY: test-only; `ENV_LOCK` is held for the whole mutation window.
     unsafe {
         for v in VARS {
             std::env::remove_var(v);

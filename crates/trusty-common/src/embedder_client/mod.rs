@@ -42,8 +42,9 @@ pub use error::EmbedderError;
 pub use in_process::InProcessEmbedderClient;
 pub use stdio::StdioEmbedderClient;
 pub use supervisor::{
-    EmbedderSupervisor, SupervisorConfig, SupervisorHandle, cuda_sidecar_batch_cap,
-    locate_embedderd_binary, sidecar_batch_size,
+    EmbedderSupervisor, FootprintSampler, RecycleClock, RecycleConfig, RecycleHooks,
+    RecycleSnapshot, RecycleStats, RecycleTrigger, SupervisorConfig, SupervisorHandle,
+    cuda_sidecar_batch_cap, locate_embedderd_binary, process_recycle_stats, sidecar_batch_size,
 };
 pub use types::{EmbedRequest, EmbedResponse};
 pub use uds::UdsEmbedderClient;

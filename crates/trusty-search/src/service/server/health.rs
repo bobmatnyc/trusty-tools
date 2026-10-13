@@ -71,6 +71,10 @@ pub(super) struct HealthResponse {
     pub(super) embedder_info: Option<EmbedderInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedderd_rss_mb: Option<u64>,
+    /// #9828: embed sidecar recycles (by trigger), failed footprint reads and
+    /// the last recycle's trigger and pids, across every supervisor in this
+    /// daemon.
+    pub(super) embedder_recycle: trusty_common::embedder_client::RecycleSnapshot,
     pub(super) background_reindex_queue_depth: usize,
     /// #4390: deferred-embed (C2) catch-up passes queued or in flight.
     ///
@@ -995,6 +999,7 @@ pub(super) async fn health_handler(
         cpu_pct,
         embedder_info,
         embedderd_rss_mb,
+        embedder_recycle: trusty_common::embedder_client::process_recycle_stats().snapshot(),
         // Issue #458: expose the background reindex backlog so operators can
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
