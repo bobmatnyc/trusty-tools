@@ -4,8 +4,9 @@
 //! on-demand machinery, and nothing starts it at login. trusty-common's
 //! `uds::on_demand` module is hard-wired to `trusty-analyze`, so this applies
 //! the same mechanism it wraps — `UdsServiceSupervisor` in detached mode — to
-//! `trusty-secrets`. The full Rust client is S9; this is the smallest helper
-//! the tm daemon and the console bridge can call.
+//! `trusty-secrets`. It stays tm's client for every method, grants included
+//! (ruling 34). The tier-3 client for exec-granted processes, which resolves
+//! only and never spawns, is [`crate::granted`] (S9, #9071).
 //! What: [`OnDemandSecrets`]: `ensure_running` (probe, spawn
 //! `trusty-secrets serve --socket <path>` when nothing answers, wait for the
 //! bind) and `call` (one framed JSON-RPC request; a dial failure re-runs

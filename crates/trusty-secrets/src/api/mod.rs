@@ -20,6 +20,8 @@ mod value;
 pub use bridge::{BRIDGE_FIELD, BackendChoice, BackendsResponse, BridgeAssertion, BridgeSource};
 pub use error::SecretsError;
 pub use mask::{MASK_HEAD_CHARS, mask_secret};
+// #9071: one name for tm and every tier-3 client.
+pub use methods::TOKEN_FD_ENV;
 pub use names::{
     BackendId, MAX_KEY_LEN, MAX_SEGMENT_LEN, OwnerName, RepoName, SecretKey, VAULT_PREFIX,
     VaultName,

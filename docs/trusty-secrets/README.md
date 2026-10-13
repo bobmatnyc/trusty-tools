@@ -38,7 +38,9 @@ cargo install trusty-secrets --version 0.1.0 --locked
 
 `api` (names, references, wire types), `store` (backends, index, scopes,
 masking), `server` (the socket and binary) and `test-support` (an in-memory
-backend). The first three are on by default. The
+backend). The first three are on by default. On Unix, `api` also carries
+`granted`, the client a program started by `tm secrets exec` uses to read a
+granted value. The
 [crate README](../../crates/trusty-secrets/README.md) lists what each adds and
 has a library example.
 
