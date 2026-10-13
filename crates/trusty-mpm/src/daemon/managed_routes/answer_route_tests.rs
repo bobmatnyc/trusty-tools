@@ -8,6 +8,7 @@
 //! first launch until a second arrives.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,7 +21,11 @@ use super::summary::{record_to_json, record_to_summary};
 use crate::daemon::rpc::managed::outcome::{RouteBody, RouteOutcome};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::decision_tests::{AnswerDriver, seed_answerable};
-use crate::session_manager::{AnswerOutcome, ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+use crate::session_manager::worktree_ownership_location::write_sentinel_bytes;
+use crate::session_manager::{
+    AnswerOutcome, ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
+};
 
 /// A daemon over an [`AnswerDriver`] with one answerable record.
 struct Harness {
@@ -216,7 +221,7 @@ async fn a_malformed_decision_id_is_400() {
 /// decision's id, and `null` once it is answered.
 #[tokio::test]
 async fn list_exposes_pending_decision_id() {
-    let h = Harness::new(ManagedSessionState::Active).await;
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
     h.ask().await;
     let record = h.record().await;
     let want = serde_json::json!(record.pending_decision_id.map(|d| d.to_string()));
@@ -340,21 +345,38 @@ async fn front_gate_approve_and_proposed_default_still_launch() {
     }
 }
 
-/// #9843 (AC-E guard): on a live harness, "no" is still typed into the
-/// proven pane; only the front gate reads the text.
+/// #9843 (M2): a pending decision on a record that is not at its front gate
+/// (an `Active` one from the pre-fix reconcile, or a `Stopped` one) is a 409
+/// telling the operator to decommission; nothing is typed or launched, and
+/// the decision and its hold stay.
 #[tokio::test]
-async fn live_decision_deny_still_types_no() {
-    let h = Harness::new(ManagedSessionState::Active).await;
-    h.ask().await;
-    let launches = Arc::new(AtomicUsize::new(0));
+async fn a_pending_decision_off_the_front_gate_is_409_decommission() {
+    for state in [ManagedSessionState::Active, ManagedSessionState::Stopped] {
+        let h = Harness::new(state.clone()).await;
+        h.ask().await;
+        let before = h.record().await.live_decision_id();
+        let launches = Arc::new(AtomicUsize::new(0));
 
-    let l = Arc::clone(&launches);
-    let out = h.answer(request("no"), move |_| counted(l)).await;
+        for answer in ["no", "yes"] {
+            let l = Arc::clone(&launches);
+            let out = h.answer(request(answer), move |_| counted(l)).await;
+            assert_eq!(out.status, 409, "{state:?} {answer:?}: {out:?}");
+            assert!(text(&out).contains("decommission"), "{out:?}");
+        }
 
-    assert_eq!(out.status, 200, "{out:?}");
-    assert_eq!(h.driver.sends(), vec!["no".to_string()]);
-    assert_eq!(launches.load(Ordering::SeqCst), 0);
-    assert_eq!(h.record().await.state, ManagedSessionState::Active);
+        assert!(
+            h.driver.sends().is_empty(),
+            "{state:?} typed: {:?}",
+            h.driver.sends()
+        );
+        assert_eq!(launches.load(Ordering::SeqCst), 0, "{state:?}");
+        let record = h.record().await;
+        assert!(before.is_some());
+        assert_eq!(record.live_decision_id(), before, "{state:?}");
+        assert!(record.front_gate_hold().is_some(), "{state:?}");
+        let mgr = h.state.session_manager().await;
+        assert!(mgr.resume_inner(&h.id).await.is_err(), "{state:?}");
+    }
 }
 
 /// #9843 (FO-3): a deny whose teardown fails is a 500, launches nothing, and
@@ -365,7 +387,11 @@ async fn front_gate_deny_teardown_failure_is_500_and_stays_unlaunchable() {
     let h = Harness::new(ManagedSessionState::Provisioning).await;
     h.ask().await;
     let mgr = h.state.session_manager().await;
-    // An Active sibling claiming the same workspace makes decommission refuse.
+    // An Active sibling claiming the same OWNED workspace makes decommission
+    // refuse (#9843 M3: an unowned one would not be checked).
+    let mut owned = h.record().await;
+    owned.workspace_owned = true;
+    mgr.store.write().await.upsert(owned).await.expect("own ws");
     let ws = h.record().await.workspace_path.expect("workspace");
     let other = seed_answerable(&mgr, &h._root, ManagedSessionState::Active).await;
     mgr.set_workspace(&other, ws, ManagedSessionState::Active)
@@ -468,4 +494,153 @@ async fn a_restart_never_makes_a_pending_front_gate_decision_resumable() {
         .await
         .expect_err("resume launched a stopped task its front gate holds");
     assert!(err.to_string().contains("still pending"), "{err}");
+}
+
+/// A relauncher that counts and starts nothing, for the auto-resume path.
+#[derive(Default)]
+struct CountingRelauncher(AtomicUsize);
+
+#[async_trait::async_trait]
+impl crate::session_manager::relaunch::RuntimeRelauncher for CountingRelauncher {
+    async fn relaunch(&self, _record: &SessionRecord) -> Result<(), String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Read `id` under the store guard until a claim has taken its decision; the
+/// record seen is what a crash right after the claim's write leaves on disk.
+async fn first_post_claim(mgr: Arc<SessionManager>, id: ManagedSessionId) -> SessionRecord {
+    for _ in 0..20_000 {
+        {
+            let mut store = mgr.store.write().await;
+            if let Ok(r) = store.get(&id).await
+                && r.pending_decision.is_none()
+            {
+                return r;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the claim never landed");
+}
+
+/// The rounds [`a_front_gate_deny_is_denied_in_the_claim_write`] runs, so the
+/// reader lands between two writes if there are two.
+const DENY_ROUNDS: usize = 8;
+
+/// #9843 (item 1): a front-gate deny is `Denied` in the claim's own write.
+/// A crash right after that write, followed by a restart, a stop, and a
+/// manual and an automatic resume, launches nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_front_gate_deny_is_denied_in_the_claim_write() {
+    use crate::session_manager::ManagedTmuxDriver as _;
+
+    for round in 0..DENY_ROUNDS {
+        let h = Harness::new(ManagedSessionState::Provisioning).await;
+        h.ask().await;
+        let mgr = h.state.session_manager().await;
+        let reader = tokio::spawn(first_post_claim(Arc::clone(&mgr), h.id));
+        let launches = Arc::new(AtomicUsize::new(0));
+
+        let l = Arc::clone(&launches);
+        h.answer(request("no"), move |_| counted(l)).await;
+        let crashed = reader.await.expect("join");
+
+        assert_eq!(
+            crashed.last_answer.as_ref().map(|a| a.outcome),
+            Some(AnswerOutcome::Denied),
+            "round {round}: the deny's claim was persisted as {:?}; a crash there leaves a launchable record",
+            crashed.last_answer
+        );
+        // The crash: the record as the claim left it, the pane gone with the
+        // daemon, then a restart.
+        mgr.store
+            .write()
+            .await
+            .upsert_decision(crashed.clone())
+            .await
+            .expect("restore");
+        let _ = h.driver.inner.kill_session(&crashed.tmux_name);
+        mgr.reconcile_on_boot(false).await.expect("reconcile");
+        let _ = mgr
+            .stop_reporting(&h.id, crate::session_manager::StopCause::Unexpected)
+            .await;
+        let relauncher = Arc::new(CountingRelauncher::default());
+        mgr.install_relauncher(relauncher.clone());
+
+        let manual = mgr.resume_inner(&h.id).await;
+        let auto = mgr.resume_auto(&h.id).await;
+        assert!(
+            manual.is_err() && auto.is_err(),
+            "round {round}: {manual:?} / {auto:?}"
+        );
+        assert_eq!(relauncher.0.load(Ordering::SeqCst), 0, "round {round}");
+        assert_eq!(launches.load(Ordering::SeqCst), 0, "round {round}");
+    }
+}
+
+/// #9843 (M3): a deny on a launch-on-main session closes it although an
+/// Active sibling runs in the same main checkout; nothing is removed there.
+#[tokio::test]
+async fn a_launch_on_main_deny_ignores_an_active_sibling_on_main() {
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let mgr = h.state.session_manager().await;
+    let main = h.record().await.workspace_path.expect("workspace");
+    std::fs::write(main.join("README.md"), "main\n").expect("write");
+    let sibling = seed_answerable(&mgr, &h._root, ManagedSessionState::Active).await;
+    mgr.set_workspace(&sibling, main.clone(), ManagedSessionState::Active)
+        .await
+        .expect("sibling on main");
+    let launches = Arc::new(AtomicUsize::new(0));
+
+    let l = Arc::clone(&launches);
+    let out = h.answer(request("no"), move |_| counted(l)).await;
+
+    assert_eq!(out.status, 200, "{out:?}");
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    assert_eq!(h.record().await.state, ManagedSessionState::Decommissioned);
+    assert_eq!(
+        std::fs::read_to_string(main.join("README.md")).expect("main kept"),
+        "main\n"
+    );
+}
+
+/// A tm-created session worktree whose only dirt is the `TASK.md` tm wrote
+/// for the seeded task, set as `h`'s workspace.
+async fn provisioned_worktree(h: &Harness, fx: &GitWorktreeFixture, name: &str) -> PathBuf {
+    let wt = fx.add_worktree(name);
+    write_sentinel_bytes(&wt, b"").expect("ownership marker");
+    let mut record = h.record().await;
+    std::fs::write(wt.join("TASK.md"), &record.task).expect("TASK.md");
+    record.workspace_path = Some(wt.clone());
+    let mgr = h.state.session_manager().await;
+    mgr.store.write().await.upsert(record).await.expect("ws");
+    wt
+}
+
+/// #9843 (M4): a deny removes the provisioned worktree the runtime never ran
+/// in; a user's file in it still keeps it.
+#[tokio::test]
+async fn a_front_gate_deny_removes_the_provisioned_worktree() {
+    let fx = GitWorktreeFixture::new();
+    let h = Harness::new(ManagedSessionState::Provisioning).await;
+    h.ask().await;
+    let wt = provisioned_worktree(&h, &fx, "deny-9843").await;
+
+    let out = h.answer(request("no"), |_| async { Ok(()) }).await;
+
+    assert_eq!(out.status, 200, "{out:?}");
+    assert!(!wt.exists(), "the provisioned worktree was kept");
+
+    let kept = Harness::new(ManagedSessionState::Provisioning).await;
+    kept.ask().await;
+    let wt = provisioned_worktree(&kept, &fx, "deny-work-9843").await;
+    std::fs::write(wt.join("notes.rs"), "// unsaved\n").expect("user work");
+
+    let out = kept.answer(request("no"), |_| async { Ok(()) }).await;
+
+    assert_eq!(out.status, 200, "{out:?}");
+    assert!(wt.join("notes.rs").exists(), "a deny discarded user work");
 }
