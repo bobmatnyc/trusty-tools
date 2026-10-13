@@ -91,7 +91,7 @@ fn a_missing_parent_is_a_bad_file() {
 fn an_invalid_parent_is_a_bad_file() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "a", "extends = \"b\"\n");
-    write(tmp.path(), "b", "[tools]\n");
+    write(tmp.path(), "b", "[agents]\n");
     let err = resolve_chain(tmp.path(), "a").unwrap_err();
     assert!(
         matches!(err, OwnerPolicyError::InvalidParent { .. }),

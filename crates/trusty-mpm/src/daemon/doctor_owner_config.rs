@@ -232,6 +232,46 @@ mod tests {
         assert!(row.message.contains("notion"), "{}", row.message);
     }
 
+    /// A skill the managed config dir carries, as `skills/<name>/SKILL.md`.
+    fn plant_skill(f: &Fx, name: &str) {
+        let dir = f.cfg.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+    }
+
+    /// #8992: the Ok summary counts the skill and tool subtractions.
+    #[test]
+    fn owner_config_ok_summary_counts_skills_and_tools() {
+        let f = fx(Some(
+            "[skills]\noff = [\"xlsx\"]\n[tools]\ndeny = [\"NotebookEdit\", \"mcp__heygen\"]\n",
+        ));
+        plant_skill(&f, "xlsx");
+        let row = run(&f);
+        assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+        assert!(row.message.contains("skills off [xlsx]"), "{}", row.message);
+        assert!(
+            row.message
+                .contains("tools deny [NotebookEdit, mcp__heygen]"),
+            "{}",
+            row.message
+        );
+    }
+
+    /// #8992: a `[skills] off` name matching no installed skill is a typo that
+    /// silently does nothing, so the row warns and names it.
+    #[test]
+    fn owner_config_warns_on_a_skills_off_name_no_skill_carries() {
+        let f = fx(Some("[skills]\noff = [\"xlsx\", \"xslx\"]\n"));
+        plant_skill(&f, "xlsx");
+        let row = run(&f);
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(
+            row.message.contains("matching no installed skill: xslx"),
+            "{}",
+            row.message
+        );
+    }
+
     #[test]
     fn owner_config_is_ok_without_an_owner() {
         let f = fx(None);
