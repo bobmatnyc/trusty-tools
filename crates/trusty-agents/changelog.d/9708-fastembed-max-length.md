@@ -1,0 +1,2 @@
+Fixed
+- The memory `FastEmbedder` passes `max_length` 256 to fastembed, so every all-MiniLM-L6-v2 input truncates at 256 tokens on every host, as trusty-common's embedder does. fastembed truncates at the smaller of that option (default 512) and the cached `tokenizer_config.json` `model_max_length`, which is 512 on hosts holding the old `Qdrant/all-MiniLM-L6-v2-onnx` revision and 256 from revision `944c7f61a294` on. Those old-cache hosts now truncate inputs of 257-512 tokens at 256; vectors already stored for such inputs keep their tail until the text is re-embedded (#9708).
