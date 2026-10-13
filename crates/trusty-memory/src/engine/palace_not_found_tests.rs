@@ -102,7 +102,21 @@ fn listing_is_sorted_capped_at_twenty_and_counted() {
     use crate::engine::palace_not_found::{ExistingPalaces, PalaceNotFound};
     let tmp = tempfile::tempdir().expect("tempdir");
     seed_listed_palaces(tmp.path(), 25);
+    // #9751: a reserved system palace sorts first; it must take no slot and
+    // add nothing to the count.
+    PalaceStore::save_palace(&Palace {
+        id: PalaceId::new("__health_probe__"),
+        name: "__health_probe__".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: tmp.path().join("__health_probe__"),
+    })
+    .expect("save the reserved probe palace");
     let absent = PalaceNotFound::listing("ghost-palace", tmp.path());
+    assert!(
+        !absent.to_string().contains("__health_probe__"),
+        "a reserved palace must not be listed: {absent}"
+    );
     match absent.existing() {
         ExistingPalaces::Listed { shown, total } => {
             assert_eq!((shown.len(), *total), (20, 25));

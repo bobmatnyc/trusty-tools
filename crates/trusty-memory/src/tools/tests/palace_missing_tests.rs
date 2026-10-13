@@ -81,3 +81,32 @@ async fn memory_remember_and_note_stay_not_found_when_listing_fails() {
         assert_unlisted_absence(&message, &state.data_root, "ghost-palace");
     }
 }
+
+/// Why (#9751): `memory_recall` runs on every prompt. A not-found there must
+/// not walk and decode every `palace.json`; the undecodable palace below would
+/// turn a walk into "could not be listed", and a walk would list the others.
+/// What: 25 listable palaces plus one undecodable; the read tool answers the
+/// not-found code with the bare message: the id, no list, no path.
+/// Test: itself.
+#[tokio::test]
+async fn memory_recall_names_a_missing_palace_without_walking_the_palaces() {
+    let (state, _tmp) = test_state();
+    seed_listed_palaces(&state.data_root, 25);
+    seed_unlistable_palace(&state.data_root);
+    let (code, message) = tool_call_error(
+        &state,
+        "memory_recall",
+        json!({"palace": "ghost-palace", "query": "anything"}),
+    )
+    .await;
+    assert_eq!(code, error_codes::NOT_FOUND, "{message}");
+    assert!(
+        message.contains("ghost-palace"),
+        "must name the id: {message}"
+    );
+    assert!(
+        !message.contains("existing palaces") && !message.contains("could not be listed"),
+        "#9751: a read-path not-found must not list the palaces: {message}"
+    );
+    crate::engine::palace_not_found_tests::assert_no_path(&message, &state.data_root);
+}

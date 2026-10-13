@@ -541,8 +541,8 @@ async fn rpc_palace_get_reports_not_found_for_an_unknown_id() {
 /// Why (#9751): the former REST methods answered a missing palace with the
 /// daemon's own path (`palace metadata missing at <root>/…/palace.json`). On the
 /// wire the refusal names the id and the existing palace ids, capped at 20 with
-/// a count, and no path — for a palace-scoped read (`memory.drawers_list`) and
-/// for the palace lookup itself (`memory.palace_get`).
+/// a count, and no path — for the palace lookup (`memory.palace_get`). The
+/// per-prompt read `memory.drawers_list` answers the bare message.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn rpc_missing_palace_is_named_with_existing_palaces_and_no_path() {
@@ -550,7 +550,16 @@ async fn rpc_missing_palace_is_named_with_existing_palaces_and_no_path() {
     let root = state.data_root.clone();
     crate::engine::palace_not_found_tests::seed_listed_palaces(&root, 25);
     let daemon = Daemon::start(state).await;
-    for method in ["memory.drawers_list", "memory.palace_get"] {
+    // `memory.drawers_list` reads through the service `open_handle`, the
+    // per-prompt read path: bare message, no list (#9751).
+    let bare = daemon
+        .call("memory.drawers_list", json!({"palace_id": "ghost-palace"}))
+        .await
+        .error
+        .expect("an absent palace must be refused");
+    assert_eq!(bare.code, crate::transport::CODE_NOT_FOUND);
+    assert_eq!(bare.message, "palace not found: ghost-palace");
+    for method in ["memory.palace_get"] {
         let response = daemon
             .call(method, json!({"palace_id": "ghost-palace"}))
             .await;
