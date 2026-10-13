@@ -226,6 +226,25 @@ fn screens_a_path_valued_candidate_the_same_way() {
     assert_eq!(contained_transcript_file(config.path(), &outside), None);
 }
 
+/// Why (#9847): with `CLAUDE_CONFIG_DIR` unset the boundary is `~/.claude`,
+/// which a host that never ran Claude Code does not have. The screen must fail
+/// closed then — a boundary that does not canonicalize admits nothing — rather
+/// than widen to whatever exists above it.
+/// Test: itself.
+#[test]
+fn rejects_every_transcript_path_when_the_config_dir_does_not_exist() {
+    let home = tempfile::tempdir().expect("temp dir");
+    let missing = home.path().join(".claude");
+    let transcript = home.path().join("s.jsonl");
+    std::fs::write(&transcript, "{}\n").expect("write");
+
+    assert!(!missing.exists());
+    assert_eq!(
+        contained_transcript_path(&missing, &transcript.to_string_lossy()),
+        None
+    );
+}
+
 /// Why (#7290): `FrameworkPaths::home_base()` falls back to `"."` when there is
 /// no home directory, and `FrameworkPaths::default()` inherits that fallback —
 /// so a containment boundary built from either canonicalizes to the process's
