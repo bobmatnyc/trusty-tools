@@ -744,10 +744,8 @@ fn file_is_0600_and_dir_0700() {
     assert_eq!(mode(fx.path.parent().expect("dir")), 0o700, "directory");
     assert_eq!(mode(&fx.path), 0o600, "log");
     assert_eq!(mode(&fx.path.with_extension("jsonl.lock")), 0o600, "lock");
-    drop(table);
-    std::fs::set_permissions(&fx.path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-    let _table = open_at(&fx.path);
-    assert_eq!(mode(&fx.path), 0o600, "an existing wider log is narrowed");
+    // #9815: an existing wider log no longer opens (narrowed before P2a);
+    // `wider_mode_log_refuses_to_open` covers it.
 }
 
 #[test]
@@ -923,4 +921,173 @@ async fn poisoned_table_is_reopened_by_the_holder() {
     let reopened = state.question_table().expect("reopen");
     assert!(!reopened.is_poisoned());
     assert!(reopened.state(id).expect("replayed").answered);
+}
+
+// ── #9815 (P2a of #8433): the log and its lock open only as sealed ──────────
+
+/// The `Unsealed` reason `open_at(path)` fails with, naming `want`.
+fn unsealed_reason(path: &Path, want: &Path) -> &'static str {
+    match QuestionTable::open_at(path) {
+        Err(QuestionTableError::Unsealed { path, reason }) => {
+            assert_eq!(path, want, "the refusal names the unsealed file");
+            reason
+        }
+        other => panic!("expected Unsealed for {}, got {other:?}", want.display()),
+    }
+}
+
+/// Create the table's `channels/` directory, 0700, as `open_at` would.
+fn make_dir(fx: &Fixture) -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let dir = fx.path.parent().expect("dir").to_path_buf();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .expect("mkdir");
+    dir
+}
+
+/// 🔴 #9815 (r-078): a log replaced by a symlink is refused, and nothing is
+/// read or written through it.
+#[test]
+fn symlinked_log_refuses_to_open() {
+    let fx = fixture();
+    let dir = make_dir(&fx);
+    let elsewhere = dir.parent().expect("root").join("elsewhere.jsonl");
+    std::fs::write(&elsewhere, "").expect("target");
+    std::fs::set_permissions(
+        &elsewhere,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .expect("chmod");
+    std::os::unix::fs::symlink(&elsewhere, &fx.path).expect("symlink");
+    assert_eq!(
+        unsealed_reason(&fx.path, &fx.path),
+        "not a regular file (a symlink, directory or device)"
+    );
+    assert_eq!(std::fs::read(&elsewhere).expect("target"), b"");
+}
+
+/// 🔴 #9815 (r-078): a log with group, other or special mode bits is
+/// refused, not narrowed.
+#[test]
+fn wider_mode_log_refuses_to_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = fixture();
+    drop(open_at(&fx.path));
+    for mode in [0o644, 0o620, 0o4600] {
+        std::fs::set_permissions(&fx.path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        assert_eq!(
+            unsealed_reason(&fx.path, &fx.path),
+            "mode grants access beyond the owner",
+            "mode {mode:o}"
+        );
+        let now = std::fs::metadata(&fx.path)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(now, mode, "the refused open changed the mode");
+    }
+}
+
+/// 🔴 #9815 (r-078): a log with a second hard link — a name outside the
+/// sealed path that writes the same file — is refused.
+#[test]
+fn hard_linked_log_refuses_to_open() {
+    let fx = fixture();
+    drop(open_at(&fx.path));
+    let link = fx
+        .path
+        .parent()
+        .expect("dir")
+        .parent()
+        .expect("root")
+        .join("alias.jsonl");
+    std::fs::hard_link(&fx.path, &link).expect("hard link");
+    assert_eq!(
+        unsealed_reason(&fx.path, &fx.path),
+        "hard-linked under another name"
+    );
+    std::fs::remove_file(&link).expect("unlink alias");
+    drop(open_at(&fx.path));
+}
+
+/// 🔴 #9815 (r-078): a lock replaced by a symlink is refused before it is
+/// opened, so the flock is never taken on a file outside the seal.
+#[test]
+fn symlinked_lock_refuses_to_open() {
+    let fx = fixture();
+    let dir = make_dir(&fx);
+    let elsewhere = dir.parent().expect("root").join("elsewhere.lock");
+    std::os::unix::fs::symlink(&elsewhere, super::lock_path(&fx.path)).expect("symlink");
+    assert_eq!(
+        unsealed_reason(&fx.path, &super::lock_path(&fx.path)),
+        "not a regular file (a symlink, directory or device)"
+    );
+    assert!(
+        !elsewhere.exists(),
+        "the lock was created through the symlink"
+    );
+}
+
+/// 🔴 #9815 (r-078): a lock with group or other access is refused.
+#[test]
+fn wider_mode_lock_refuses_to_open() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = fixture();
+    drop(open_at(&fx.path));
+    let lock = super::lock_path(&fx.path);
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o666)).expect("chmod");
+    assert_eq!(
+        unsealed_reason(&fx.path, &lock),
+        "mode grants access beyond the owner"
+    );
+}
+
+/// 🔴 #9815 (r-078): a file owned by another user is refused; the file the
+/// daemon leaves (regular, its own, 0600, one link) passes.
+#[test]
+fn seal_refuses_a_file_owned_by_another_user() {
+    use super::seal::{Stat, verdict};
+    let sealed = Stat {
+        regular: true,
+        uid: 501,
+        mode: 0o100_600,
+        nlink: 1,
+    };
+    assert_eq!(verdict(sealed, 501), Ok(()));
+    assert_eq!(
+        verdict(Stat { uid: 0, ..sealed }, 501),
+        Err("owned by another user")
+    );
+}
+
+/// 🔴 #9815 (r-078): a symlink planted at the torn-line file is not
+/// followed: the open fails and the link's target is untouched.
+#[test]
+fn torn_file_symlink_is_not_followed() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    ask(&table, bob_ask());
+    drop(table);
+    append_raw(&fx.path, "{\"v\":1,\"op\":\"res");
+    let outside = fx
+        .path
+        .parent()
+        .expect("dir")
+        .parent()
+        .expect("root")
+        .join("outside");
+    std::fs::write(&outside, "keep\n").expect("outside");
+    std::os::unix::fs::symlink(&outside, super::torn_path(&fx.path)).expect("symlink");
+    assert!(
+        matches!(
+            QuestionTable::open_at(&fx.path),
+            Err(QuestionTableError::Io { .. })
+        ),
+        "a table opened through a symlinked torn file"
+    );
+    assert_eq!(std::fs::read(&outside).expect("outside"), b"keep\n");
 }

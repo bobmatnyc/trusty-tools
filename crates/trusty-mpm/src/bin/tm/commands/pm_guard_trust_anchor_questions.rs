@@ -15,3 +15,7 @@ pub(super) fn questions_verdict(
 ) -> Option<String> {
     None
 }
+
+#[cfg(test)]
+#[path = "pm_guard_trust_anchor_questions_tests.rs"]
+mod tests;
