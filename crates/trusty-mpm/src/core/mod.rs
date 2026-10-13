@@ -221,6 +221,8 @@ pub mod ipc;
 // `issue_audit_recent` doctor check runs from the library.
 pub mod issue_audit;
 pub mod issue_audit_gh;
+// #8988: per-owner launch config — owner discovery, schema, extends, last-good.
+pub mod launch_policy;
 pub mod llm_overseer;
 // ADR-0055 / #6000: the local-path `repo_url` rule and its typed refusal,
 // shared by every `session_new` entry point.

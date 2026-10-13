@@ -82,6 +82,7 @@ trusty-mpm	lib	core::instruction_overrides::tests	reads test_support::rc — com
 trusty-mpm	lib	core::instruction_package::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::instruction_pipeline::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::instruction_safety_core::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
+trusty-mpm	lib	core::launch_policy::floor::tests::floor_covers_every_agent_tools_mcp_grant	reads literal '../../content/agents' — the floor must cover every agent tools: mcp grant (#8988)
 trusty-mpm	lib	core::managed_config::tests	reads test_support::rc — the skill source stamp (#9012)
 trusty-mpm	lib	core::managed_config::tests::ensure_managed_config_dir_refreshes_stale_bundled_agents	reads test_support::repo_roster; runtime: autodeploy resolves content from the cwd
 trusty-mpm	lib	core::managed_config::tests::manual_static_verify_full_roster	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)

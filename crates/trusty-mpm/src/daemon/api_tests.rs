@@ -1447,6 +1447,8 @@ async fn doctor_endpoint_returns_report() {
         "auto_memory",
         // #7673: every CLAUDE.md ABOVE the project root.
         "ancestor_claude_md",
+        // #8988: the per-owner launch config and its last-good fallback.
+        "owner_config",
         // #9238: a record whose pane is live under another tmux name. Added by
         // `run_doctor_for_manager`, so it is last.
         "session_names",

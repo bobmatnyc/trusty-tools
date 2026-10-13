@@ -345,6 +345,9 @@ use doctor_stray_mcp::check_stray_mcp_json;
 #[path = "doctor_session_scope.rs"]
 mod doctor_session_scope;
 use doctor_session_scope::check_session_scope;
+// #8988: the per-owner launch config and its last-good fallback. Read-only.
+#[path = "doctor_owner_config.rs"]
+mod doctor_owner_config;
 // #6469: a tmux server tm did not start carries none of tm's server globals —
 // a tmux-resurrect restore leaves every restored pane on the factory 2000-line
 // scrollback. Read-only: it reads options, never sets one.
@@ -469,7 +472,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_seventy_four_checks`,
+/// Test: `run_doctor_produces_seventy_five_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -803,6 +806,9 @@ pub(crate) async fn run_doctor_with_claims(
         Some(home.as_path()),
         crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
     ));
+    // #8988: a bad owner file never refuses a launch, so this row is the
+    // loud signal. Read-only.
+    checks.push(doctor_owner_config::check_owner_config(project_dir));
 
     DoctorReport::from_checks(checks)
 }
@@ -885,7 +891,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_seventy_four_checks`.
+/// this wiring is covered by `run_doctor_produces_seventy_five_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,
