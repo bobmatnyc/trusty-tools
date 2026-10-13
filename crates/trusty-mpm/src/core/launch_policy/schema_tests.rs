@@ -26,6 +26,17 @@ fn an_absent_owner_file_is_none() {
     );
 }
 
+/// #8988: a dangling symlink is a present-but-unreadable file, never an absent one.
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_owner_file_is_unreadable_not_absent() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join(OWNER_FILE);
+    std::os::unix::fs::symlink(tmp.path().join("missing-target"), &path).unwrap();
+    let err = parse_owner_file(&path).expect_err("a dangling symlink must be a bad file");
+    assert!(matches!(err, OwnerPolicyError::Unreadable { .. }), "{err}");
+}
+
 /// Q5: `allow = []` is a policy, not an error.
 #[test]
 fn an_empty_allow_list_is_a_valid_policy() {

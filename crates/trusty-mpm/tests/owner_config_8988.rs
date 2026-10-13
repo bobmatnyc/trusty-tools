@@ -212,3 +212,19 @@ async fn owner_config_is_off_when_the_owner_file_is_deleted_even_with_a_last_goo
         row.message
     );
 }
+
+/// #8988: a dangling symlink at the owner-file path is an unreadable (bad) file,
+/// not a deleted one — the row fails instead of reporting the layer off.
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_config_fails_on_a_dangling_symlink_owner_file() {
+    let fx = Fixture::new();
+    let dir = fx.repos_root.join("acme");
+    std::fs::create_dir_all(&dir).expect("owner dir");
+    std::os::unix::fs::symlink(dir.join("missing-target"), dir.join(OWNER_FILE))
+        .expect("dangling symlink");
+
+    let row = fx.row().await;
+
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+}
