@@ -28,6 +28,9 @@ use trusty_channels::policy::{Channel, QuestionId, QuestionState};
 mod replay;
 use replay::{Book, LineOut, Record, decode, replay_line, validate};
 
+// #9815: the open-time seal check on the log and its lock.
+mod seal;
+
 /// The record format version every line carries.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -41,6 +44,16 @@ pub fn questions_path(home: &Path) -> PathBuf {
     )
     .join("channels")
     .join("questions.jsonl")
+}
+
+/// The lifetime lock beside the table log at `path`.
+pub fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.lock")
+}
+
+/// Where [`QuestionTable::open_at`] moves a torn final line of `path`.
+pub fn torn_path(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.torn")
 }
 
 /// A question-table operation that could not be completed.
@@ -83,6 +96,15 @@ pub enum QuestionTableError {
     /// The daemon has no home to hold the table under.
     #[error("no home directory to hold the question table")]
     NoHome,
+    /// The log or its lock is not in the state the daemon leaves it in, so a
+    /// writer outside the trust-anchor seal changed it (#9815).
+    #[error("{}: not sealed ({reason}); the question table refuses to open", path.display())]
+    Unsealed {
+        /// The log or lock.
+        path: PathBuf,
+        /// A content-free reason.
+        reason: &'static str,
+    },
 }
 
 /// Where a question was asked: the DM channel id and the posted thread.
@@ -235,7 +257,7 @@ impl QuestionTable {
             .mode(0o700)
             .create(dir)
             .map_err(io_err(dir))?;
-        let lock = take_lock(&path.with_extension("jsonl.lock"))?;
+        let lock = take_lock(&lock_path(path))?;
         let (bytes, created) = match std::fs::read(path) {
             Ok(bytes) => (bytes, false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
@@ -262,7 +284,7 @@ impl QuestionTable {
                 Err(_) => {
                     // #8433: copy the fragment aside BEFORE cutting it, so a
                     // failed copy fails the open and loses nothing.
-                    let torn = path.with_extension("jsonl.torn");
+                    let torn = torn_path(path);
                     append_once(&torn, &[tail, b"\n"].concat())?;
                     cut(path, body_len)?;
                     quarantined = Some(tail.len());

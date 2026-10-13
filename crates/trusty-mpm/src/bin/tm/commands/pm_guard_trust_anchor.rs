@@ -195,6 +195,10 @@ pub(crate) fn evaluate(
     if let Some(reason) = taint::taint_verdict(&writes, cwd, env.home.as_deref()) {
         return Some(reason);
     }
+    // #9815: the question table is sealed for every session, taint or none.
+    if let Some(reason) = questions::questions_verdict(&writes, cwd, env.home.as_deref()) {
+        return Some(reason);
+    }
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
@@ -701,6 +705,10 @@ mod egress;
 // #8433 P0: the channel taint directory as a trust anchor.
 #[path = "pm_guard_trust_anchor_taint.rs"]
 mod taint;
+
+// #9815 (P2a of #8433): the channel question table as a trust anchor.
+#[path = "pm_guard_trust_anchor_questions.rs"]
+mod questions;
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]
