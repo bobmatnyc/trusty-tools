@@ -10,7 +10,9 @@
 //! drives the REAL spawn and resume paths against a recording tmux, reads the
 //! launch spec the typed line names, and asserts on the exact contents of the
 //! file its `--settings` token names. A third case proves the no-owner launch
-//! carries no `--settings` at all.
+//! carries no `--settings` at all. #8992: the `[skills] off` / `[tools] deny`
+//! cases drive the same three callers (spawn, resume, in-place relaunch) for a
+//! PM and for an allow-listed Architect, which gets the `[mcp]` part only.
 //! Test: this file IS the test.
 
 use std::path::{Path, PathBuf};
@@ -165,6 +167,79 @@ impl Fixture {
     fn adapter(&self, tmux: &Arc<Recorder>) -> ClaudeCodeAdapter {
         ClaudeCodeAdapter::new(tmux.clone(), Some(true), &self.home.join(".trusty-mpm"))
     }
+
+    /// Make the project an Architect (#8453): it asks for the supervisor
+    /// profile and the operator's user config allow-lists it.
+    fn make_architect(&self) {
+        std::fs::write(
+            self.project.join(".trusty-mpm.toml"),
+            "profile = \"supervisor\"\n",
+        )
+        .expect("write project config");
+        let root = self.home.join(".trusty-mpm");
+        std::fs::create_dir_all(&root).expect("mkdir framework root");
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[supervisor]\nprojects = [{:?}]\n",
+                self.project.display().to_string()
+            ),
+        )
+        .expect("write user config");
+    }
+
+    /// The argv of one fresh spawn in the project.
+    fn spawn_args(&self) -> Vec<String> {
+        let tmux = Arc::new(Recorder::default());
+        self.adapter(&tmux)
+            .spawn(
+                "tm-acme-01",
+                &self.project,
+                "t",
+                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+                &[],
+            )
+            .expect("the spawn path must run with claude on PATH");
+        launched_args(&tmux)
+    }
+
+    /// The argv of one resume in the project.
+    fn resume_args(&self) -> Vec<String> {
+        let tmux = Arc::new(Recorder::default());
+        self.adapter(&tmux)
+            .spawn_resume(
+                "tm-acme-01",
+                Some("%7"),
+                &self.project,
+                "t",
+                None,
+                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+                &[],
+            )
+            .expect("the resume path must run with claude on PATH");
+        launched_args(&tmux)
+    }
+
+    /// The argv of one in-place relaunch in the project.
+    fn inplace_args(&self) -> Vec<String> {
+        let fw = trusty_mpm::core::paths::FrameworkPaths::under(&self.home);
+        trusty_mpm::runtime::build_inplace_resume_command_under(&fw, &self.project, None)
+            .expect("the relaunch must build with claude on PATH")
+            .args
+    }
+}
+
+/// #8992: the owner file every Architect case uses — all three tables set.
+const ALL_TABLES: &str = "[mcp]\ndeny = [\"heygen\"]\n\
+                          [skills]\noff = [\"xlsx\"]\n\
+                          [tools]\ndeny = [\"NotebookEdit\"]\n";
+
+/// The value after each `--disallowedTools` token in `args`.
+fn disallowed_tools(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|w| w[0] == "--disallowedTools")
+        .map(|w| w[1].clone())
+        .collect()
 }
 
 /// The argv of the one launch spec the recorder saw typed.
@@ -349,5 +424,120 @@ fn a_deleted_owner_file_stays_off_when_a_bad_file_follows() {
     assert!(
         !args.iter().any(|a| a == "--settings"),
         "a bad file after a delete must not revive the old policy: {args:?}"
+    );
+}
+
+/// #8992: a PM spawn under an owner `[skills] off` carries the skill as
+/// `"off"` in `skillOverrides`.
+#[test]
+#[cfg(unix)]
+fn a_pm_spawn_under_owner_skills_off_carries_skill_overrides() {
+    let fx = Fixture::new();
+    fx.owner_file("[skills]\noff = [\"xlsx\"]\n");
+    let (_, settings) = settings_file(&fx.spawn_args());
+    assert_eq!(
+        settings,
+        serde_json::json!({"skillOverrides": {"xlsx": "off"}})
+    );
+}
+
+/// #8992: a PM spawn under an owner `[tools] deny` carries it as
+/// `permissions.deny`, and the PM trim argv is untouched: still exactly one
+/// `--disallowedTools Workflow,DesignSync`.
+#[test]
+#[cfg(unix)]
+fn a_pm_spawn_under_owner_tools_deny_carries_permissions_deny() {
+    let fx = Fixture::new();
+    fx.owner_file("[tools]\ndeny = [\"NotebookEdit\"]\n");
+    let args = fx.spawn_args();
+    let (_, settings) = settings_file(&args);
+    assert_eq!(
+        settings,
+        serde_json::json!({"permissions": {"deny": ["NotebookEdit"]}})
+    );
+    assert_eq!(disallowed_tools(&args), vec!["Workflow,DesignSync"]);
+}
+
+/// #8992 Q-B: an Architect spawn gets the `[mcp]` part exactly as in #8988 1b,
+/// and neither the skills nor the tools part.
+#[test]
+#[cfg(unix)]
+fn an_architect_spawn_gets_the_mcp_part_but_no_tools_or_skills() {
+    let fx = Fixture::new();
+    fx.make_architect();
+    fx.owner_file(ALL_TABLES);
+    let args = fx.spawn_args();
+    let (_, settings) = settings_file(&args);
+    assert_eq!(
+        settings,
+        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
+    assert!(disallowed_tools(&args).is_empty(), "{args:?}");
+}
+
+/// #8992: the resume path is a separate caller; a PM resume carries all three.
+#[test]
+#[cfg(unix)]
+fn a_pm_resume_under_owner_skills_and_tools_carries_both() {
+    let fx = Fixture::new();
+    fx.owner_file(ALL_TABLES);
+    let args = fx.resume_args();
+    let (_, settings) = settings_file(&args);
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "deniedMcpServers": [{"serverName": "heygen"}],
+            "permissions": {"deny": ["NotebookEdit"]},
+            "skillOverrides": {"xlsx": "off"}
+        })
+    );
+    assert_eq!(disallowed_tools(&args), vec!["Workflow,DesignSync"]);
+}
+
+/// #8992 Q-B on the resume path.
+#[test]
+#[cfg(unix)]
+fn an_architect_resume_gets_the_mcp_part_only() {
+    let fx = Fixture::new();
+    fx.make_architect();
+    fx.owner_file(ALL_TABLES);
+    let (_, settings) = settings_file(&fx.resume_args());
+    assert_eq!(
+        settings,
+        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
+}
+
+/// #8992: the in-place relaunch is the third caller; a PM relaunch carries
+/// all three.
+#[test]
+#[cfg(unix)]
+fn an_inplace_pm_relaunch_carries_skills_and_tools() {
+    let fx = Fixture::new();
+    fx.owner_file(ALL_TABLES);
+    let args = fx.inplace_args();
+    let (_, settings) = settings_file(&args);
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "deniedMcpServers": [{"serverName": "heygen"}],
+            "permissions": {"deny": ["NotebookEdit"]},
+            "skillOverrides": {"xlsx": "off"}
+        })
+    );
+    assert_eq!(disallowed_tools(&args), vec!["Workflow,DesignSync"]);
+}
+
+/// #8992 Q-B on the in-place relaunch.
+#[test]
+#[cfg(unix)]
+fn an_inplace_architect_relaunch_gets_the_mcp_part_only() {
+    let fx = Fixture::new();
+    fx.make_architect();
+    fx.owner_file(ALL_TABLES);
+    let (_, settings) = settings_file(&fx.inplace_args());
+    assert_eq!(
+        settings,
+        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
     );
 }

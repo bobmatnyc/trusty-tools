@@ -2,10 +2,12 @@
 //!
 //! Why: one owner's policy must not depend on each repository carrying a copy,
 //! and a typo must fail loudly rather than no-op — so every table is strict.
-//! What: [`OWNER_FILE`], the [`OwnerFile`] / [`McpTable`] schema (PR 1a: the
-//! top-level `extends` key and `[mcp]` only; any other table, including PR 2's
-//! `[tools]`/`[skills]`/`[agents]`, is an unknown key), [`parse_owner_file`],
-//! and the [`OwnerPolicyError`] every bad-file arm reports.
+//! What: [`OWNER_FILE`], the [`OwnerFile`] schema — the top-level `extends`
+//! key, [`McpTable`] (PR 1a), and #8992's [`SkillsTable`] / [`ToolsTable`];
+//! any other table, `[agents]` included, is an unknown key —
+//! [`parse_owner_file`], and the [`OwnerPolicyError`] every bad-file arm
+//! reports. The `[skills]`/`[tools]` value checks live in
+//! [`super::validate_tables`].
 //! Test: `schema_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -27,8 +29,10 @@ pub const MAX_CHAIN: usize = 4;
 /// One owner file, as written.
 ///
 /// Why: every key is optional, so an empty file is a valid "decline to decide".
-/// What: `extends` names one parent owner; `mcp` is the MCP table.
-/// Test: `an_empty_owner_file_is_a_valid_policy`, `a_pr2_table_is_an_unknown_key`.
+/// What: `extends` names one parent owner; `mcp`, `skills` and `tools` are
+/// the three tables.
+/// Test: `an_empty_owner_file_is_a_valid_policy`, `a_pr2_table_is_an_unknown_key`,
+/// `good_skills_and_tools_tables_parse`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 // #8988: a misspelled key or an early PR 2 table is a bad file (Q7).
 #[serde(deny_unknown_fields)]
@@ -39,6 +43,12 @@ pub struct OwnerFile {
     /// The `[mcp]` table.
     #[serde(default)]
     pub mcp: Option<McpTable>,
+    /// The `[skills]` table (#8992).
+    #[serde(default)]
+    pub skills: Option<SkillsTable>,
+    /// The `[tools]` table (#8992).
+    #[serde(default)]
+    pub tools: Option<ToolsTable>,
 }
 
 /// The `[mcp]` table of an owner file.
@@ -60,6 +70,38 @@ pub struct McpTable {
     /// `Some(false)` turns the claude.ai connectors off.
     #[serde(default)]
     pub claude_ai_connectors: Option<bool>,
+}
+
+/// The `[skills]` table of an owner file (#8992).
+///
+/// Why: Architect ruling Q-A — an owner may only turn skills off, so the one
+/// key is `off` and there is no `on`.
+/// What: exact skill names, each written as `"off"` in the launch's
+/// `skillOverrides`; absent or `[]` turns nothing off.
+/// Test: `good_skills_and_tools_tables_parse`,
+/// `a_wrong_type_or_unknown_key_in_the_new_tables_is_malformed`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsTable {
+    /// Skills this owner turns off.
+    #[serde(default)]
+    pub off: Option<Vec<String>>,
+}
+
+/// The `[tools]` table of an owner file (#8992).
+///
+/// Why: Architect ruling Q-C — bare tool names only; a parenthesised rule such
+/// as `Agent(engineer)` or `Bash(rm:*)` is a bad file.
+/// What: built-in tool names, `mcp__<server>` and `mcp__<server>__<tool>`,
+/// written to the launch's `permissions.deny`; absent or `[]` denies nothing.
+/// Test: `good_skills_and_tools_tables_parse`,
+/// `a_forbidden_skills_or_tools_value_is_a_bad_file_naming_its_key`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsTable {
+    /// Tools this owner denies.
+    #[serde(default)]
+    pub deny: Option<Vec<String>>,
 }
 
 /// Why an owner file, or its `extends` chain, is a bad file.
@@ -149,7 +191,8 @@ pub fn is_owner_name(name: &str) -> bool {
 /// What: `Ok(None)` when the path has no directory entry (a dangling symlink
 /// is `Unreadable`); `Err` for an unreadable file, bad
 /// TOML, an unknown key, a wildcard or empty server name, a floor server in
-/// `deny`, or an `extends` value that is not an owner name. On success also
+/// `deny`, an `extends` value that is not an owner name, or a bad `[skills]` /
+/// `[tools]` value ([`super::validate_tables`]). On success also
 /// returns the raw bytes, for the last-good sha.
 /// Test: every test in `schema_tests.rs`.
 pub fn parse_owner_file(path: &Path) -> Result<Option<(OwnerFile, Vec<u8>)>, OwnerPolicyError> {
@@ -198,6 +241,8 @@ fn validate(path: &Path, file: &OwnerFile) -> Result<(), OwnerPolicyError> {
             format!("`{parent}` is not an owner name"),
         ));
     }
+    // #8992: the `[skills]`/`[tools]` values, each an `Invalid` naming its key.
+    super::validate_tables::validate(file).map_err(|(key, reason)| invalid(key, reason))?;
     let Some(mcp) = &file.mcp else {
         return Ok(());
     };

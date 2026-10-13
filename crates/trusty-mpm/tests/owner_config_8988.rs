@@ -150,8 +150,8 @@ async fn owner_config_reports_a_valid_owner_file_with_an_empty_allow_list() {
     assert!(row.message.contains("acme"), "{}", row.message);
 }
 
-/// Q7: a PR 2 table is an unknown key, so the file is bad. With no last-good
-/// on record the owner layer is skipped — never a refused launch.
+/// #8992: a floor tool in `[tools] deny` is a bad file. With no last-good on
+/// record the owner layer is skipped — never a refused launch.
 #[tokio::test]
 async fn owner_config_fails_on_a_bad_owner_file_and_skips_the_layer_without_a_last_good() {
     let fx = Fixture::new();

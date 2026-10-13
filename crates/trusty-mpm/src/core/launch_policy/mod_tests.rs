@@ -123,7 +123,7 @@ fn a_bad_file_never_overwrites_the_last_good_record() {
     let path = last_good::last_good_path(&fx.state, "acme");
     let before = std::fs::read(&path).unwrap();
     for bad in [
-        "[tools]\n",
+        "[agents]\n",
         "[mcp]\ndeny = [\"*\"]\n",
         "extends = \"ghost\"\n",
     ] {

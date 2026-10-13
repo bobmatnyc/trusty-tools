@@ -208,7 +208,13 @@ pub(crate) fn start(
         "launch",
     )?;
     // #8988: an Architect dir sits at depth 1, so it resolves no owner.
-    let files = crate::commands::launch_home::launch_files(dir, config_dir.as_deref(), Some(home))?;
+    // #8992: the profile is passed anyway; an Architect never gets skills/tools.
+    let files = crate::commands::launch_home::launch_files(
+        dir,
+        config_dir.as_deref(),
+        Some(home),
+        cli.profile,
+    )?;
     // #8308: the launch travels in a spec under `home`; the pane types a short line.
     let mut claude_spec = crate::commands::launch::launch_claude_spec(
         dir,

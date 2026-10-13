@@ -5,8 +5,9 @@
 //! What: [`check_owner_config`] reads [`crate::core::launch_policy::resolve`]
 //! for the project and writes nothing. `Fail` for a bad file or a broken
 //! `extends` chain, naming the last-good record in use or "no last good";
-//! `Warn` when an `allow`/`deny` name matches no user-scope or builtin server;
-//! `Ok` otherwise, including "none" when there is no owner or no file.
+//! `Warn` when an `allow`/`deny` name matches no user-scope or builtin server,
+//! or (#8992) a `[skills] off` name matches no installed skill; `Ok`
+//! otherwise, including "none" when there is no owner or no file.
 //! Test: `tests/owner_config_8988.rs` and the `tests` module below.
 
 use std::path::Path;
@@ -48,7 +49,9 @@ pub(super) fn check_owner_config(project_dir: Option<&Path>) -> DoctorCheck {
 /// [`check_owner_config`] over explicit inputs.
 ///
 /// Test: `owner_config_warns_on_a_name_no_server_carries`,
-/// `owner_config_is_ok_and_names_the_chain`, `owner_config_is_ok_without_an_owner`.
+/// `owner_config_is_ok_and_names_the_chain`, `owner_config_is_ok_without_an_owner`,
+/// `owner_config_ok_summary_counts_skills_and_tools`,
+/// `owner_config_warns_on_a_skills_off_name_no_skill_carries`.
 pub(super) fn check_owner_config_at(
     inputs: &OwnerInputs<'_>,
     config_dir: Option<&Path>,
@@ -82,16 +85,28 @@ pub(super) fn check_owner_config_at(
                 chain.chain.join(" → "),
                 describe(&chain.policy)
             );
-            match unknown_names(&chain.policy, config_dir) {
-                Some(unknown) if !unknown.is_empty() => DoctorCheck::new(
-                    CHECK_NAME,
-                    CheckStatus::Warn,
-                    format!(
-                        "{summary}; name(s) matching no user-scope or builtin server: {}",
-                        unknown.join(", ")
-                    ),
-                ),
-                _ => ok(summary),
+            let mut warnings = Vec::new();
+            if let Some(unknown) = unknown_names(&chain.policy, config_dir)
+                && !unknown.is_empty()
+            {
+                warnings.push(format!(
+                    "name(s) matching no user-scope or builtin server: {}",
+                    unknown.join(", ")
+                ));
+            }
+            // #8992 spike gap 3: a mistyped skill name silently turns nothing off.
+            let missing = unknown_skills(&chain.policy, config_dir, inputs.cwd);
+            if !missing.is_empty() {
+                warnings.push(format!(
+                    "[skills] off name(s) matching no installed skill: {}",
+                    missing.join(", ")
+                ));
+            }
+            if warnings.is_empty() {
+                ok(summary)
+            } else {
+                let text = format!("{summary}; {}", warnings.join("; "));
+                DoctorCheck::new(CHECK_NAME, CheckStatus::Warn, text)
             }
         }
         Outcome::Fallback { error, last_good } => DoctorCheck::new(
@@ -142,10 +157,38 @@ fn describe(policy: &OwnerPolicy) -> String {
         Some(false) => "off",
         _ => "default",
     };
+    // #8992: the skill and tool parts apply to PM launches only (Q-B).
     format!(
-        "allow {allow}, deny [{}], claude.ai connectors {connectors}",
-        list(&policy.deny)
+        "allow {allow}, deny [{}], claude.ai connectors {connectors}, skills off [{}], \
+         tools deny [{}] (skills/tools: PM launches only)",
+        list(&policy.deny),
+        list(&policy.skills_off),
+        list(&policy.tools_deny)
     )
+}
+
+/// `[skills] off` names with no skill directory under the managed config dir's
+/// `skills/` or the project's `.claude/skills/` (#8992). A plugin-namespaced
+/// `plugin:skill` name is never checked; nothing is checked without a config dir.
+fn unknown_skills(policy: &OwnerPolicy, config_dir: Option<&Path>, cwd: &Path) -> Vec<String> {
+    let Some(config_dir) = config_dir else {
+        return Vec::new();
+    };
+    let roots = [
+        config_dir.join("skills"),
+        cwd.join(".claude").join("skills"),
+    ];
+    policy
+        .skills_off
+        .iter()
+        .filter(|name| !name.contains(':'))
+        .filter(|name| {
+            !roots.iter().any(|root| {
+                root.join(name.as_str()).is_dir() || root.join(format!("{name}.md")).is_file()
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// `allow`/`deny` names that match no user-scope or builtin server; `None` when
@@ -230,6 +273,46 @@ mod tests {
         let row = run(&f);
         assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
         assert!(row.message.contains("notion"), "{}", row.message);
+    }
+
+    /// A skill the managed config dir carries, as `skills/<name>/SKILL.md`.
+    fn plant_skill(f: &Fx, name: &str) {
+        let dir = f.cfg.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+    }
+
+    /// #8992: the Ok summary counts the skill and tool subtractions.
+    #[test]
+    fn owner_config_ok_summary_counts_skills_and_tools() {
+        let f = fx(Some(
+            "[skills]\noff = [\"xlsx\"]\n[tools]\ndeny = [\"NotebookEdit\", \"mcp__heygen\"]\n",
+        ));
+        plant_skill(&f, "xlsx");
+        let row = run(&f);
+        assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+        assert!(row.message.contains("skills off [xlsx]"), "{}", row.message);
+        assert!(
+            row.message
+                .contains("tools deny [NotebookEdit, mcp__heygen]"),
+            "{}",
+            row.message
+        );
+    }
+
+    /// #8992: a `[skills] off` name matching no installed skill is a typo that
+    /// silently does nothing, so the row warns and names it.
+    #[test]
+    fn owner_config_warns_on_a_skills_off_name_no_skill_carries() {
+        let f = fx(Some("[skills]\noff = [\"xlsx\", \"xslx\"]\n"));
+        plant_skill(&f, "xlsx");
+        let row = run(&f);
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(
+            row.message.contains("matching no installed skill: xslx"),
+            "{}",
+            row.message
+        );
     }
 
     #[test]

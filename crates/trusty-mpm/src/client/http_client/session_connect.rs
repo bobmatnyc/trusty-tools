@@ -306,8 +306,10 @@ fn client_prompt_spec(
     spec.args
         .extend(crate::core::pm_tool_trim::trim_args(profile));
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
-    spec.args
-        .extend(crate::core::launch_policy::provision_settings_default(project, None).argv());
+    // #8992: the same profile decides whether the skill and tool parts apply.
+    spec.args.extend(
+        crate::core::launch_policy::provision_settings_default(project, None, profile).argv(),
+    );
     Ok(spec)
 }
 

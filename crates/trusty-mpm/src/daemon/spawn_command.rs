@@ -143,7 +143,9 @@ pub(crate) fn gui_spawn_line(
     )?;
     // #8988: unrelocated, so the policy reads the operator's own `.claude.json`;
     // the pane shell re-splits the line, so each token is single-quoted.
-    let settings = crate::core::launch_policy::provision_settings_default(workdir, None);
+    // #8992: the profile decides whether the skill and tool parts apply.
+    let settings =
+        crate::core::launch_policy::provision_settings_default(workdir, None, cli.profile);
     Ok(format!(
         "{}{}",
         gui_spawn_command(

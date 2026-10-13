@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use crate::commands::project::resolve_dir;
+use crate::commands::{launch_home::launch_files, project::resolve_dir};
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, tmux_has_session,
@@ -381,7 +381,7 @@ pub(crate) async fn launch(
     // #7422: compose this session's default-deny MCP config before the line
     // that names it. Fatal — launching without `--mcp-config` would hand the
     // pane the whole shared server map.
-    let files = super::launch_home::launch_files(&managed_path, config_dir.as_deref(), home)?;
+    let files = launch_files(&managed_path, config_dir.as_deref(), home, cli.profile)?;
     // #8308: the launch travels in a mode-0600 spec; the pane types a short
     // line naming it, so no token or path is typed.
     // #4181: `config_dir` selects `--setting-sources user,project,local` and
@@ -670,7 +670,7 @@ pub(crate) async fn connect(
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
-        let files = super::launch_home::launch_files(&path, config_dir.as_deref(), home)?;
+        let files = launch_files(&path, config_dir.as_deref(), home, cli.profile)?;
         // #8308: same spec carrier as `tm launch`.
         let claude_spec = connect_claude_spec(
             &path,
