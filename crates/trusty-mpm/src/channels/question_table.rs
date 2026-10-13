@@ -237,16 +237,18 @@ impl QuestionTable {
     /// [`Book::apply`], or the open fails with `Corrupt`. An unterminated
     /// final line that decodes is kept and given its newline; one that does
     /// not is appended to `questions.jsonl.torn` before the log is cut. A new
-    /// file is created 0600, and its directory fsynced. #9815: an existing log
-    /// or lock that is not sealed ([`seal::check_path`]) refuses the open with
-    /// `Unsealed`, and a symlink at the torn file is not followed.
+    /// file is created 0600, and its directory fsynced. #9815: an existing log,
+    /// lock or torn file that is not sealed ([`seal::check_path`]) refuses the
+    /// open with `Unsealed`; the torn-file append follows no symlink and does
+    /// not wait on a FIFO.
     /// Test: `table_survives_restart`, `torn_final_line_quarantined`,
     /// `final_line_missing_only_newline_is_kept`,
     /// `malformed_middle_line_fails_the_open`,
     /// `second_table_on_same_path_is_refused_while_first_lives`,
     /// `file_is_0600_and_dir_0700`, `home_write_fence_is_called`,
     /// `symlinked_log_refuses_to_open`, `symlinked_lock_refuses_to_open`,
-    /// `torn_file_symlink_is_not_followed`.
+    /// `torn_file_symlink_is_not_followed`,
+    /// `fifo_at_the_torn_file_refuses_to_open_without_blocking`.
     pub fn open_at(path: &Path) -> Result<Self, QuestionTableError> {
         // #8433: a test must never write the operator's home (#8545); the
         // lock and torn files are siblings of `path`.
@@ -290,6 +292,9 @@ impl QuestionTable {
                     // #8433: copy the fragment aside BEFORE cutting it, so a
                     // failed copy fails the open and loses nothing.
                     let torn = torn_path(path);
+                    // #9815: a torn file changed outside the seal (a FIFO, a
+                    // link) is never written; it would block or redirect.
+                    seal::check_path(&torn)?;
                     append_once(&torn, &[tail, b"\n"].concat())?;
                     cut(path, body_len)?;
                     quarantined = Some(tail.len());
@@ -537,13 +542,17 @@ fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
 }
 
 /// Append `bytes` to `path` (creating, 0600) with one write, then sync.
+/// Test: `torn_line_append_on_a_fifo_fails_fast`,
+/// `torn_file_symlink_is_not_followed`.
 fn append_once(path: &Path, bytes: &[u8]) -> Result<(), QuestionTableError> {
     OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        // #9815: a symlink planted here would aim the daemon's write elsewhere.
-        .custom_flags(libc::O_NOFOLLOW)
+        // #9815: a symlink planted here would aim the daemon's write elsewhere,
+        // and a FIFO swapped in after the seal check would block the open
+        // (and the daemon's table slot) until a reader came; fail fast.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_data()))
         .map_err(io_err(path))

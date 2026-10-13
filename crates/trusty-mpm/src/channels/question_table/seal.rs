@@ -1,6 +1,6 @@
 //! The open-time seal check on the question table's files (#9815, P2a of #8433).
 //!
-//! Why: `tm hook --pm-guard` seals `questions.jsonl` and its `.lock` as a
+//! Why: `tm hook --pm-guard` seals `questions.jsonl`, its `.lock` and `.torn` as a
 //! trust anchor, so no session may write them. A file the daemon would not
 //! have left — a symlink, a second hard link, group or other access, another
 //! owner — was made by a writer outside that seal, and the table must not open
@@ -13,7 +13,9 @@
 //! line such a writer appends keeps the file's metadata.
 //! Test: `symlinked_log_refuses_to_open`, `wider_mode_log_refuses_to_open`,
 //! `hard_linked_log_refuses_to_open`, `symlinked_lock_refuses_to_open`,
-//! `wider_mode_lock_refuses_to_open`, `seal_refuses_a_file_owned_by_another_user`.
+//! `wider_mode_lock_refuses_to_open`, `seal_refuses_a_file_owned_by_another_user`,
+//! `fifo_at_the_torn_file_refuses_to_open_without_blocking`,
+//! `seal_reports_an_unreadable_directory_as_io`.
 
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
