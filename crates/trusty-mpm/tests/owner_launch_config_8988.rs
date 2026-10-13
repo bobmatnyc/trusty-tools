@@ -1,0 +1,300 @@
+//! A managed launch under an owner file carries the owner's MCP deny list
+//! (#8988 PR 1b).
+//!
+//! Why an INTEGRATION test: these assertions must run against the code BEFORE
+//! the fix, to prove they were red there. `ClaudeCodeAdapter`,
+//! `RuntimeAdapter::spawn`/`spawn_resume` and `ManagedTmuxDriver` are public
+//! library API that predates #8988, so the same file compiles on either side.
+//! What: plants three user-scope servers in the managed config dir's
+//! `.claude.json` and an owner file at `<repos_root>/acme/.trusty-mpm-owner.toml`,
+//! drives the REAL spawn and resume paths against a recording tmux, reads the
+//! launch spec the typed line names, and asserts on the exact contents of the
+//! file its `--settings` token names. A third case proves the no-owner launch
+//! carries no `--settings` at all.
+//! Test: this file IS the test.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
+use trusty_mpm::session_manager::{ManagedError, ManagedTmuxDriver};
+
+/// The owner file's basename, as a literal: the constant moves with the fix.
+const OWNER_FILE: &str = ".trusty-mpm-owner.toml";
+
+/// Records each launch line typed into the pane and answers the pre-launch
+/// `echo` handshake like a shell (see `pane_launch_line_8233.rs`).
+#[derive(Default)]
+struct Recorder {
+    typed: Mutex<Vec<String>>,
+    printed: Mutex<String>,
+}
+
+impl Recorder {
+    fn record(&self, text: &str) {
+        if let Some(word) = text.strip_prefix("echo ") {
+            let mut out = self.printed.lock().expect("recorder mutex");
+            out.push_str(&word.replace(['"', '\''], ""));
+            out.push('\n');
+            return;
+        }
+        self.typed
+            .lock()
+            .expect("recorder mutex")
+            .push(text.to_owned());
+    }
+}
+
+impl ManagedTmuxDriver for Recorder {
+    fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _name: &str, text: &str) -> Result<(), ManagedError> {
+        self.record(text);
+        Ok(())
+    }
+    fn send_line_to_pane(&self, _name: &str, _pane: &str, text: &str) -> Result<(), ManagedError> {
+        self.record(text);
+        Ok(())
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(self.printed.lock().expect("recorder mutex").clone())
+    }
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Restores `HOME`, `PATH` and `TRUSTY_MPM_REPOS_ROOT` when a case ends.
+///
+/// `env_serial` runs one test at a time, so no other test observes the rewrite.
+struct EnvGuard {
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvGuard {
+    fn install(home: &Path, bin: &Path, repos_root: &Path) -> Self {
+        let names = ["HOME", "PATH", "TRUSTY_MPM_REPOS_ROOT"];
+        let saved = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
+        let mut entries = vec![bin.to_path_buf()];
+        if let Some(p) = std::env::var_os("PATH") {
+            entries.extend(std::env::split_paths(&p));
+        }
+        let path = std::env::join_paths(entries).expect("join PATH");
+        // SAFETY: `env_serial` forces one test thread; Drop restores all three.
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("PATH", path);
+            std::env::set_var("TRUSTY_MPM_REPOS_ROOT", repos_root);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..) {
+            // SAFETY: as in `install`.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
+/// A scratch home: a fake `claude`, a project at `projects/acme/widget`, and a
+/// managed `.claude.json` holding three user-scope servers.
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    home: PathBuf,
+    repos_root: PathBuf,
+    project: PathBuf,
+    _env: EnvGuard,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let home = tmp.path().canonicalize().expect("canonical tempdir");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir bin");
+        let exe = bin.join("claude");
+        std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").expect("write fake claude");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let repos_root = home.join("projects");
+        let project = repos_root.join("acme").join("widget");
+        std::fs::create_dir_all(&project).expect("mkdir project");
+        // The `.claude.json` the managed launch actually reads.
+        let config_dir = home.join(".trusty-tools/trusty-mpm/claude-config");
+        std::fs::create_dir_all(&config_dir).expect("mkdir config dir");
+        std::fs::write(
+            config_dir.join(".claude.json"),
+            r#"{"mcpServers":{"heygen":{"type":"http","url":"https://h.invalid"},
+                "apex":{"type":"http","url":"https://a.invalid"},
+                "trusty-search":{"type":"stdio","command":"trusty-search"}}}"#,
+        )
+        .expect("write .claude.json");
+        let env = EnvGuard::install(&home, &bin, &repos_root);
+        Self {
+            _tmp: tmp,
+            home,
+            repos_root,
+            project,
+            _env: env,
+        }
+    }
+
+    fn owner_file(&self, body: &str) {
+        std::fs::write(self.repos_root.join("acme").join(OWNER_FILE), body)
+            .expect("write owner file");
+    }
+
+    fn adapter(&self, tmux: &Arc<Recorder>) -> ClaudeCodeAdapter {
+        ClaudeCodeAdapter::new(tmux.clone(), Some(true), &self.home.join(".trusty-mpm"))
+    }
+}
+
+/// The argv of the one launch spec the recorder saw typed.
+fn launched_args(tmux: &Recorder) -> Vec<String> {
+    let typed = tmux.typed.lock().expect("recorder mutex").clone();
+    let line = typed
+        .iter()
+        .find(|l| l.contains("--launch-spec"))
+        .unwrap_or_else(|| panic!("no launch line was typed: {typed:?}"));
+    let path = line
+        .rsplit("--launch-spec ")
+        .next()
+        .expect("a spec path")
+        .trim()
+        .trim_matches('\'');
+    let spec: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read the launch spec"))
+            .expect("the launch spec is JSON");
+    spec["args"]
+        .as_array()
+        .expect("spec args")
+        .iter()
+        .map(|a| a.as_str().expect("string arg").to_owned())
+        .collect()
+}
+
+/// The parsed file the `--settings` token names, and its path.
+fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
+    let at = args
+        .iter()
+        .position(|a| a == "--settings")
+        .unwrap_or_else(|| panic!("argv carries no --settings: {args:?}"));
+    let path = PathBuf::from(&args[at + 1]);
+    let body = std::fs::read(&path).expect("read the settings file");
+    (
+        path,
+        serde_json::from_slice(&body).expect("the settings file is JSON"),
+    )
+}
+
+/// #8988 closure condition: the owner's `allow` decides which user-scope
+/// servers load; every other non-floor server is denied, and the floor
+/// (`trusty-search`) is never named.
+#[test]
+#[cfg(unix)]
+fn a_managed_spawn_under_an_owner_file_denies_the_unallowed_user_scope_servers() {
+    let fx = Fixture::new();
+    fx.owner_file("[mcp]\nallow = [\"apex\"]\n");
+    let tmux = Arc::new(Recorder::default());
+
+    fx.adapter(&tmux)
+        .spawn(
+            "tm-acme-01",
+            &fx.project,
+            "t",
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        )
+        .expect("the spawn path must run with claude on PATH");
+
+    let (path, settings) = settings_file(&launched_args(&tmux));
+    assert_eq!(
+        settings,
+        serde_json::json!({"deniedMcpServers": [{"serverName": "heygen"}]})
+    );
+    assert!(
+        path.starts_with(fx.home.join(".trusty-tools/trusty-mpm/session-settings")),
+        "{}",
+        path.display()
+    );
+    assert!(
+        !path.starts_with(&fx.project),
+        "never inside the repository"
+    );
+}
+
+/// The resume path is a second caller; `allow = []` with the connectors off
+/// denies every non-floor server and turns the claude.ai connectors off.
+#[test]
+#[cfg(unix)]
+fn a_managed_resume_under_an_owner_file_carries_the_same_policy() {
+    let fx = Fixture::new();
+    fx.owner_file("[mcp]\nallow = []\nclaude_ai_connectors = false\n");
+    let tmux = Arc::new(Recorder::default());
+
+    fx.adapter(&tmux)
+        .spawn_resume(
+            "tm-acme-01",
+            Some("%7"),
+            &fx.project,
+            "t",
+            None,
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        )
+        .expect("the resume path must run with claude on PATH");
+
+    let (_, settings) = settings_file(&launched_args(&tmux));
+    assert_eq!(
+        settings,
+        serde_json::json!({
+            "deniedMcpServers": [{"serverName": "apex"}, {"serverName": "heygen"}],
+            "disableClaudeAiConnectors": true
+        })
+    );
+}
+
+/// With no owner file the launch is byte-identical to today: no `--settings`,
+/// and no settings file written. Green on both sides of the fix.
+#[test]
+#[cfg(unix)]
+fn a_spawn_with_no_owner_file_carries_no_settings_flag() {
+    let fx = Fixture::new();
+    let tmux = Arc::new(Recorder::default());
+
+    fx.adapter(&tmux)
+        .spawn(
+            "tm-acme-01",
+            &fx.project,
+            "t",
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        )
+        .expect("the spawn path must run with claude on PATH");
+
+    let args = launched_args(&tmux);
+    assert!(!args.iter().any(|a| a == "--settings"), "{args:?}");
+    assert!(
+        !fx.home
+            .join(".trusty-tools/trusty-mpm/session-settings")
+            .exists()
+    );
+}
