@@ -18,9 +18,12 @@
 //! [`DoctorCheck`] — `Ok` when complete, `Fail` naming every gap otherwise.
 //! Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`.
 
-use crate::core::deploy_validate::validate_workspace;
+use std::path::PathBuf;
+
+use crate::core::deploy_validate::{validate_workspace, validate_workspace_in};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
+use crate::core::session_record::claude_config_dir_override;
 
 /// Probe deployment completeness by diffing against the canonical bundled roster.
 ///
@@ -31,9 +34,16 @@ use crate::core::paths::FrameworkPaths;
 /// gap (semicolon-joined, capped implicitly by the small roster size so the
 /// message stays readable) plus the actionable hint to run `tm validate
 /// --repair` otherwise.
-/// Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`.
+/// #9156: a home-scoped run reads `settings.json` from `CLAUDE_CONFIG_DIR`
+/// when that is set; see [`user_tier_settings_dir`].
+/// Test: `deployment_check_ok_when_complete`, `deployment_check_fail_lists_gaps`,
+/// `deployment_check_reads_settings_from_claude_config_dir`,
+/// `deployment_check_keeps_the_project_tier_under_claude_config_dir`.
 pub(super) fn check_deployment_completeness(paths: &FrameworkPaths) -> DoctorCheck {
-    let report = validate_workspace(paths);
+    let report = match user_tier_settings_dir(paths) {
+        Some(dir) => validate_workspace_in(paths, &dir),
+        None => validate_workspace(paths),
+    };
     if report.is_complete() {
         return DoctorCheck::new(
             "deployment",
@@ -51,6 +61,21 @@ pub(super) fn check_deployment_completeness(paths: &FrameworkPaths) -> DoctorChe
             detail.join("; ")
         ),
     )
+}
+
+/// The active Claude config dir, when `paths` is scoped to the user tier.
+///
+/// Why (#9156): a home-scoped run reads `<home>/.claude/settings.json`, but a
+/// session launched with `CLAUDE_CONFIG_DIR` reads its user tier from that dir.
+/// A project-scoped run reads the project's own `.claude/`, which
+/// `CLAUDE_CONFIG_DIR` does not replace.
+/// What: [`claude_config_dir_override`] when `paths.claude_home_dir()` is the
+/// base the layout was resolved against (`paths.root`'s parent), else `None`.
+/// Test: `deployment_check_reads_settings_from_claude_config_dir`,
+/// `deployment_check_keeps_the_project_tier_under_claude_config_dir`.
+fn user_tier_settings_dir(paths: &FrameworkPaths) -> Option<PathBuf> {
+    let home_scoped = paths.root.parent() == Some(paths.claude_home_dir().as_path());
+    home_scoped.then(claude_config_dir_override).flatten()
 }
 
 #[cfg(test)]

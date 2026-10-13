@@ -117,9 +117,11 @@ fn read_layer(path: &Path) -> LayerValue {
 /// never uses.
 /// What: project-local, project, user-local, user; the project pair is omitted
 /// when the caller has no project directory. Each entry carries a scope label
-/// for the report.
+/// for the report. #9156: the user pair is read from `CLAUDE_CONFIG_DIR` when
+/// that is set, else from `<home>/.claude`.
 /// Test: `auto_memory_project_local_overrides_project`,
-/// `auto_memory_falls_back_to_the_user_tier`.
+/// `auto_memory_falls_back_to_the_user_tier`,
+/// `auto_memory_reads_the_user_tier_from_claude_config_dir`.
 fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &'static str)> {
     let paths = ClaudeConfigReader::paths_for_project_with_home(project_dir.unwrap_or(home), home);
     let mut layers = Vec::with_capacity(4);
@@ -127,8 +129,17 @@ fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &
         layers.push((paths.project_local_settings, "project-local"));
         layers.push((paths.project_settings, "project"));
     }
-    layers.push((paths.user_local_settings, "user-local"));
-    layers.push((paths.user_settings, "user"));
+    // #9156: a session launched with CLAUDE_CONFIG_DIR reads its user tier there.
+    match crate::core::session_record::claude_config_dir_override() {
+        Some(dir) => {
+            layers.push((dir.join("settings.local.json"), "user-local"));
+            layers.push((dir.join("settings.json"), "user"));
+        }
+        None => {
+            layers.push((paths.user_local_settings, "user-local"));
+            layers.push((paths.user_settings, "user"));
+        }
+    }
     layers
 }
 
