@@ -345,6 +345,9 @@ use doctor_stray_mcp::check_stray_mcp_json;
 #[path = "doctor_session_scope.rs"]
 mod doctor_session_scope;
 use doctor_session_scope::check_session_scope;
+// #8988: the per-owner launch config and its last-good fallback. Read-only.
+#[path = "doctor_owner_config.rs"]
+mod doctor_owner_config;
 // #6469: a tmux server tm did not start carries none of tm's server globals —
 // a tmux-resurrect restore leaves every restored pane on the factory 2000-line
 // scrollback. Read-only: it reads options, never sets one.
@@ -803,6 +806,9 @@ pub(crate) async fn run_doctor_with_claims(
         Some(home.as_path()),
         crate::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
     ));
+    // #8988: a bad owner file never refuses a launch, so this row is the
+    // loud signal. Read-only.
+    checks.push(doctor_owner_config::check_owner_config(project_dir));
 
     DoctorReport::from_checks(checks)
 }

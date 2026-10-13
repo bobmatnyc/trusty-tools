@@ -1,0 +1,3 @@
+Added
+- Per-owner launch config file `<repos_root>/<owner>/.trusty-mpm-owner.toml`: a strict `[mcp]` table (`allow`, `deny`, `claude_ai_connectors`) and a top-level `extends = "<owner>"` key, at most four files per chain. A bad file falls back to the last good policy recorded under `~/.trusty-tools/trusty-mpm/owner-policy/` and never refuses a launch; a deleted file turns the layer off. tm's trusty-* builtins and `claude-in-chrome` can never be denied. The policy is not yet applied at launch (Refs #8988).
+- `tm doctor` row `owner_config`: `Fail` on a bad owner file or `extends` chain, naming the last good policy in use or that none exists; `Warn` on a name matching no server; `Ok` otherwise (Refs #8988).
