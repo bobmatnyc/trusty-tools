@@ -12,7 +12,10 @@
 //! existing one are refused, and a location that does not resolve refuses
 //! every write. The Architect's main thread, which the parent exempts, is
 //! judged by [`questions_verdict`] against these files alone, under the same
-//! rules: a write the guard cannot place and an unknown home deny too.
+//! rules: a write the guard cannot place and an unknown home deny too. A
+//! target in a directory the guard cannot place is judged by its name against
+//! the table's file names and its last three directories only (Architect
+//! ruling (b), `pm_guard_trust_anchor_names.rs`).
 //! Residual: the parent's — `xargs rm`, `find -delete`, a glob after a `cd`
 //! and writers outside its verb list (`dd`, interpreters).
 //! Test: `pm_guard_trust_anchor_questions_tests.rs`.
@@ -22,8 +25,7 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::channels::question_table::{lock_path, questions_path, torn_path};
 
 use super::{
-    AnchorWrite, Anchors, FileId, Resolved, UnplaceableWrite, component_names, file_id,
-    judge_writes, resolve,
+    AnchorWrite, Anchors, FileId, Resolved, UnplaceableWrite, file_id, judge_writes, names, resolve,
 };
 
 /// The question table's files under one home, resolved.
@@ -70,7 +72,9 @@ impl QuestionsAnchor {
 /// `anchor_denies_rm_and_replace_of_the_questions_lock`,
 /// `anchor_denies_a_link_planted_at_the_torn_file`,
 /// `the_architect_cannot_reach_the_question_table_through_an_unplaceable_write`,
-/// `questions_anchor_unknown_home_denies_every_write`.
+/// `questions_anchor_unknown_home_denies_every_write`,
+/// `the_architect_is_denied_targets_that_could_name_the_table`,
+/// `the_architect_may_make_routine_writes_that_cannot_name_the_table`.
 pub(super) fn questions_verdict(
     writes: &Result<Vec<AnchorWrite>, UnplaceableWrite>,
     cwd: Option<&Path>,
@@ -99,7 +103,8 @@ pub(super) fn questions_verdict(
     let mut anchors = Anchors::bare(false);
     anchors.guarded = table.guarded;
     anchors.ids = table.ids;
-    anchors.names = component_names(&table.paths);
+    // #9815 (ruling (b)): only the table's own names, not every component.
+    anchors.table_names = Some(names::table_names(&table.paths));
     judge_writes(&anchors, writes, cwd, home).map(|_| questions_reason("this write"))
 }
 

@@ -45,15 +45,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
-use trusty_mpm::core::architect_conversation::CONVERSATION_EXT;
-use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
-use trusty_mpm::core::architect_session::SESSION_EXT;
+use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::session_profile;
 use trusty_mpm::core::twin_arming::{self, ARMED_DIR};
 use trusty_mpm::core::twin_identity::ClaudeProcess;
 
-use crate::commands::env_file_grant::{GRANT_DIR, GRANT_EXT};
+use crate::commands::env_file_grant::GRANT_DIR;
 use crate::commands::misc::SUB_AGENT_ENV;
 use crate::commands::pm_guard::{EDIT_TOOLS, edit_tool_target_path};
 use crate::commands::pm_guard_architect_reason::{architect_main_thread, with_identity};
@@ -340,6 +338,9 @@ struct Anchors {
     /// Every path component of every anchor, lexical and resolved: the names
     /// an unplaceable target's file name is compared against.
     names: Vec<String>,
+    /// #9815 (ruling (b)): when set, [`Self::could_be`] compares only these
+    /// question-table names, by [`names::could_name_table`].
+    table_names: Option<Vec<String>>,
 }
 
 /// The live arming records.
@@ -361,6 +362,7 @@ impl Anchors {
             fence: Vec::new(),
             records_live,
             names: Vec::new(),
+            table_names: None,
         }
     }
 
@@ -445,6 +447,7 @@ impl Anchors {
             armed,
             fence,
             names,
+            table_names: None,
         })
     }
 
@@ -466,38 +469,6 @@ impl Anchors {
                 || (resolved.parent().is_some_and(|p| same_ci(p, &armed.dir))
                     && resolved.file_name().is_some_and(is_json))
         })
-    }
-
-    /// Whether a target whose directory is unknown could still name an
-    /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
-    /// anchor path component (`envfile-grants` included), a `*.architect`
-    /// launch record, its `*.architect-session` name sidecar, the
-    /// `*.architect-conversation` record or a `*.grant` `tm env` grant (any
-    /// case), or a `*.json` while records could be live.
-    /// Test: `the_launch_record_dir_is_an_anchor`.
-    fn could_be(&self, spelling: &str) -> bool {
-        let name = spelling.trim_end_matches('/');
-        let name = name.rsplit('/').next().unwrap_or(name);
-        name.is_empty()
-            || name == "."
-            || name == ".."
-            || name.starts_with('~')
-            || has_shell_pattern(name)
-            || self
-                .names
-                .iter()
-                .any(|anchor| anchor.eq_ignore_ascii_case(name))
-            // #8878 ruling A: a planted launch record would be an identity,
-            // and (R1 critic HIGH) a planted name sidecar would rename it.
-            // #8939: a planted `tm env` grant would be a main-thread proof.
-            // #8981: a planted conversation record would pick what it resumes.
-            || Path::new(name).extension().is_some_and(|ext| {
-                ext.eq_ignore_ascii_case(ARCHITECT_EXT)
-                    || ext.eq_ignore_ascii_case(SESSION_EXT)
-                    || ext.eq_ignore_ascii_case(GRANT_EXT)
-                    || ext.eq_ignore_ascii_case(CONVERSATION_EXT)
-            })
-            || (self.records_live && is_json(name.as_ref()))
     }
 
     /// The deny for one write, or `None` when it misses every anchor.
@@ -548,7 +519,7 @@ impl Anchors {
         let path = match place(dest, base, home, true) {
             Placed::At(path) => path,
             Placed::Unknown => {
-                if self.could_be(dest) {
+                if self.could_be_dest(dest, dest_too) {
                     return Some(unknown_reason(dest));
                 }
                 let name = names.iter().find(|name| self.could_be(name))?;
@@ -732,6 +703,10 @@ mod taint;
 // #9815 (P2a of #8433): the channel question table as a trust anchor.
 #[path = "pm_guard_trust_anchor_questions.rs"]
 mod questions;
+
+// #8878, #9815: the name rules for a target the guard cannot place.
+#[path = "pm_guard_trust_anchor_names.rs"]
+mod names;
 
 #[cfg(test)]
 #[path = "pm_guard_trust_anchor_tests.rs"]
