@@ -1,2 +1,3 @@
 Fixed
 - A daemon restart no longer brings back a session whose front gate denied its launch as active. When the deny's teardown failed or was interrupted and the session's pane is still live, boot reconciliation now keeps the session at its front gate, where resume refuses it and decommission can finish the close (#9850).
+- A session whose front-gate decision is pending or was denied can no longer be made active by an in-place reactivate (bare `tm` in its pane) or by `tm sessions rebind`; both answer 409 naming the front gate, and the session keeps its state. The automatic rebind after a tmux server replacement skips such a session. A session whose front gate was approved is unaffected (#9850).

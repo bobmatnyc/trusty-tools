@@ -240,6 +240,25 @@ impl SessionRecord {
             None
         }
     }
+
+    /// Refuse `verb` on a record its front gate holds (#9850).
+    ///
+    /// Why: reactivate and rebind each write `Active` (resume relaunches), and
+    /// a task its front gate holds or denied must stay down whichever verb
+    /// asks; one refusal keeps their wording and test from drifting apart.
+    /// What: `Err(InvalidState)` naming `verb` and [`Self::front_gate_hold`]'s
+    /// reason when it holds, else `Ok(())`.
+    /// Test: `mark_reactivated_refuses_a_record_its_front_gate_holds`,
+    /// `the_manual_rebind_refuses_a_record_its_front_gate_denied`.
+    pub(crate) fn refuse_front_gate_hold(&self, verb: &str) -> Result<(), ManagedError> {
+        match self.front_gate_hold() {
+            Some(why) => Err(ManagedError::InvalidState(
+                self.id.to_string(),
+                format!("cannot {verb} session {} at its front gate: {why}", self.id),
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// `decision <id>`, or a name for a decision set before #9841.
