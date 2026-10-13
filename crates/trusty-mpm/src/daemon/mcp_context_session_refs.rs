@@ -13,7 +13,9 @@
 
 use std::path::Path;
 
-use crate::core::session_ref_identity::{SessionRefGitEnv, session_ref_git_env};
+use crate::core::session_ref_identity::{
+    SessionRefGitEnv, session_ref_git_env, session_ref_publish_git_env,
+};
 use crate::daemon::catchup_payload::HydrationReceipt;
 
 /// Rebuild `<project>/.trusty-mpm/sessions/` from its session refs (#7830).
@@ -174,7 +176,7 @@ pub(crate) async fn publish_session_ref(
         session_id,
         outcome,
         enabled,
-        session_ref_git_env,
+        session_ref_publish_git_env,
     )
     .await
 }

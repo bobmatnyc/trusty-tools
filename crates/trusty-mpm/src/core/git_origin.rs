@@ -135,3 +135,50 @@ pub fn get_origin_url(path: &Path) -> Result<Option<String>, String> {
         )),
     }
 }
+
+/// The URLs git will really use for `origin`, after `insteadOf` rewrites.
+///
+/// Why: `remote.origin.url` is the stored text; git fetches from the URL that
+/// `url.<base>.insteadOf` rewrites it to, and pushes to `remote.origin.pushurl`
+/// or the `pushInsteadOf` rewrite. Classifying the stored text mistook an https
+/// origin that git reaches over ssh for a gh-pinnable one (#9160).
+/// What: `git remote get-url origin` (fetch) or `git remote get-url --push
+/// origin`; one URL per line, since `pushurl` may repeat. A git failure or an
+/// empty answer is `Err` so the caller fails closed.
+/// Test: `an_insteadof_ssh_rewrite_is_never_pinned`,
+/// `a_push_url_rewritten_to_ssh_is_never_pinned_for_publish`,
+/// `an_unreadable_origin_refuses_without_proving`.
+pub(crate) fn effective_remote_urls(path: &Path, push: bool) -> Result<Vec<String>, String> {
+    let mut cmd = trusty_common::git::command();
+    cmd.arg("-C").arg(path).args(["remote", "get-url"]);
+    if push {
+        cmd.arg("--push");
+    }
+    let out = cmd.arg("origin").output().map_err(|e| {
+        format!(
+            "could not run `git remote get-url` in '{}': {e}",
+            path.display()
+        )
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "`git remote get-url{}` failed in '{}': {}",
+            if push { " --push" } else { "" },
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let urls: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    if urls.is_empty() {
+        return Err(format!(
+            "git reported no URL for origin in '{}'",
+            path.display()
+        ));
+    }
+    Ok(urls)
+}

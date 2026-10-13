@@ -142,6 +142,12 @@ pub(crate) struct IdentitySeams<'a> {
     pub(crate) prove: &'a dyn Fn(&PinnedGhIdentity, &str, &str) -> Result<ProvenToken, String>,
 }
 
+/// Production entry point for a pause: [`session_ref_git_env`] for `ls-remote`,
+/// fetch and push (#9160).
+pub(crate) fn session_ref_publish_git_env(repo: &Path) -> SessionRefGitEnv {
+    session_ref_git_env_for(repo, SessionRefOp::Publish)
+}
+
 /// Production entry point: the host's registry, org map, `gh` and `GET /user`,
 /// with proofs remembered in [`crate::core::gh_account_proof::PROCESS_PROOFS`].
 ///
@@ -150,6 +156,11 @@ pub(crate) struct IdentitySeams<'a> {
 /// What: blocking (a `gh` subprocess and HTTPS); run it off the executor.
 /// Test: the decisions are [`session_ref_git_env_with`]'s.
 pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
+    session_ref_git_env_for(repo, SessionRefOp::Fetch)
+}
+
+/// The production seams for `op`.
+fn session_ref_git_env_for(repo: &Path, op: SessionRefOp) -> SessionRefGitEnv {
     let state_root = crate::core::paths::FrameworkPaths::default().root;
     let aliases = SshHostAliases::for_current_user();
     let registry_dir = crate::project::registry_data_dir();
@@ -165,7 +176,7 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
     };
     session_ref_git_env_with(
         repo,
-        SessionRefOp::Fetch,
+        op,
         &IdentitySeams {
             registry_dir: &registry_dir,
             state_root: &state_root,
@@ -179,7 +190,8 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
 /// [`session_ref_git_env`] over explicit seams (#9160).
 ///
 /// What, in order: the origin (unreadable → `Refused`; none → `Ambient`); an
-/// ssh or non-https origin → `Ambient`, saying a gh pin cannot apply (Q4); the
+/// ssh or non-https EFFECTIVE fetch URL (and, for a publish, push URL — after
+/// `insteadOf` / `pushurl`) → `Ambient`, saying a gh pin cannot apply (Q4); the
 /// registry pin, else the `[accounts]` org map (either unreadable →
 /// `Refused`; neither → `Ambient` "no gh pin", Q2); then the spawn path's own
 /// [`crate::core::gh_session_account::session_spawn_env`] under `prove`. A
@@ -195,7 +207,7 @@ pub(crate) fn session_ref_git_env(repo: &Path) -> SessionRefGitEnv {
 /// `a_proven_identity_is_reused_across_two_resolutions`.
 pub(crate) fn session_ref_git_env_with(
     repo: &Path,
-    _op: SessionRefOp,
+    op: SessionRefOp,
     seams: &IdentitySeams<'_>,
 ) -> SessionRefGitEnv {
     use crate::core::remote_mode::{RemoteMode, remote_mode};
@@ -215,20 +227,9 @@ pub(crate) fn session_ref_git_env_with(
         }
     };
     let shown = redact_stored_url(&origin).to_string();
-    match transport(&origin) {
-        Transport::Https => {}
-        // #9160 Q4: the helper pin is `credential.https://<host>.helper`.
-        Transport::Ssh => {
-            return ambient(&format!(
-                "origin {shown} is an ssh remote: a gh account pin cannot apply to it (the gh \
-                 credential helper serves https only), so git authenticates with its own ssh key"
-            ));
-        }
-        Transport::Other => {
-            return ambient(&format!(
-                "origin {shown} is not an https remote, so no gh credential applies"
-            ));
-        }
+    // #9160: classify the URLs git will actually use, not the stored text.
+    if let Some(early) = effective_transport(repo, op, &shown) {
+        return early;
     }
 
     let pinned = match crate::core::gh_account_registry::read_pin(seams.registry_dir, &origin) {
@@ -282,6 +283,56 @@ pub(crate) fn session_ref_git_env_with(
         }
         Some(Ok(env)) => pinned_env(env.vars, &origin, seams.aliases),
     }
+}
+
+/// The early outcome when git's effective URL for `op` is not https, else `None`.
+///
+/// Why: `url.*.insteadOf`, `pushInsteadOf` and `pushurl` change the transport
+/// git uses without changing `remote.origin.url` (#9160).
+/// What: a fetch checks the effective fetch URL; a publish also checks the
+/// effective push URL. An ssh URL is Q4 `Ambient` "pin cannot apply" (the gh
+/// credential helper serves https only); another non-https URL is `Ambient`; a
+/// git failure reading the URL is `Refused`.
+/// Test: `an_insteadof_ssh_rewrite_is_never_pinned`,
+/// `a_push_url_rewritten_to_ssh_is_never_pinned_for_publish`,
+/// `an_ssh_origin_reports_that_the_pin_cannot_apply`.
+fn effective_transport(repo: &Path, op: SessionRefOp, shown: &str) -> Option<SessionRefGitEnv> {
+    let legs: &[(bool, &str)] = match op {
+        SessionRefOp::Fetch => &[(false, "fetch")],
+        SessionRefOp::Publish => &[(false, "fetch"), (true, "push")],
+    };
+    for &(push, leg) in legs {
+        let urls = match crate::core::git_origin::effective_remote_urls(repo, push) {
+            Ok(urls) => urls,
+            Err(e) => {
+                let reason = format!(
+                    "the effective {leg} URL of {} could not be read ({e})",
+                    repo.display()
+                );
+                return Some(refused(&reason, None, None));
+            }
+        };
+        for url in urls {
+            let url_shown = redact_stored_url(&url).to_string();
+            match transport(&url) {
+                Transport::Https => {}
+                Transport::Ssh => {
+                    return Some(ambient(&format!(
+                        "origin {shown} is an ssh remote for {leg} ({url_shown}): a gh \
+                         account pin cannot apply to it (the gh credential helper serves https \
+                         only), so git authenticates with its own ssh key"
+                    )));
+                }
+                Transport::Other => {
+                    return Some(ambient(&format!(
+                        "origin {shown} reaches git via a non-https {leg} URL ({url_shown}), so \
+                         no gh credential applies"
+                    )));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// A proven spawn env, with git's credential helper pinned to gh for the host.
