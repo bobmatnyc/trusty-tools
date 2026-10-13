@@ -821,6 +821,50 @@ fn reopen_waits_out_a_forked_childs_lock_descriptor() {
     assert!(reopened.state(id).is_some());
 }
 
+/// 🔴 #8433: a dropped table releases its flock explicitly, so a forked
+/// child's copy of the lock descriptor does not hold it; the reopen takes
+/// the lock at once, with no retry.
+#[test]
+fn dropped_table_releases_its_flock_despite_a_forked_child() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let child = HeldChild::fork();
+    drop(table);
+    let reopened = QuestionTable::open_at(&fx.path);
+    let released = child.release_after(Duration::ZERO);
+    assert!(released.join().expect("release thread").success());
+    let reopened = reopened.expect("a forked child's lock descriptor held a dropped table's flock");
+    assert!(reopened.state(id).is_some());
+}
+
+/// 🔴 #8433: a table releases its flock when it poisons, so a reopen takes
+/// the lock while stale `Arc` holders still run, and those holders refuse
+/// every operation, so the reopened table is the only writer.
+#[test]
+fn poisoned_table_releases_its_flock_while_arc_held() {
+    let fx = fixture();
+    let table = Arc::new(open_at(&fx.path));
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    let stale = Arc::clone(&table);
+    set_fault(&table, Some(Fault::BeforeWrite));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Poisoned
+    );
+    set_fault(&table, None);
+    drop(table);
+    let reopened = QuestionTable::open_at(&fx.path)
+        .expect("a poisoned table's stale holder kept the flock from the reopen");
+    assert_refuses_everything(&stale, id, reserved, "a stale holder after the reopen");
+    assert_eq!(
+        reopened.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    assert_eq!(resolve_lines(&fx.path, id).len(), 1);
+}
+
 /// #9842: a refused reopen right after a drop must also wait out a forked
 /// child's lock descriptor, or it reports `Locked` instead of `Unsealed`.
 #[test]
