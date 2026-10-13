@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 
 use trusty_channels::policy::Channel;
 
@@ -58,7 +59,35 @@ fn bob_ask() -> Ask {
 }
 
 fn open_at(path: &Path) -> QuestionTable {
-    QuestionTable::open_at(path).expect("open table")
+    // #9833: a sibling test's forked child can hold the dropped table's flock.
+    retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)).expect("open table")
+}
+
+/// How long a reopen waits for forked children to exec (#9833).
+const REOPEN_GRACE: Duration = Duration::from_secs(10);
+
+/// Run `open` again while it reports `Locked`, for at most `grace`.
+///
+/// Why: a child that any thread of this test binary forks holds a copy of
+/// the lock descriptor until it execs, so a dropped table's flock can
+/// outlive it for that window (#9833).
+/// What: every other result returns at once. A live second holder never
+/// releases, so it still ends `Locked` once `grace` runs out.
+/// Test: `reopen_waits_out_a_forked_childs_lock_descriptor`,
+/// `retry_locked_still_refuses_a_live_holder`.
+fn retry_locked<T>(
+    grace: Duration,
+    mut open: impl FnMut() -> Result<T, QuestionTableError>,
+) -> Result<T, QuestionTableError> {
+    let deadline = Instant::now() + grace;
+    loop {
+        match open() {
+            Err(QuestionTableError::Locked { .. }) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Reserve and open one question; its id.
@@ -436,7 +465,8 @@ fn final_line_missing_only_newline_is_kept() {
 
 /// Assert opening `path` fails as `Corrupt` at `line`.
 fn assert_corrupt(path: &Path, line: usize, what: &str) {
-    match QuestionTable::open_at(path) {
+    // #9833: wait out a forked child's copy of the dropped table's lock fd.
+    match retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)) {
         Err(QuestionTableError::Corrupt { line: l, .. }) => assert_eq!(l, line, "{what}"),
         other => panic!("{what}: opened: {other:?}"),
     }
@@ -719,6 +749,73 @@ fn second_table_on_same_path_is_refused_while_first_lives() {
     assert!(second.state(id).is_some());
 }
 
+/// #9833: a child another thread forked holds a copy of the lock descriptor
+/// until it execs, so the flock outlives the dropped table for that window.
+#[test]
+fn reopen_waits_out_a_forked_childs_lock_descriptor() {
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let (mut ready_rx, ready_tx) = std::io::pipe().expect("ready pipe");
+    let (go_rx, mut go_tx) = std::io::pipe().expect("go pipe");
+    let (ready_fd, go_rx_fd, go_tx_fd) =
+        (ready_tx.as_raw_fd(), go_rx.as_raw_fd(), go_tx.as_raw_fd());
+    let mut child = std::process::Command::new("true");
+    // SAFETY: the hook runs between fork and exec and makes only the
+    // async-signal-safe calls close, write and read on inherited fds.
+    unsafe {
+        child.pre_exec(move || {
+            // Our own copy of the release end closes, so a parent that dies
+            // reads as EOF here and the child still execs.
+            libc::close(go_tx_fd);
+            libc::write(ready_fd, [1u8].as_ptr().cast(), 1);
+            let mut byte = 0u8;
+            libc::read(go_rx_fd, (&raw mut byte).cast(), 1);
+            Ok(())
+        });
+    }
+    let spawner = std::thread::spawn(move || child.status().expect("spawn child"));
+    ready_rx.read_exact(&mut [0u8; 1]).expect("child forked");
+    drop(table);
+    // The cause: the forked child's descriptor keeps the flock after drop.
+    assert!(
+        matches!(
+            QuestionTable::open_at(&fx.path),
+            Err(QuestionTableError::Locked { .. })
+        ),
+        "a forked child's copy of the lock descriptor did not hold the flock"
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        go_tx.write_all(&[1]).expect("release child");
+    });
+    let reopened = open_at(&fx.path);
+    release.join().expect("release thread");
+    assert!(spawner.join().expect("spawner thread").success());
+    assert!(reopened.state(id).is_some());
+}
+
+/// #9833: the reopen wait must not outlast a real second holder.
+#[test]
+fn retry_locked_still_refuses_a_live_holder() {
+    let fx = fixture();
+    let first = open_at(&fx.path);
+    let grace = Duration::from_millis(200);
+    let started = Instant::now();
+    assert!(matches!(
+        retry_locked(grace, || QuestionTable::open_at(&fx.path)),
+        Err(QuestionTableError::Locked { .. })
+    ));
+    assert!(
+        started.elapsed() >= grace,
+        "gave up before the grace ran out"
+    );
+    drop(first);
+}
+
 #[test]
 fn poisoned_mutex_refuses_every_op() {
     let fx = fixture();
@@ -918,7 +1015,8 @@ async fn poisoned_table_is_reopened_by_the_holder() {
         Err(QuestionTableError::Locked { .. })
     ));
     drop(table);
-    let reopened = state.question_table().expect("reopen");
+    // #9833: wait out a forked child's copy of the dropped table's lock fd.
+    let reopened = retry_locked(REOPEN_GRACE, || state.question_table()).expect("reopen");
     assert!(!reopened.is_poisoned());
     assert!(reopened.state(id).expect("replayed").answered);
 }
