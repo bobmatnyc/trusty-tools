@@ -7,7 +7,7 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-six
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-seven
 //! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
@@ -16,8 +16,8 @@
 //! `session_context_pause` — a DIFFERENT concept from managed-sub-session
 //! lifecycle, kept in the same tool group for file-count reasons only), five
 //! console-facing tools, four project-registry tools, four session-manager
-//! proxy tools, the Disk-dashboard survey (#6927), and `secrets_get_ref`
-//! (#7522) — the [`OrchestratorBackend`] trait the daemon implements to
+//! proxy tools, the Disk-dashboard survey (#6927), `secrets_get_ref`
+//! (#7522) and `ask_owner` (#9856) — the [`OrchestratorBackend`] trait the daemon implements to
 //! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
 //! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
 //! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
@@ -164,6 +164,20 @@ pub trait OrchestratorBackend: Send + Sync {
     /// `secrets_get_ref_reports_a_project_key_without_its_value` (daemon,
     /// real socket).
     async fn secrets_get_ref(&self, project: &str, key: &str) -> Result<Value, String>;
+
+    // ── #9856: the owner question DM ─────────────────────────────────────────
+
+    /// Back `ask_owner`: post one `question` DM to the Slack user `recipient`
+    /// a channel route names, with the daemon-held bot token.
+    ///
+    /// Why: #8433 P4 — the Architect asks its owner; the answer binds to the
+    /// question id (P5). No argument names the asker (#9856 Q1).
+    /// What: the daemon proves the asker from the kernel's peer pid on the
+    /// daemon socket and refuses an unproven one; returns the question id,
+    /// route, DM channel and thread, or an error naming the rule.
+    /// Test: `dispatch_ask_owner_tool` (mock); the decision in
+    /// `channels/ask_owner_tests.rs`.
+    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String>;
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
 
@@ -721,6 +735,14 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
         // #7522: references only, resolved on demand.
         "secrets_get_ref" => match (required_str(&args, "project"), required_str(&args, "key")) {
             (Ok(project), Ok(key)) => backend.secrets_get_ref(&project, &key).await,
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
+        // #9856: the asker is proven by the daemon, never named here.
+        "ask_owner" => match (
+            required_str(&args, "recipient"),
+            required_str(&args, "question"),
+        ) {
+            (Ok(recipient), Ok(question)) => backend.ask_owner(&recipient, &question).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
         // ── #1222: console-facing tools ──────────────────────────────────────

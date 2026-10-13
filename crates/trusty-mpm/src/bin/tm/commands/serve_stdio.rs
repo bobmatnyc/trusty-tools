@@ -26,7 +26,11 @@
 //! Claude Code spawned it inside the managed pane, while the daemon it forwards
 //! to is long-lived and shared.
 //!
-//! Test: `is_notification_*`, `value_to_mcp_response_*`,
+//! #9856: an `ask_owner` call goes over the daemon socket instead
+//! ([`forward_over_socket`]): the daemon proves its asker from the kernel's
+//! peer pid, which only the socket carries.
+//!
+//! Test: `is_notification_*`, `value_to_mcp_response_*`, `socket_tool_*`,
 //! `forward_rpc_errors_on_refused`, and `stamp_*` unit tests below; the
 //! daemon-side `POST /rpc` dispatch is covered by `daemon::api_tests::rpc_*`.
 
@@ -238,6 +242,38 @@ fn stamp_caller_session_id(req: &mut serde_json::Value, managed: Option<&str>) {
     );
 }
 
+/// MCP tools whose call must reach the daemon over its socket (#9856).
+const SOCKET_TOOLS: &[&str] = &["ask_owner"];
+
+/// True for a `tools/call` of one of [`SOCKET_TOOLS`].
+///
+/// Why: #9856 Q1, the daemon proves `ask_owner`'s asker from the socket
+/// peer; over HTTP the call is always refused as unproven.
+/// Test: `socket_tool_call_is_routed_over_the_socket`.
+fn routes_over_socket(req: &serde_json::Value) -> bool {
+    req.get("method").and_then(|m| m.as_str()) == Some("tools/call")
+        && req
+            .pointer("/params/name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|name| SOCKET_TOOLS.contains(&name))
+}
+
+/// Send one MCP request as `mpm.mcp.dispatch` over the daemon socket.
+///
+/// What: the socket client's `POST /rpc` mapping; never a TCP fallback.
+async fn forward_over_socket(req: serde_json::Value) -> Result<serde_json::Value> {
+    let daemon = trusty_mpm::client::DaemonClient::from_resolved_socket()?;
+    daemon
+        .post("/rpc")
+        .json(&req)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await
+}
+
 /// Convert the daemon's JSON-RPC response value into an `mcp::Response`.
 ///
 /// Why: `run_stdio_loop` expects `mcp::Response`; the daemon returns a raw value
@@ -345,7 +381,13 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
             let base_url = trusty_mpm::core::resolve_daemon_url(None);
             let mut req_value = req_to_value(&req);
             stamp_caller_session_id(&mut req_value, managed_session_id.as_deref());
-            match forward_rpc(&client, &base_url, req_value).await {
+            // #9856: the asker of `ask_owner` is proven only over the socket.
+            let forwarded = if routes_over_socket(&req_value) {
+                forward_over_socket(req_value).await
+            } else {
+                forward_rpc(&client, &base_url, req_value).await
+            };
+            match forwarded {
                 Ok(resp_value) => value_to_mcp_response(resp_value),
                 Err(e) => {
                     tracing::warn!("trusty-mpm stdio bridge: transport error: {e:#}");
@@ -365,6 +407,18 @@ pub(crate) async fn run_stdio_bridge() -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #9856: only an `ask_owner` call leaves over the socket.
+    #[test]
+    fn socket_tool_call_is_routed_over_the_socket() {
+        let call = |name: &str| json!({"method": "tools/call", "params": {"name": name}});
+        assert!(routes_over_socket(&call("ask_owner")));
+        assert!(!routes_over_socket(&call("session_list")));
+        assert!(!routes_over_socket(&json!({"method": "tools/list"})));
+        assert!(!routes_over_socket(
+            &json!({"method": "initialize", "params": {"name": "ask_owner"}})
+        ));
+    }
 
     #[test]
     fn build_rpc_client_succeeds() {

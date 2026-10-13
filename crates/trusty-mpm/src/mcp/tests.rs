@@ -234,6 +234,11 @@ impl OrchestratorBackend for MockBackend {
         Ok(json!({ "project": project, "reference": format!("secret://{key}") }))
     }
 
+    // #9856: echoes its arguments so dispatch's wiring is observable.
+    async fn ask_owner(&self, recipient: &str, question: &str) -> Result<Value, String> {
+        Ok(json!({ "recipient": recipient, "question": question }))
+    }
+
     // ── #6927: the Disk dashboard's survey ───────────────────────────────────
     async fn disk_survey(
         &self,
@@ -439,7 +444,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
     // two PM pause/resume context tools `session_context_catchup` /
     // `session_context_pause` + the #6927 Disk survey `disk_survey` + the
-    // #7522 `secrets_get_ref`).
+    // #7522 `secrets_get_ref` + the #9856 `ask_owner`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -448,7 +453,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 36);
+    assert_eq!(tools.as_array().unwrap().len(), 37);
 }
 
 /// Why: #6431's bulk delete must route through dispatch and report per-session
@@ -1718,6 +1723,31 @@ async fn dispatch_secrets_get_ref_tool() {
 
     for args in [json!({ "project": "/repo" }), json!({ "key": "API_TOKEN" })] {
         let resp = dispatch(&MockBackend, call("secrets_get_ref", args.clone())).await;
+        let result = resp.result.expect("a result");
+        assert_eq!(result["isError"], true, "{args}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("missing required string argument"), "{text}");
+    }
+}
+
+/// Why (#9856): `ask_owner` needs both arguments to reach the backend, and a
+/// call missing either fails before the daemon is asked.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_ask_owner_tool() {
+    let args = json!({ "recipient": "U0OWNER1", "question": "Merge now?" });
+    let resp = dispatch(&MockBackend, call("ask_owner", args)).await;
+    let result = resp.result.expect("a result");
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("U0OWNER1"), "{text}");
+    assert!(text.contains("Merge now?"), "{text}");
+
+    for args in [
+        json!({ "recipient": "U0OWNER1" }),
+        json!({ "question": "q" }),
+    ] {
+        let resp = dispatch(&MockBackend, call("ask_owner", args.clone())).await;
         let result = resp.result.expect("a result");
         assert_eq!(result["isError"], true, "{args}");
         let text = result["content"][0]["text"].as_str().expect("text");
