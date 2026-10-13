@@ -209,19 +209,42 @@ fn allowed_commands(fx: &Fixture) -> Vec<String> {
 #[test]
 fn the_kuzu_import_exception_allows_for_every_caller_and_bypass() {
     let (fx, _root) = fixture();
-    for command in allowed_commands(&fx) {
-        let payload = bash_payload(&fx, &command);
+    assert_allowed_for_every_caller(&fx, &allowed_commands(&fx));
+}
+
+// #9794, owner ruling D61: "Allow apply for every caller" — the import
+// without `--dry-run`, with and without `--review-ledger`.
+#[test]
+fn the_kuzu_import_apply_forms_allow_for_every_caller_and_bypass() {
+    let (fx, _root) = fixture();
+    let ledger = "--review-ledger ~/.trusty-tools/kuzu-review/R/ledger.jsonl";
+    let apply = [
+        "trusty-memory import kuzu --discover".to_string(),
+        format!("env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger}"),
+        format!(
+            "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu --discover {ledger} 2>&1 \
+             | tee ~/.trusty-tools/kuzu-review/R/import.txt"
+        ),
+    ];
+    assert_allowed_for_every_caller(&fx, &apply);
+}
+
+/// Asserts each command allows for a PM and a subagent under each bypass,
+/// and for the Architect with and without each bypass.
+fn assert_allowed_for_every_caller(fx: &Fixture, commands: &[String]) {
+    for command in commands {
+        let payload = bash_payload(fx, command);
         for bypass in BYPASSES {
             let env: Vec<(&str, &str)> = bypass.into_iter().collect();
             for stdin in [payload.clone(), as_subagent(&payload)] {
-                let out = run(&fx, &stdin, &env, None);
+                let out = run(fx, &stdin, &env, None);
                 assert!(!out.contains("\"deny\""), "{bypass:?} {stdin}: {out}");
             }
         }
-        let out = run_under_claude(&fx, &payload, true);
+        let out = run_under_claude(fx, &payload, true);
         assert!(!out.contains("\"deny\""), "the Architect, {command}: {out}");
         for bypass in BYPASSES.into_iter().flatten() {
-            let out = run_under_claude_with(&fx, &payload, true, &[bypass]);
+            let out = run_under_claude_with(fx, &payload, true, &[bypass]);
             assert!(!out.contains("\"deny\""), "{bypass:?} {command}: {out}");
         }
     }

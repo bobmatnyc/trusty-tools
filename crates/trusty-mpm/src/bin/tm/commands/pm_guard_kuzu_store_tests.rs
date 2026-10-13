@@ -758,6 +758,43 @@ fn allows_the_dry_run_export_and_review_forms() {
     );
 }
 
+// #9794, owner ruling D61: "Allow apply for every caller". The import
+// without `--dry-run`, `--review-ledger` included, allows in the one decision
+// every caller reaches, and on the Architect's gated path.
+#[test]
+fn allows_the_apply_forms_for_every_caller() {
+    use crate::commands::pm_guard_architect_envfile::evaluate_secret_file_read_gated;
+    use crate::commands::pm_guard_floor::ArchitectGate;
+    use crate::commands::pm_guard_trust_anchor::tests::{
+        allowlist, architect_env, fixture, payload,
+    };
+    let fx = Fx::new();
+    let review = "~/.trusty-tools/kuzu-review";
+    let env = "env -u TRUSTY_MEMORY_PALACE trusty-memory import kuzu";
+    let ledger = format!("--review-ledger {review}/20261012T000000Z-ab12cd34/ledger.jsonl");
+    let apply: Vec<String> = vec![
+        "trusty-memory import kuzu --discover".into(),
+        format!("{env} --discover"),
+        format!("{env} --discover --root ~/p --max-depth 3"),
+        format!("{env} --discover --update --bridge-timeout-secs 600"),
+        format!("{env} --from ~/p --palace x"),
+        format!("{env} --discover {ledger}"),
+        format!("trusty-memory import kuzu --discover --root ~/a --root ~/b {ledger}"),
+        format!("{env} --discover {ledger} 2>&1 | tee {review}/R/import.txt"),
+        format!("{env} --discover {ledger} 2>&1 | tee {SCRATCH}/import.txt"),
+    ];
+    assert_allowed(&fx, &apply);
+    let afx = fixture();
+    for command in &apply {
+        let call = payload(&afx, "Bash", json!({ "command": command }));
+        let gate = ArchitectGate::new(&call, architect_env(&afx), || allowlist(&afx));
+        assert!(gate.is_architect(), "the fixture is the Architect");
+        let deny =
+            evaluate_secret_file_read_gated("Bash", call.get("tool_input"), &afx.project, &gate);
+        assert_eq!(deny, None, "the Architect runs {command:?}");
+    }
+}
+
 #[test]
 fn denies_any_python_flag_with_its_own_slug() {
     let fx = Fx::new();
