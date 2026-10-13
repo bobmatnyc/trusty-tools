@@ -362,6 +362,8 @@ pub mod session_pause_pr;
 // #7830 / ADR-0062: session history is an orphan, append-only commit chain in
 // `refs/tm/sessions/<user>/<key>` — never a commit on a code branch.
 pub mod session_ref_publish;
+// #9160: the pinned gh identity session-ref git network calls run as.
+pub(crate) mod session_ref_identity;
 // #7422: the plugin half of the same default-deny decision — written into the
 // project's `.claude/settings.json`, because Claude Code has no plugin flag.
 pub mod session_plugin_scope;

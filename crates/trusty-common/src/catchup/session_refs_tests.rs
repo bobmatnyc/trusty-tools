@@ -792,3 +792,60 @@ fn catchup_on_a_repo_with_no_origin_creates_none() {
         "no refspec may be written into a repo with no origin"
     );
 }
+
+/// A `GIT_CONFIG_*` env that rewrites `https://fixture.invalid/o/r.git` to
+/// `remote` — standing in for a credential pin, with no network (#9160).
+fn rewrite_env(remote: &Path) -> Vec<(String, String)> {
+    vec![
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            format!("url.{}.insteadOf", remote.display()),
+        ),
+        (
+            "GIT_CONFIG_VALUE_0".to_string(),
+            "https://fixture.invalid/o/r.git".to_string(),
+        ),
+    ]
+}
+
+/// Why (#9160): the fetch ran with the daemon's ambient credential, so a
+/// caller's pinned identity never reached it.
+/// What: origin is an unresolvable https URL; only the supplied env rewrites
+/// it to the local bare remote. Without the env the fetch fails; with it the
+/// caller's own ref is fetched and restored.
+/// Test: itself.
+#[test]
+fn fetch_applies_the_supplied_git_env() {
+    let fx = RemoteFixture::new();
+    fx.push_ref(&RefCommit {
+        user: USER,
+        key: "s-alpha",
+        trailer_session_id: "s-alpha",
+        snapshot_rel: ALPHA,
+        body: BODY,
+        extra: &[],
+    });
+    let fresh = fx.plain_clone("fresh");
+    git_ok(
+        &fresh,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://fixture.invalid/o/r.git",
+        ],
+    );
+
+    let without = hydrate_session_cache(&fresh, &alpha_target());
+    assert!(
+        without.is_err(),
+        "the bare https origin must not resolve: {without:?}"
+    );
+
+    let outcome = hydrate_session_cache_with_env(&fresh, &alpha_target(), &rewrite_env(&fx.remote))
+        .expect("the supplied env must reach the fetch");
+    assert_eq!(outcome.refs_seen, 1, "{outcome:?}");
+    assert!(outcome.own_ref_found, "{outcome:?}");
+    assert_eq!(outcome.snapshots_written.len(), 1, "{outcome:?}");
+}
