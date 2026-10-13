@@ -1,8 +1,9 @@
 //! #9034 regression tests: a slow daemon is not a down daemon, and autostart
 //! keeps a live lock.
 //!
-//! Every test runs against a stub server on an ephemeral port or a refused
-//! loopback port, a temp-dir lock file, and an injected autostart step. None
+//! Every test runs against a stub server on an ephemeral port or an address
+//! whose connect fails at once (#9837), a temp-dir lock file, and an injected
+//! autostart step. None
 //! touches the daemon on 7880, `~/.trusty-mpm/daemon.lock`, or launchd.
 
 use super::*;
@@ -11,8 +12,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Loopback port 1: reserved, never bound, so a connect is refused.
-const REFUSED_URL: &str = "http://127.0.0.1:1";
+/// A URL whose connect fails at once with a connect error, never a timeout.
+///
+/// #9837: not `127.0.0.1:1` — a host that drops a SYN to a closed loopback
+/// port turns that connect into a timeout, which classifies as `Unknown`.
+fn refused_url() -> String {
+    format!("http://{}", crate::commands::dead_addr::dead_addr())
+}
 
 /// A pid no process can hold (above the default `pid_max`).
 const DEAD_PID: u32 = 4_194_303;
@@ -128,7 +134,7 @@ async fn classify_timeout_is_unknown_not_down() {
 #[tokio::test]
 async fn classify_refused_with_live_lock_pid_is_unknown() {
     let client = short_timeout_client();
-    let err = listing_error(&client, REFUSED_URL).await;
+    let err = listing_error(&client, &refused_url()).await;
     let reach = classify_list_failure(&err, Some("daemon.lock names live pid 1"));
     assert!(
         matches!(reach, DaemonReach::Unknown(_)),
@@ -139,7 +145,7 @@ async fn classify_refused_with_live_lock_pid_is_unknown() {
 #[tokio::test]
 async fn classify_refused_without_live_pid_is_down() {
     let client = short_timeout_client();
-    let err = listing_error(&client, REFUSED_URL).await;
+    let err = listing_error(&client, &refused_url()).await;
     assert_eq!(classify_list_failure(&err, None), DaemonReach::Down);
 }
 
@@ -193,9 +199,9 @@ async fn slow_listing_stops_without_autostart() {
 async fn refused_with_live_lock_pid_stops_without_autostart() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, REFUSED_URL, std::process::id());
+    write_lock(&lock, &refused_url(), std::process::id());
     let client = short_timeout_client();
-    let (flow, autostarted) = run_flow(&client, REFUSED_URL, &lock, Ok(String::new())).await;
+    let (flow, autostarted) = run_flow(&client, &refused_url(), &lock, Ok(String::new())).await;
     assert!(
         !autostarted,
         "a live lock pid must not lead to a second daemon"
@@ -208,11 +214,11 @@ async fn refused_without_live_pid_autostarts_then_goes_offline() {
     // Positive control: a down daemon still gets autostart and the fallback.
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, REFUSED_URL, DEAD_PID);
+    write_lock(&lock, &refused_url(), DEAD_PID);
     let client = short_timeout_client();
     let (flow, autostarted) = run_flow(
         &client,
-        REFUSED_URL,
+        &refused_url(),
         &lock,
         Err(anyhow::anyhow!("stub: spawn failed")),
     )
@@ -231,7 +237,7 @@ async fn slow_listing_after_autostart_stops_not_offline() {
     let slow = serve_silent().await;
     let (flow, autostarted) = run_flow(
         &client,
-        REFUSED_URL,
+        &refused_url(),
         &tmp.path().join("daemon.lock"),
         Ok(slow),
     )
@@ -249,7 +255,7 @@ async fn alive_unresponsive_autostart_stops_not_offline() {
     };
     let (flow, _) = run_flow(
         &client,
-        REFUSED_URL,
+        &refused_url(),
         &tmp.path().join("daemon.lock"),
         Err(alive.into()),
     )
@@ -291,11 +297,11 @@ async fn refused_with_unknown_identity_lock_pid_stops_and_keeps_the_lock() {
     // delete the lock nor spawn.
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, REFUSED_URL, std::process::id());
+    write_lock(&lock, &refused_url(), std::process::id());
     let client = short_timeout_client();
     let (flow, autostarted) = run_flow_with(
         &client,
-        REFUSED_URL,
+        &refused_url(),
         &lock,
         PidIdentity::Unknown,
         Err(anyhow::anyhow!("stub: spawn failed")),
@@ -319,7 +325,7 @@ async fn unverified_lock_autostart_error_stops_not_offline() {
     };
     let (flow, _) = run_flow(
         &client,
-        REFUSED_URL,
+        &refused_url(),
         &tmp.path().join("daemon.lock"),
         Err(blocked.into()),
     )
@@ -331,9 +337,9 @@ async fn unverified_lock_autostart_error_stops_not_offline() {
 async fn refused_with_live_lock_pid_message_names_recovery() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let lock = tmp.path().join("daemon.lock");
-    write_lock(&lock, REFUSED_URL, std::process::id());
+    write_lock(&lock, &refused_url(), std::process::id());
     let client = short_timeout_client();
-    let (flow, _) = run_flow(&client, REFUSED_URL, &lock, Ok(String::new())).await;
+    let (flow, _) = run_flow(&client, &refused_url(), &lock, Ok(String::new())).await;
     let msg = assert_stopped(flow);
     assert!(
         msg.contains("tm start") && msg.contains("daemon.lock"),
