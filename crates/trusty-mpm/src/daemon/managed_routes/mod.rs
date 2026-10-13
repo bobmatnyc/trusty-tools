@@ -31,6 +31,9 @@ pub(crate) mod cores;
 pub mod delete;
 mod deliverable_link;
 mod deployment_check;
+// #8454 VC: the egress hook's policy verdict from the daemon's snapshot.
+#[cfg(feature = "channels")]
+pub mod egress_verdict;
 // #94: the per-session file-change view over the hook-event ring buffer.
 pub mod files;
 pub mod fleet;
@@ -117,6 +120,19 @@ use summary::{
     attach_cmd_for, checked_summaries, numbered_summaries, parse_id, reconcile_against_tmux,
     record_to_summary, record_to_summary_checked,
 };
+
+/// The egress verdict sub-router (#8454 VC); no route in a build without
+/// the `channels` feature, which has no policy snapshot to answer from.
+pub fn egress_verdict_router() -> axum::Router<Arc<DaemonState>> {
+    #[cfg(feature = "channels")]
+    {
+        egress_verdict::router()
+    }
+    #[cfg(not(feature = "channels"))]
+    {
+        axum::Router::new()
+    }
+}
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 

@@ -22,7 +22,8 @@ pub const NOT_READY_CHECK: &str = "egress-policy-not-ready";
 pub const HOOK_LOAD_LIMIT: Duration = Duration::from_millis(1500);
 
 /// Which host-ceiling fault left the policy not ready.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// #8454 VC: serde for the daemon's egress verdict reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HostBranch {
     /// No home directory is known (B1).
     HomeUnknown,
@@ -65,7 +66,8 @@ impl std::fmt::Display for HostBranch {
 /// `file_not_in_effect_denies_a_gated_call`, `load_past_deadline_denies`,
 /// `load_panic_denies`, `empty_policy_with_enabled_channel_denies`,
 /// `build_without_channels_feature_denies`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+// #8454 VC: serde for the daemon's egress verdict reply.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum NotReady {
     /// The host ceiling was refused (B1-B4).
     #[error("{branch} ({error})")]
@@ -108,6 +110,13 @@ pub enum NotReady {
     /// This build has no `channels` feature (B9).
     #[error("this build has no `channels` feature, so it cannot load the policy")]
     Unsupported,
+    /// The daemon answered the egress verdict query with a reply the hook
+    /// cannot use: a non-2xx status or a malformed body (#8454 VC).
+    #[error("the daemon's policy verdict was unusable ({detail})")]
+    Unanswered {
+        /// A fixed description of the fault; never a reply byte.
+        detail: String,
+    },
 }
 
 impl NotReady {
