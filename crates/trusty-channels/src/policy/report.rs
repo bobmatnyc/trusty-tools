@@ -74,6 +74,7 @@ impl LoadReport {
                     s.state = FileState::Withheld;
                     s.gchat_connection = None;
                     s.gchat_spaces.clear();
+                    s.verified_commit = None;
                 }
                 s
             })

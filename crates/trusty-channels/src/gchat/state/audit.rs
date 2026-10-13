@@ -11,15 +11,14 @@
 //! [`AuditLog::record`] appends one line; [`AuditLog::record_all`] appends a
 //! batch with one write.
 //! Test: `audit_lines_never_contain_message_text`,
-//! `audit_record_keys_are_the_allowlist`, `record_all_appends_every_line`,
-//! `owner_only_log_creates_file_0600`.
+//! `record_all_appends_every_line`, `owner_only_log_creates_file_0600`.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::gchat::error::StateError;
-use crate::gchat::state::{append_line, now_rfc3339};
+use crate::gchat::state::{append_bytes, append_line, now_rfc3339};
 
 /// The longest identifier copied into an audit line.
 const MAX_FIELD_CHARS: usize = 254;
@@ -146,10 +145,15 @@ impl AuditLog {
     /// Why: #9832 (A3): the tm daemon's channel audit names projects,
     /// commits and authors; other local users must not read it. gchat's
     /// state files keep the mode they are created with ([`AuditLog::new`]).
-    /// What: seam; see the implementation commit.
-    /// Test: `owner_only_log_creates_file_0600`.
+    /// What: as [`AuditLog::new`], except each write creates the file 0600
+    /// and narrows an existing file to 0600 before it appends.
+    /// Test: `owner_only_log_creates_file_0600`,
+    /// `gchat_log_keeps_an_existing_file_mode`.
     pub fn owner_only(path: &Path) -> Self {
-        Self::new(path)
+        Self {
+            path: path.to_path_buf(),
+            owner_only: true,
+        }
     }
 
     /// The log path.
@@ -166,10 +170,55 @@ impl AuditLog {
     ///
     /// Why: #9832: a route change is durable before the routes go live, so
     /// one batch is one write and one fsync.
-    /// What: seam; see the implementation commit.
-    /// Test: `record_all_appends_every_line`.
+    /// What: encodes every record as one JSON line, then appends them all
+    /// with one `write_all` and one `sync_data`; an empty batch writes
+    /// nothing. An encode or I/O failure returns the error and appends
+    /// nothing it can avoid; a crash mid-write can leave a torn last line.
+    /// Test: `record_all_appends_every_line`, `owner_only_log_creates_file_0600`.
     pub fn record_all(&self, records: &[AuditRecord]) -> Result<(), StateError> {
-        let _ = (records, self.owner_only);
-        Ok(())
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut bytes = Vec::new();
+        for record in records {
+            serde_json::to_writer(&mut bytes, record).map_err(|e| StateError::Corrupt {
+                path: self.path.clone(),
+                line: 0,
+                reason: format!("cannot encode record: {e}"),
+            })?;
+            bytes.push(b'\n');
+        }
+        if self.owner_only {
+            append_owner_only(&self.path, &bytes)
+        } else {
+            append_bytes(&self.path, &bytes)
+        }
     }
+}
+
+/// Append `bytes` to `path` with one `write_all` and an fsync, creating the
+/// file 0600 and narrowing an existing one to 0600 first (#9832 A3).
+#[cfg(unix)]
+fn append_owner_only(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let io = |e: std::io::Error| StateError::io(path, &e);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(io)?;
+    // #9832: narrow through the open handle, so a swapped path is not chmodded.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(io)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_data())
+        .map_err(io)
+}
+
+/// Owner-only modes are a Unix notion; elsewhere this is a plain append.
+#[cfg(not(unix))]
+fn append_owner_only(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    append_bytes(path, bytes)
 }
