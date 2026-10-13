@@ -39,11 +39,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::engine::PalaceRegistry;
 use crate::engine::decay::DecayConfig;
 use crate::engine::palace::Drawer;
 use crate::engine::store::kg_redb::KgStoreRedb;
-use crate::engine::store::rooms::{list_room_summaries, RoomSummary};
-use crate::engine::PalaceRegistry;
+use crate::engine::store::rooms::{RoomSummary, list_room_summaries};
 use anyhow::{Context, Result};
 
 use super::log_index::InjectionIndex;

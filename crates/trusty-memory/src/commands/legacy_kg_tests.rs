@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::engine::palace::PalaceId;
-use crate::engine::retrieval::{recall_with_default_embedder, PalaceHandle};
+use crate::engine::retrieval::{PalaceHandle, recall_with_default_embedder};
 use crate::engine::store::kg_redb::KgStoreRedb;
 
 /// Room every legacy fixture drawer sits in.
@@ -169,9 +169,11 @@ fn dry_run_counts_legacy_drawers_and_writes_nothing() {
         embed_error: Some("embedder down".into()),
         ..LegacyReport::default()
     };
-    assert!(failed
-        .render()
-        .contains("FAILED after the import committed"));
+    assert!(
+        failed
+            .render()
+            .contains("FAILED after the import committed")
+    );
 
     let after = (bytes(&dir.join("kg.db")), bytes(&dir.join("kg.redb")));
     assert!(before == after, "a dry run changed kg.db or kg.redb");

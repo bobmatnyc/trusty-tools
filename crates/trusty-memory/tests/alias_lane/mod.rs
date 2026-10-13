@@ -19,8 +19,8 @@
 //! Test: used by `bm25_alias_recall.rs` and `bm25_alias_write.rs`.
 
 use trusty_common::palace_alias::PalaceAliasStore;
-use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::AppState;
+use trusty_memory::engine::palace::{Palace, PalaceId};
 
 /// Turn the lexical lane on.
 ///

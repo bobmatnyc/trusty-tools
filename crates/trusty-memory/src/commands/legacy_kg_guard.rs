@@ -17,20 +17,20 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engine::filter::{check_secret, FilterReject};
+use crate::engine::filter::{FilterReject, check_secret};
 use crate::engine::palace::Drawer;
 use crate::engine::retrieval::RememberOptions;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::engine::store::concurrent_open::try_open_or_snapshot;
 use crate::engine::store::OpenIntent;
+use crate::engine::store::concurrent_open::try_open_or_snapshot;
 use std::panic::AssertUnwindSafe;
 
 use super::{COPIED_SUFFIXES, INDEX_FILE, LEGACY_KG_FILE};
-use crate::commands::store_snapshot::{with_store_copy, KG_FILE, SCRATCH_PREFIX};
+use crate::commands::store_snapshot::{KG_FILE, SCRATCH_PREFIX, with_store_copy};
 use crate::tools::helpers::{blocklist_gate, content_gate, mcp_remember_opts};
 
 /// Name prefix of a backup directory inside the palace dir.

@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::engine::maintenance_lease::MAINTENANCE_LOCK_FILE;
 
 use super::super::CheckStatus;
-use super::{classify_lease, palace_locks_verdict, pid_liveness, LeaseHolder};
+use super::{LeaseHolder, classify_lease, palace_locks_verdict, pid_liveness};
 
 /// Write `content` as the lease file under `root`.
 fn seed_lease(root: &Path, content: &str) {

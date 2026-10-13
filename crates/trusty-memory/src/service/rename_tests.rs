@@ -14,12 +14,12 @@ use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::palace_emptiness::PalaceNotEmpty;
 use crate::engine::registry::{PalaceRenameError, RenameOptions};
 use crate::engine::store::{PalaceStore, PalaceStoreError};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::rename::{count_refusal, RenameError};
+use super::rename::{RenameError, count_refusal};
 use crate::service::MemoryService;
 use crate::tools::dispatch_tool;
-use crate::transport::rpc::{error_codes, JsonRpcResponse};
+use crate::transport::rpc::{JsonRpcResponse, error_codes};
 use crate::{AppState, DaemonEvent};
 
 /// Bound on any single rename in these tests; a deadlock trips it.

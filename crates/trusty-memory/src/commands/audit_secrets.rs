@@ -30,16 +30,16 @@
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::engine::filter::{check_secret, find_secret_spans, FilterReject};
 use crate::engine::PalaceRegistry;
+use crate::engine::filter::{FilterReject, check_secret, find_secret_spans};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::store_snapshot::{sweep_stale_copies, with_store_copy, SCRATCH_PREFIX, STALE_COPY_AGE};
+use super::store_snapshot::{SCRATCH_PREFIX, STALE_COPY_AGE, sweep_stale_copies, with_store_copy};
 
 /// Arguments of `trusty-memory audit` (#8645).
 ///
@@ -321,10 +321,10 @@ pub fn scan_palaces(
         }
         out.push(counts);
     }
-    if let Some(name) = palace_filter {
-        if out.is_empty() {
-            anyhow::bail!("no palace named `{name}` under {}", registry_dir.display());
-        }
+    if let Some(name) = palace_filter
+        && out.is_empty()
+    {
+        anyhow::bail!("no palace named `{name}` under {}", registry_dir.display());
     }
     Ok(out)
 }

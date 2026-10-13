@@ -219,7 +219,7 @@ pub fn migrate_config_file(path: &Path, dry_run: bool) -> ConfigMigrateResult {
             return ConfigMigrateResult {
                 path: path.to_path_buf(),
                 status: ConfigMigrateStatus::Skipped,
-            }
+            };
         }
     };
 

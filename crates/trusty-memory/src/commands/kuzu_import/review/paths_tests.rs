@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::paths::*;
 use super::ReviewError;
+use super::paths::*;
 
 fn canon(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).expect("canonicalize")

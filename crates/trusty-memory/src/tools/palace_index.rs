@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 use crate::engine::room_identity::room_type_tag;
 use crate::engine::store::kg_redb::KgStoreRedb;
-use crate::engine::store::rooms::{list_room_summaries, RoomSummary};
+use crate::engine::store::rooms::{RoomSummary, list_room_summaries};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::helpers::open_palace_handle;

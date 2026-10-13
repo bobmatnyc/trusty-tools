@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use super::CheckResult;
 use crate::prompt_facts::{
-    render_stale_tier_s_report, stale_tier_s_facts, TierSFact, PROMPT_FACTS_METHOD,
-    TIER_S_MAX_FACTS, TIER_S_REAFFIRM_DAYS,
+    PROMPT_FACTS_METHOD, TIER_S_MAX_FACTS, TIER_S_REAFFIRM_DAYS, TierSFact,
+    render_stale_tier_s_report, stale_tier_s_facts,
 };
 
 /// Budget for the prompt-facts fetch.

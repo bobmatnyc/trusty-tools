@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::candidates::build_census;
 use super::log_index::InjectionIndex;
 use super::render::{render_json, render_text};
-use super::signals::{observe, Signal};
+use super::signals::{Signal, observe};
 use crate::commands::prompt_context::format::drawer_preview;
 
 // ---------------------------------------------------------------- helpers
@@ -360,8 +360,8 @@ fn predates_log_window_is_silent_when_no_log_was_scanned() {
 
 /// Build a palace on disk and return (registry_dir, palace_slug).
 fn fixture_palace(root: &Path, slug: &str, drawers: &[Drawer]) {
-    use crate::engine::store::kg_redb::KgStoreRedb;
     use crate::engine::store::OpenIntent;
+    use crate::engine::store::kg_redb::KgStoreRedb;
     use std::sync::Arc;
 
     let data_dir = root.join(slug);
@@ -809,11 +809,13 @@ fn json_round_trips() {
     assert_eq!(v["candidates"][0]["drawer_id"], d.id.to_string());
     assert_eq!(v["candidates"][0]["injections"], 1);
     assert_eq!(v["coverage"]["injections_counted"], 1);
-    assert!(v["candidates"][0]["signals"]
-        .as_array()
-        .expect("signals")
-        .iter()
-        .any(|s| s == "tag:status"));
+    assert!(
+        v["candidates"][0]["signals"]
+            .as_array()
+            .expect("signals")
+            .iter()
+            .any(|s| s == "tag:status")
+    );
 }
 
 #[test]

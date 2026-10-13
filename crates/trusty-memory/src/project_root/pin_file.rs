@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 
 use crate::messaging::slugify_string;
 
-use super::detection::{find_project_root, is_unsafe_pin_location, TRUSTY_TOOLS_DIR};
+use super::detection::{TRUSTY_TOOLS_DIR, find_project_root, is_unsafe_pin_location};
 
 // #5811: schema and read path are shared. A second definition here would let
 // the writer and the readers drift on the same file.
-pub use trusty_common::palace_resolve::{ProjectPin, PIN_FILE_REL, PIN_SCHEMA_VERSION};
+pub use trusty_common::palace_resolve::{PIN_FILE_REL, PIN_SCHEMA_VERSION, ProjectPin};
 
 /// Read the palace pin from `.trusty-tools/trusty-memory.yaml` at `root`.
 ///
@@ -94,11 +94,7 @@ pub fn write_project_pin(root: &Path, pin: &ProjectPin) -> Result<PathBuf> {
 pub fn project_slug_from_basename(root: &Path) -> Option<String> {
     let basename = root.file_name()?.to_str()?;
     let slug = trusty_common::palace_id::clamp_palace_id(&slugify_string(basename));
-    if slug.is_empty() {
-        None
-    } else {
-        Some(slug)
-    }
+    if slug.is_empty() { None } else { Some(slug) }
 }
 
 /// Read the pin at the project root above `start`, failing closed.

@@ -224,13 +224,13 @@ impl PromptLogger {
                 Some(d) => d,
                 None => continue,
             };
-            if date < cutoff {
-                if let Err(e) = std::fs::remove_file(entry.path()) {
-                    tracing::warn!(
-                        "trusty-memory prompt log: prune {}: {e}",
-                        entry.path().display()
-                    );
-                }
+            if date < cutoff
+                && let Err(e) = std::fs::remove_file(entry.path())
+            {
+                tracing::warn!(
+                    "trusty-memory prompt log: prune {}: {e}",
+                    entry.path().display()
+                );
             }
         }
     }
@@ -273,8 +273,8 @@ pub(super) fn hash_prompt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::config::{
-        is_off, is_on, DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS, ENV_DIR, ENV_ENABLED,
-        ENV_HASH_PROMPTS, ENV_MAX_BYTES, ENV_RETENTION_DAYS,
+        DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS, ENV_DIR, ENV_ENABLED, ENV_HASH_PROMPTS,
+        ENV_MAX_BYTES, ENV_RETENTION_DAYS, is_off, is_on,
     };
     use super::*;
     use std::path::{Path, PathBuf};

@@ -9,17 +9,17 @@
 //! Test: `all_tools_returns_expected_set`,
 //! `execute_tool_dispatches_known_tools` in `tools_tests.rs`.
 
+use crate::AppState;
+use crate::engine::PalaceRegistry;
 use crate::engine::dream::PersistedDreamStats;
 use crate::engine::palace::{PalaceId, RoomType};
 use crate::engine::store::kg::Triple;
-use crate::engine::PalaceRegistry;
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
 use crate::service::recall_stream::RecallAllScope;
-use crate::service::{load_user_config, palace_info_from, DreamStatusPayload, MemoryService};
-use crate::AppState;
+use crate::service::{DreamStatusPayload, MemoryService, load_user_config, palace_info_from};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use trusty_common::{ChatMessage, ToolDef};
 
 // ---------------------------------------------------------------------------
@@ -333,17 +333,18 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
         .recall_ranked(palace_id, query, top_k, false)
         .await;
     match ranked {
-        Ok(hits) => json!(hits
-            .into_iter()
-            .map(|r| json!({
-                "drawer_id": r.drawer.id.to_string(),
-                "content": r.drawer.content(),
-                "importance": r.drawer.importance,
-                "tags": r.drawer.tags,
-                "score": r.score,
-                "layer": r.layer,
-            }))
-            .collect::<Vec<_>>()),
+        Ok(hits) => json!(
+            hits.into_iter()
+                .map(|r| json!({
+                    "drawer_id": r.drawer.id.to_string(),
+                    "content": r.drawer.content(),
+                    "importance": r.drawer.importance,
+                    "tags": r.drawer.tags,
+                    "score": r.score,
+                    "layer": r.layer,
+                }))
+                .collect::<Vec<_>>()
+        ),
         Err(e) => json!({ "error": format!("recall {palace_id}: {e}") }),
     }
 }

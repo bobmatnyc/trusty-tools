@@ -7,7 +7,7 @@
 //! Test: `tool_definitions_lists_all_tools`,
 //! `tool_definitions_drops_palace_required_when_default_set` in `tools::tests`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::chat_definitions::chat_tool_definitions;
 use super::embed_audit_definitions::embed_audit_tool_definitions;

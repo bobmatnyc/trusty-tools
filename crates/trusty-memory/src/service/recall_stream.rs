@@ -30,12 +30,12 @@
 //! `recall_streamed_visits_every_palace_in_bounded_batches` in
 //! `recall_stream_tests`; the ADR-0071 criteria in `recall_scope_tests`.
 
+use crate::AppState;
+use crate::engine::PalaceHandle;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::retrieval::{CrossPalaceRecall, CrossPalaceResult};
-use crate::engine::PalaceHandle;
-use crate::AppState;
-use anyhow::{bail, Result};
-use serde_json::{json, Map, Value};
+use anyhow::{Result, bail};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -562,7 +562,7 @@ impl Merger {
 #[cfg(test)]
 mod coverage_tests {
     use super::{RecallAllScope, RecallCoverage};
-    use serde_json::{json, Map};
+    use serde_json::{Map, json};
 
     /// Why (#9299): each not-searched reason must reach the wire and turn
     /// `coverage` partial; a filter failure has no runtime route in a test,

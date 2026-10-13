@@ -181,7 +181,7 @@ pub(crate) fn build_launchd_config(
     exe: std::path::PathBuf,
     log_dir: std::path::PathBuf,
 ) -> trusty_common::launchd::LaunchdConfig {
-    use trusty_common::launchd::{KeepAlive, LaunchdConfig, LAUNCHD_FD_LIMIT};
+    use trusty_common::launchd::{KeepAlive, LAUNCHD_FD_LIMIT, LaunchdConfig};
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
         exe_path: exe,
@@ -358,7 +358,7 @@ fn ensure_fastembed_cache_dir() {
 /// `service_start_fails_when_the_kickstarted_unit_never_runs`.
 #[cfg(target_os = "macos")]
 fn service_start() -> Result<()> {
-    use super::stop::launchd::{start_loaded_unit, StartOutcome, UserLaunchAgent};
+    use super::stop::launchd::{StartOutcome, UserLaunchAgent, start_loaded_unit};
     service_install()?;
     // #8750: an idle loaded unit stays down unless something kickstarts it.
     if let StartOutcome::Kickstarted(pid) =

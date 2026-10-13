@@ -20,15 +20,15 @@
 //! `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
 //! `merge_reports_a_failed_repoint_and_leaves_the_fact_readable`.
 
-use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use crate::engine::store::OpenIntent;
+use crate::engine::store::kg::{KnowledgeGraph, Triple};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 
-use super::kg_rebuild::{scan_active_triples, STRUCTURAL_PREFIXES};
+use super::kg_rebuild::{STRUCTURAL_PREFIXES, scan_active_triples};
 use super::maintenance_gate::require_state_lease;
-use crate::kg_extract::{canonical_entity, is_stop_token, AUTO_PROVENANCE};
 use crate::AppState;
+use crate::kg_extract::{AUTO_PROVENANCE, canonical_entity, is_stop_token};
 
 /// One fact's move from a punctuated node onto the cleaned one.
 ///

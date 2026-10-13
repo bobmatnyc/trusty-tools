@@ -58,14 +58,14 @@ use serde_json::Value;
 #[cfg(feature = "server")]
 use tracing::info;
 #[cfg(feature = "server")]
-use trusty_common::uds::server::{serve_until, RpcError, RpcFallback, RpcRouter, RpcServeOptions};
+use trusty_common::uds::server::{RpcError, RpcFallback, RpcRouter, RpcServeOptions, serve_until};
 
 #[cfg(feature = "server")]
 use crate::transport::methods::{activity, admin, chat, health, kg, palaces, protocol};
 #[cfg(feature = "server")]
-use crate::transport::rpc::{dispatch, JsonRpcRequest};
+use crate::transport::rpc::{JsonRpcRequest, dispatch};
 #[cfg(feature = "server")]
-use crate::{is_data_dir_override_active, AppState};
+use crate::{AppState, is_data_dir_override_active};
 
 /// The method `trusty-console`'s connector and `tctl`'s probe dial.
 ///

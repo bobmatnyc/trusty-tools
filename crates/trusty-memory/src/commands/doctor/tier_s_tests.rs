@@ -16,7 +16,7 @@
 
 use super::super::CheckStatus;
 use super::interpret_tier_s_facts;
-use crate::prompt_facts::{TierSFact, TIER_S_REAFFIRM_DAYS};
+use crate::prompt_facts::{TIER_S_REAFFIRM_DAYS, TierSFact};
 use chrono::{DateTime, Duration, Utc};
 
 /// A fixed clock so no test depends on wall time.

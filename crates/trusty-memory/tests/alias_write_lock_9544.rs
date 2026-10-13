@@ -23,8 +23,7 @@ use trusty_memory::tools::dispatch_tool;
 const ATTEMPTS: usize = 8;
 
 /// Long enough to clear the 8-token MCP filter.
-const TEXT: &str =
-    "Concurrent identical writes through an alias and its target palace must collapse to one drawer";
+const TEXT: &str = "Concurrent identical writes through an alias and its target palace must collapse to one drawer";
 
 /// Why (#9544): see the module doc.
 /// What: per attempt, builds a fresh aliased palace, releases two

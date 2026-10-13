@@ -64,9 +64,9 @@ mod rename_tests;
 // their new home here so `crate::service::X` call sites are unaffected.
 pub use core::MemoryService;
 pub use helpers::{
-    drawer_content_preview, drawer_snippet, enrich_gap_exploration, palace_info_from,
-    recall_entry_json, refresh_gaps_cache, service_result_to_anyhow, DRAWER_PREVIEW_MAX_CHARS,
-    DRAWER_SNIPPET_MAX_CHARS,
+    DRAWER_PREVIEW_MAX_CHARS, DRAWER_SNIPPET_MAX_CHARS, drawer_content_preview, drawer_snippet,
+    enrich_gap_exploration, palace_info_from, recall_entry_json, refresh_gaps_cache,
+    service_result_to_anyhow,
 };
 // #4670 added KgNeighborsPayload / KgNodeView / KgSeedPayload — the
 // progressive graph-exploration payloads.
@@ -75,4 +75,4 @@ pub use types::{
     KgNeighborsPayload, KgNodeView, KgSeedPayload, ListDrawersQuery, PalaceInfo, ServiceError,
     ServiceResult, StatusPayload,
 };
-pub use user_config::{dream_config_from_user_config, load_user_config, LoadedUserConfig};
+pub use user_config::{LoadedUserConfig, dream_config_from_user_config, load_user_config};

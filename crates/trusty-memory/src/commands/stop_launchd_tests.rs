@@ -274,7 +274,7 @@ fn stop_message_names_the_command_that_restarts_the_daemon() {
 /// Only launchd's not-found answer is "not loaded".
 #[test]
 fn launchctl_print_exits_classify_into_loaded_absent_or_error() {
-    use launchd::{classify_print, PrintVerdict};
+    use launchd::{PrintVerdict, classify_print};
     let not_found = "Bad request.\nCould not find service \"com.trusty.memory\" in domain";
     for (code, stderr, want) in [
         (Some(0), "", PrintVerdict::Loaded),

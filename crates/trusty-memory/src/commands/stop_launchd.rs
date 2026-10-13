@@ -23,11 +23,11 @@
 //! `service_start_kickstarts_a_loaded_unit_with_no_pid`,
 //! `launchctl_print_exits_classify_into_loaded_absent_or_error`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::time::{Duration, Instant};
 
-use super::{daemon_pids_in, pid_alive, stop_daemons_in, ProcInfo};
+use super::{ProcInfo, daemon_pids_in, pid_alive, stop_daemons_in};
 
 /// launchd's view of the daemon's LaunchAgent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

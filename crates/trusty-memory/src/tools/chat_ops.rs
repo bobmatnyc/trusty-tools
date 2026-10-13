@@ -15,15 +15,15 @@
 //! to them.
 //! Test: `crates/trusty-memory/tests/chat_mcp.rs`.
 
-use crate::engine::store::chat_sessions::ChatMessage;
 use crate::AppState;
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use crate::engine::store::chat_sessions::ChatMessage;
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 
 use super::helpers::resolve_palace;
 // #6318: the three session READ tools fall back to a palace index; create,
 // add_turn, turn_append and delete write, so they keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 
 /// Roles accepted on a chat turn. Mirrors the OpenAI/Anthropic message-role
 /// vocabulary the spec's `chat_session_add_turn` schema enumerates.

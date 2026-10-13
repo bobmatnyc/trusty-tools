@@ -16,11 +16,11 @@
 //! Test: `super::super::uds::tests` — `rpc_chat_providers_*`, `rpc_messages_*`.
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::service::load_user_config;
-use crate::transport::api_error::{open_handle, ApiError};
+use crate::transport::api_error::{ApiError, open_handle};
 use crate::{ActivitySource, AppState, DaemonEvent};
 
 use super::{CallerParams, NoParams};

@@ -8,7 +8,7 @@
 
 use super::*;
 // #9269: `handle_message` (and the `json!` import it carried) moved to `mcp_message`.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests
 /// could keep using `AppState` without juggling the directory handle, but
@@ -42,6 +42,7 @@ fn test_state_warming() -> (AppState, tempfile::TempDir) {
     // remaining consistent with the idempotent-write approach used in
     // `test_state()`.
     static SKIP_ENFORCEMENT_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    // SAFETY: the OnceLock runs this write once; every writer of this key sets the same "1".
     SKIP_ENFORCEMENT_SET.get_or_init(|| unsafe {
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
     });
@@ -140,7 +141,7 @@ async fn app_state_default_constructs() {
 /// size `max_open_palaces`.
 #[tokio::test]
 async fn machine_budget_is_detected_and_self_consistent() {
-    use trusty_common::machine_tier::{MachineBudget, MemoryTier, MEMORY_LIMIT_FLOOR_MB};
+    use trusty_common::machine_tier::{MEMORY_LIMIT_FLOOR_MB, MachineBudget, MemoryTier};
     let (s, _tmp) = test_state();
     let m = s.machine;
     assert!(m.total_ram_mb > 0, "a budget of zero RAM is never correct");
@@ -184,8 +185,8 @@ fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
     // SAFETY: libc::geteuid is a thread-safe syscall with no preconditions.
     if unsafe { libc::geteuid() } == 0 {
         eprintln!(
-                "skipping open_activity_log_with_fallback_returns_discard_when_unwritable: running as root"
-            );
+            "skipping open_activity_log_with_fallback_returns_discard_when_unwritable: running as root"
+        );
         return;
     }
 
@@ -230,10 +231,11 @@ fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
         .expect("discard append must succeed");
     assert_eq!(id, 0);
     assert_eq!(log.count().expect("discard count"), 0);
-    assert!(log
-        .list(&ActivityFilter::default(), 10, 0)
-        .expect("discard list")
-        .is_empty());
+    assert!(
+        log.list(&ActivityFilter::default(), 10, 0)
+            .expect("discard list")
+            .is_empty()
+    );
 }
 
 /// Why: Issue #26 — when `serve --palace <name>` is set, the MCP server
@@ -665,8 +667,8 @@ fn incompatible_palace_fixture() -> (
 /// Test: this test itself.
 #[tokio::test]
 async fn load_palaces_from_disk_honours_registry_open_intent() {
-    use crate::engine::store::redb_open::INCOMPATIBLE_SUFFIX;
     use crate::engine::store::OpenIntent;
+    use crate::engine::store::redb_open::INCOMPATIBLE_SUFFIX;
 
     // Phase 1 — a read-only client must refuse and leave the store where it is.
     let (_ro_tmp, ro_root, ro_pid, ro_store) = incompatible_palace_fixture();
@@ -1310,6 +1312,7 @@ async fn bm25_lane_disabled_by_default() {
 async fn bm25_lane_enabled_when_env_set() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var("TRUSTY_BM25_DAEMON", "1");
     }
@@ -1377,6 +1380,7 @@ async fn multi_tenant_mode_disabled_by_default() {
 async fn multi_tenant_mode_enabled_when_env_set() {
     let _guard = crate::commands::env_test_lock().lock().await;
     let prev = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").ok();
+    // SAFETY: `env_test_lock()` is held, serialising every env writer in this test binary.
     unsafe {
         std::env::set_var("TRUSTY_MEMORY_MULTI_TENANT", "1");
     }

@@ -40,8 +40,7 @@ const MCP_ENTRYPOINT_ARG: &str = "serve";
 const LEGACY_TRANSPORT_FLAG: &str = "--stdio";
 
 /// The transport contract the canonical vector selects.
-const TRANSPORT_CONTRACT: &str =
-    "MCP over stdio; the process stays attached to stdin/stdout and starts the \
+const TRANSPORT_CONTRACT: &str = "MCP over stdio; the process stays attached to stdin/stdout and starts the \
      daemon itself when one is not already running";
 
 /// One MCP-client registration of trusty-memory, as read off disk.
@@ -446,9 +445,11 @@ mod tests {
     /// `--palace=value` is the same pin as `--palace value`.
     #[test]
     fn equals_form_of_the_palace_flag_is_recognised() {
-        assert!(reg(&["serve", "--palace=x"])
-            .binding()
-            .contains("palace 'x'"));
+        assert!(
+            reg(&["serve", "--palace=x"])
+                .binding()
+                .contains("palace 'x'")
+        );
     }
 
     /// No registration at all is a warning that names the file and the fix.

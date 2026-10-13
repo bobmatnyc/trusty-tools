@@ -454,12 +454,11 @@ fn read_origin_url(root: &Path) -> Option<String> {
         .arg("--get")
         .arg("remote.origin.url")
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
-                return Some(url);
-            }
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
         }
     }
 
@@ -475,14 +474,12 @@ fn read_origin_url(root: &Path) -> Option<String> {
             in_origin = trimmed == "[remote \"origin\"]";
             continue;
         }
-        if in_origin {
-            if let Some(rest) = trimmed.strip_prefix("url") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    let url = rest.trim().to_string();
-                    if !url.is_empty() {
-                        return Some(url);
-                    }
+        if in_origin && let Some(rest) = trimmed.strip_prefix("url") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let url = rest.trim().to_string();
+                if !url.is_empty() {
+                    return Some(url);
                 }
             }
         }

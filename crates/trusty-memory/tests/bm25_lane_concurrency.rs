@@ -24,10 +24,10 @@
 use std::sync::Arc;
 
 use serde_json::json;
+use trusty_memory::AppState;
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 
 /// Build an `AppState` with the lane armed at an explicit residency cap.
 ///
@@ -205,11 +205,11 @@ async fn writes_through_the_tool_surface_survive_eviction() {
         // assume the indexer worker has drained.
         let mut found = Vec::new();
         for _ in 0..100 {
-            if let Ok(hits) = lane.search(palace, token, 10).await {
-                if !hits.is_empty() {
-                    found = hits.into_iter().map(|h| h.doc_id).collect();
-                    break;
-                }
+            if let Ok(hits) = lane.search(palace, token, 10).await
+                && !hits.is_empty()
+            {
+                found = hits.into_iter().map(|h| h.doc_id).collect();
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }

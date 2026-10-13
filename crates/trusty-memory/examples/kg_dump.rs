@@ -26,7 +26,7 @@
 //!       --example kg_dump -- --whole-file > after.txt`
 
 use std::io::{BufRead, Write};
-use trusty_memory::kg_extract::{extract_triples, ExtractInput};
+use trusty_memory::kg_extract::{ExtractInput, extract_triples};
 use uuid::Uuid;
 
 const PATTERN_PREDICATES: &[&str] = &["is-a", "works-at", "uses", "depends-on"];

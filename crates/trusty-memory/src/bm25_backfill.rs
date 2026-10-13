@@ -78,8 +78,8 @@ use std::time::{Duration, Instant};
 use crate::engine::palace::Drawer;
 use crate::engine::retrieval::PalaceHandle;
 
-use crate::bm25_lane::Bm25Lane;
 use crate::AppState;
+use crate::bm25_lane::Bm25Lane;
 
 /// Whole-palace time budget.
 ///

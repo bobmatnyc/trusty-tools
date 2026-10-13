@@ -11,8 +11,8 @@
 //! Test: `bm25_index_queue_drops_when_full`, `bm25_lane_tests.rs`, and
 //! `tests/bm25_alias_recall.rs` / `tests/bm25_alias_write.rs`.
 
-use crate::bm25_lane::BM25Hit;
 use crate::AppState;
+use crate::bm25_lane::BM25Hit;
 use uuid::Uuid;
 
 // Why (#5329): `bm25_data_dir_for_palace` was REMOVED from this module. It

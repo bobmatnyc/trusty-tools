@@ -9,7 +9,7 @@
 //! Test: types are covered by the scanner and integration tests in sibling
 //! modules.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 /// A single bootstrap discovery before it becomes a Triple.
@@ -68,8 +68,7 @@ pub struct BootstrapResult {
 /// this with one line of code at the call site.
 /// What: Static string, kept in this module so tests can pin it.
 /// Test: `kg_query_reports_graph_empty_when_graph_has_no_triples`.
-pub const KG_EMPTY_HINT: &str =
-    "Knowledge graph is empty. Run kg_bootstrap to seed it from project files, \
+pub const KG_EMPTY_HINT: &str = "Knowledge graph is empty. Run kg_bootstrap to seed it from project files, \
      or use kg_assert to add triples manually.";
 
 /// Hint string returned by `kg_query` when the graph has triples but not for
@@ -81,8 +80,7 @@ pub const KG_EMPTY_HINT: &str =
 /// What: names `kg_list_subjects` (shipped in #4776) so the recovery step is a
 /// tool call, not a second guess.
 /// Test: `kg_query_reports_subject_not_found_when_graph_has_other_subjects`.
-pub const KG_SUBJECT_NOT_FOUND_HINT: &str =
-    "No active triples for this subject. The knowledge graph is not empty — \
+pub const KG_SUBJECT_NOT_FOUND_HINT: &str = "No active triples for this subject. The knowledge graph is not empty — \
      call kg_list_subjects to see which subjects it holds.";
 
 /// Which of the two distinct "no triples came back" outcomes a `kg_query` hit.

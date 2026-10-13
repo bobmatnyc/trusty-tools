@@ -16,16 +16,16 @@ use std::path::{Path, PathBuf};
 use crate::engine::filter::SECRET_FILTER_VERSION;
 use serde::Deserialize;
 
+use super::ReviewError;
 use super::carve_out::row_admissible;
 use super::export::{DIR_MODE, EXPORTABLE, MASKED_FILE, RECORD_SCHEMA};
 use super::ledger::{
-    append_entry, is_sealed, parse_ledger, read_owner_only, seal, LedgerError, Lookup,
-    ReviewLedger, LEDGER_FILE,
+    LEDGER_FILE, LedgerError, Lookup, ReviewLedger, append_entry, is_sealed, parse_ledger,
+    read_owner_only, seal,
 };
 use super::ops::check_ops;
 use super::paths::{default_root, guard_destination};
 use super::verdict::{LedgerEntry, RedactOp, Verdict};
-use super::ReviewError;
 
 /// `trusty-memory import kuzu <command>`.
 #[derive(Debug, Clone, clap::Subcommand)]
@@ -281,11 +281,11 @@ pub(crate) fn record(dir: &Path, a: &RecordArgs) -> Result<String, LedgerError> 
         .find(|s| !EXPORTABLE.iter().any(|r| r.label() == s.rule));
     let verdict = match a.verdict {
         _ if !a.ops.is_empty() && a.verdict != VerdictKind::AdmitRedacted => {
-            return reject("--op is only for admit-redacted")
+            return reject("--op is only for admit-redacted");
         }
         VerdictKind::KeepRefused => Verdict::KeepRefused {},
         _ if auto.is_some() => {
-            return reject("the row holds an auto-refuse span; it can never be admitted")
+            return reject("the row holds an auto-refuse span; it can never be admitted");
         }
         VerdictKind::Admit => {
             let shapes = row

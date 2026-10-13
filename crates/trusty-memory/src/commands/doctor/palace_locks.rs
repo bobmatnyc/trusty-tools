@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::maintenance_lease::MAINTENANCE_LOCK_FILE;
 
-use super::checks::find_lock_files;
 use super::CheckResult;
+use super::checks::find_lock_files;
 
 /// What the pid recorded in `maintenance.lock` says about its holder (#8751).
 #[derive(Debug, Clone, PartialEq, Eq)]

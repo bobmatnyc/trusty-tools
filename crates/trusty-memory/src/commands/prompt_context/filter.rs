@@ -19,7 +19,7 @@
 //! `project_scope_drops_foreign_cwd_drawer`, and
 //! `select_relevant_triples_filters_by_prompt_overlap` in `mod.rs`.
 
-use crate::engine::retrieval::{apply_relevance_floor, FloorOutcome};
+use crate::engine::retrieval::{FloorOutcome, apply_relevance_floor};
 use serde_json::Value;
 
 /// A drawer parsed from the `/recall` endpoint's flat JSON shape.

@@ -21,7 +21,7 @@ use std::io::Write;
 use anyhow::Result;
 use serde_json::json;
 
-use super::candidates::{short_id, Census};
+use super::candidates::{Census, short_id};
 use super::log_index::ScanStats;
 
 /// Width the excerpt is wrapped to, before the stanza indent.

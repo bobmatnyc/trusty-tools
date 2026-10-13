@@ -14,9 +14,9 @@
 
 use serde_json::json;
 use tempfile::TempDir;
+use trusty_memory::AppState;
 use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 
 fn ready_state(tmp: &TempDir) -> AppState {
     let state = AppState::new(tmp.path().to_path_buf());
@@ -254,10 +254,12 @@ async fn wing_scoped_write_then_recall_over_mcp() {
     .expect("list pm");
     let pm_rows = pm["drawers"].as_array().expect("drawers");
     assert_eq!(pm_rows.len(), 1, "pm wing holds one drawer");
-    assert!(pm_rows[0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("launch review"));
+    assert!(
+        pm_rows[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("launch review")
+    );
 
     // And wing-scoped RECALL returns only that wing's drawer.
     let recalled = dispatch_tool(

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::mapping::{
-    MappedMemory, HASH_TAG_PREFIX, PENDING_TAG_PREFIX, SOURCE_TAG_PREFIX, STORE_TAG_PREFIX,
+    HASH_TAG_PREFIX, MappedMemory, PENDING_TAG_PREFIX, SOURCE_TAG_PREFIX, STORE_TAG_PREFIX,
 };
 
 /// One drawer an earlier run imported.

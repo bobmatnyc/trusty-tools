@@ -20,19 +20,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use trusty_common::uds::server::{RpcResponse, CODE_METHOD_NOT_FOUND};
+use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, RpcResponse};
 use trusty_common::uds::{
-    send_framed_request_capped, send_framed_stream_request_capped, verify_socket_for_connect,
-    UdsRpcError,
+    UdsRpcError, send_framed_request_capped, send_framed_stream_request_capped,
+    verify_socket_for_connect,
 };
 use trusty_common::{ChatEvent, ChatMessage, ChatProvider, ToolDef};
 
 use super::{
-    build_router, dispatcher_method_count, serve_with_shutdown, socket_path, FOLDED_METHODS,
-    MAX_FRAME_BYTES, METHOD_HEALTH, STREAM_METHODS,
+    FOLDED_METHODS, MAX_FRAME_BYTES, METHOD_HEALTH, STREAM_METHODS, build_router,
+    dispatcher_method_count, serve_with_shutdown, socket_path,
 };
 use crate::AppState;
 
@@ -1605,8 +1605,8 @@ async fn a_prompt_exit_flush_is_not_cut_short() {
 /// instance writes the same bytes and leaves `state.registry` cold, which is
 /// the only way to exercise an open that fails.
 fn seed_palace_off_registry(state: &AppState, name: &str) -> String {
-    use crate::engine::palace::{Palace, PalaceId};
     use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
     let id = PalaceId::new(name);
     let palace = Palace {
         id: id.clone(),

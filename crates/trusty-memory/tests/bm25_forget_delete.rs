@@ -31,10 +31,10 @@
 use std::time::Duration;
 
 use serde_json::json;
+use trusty_memory::AppState;
 use trusty_memory::bm25_lane::Bm25Lane;
 use trusty_memory::engine::palace::{Palace, PalaceId};
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 
 /// The token the drawer is found by. Nonsense so nothing else can match it.
 const TOKEN: &str = "zqxjforgetme";

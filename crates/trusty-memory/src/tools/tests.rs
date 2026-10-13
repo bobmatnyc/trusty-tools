@@ -8,8 +8,8 @@
 //! Test: this IS the test module.
 
 use super::*;
-use crate::engine::palace::PalaceId;
 use crate::AppState;
+use crate::engine::palace::PalaceId;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -820,10 +820,12 @@ async fn dispatch_kg_gaps_returns_cached() {
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0]["entities"][0], "x");
     assert_eq!(gaps[0]["external_bridges"], 0);
-    assert!(gaps[0]["suggested_exploration"]
-        .as_str()
-        .unwrap()
-        .contains("x"));
+    assert!(
+        gaps[0]["suggested_exploration"]
+            .as_str()
+            .unwrap()
+            .contains("x")
+    );
 }
 
 /// Why: Issue #42 — `add_alias` must (a) assert the triple in the KG,
@@ -1473,10 +1475,12 @@ async fn dispatch_remember_skips_short_no_context() {
     .await
     .expect("memory_remember (short)");
     assert_eq!(res["status"], "skipped");
-    assert!(res["reason"]
-        .as_str()
-        .unwrap_or("")
-        .contains("content gate"));
+    assert!(
+        res["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("content gate")
+    );
     // No drawer was written.
     let listed = dispatch_tool(
         &state,
@@ -3719,7 +3723,7 @@ async fn chat_kg_assert_tool_allows_cold_predicates_at_cap() {
 fn kuzu_import_never_writes_a_hot_predicate() {
     use crate::commands::kuzu_import::bridge::KuzuEntityRow;
     use crate::commands::kuzu_import::mapping::{entity_triples, relates_to_predicate};
-    use crate::prompt_facts::{is_hot_predicate, HOT_PREDICATES};
+    use crate::prompt_facts::{HOT_PREDICATES, is_hot_predicate};
 
     let entity = KuzuEntityRow {
         id: Some("e0".to_string()),

@@ -16,7 +16,7 @@ use std::path::Path;
 // trusty-agents and trusty-common's catch-up all need the same answer for
 // "where does this project begin?", so a second copy here would be a second
 // answer.
-pub use trusty_common::palace_resolve::{find_project_root, PROJECT_MARKERS, TRUSTY_TOOLS_DIR};
+pub use trusty_common::palace_resolve::{PROJECT_MARKERS, TRUSTY_TOOLS_DIR, find_project_root};
 
 /// Sentinel palace name that is always valid regardless of project context.
 ///

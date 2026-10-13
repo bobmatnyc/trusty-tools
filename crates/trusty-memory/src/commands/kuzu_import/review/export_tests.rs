@@ -8,12 +8,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::engine::filter::{
-    find_secret_spans, mask_content, MaskError, SecretSpan, SECRET_FILTER_VERSION,
+    MaskError, SECRET_FILTER_VERSION, SecretSpan, find_secret_spans, mask_content,
 };
 
 use super::super::bridge::KuzuMemoryRow;
-use super::export::*;
 use super::ReviewError;
+use super::export::*;
 
 /// A bare mixed-case alphanumeric token: an exportable rule.
 pub(super) fn mixed_token() -> String {

@@ -7,7 +7,7 @@
 //! `tool_definitions_with`.
 //! Test: `tool_definitions_lists_all_tools`, `mcp_schema_matches_snapshot`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The `palace_backup` schema (#9282).
 ///

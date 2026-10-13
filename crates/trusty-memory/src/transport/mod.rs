@@ -39,10 +39,10 @@ pub mod rpc;
 pub mod uds;
 
 #[cfg(feature = "server")]
-pub use api_error::{ApiError, ErrorKind, CODE_NOT_FOUND, CODE_REFUSED};
+pub use api_error::{ApiError, CODE_NOT_FOUND, CODE_REFUSED, ErrorKind};
 #[cfg(feature = "server")]
-pub use rpc::{dispatch, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-pub use uds::{socket_path, FOLDED_METHODS, METHOD_HEALTH, STREAM_METHODS};
+pub use rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, dispatch};
+pub use uds::{FOLDED_METHODS, METHOD_HEALTH, STREAM_METHODS, socket_path};
 // The serving half needs the `server` feature: it registers `memory.chat`, whose
 // handler lives in the `server`-gated `crate::chat`. A slim library consumer
 // (`default-features = false`, with or without `mcp-schema`) still gets

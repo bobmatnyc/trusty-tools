@@ -554,10 +554,12 @@ fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
 
     let gamma = row(&rows, "gamma/data");
     assert_eq!(gamma.store, StoreState::Error);
-    assert!(gamma
-        .error
-        .as_deref()
-        .is_some_and(|e| e.contains("cannot stat")));
+    assert!(
+        gamma
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cannot stat"))
+    );
     let delta = row(&rows, "delta");
     assert_eq!(
         (delta.store, delta.error.as_deref()),
@@ -567,9 +569,11 @@ fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
     render(&mut out, &mut err, &rows, false).expect("render");
     let stdout = String::from_utf8(out).expect("utf8");
     assert!(stdout.contains("palace=delta store=absent "));
-    assert!(String::from_utf8(err)
-        .expect("utf8")
-        .contains("palace=gamma/data"));
+    assert!(
+        String::from_utf8(err)
+            .expect("utf8")
+            .contains("palace=gamma/data")
+    );
     assert!(
         scan_verdict(&rows).is_err(),
         "an unstattable store fails the run"
@@ -643,9 +647,10 @@ fn verdict_fails_on_error_or_unreadable_rows_and_passes_a_clean_set() {
     let e = scan_verdict(&[clean.clone(), errored]).expect_err("error row fails");
     assert!(e.to_string().contains("1 palace(s) could not be read"));
     let e = scan_verdict(&[clean, partial]).expect_err("unreadable rows fail");
-    assert!(e
-        .to_string()
-        .contains("2 unreadable drawer row(s) in 1 palace(s)"));
+    assert!(
+        e.to_string()
+            .contains("2 unreadable drawer row(s) in 1 palace(s)")
+    );
 }
 
 /// Why: #8645 review — a killed run leaves a plaintext store copy in
@@ -656,7 +661,7 @@ fn verdict_fails_on_error_or_unreadable_rows_and_passes_a_clean_set() {
 /// Test: This test.
 #[test]
 fn sweep_removes_only_stale_scratch_dirs() {
-    use crate::commands::store_snapshot::{sweep_stale_copies, SCRATCH_PREFIX, STALE_COPY_AGE};
+    use crate::commands::store_snapshot::{SCRATCH_PREFIX, STALE_COPY_AGE, sweep_stale_copies};
 
     let parent = tempfile::tempdir().expect("parent");
     let outside = tempfile::tempdir().expect("outside");

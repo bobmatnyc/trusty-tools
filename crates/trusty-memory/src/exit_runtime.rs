@@ -141,8 +141,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn a_finite_commit_longer_than_a_second_completes_before_exit() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let committed = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&committed);
         run_main(async move {

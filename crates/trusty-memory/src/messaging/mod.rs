@@ -35,8 +35,8 @@ pub use operations::{
     send_message_to_palace,
 };
 pub use types::{
-    build_message_tags, slugify_for_palace, slugify_string, Message, MSG_MARKER_TAG,
-    TAG_FROM_PREFIX, TAG_PURPOSE_PREFIX, TAG_READ_PREFIX, TAG_SENT_AT_PREFIX, TAG_TO_PREFIX,
+    MSG_MARKER_TAG, Message, TAG_FROM_PREFIX, TAG_PURPOSE_PREFIX, TAG_READ_PREFIX,
+    TAG_SENT_AT_PREFIX, TAG_TO_PREFIX, build_message_tags, slugify_for_palace, slugify_string,
 };
 
 #[cfg(test)]
@@ -167,9 +167,10 @@ mod tests {
         assert!(tags.iter().any(|t| t == "msg:to=beta"));
         assert!(tags.iter().any(|t| t == "msg:purpose=task"));
         assert!(tags.iter().any(|t| t == "msg:read=false"));
-        assert!(tags
-            .iter()
-            .any(|t| t.starts_with("msg:sent_at=") && t.ends_with(&ts.to_rfc3339())));
+        assert!(
+            tags.iter()
+                .any(|t| t.starts_with("msg:sent_at=") && t.ends_with(&ts.to_rfc3339()))
+        );
     }
 
     #[test]
@@ -369,7 +370,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_prefers_pin_file() {
-        use crate::project_root::{write_project_pin, ProjectPin};
+        use crate::project_root::{ProjectPin, write_project_pin};
         let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -396,7 +397,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_reads_pin_from_subdir() {
-        use crate::project_root::{write_project_pin, ProjectPin};
+        use crate::project_root::{ProjectPin, write_project_pin};
         let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -422,7 +423,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_pin_read_does_not_create_pin_file() {
-        use crate::project_root::{read_project_pin, PIN_FILE_REL};
+        use crate::project_root::{PIN_FILE_REL, read_project_pin};
         let _env = palace_env_lock();
         let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");

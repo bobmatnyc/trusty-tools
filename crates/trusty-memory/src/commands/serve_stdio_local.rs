@@ -41,7 +41,7 @@
 //! and `the_handshake_is_answered_with_no_daemon_listening` in
 //! `super::serve_stdio_bridge`.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use trusty_mcp::Request;
 
 /// The methods [`local_answer`] claims, which never reach the daemon.

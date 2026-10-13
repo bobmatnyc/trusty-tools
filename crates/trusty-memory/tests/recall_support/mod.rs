@@ -11,13 +11,13 @@
 #![allow(dead_code)] // each binary uses a different subset
 
 use chrono::{Duration, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
+use trusty_memory::AppState;
 use trusty_memory::engine::palace::PalaceId;
 use trusty_memory::engine::retrieval::seed_shared_embedder_with_mock;
 use trusty_memory::service::MemoryService;
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
 use uuid::Uuid;
 
 /// A ready `AppState` on `tmp` with each named palace created.

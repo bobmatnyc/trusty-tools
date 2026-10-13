@@ -20,32 +20,32 @@
 
 use crate::engine::palace::{Drawer, RoomType};
 use crate::engine::retrieval::{
-    recall_across_palaces_reporting, recall_deep_scoped, recall_scoped, scope_admits,
-    CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope,
+    CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope, recall_across_palaces_reporting,
+    recall_deep_scoped, recall_scoped, scope_admits,
 };
 use crate::{AppState, DaemonReadiness};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 
-use crate::service::recall_stream::{recall_all_scoped, RecallAllScope};
+use crate::service::recall_stream::{RecallAllScope, recall_all_scoped};
 
 use super::bm25::{bm25_live_hits, bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 // #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
 use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
-use super::recall_rulings::{fetch_user_rulings, fold_rulings, RulingsFold};
+use super::recall_rulings::{RulingsFold, fetch_user_rulings, fold_rulings};
 use super::recall_rulings_floor::apply_rulings_floor;
 // #9421: drawers superseded through a `superseded_by` edge rank below their
 // replacements on every recall path.
-use super::recall_supersede::{supersessions_across, supersessions_for, Supersessions};
+use super::recall_supersede::{Supersessions, supersessions_across, supersessions_for};
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
-    apply_score_floor, include_creator_tags_arg, min_score_arg, project_tags, serialize_recall,
-    RecallProjection,
+    RecallProjection, apply_score_floor, include_creator_tags_arg, min_score_arg, project_tags,
+    serialize_recall,
 };
 use super::wing_ops::resolve_wing_arg;
 

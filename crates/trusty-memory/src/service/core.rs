@@ -11,13 +11,13 @@
 //! `web::tests`.
 
 use crate::attribution::CreatorInfo;
+use crate::engine::PalaceRegistry;
 use crate::engine::palace::{Palace, PalaceId, RoomType};
 use crate::engine::retrieval::RememberOptions;
 use crate::engine::store::{PalaceStore, PalaceStoreError};
-use crate::engine::PalaceRegistry;
 use crate::{ActivitySource, AppState, DaemonEvent};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use trusty_common::palace_alias::canonical_palace_id;
 use uuid::Uuid;

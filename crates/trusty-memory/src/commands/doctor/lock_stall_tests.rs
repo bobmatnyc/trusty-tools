@@ -10,8 +10,8 @@
 
 use std::time::Duration;
 
-use super::super::checks::{interpret_health_body_with_stall, summarize};
 use super::super::CheckStatus;
+use super::super::checks::{interpret_health_body_with_stall, summarize};
 use super::derive_lock_stall_threshold;
 
 const URL: &str = "/tmp/tm.sock";

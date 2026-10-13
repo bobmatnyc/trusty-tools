@@ -12,11 +12,11 @@
 //! survives; `rpc_health_answers_over_a_real_socket` in
 //! `crate::transport::uds::tests` covers the wire half the router used to.
 
-use super::health::{
-    ensure_health_probe_palace, run_health_round_trip_inner, seed_probe_sentinel_if_absent,
-    HealthProbeError, HealthQuery, PROBE_SENTINEL_CONTENT,
-};
 use super::HEALTH_PROBE_PALACE;
+use super::health::{
+    HealthProbeError, HealthQuery, PROBE_SENTINEL_CONTENT, ensure_health_probe_palace,
+    run_health_round_trip_inner, seed_probe_sentinel_if_absent,
+};
 use crate::engine::palace::PalaceId;
 use crate::engine::retrieval::{PalaceHandle, RecallResult};
 use crate::engine::store::hnsw_store::OpPark;

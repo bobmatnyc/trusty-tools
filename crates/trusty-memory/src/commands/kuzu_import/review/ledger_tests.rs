@@ -10,16 +10,16 @@ use std::path::{Path, PathBuf};
 use crate::engine::filter::SECRET_FILTER_VERSION;
 
 use super::super::mapping::map_memory;
-use super::carve_out::{is_high_entropy, HIGH_ENTROPY_MIN_LEN, HIGH_ENTROPY_TENTHS};
+use super::carve_out::{HIGH_ENTROPY_MIN_LEN, HIGH_ENTROPY_TENTHS, is_high_entropy};
 use super::cli::{
-    run_review, status, KuzuCommand, RecordArgs, ReviewCommand, RunArgs, VerdictKind,
+    KuzuCommand, RecordArgs, ReviewCommand, RunArgs, VerdictKind, run_review, status,
 };
-use super::export::{classify_mapped, ledger_key, write_run, MaskedRecord, OsFs, RowVerdict};
+use super::export::{MaskedRecord, OsFs, RowVerdict, classify_mapped, ledger_key, write_run};
 use super::export_tests::{leaked_windows, mixed_token, provider_token, row};
 use super::ledger::{
-    append_entry, load_sealed, parse_ledger, seal, LedgerError, Lookup, LEDGER_FILE, SEAL_FILE,
+    LEDGER_FILE, LedgerError, Lookup, SEAL_FILE, append_entry, load_sealed, parse_ledger, seal,
 };
-use super::verdict::{verdict_digest, LedgerEntry, RedactOp, Verdict};
+use super::verdict::{LedgerEntry, RedactOp, Verdict, verdict_digest};
 
 /// The store string every fixture row is keyed under.
 pub(super) const STORE: &str = "/synthetic/proj/.kuzu-memory";
@@ -518,10 +518,12 @@ fn record_refuses_a_loose_or_symlinked_ledger() {
     std::fs::write(&path, b"").expect("ledger");
     set_mode(&path, 0o644);
     let cmd = rec(&records[0].key, VerdictKind::KeepRefused, &[]);
-    assert!(run(tmp.path(), &cmd)
-        .expect_err("loose")
-        .to_string()
-        .contains("644"));
+    assert!(
+        run(tmp.path(), &cmd)
+            .expect_err("loose")
+            .to_string()
+            .contains("644")
+    );
     std::fs::remove_file(&path).expect("rm");
     let elsewhere = tmp.path().join("elsewhere.jsonl");
     std::fs::write(&elsewhere, b"").expect("target");
@@ -633,20 +635,22 @@ fn review_subcommands_parse_and_take_no_import_flags() {
     );
     assert!(parse(&["kuzu", "review", "status", "--run", RUN]).is_ok());
     assert!(parse(&["kuzu", "review", "finish", "--run", RUN]).is_ok());
-    assert!(parse(&[
-        "kuzu",
-        "review",
-        "record",
-        "--run",
-        RUN,
-        "--key",
-        "k",
-        "--verdict",
-        "admit",
-        "--op",
-        "replace:0"
-    ])
-    .is_err());
+    assert!(
+        parse(&[
+            "kuzu",
+            "review",
+            "record",
+            "--run",
+            RUN,
+            "--key",
+            "k",
+            "--verdict",
+            "admit",
+            "--op",
+            "replace:0"
+        ])
+        .is_err()
+    );
     assert!(parse(&["kuzu", "--dry-run", "review", "status", "--run", RUN]).is_err());
     let ImportSource::Kuzu(a) = parse(&["kuzu", "--from", "/s", "--review-ledger", "/l.jsonl"])
         .expect("ledger flag parses")

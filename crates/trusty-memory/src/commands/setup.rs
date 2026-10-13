@@ -26,7 +26,7 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use trusty_common::claude_config::{
     default_settings_max_depth, discover_claude_settings, mcp_server_entry, merge_hook_entries,
@@ -318,7 +318,7 @@ fn ensure_data_dir() -> Result<PathBuf> {
 fn install_service_phase() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        use crate::commands::service::{build_launchd_config, launchd_log_dir, LAUNCHD_LABEL};
+        use crate::commands::service::{LAUNCHD_LABEL, build_launchd_config, launchd_log_dir};
 
         let exe = std::env::current_exe()
             .map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))?;
@@ -671,7 +671,7 @@ fn merge_prompt_context_hook(path: &Path, exe: Option<&std::path::Path>) -> Resu
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(serde_json::Map::new()),
         Err(e) => {
             return Err(anyhow::Error::new(e))
-                .with_context(|| format!("read settings file {}", path.display()))
+                .with_context(|| format!("read settings file {}", path.display()));
         }
     };
     let additions = prompt_context_hook_additions(exe);

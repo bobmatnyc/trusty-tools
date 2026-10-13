@@ -14,7 +14,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use super::kuzu_import::{handle_import_kuzu, KuzuImportArgs, DEFAULT_MAX_DEPTH};
+use super::kuzu_import::{DEFAULT_MAX_DEPTH, KuzuImportArgs, handle_import_kuzu};
 
 /// Forward `migrate kuzu-data` to `import kuzu`, with a deprecation warning.
 ///

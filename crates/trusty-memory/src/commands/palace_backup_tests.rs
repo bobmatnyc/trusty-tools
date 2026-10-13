@@ -10,8 +10,8 @@
 
 use super::*;
 use crate::engine::palace::{Drawer, PalaceId, RoomType};
-use crate::engine::store::rooms::resolve_or_create_room_sync;
 use crate::engine::store::PalaceStore;
+use crate::engine::store::rooms::resolve_or_create_room_sync;
 
 const ID: &str = "unit-bk";
 

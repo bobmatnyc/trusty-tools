@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use crate::engine::dream::DreamConfig;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::Drawer;
-use crate::engine::retrieval::{shared_embedder, PalaceHandle, VectorBackfillOptions};
+use crate::engine::retrieval::{PalaceHandle, VectorBackfillOptions, shared_embedder};
 use crate::engine::store::VectorStore as _;
 use crate::engine::{memory_content_hash, timeouts};
 use anyhow::{Context, Result};

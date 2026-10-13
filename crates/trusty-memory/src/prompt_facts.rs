@@ -27,7 +27,7 @@
 //! `*_endpoint_enforces_tier_s_*` in `web::tests::prompt_tests`.
 
 use crate::AppState;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 
 /// Cached prompt-facts surface: raw triples and a pre-formatted Markdown block.

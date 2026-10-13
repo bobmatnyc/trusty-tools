@@ -24,13 +24,13 @@
 //!
 //! Test: this IS the test file.
 
+use trusty_memory::AppState;
 use trusty_memory::bm25_backfill::run_startup_sweep;
 use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
 use trusty_memory::engine::retrieval::{
     recall_with_default_embedder, seed_shared_embedder_with_mock,
 };
 use trusty_memory::service::MemoryService;
-use trusty_memory::AppState;
 
 /// Arm the lexical lane and the vector lane together.
 ///

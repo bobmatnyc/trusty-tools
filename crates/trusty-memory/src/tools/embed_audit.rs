@@ -35,14 +35,14 @@
 //! `verify_embedded_separates_an_unknown_id_from_an_unembedded_one`,
 //! `embed_sweep_sees_a_palace_the_cache_never_opened`.
 
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::helpers::open_palace_handle;
 // #6318: `palace_verify_embedded` reads, so it falls back to a palace index.
 // `palace_embed_sweep` takes no palace at all, so nothing there changes.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 use crate::AppState;
 
 /// Read a palace's coverage into the shape both handlers report.

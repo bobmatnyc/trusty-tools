@@ -47,7 +47,7 @@ pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 use checks::check_launchd_plist;
 use checks::{check_daemon_health, check_fastembed_cache, check_kg_redb_size};
 use drawer_counts::check_drawer_counts;
-pub use drawer_counts::{handle_ack_drop, handle_drawer_report, DrawerCountArgs};
+pub use drawer_counts::{DrawerCountArgs, handle_ack_drop, handle_drawer_report};
 use mcp_registration::check_mcp_registrations;
 use palace_format::check_palace_formats;
 use palace_locks::check_stale_palace_locks;
@@ -503,7 +503,7 @@ mod tests {
     /// Test: pure filesystem.
     #[test]
     fn audit_palaces_ok_when_pin_file_claims_it() {
-        use crate::project_root::{write_project_pin, ProjectPin};
+        use crate::project_root::{ProjectPin, write_project_pin};
         let tmp = tempfile::tempdir().expect("tempdir");
 
         // Set up a fake "Projects" directory with a project that has a pin.
@@ -532,7 +532,7 @@ mod tests {
     /// Test: pure filesystem.
     #[test]
     fn scan_project_dirs_returns_false_for_mismatch() {
-        use crate::project_root::{write_project_pin, ProjectPin};
+        use crate::project_root::{ProjectPin, write_project_pin};
         let tmp = tempfile::tempdir().expect("tempdir");
         let projects_dir = tmp.path().join("Projects");
         let project_dir = projects_dir.join("some-project");

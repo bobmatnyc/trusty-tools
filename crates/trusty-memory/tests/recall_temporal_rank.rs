@@ -14,7 +14,7 @@ mod recall_support;
 
 use chrono::Duration;
 use recall_support::{
-    backdate, fact_key, rank_of, recall, recall_on, remember, remember_typed, state_with, Surface,
+    Surface, backdate, fact_key, rank_of, recall, recall_on, remember, remember_typed, state_with,
 };
 use serde_json::Value;
 use uuid::Uuid;

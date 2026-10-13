@@ -24,10 +24,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::filter::{RawTriple, RecalledDrawer};
 use super::EMPTY_PLACEHOLDER;
+use super::filter::{RawTriple, RecalledDrawer};
 
 /// How many triples to pull before filtering them in memory.
 ///

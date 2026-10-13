@@ -29,9 +29,9 @@ use crate::engine::palace::{Drawer, DrawerType};
 use crate::engine::retrieval::{CrossPalaceResult, RecallResult};
 use chrono::{DateTime, Utc};
 
-use super::recall_projection::{candidate_window, MAX_CANDIDATE_WINDOW};
+use super::recall_projection::{MAX_CANDIDATE_WINDOW, candidate_window};
 // #9421: superseded drawers rank below their replacements.
-use super::recall_supersede::{demote_superseded, Supersessions};
+use super::recall_supersede::{Supersessions, demote_superseded};
 
 /// Tags that mark a drawer as an owner ruling or decision.
 ///

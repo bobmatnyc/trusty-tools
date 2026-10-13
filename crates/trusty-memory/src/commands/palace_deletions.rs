@@ -9,7 +9,7 @@
 //! safe with the daemon up.
 //! Test: `palace_deletions_shows_the_survivor_and_score_for_a_removed_drawer`.
 
-use crate::engine::maintenance_log::{read_journal, MaintenanceDeletion};
+use crate::engine::maintenance_log::{MaintenanceDeletion, read_journal};
 use crate::engine::palace::Palace;
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -76,7 +76,7 @@ pub(crate) fn deletions_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::maintenance_log::{record, DeletionReason};
+    use crate::engine::maintenance_log::{DeletionReason, record};
     use crate::engine::palace::PalaceId;
 
     /// Why: #8729's open question is "which surviving drawer did each removed

@@ -99,8 +99,8 @@ mod write_property_definitions;
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
 // resolving exactly as they did against the former monolithic module.
 #[cfg(feature = "server")]
-pub use bm25::{spawn_bm25_index_worker, Bm25IndexRequest, BM25_INDEX_QUEUE_CAPACITY};
-pub use definitions::{tool_definitions, tool_definitions_with, MemoryMcpServer};
+pub use bm25::{BM25_INDEX_QUEUE_CAPACITY, Bm25IndexRequest, spawn_bm25_index_worker};
+pub use definitions::{MemoryMcpServer, tool_definitions, tool_definitions_with};
 #[cfg(feature = "server")]
 pub(crate) use helpers::{auto_extract_and_assert, room_label};
 

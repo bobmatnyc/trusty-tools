@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::project_root::{project_slug_at, read_project_pin, PERSONAL_PALACE, PIN_FILE_REL};
+use crate::project_root::{PERSONAL_PALACE, PIN_FILE_REL, project_slug_at, read_project_pin};
 
 /// Outcome of a single palace audit entry for `doctor --fix-palaces`.
 ///
@@ -212,15 +212,15 @@ pub fn scan_project_dirs_for_pin(search_dirs: &[PathBuf], palace_id: &str) -> bo
                 continue;
             }
             // Read the pin file if present.
-            if let Ok(Some(pin)) = read_project_pin(&candidate) {
-                if pin.palace == palace_id {
-                    tracing::debug!(
-                        palace_id = %palace_id,
-                        pin_path = %candidate.join(PIN_FILE_REL).display(),
-                        "audit: palace claimed by pin file — classifying as Ok"
-                    );
-                    return true;
-                }
+            if let Ok(Some(pin)) = read_project_pin(&candidate)
+                && pin.palace == palace_id
+            {
+                tracing::debug!(
+                    palace_id = %palace_id,
+                    pin_path = %candidate.join(PIN_FILE_REL).display(),
+                    "audit: palace claimed by pin file — classifying as Ok"
+                );
+                return true;
             }
         }
     }

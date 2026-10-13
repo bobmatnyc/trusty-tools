@@ -418,6 +418,7 @@ fn is_data_dir_override_active_when_set() {
 #[test]
 fn is_data_dir_override_inactive_when_unset() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: `env_lock()` is held, serialising this binary's override writers.
     unsafe { std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV) };
     let result = trusty_memory::is_data_dir_override_active();
     assert!(
@@ -435,6 +436,7 @@ fn is_data_dir_override_inactive_when_unset() {
 #[test]
 fn is_data_dir_override_inactive_when_blank() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: `env_lock()` is held, serialising this binary's override writers.
     unsafe { std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, "   ") };
     let result = trusty_memory::is_data_dir_override_active();
     unsafe { std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV) };

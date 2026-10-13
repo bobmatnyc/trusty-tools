@@ -74,13 +74,13 @@ use std::time::Duration;
 
 use colored::Colorize;
 
-use apply::{execute, plan_store, HandleSink, PalaceSink, PalaceView, StoreCounts};
-use bridge::{export_store, resolve_python, CommandRunner, KuzuExport, SystemRunner};
-use discovery::{discover, resolve_from, DiscoveredStore};
+use apply::{HandleSink, PalaceSink, PalaceView, StoreCounts, execute, plan_store};
+use bridge::{CommandRunner, KuzuExport, SystemRunner, export_store, resolve_python};
+use discovery::{DiscoveredStore, discover, resolve_from};
 use ledger::Ledger;
 use palace_io::{
-    check_env_override, open_palace_for_write, open_snapshot_view, store_is_live, target_palace,
-    DaemonProbe, SystemDaemonProbe,
+    DaemonProbe, SystemDaemonProbe, check_env_override, open_palace_for_write, open_snapshot_view,
+    store_is_live, target_palace,
 };
 use report::{print_report, print_totals};
 

@@ -32,9 +32,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use crate::hook_emit::{post_hook_event, HookEventPayload};
+use crate::hook_emit::{HookEventPayload, post_hook_event};
 use crate::prompt_log::{PromptLogEntry, PromptLogger};
-use crate::{hook_prompt_excerpt, HookType, InjectionKind};
+use crate::{HookType, InjectionKind, hook_prompt_excerpt};
 
 /// Connect + total request timeout. Kept short so a slow/dead daemon can
 /// never block a Claude Code session for more than a few seconds.

@@ -16,8 +16,8 @@
 
 use serde_json::json;
 use tempfile::TempDir;
-use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
+use trusty_memory::tools::dispatch_tool;
 
 fn ready_state(tmp: &TempDir) -> AppState {
     let state = AppState::new(tmp.path().to_path_buf());

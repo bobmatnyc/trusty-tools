@@ -39,7 +39,7 @@ use serde_json::Value;
 #[cfg(feature = "server")]
 use {
     super::recall_projection::FIRST_FILTERABLE_LAYER,
-    anyhow::{anyhow, Result},
+    anyhow::{Result, anyhow},
     serde::Serialize,
     serde_json::Map,
 };
@@ -231,7 +231,7 @@ impl Bounds {
                         "{tool}: 'max_bytes' must be an integer number of bytes in 0..={}, \
                          got {v} — a quoted or negative value is not coerced",
                         u32::MAX
-                    ))
+                    ));
                 }
             },
         };
@@ -242,7 +242,7 @@ impl Bounds {
                 return Err(anyhow!(
                     "{tool}: 'full' must be a boolean (true returns every entry with no \
                      byte ceiling), got {other} — a quoted value is not coerced"
-                ))
+                ));
             }
         };
         Ok(Self {

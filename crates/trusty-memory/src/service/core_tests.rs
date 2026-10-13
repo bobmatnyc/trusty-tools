@@ -305,9 +305,9 @@ async fn delete_palace_refuses_while_legacy_kg_holds_unimported_drawers() {
 /// Test: itself.
 #[tokio::test]
 async fn delete_palace_refuses_when_open_fails_or_load_is_degraded() {
+    use crate::engine::store::PalaceStore;
     use crate::engine::store::kg_redb::KgStoreRedb;
     use crate::engine::store::kg_store::DRAWERS;
-    use crate::engine::store::PalaceStore;
     use crate::engine::{Palace, PalaceId};
     let (svc, state) = service();
     for (name, degraded) in [("unopenable", false), ("degraded", true)] {

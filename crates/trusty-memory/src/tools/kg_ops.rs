@@ -11,19 +11,19 @@
 //! Test: `dispatch_kg_assert_then_query`, `dispatch_discover_aliases_*`,
 //! `dispatch_kg_gaps_returns_cached` in `tools::tests`.
 
+use crate::AppState;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::Triple;
 use crate::kg_write::CachePolicy;
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
-use crate::AppState;
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 
 use super::helpers::{open_palace_handle, resolve_palace};
 // #6318: the KG READ tools fall back to a palace index; `kg_assert`,
 // `kg_retract_triple`, `add_alias`, `discover_aliases` and `kg_bootstrap` all
 // write, so they keep `resolve_palace`'s error.
-use super::palace_index::{resolve_palace_or_index, PalaceScope};
+use super::palace_index::{PalaceScope, resolve_palace_or_index};
 
 pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "kg_assert")?;

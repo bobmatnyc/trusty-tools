@@ -10,9 +10,9 @@
 //! consistency arms and the measurement-failure arm.
 //! Test: this module.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::byte_cap::{apply, capped_tool_names, measure, DEFAULT_MAX_BYTES, HARD_MAX_BYTES};
+use super::byte_cap::{DEFAULT_MAX_BYTES, HARD_MAX_BYTES, apply, capped_tool_names, measure};
 use super::tests::test_state;
 use super::{dispatch_tool, tool_definitions};
 
@@ -404,9 +404,11 @@ fn every_capped_tool_advertises_max_bytes_and_full() {
         .iter()
         .find(|t| t["name"] == "memory_remember")
         .expect("memory_remember");
-    assert!(remember["inputSchema"]["properties"]
-        .get("max_bytes")
-        .is_none());
+    assert!(
+        remember["inputSchema"]["properties"]
+            .get("max_bytes")
+            .is_none()
+    );
 }
 
 /// Every capped tool is a tool the dispatcher actually routes.

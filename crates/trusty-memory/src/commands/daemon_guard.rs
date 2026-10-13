@@ -34,7 +34,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use colored::Colorize;
 use trusty_common::launchd_claim::SocketOwner;
 use trusty_mcp::StartLock;

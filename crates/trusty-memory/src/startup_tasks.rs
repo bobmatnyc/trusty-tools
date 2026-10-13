@@ -196,10 +196,10 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
         // cwd targeting the default palace (if configured). Without a default
         // palace there's no obvious destination, so skip — explicit MCP
         // `discover_aliases` calls still work.
-        if let Some(palace) = bg_state.default_palace.clone() {
-            if let Ok(cwd) = std::env::current_dir() {
-                bg_state.spawn_alias_discovery(palace, cwd);
-            }
+        if let Some(palace) = bg_state.default_palace.clone()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            bg_state.spawn_alias_discovery(palace, cwd);
         }
         // Issue #537: throttled startup update check. Runs once per 24h (on-disk
         // cache). Result stored in AppState::update_available for /health.

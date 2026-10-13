@@ -16,16 +16,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use trusty_memory::AppState;
 use trusty_memory::engine::palace::{Drawer, Palace, PalaceId, RoomType};
-use trusty_memory::engine::retrieval::{seed_shared_embedder_with_mock, PalaceHandle};
+use trusty_memory::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use trusty_memory::engine::store::PalaceStore;
 use trusty_memory::engine::store::chat_sessions::ChatSessionStore;
 use trusty_memory::engine::store::kg_redb::{BatchWriteOp, KgStoreRedb};
 use trusty_memory::engine::store::rooms::resolve_or_create_room_sync;
-use trusty_memory::engine::store::PalaceStore;
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::transport::{dispatch, JsonRpcRequest};
-use trusty_memory::AppState;
+use trusty_memory::transport::{JsonRpcRequest, dispatch};
 
 // ---------------------------------------------------------------- MCP tool
 
@@ -252,9 +252,11 @@ async fn palace_backup_error_arms_fail_and_write_nothing() {
         json!({"palace": "bk-err", "dest": 7}),
     )
     .await;
-    assert!(typed
-        .expect_err("a non-string dest is refused")
-        .contains("dest"));
+    assert!(
+        typed
+            .expect_err("a non-string dest is refused")
+            .contains("dest")
+    );
 
     let existing = flat_manual(root).join("already-here");
     std::fs::create_dir_all(&existing).expect("mkdir");

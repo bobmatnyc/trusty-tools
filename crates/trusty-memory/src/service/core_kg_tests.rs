@@ -21,7 +21,7 @@
 
 use crate::engine::palace::PalaceId;
 use crate::engine::store::kg::Triple;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::service::{CreatePalaceBody, KgAssertBody, MemoryService, ServiceError};
 use crate::transport::methods::kg as folded;

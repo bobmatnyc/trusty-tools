@@ -13,14 +13,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::engine::maintenance_log::{read_journal, MaintenanceDeletion};
+use crate::engine::maintenance_log::{MaintenanceDeletion, read_journal};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::Args;
 use colored::Colorize;
 
 use super::CheckResult;
-use crate::drawer_counts::analysis::{self, DrawerReport, Verdict, STALE_AFTER};
+use crate::drawer_counts::analysis::{self, DrawerReport, STALE_AFTER, Verdict};
 use crate::drawer_counts::{self as counts, History};
 
 const LABEL: &str = "drawer counts";

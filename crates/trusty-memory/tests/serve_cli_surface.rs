@@ -16,7 +16,7 @@
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 /// How long [`run_piped`] lets its child run before killing it.

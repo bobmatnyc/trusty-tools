@@ -38,11 +38,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::engine::PalaceRegistry;
 use crate::engine::dream::{
-    dream_max_concurrent, stagger_offset, AfterCycle, Dreamer, PersistedDreamStats,
+    AfterCycle, Dreamer, PersistedDreamStats, dream_max_concurrent, stagger_offset,
 };
 use crate::engine::palace::PalaceId;
-use crate::engine::PalaceRegistry;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -404,10 +404,10 @@ pub fn spawn_shutdown_bridge(tx: watch::Sender<bool>) -> tokio::task::JoinHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::PalaceRegistry;
     use crate::engine::dream::DreamConfig;
     use crate::engine::dream::Dreamer;
     use crate::engine::palace::{Palace, PalaceId};
-    use crate::engine::PalaceRegistry;
     use serial_test::serial;
     use std::sync::Arc;
     use std::time::Duration;

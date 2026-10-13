@@ -14,8 +14,8 @@
 use super::*;
 use serde_json::json;
 use std::io;
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::Duration;
 
 /// How long an armed `list` may run before the test calls it a hang.

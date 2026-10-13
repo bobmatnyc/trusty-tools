@@ -26,8 +26,8 @@
 //! [`palace_override_from_env`]: trusty_common::palace_id::palace_override_from_env
 
 pub use trusty_common::palace_id::{
-    derive_palace_id, owner_repo_from_git_remote, palace_override_from_env, parent_dir_slug,
-    PALACE_OVERRIDE_ENV,
+    PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
+    parent_dir_slug,
 };
 
 /// Follow a palace-level alias so a derived slug becomes a name that resolves.

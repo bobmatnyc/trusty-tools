@@ -224,7 +224,7 @@ mod tests {
     async fn hook_emit_failure_isolated() {
         use std::sync::Arc;
         use trusty_common::uds::server::{
-            serve_until, RpcError, RpcFallback, RpcRouter, RpcServeOptions,
+            RpcError, RpcFallback, RpcRouter, RpcServeOptions, serve_until,
         };
 
         /// Refuses every method, the way a daemon that cannot accept the event

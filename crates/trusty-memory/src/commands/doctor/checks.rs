@@ -176,7 +176,7 @@ pub async fn check_daemon_health() -> CheckResult {
             return CheckResult::fail(
                 label,
                 format!("could not resolve the trusty-memory data directory: {e:#}"),
-            )
+            );
         }
     };
     check_daemon_health_at(label, &socket, PROBE_TIMEOUT).await
@@ -531,13 +531,13 @@ pub fn find_lock_files(root: &Path) -> Vec<PathBuf> {
         if is_lock_file(&path) {
             out.push(path.clone());
         }
-        if path.is_dir() {
-            if let Ok(sub) = std::fs::read_dir(&path) {
-                for child in sub.flatten() {
-                    let cpath = child.path();
-                    if is_lock_file(&cpath) {
-                        out.push(cpath);
-                    }
+        if path.is_dir()
+            && let Ok(sub) = std::fs::read_dir(&path)
+        {
+            for child in sub.flatten() {
+                let cpath = child.path();
+                if is_lock_file(&cpath) {
+                    out.push(cpath);
                 }
             }
         }

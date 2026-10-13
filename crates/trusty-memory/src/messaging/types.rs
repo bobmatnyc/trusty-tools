@@ -9,7 +9,7 @@
 //! `decode_message_from_drawer_round_trips`, `slug_derivation_cases`.
 
 use crate::engine::palace::Drawer;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
