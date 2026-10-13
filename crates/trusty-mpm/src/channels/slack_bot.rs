@@ -6,7 +6,8 @@
 //! Check site: a send whose outcome is not known must never read as "not
 //! sent", or the caller would reissue its question id.
 //! What: [`bot_ref`] reads the host ceiling's Slack `bot_ref`;
-//! [`resolve_bot_token`] resolves it through the credential registry and
+//! [`resolve_bot_token`] resolves it through the credential registry and the
+//! daemon's credential door (`secret_source`), and
 //! refuses every key but [`SLACK_BOT_REF`]; [`SlackBot`] posts to
 //! [`SLACK_API_BASE`], a constant (never an env var); [`classify`] turns a
 //! reply into [`Posted`] or a [`SendFailure`].
@@ -16,7 +17,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use trusty_channels::policy::{Channel, parse_host};
-use trusty_common::credentials::{CredentialRef, Principal, Scope, Secret, ServiceId};
+use trusty_common::credential_registry::env_var_for;
+use trusty_common::credentials::Secret;
 
 /// The production Slack Web API base. Never read from the environment.
 pub const SLACK_API_BASE: &str = "https://slack.com/api";
@@ -190,15 +192,18 @@ pub fn bot_ref(home: Option<&Path>) -> Result<String, String> {
 ///
 /// Why: #8454 A14: no user token is ever loaded on a channel path.
 /// What: refuses any key but [`SLACK_BOT_REF`] (so [`SLACK_USER_REF`]
-/// never resolves), then `trusty_common::credentials::resolve` as the
-/// `trusty-mpm` service. Blocking (Keychain).
+/// never resolves), maps the key to its registry variable, then reads it
+/// through the daemon's one credential door,
+/// `secret_source::resolve_bounded_gated` (#9121: nothing in a sandboxed
+/// daemon). Blocking (Keychain). The error names the kind, never a value.
 /// Test: `resolve_bot_token_refuses_the_user_token`.
 pub fn resolve_bot_token(bot_ref: &str) -> Result<Secret<String>, String> {
     check_bot_ref(bot_ref)?;
-    let cref = CredentialRef::parse(bot_ref).map_err(|e| e.to_string())?;
-    let service = ServiceId::parse("trusty-mpm").map_err(|e| e.to_string())?;
-    trusty_common::credentials::resolve(&cref, &Principal::Service(service), &Scope::write())
-        .map_err(|e| e.to_string())
+    let var = env_var_for(bot_ref)
+        .ok_or_else(|| format!("bot_ref {bot_ref:?} is not in the credential registry"))?;
+    crate::secret_source::resolve_bounded_gated(var)
+        .map(Secret::new)
+        .map_err(|e| format!("{var} could not be resolved: {}", e.kind()))
 }
 
 /// `Ok` only for [`SLACK_BOT_REF`]; the refusal names the key's role.
