@@ -410,7 +410,10 @@ check "closed: no stable release below the declared version" 3 "$rc" "$out" "NO 
 
 rc=0
 out="$(run_gate "${INDEX}/503" clean.out 0 "${P[@]}" engine-nodefault)" || rc=$?
-check "closed: an unreachable index" 3 "$rc" "$out" "TOOL ERROR"
+# The fault must surface as the registry fault itself, not as a later guard
+# tripping over an empty probe.
+check "closed: an unreachable index" 3 "$rc" "${out} $(args_seen)" "TOOL ERROR" \
+  "<not invoked>" "!could not compare"
 
 rc=0
 out="$(run_gate "${INDEX}/v/0.35.0" clean.out 0 "${P[@]}" engine-pinned)" || rc=$?
