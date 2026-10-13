@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use trusty_channels::policy::Channel;
 
@@ -58,37 +58,10 @@ fn bob_ask() -> Ask {
     ask_of("bob-dm", BOB, bob_conv())
 }
 
+// #8433: no retry on `Locked`; a dropped table releases its flock at once,
+// even while a sibling test's forked child holds the descriptor (#9833).
 fn open_at(path: &Path) -> QuestionTable {
-    // #9833: a sibling test's forked child can hold the dropped table's flock.
-    retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)).expect("open table")
-}
-
-/// How long a reopen waits for forked children to exec (#9833).
-const REOPEN_GRACE: Duration = Duration::from_secs(10);
-
-/// Run `open` again while it reports `Locked`, for at most `grace`.
-///
-/// Why: a child that any thread of this test binary forks holds a copy of
-/// the lock descriptor until it execs, so a dropped table's flock can
-/// outlive it for that window (#9833).
-/// What: every other result returns at once. A live second holder never
-/// releases, so it still ends `Locked` once `grace` runs out.
-/// Test: `reopen_waits_out_a_forked_childs_lock_descriptor`,
-/// `unsealed_reason_waits_out_a_forked_childs_lock_descriptor`,
-/// `retry_locked_still_refuses_a_live_holder`.
-fn retry_locked<T>(
-    grace: Duration,
-    mut open: impl FnMut() -> Result<T, QuestionTableError>,
-) -> Result<T, QuestionTableError> {
-    let deadline = Instant::now() + grace;
-    loop {
-        match open() {
-            Err(QuestionTableError::Locked { .. }) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            other => return other,
-        }
-    }
+    QuestionTable::open_at(path).expect("open table")
 }
 
 /// Reserve and open one question; its id.
@@ -467,7 +440,7 @@ fn final_line_missing_only_newline_is_kept() {
 /// Assert opening `path` fails as `Corrupt` at `line`.
 fn assert_corrupt(path: &Path, line: usize, what: &str) {
     // #9833: wait out a forked child's copy of the dropped table's lock fd.
-    match retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)) {
+    match QuestionTable::open_at(path) {
         Err(QuestionTableError::Corrupt { line: l, .. }) => assert_eq!(l, line, "{what}"),
         other => panic!("{what}: opened: {other:?}"),
     }
@@ -798,71 +771,99 @@ impl HeldChild {
     }
 }
 
-/// #9833: a child another thread forked holds a copy of the lock descriptor
-/// until it execs, so the flock outlives the dropped table for that window.
+/// 🔴 #8433: a dropped table releases its flock explicitly, so a forked
+/// child's copy of the lock descriptor does not hold it; the reopen takes
+/// the lock at once, with no retry. Before the fix it was `Locked` until
+/// the child exec'd (#9833).
 #[test]
-fn reopen_waits_out_a_forked_childs_lock_descriptor() {
+fn dropped_table_releases_its_flock_despite_a_forked_child() {
     let fx = fixture();
     let table = open_at(&fx.path);
     let id = ask(&table, bob_ask());
     let child = HeldChild::fork();
     drop(table);
-    // The cause: the forked child's descriptor keeps the flock after drop.
-    assert!(
-        matches!(
-            QuestionTable::open_at(&fx.path),
-            Err(QuestionTableError::Locked { .. })
-        ),
-        "a forked child's copy of the lock descriptor did not hold the flock"
-    );
-    let released = child.release_after(Duration::from_millis(300));
-    let reopened = open_at(&fx.path);
+    let reopened = QuestionTable::open_at(&fx.path);
+    let released = child.release_after(Duration::ZERO);
     assert!(released.join().expect("release thread").success());
+    let reopened = reopened.expect("a forked child's lock descriptor held a dropped table's flock");
     assert!(reopened.state(id).is_some());
 }
 
-/// #9842: a refused reopen right after a drop must also wait out a forked
-/// child's lock descriptor, or it reports `Locked` instead of `Unsealed`.
+/// 🔴 #8433: a table releases its flock when it poisons, so a reopen takes
+/// the lock while stale `Arc` holders still run, and those holders refuse
+/// every operation, so the reopened table is the only writer.
 #[test]
-fn unsealed_reason_waits_out_a_forked_childs_lock_descriptor() {
+fn poisoned_table_releases_its_flock_while_arc_held() {
+    let fx = fixture();
+    let table = Arc::new(open_at(&fx.path));
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    let stale = Arc::clone(&table);
+    set_fault(&table, Some(Fault::BeforeWrite));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Poisoned
+    );
+    set_fault(&table, None);
+    drop(table);
+    let reopened = QuestionTable::open_at(&fx.path)
+        .expect("a poisoned table's stale holder kept the flock from the reopen");
+    assert_refuses_everything(&stale, id, reserved, "a stale holder after the reopen");
+    assert_eq!(
+        reopened.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    assert_eq!(resolve_lines(&fx.path, id).len(), 1);
+}
+
+/// #9842: a reopen right after a drop reports `Unsealed`, not `Locked`, while
+/// a forked child holds the lock descriptor; the flock is taken before the
+/// seal check. #8433: the dropped table released it, so no wait is needed.
+#[test]
+fn unsealed_reason_is_not_masked_by_a_forked_childs_lock_descriptor() {
     use std::os::unix::fs::PermissionsExt as _;
     let fx = fixture();
     let table = open_at(&fx.path);
     let child = HeldChild::fork();
     drop(table);
     std::fs::set_permissions(&fx.path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-    // The cause: the flock is taken before the seal check, so it wins.
-    assert!(
-        matches!(
-            QuestionTable::open_at(&fx.path),
-            Err(QuestionTableError::Locked { .. })
-        ),
-        "a forked child's copy of the lock descriptor did not hold the flock"
-    );
-    let released = child.release_after(Duration::from_millis(300));
-    assert_eq!(
-        unsealed_reason(&fx.path, &fx.path),
-        "mode grants access beyond the owner"
-    );
+    let reopened = QuestionTable::open_at(&fx.path).map(drop);
+    let released = child.release_after(Duration::ZERO);
     assert!(released.join().expect("release thread").success());
+    match reopened {
+        Err(QuestionTableError::Unsealed { reason, .. }) => {
+            assert_eq!(reason, "mode grants access beyond the owner");
+        }
+        other => panic!("expected Unsealed with a forked child alive, got {other:?}"),
+    }
 }
 
-/// #9833: the reopen wait must not outlast a real second holder.
+/// 🔴 #8433 Fail-Open Check: an unlock that fails at the poison transition
+/// leaves the table poisoned and its flock held, so the reopen is refused
+/// (`Locked`) until the table drops, and nothing is served meanwhile.
 #[test]
-fn retry_locked_still_refuses_a_live_holder() {
+fn failed_unlock_at_poison_keeps_the_table_refusing_and_locked() {
     let fx = fixture();
-    let first = open_at(&fx.path);
-    let grace = Duration::from_millis(200);
-    let started = Instant::now();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    let reserved = table.reserve().expect("reserve");
+    {
+        let mut state = table.state.lock().expect("state lock");
+        state.fault = Some(Fault::BeforeWrite);
+        state.unlock_fails = true;
+    }
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Poisoned
+    );
+    set_fault(&table, None);
+    assert_refuses_everything(&table, id, reserved, "after a failed unlock");
     assert!(matches!(
-        retry_locked(grace, || QuestionTable::open_at(&fx.path)),
+        QuestionTable::open_at(&fx.path),
         Err(QuestionTableError::Locked { .. })
     ));
-    assert!(
-        started.elapsed() >= grace,
-        "gave up before the grace ran out"
-    );
-    drop(first);
+    drop(table);
+    assert!(open_at(&fx.path).state(id).is_some());
 }
 
 #[test]
@@ -878,6 +879,9 @@ fn poisoned_mutex_refuses_every_op() {
     assert!(panicked.is_err());
     assert_refuses_everything(&table, id, reserved, "after a panic under the lock");
     assert!(resolve_lines(&fx.path, id).is_empty());
+    // #8433: a poisoned mutex released the flock; the reopen takes it now.
+    let reopened = QuestionTable::open_at(&fx.path).expect("reopen while the table lives");
+    assert!(reopened.state(id).is_some());
 }
 
 #[test]
@@ -1058,25 +1062,23 @@ async fn poisoned_table_is_reopened_by_the_holder() {
         table.resolve(id, BOB, &bob_conv(), "yes"),
         ResolveOutcome::Poisoned
     );
-    // The poisoned table still lives here, so its lock refuses the reopen.
-    assert!(matches!(
-        state.question_table(),
-        Err(QuestionTableError::Locked { .. })
-    ));
-    drop(table);
-    // #9833: wait out a forked child's copy of the dropped table's lock fd.
-    let reopened = retry_locked(REOPEN_GRACE, || state.question_table()).expect("reopen");
+    // #8433: the poisoned table still lives here, but it released its flock
+    // when it poisoned, so the holder reopens it at once.
+    let reopened = state
+        .question_table()
+        .expect("reopen beside a stale holder");
+    assert!(!Arc::ptr_eq(&reopened, &table));
     assert!(!reopened.is_poisoned());
     assert!(reopened.state(id).expect("replayed").answered);
+    // The stale holder refuses, so the reopened table is the only writer.
+    assert!(matches!(table.reserve(), Err(QuestionTableError::Poisoned)));
 }
 
 // ── #9815 (P2a of #8433): the log and its lock open only as sealed ──────────
 
 /// The `Unsealed` reason `open_at(path)` fails with, naming `want`.
 fn unsealed_reason(path: &Path, want: &Path) -> &'static str {
-    // #9842: the flock is taken before the seal check; wait out a forked
-    // child's copy of a dropped table's lock fd (#9833).
-    match retry_locked(REOPEN_GRACE, || QuestionTable::open_at(path)) {
+    match QuestionTable::open_at(path) {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, want, "the refusal names the unsealed file");
             reason
@@ -1303,12 +1305,8 @@ fn fifo_at_the_torn_file_refuses_to_open_without_blocking() {
     let log = table_with_torn_tail(&fx);
     let torn = super::torn_path(&fx.path);
     mkfifo(&torn);
-    // #9842: a Locked spell must end before FIFO_BOUND, or it reads as a block.
-    const FIFO_REOPEN_GRACE: Duration = Duration::from_secs(3);
     let path = fx.path.clone();
-    let opened = bounded_on_fifo(&torn, move || {
-        retry_locked(FIFO_REOPEN_GRACE, || QuestionTable::open_at(&path)).map(drop)
-    });
+    let opened = bounded_on_fifo(&torn, move || QuestionTable::open_at(&path).map(drop));
     match opened {
         Err(QuestionTableError::Unsealed { path, reason }) => {
             assert_eq!(path, torn, "the refusal names the torn file");
