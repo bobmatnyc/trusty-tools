@@ -99,14 +99,7 @@ pub(super) fn taint_verdict(
         Ok(writes) => writes,
         Err(what) => return Some(taint_reason(what)),
     };
-    let mut anchors = Anchors {
-        guarded: Vec::new(),
-        ids: Vec::new(),
-        armed: None,
-        fence: Vec::new(),
-        records_live: true,
-        names: Vec::new(),
-    };
+    let mut anchors = Anchors::bare(true);
     let mut paths = Vec::new();
     anchor.extend(&mut anchors.guarded, &mut anchors.fence, &mut paths);
     anchors.names = component_names(&paths);
