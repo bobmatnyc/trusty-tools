@@ -211,11 +211,17 @@ impl FastEmbedder {
 
     /// One unretried `TextEmbedding::try_new` against the resolved cache dir.
     fn try_init_once() -> Result<TextEmbedding> {
-        let opts = InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-            .with_show_download_progress(false)
-            .with_cache_dir(Self::cache_dir());
-        TextEmbedding::try_new(opts)
+        TextEmbedding::try_new(Self::init_options(Self::cache_dir()))
             .context("failed to initialize fastembed TextEmbedding (AllMiniLML6V2)")
+    }
+
+    /// fastembed options for `AllMiniLML6V2` cached in `cache_dir`. No side
+    /// effects.
+    /// Test: `init_options_pin_max_length_to_the_minilm_window`.
+    fn init_options(cache_dir: PathBuf) -> InitOptions {
+        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_show_download_progress(false)
+            .with_cache_dir(cache_dir)
     }
 
     /// Resolve the on-disk cache directory for model files.
@@ -434,6 +440,22 @@ mod tests {
             None => unsafe { std::env::remove_var("FASTEMBED_CACHE_DIR") },
         }
         assert_eq!(resolved, PathBuf::from("/tmp/trusty-agents-812-cache"));
+    }
+
+    /// #9708: fastembed 5.13.4 truncates at min(`max_length`, the cached
+    /// `tokenizer_config.json` `model_max_length`). The option defaults to 512
+    /// and the cached value is 512 or 256 by revision, so the option must say
+    /// 256 for every host to truncate alike. No model load, no network.
+    #[test]
+    fn init_options_pin_max_length_to_the_minilm_window() {
+        let cache_dir = PathBuf::from("/nonexistent/trusty-agents-9708-cache");
+        let opts = FastEmbedder::init_options(cache_dir.clone());
+        assert_eq!(opts.max_length, 256);
+        assert_eq!(
+            opts.max_length,
+            trusty_common::embedder::FASTEMBED_MAX_LENGTH
+        );
+        assert_eq!(opts.cache_dir, cache_dir);
     }
 
     /// Module-level singleton so all tests share one initialized model.
