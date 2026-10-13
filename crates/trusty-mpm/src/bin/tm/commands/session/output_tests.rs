@@ -188,3 +188,60 @@ async fn an_unknown_session_is_not_found_9162() {
         .expect_err("an unknown session must fail");
     assert!(err.to_string().contains("not found"), "{err}");
 }
+
+/// Two managed sessions whose names both extend the project session `front`.
+const FRONT_A: (&str, &str) = ("22222222-0000-0000-0000-000000000001", "frontend-a");
+const FRONT_B: (&str, &str) = ("22222222-0000-0000-0000-000000000002", "frontend-b");
+
+/// #9162 (criterion 2): an id that is an exact project session name but an
+/// ambiguous managed prefix still reads the project pane.
+#[tokio::test]
+async fn ambiguous_managed_prefix_still_reads_the_project_pane_9162() {
+    let daemon = client_for(Stub {
+        list: list_of(&[FRONT_A, FRONT_B]),
+        managed_output: pane("must not be read"),
+        project_output: pane("project front pane"),
+    })
+    .await;
+    let body = fetch_output(&daemon, "front", 50, false)
+        .await
+        .expect("an exact project session name must resolve");
+    assert_eq!(body["output"], "project front pane");
+}
+
+/// #9162: ambiguous managed prefix and no such project session (404) is the
+/// ambiguity error naming both candidates.
+#[tokio::test]
+async fn ambiguous_managed_prefix_with_project_404_is_ambiguity_9162() {
+    let daemon = client_for(Stub {
+        list: list_of(&[FRONT_A, FRONT_B]),
+        managed_output: pane("must not be read"),
+        project_output: no_route(),
+    })
+    .await;
+    let err = fetch_output(&daemon, "front", 50, false)
+        .await
+        .expect_err("an ambiguous prefix with no project match must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("ambiguous"), "not an ambiguity error: {msg}");
+    assert!(msg.contains(FRONT_A.1) && msg.contains(FRONT_B.1), "{msg}");
+}
+
+/// #9162: a project-route 5xx under an ambiguous managed prefix surfaces as
+/// that error, never as ambiguity or "not found".
+#[tokio::test]
+async fn ambiguous_managed_prefix_with_project_500_surfaces_the_500_9162() {
+    let daemon = client_for(Stub {
+        list: list_of(&[FRONT_A, FRONT_B]),
+        managed_output: pane("must not be read"),
+        project_output: (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
+    })
+    .await;
+    let err = fetch_output(&daemon, "front", 50, false)
+        .await
+        .expect_err("a project 500 must fail the verb");
+    let msg = err.to_string();
+    assert!(msg.contains("500"), "the 500 was masked: {msg}");
+    assert!(!msg.contains("ambiguous"), "read as ambiguity: {msg}");
+    assert!(!msg.contains("not found"), "read as not found: {msg}");
+}
