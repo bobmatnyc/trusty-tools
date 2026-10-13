@@ -770,6 +770,35 @@ async fn exec_siblings_resolve_on_one_token() {
     assert!(left.is_empty(), "the token directory was left: {left:?}");
 }
 
+/// Why: #9071 S10 AC11 end to end — `tm secrets exec` sweeps the temp dir
+/// before it spawns the stub: a `tm-grant-*` directory older than the
+/// 3600 s grant TTL goes, a young one stays.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_sweeps_stale_grant_dirs_before_the_stub() {
+    let fx = Fixture::new(Script::new()).await;
+    let tmp = fx.path("tmp");
+    let old = std::time::SystemTime::now() - Duration::from_secs(3700);
+    for name in ["tm-grant-stale", "tm-grant-young"] {
+        let dir = tmp.join(name);
+        std::fs::create_dir_all(&dir).expect("grant dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        if name.ends_with("stale") {
+            let handle = std::fs::File::open(&dir).expect("open dir");
+            handle.set_modified(old).expect("backdate");
+        }
+    }
+    let mut cmd = fx.tm(&["--env", "FOO=GH_TOKEN", "--", "true"]);
+    cmd.env("TMPDIR", &tmp);
+    let out = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+        .await
+        .expect("tm finished in 60 s")
+        .expect("tm output");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!tmp.join("tm-grant-stale").exists(), "the stale dir stayed");
+    assert!(tmp.join("tm-grant-young").exists(), "the young dir went");
+}
+
 /// Why: on a terminal nothing is scrubbed (Architect ruling Q3).
 /// What: tm's stdout is a pty slave; a thread reads the master until the
 /// first line, and that line carries the value.
