@@ -1064,3 +1064,9 @@ fn which_embedderd() -> Result<PathBuf> {
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 mod tests;
+
+// #9828: graceful-recycle tests (footprint ceiling, max age, max calls, and
+// the footprint-read-failure arm) against a real mock child.
+#[cfg(all(test, unix))]
+#[path = "supervisor_recycle_tests.rs"]
+mod recycle_tests;
