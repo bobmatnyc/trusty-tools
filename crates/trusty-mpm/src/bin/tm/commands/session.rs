@@ -23,6 +23,8 @@ pub(crate) mod catchup;
 pub(crate) mod instructions;
 mod output;
 mod start;
+// #9834: managed-session resolution for pause/events/run/activity.
+mod target;
 
 use instructions::{compose_session_instructions, print_excluded_scope};
 
