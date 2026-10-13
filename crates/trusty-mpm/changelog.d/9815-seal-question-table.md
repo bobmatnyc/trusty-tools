@@ -1,0 +1,3 @@
+Security
+- `tm hook --pm-guard` now seals the channel question table, `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`, and its `.lock` and `.torn` files as a trust anchor. No session may write, move, delete or link them, the Architect included, whether or not a channel taint is live; neither bypass variable lifts the rule. A write the guard cannot place, and a table location that does not resolve, are now denied to every session, the Architect included (Refs #9815, #8433).
+- The question table no longer opens on a log or lock that is a symlink, has a second hard link, grants group or other access, or is owned by another user; it refuses with an `Unsealed` error instead of narrowing the mode. A symlink at the torn-line file is not followed (Refs #9815).

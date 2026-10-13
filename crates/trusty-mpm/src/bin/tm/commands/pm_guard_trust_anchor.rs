@@ -22,6 +22,8 @@
 //! is live — or to anything under `architect-launch/`. Anchor names and the
 //! `.json` and `.architect` extensions compare ASCII case-insensitively, as
 //! APFS does.
+//! #9815: the channel question table's files are anchors too, and bind the
+//! Architect's main thread as well (`pm_guard_trust_anchor_questions.rs`).
 //! FAIL-CLOSED (Q4/Q5): an unknown home, a config location that does not
 //! resolve, a target that does not resolve, a target built from an expansion,
 //! glob or `cd` whose file name could name an anchor, an unplaceable write
@@ -168,8 +170,10 @@ pub(crate) async fn deny_trust_anchor_write(url: &str, payload: &Value) -> bool 
 /// The trust-anchor verdict for one `PreToolUse` payload: `Some(reason)` denies.
 ///
 /// Why/What: see the module doc. `config` is read only when the launch stamp
-/// says supervisor. The payload `cwd` places a relative path; with no `cwd`
-/// a relative path cannot be placed.
+/// says supervisor. #9815: the Architect's main thread is still judged
+/// against the question table ([`questions::questions_verdict`]). The
+/// payload `cwd` places a relative path; with no `cwd` a relative path cannot
+/// be placed.
 /// Test: `an_edit_tool_write_to_the_anchor_is_denied`,
 /// `the_architect_main_thread_may_write_the_anchor`,
 /// `an_unknown_home_denies_every_write`.
@@ -195,14 +199,11 @@ pub(crate) fn evaluate(
     if let Some(reason) = taint::taint_verdict(&writes, cwd, env.home.as_deref()) {
         return Some(reason);
     }
-    // #9815: the question table is sealed for every session, taint or none.
-    if let Some(reason) = questions::questions_verdict(&writes, cwd, env.home.as_deref()) {
-        return Some(reason);
-    }
     // #8878: the ONE identity decision; an identity ruling swaps this call only.
     // #8878 PR-I: the deny names the identity check that failed.
     let Err(why) = architect_main_thread(payload, env, config) else {
-        return None;
+        // #9815: the question table binds the Architect too, taint or none.
+        return questions::questions_verdict(&writes, cwd, env.home.as_deref());
     };
     decide(writes, cwd, env.home.as_deref()).map(|reason| with_identity(reason, why))
 }
@@ -350,6 +351,19 @@ struct ArmedAnchors {
 }
 
 impl Anchors {
+    /// An empty anchor set a child module fills: the taint (#8433) and
+    /// question-table (#9815) seals judge their own paths alone.
+    fn bare(records_live: bool) -> Self {
+        Self {
+            guarded: Vec::new(),
+            ids: Vec::new(),
+            armed: None,
+            fence: Vec::new(),
+            records_live,
+            names: Vec::new(),
+        }
+    }
+
     /// Resolve the anchors under `home`; `Err(path)` when the config's own
     /// location does not resolve.
     ///
@@ -413,12 +427,20 @@ impl Anchors {
         // a taint is live a `*.json` in an unknown directory could be one.
         let taint = taint::TaintAnchor::locate(home);
         taint.extend(&mut guarded, &mut fence, &mut paths);
+        // #9815: the question table's files, with the config's rules.
+        let questions = questions::QuestionsAnchor::locate(home)?;
+        guarded.extend(questions.guarded);
+        paths.extend(questions.paths);
         let mut names = component_names(&paths);
         // #8939: the `tm env` grant directory under the launch-record anchor.
         names.push(GRANT_DIR.to_owned());
         Ok(Self {
             guarded,
-            ids: file_id(&config).into_iter().chain(extra.ids).collect(),
+            ids: file_id(&config)
+                .into_iter()
+                .chain(extra.ids)
+                .chain(questions.ids)
+                .collect(),
             records_live: records_live || taint.live,
             armed,
             fence,
@@ -627,7 +649,8 @@ const REMEDY: &str = "Trust anchors are `~/.trusty-mpm/config.toml`, \
      `~/.trusty-mpm/twin/armed/*.json`. Only the Architect session's main thread may write them \
      — no PM, agent or subagent — and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` \
      do not lift this rule. Ask the operator, or make the change from the Architect session. \
-     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433).";
+     `~/.trusty-tools/trusty-mpm/channels/taint/` is an anchor no session may write (#8433), \
+     as are `channels/questions.jsonl` and its `.lock` and `.torn` files (#9815).";
 
 /// The deny for a write, link or rename that resolves to an anchor.
 fn anchor_reason(target: &str) -> String {

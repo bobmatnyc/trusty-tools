@@ -36,7 +36,7 @@ pub const FORMAT_VERSION: u32 = 1;
 
 /// The question table under `home`:
 /// `~/.trusty-tools/trusty-mpm/channels/questions.jsonl`.
-// See #9815: the trust anchor seals this file and its `.lock` (P2a, G7).
+// #9815: `tm hook --pm-guard` seals this file, its `.lock` and `.torn`.
 pub fn questions_path(home: &Path) -> PathBuf {
     trusty_common::crate_config::crate_config_dir_at(
         home,
@@ -237,13 +237,16 @@ impl QuestionTable {
     /// [`Book::apply`], or the open fails with `Corrupt`. An unterminated
     /// final line that decodes is kept and given its newline; one that does
     /// not is appended to `questions.jsonl.torn` before the log is cut. A new
-    /// file is created 0600, and its directory fsynced; an existing one is
-    /// set to 0600.
+    /// file is created 0600, and its directory fsynced. #9815: an existing log
+    /// or lock that is not sealed ([`seal::check_path`]) refuses the open with
+    /// `Unsealed`, and a symlink at the torn file is not followed.
     /// Test: `table_survives_restart`, `torn_final_line_quarantined`,
     /// `final_line_missing_only_newline_is_kept`,
     /// `malformed_middle_line_fails_the_open`,
     /// `second_table_on_same_path_is_refused_while_first_lives`,
-    /// `file_is_0600_and_dir_0700`, `home_write_fence_is_called`.
+    /// `file_is_0600_and_dir_0700`, `home_write_fence_is_called`,
+    /// `symlinked_log_refuses_to_open`, `symlinked_lock_refuses_to_open`,
+    /// `torn_file_symlink_is_not_followed`.
     pub fn open_at(path: &Path) -> Result<Self, QuestionTableError> {
         // #8433: a test must never write the operator's home (#8545); the
         // lock and torn files are siblings of `path`.
@@ -258,6 +261,8 @@ impl QuestionTable {
             .create(dir)
             .map_err(io_err(dir))?;
         let lock = take_lock(&lock_path(path))?;
+        // #9815: a log changed outside the trust-anchor seal never opens.
+        seal::check_path(path)?;
         let (bytes, created) = match std::fs::read(path) {
             Ok(bytes) => (bytes, false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
@@ -513,6 +518,8 @@ fn append(state: &mut State, record: &Record) -> std::io::Result<()> {
 
 /// Open (creating, 0600) and exclusively `flock` `path` without waiting.
 fn take_lock(path: &Path) -> Result<File, QuestionTableError> {
+    // #9815: a lock changed outside the trust-anchor seal is never taken.
+    seal::check_path(path)?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -535,6 +542,8 @@ fn append_once(path: &Path, bytes: &[u8]) -> Result<(), QuestionTableError> {
         .create(true)
         .append(true)
         .mode(0o600)
+        // #9815: a symlink planted here would aim the daemon's write elsewhere.
+        .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_data()))
         .map_err(io_err(path))
