@@ -439,14 +439,25 @@ pub(crate) fn require_maintenance_lease(state: &AppState) -> Result<()> {
 /// `?` on the line below releases it just as reliably as the success path.
 /// What: unchanged behaviour, plus a [`crate::worker_liveness`] registration
 /// held for the duration of the open. Writes register once for their whole
-/// duration in [`begin_budgeted_write`] instead.
-/// Test: `worker_liveness::tests`, `web::tests::health_tests`.
+/// duration in [`begin_budgeted_write`] instead. A missing palace fails with
+/// the bare [`crate::engine::PalaceNotFound`] (id, no path, no list): this
+/// is the read path, `memory_recall` among it, which the UserPromptSubmit hook
+/// calls on every prompt, and the list costs a walk that JSON-decodes every
+/// `palace.json` (#9751). Only the write tools list, via
+/// [`open_palace_handle_within`].
+/// Test: `worker_liveness::tests`, `web::tests::health_tests`,
+/// `memory_recall_names_a_missing_palace_without_walking_the_palaces`.
 pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
 ) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
     let _tracked = state.worker_liveness.track();
-    open_palace_handle_within(state, palace_id, OpBudget::start(state.write_op_budget))
+    open_within(
+        state,
+        palace_id,
+        OpBudget::start(state.write_op_budget),
+        false,
+    )
 }
 
 /// Open a palace handle inside an operation that has already spent part of its
@@ -464,7 +475,9 @@ pub(crate) fn open_palace_handle(
 /// caller runs inside [`begin_budgeted_write`], whose [`WriteGuard`] already
 /// counts the write once. Read paths keep calling [`open_palace_handle`], which
 /// stamps a full budget and therefore behaves exactly as before. A missing
-/// palace fails with the listed [`crate::engine::PalaceNotFound`] (#9751).
+/// palace fails with the listed [`crate::engine::PalaceNotFound`] (#9751):
+/// this is the write path (`memory_remember`, `memory_note`), where
+/// a caller needs the ids it could have used and one walk is not per-prompt.
 /// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`,
 /// `memory_remember_and_note_name_a_missing_palace_without_its_path`.
 pub(crate) fn open_palace_handle_within(
@@ -472,17 +485,45 @@ pub(crate) fn open_palace_handle_within(
     palace_id: &str,
     budget: OpBudget,
 ) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
+    open_within(state, palace_id, budget, true)
+}
+
+/// The one open both helpers share; `list_existing` picks the not-found form.
+///
+/// Why: listing the existing palaces JSON-decodes every `palace.json` (up to
+/// ~5,800 on an estate, #4637) and logs a WARN per corrupt one, so it runs only
+/// where a human reads the answer. Directory names are not guaranteed to equal
+/// palace ids (a rename keeps the directory, #9544), so a names-only read
+/// cannot stand in for the walk.
+/// What: opens the palace within `budget`. A genuine absence fails with the
+/// [`crate::engine::PalaceNotFound`] listing the palaces when `list_existing`,
+/// else with the registry's bare one; the type survives either way for the
+/// -32004 wire code. Any other failure gets `open palace <id>` context.
+/// Test: `memory_remember_and_note_name_a_missing_palace_without_its_path`,
+/// `memory_recall_names_a_missing_palace_without_walking_the_palaces`.
+fn open_within(
+    state: &AppState,
+    palace_id: &str,
+    budget: OpBudget,
+    list_existing: bool,
+) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
     // #4001: untracked here so one write is not counted twice in `in_flight`.
     let pid = PalaceId::new(palace_id);
     state
         .registry
         .open_palace_within(&state.data_root, &pid, budget)
         .map_err(|e| {
-            // #9751: an absence answers with the id and the existing palace
-            // ids, no path; the type survives for the -32004 wire code.
-            match crate::engine::PalaceNotFound::listed_absence(&e, &state.data_root) {
-                Some(absent) => absent.into(),
-                None => e.context(format!("open palace {palace_id}")),
+            // #9751: an absence answers with the id, no path.
+            if e.downcast_ref::<crate::engine::PalaceNotFound>().is_none() {
+                return e.context(format!("open palace {palace_id}"));
+            }
+            if list_existing {
+                match crate::engine::PalaceNotFound::listed_absence(&e, &state.data_root) {
+                    Some(absent) => absent.into(),
+                    None => e,
+                }
+            } else {
+                e
             }
         })
 }

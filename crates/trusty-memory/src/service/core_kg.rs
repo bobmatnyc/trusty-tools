@@ -11,7 +11,6 @@ use crate::engine::dream::{DreamConfig, Dreamer, PersistedDreamStats};
 use crate::engine::palace::PalaceId;
 use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
-use std::path::Path;
 use std::sync::Arc;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
 use crate::engine::store::kg::{ExpandDirection, Triple};
@@ -535,7 +534,7 @@ impl MemoryService {
         self.state
             .registry
             .open_palace(&self.state.data_root, &PalaceId::new(id))
-            .map_err(|e| open_failure(id, &e, &self.state.data_root))
+            .map_err(|e| open_failure(id, &e))
     }
 }
 
@@ -543,15 +542,16 @@ impl MemoryService {
 ///
 /// Why: [`MemoryService::open_handle`]'s mapping, kept apart so a test can
 /// drive it with every error variant, not only the ones a fixture can provoke.
-/// What: `NotFound` for a genuine absence, its message the listed
-/// [`PalaceNotFound`] for palaces under `data_root` (#9751), `Conflict` for a format refusal,
+/// What: `NotFound` for a genuine absence, its message the bare
+/// [`PalaceNotFound`] — no directory walk (#9751) — `Conflict` for a format refusal,
 /// `Internal` otherwise — the table `transport::api_error::open_handle` keeps.
 /// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`.
-pub(super) fn open_failure(id: &str, e: &anyhow::Error, data_root: &Path) -> ServiceError {
+pub(super) fn open_failure(id: &str, e: &anyhow::Error) -> ServiceError {
     // #5549: every open failure mapped to 404, so a palace that
     // could not be read was reported as one that is not there.
-    if let Some(absent) = PalaceNotFound::listed_absence(e, data_root) {
-        // #9751: the id and the existing palace ids, never the path.
+    if let Some(absent) = e.downcast_ref::<PalaceNotFound>() {
+        // #9751: the id, never the path, and no palace listing: this serves
+        // `memory.kg_all`, which the prompt hook calls on every prompt.
         ServiceError::not_found(absent.to_string())
     } else if is_format_refusal(e) {
         // #9665: a format refusal no retry can clear was reported as internal.

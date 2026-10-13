@@ -13,7 +13,9 @@
 //! `rpc_missing_palace_is_named_with_existing_palaces_and_no_path`,
 //! `absent_palace_is_named_with_existing_palaces_and_no_path_at_every_service_site`.
 
+use crate::engine::palace::PalaceId;
 use crate::engine::registry::PalaceRegistry;
+use crate::service::helpers::is_reserved_system_palace;
 use std::fmt;
 use std::path::Path;
 
@@ -72,8 +74,15 @@ impl PalaceNotFound {
 
     /// The absence of `palace`, listing the ids in `ids` (sorted, deduplicated,
     /// capped at [`MAX_LISTED_PALACES`]).
+    ///
+    /// Reserved system palaces (`__health_probe__`, #185) are dropped before
+    /// the count, so they take no slot and add nothing to `total`.
     pub fn from_ids(palace: impl Into<String>, ids: impl IntoIterator<Item = String>) -> Self {
-        let mut ids: Vec<String> = ids.into_iter().collect();
+        // #9751: a `__` palace never appears on a user-facing surface.
+        let mut ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !is_reserved_system_palace(&PalaceId::new(id.as_str())))
+            .collect();
         ids.sort();
         ids.dedup();
         let total = ids.len();
@@ -85,6 +94,10 @@ impl PalaceNotFound {
     }
 
     /// The absence of `palace`, listing the palaces under `data_root`.
+    ///
+    /// Cost: one `list_palaces` walk, which reads and JSON-decodes every
+    /// `palace.json`. Call it only where a human reads the answer (#9751);
+    /// the per-prompt read paths keep the bare form.
     ///
     /// A listing failure keeps the error a not-found and omits the list; the
     /// failure, which may name a path, goes to the server log only.
