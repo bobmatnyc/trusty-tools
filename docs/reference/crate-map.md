@@ -80,7 +80,9 @@ live primarily behind `trusty-common` features. MCP protocol primitives were
 later extracted again into the standalone `trusty-mcp` package by
 [ADR-0040](../adr/0040-trusty-mcp-services-absorbs-trusty-gworkspace.md).
 There is no `trusty_common::mcp` compatibility re-export; the memory client is
-`trusty_common::memory_rpc`.
+`trusty_common::memory_rpc`. The `trusty-memory-core` engine is the exception:
+it lived in trusty-common's `memory-core` feature until #9271 moved it into
+`trusty-memory` as `trusty_memory::engine`.
 
 ## Runtime relationships
 

@@ -1,9 +1,10 @@
 # trusty-memory — documentation
 
-Memory palace storage daemon + MCP server frontend. The storage engine lives in
-`crates/trusty-common`'s `memory_core` module (behind the `memory-core` feature
-flag, absorbing the former `trusty-memory-core` crate); the frontend is
-`crates/trusty-memory`.
+Memory palace storage daemon + MCP server frontend. Both live in
+`crates/trusty-memory`: the storage engine is its `engine` module
+(`crates/trusty-memory/src/engine/`). The engine absorbed the former
+`trusty-memory-core` crate and lived in `crates/trusty-common`'s `memory_core`
+module, behind the `memory-core` feature, until #9271.
 
 ## Historical product baseline
 
@@ -20,7 +21,7 @@ contracts, and source for implemented behavior:
 
 Architectural decision records live in [`decisions/`](decisions/):
 
-- [ADR-0001 — Frontend/core split: trusty-memory ⇄ trusty-common `memory_core`](decisions/0001-frontend-core-split.md)
+- [ADR-0001 — Frontend/core split: trusty-memory ⇄ trusty-common `memory_core`](decisions/0001-frontend-core-split.md) — amended by [workspace ADR-0066](../adr/0066-trusty-memory-1x-compatibility-contract.md)
 
 ## Layout
 

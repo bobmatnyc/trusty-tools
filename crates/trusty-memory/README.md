@@ -396,10 +396,10 @@ All consolidation tests use `MockInference` — no real API calls are made durin
 
 ```bash
 # Unit + integration tests (no network)
-cargo test -p trusty-common --features memory-core -- semantic_consolidation
+cargo test -p trusty-memory -- semantic_consolidation
 
 # Live-network tests (requires OPENROUTER_API_KEY)
-cargo test -p trusty-common --features memory-core -- --include-ignored semantic_consolidation
+cargo test -p trusty-memory -- --include-ignored semantic_consolidation
 ```
 
 ### Inter-project messaging (issue #99)
@@ -617,7 +617,7 @@ Each palace directory contains:
 ## Architecture
 
 ```
-trusty-memory (this crate)          trusty-common `memory-core` feature
+trusty-memory server surface        `engine` module (this crate)
   serve/start (Unix socket) ─────►  PalaceRegistry
   serve --stdio (JSON-RPC)  ─────►  HNSW vector index (index.usearch)
   MCP tool surface                  redb metadata + KG (kg.redb)
@@ -627,15 +627,23 @@ Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
                                   ──Unix socket──► trusty-memory daemon
 ```
 
-The `memory-core` feature of `trusty-common` owns the storage engine: `hnsw_rs` for approximate
-nearest-neighbor search, `redb` for drawer metadata and knowledge-graph triples, and
-`fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
-thin protocol layer on top.
+The `engine` module (`crates/trusty-memory/src/engine/`) owns the storage
+engine: `hnsw_rs` for approximate nearest-neighbor search, `redb` for drawer
+metadata and knowledge-graph triples, and `fastembed` for 384-dim text
+embeddings. It lived in trusty-common's `memory-core` feature until #9271. The
+MCP server surface is a thin protocol layer on top.
 
 This crate has no embedded UI and no HTTP listener
 ([#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286)):
 `trusty_common::uds::server` serves one Unix domain socket, and
 `trusty-console` reads it to render the dashboard — see [Web UI](#web-ui).
+
+### Palace format guard
+
+The guard moved here from trusty-common with the engine (#9271); it lives in
+`engine::store`.
+
+`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 1. A writer-intent `PalaceHandle` open migrates a format-0 palace at its first open, behind a verified backup under `<data_root>/backups/format-migration/<palace>/`; a read-only open of a format-0 palace is refused until the daemon has migrated it. One migration of a palace runs at a time: a second writer open in the process waits for it, and another process fails while it holds the palace directory's lock. `palace_format::palace_format_status` reads a palace's state without writing, and reports `Unverified` when `kg.redb` cannot be read without writing (held by a running daemon, or in need of crash repair). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
 
 ## Feature Flags
 
@@ -644,6 +652,8 @@ This crate has no embedded UI and no HTTP listener
 | `server` | **enabled** | Compiles the daemon, the CLI and both binaries: the socket-serving surface (`transport::uds`, `serve` / `start`), the tool handlers and every server module. Implies `mcp-schema`. Added by [#9269](https://github.com/bobmatnyc/trusty-tools/issues/9269) ([ADR-0066](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0066-trusty-memory-1x-compatibility-contract.md) D1.4). |
 | `daemon` | via `server` | Alias of `server`, kept for all of 1.x. Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
 | `mcp-schema` | via `server` | Compiles only the MCP tool schema (`tools::tool_definitions*`, `openrpc`) and `MemoryMcpService`, for a host that merges the schema into its own `rpc.discover` without linking the daemon (e.g. `trusty-agents`). |
+| `embedder-test-support` | off | Test-only. Exposes `engine::retrieval::seed_shared_embedder_with_mock` and the mock-embedder hooks. Never enable it in a production build. |
+| `memory-core-test-support` | off | Test-only. Exposes the format-0 and format-1 palace fixtures under `engine::store` (`format_v0_fixture`, `format_v1_fixture`) for migration tests. Moved here from trusty-common in #9271. |
 
 A `--no-default-features` build carries no trusty-mcp, clap or rusqlite and
 compiles no binary.
@@ -722,8 +732,8 @@ cargo run -p trusty-memory -- serve --foreground
 
 # Tests
 cargo test -p trusty-memory
-# Storage-engine tests live in trusty-common behind the memory-core feature:
-cargo test -p trusty-common --features memory-core
+# The run above covers the storage engine (`src/engine/`) too; it moved here
+# from trusty-common's `memory-core` feature in #9271.
 
 # Check only (faster)
 cargo check -p trusty-memory
