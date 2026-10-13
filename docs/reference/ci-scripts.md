@@ -202,3 +202,14 @@ fixture workspace, `--range` mode (a valid two-commit range, a missing value
 bounded by `timeout`, and an unresolvable ref), a bash <4 (`/bin/bash` on
 macOS) compatibility guard, and a short live check of the `trusty-common`
 feature override against this repo's own graph.
+
+## Not wired yet: SemVer surface profiles (#9278)
+
+Two scripts added by #9278 that no workflow runs until tm-dogfood wires them
+into `.github/workflows/semver-checks.yml`. Behaviour, table format and the
+pin step: [semver-gate.md, "Surface profiles"](semver-gate.md#surface-profiles-9278).
+
+| Script | Who calls it | What it answers |
+|---|---|---|
+| `lib/semver_profile.sh` | sourced by `check_semver.sh` when `--profile <name>` is given; `bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault` | Compares one declared surface from `scripts/semver-surface-profiles.tsv` — for trusty-memory the `--no-default-features` engine build (ADR-0066). `informational` reports a computed break and exits 0; every fault (missing or unparsable table, missing row, no usable baseline, a tool error) exits 3. |
+| `check_semver_profile_selftest.sh` | `bash scripts/check_semver_profile_selftest.sh [--gate <path>]` | Drives the gate's profile arm with a stub `cargo`, stub `rustc` and stub index, so it runs no cargo. Covers the run results, the unchanged default path, and every fail-closed branch. |

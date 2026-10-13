@@ -26,6 +26,7 @@
 | `scripts/preflight-publish.sh` CHECK 5 | immediately before `cargo publish` | Only on an infrastructure fault (comparison could not run) — never on a computed break (owner ruling 2026-09-26) |
 | `.github/workflows/semver-checks.yml` | on a `<crate>-v<version>` tag push | No — reports |
 | `bash scripts/check_semver.sh --crate <crate>` | on demand, any time | n/a |
+| `bash scripts/check_semver.sh --crate <crate> --profile <name>` | on demand; not wired into CI yet | n/a — see [Surface profiles](#surface-profiles-9278) |
 
 **Internal consistency is the bar — do not deliberate over external SemVer.**
 Keep the workspace self-consistent; what a third-party crates.io consumer
@@ -590,6 +591,108 @@ So the gate enumerates every declared feature and subtracts only what
 reason. An excluded feature's public API is unchecked, so every row is a real
 coverage hole and has to earn its place. "It is slow" is not a reason.
 
+## Surface profiles ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
+
+The default run never builds a crate with no features. trusty-memory's 1.x
+contract freezes exactly that build: every item reachable as
+`trusty_memory::engine::*` under `--no-default-features`
+([ADR-0066](../adr/0066-trusty-memory-1x-compatibility-contract.md) D1.4, D4).
+A surface profile compares that one surface:
+
+```bash
+bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault
+```
+
+The profile is a row in `scripts/semver-surface-profiles.tsv`, six
+TAB-separated columns:
+
+| Column | Values |
+|---|---|
+| `crate` | package name |
+| `profile` | `[a-z0-9][a-z0-9-]*` |
+| `features` | `-` for none (`--only-explicit-features` with nothing named, which is the `--no-default-features` build), else a comma-separated list |
+| `mode` | `informational` or `blocking` |
+| `baseline` | `auto` (the greatest non-yanked stable release below the declared version, the same rule as the default run) or a pinned stable `X.Y.Z` |
+| `reason` | non-blank text |
+
+The one row today is `trusty-memory  engine-nodefault  -  informational  auto`.
+
+**Informational mode.** A computed break is printed, counted in the summary
+and reported on the `semver-gate-profile:` line, and the run exits 0. This is
+Architect ruling D4 (2026-10-13): until a release carries the audited engine
+surface, a comparison against 0.35.0 measures the move of `engine` out of
+trusty-common, not the audit, so it must not block. The output still says that
+the profile ran, which release it compared against and whether it found
+breaks:
+
+```text
+PROFILE trusty-memory/engine-nodefault: surface = no features — the --no-default-features build; mode = informational
+PROFILE trusty-memory/engine-nodefault: compared v0.35.1 against v0.35.0 (auto: greatest stable release below v0.35.1), minor release
+PROFILE trusty-memory/engine-nodefault: INFORMATIONAL — breaking change(s) listed above against v0.35.0. Not blocking: ...
+semver-gate-profile: crate=trusty-memory profile=engine-nodefault mode=informational features=none baseline=0.35.0 baseline_source=auto release=minor result=break blocking=no
+```
+
+`result` is `clean`, `break` or `no-verdict`; `blocking` is `yes` only for a
+break in `blocking` mode. `semver-gate-verdict:` and the summary line keep their
+default-run format.
+
+**Informational covers a computed break only.** Every fault exits 3 in either
+mode, the same rule CHECK 5 follows (owner ruling 2026-09-26):
+
+| Fault | Message |
+|---|---|
+| the table does not exist | `PROFILE FILE MISSING` |
+| any row anywhere in the table is malformed (field count, mode, baseline, features, blank reason, duplicate) | `PROFILE FILE UNPARSABLE`, with the line number |
+| no row for a requested crate and profile; checked for every `--crate` before any comparison | `NO PROFILE ENTRY` |
+| the crate is `publish = false` or has no library target | `PROFILE TARGETS NO PUBLISHED LIBRARY` |
+| `auto`, and nothing stable is published below the declared version | `NO BASELINE FOR PROFILE` |
+| a pinned baseline that is not a non-yanked release | `PINNED BASELINE NOT AVAILABLE` |
+| a pinned baseline at or above the declared version | `PINNED BASELINE NOT BELOW` |
+| the registry is unreachable, the tool is missing, rustdoc fails, or the run executed no checks | the default run's `TOOL ERROR` / `NO VERDICT` messages |
+
+`--profile` needs `--crate` and does not combine with `--probe` (exit 2).
+Without `--profile` the gate issues exactly the command it issued before: the
+profile arm is a separate branch at the top of the per-crate loop
+(`scripts/lib/semver_profile.sh`), and the profile table is not read.
+
+A profile run does not consult the crate or feature exclusion tables. The
+profile's own feature list is the whole feature set, and the profile is an
+explicit request for one crate.
+
+An already-breaking delta (a pinned 0.34.0 against a declared 0.35.1, say) adds
+`--release-type minor` so every lint still runs, as the INVENTORY arm does. A
+break found there is reported and never blocks, whatever the mode.
+
+**The type differ shares the cache.** A profile run writes the crate's current
+rustdoc JSON under `target/semver-checks/` like any run, so a
+`check_semver_types.sh --crate trusty-memory` straight after it diffs the
+no-features build. Run the default `--crate` first when the type diff should
+cover the all-features build.
+
+### The pin step
+
+D4 pins the baseline at the first trusty-memory release that carries the
+audited engine surface (the release cut after the #9278 NARROW and typed-error
+PRs land). The pin is one PR that edits the row:
+
+1. `baseline`: `auto` -> that release, e.g. `0.38.0`. The gate then refuses the
+   run if the version is not a non-yanked release below the declared one.
+2. `mode`: `informational` -> `blocking`, once the Architect rules the engine
+   surface guarded. A break then exits 1, and `preflight-publish.sh` CHECK 5
+   treats it by its own rule if it ever runs the profile.
+3. Verify with `bash scripts/check_semver_profile_selftest.sh` and one live
+   `--profile` run.
+
+At 1.0.0, ADR-0066 D4 compares against the last 1.x release; set `baseline`
+back to `auto` then.
+
+### Where it runs
+
+Nothing runs the profile yet. `preflight-publish.sh` CHECK 5 and
+`.github/workflows/semver-checks.yml` call the gate without `--profile`, so
+their behaviour is unchanged. Wiring the profile and its self-test into the
+workflow is tm-dogfood's step (#9278 plan, section 3.2).
+
 ## When it fires
 
 At release time (CHECK 5) it no longer fires anything to fire AT — see the
@@ -804,6 +907,8 @@ and a disclosed `[WARN]` beats an undisclosed workaround.
 bash scripts/check_semver.sh --crate trusty-common  # one crate — the release path
 bash scripts/check_semver.sh --probe trusty-common  # what would it compare to?
 bash scripts/check_semver.sh                        # every crate changed vs origin/main
+bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault
+                                                    # the frozen engine surface (#9278)
 ```
 
 Or through the blocking caller, which also reports the other four publish
@@ -829,7 +934,22 @@ bash scripts/check_semver_types.sh --baseline-json <a.json> --current-json <b.js
 
 ## Self-test
 
-Three files. `scripts/check_semver_types_selftest.sh` covers the type differ: the
+Four files. `scripts/check_semver_profile_selftest.sh` covers
+[surface profiles](#surface-profiles-9278) and runs no cargo at all: a stub
+`cargo` answers `metadata` from a synthetic workspace and replays the captured
+runs under `scripts/test-data/semver-gate/`, and a stub index serves release
+histories with yanked versions. It pins that an informational break exits 0
+and names its baseline and result, that a blocking break exits 1, that the
+no-features build passes `--only-explicit-features` and no `--features`, that a
+run without `--profile` is unchanged, and that each fault in the table above
+exits 2 or 3. Every profile case failed against the gate before #9278, which
+rejected `--profile` as an unknown argument. Mutation runs that turned each
+fault branch into a pass each turned at least one case red; the registry
+re-raise is backed by the `release_type` guard, so only a mutant without both
+exits 0 (the unreachable-index case catches it). `--gate <path>`
+runs it against another copy of the gate.
+
+The other three predate profiles. `scripts/check_semver_types_selftest.sh` covers the type differ: the
 seven substitutions `cargo-semver-checks` misses are each asserted by name
 against the probe crate's real rustdoc JSON, and every way the differ can fail to
 understand a document is pinned to exit 3.
