@@ -189,7 +189,7 @@ pub fn granted_plugins_with_trust(project_dir: &Path, trusted: bool) -> Vec<Stri
 /// `project_trust::normalize`'s fallback so the two agree on the same
 /// directory).
 /// Test: `session_mcp_path_is_per_workspace`.
-fn workspace_key(cwd: &Path) -> String {
+pub(crate) fn workspace_key(cwd: &Path) -> String {
     use sha2::{Digest as _, Sha256};
     let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut hasher = Sha256::new();

@@ -40,6 +40,7 @@ fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
         // #8233: the flag now renders the path the launch PROVISIONED, so these
         // builder tests supply it the same way the launch does.
         mcp_config: config_dir.map(|_| Path::new(SCOPE_MCP_CONFIG)),
+        settings: None,
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
         memory_reachable: true,
         alternate_screen: false,

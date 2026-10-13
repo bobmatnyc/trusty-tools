@@ -42,6 +42,28 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// #8988: `tm launch`, `tm connect` and the Architect carry the owner
+/// settings file as one unquoted pair right after `--mcp-config`.
+#[test]
+fn isolated_spec_carries_the_owner_settings_after_the_mcp_config() {
+    let launch = CliLaunch {
+        model: None,
+        prompt_file: None,
+        config_dir: Some(Path::new("/h/cfg")),
+        oauth_token: None,
+        mcp_env: &[],
+        scoped_mcp: Some(Path::new("/h/mcp.json")),
+        settings: Some(Path::new("/h/with space/s.json")),
+        alternate_screen: false,
+    };
+    let args = super::isolated_spec(Path::new("/work"), &launch).args;
+    let at = args.iter().position(|a| a == "--mcp-config").expect("mcp");
+    assert_eq!(
+        args[at + 2..at + 4],
+        ["--settings".to_owned(), "/h/with space/s.json".to_owned()]
+    );
+}
+
 /// #8308: the isolated spec carries every variable and flag of the
 /// `build_claude_command_with_configured` line, in the same order, and none of
 /// its shell quoting.
@@ -55,6 +77,7 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
         oauth_token: Some("tok"),
         mcp_env: &env,
         scoped_mcp: Some(Path::new("/h/mcp.json")),
+        settings: None,
         alternate_screen: false,
     };
     let spec = super::isolated_spec(Path::new("/work"), &launch);
@@ -123,6 +146,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             oauth_token: None,
             mcp_env: &env,
             scoped_mcp: None,
+            settings: None,
             alternate_screen: false,
         };
         let spec = super::isolated_spec(Path::new("/work"), &launch);
@@ -144,6 +168,7 @@ fn only_an_architect_stamp_value_skips_the_pm_trim() {
             oauth_token: None,
             mcp_env: &env,
             scoped_mcp: None,
+            settings: None,
             alternate_screen: false,
         };
         let spec = super::isolated_spec(Path::new("/work"), &launch);
@@ -175,6 +200,7 @@ fn an_architect_isolated_spec_keeps_every_tool() {
         oauth_token: None,
         mcp_env: &env,
         scoped_mcp: None,
+        settings: None,
         alternate_screen: false,
     };
     let spec = super::isolated_spec(Path::new("/work"), &launch);
@@ -261,6 +287,7 @@ fn worst_case_cli_launch_line_is_short_and_carries_no_token() {
         oauth_token: Some(&token),
         mcp_env: &env,
         scoped_mcp: Some(&mcp),
+        settings: None,
         alternate_screen: false,
     };
     let spec = super::isolated_spec(&managed, &launch);

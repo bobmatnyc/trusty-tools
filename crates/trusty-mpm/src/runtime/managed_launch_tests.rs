@@ -90,6 +90,7 @@ impl Worst {
             gh_env: &self.gh_env,
             mcp_env: &self.mcp_env,
             mcp_config: Some(&self.mcp_config),
+            settings: None,
             memory_reachable: true,
             // #8405: the worst case carries the configured renderer too.
             alternate_screen: true,
@@ -111,6 +112,7 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         mcp_env: &[],
         // #8233: `config_dir: None`, so no scoped file was provisioned.
         mcp_config: None,
+        settings: None,
         memory_reachable: false,
         alternate_screen: false,
         profile: Default::default(),
@@ -270,6 +272,28 @@ fn spawn_argv_matches_the_shell_line_it_replaces() {
             .map(str::to_owned),
     );
     assert_eq!(spec.args, expected);
+}
+
+/// #8988: an owner settings file rides spawn and resume as one unquoted
+/// `--settings <file>` pair right after `--mcp-config`; attach takes no flags.
+#[test]
+fn spawn_and_resume_carry_the_owner_settings_after_the_mcp_config() {
+    let w = Worst::new();
+    let settings = Path::new("/h/.trusty-tools/trusty-mpm/session-settings/k.json");
+    let launch = ManagedLaunch {
+        settings: Some(settings),
+        ..w.launch()
+    };
+    for spec in [spawn_spec(&launch), resume_spec(&launch, Some("id"))] {
+        let at = spec
+            .args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings");
+        assert_eq!(spec.args[at + 1], settings.display().to_string());
+        assert_eq!(spec.args[at - 2], "--mcp-config");
+    }
+    assert_eq!(attach_spec(&launch, "ab12").args, vec!["attach", "ab12"]);
 }
 
 /// #8992: a PM's spawn and resume carry `CLAUDE_CODE_DISABLE_ARTIFACT=1` and

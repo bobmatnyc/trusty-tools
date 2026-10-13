@@ -207,11 +207,8 @@ pub(crate) fn start(
         dir,
         "launch",
     )?;
-    let scoped_mcp = crate::commands::launch_home::provision_session_mcp(
-        dir,
-        config_dir.as_deref(),
-        Some(home),
-    )?;
+    // #8988: an Architect dir sits at depth 1, so it resolves no owner.
+    let files = crate::commands::launch_home::launch_files(dir, config_dir.as_deref(), Some(home))?;
     // #8308: the launch travels in a spec under `home`; the pane types a short line.
     let mut claude_spec = crate::commands::launch::launch_claude_spec(
         dir,
@@ -220,7 +217,7 @@ pub(crate) fn start(
         Some(prompt.as_path()),
         config_dir.as_deref(),
         &cli.env,
-        scoped_mcp.as_deref(),
+        &files,
     );
     // #8981: the conversation id comes from tm's own record, which outlives
     // the daemon's session record.

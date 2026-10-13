@@ -381,8 +381,7 @@ pub(crate) async fn launch(
     // #7422: compose this session's default-deny MCP config before the line
     // that names it. Fatal — launching without `--mcp-config` would hand the
     // pane the whole shared server map.
-    let scoped_mcp =
-        super::launch_home::provision_session_mcp(&managed_path, config_dir.as_deref(), home)?;
+    let files = super::launch_home::launch_files(&managed_path, config_dir.as_deref(), home)?;
     // #8308: the launch travels in a mode-0600 spec; the pane types a short
     // line naming it, so no token or path is typed.
     // #4181: `config_dir` selects `--setting-sources user,project,local` and
@@ -397,7 +396,7 @@ pub(crate) async fn launch(
         // #4181: the per-project MCP pins the shared user-scope declarations
         // cannot carry as arguments; #8453: plus the profile stamp.
         &cli.env,
-        scoped_mcp.as_deref(),
+        &files,
     );
     let spec_dir = launch_spec_dir(home)?;
 
@@ -671,8 +670,7 @@ pub(crate) async fn connect(
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
         // #7422: same fail-closed composition as `tm launch`.
-        let scoped_mcp =
-            super::launch_home::provision_session_mcp(&path, config_dir.as_deref(), home)?;
+        let files = super::launch_home::launch_files(&path, config_dir.as_deref(), home)?;
         // #8308: same spec carrier as `tm launch`.
         let claude_spec = connect_claude_spec(
             &path,
@@ -680,7 +678,7 @@ pub(crate) async fn connect(
             config_dir.as_deref(),
             // #4181: the per-project MCP pins; #8453: plus the profile stamp.
             &cli.env,
-            scoped_mcp.as_deref(),
+            &files,
             // #8405: the operator's config decides the renderer.
             trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
         );
@@ -774,7 +772,7 @@ pub(crate) fn connect_claude_spec(
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
-    scoped_mcp: Option<&std::path::Path>,
+    files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
 ) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
     isolated_claude_spec(
@@ -783,7 +781,7 @@ pub(crate) fn connect_claude_spec(
         prompt_file,
         config_dir,
         mcp_env,
-        scoped_mcp,
+        files,
         config_root,
     )
 }
@@ -802,7 +800,7 @@ pub(crate) fn launch_claude_spec(
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
-    scoped_mcp: Option<&std::path::Path>,
+    files: &trusty_mpm::core::launch_policy::LaunchFiles,
 ) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
     isolated_claude_spec(
         cwd,
@@ -810,7 +808,7 @@ pub(crate) fn launch_claude_spec(
         prompt_file,
         config_dir,
         mcp_env,
-        scoped_mcp,
+        files,
         config_root,
     )
 }
@@ -819,15 +817,15 @@ pub(crate) fn launch_claude_spec(
 ///
 /// What: resolves the OAuth token only when `config_dir` relocates the config
 /// home (#4181/#2246 — a non-relocated spawn uses the operator's own login),
-/// and the renderer from `config_root` (#8405); `scoped_mcp` is the composed
-/// default-deny MCP file the caller already wrote (#7422).
+/// and the renderer from `config_root` (#8405); `files` are the composed
+/// MCP and owner settings files the caller already wrote (#7422, #8988).
 fn isolated_claude_spec(
     cwd: &std::path::Path,
     model: Option<&str>,
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
     mcp_env: &[(String, String)],
-    scoped_mcp: Option<&std::path::Path>,
+    files: &trusty_mpm::core::launch_policy::LaunchFiles,
     config_root: Option<&std::path::Path>,
 ) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
     let token = config_dir.and_then(|_| trusty_mpm::core::oauth_token::resolve_oauth_token());
@@ -839,7 +837,8 @@ fn isolated_claude_spec(
             config_dir,
             oauth_token: token.as_deref(),
             mcp_env,
-            scoped_mcp,
+            scoped_mcp: files.mcp_config.as_deref(),
+            settings: files.settings.as_deref(),
             alternate_screen: trusty_mpm::core::alt_screen::configured_alternate_screen_in(
                 config_root,
             ),

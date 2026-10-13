@@ -335,7 +335,10 @@ async fn start_session_in_place(
             let root = fw.crate_config_root();
             // #8405: the config under this launch's named root decides the renderer.
             // #8286: `prompt` was written by `inplace_prompt_file` above.
-            let spec = inplace_session_spec(path, &root, &prompt);
+            let mut spec = inplace_session_spec(path, &root, &prompt);
+            // #8988: unrelocated, so the policy reads the operator's own `.claude.json`.
+            let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None);
+            spec.args.extend(settings.argv());
             let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
             match trusty_mpm::runtime::cli_launch::send_spec_launch(&body.name, &spec, &spec_dir) {
                 Ok(()) => {
