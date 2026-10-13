@@ -72,11 +72,13 @@ fn daemon_row_names_its_transport_and_no_port() {
 
 /// The probe distinguishes "nothing is listening" from every other failure.
 ///
-/// Port 1 on loopback is the same never-listening address the `tm hook`
-/// fail-open suite uses, so the connect is refused rather than timing out.
+/// #9837: the target is [`crate::commands::dead_addr::dead_addr`], whose
+/// connect fails inside `connect(2)` on every host. `127.0.0.1:1` is not that
+/// address: a host that drops the SYN turns the probe into a timeout.
 #[tokio::test]
 async fn daemon_probe_reports_not_running_when_nothing_listens() {
-    let (reachability, snapshot) = probe_daemon(&DaemonClient::new("http://127.0.0.1:1")).await;
+    let url = format!("http://{}", crate::commands::dead_addr::dead_addr());
+    let (reachability, snapshot) = probe_daemon(&DaemonClient::new(url)).await;
     assert_eq!(reachability, DaemonReachability::NotRunning);
     assert!(snapshot.is_none());
 }
