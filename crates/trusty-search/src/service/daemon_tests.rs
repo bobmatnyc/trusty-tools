@@ -860,7 +860,11 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
         let shutdown_tx = state.shutdown_tx.clone();
         let handle = tokio::spawn(run_daemon(state, None));
         assert!(wait_for_socket(&socket_path).await, "the socket must serve");
-        let _ = shutdown_tx.send(true);
+        // #9736: a lost stop fails here and names the cause, not as a 20 s timeout.
+        assert!(
+            shutdown_tx.send(true).is_ok(),
+            "#9736: the stop must find the daemon's receiver once the socket serves"
+        );
         let exit = tokio::time::timeout(std::time::Duration::from_secs(20), handle).await;
         assert!(
             matches!(exit, Ok(Ok(Ok(())))),
