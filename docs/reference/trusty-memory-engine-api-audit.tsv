@@ -1,0 +1,464 @@
+path	kind	disposition	consumer_or_reason	batch
+trusty_memory::engine::store::KnowledgeGraph	struct	KEEP	engine signatures (PalaceHandle::kg, community::find_communities, store::rooms); tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::adjacency_desynced	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::assert_sync	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::KnowledgeGraph::astar_path	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::cascade_delete_by_drawer	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::KnowledgeGraph::community_computations	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::KnowledgeGraph::community_count	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::connected_components	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::count_active_triples	method	KEEP	tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::delete_drawer	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::delete_drawer_sync	method	NARROW	removed: no caller anywhere	A3a
+trusty_memory::engine::store::KnowledgeGraph::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::dump_all_triples	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::KnowledgeGraph::edge_count	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::expand_neighbors	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::incoming	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::is_read_only	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::knowledge_gaps	method	KEEP	tests/community_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::list_active	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::list_subjects	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::list_subjects_with_counts	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::load_drawer	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::load_drawer_ids	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::load_drawers	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::load_drawers_with_skipped	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::neighbors	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::node_count	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::open	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::open_with_intent	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::query_active	method	KEEP	tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::reachable	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::redb_store	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::retract	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::retract_triple	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::shortest_path	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::store	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::superseded_by_many	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::top_degree_subgraph	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	tests/bm25_stale_edit_8246.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	tests/memory_palace.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawers_atomic	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::KnowledgeGraph::verify_with_many	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg	mod	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync	enum	KEEP	error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424)	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::cause	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::committed	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::earlier_committed	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::earlier_operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::ExpandDirection	enum	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::ExpandDirection::Both	variant	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::ExpandDirection::In	variant	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::ExpandDirection::Out	variant	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::KgEdge	struct	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::kg::KgEdge::confidence	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::KgEdge::predicate	field	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::kg::KgEdge::provenance	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::KgEdge::valid_from	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::KgEdge::valid_to	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::KnowledgeGraph	struct	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::kg::SeedNode	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::SeedNode::degree	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::SeedNode::entity	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::SeedNode::in_degree	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::SeedNode::out_degree	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg::Triple	struct	KEEP	tests/engine_standalone.rs; examples/kg_dump.rs	A3a
+trusty_memory::engine::store::kg::Triple::confidence	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::object	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::predicate	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::provenance	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::subject	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::valid_from	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg::Triple::valid_to	field	KEEP	member of Triple (tests/engine_standalone.rs; examples/kg_dump.rs)	A3a
+trusty_memory::engine::store::kg_redb	mod	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::BatchOpResult	enum	KEEP	return type of KgStoreRedb::apply_batch	A3a
+trusty_memory::engine::store::kg_redb::BatchOpResult::Asserted	variant	KEEP	member of BatchOpResult (return type of KgStoreRedb::apply_batch)	A3a
+trusty_memory::engine::store::kg_redb::BatchOpResult::DrawerDeleted	variant	KEEP	member of BatchOpResult (return type of KgStoreRedb::apply_batch)	A3a
+trusty_memory::engine::store::kg_redb::BatchOpResult::DrawerUpserted	variant	KEEP	member of BatchOpResult (return type of KgStoreRedb::apply_batch)	A3a
+trusty_memory::engine::store::kg_redb::BatchOpResult::Retracted	variant	KEEP	member of BatchOpResult (return type of KgStoreRedb::apply_batch)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp	enum	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::Assert	variant	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::DeleteDrawer	variant	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::Retract	variant	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::Retract::predicate	field	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::Retract::subject	field	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::BatchWriteOp::UpsertDrawer	variant	KEEP	member of BatchWriteOp (tests/palace_backup_9282.rs)	A3a
+trusty_memory::engine::store::kg_redb::CompactFaultHook	type	NARROW	duplicate re-export of kg_redb::copy_swap::CompactFaultHook	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome	struct	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome::backup	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome::backup	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome::bytes_after	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome::bytes_after	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome::bytes_before	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome::bytes_before	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome::history_rows_pruned	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome::history_rows_pruned	A3a
+trusty_memory::engine::store::kg_redb::CompactOutcome::rows_copied	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactOutcome::rows_copied	A3a
+trusty_memory::engine::store::kg_redb::CompactPlan	struct	NARROW	duplicate re-export of kg_redb::copy_swap::CompactPlan	A3a
+trusty_memory::engine::store::kg_redb::CompactPlan::history_cutoff_ms	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactPlan::history_cutoff_ms	A3a
+trusty_memory::engine::store::kg_redb::CompactPlan::keep_backup	field	NARROW	duplicate re-export of kg_redb::copy_swap::CompactPlan::keep_backup	A3a
+trusty_memory::engine::store::kg_redb::CompactStep	enum	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep	A3a
+trusty_memory::engine::store::kg_redb::CompactStep::AfterBackup	variant	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep::AfterBackup	A3a
+trusty_memory::engine::store::kg_redb::CompactStep::AfterCopy	variant	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep::AfterCopy	A3a
+trusty_memory::engine::store::kg_redb::CompactStep::AfterFsync	variant	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep::AfterFsync	A3a
+trusty_memory::engine::store::kg_redb::CompactStep::AfterRename	variant	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep::AfterRename	A3a
+trusty_memory::engine::store::kg_redb::CompactStep::BeforeRename	variant	NARROW	duplicate re-export of kg_redb::copy_swap::CompactStep::BeforeRename	A3a
+trusty_memory::engine::store::kg_redb::Drawer	struct	NARROW	duplicate re-export of engine::palace::Drawer	A3a
+trusty_memory::engine::store::kg_redb::Drawer::access_count	field	NARROW	duplicate re-export of engine::palace::Drawer::access_count	A3a
+trusty_memory::engine::store::kg_redb::Drawer::completed_at	field	NARROW	duplicate re-export of engine::palace::Drawer::completed_at	A3a
+trusty_memory::engine::store::kg_redb::Drawer::created_at	field	NARROW	duplicate re-export of engine::palace::Drawer::created_at	A3a
+trusty_memory::engine::store::kg_redb::Drawer::drawer_type	field	NARROW	duplicate re-export of engine::palace::Drawer::drawer_type	A3a
+trusty_memory::engine::store::kg_redb::Drawer::expires_at	field	NARROW	duplicate re-export of engine::palace::Drawer::expires_at	A3a
+trusty_memory::engine::store::kg_redb::Drawer::fact_key	field	NARROW	duplicate re-export of engine::palace::Drawer::fact_key	A3a
+trusty_memory::engine::store::kg_redb::Drawer::id	field	NARROW	duplicate re-export of engine::palace::Drawer::id	A3a
+trusty_memory::engine::store::kg_redb::Drawer::importance	field	NARROW	duplicate re-export of engine::palace::Drawer::importance	A3a
+trusty_memory::engine::store::kg_redb::Drawer::last_accessed_at	field	NARROW	duplicate re-export of engine::palace::Drawer::last_accessed_at	A3a
+trusty_memory::engine::store::kg_redb::Drawer::room_id	field	NARROW	duplicate re-export of engine::palace::Drawer::room_id	A3a
+trusty_memory::engine::store::kg_redb::Drawer::source_file	field	NARROW	duplicate re-export of engine::palace::Drawer::source_file	A3a
+trusty_memory::engine::store::kg_redb::Drawer::tags	field	NARROW	duplicate re-export of engine::palace::Drawer::tags	A3a
+trusty_memory::engine::store::kg_redb::KG_SCHEMA_DRAWERS_AUTHORITATIVE	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats	struct	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::dead_predicate_index	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::dead_predicate_index	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::file_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::file_bytes	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::from_snapshot	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::from_snapshot	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::history_cutoff_days	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::history_cutoff_days	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::path	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::path	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::reclaimable_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::reclaimable_bytes	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::superseded_drawers	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::superseded_drawers	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::tables	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::tables	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::triples_active	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_active	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::triples_closed_in_place	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_closed_in_place	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::triples_history	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_history	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::triples_history_stale	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_history_stale	A3a
+trusty_memory::engine::store::kg_redb::KgRedbStats::triples_history_stale_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_history_stale_bytes	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb	struct	KEEP	engine signatures (store::rooms, store::wings); tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::adopt_snapshot_drawers	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::apply_batch	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::assert	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::count_active_triples	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_by_subject	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_drawer	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::drawers_authoritative	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::dump_all_triples	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::get_room	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::get_wing	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::import_all	method	KEEP	tests/recall_supersession.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::insert_room_if_absent	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::insert_wing_if_absent	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::is_read_only	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_active	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_rooms	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_subjects	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_subjects_with_counts	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_wings	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawer	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawer_ids	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawers	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawers_with_skipped	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::lookup_room_id	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::lookup_wing_id	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::open	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::open_with_intent	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::path	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::query_active	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::rename_room	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::rename_wing_in_place	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::retract	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::retract_triple	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::room_schema_version	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::set_room_schema_version	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::set_wing_schema_version	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::superseded_by_many	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::upsert_drawer	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::verify_with_many	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::wing_schema_version	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats	struct	NARROW	duplicate re-export of kg_redb::stats::KgTableStats	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::fragmented_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::fragmented_bytes	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::metadata_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::metadata_bytes	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::name	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::name	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::pages	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::pages	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::rows	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::rows	A3a
+trusty_memory::engine::store::kg_redb::KgTableStats::stored_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgTableStats::stored_bytes	A3a
+trusty_memory::engine::store::kg_redb::PalaceSnapshot	struct	NARROW	duplicate re-export of kg_redb::snapshot::PalaceSnapshot	A3a
+trusty_memory::engine::store::kg_redb::PalaceSnapshot::dir	field	NARROW	duplicate re-export of kg_redb::snapshot::PalaceSnapshot::dir	A3a
+trusty_memory::engine::store::kg_redb::PalaceSnapshot::manifest	field	NARROW	duplicate re-export of kg_redb::snapshot::PalaceSnapshot::manifest	A3a
+trusty_memory::engine::store::kg_redb::PreparedCompaction	struct	NARROW	duplicate re-export of kg_redb::copy_swap::PreparedCompaction	A3a
+trusty_memory::engine::store::kg_redb::READ_ONLY_ERROR_MSG	const	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError	enum	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::BackupRootUnsafe	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::BackupRootUnsafe	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::BackupRootUnsafe::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::BackupRootUnsafe::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::BackupRootUnsafe::reason	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::BackupRootUnsafe::reason	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ChecksumMismatch	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ChecksumMismatch	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ChecksumMismatch::actual	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ChecksumMismatch::actual	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ChecksumMismatch::expected	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ChecksumMismatch::expected	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ChecksumMismatch::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ChecksumMismatch::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::CountMismatch	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::CountMismatch	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::CountMismatch::actual	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::CountMismatch::actual	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::CountMismatch::expected	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::CountMismatch::expected	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::CountMismatch::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::CountMismatch::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::CountMismatch::table	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::CountMismatch::table	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::DestinationExists	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::DestinationExists	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::DestinationExists::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::DestinationExists::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidBackupName	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidBackupName	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidBackupName::name	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidBackupName::name	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidBackupName::reason	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidBackupName::reason	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidManifest	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidManifest	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidManifest::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidManifest::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::InvalidManifest::reason	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::InvalidManifest::reason	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Io	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Io	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Io::op	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Io::op	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Io::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Io::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Io::source	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Io::source	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ManifestJson	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ManifestJson	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ManifestJson::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ManifestJson::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ManifestJson::source	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ManifestJson::source	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::NoDataDir	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::NoDataDir	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::NoDataDir::palace	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::NoDataDir::palace	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::PalaceFormatTooNew	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::PalaceFormatTooNew::found	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::found	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::PalaceFormatTooNew::supported	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::supported	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ReadOnlyHandle	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ReadOnlyHandle	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::ReadOnlyHandle::palace	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::ReadOnlyHandle::palace	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Redb	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Redb	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Redb::op	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Redb::op	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Redb::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Redb::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::Redb::reason	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::Redb::reason	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::TargetNotEmpty	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::TargetNotEmpty	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::TargetNotEmpty::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::TargetNotEmpty::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnknownTables	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnknownTables	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnknownTables::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnknownTables::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnknownTables::tables	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnknownTables::tables	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnsafeBackupComponent	variant	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnsafeBackupComponent::path	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::path	A3a
+trusty_memory::engine::store::kg_redb::SnapshotError::UnsafeBackupComponent::reason	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::reason	A3a
+trusty_memory::engine::store::kg_redb::SnapshotFile	struct	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotFile	A3a
+trusty_memory::engine::store::kg_redb::SnapshotFile::len	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotFile::len	A3a
+trusty_memory::engine::store::kg_redb::SnapshotFile::name	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotFile::name	A3a
+trusty_memory::engine::store::kg_redb::SnapshotFile::sha256	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotFile::sha256	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest	struct	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::chat_tables	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::chat_tables	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::drawer_count	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::drawer_count	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::files	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::files	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::format_version	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::format_version	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::kg_tables	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::kg_tables	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::kind	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::kind	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::palace	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::palace	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::palace_format	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::palace_format	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::room_count	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::room_count	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::taken_at	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::taken_at	A3a
+trusty_memory::engine::store::kg_redb::SnapshotManifest::writer_version	field	NARROW	duplicate re-export of kg_redb::snapshot::SnapshotManifest::writer_version	A3a
+trusty_memory::engine::store::kg_redb::Triple	struct	NARROW	duplicate re-export of store::kg::Triple	A3a
+trusty_memory::engine::store::kg_redb::Triple::confidence	field	NARROW	duplicate re-export of store::kg::Triple::confidence	A3a
+trusty_memory::engine::store::kg_redb::Triple::object	field	NARROW	duplicate re-export of store::kg::Triple::object	A3a
+trusty_memory::engine::store::kg_redb::Triple::predicate	field	NARROW	duplicate re-export of store::kg::Triple::predicate	A3a
+trusty_memory::engine::store::kg_redb::Triple::provenance	field	NARROW	duplicate re-export of store::kg::Triple::provenance	A3a
+trusty_memory::engine::store::kg_redb::Triple::subject	field	NARROW	duplicate re-export of store::kg::Triple::subject	A3a
+trusty_memory::engine::store::kg_redb::Triple::valid_from	field	NARROW	duplicate re-export of store::kg::Triple::valid_from	A3a
+trusty_memory::engine::store::kg_redb::Triple::valid_to	field	NARROW	duplicate re-export of store::kg::Triple::valid_to	A3a
+trusty_memory::engine::store::kg_redb::check_backup_name	fn	NARROW	duplicate re-export of kg_redb::snapshot::check_backup_name	A3a
+trusty_memory::engine::store::kg_redb::copy_swap	mod	KEEP	path of CompactFaultHook	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::BACKUP_SUFFIX	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::COMPACTING_SUFFIX	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactFaultHook	type	KEEP	engine::dream::kg_compact_pass_with_hook signature (A5)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::backup	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::bytes_after	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::bytes_before	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::bytes_reclaimed	method	NARROW	removed: no caller anywhere	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::history_rows_pruned	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::rows_copied	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactPlan	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactPlan::default	trait_method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactPlan::history_cutoff_ms	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactPlan::keep_backup	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep	enum	KEEP	named by the CompactFaultHook alias	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep::AfterBackup	variant	KEEP	member of CompactStep (named by the CompactFaultHook alias)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep::AfterCopy	variant	KEEP	member of CompactStep (named by the CompactFaultHook alias)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep::AfterFsync	variant	KEEP	member of CompactStep (named by the CompactFaultHook alias)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep::AfterRename	variant	KEEP	member of CompactStep (named by the CompactFaultHook alias)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactStep::BeforeRename	variant	KEEP	member of CompactStep (named by the CompactFaultHook alias)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::PreparedCompaction	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::PreparedCompaction::commit	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::PreparedCompaction::counts	method	NARROW	removed: no caller anywhere	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::PreparedCompaction::drop	trait_method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::prepare	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::restore_palace_snapshot	fn	NARROW	duplicate re-export of kg_redb::snapshot::restore_palace_snapshot	A3a
+trusty_memory::engine::store::kg_redb::snapshot	mod	KEEP	path of PalaceSnapshot and SnapshotError	A3a
+trusty_memory::engine::store::kg_redb::snapshot::CHAT_FILE	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::DRAWER_COUNTS_FILE	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::KG_FILE	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::PalaceSnapshot	struct	KEEP	engine::PalaceHandle::snapshot return type (A4)	A3a
+trusty_memory::engine::store::kg_redb::snapshot::PalaceSnapshot::dir	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::PalaceSnapshot::manifest	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_FORMAT_VERSION	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_KIND	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError	enum	KEEP	engine::PalaceHandle::snapshot error type (A4)	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::table	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::name	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::found	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::supported	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::tables	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile::len	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile::name	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile::sha256	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest	struct	KEEP	commands::palace_backup::RestoreReport::manifest (server; narrowing trips private_interfaces)	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::chat_tables	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::drawer_count	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::files	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::format_version	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::kg_tables	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::kind	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::palace	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::palace_format	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::room_count	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::taken_at	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotManifest::writer_version	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::check_backup_name	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::snapshot::restore_palace_snapshot	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats	mod	KEEP	path of KgRedbStats	A3a
+trusty_memory::engine::store::kg_redb::stats::HISTORY_KEY_PREFIX	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats	struct	KEEP	engine::dream::KgCompactReport::stats field (A5)	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::dead_predicate_index	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::file_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::from_snapshot	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::history_cutoff_days	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::measure	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::measure_at	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::path	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::reclaimable_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::rows	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::superseded_drawers	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::tables	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::triples_active	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::triples_closed_in_place	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::triples_history	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::triples_history_stale	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgRedbStats::triples_history_stale_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::fragmented_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::live_bytes	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::metadata_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::name	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::pages	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::rows	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::KgTableStats::stored_bytes	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::history_close_ms	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::stats::history_cutoff_ms	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store	mod	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::ACTIVE_SUBJECT_COUNTS	const	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::DELETED_VECTORS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DRAWERS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DRAWERS_BY_FACT_KEY	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::completed_at_ms	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::content	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::created_at_ms	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::drawer_type	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::expires_at_ms	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::fact_key	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::importance	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::room_id	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::source_file	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::DrawerRecord::tags	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::FUNCTIONAL_PREDICATES	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::KG_SCHEMA	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::KG_SCHEMA_TRIPLE_KEY	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::KG_TRIPLE_KEY_SCHEMA_VERSION	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::KgSchemaMarker	struct	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::KgSchemaMarker::schema_version	field	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::NEXT_VECTOR_ID	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::PAYLOADS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::RECALL_LOG	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::ROOMS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::ROOM_KEYS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::SESSIONS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::TRIPLES	const	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TRIPLES_BY_OBJECT	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::TRIPLES_BY_PREDICATE	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::TripleValue	struct	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TripleValue::confidence	field	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TripleValue::object	field	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TripleValue::provenance	field	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TripleValue::valid_from_ms	field	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::TripleValue::valid_to_ms	field	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::VECTORS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::VECTOR_ID_SEQ	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::VECTOR_KEYS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::VERIFY_WITH	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::WINGS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::WING_KEYS	const	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::decode_legacy_triple_key	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_store::decode_triple_key	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::decode_u64	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::decode_value	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::encode_object_index_key	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::encode_payload_key	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::encode_predicate_index_key	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_store::encode_triple_key	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::encode_u64	fn	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::encode_value	fn	HIDE	tests/kg_triple_key_migration_tests.rs (storage layout; #[doc(hidden)] kg_store)	A3a
+trusty_memory::engine::store::kg_store::is_functional_predicate	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::prefix_range_end	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::segment_prefix	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::subject_predicate_prefix	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_store::subject_prefix	fn	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_writer	mod	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter	struct	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::assert	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::assert_sync	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::bypass	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::delete_drawer	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::delete_drawer_sync	method	NARROW	removed: no caller anywhere	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::retract	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::spawn	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::store	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::upsert_drawer	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::kg_writer::KgWriter::upsert_drawer_sync	method	NARROW	no consumer outside the library; module pub(crate)	A3a
