@@ -20,7 +20,10 @@
 #                  public-api` omits `#[doc(hidden)]` items, so a HIDE item
 #                  that is listed lost its attribute);
 #     - UNAUDITED  a listed path with no row at all;
-#     - MISSING    a KEEP or DEPRECATE row whose path is not listed.
+#     - MISSING    a KEEP or DEPRECATE row whose path is not listed;
+#     - UNMARKED   a listed `pub enum` whose attribute prefix lacks
+#                  `#[non_exhaustive]` (A1 Q1: no enum is exhaustive and
+#                  there is no allow-list; a re-export path counts too).
 #   Each failure prints one line naming the path.
 #
 #   One path may carry two rows only when they differ in `kind` and agree on
@@ -52,14 +55,14 @@
 # Env (fixtures only):
 #   ENGINE_API_AUDIT_TSV  the audit table (default docs/reference/...tsv)
 #
-# Exit: 0 when the listing matches the table; 1 on any EXTRA, UNAUDITED or
-#   MISSING path; 2 on a usage, tool, table or listing error.
+# Exit: 0 when the listing matches the table; 1 on any EXTRA, UNAUDITED,
+#   MISSING or UNMARKED path; 2 on a usage, tool, table or listing error.
 #
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path (in an engine module,
 #   at the crate root, under `transport`, sharing a row's stem, on a generic
 #   type, each generic shape, and generics carrying `->`), a missing KEEP or
-#   DEPRECATE row, a field
+#   DEPRECATE row, an enum without `#[non_exhaustive]`, a field
 #   and method sharing a path, the bad-header, malformed-row, duplicate-row and
 #   conflicting-row errors, and the missing, empty, crate-less and unparsable
 #   listing errors.
@@ -156,12 +159,16 @@ fi
 # then cut at the first `(`, `{`, `: ` or ` `. #9278 A6: a `pub` line that does
 # not cut to a `trusty_memory` path, or a line that is neither `pub` nor an
 # impl header, is a parser gap: it fails closed rather than drop a path.
-if ! awk '{
-  s = $0
-  while (s ~ /^#\[[^]]*\] /) sub(/^#\[[^]]*\] /, "", s)
+# #9278 A1 Q1: the attribute prefix is saved as it is dropped; a `pub enum`
+# line whose prefix lacks `#[non_exhaustive]` writes its path to $WORK/unmarked.
+: > "$WORK/unmarked"
+if ! awk -v unmarked="$WORK/unmarked" '{
+  s = $0; attrs = ""
+  while (match(s, /^#\[[^]]*\] /)) { attrs = attrs substr(s, 1, RLENGTH); s = substr(s, RLENGTH + 1) }
   if (s == "" || s ~ /^(unsafe )?impl/) next
   if (s !~ /^pub /) { bad_line(); next }
   sub(/^pub /, "", s)
+  is_enum = (s ~ /^enum /)
   sub(/^((unsafe|async|const|extern "[^"]*") )*fn /, "", s)
   sub(/^(struct|enum|union|trait|unsafe trait|type|mod|const|static|use|macro) /, "", s)
   # #9278: strip generic groups (nested too) before the cut, so `X<T>::m` is
@@ -174,8 +181,9 @@ if ! awk '{
   # read (e.g. `<{ N > 1 }>`); fail closed rather than cut it at a space.
   if (s ~ /[<>]/) { bad_line(); next }
   sub(/ .*/, "", s); sub(/:$/, "", s)
-  if (s ~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*$/) print s
-  else bad_line()
+  if (s !~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*$/) { bad_line(); next }
+  print s
+  if (is_enum && index(attrs, "#[non_exhaustive] ") == 0) print s > unmarked
 }
 function bad_line() {
   printf "check_engine_api_audit: unparsable listing line %d in %s: %s\n", NR, FILENAME, $0 > "/dev/stderr"
@@ -213,6 +221,8 @@ LC_ALL=C comm -13 "$WORK/listed" "$WORK/public" > "$WORK/missing"
 report EXTRA "$WORK/extra"
 report UNAUDITED "$WORK/unaudited"
 report MISSING "$WORK/missing"
+LC_ALL=C sort -u "$WORK/unmarked" > "$WORK/unmarked.sorted"
+report UNMARKED "$WORK/unmarked.sorted"
 
 if [ "$FAILS" -gt 0 ]; then
   echo "check_engine_api_audit: FAIL — $FAILS path(s) disagree with $AUDIT"
