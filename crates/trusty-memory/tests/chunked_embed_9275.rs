@@ -42,7 +42,6 @@ fn open_palace(name: &str) -> Arc<PalaceHandle> {
 }
 
 // #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
-#[expect(clippy::field_reassign_with_default)]
 async fn remember(handle: &PalaceHandle, text: &str) -> Uuid {
     let mut opts = RememberOptions::default();
     opts.force = true;
@@ -169,7 +168,6 @@ async fn rewriting_a_drawer_shorter_drops_its_stale_chunk_rows() {
 
 #[tokio::test]
 // #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
-#[expect(clippy::field_reassign_with_default)]
 async fn legacy_palace_recalls_unchanged_then_reembed_adds_the_tail() {
     let handle = open_palace("legacy");
     for n in 0..20 {
