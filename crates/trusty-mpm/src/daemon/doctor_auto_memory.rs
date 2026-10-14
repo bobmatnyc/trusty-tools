@@ -1,7 +1,8 @@
-//! `tm doctor` auto-memory probe and its `--fix` repair (#7685).
+//! `tm doctor` auto-memory probe and its `--fix` repair (#7685, #8436).
 //!
-//! Why: the owner directive is that Claude Code's own auto memory (`MEMORY.md`)
-//! is not used in tm sessions — `trusty-memory` is the memory. Two write sites
+//! Why: Claude Code's own auto memory (`MEMORY.md`) is off for every tm session,
+//! with no fallback — `trusty-memory` is the memory (#8436, Bob Db0 Q5a
+//! 2026-10-14, which retired the 2026-09-12 fallback ruling). Two write sites
 //! make that true at launch (the project-tier `autoMemoryEnabled: false` key and
 //! the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` managed-spawn assignment), and
 //! neither is observable afterwards: a project that has never been launched, or
@@ -9,34 +10,27 @@
 //! with nothing reporting it. Measured on 2026-09-12, three headless subagent
 //! probes in this project each read the auto-memory index and quoted its first
 //! entry, so the exposure is real rather than theoretical.
-//!
-//! The 2026-09-12 owner ruling made auto memory a FALLBACK rather than a thing
-//! to be off unconditionally, which is why this row grades a PAIR: the same
-//! configuration is a defect beside a healthy trusty-memory and correct beside a
-//! dead one — and auto memory off beside a dead one is the project having no
-//! memory at all.
 //! What: [`check_auto_memory`] resolves the EFFECTIVE `autoMemoryEnabled` value
 //! across the same four settings layers Claude Code itself consults — project
 //! local > project > user local > user — reads whether the project's `MEMORY.md`
-//! still holds facts, and grades the pair against whether trusty-memory
-//! answered. Its doc carries the full table. [`repair_auto_memory`] is the
-//! `tm doctor --fix` half: it writes the key into the PROJECT tier through the
-//! same [`crate::core::session_launch::merge_settings_key`] the launch path
-//! uses, so a repaired project and a launched one converge on one code path —
-//! and in the same DIRECTION, `false` beside a healthy trusty-memory and `true`
-//! beside a dead one. It does NOT migrate — `tm memory import-auto-memory` does,
-//! and the check names it.
+//! still holds facts, and names whether trusty-memory answered. Its doc carries
+//! the full table. [`repair_auto_memory`] is the `tm doctor --fix` half: it
+//! writes `false` into the PROJECT tier through the same
+//! [`crate::core::session_launch::merge_settings_key`] the launch path uses, so
+//! a repaired project and a launched one converge on one code path. It never
+//! writes `true` and does NOT migrate — `tm memory import-auto-memory` does, and
+//! both the check and the repair name it.
 //! Test: `auto_memory_fails_when_on_beside_a_healthy_trusty_memory`,
-//! `auto_memory_is_ok_when_on_while_trusty_memory_is_down`,
+//! `auto_memory_fails_when_on_while_trusty_memory_is_down`,
 //! `auto_memory_warns_when_off_while_trusty_memory_is_down`,
 //! `auto_memory_ok_when_off_and_the_index_is_empty`,
 //! `auto_memory_fails_when_the_index_still_holds_facts`,
-//! `auto_memory_warns_when_the_index_holds_facts_and_memory_is_down`,
+//! `auto_memory_fails_when_the_index_holds_facts_and_memory_is_down`,
 //! `auto_memory_project_local_overrides_project`,
 //! `auto_memory_falls_back_to_the_user_tier`,
 //! `auto_memory_fails_on_malformed_json`,
 //! `auto_memory_repair_applies_when_absent`,
-//! `auto_memory_repair_restores_the_fallback_when_memory_is_down`,
+//! `auto_memory_repair_writes_false_when_memory_is_down`,
 //! `auto_memory_repair_dry_run_writes_nothing`,
 //! `auto_memory_repair_is_silent_when_already_false`,
 //! `auto_memory_repair_reports_a_write_failure`,
@@ -56,9 +50,9 @@ pub(crate) const CHECK_NAME: &str = "auto_memory";
 
 /// The documented env-var half of the same directive.
 ///
-/// Why: named in this check's remedy text so an operator reading a `Warn` row
+/// Why: named in this check's remedy text so an operator reading a `Fail` row
 /// learns both levers, not only the one `--fix` writes. The assignment itself
-/// lives in [`crate::runtime::claude_code::env_bin_prefix`]; this is prose.
+/// lives in [`crate::runtime::managed_launch`]; this is prose.
 /// What: the variable name, as Claude Code's docs spell it.
 /// Test: `auto_memory_fails_when_on_beside_a_healthy_trusty_memory`.
 const DISABLE_ENV_VAR: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
@@ -165,34 +159,33 @@ fn effective_setting(project_dir: Option<&Path>, home: &Path) -> Effective {
     Ok(None)
 }
 
-/// Probe the auto-memory FALLBACK posture for this project (#7685).
+/// Grade this project's auto-memory posture (#7685, #8436).
 ///
-/// Why: the owner ruling of 2026-09-12 made this a check about the FALLBACK
-/// POSTURE rather than about one boolean. Auto memory being on is a finding only
-/// while trusty-memory is UP; while it is down, auto memory on is the posture the
-/// directive asks for, and auto memory OFF is the double-loss state — a project
-/// with no memory at all — which is exactly what an operator needs told.
+/// Why: auto memory is off for every tm session, trusty-memory down included
+/// (#8436, Bob Db0 Q5a 2026-10-14). The row flags any project where it is on,
+/// and any whose `MEMORY.md` still strands facts; with auto memory correctly off,
+/// a trusty-memory that does not answer is the remaining finding — the session
+/// has no memory until it does.
 /// What: resolves the effective key via [`effective_setting`] and reads the
 /// project's `MEMORY.md` through
 /// [`crate::core::auto_memory_import::index_has_content`], then:
 ///
-/// | trusty-memory | auto memory | `MEMORY.md` | verdict |
+/// | auto memory | `MEMORY.md` | trusty-memory | verdict |
 /// |---|---|---|---|
-/// | up | on | any | `Fail` — the directive is unmet |
-/// | up | off | non-empty | `Fail` — facts are stranded in the fallback |
-/// | up | off | empty/absent | `Ok` |
-/// | down | on | any | `Ok` — the fallback is carrying the project |
-/// | down | off | any | `Warn` — no memory at all; `--fix` restores it |
+/// | on | any | any | `Fail` — `--fix` writes `false` |
+/// | off | non-empty | any | `Fail` — facts stranded; run the migration |
+/// | off | empty/absent | not healthy | `Warn` — no memory until it answers |
+/// | off | empty/absent | healthy | `Ok` |
 ///
 /// An unset key counts as ON: Claude Code documents auto memory as on by
 /// default. A malformed settings file is `Fail` regardless. Read-only —
 /// [`repair_auto_memory`] is the write half, and it never migrates.
 /// Test: `auto_memory_fails_when_on_beside_a_healthy_trusty_memory`,
-/// `auto_memory_is_ok_when_on_while_trusty_memory_is_down`,
+/// `auto_memory_fails_when_on_while_trusty_memory_is_down`,
 /// `auto_memory_ok_when_off_and_the_index_is_empty`,
 /// `auto_memory_fails_when_the_index_still_holds_facts`,
+/// `auto_memory_fails_when_the_index_holds_facts_and_memory_is_down`,
 /// `auto_memory_warns_when_off_while_trusty_memory_is_down`,
-/// `auto_memory_warns_when_the_index_holds_facts_and_memory_is_down`,
 /// `auto_memory_project_local_overrides_project`,
 /// `auto_memory_falls_back_to_the_user_tier`,
 /// `auto_memory_fails_on_malformed_json`,
@@ -205,7 +198,6 @@ pub(crate) fn check_auto_memory(
 ) -> DoctorCheck {
     // #7685: the row names WHY trusty-memory is not the memory — a wedged daemon
     // is sampled before it is restarted, a dead one is just started.
-    let memory_reachable = memory.is_reachable();
     let memory_state = memory.describe();
     let effective = match effective_setting(project_dir, home) {
         Ok(effective) => effective,
@@ -221,73 +213,61 @@ pub(crate) fn check_auto_memory(
             format!("`{AUTO_MEMORY_KEY}` unset in every settings tier (Claude Code defaults it ON)")
         }
     };
-    let index = index_state(project_dir, config_dir);
 
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) — on
+    // is a defect whatever trusty-memory's state.
     if auto_on {
-        if memory_reachable {
-            return DoctorCheck::new(
-                CHECK_NAME,
-                CheckStatus::Fail,
-                format!(
-                    "trusty-memory is healthy and IS the memory here, but Claude Code \
-                     auto-memory is ON — {where_set}. Run `{REMEDY}` to write \
-                     `{AUTO_MEMORY_KEY}: false` into the project tier; a managed `tm` launch \
-                     also sets `{DISABLE_ENV_VAR}=1` on the spawned session"
-                ),
-            );
-        }
         return DoctorCheck::new(
             CHECK_NAME,
-            CheckStatus::Ok,
+            CheckStatus::Fail,
             format!(
-                "{memory_state}, so Claude Code auto-memory is carrying this project as the \
-                 FALLBACK — {where_set}. This is the posture the directive asks for while \
-                 trusty-memory is down"
+                "Claude Code auto-memory is ON — {where_set} — but every tm session runs \
+                 with it off ({memory_state}). Run `{REMEDY}` to write \
+                 `{AUTO_MEMORY_KEY}: false` into the project tier; a managed `tm` launch \
+                 also sets `{DISABLE_ENV_VAR}=1` on the spawned session"
             ),
         );
     }
 
-    // Auto memory is OFF. With trusty-memory down that is the double-loss state
-    // the two-way launch write exists to prevent, and it outranks the index
-    // finding — a project with no memory at all is the more urgent fact.
-    if !memory_reachable {
-        let stranded = match &index {
-            IndexState::Holding(path) => {
-                format!("; its index also still holds facts ({})", path.display())
-            }
-            IndexState::Empty => String::new(),
+    if let IndexState::Holding(path) = index_state(project_dir, config_dir) {
+        let first = if memory.is_reachable() {
+            String::new()
+        } else {
+            format!(" once trusty-memory answers ({memory_state})")
         };
         return DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Warn,
-            format!(
-                "the fallback is disabled while {memory_state} — {where_set}, so this \
-                 project currently has NO memory. Run `{REMEDY}` to write \
-                 `{AUTO_MEMORY_KEY}: true` and restore it{stranded}"
-            ),
-        );
-    }
-
-    match index {
-        IndexState::Holding(path) => DoctorCheck::new(
             CHECK_NAME,
             CheckStatus::Fail,
             format!(
                 "Claude Code auto-memory is off ({where_set}) but its index still holds \
-                 facts ({}) — nothing has moved them into the palace. Run `{MIGRATE}`; \
-                 it stores each fact, archives the file, and only then empties the index",
+                 facts ({}) — nothing reads them and nothing has moved them into the \
+                 palace. Run `{MIGRATE}`{first}; it stores each fact, archives the file, \
+                 and only then empties the index",
                 path.display()
             ),
-        ),
-        IndexState::Empty => DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Ok,
-            format!(
-                "trusty-memory is the memory here — auto-memory off ({where_set}) and its \
-                 index is empty"
-            ),
-        ),
+        );
     }
+
+    if !memory.is_reachable() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!(
+                "Claude Code auto-memory is off as expected ({where_set}), but \
+                 {memory_state} — sessions here have no memory until trusty-memory \
+                 answers. Start or restart it; auto memory stays off (#8436)"
+            ),
+        );
+    }
+
+    DoctorCheck::new(
+        CHECK_NAME,
+        CheckStatus::Ok,
+        format!(
+            "trusty-memory is the memory here — auto-memory off ({where_set}) and its \
+             index is empty"
+        ),
+    )
 }
 
 /// Whether this project's auto-memory index still holds anything.
@@ -329,58 +309,49 @@ const REMEDY: &str = "tm doctor --fix --yes";
 /// Why: `--fix` writes one boolean key; moving facts between two stores is a
 /// data migration with its own failure modes, and an operator must choose to run
 /// it. Naming it in the remedy text is how the row stays actionable anyway.
-/// What: the command line, quoted verbatim in the `Holding` verdicts.
-/// Test: `auto_memory_fails_when_the_index_still_holds_facts`.
+/// What: the command line, quoted verbatim in the `Holding` verdict and the
+/// repair step.
+/// Test: `auto_memory_fails_when_the_index_still_holds_facts`,
+/// `auto_memory_repair_writes_false_when_memory_is_down`.
 const MIGRATE: &str = "tm memory import-auto-memory";
 
-/// Write `autoMemoryEnabled` into the project tier under `--fix` (#7685).
+/// Write `autoMemoryEnabled: false` into the project tier under `--fix`.
 ///
 /// Why: the launch path already writes this key, but only on a launch. A project
-/// whose settings file predates #7685, or that an operator edited, has no other
-/// route back to the directive short of hand-editing JSON. The repair is purely
-/// additive — one boolean key, every other key preserved — which is why it is in
-/// the auto-repairable set at all.
-///
-/// It is TWO-WAY for the same reason the launch write is: a repair that could
-/// only ever write `false` would deepen the exact failure the check now warns
-/// about, disabling the fallback on a host whose trusty-memory is down.
-/// What: derives the wanted value as `!memory_reachable` and reads the PROJECT
-/// tier only (the tier tm owns; a higher-precedence `settings.local.json` is the
-/// operator's and is never rewritten, the same refusal `output_style_legacy_ids`
-/// makes). Produces no step when that tier already reads the wanted value.
-/// Otherwise plans the write in [`RepairMode::DryRun`], and in
-/// [`RepairMode::Apply`] performs it through [`merge_settings_key`]. A write that
-/// fails yields [`StepStatus::Failed`] carrying the error — never an `Applied`
-/// step, so a `--fix` run cannot report a repair it did not make.
+/// whose settings file predates #7685, that an operator edited, or that the
+/// retired #7685 fallback left `true` has no other route back short of
+/// hand-editing JSON. The repair is purely additive — one boolean key, every
+/// other key preserved — which is why it is in the auto-repairable set at all.
+/// #8436: it writes `false` whatever trusty-memory's state; there is no fallback
+/// to restore.
+/// What: reads the PROJECT tier only (the tier tm owns; a higher-precedence
+/// `settings.local.json` is the operator's and is never rewritten, the same
+/// refusal `output_style_legacy_ids` makes). Produces no step when that tier
+/// already reads `false`. Otherwise plans the write in [`RepairMode::DryRun`],
+/// and in [`RepairMode::Apply`] performs it through [`merge_settings_key`]. A
+/// write that fails yields [`StepStatus::Failed`] carrying the error — never an
+/// `Applied` step, so a `--fix` run cannot report a repair it did not make.
 ///
 /// It deliberately does NOT migrate the auto-memory store (#7685): that is
-/// [`MIGRATE`], an operator-run data move with its own failure modes, and a
-/// `--fix` that quietly rewrote two stores would be the wrong shape of repair.
+/// [`MIGRATE`], an operator-run data move with its own failure modes; the step
+/// text names it.
 /// Test: `auto_memory_repair_applies_when_absent`,
-/// `auto_memory_repair_restores_the_fallback_when_memory_is_down`,
+/// `auto_memory_repair_writes_false_when_memory_is_down`,
 /// `auto_memory_repair_dry_run_writes_nothing`,
 /// `auto_memory_repair_is_silent_when_already_false`,
 /// `auto_memory_repair_reports_a_write_failure`,
 /// `auto_memory_repair_never_migrates`.
-pub fn repair_auto_memory(
-    project_dir: &Path,
-    mode: RepairMode,
-    memory_reachable: bool,
-) -> Vec<RepairStep> {
-    let wanted = !memory_reachable;
+pub fn repair_auto_memory(project_dir: &Path, mode: RepairMode) -> Vec<RepairStep> {
     let settings_path = project_dir.join(".claude").join("settings.json");
-    if matches!(read_layer(&settings_path), LayerValue::Set(v) if v == wanted) {
+    if matches!(read_layer(&settings_path), LayerValue::Set(false)) {
         return Vec::new();
     }
 
-    let what = if wanted {
-        format!(
-            "set `{AUTO_MEMORY_KEY}: true`, restoring the fallback (trusty-memory is not \
-             answering)"
-        )
-    } else {
-        format!("set `{AUTO_MEMORY_KEY}: false` (trusty-memory is the memory)")
-    };
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14)
+    let what = format!(
+        "set `{AUTO_MEMORY_KEY}: false` (auto memory is off for every tm session; facts \
+         still in `MEMORY.md` move with `{MIGRATE}`)"
+    );
     if mode == RepairMode::DryRun {
         return vec![RepairStep {
             check: CHECK_NAME,
@@ -390,14 +361,11 @@ pub fn repair_auto_memory(
         }];
     }
 
-    let status = match merge_settings_key(
-        project_dir,
-        AUTO_MEMORY_KEY,
-        serde_json::Value::Bool(wanted),
-    ) {
-        Ok(()) => StepStatus::Applied { backup: None },
-        Err(err) => StepStatus::Failed(err.to_string()),
-    };
+    let status =
+        match merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false)) {
+            Ok(()) => StepStatus::Applied { backup: None },
+            Err(err) => StepStatus::Failed(err.to_string()),
+        };
     vec![RepairStep {
         check: CHECK_NAME,
         path: settings_path,

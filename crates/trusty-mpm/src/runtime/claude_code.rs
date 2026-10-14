@@ -16,7 +16,6 @@ use tracing::debug;
 
 // #7685: imported rather than path-qualified at each use — this file sits at
 // its SLOC cap and the qualified form wraps over three lines per call site.
-use crate::core::memory_reachable::{resolve_memory_reachable, resolve_spawn_memory_reachable};
 use crate::session_manager::ManagedTmuxDriver;
 
 use super::RuntimeAdapter;
@@ -612,9 +611,6 @@ fn build_inplace_resume_command_with(
 /// `claude_code_adapter_identifies`.
 pub struct ClaudeCodeAdapter {
     tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
-    /// What the launch already resolved about trusty-memory (#7685); `None`
-    /// means this adapter must ask the host itself.
-    memory_reachable: Option<bool>,
     /// #8233: the framework layout every home-derived launch path now reads,
     /// resolved once by the caller (`DaemonState::framework_root`) instead of
     /// from `dirs::home_dir()` on each spawn.
@@ -628,32 +624,21 @@ impl ClaudeCodeAdapter {
     /// Construct an adapter backed by the given tmux driver.
     ///
     /// Why: the session manager injects the tmux driver via `Arc<dyn …>` so
-    /// the adapter is testable without a real tmux binary. `memory_reachable`
-    /// (#7685) is what this launch's `prepare_session_inner` already answered one
-    /// `PROBE_TIMEOUT` ago; taking it at CONSTRUCTION rather than offering a
-    /// setter is what stops a caller spawning before pinning it. `None` — from a
-    /// caller that ran no preparation — keeps the probe, so the answer is never
-    /// guessed.
+    /// the adapter is testable without a real tmux binary.
     /// `framework_root` (#8233) is the `…/.trusty-mpm` directory this adapter's
     /// launches read and write — `DaemonState::framework_root()` on the daemon
     /// path, `FrameworkPaths::default().root` in the `tm` CLI. Taking it at
-    /// CONSTRUCTION, like `memory_reachable`, is what stops a launch resolving
-    /// it from the process home instead.
-    /// What: stores the driver and the reachability, and expands
+    /// CONSTRUCTION is what stops a launch resolving it from the process home
+    /// instead.
+    /// What: stores the driver, and expands
     /// `framework_root` into a [`FrameworkPaths`] via
     /// [`FrameworkPaths::from_root`].
     /// Test: used in every `ClaudeCodeAdapter` test;
-    /// `spawn_uses_the_launch_resolved_reachability` pins the reachability half,
-    /// `prepare_managed_config_writes_only_under_the_named_framework_root` the
-    /// root half.
-    pub fn new(
-        tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
-        memory_reachable: Option<bool>,
-        framework_root: &Path,
-    ) -> Self {
+    /// `prepare_managed_config_writes_only_under_the_named_framework_root` pins
+    /// the root.
+    pub fn new(tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>, framework_root: &Path) -> Self {
         Self {
             tmux,
-            memory_reachable,
             fw: FrameworkPaths::from_root(framework_root),
             prompt_dir: std::env::temp_dir(),
         }
@@ -839,11 +824,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             cwd,
             None,
         );
-        // #7685: auto memory is the FALLBACK, so the kill switch goes into the
-        // spec only when trusty-memory answered. The launch resolved this
-        // already where it could; this only probes when nothing did, so the
-        // spec builders below stay pure functions of their arguments.
-        let memory_reachable = resolve_spawn_memory_reachable(self.memory_reachable);
         // #8988: the owner MCP policy, under the same named state home.
         let settings = owner_settings(&self.fw, cwd, &config_dir, profile);
         // #2997: `claude_bin` is passed UNWRAPPED — the shim is now the process
@@ -860,7 +840,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
             settings: settings.file.as_deref(),
-            memory_reachable,
             alternate_screen,
             profile,
         };
@@ -1035,9 +1014,6 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             mcp_env: &mcp_env,
             mcp_config: mcp_config.as_deref(),
             settings: settings.file.as_deref(),
-            // #7685: same fallback rule as `spawn` — a resumed session must not
-            // lose auto memory while trusty-memory is down either.
-            memory_reachable: resolve_memory_reachable(self.memory_reachable),
             alternate_screen,
             profile,
         };

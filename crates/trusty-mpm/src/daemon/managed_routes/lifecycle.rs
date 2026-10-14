@@ -807,9 +807,7 @@ pub(super) async fn spawn_managed_inproject(
     // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
-    // #7685: reuse prep's reachability answer rather than probing again.
-    let reachable =
-        prepare_inproject_session(&fw, session_id, &worktree, source.repo_url.as_deref())?;
+    prepare_inproject_session(&fw, session_id, &worktree, source.repo_url.as_deref())?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
@@ -870,9 +868,7 @@ pub(super) async fn spawn_managed_inproject(
     // Deployment-completeness check (#2158, made non-blocking by #2172): a
     // false positive must never withhold the runtime launch. Reuses the `fw`
     // already resolved above for `prepare_inproject_session`.
-    // #7763: `reachable` is what `prepare_inproject_session` already resolved —
-    // the gate's repair reuses it instead of re-probing trusty-memory.
-    let host = RepairHost::new(reachable, state.user_home());
+    let host = RepairHost::new(state.user_home());
     let url = record.repo_url.as_deref();
     if let Err(reason) = ensure_deployment_complete(&fw, &worktree, url, session_id, host) {
         warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
@@ -891,7 +887,7 @@ pub(super) async fn spawn_managed_inproject(
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    let adapter = build_adapter(record.runtime, tmux_arc, reachable, state.framework_root());
+    let adapter = build_adapter(record.runtime, tmux_arc, state.framework_root());
     let gh_env = resolve_gh_env(state, &worktree).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
@@ -1124,9 +1120,7 @@ pub async fn resume_managed(
     // `~/.trusty-tools/trusty-mpm/claude-config/` on every test run of this route.
     let fw_root = state.framework_root();
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(fw_root, &workspace);
-    // #7763: a resume runs no `prepare_session*`, so it has no verdict to reuse —
-    // `None` keeps the single probe the repair pipeline makes for itself.
-    let host = RepairHost::new(None, state.user_home());
+    let host = RepairHost::new(state.user_home());
     let url = record.repo_url.as_deref();
     if let Err(reason) = ensure_deployment_complete(&fw, &workspace, url, &record.id, host) {
         warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
@@ -1150,7 +1144,7 @@ pub async fn resume_managed(
     }
 
     // #6766: the post-send launch check below takes its own driver handle.
-    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), None, fw_root);
+    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), fw_root);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume

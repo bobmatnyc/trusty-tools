@@ -122,43 +122,11 @@ pub fn prepare_session_with_repo_url_and_exe(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
-    // #7763: `None` is "probe the host"; the repair path passes what the launch
-    // already resolved.
-    prepare_session_for_repair(fw, project_dir, repo_url, hook_exe, None)
-}
-
-/// [`prepare_session_with_repo_url_and_exe`] reusing a resolved reachability.
-///
-/// Why (#7763): the deployment gate re-runs this pipeline as its repair step,
-/// AFTER the same launch already probed trusty-memory once. With nothing to
-/// thread, the repair probed again, so a launch against a slow or wedged daemon
-/// paid [`PROBE_TIMEOUT`](crate::core::memory_reachable::PROBE_TIMEOUT) twice.
-/// The value is the only thing the repair needs from the launch, so a dedicated
-/// entry point carries it rather than a parameter every other caller would
-/// default (#7715).
-/// What: identical to [`prepare_session_with_repo_url_and_exe`] except
-/// `memory_reachable` replaces the live probe. `None` keeps the probe, which is
-/// what a resume — which never prepared — still passes.
-/// Test: `repair_reuses_the_reachability_the_launch_resolved`.
-pub fn prepare_session_for_repair(
-    fw: &FrameworkPaths,
-    project_dir: &Path,
-    repo_url: Option<&str>,
-    hook_exe: Option<&Path>,
-    memory_reachable: Option<bool>,
-) -> Result<PrepReport, PrepError> {
     let home = dirs::home_dir();
-    prepare_session_for_repair_under(
-        fw,
-        project_dir,
-        repo_url,
-        hook_exe,
-        memory_reachable,
-        home.as_deref(),
-    )
+    prepare_session_for_repair_under(fw, project_dir, repo_url, hook_exe, home.as_deref())
 }
 
-/// [`prepare_session_for_repair`] with the user home named (#8545).
+/// [`prepare_session_with_repo_url_and_exe`] with the user home named (#8545).
 ///
 /// Why: a daemon pinned to a test home repairs through here, so the user-tier
 /// statusLine and trust seed land under that home, never `$HOME`.
@@ -169,7 +137,6 @@ pub fn prepare_session_for_repair_under(
     project_dir: &Path,
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
-    memory_reachable: Option<bool>,
     home: Option<&Path>,
 ) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
@@ -183,7 +150,6 @@ pub fn prepare_session_for_repair_under(
         HostInputs {
             home,
             hook_exe,
-            memory_reachable,
             palace_registry: None,
         },
     )
@@ -388,39 +354,5 @@ pub fn prepare_session_with_home(
         None,
         None,
         HostInputs::with_home(home),
-    )
-}
-
-/// [`prepare_session_with_home`] with the trusty-memory verdict pinned (#7685).
-///
-/// Why: auto memory is a FALLBACK — the project-tier `autoMemoryEnabled: false`
-/// key is written only when trusty-memory answered (owner ruling 2026-09-12).
-/// Production resolves that by probing the host, which a test cannot point
-/// anywhere, so both branches would otherwise be untestable and the one that
-/// matters — leaving auto memory ON beside a dead daemon — would ship unproven.
-/// What: identical to [`prepare_session_with_home`] except `memory_reachable`
-/// replaces the live probe. Production callers keep using the probe-resolving
-/// entry points.
-/// Test: `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`.
-pub fn prepare_session_with_memory_reachable(
-    fw: &FrameworkPaths,
-    project_dir: &Path,
-    home: Option<&Path>,
-    memory_reachable: bool,
-) -> Result<PrepReport, PrepError> {
-    prepare_session_inner(
-        fw,
-        project_dir,
-        None,
-        false,
-        None,
-        None,
-        HostInputs {
-            home,
-            hook_exe: None,
-            memory_reachable: Some(memory_reachable),
-            palace_registry: None,
-        },
     )
 }

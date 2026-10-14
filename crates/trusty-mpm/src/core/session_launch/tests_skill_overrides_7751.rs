@@ -20,7 +20,7 @@ const USER_SETTINGS: &str =
     r#"{"permissions":{"allow":["Bash(ls)"]},"skillOverrides":{"breeze-voice":"on"}}"#;
 
 fn run_prepare(fw: &crate::core::paths::FrameworkPaths, project: &Path, home: &Path) {
-    prepare_session_with_memory_reachable(fw, project, Some(home), true).expect("prep succeeds");
+    prepare_session_with_home(fw, project, None, false, Some(home)).expect("prep succeeds");
 }
 
 /// Run the real launch path on a project with `markers`, then assert both

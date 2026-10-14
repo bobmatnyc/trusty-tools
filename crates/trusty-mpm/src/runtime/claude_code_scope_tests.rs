@@ -42,7 +42,6 @@ fn scope_launch(config_dir: Option<&Path>) -> ManagedLaunch<'_> {
         mcp_config: config_dir.map(|_| Path::new(SCOPE_MCP_CONFIG)),
         settings: None,
         // #7685: the reachable posture — MCP scoping is orthogonal to it.
-        memory_reachable: true,
         alternate_screen: false,
         profile: Default::default(),
     }
@@ -264,7 +263,7 @@ fn assert_scope_failure(err: &RuntimeError) {
 fn spawn_fails_when_the_composed_file_cannot_be_written() {
     let (_tmp, root) = poisoned_state_root();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &root);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &root);
 
     let err = adapter
         .spawn(
@@ -287,7 +286,7 @@ fn spawn_fails_when_the_composed_file_cannot_be_written() {
 fn spawn_resume_fails_when_the_composed_file_cannot_be_written() {
     let (_tmp, root) = poisoned_state_root();
     let fake = FakeTmux::new();
-    let adapter = ClaudeCodeAdapter::new(fake.clone(), None, &root);
+    let adapter = ClaudeCodeAdapter::new(fake.clone(), &root);
 
     let err = adapter
         .spawn_resume(
