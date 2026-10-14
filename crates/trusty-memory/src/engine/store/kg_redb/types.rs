@@ -472,6 +472,7 @@ pub enum BatchWriteOp {
     Assert(Triple),
     /// Close the active triple for `(subject, predicate)` without
     /// inserting a replacement.
+    #[non_exhaustive] // #9278 A2c: a new field stays additive for other crates.
     Retract { subject: String, predicate: String },
     /// Persist a drawer row.
     UpsertDrawer(Drawer),

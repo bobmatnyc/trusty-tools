@@ -79,6 +79,7 @@ impl Default for SemanticConsolidationConfig {
 #[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum ConsolidationAction {
     /// Two strings that refer to the same concept (e.g. `"ts"` → `"trusty-search"`).
+    #[non_exhaustive] // #9278 A2c: a new field stays additive for other crates.
     Alias { from: String, to: String },
     /// A cluster of drawers that should share one canonical summary.
     /// `canonical_content` is the LLM's output; `superseded_ids` are the
