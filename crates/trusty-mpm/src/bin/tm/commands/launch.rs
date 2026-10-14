@@ -9,11 +9,9 @@
 
 use serde::Deserialize;
 
+use crate::commands::launch_handoff::Handoff;
 use crate::commands::{launch_home::launch_files, project::resolve_dir};
-use crate::formatters::banner::{
-    fallback_session_name, normalize_workdir, print_launch_banner,
-    print_launch_banner_reconnecting, tmux_has_session,
-};
+use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
 
 /// RAII guard that kills a tmux session on drop unless explicitly disarmed.
 ///
@@ -105,13 +103,16 @@ impl Drop for LaunchSessionGuard {
 /// [`super::managed_workspace::LaunchDir`]. Two of the three callers here reach
 /// this function with placement already decided, and resolving it again
 /// relocates their session.
+///
+/// #8406: `handoff` decides the end of every path, the reattach included:
+/// [`Handoff::Detach`] prints the session name and pane id and returns.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
 /// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
-/// `cli_parses_launch_with_twin`,
+/// `cli_parses_launch_with_twin`, `cli_parses_launch_with_detach`,
 /// `a_twin_worktree_launch_is_refused_before_anything_is_touched`;
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// covers the composed fallback path.
-#[allow(clippy::too_many_arguments)] // #8878: `twin` is the eighth.
+#[allow(clippy::too_many_arguments)] // #8878 `twin`, #8406 `handoff`.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
@@ -121,6 +122,7 @@ pub(crate) async fn launch(
     launch_dir: super::managed_workspace::LaunchDir,
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
     twin: bool,
+    handoff: Handoff,
 ) -> anyhow::Result<()> {
     super::launch_twin::preflight(twin, worktree)?; // #8878: before anything is touched.
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
@@ -156,7 +158,7 @@ pub(crate) async fn launch(
         super::origin_plan::OriginPlan::LiveCheckout => {
             super::launch_twin::refuse_live_checkout(twin)?; // #8878
             eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
-            return connect(client, url, Some(live_workdir), home).await;
+            return connect(client, url, Some(live_workdir), home, handoff).await; // #8406
         }
         // Any origin remote keeps the pre-#6276 path exactly: parse it as
         // owner/repo, or stop with the hint below.
@@ -191,9 +193,9 @@ pub(crate) async fn launch(
         && !existing.is_empty()
     {
         super::launch_twin::refuse_reattach(twin, &existing)?; // #8878
-        print_launch_banner_reconnecting(&live_workdir, &existing);
-        crate::commands::tmux_attach::tmux_attach(&existing)?;
-        return Ok(());
+        // #8406: a detached launch reports the running session, never attaches.
+        handoff.announce_reconnect(&live_workdir, &existing);
+        return handoff.hand_over(&existing);
     }
 
     // #9091: a broken `[accounts]` table refuses before provisioning.
@@ -402,8 +404,8 @@ pub(crate) async fn launch(
 
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
-    //     directory (not just the base project dir).
-    print_launch_banner(
+    //     directory (not just the base project dir). #8406: not when detached.
+    handoff.announce(
         &live_workdir,
         &tmux_name,
         Some(prompt_path.as_path()),
@@ -478,9 +480,10 @@ pub(crate) async fn launch(
     }
 
     // 14. Attach to the session — blocks until the user detaches or exits claude.
-    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
-    // Attach succeeded: the user detached normally. Disarm the guard so the
-    // session persists and can be resumed with `tmux attach -t <name>`.
+    // #8406: a detached launch prints the session name and pane id instead.
+    handoff.hand_over(&tmux_name)?;
+    // Handed over: disarm the guard so the session persists and can be
+    // resumed with `tmux attach -t <name>`.
     session_guard.disarm();
     Ok(())
 }
@@ -511,13 +514,16 @@ pub(crate) async fn launch(
 /// (`tmux new-session -A`), and — only when the session is freshly created —
 /// starts `claude` from the launch spec [`connect_claude_spec`] builds (`--append-system-prompt-file`
 /// plus the shared `--setting-sources project,local` /
-/// `--dangerously-skip-permissions` isolation flags), then `attach`es to it.
+/// `--dangerously-skip-permissions` isolation flags), then `attach`es to it —
+/// or, under [`Handoff::Detach`] (`tm launch --detach` on a checkout with no
+/// origin, #8406), prints the session name and pane id and returns.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.
 pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
+    handoff: Handoff,
 ) -> anyhow::Result<()> {
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
@@ -535,9 +541,8 @@ pub(crate) async fn connect(
         && !existing.is_empty()
     {
         // Full-screen robot splash + rich info panel (reconnect mode).
-        print_launch_banner_reconnecting(&workdir, &existing);
-        crate::commands::tmux_attach::tmux_attach(&existing)?;
-        return Ok(());
+        handoff.announce_reconnect(&workdir, &existing); // #8406
+        return handoff.hand_over(&existing);
     }
 
     // 1c. Deploy the framework directly into the live checkout — agents,
@@ -630,7 +635,7 @@ pub(crate) async fn connect(
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
-    print_launch_banner(&workdir, &tmux_name, Some(prompt_path.as_path()), None);
+    handoff.announce(&workdir, &tmux_name, Some(prompt_path.as_path()), None); // #8406
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -693,8 +698,9 @@ pub(crate) async fn connect(
     }
 
     // 6. Attach — takes over the current terminal until the user detaches.
-    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
-    // Attach succeeded: disarm the guard so the session persists for re-attachment.
+    // #8406: a detached launch prints the session name and pane id instead.
+    handoff.hand_over(&tmux_name)?;
+    // Handed over: disarm the guard so the session persists for re-attachment.
     if let Some(ref mut g) = session_guard {
         g.disarm();
     }

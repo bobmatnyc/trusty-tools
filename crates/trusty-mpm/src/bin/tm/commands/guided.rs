@@ -1328,7 +1328,8 @@ pub(crate) async fn fallback_protected_gated(
         super::origin_plan::OriginPlan::LiveCheckout => {
             eprintln!("{}", super::origin_plan::live_checkout_notice(&git_root));
             let dir = Some(git_root.to_string_lossy().into_owned());
-            super::launch::connect(client, url, dir, home).await
+            let attach = super::launch_handoff::Handoff::Attach; // #8406
+            super::launch::connect(client, url, dir, home, attach).await
         }
         // Non-GitHub remote: refuse to write to the live tree.
         // NOTE: the daemon's reachability is irrelevant here — this branch is

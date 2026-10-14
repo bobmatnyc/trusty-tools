@@ -1017,6 +1017,7 @@ async fn a_twin_worktree_launch_is_refused_before_anything_is_touched() {
         crate::commands::managed_workspace::LaunchDir::OperatorCwd,
         None,
         true,
+        crate::commands::launch_handoff::Handoff::Attach,
     )
     .await
     .expect_err("a twin worktree launch is refused");

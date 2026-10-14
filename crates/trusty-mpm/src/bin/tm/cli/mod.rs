@@ -797,7 +797,7 @@ pub(crate) enum Command {
     /// This runs the full `prepare_session` deployment sequence (instructions,
     /// agents, skills, MCP config) into the project before starting or
     /// attaching to the session in the current terminal (behaves like running
-    /// `claude-mpm`).
+    /// `claude-mpm`). `--detach` starts it and returns instead.
     ///
     /// A GitHub-backed project is provisioned into a managed clone. A local
     /// repository with no origin remote runs its session in the checkout
@@ -830,6 +830,13 @@ pub(crate) enum Command {
         /// reattach and for a checkout with no origin remote.
         #[arg(long)]
         twin: bool,
+        /// Start the session in its own tmux session and return without
+        /// attaching this terminal (#8406).
+        ///
+        /// Prints `session=<name> pane=<pane id>` on stdout. A session already
+        /// running for the project is reported the same way, not restarted.
+        #[arg(long)]
+        detach: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///
