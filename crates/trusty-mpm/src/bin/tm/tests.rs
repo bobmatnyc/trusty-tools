@@ -962,6 +962,31 @@ fn cli_parses_launch_with_twin() {
     }
 }
 
+/// `tm launch --detach` reaches the launch as a detached request, and a bare
+/// `tm launch` stays attached (#8406).
+///
+/// Why: a supervisor in its own tmux pane must start a project session without
+/// `tm launch` switching its client into the new session.
+/// What: parses both forms and reads the `detach` field from the parsed
+/// command's debug form, so this compiles before the flag exists and fails then.
+/// Test: itself.
+#[test]
+fn cli_parses_launch_with_detach() {
+    for (argv, want) in [
+        (
+            &["trusty-mpm", "launch", "--detach", "/work/p"][..],
+            "detach: true",
+        ),
+        (&["trusty-mpm", "launch", "/work/p"][..], "detach: false"),
+    ] {
+        let parsed = format!("{:?}", Cli::try_parse_from(argv).map(|cli| cli.command));
+        assert!(
+            parsed.contains(want),
+            "{argv:?} must parse with {want}: {parsed}"
+        );
+    }
+}
+
 /// `--twin --worktree` is refused, and only that pair (#8878 review).
 #[test]
 fn twin_preflight_refuses_only_twin_with_worktree() {
