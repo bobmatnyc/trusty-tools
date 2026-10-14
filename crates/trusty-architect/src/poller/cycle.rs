@@ -10,7 +10,8 @@
 //! and evaluates it. It then raises `exited` for each vanished session,
 //! adds the fleet plan, events, host and self-ctx alerts, drops `idle` alerts
 //! of quiet sessions, and dedups. Test-fixture sessions never raise `exited`.
-//! Steps owned elsewhere are left out: usage, effort, token, pm_intake,
+//! It runs the usage step after the fleet plan (#9801 slice 1).
+//! Steps owned elsewhere are left out: effort, token, pm_intake,
 //! dashboard, owner_*, auto_sleep, user_state, exited_step and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
@@ -27,6 +28,7 @@ use super::host::{HostProbe, host_alerts};
 use super::listing::{Pane, capture, list_panes};
 use super::self_ctx_alerts::self_ctx_alerts;
 use super::state::PollState;
+use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::windows::rename_windows;
 use crate::classify::{Alert, PaneInfo, alert, dedup, evaluate, fleet_plan_alerts, parse_pane};
 use crate::error::{CycleError, TmuxError};
@@ -66,6 +68,8 @@ pub struct Sensors<'a, T: Tmux + ?Sized> {
     pub probe: &'a dyn HostProbe,
     /// Paths and thresholds.
     pub config: &'a Config,
+    /// Starts the usage step's `/usage` probe (#9801).
+    pub usage_probe: &'a dyn ProbeLauncher,
     /// When true, rename nothing.
     pub dry_run: bool,
 }
@@ -130,6 +134,7 @@ pub fn collect<T: Tmux + ?Sized>(
     let mut candidates = Vec::new();
     let mut infos = Vec::new();
     let mut current = BTreeMap::new();
+    let mut idle_panes = Vec::new();
     for p in &watched {
         let (sess, pid) = (p.session.as_str(), p.pane.as_target());
         current.insert(sess.to_owned(), pid.to_owned());
@@ -153,6 +158,9 @@ pub fn collect<T: Tmux + ?Sized>(
         let mut info = parse_pane(&raw);
         if let Err(e) = transcripts.fill_ctx(s.config, &mut info, pid) {
             log.push(format!("transcript ctx ERROR {e}"));
+        }
+        if probe_idle(&info) {
+            idle_panes.push((sess.to_owned(), pid.to_owned())); // #9801: a /usage probe may type here
         }
         let found = evaluate(&info, ps, now, sess, pid);
         if s.dry_run {
@@ -178,6 +186,12 @@ pub fn collect<T: Tmux + ?Sized>(
     state.panes.retain(|k, _| live.contains(k));
     state.sessions = current;
     candidates.extend(fleet_plan_alerts(&infos, now));
+    // #9801: a usage failure is a log line, never a stopped cycle.
+    let usage = &s.config.usage;
+    let (found, lines) =
+        usage_step(usage, s.usage_probe, &mut state.other, now, &idle_panes, s.dry_run);
+    candidates.extend(found);
+    log.extend(lines);
     let failed = |e, log| Stopped::Failed(e, log);
     match read_events(&s.config.events(), &mut state.events_offset, now) {
         // #9822: a configured supervisor's own events drop too.

@@ -6,7 +6,9 @@
 //! (#9171 A3b-2, plan AC3 and AC4).
 //! What: [`Runner::run_once`] runs one cycle on a copy of the state: collect
 //! and dedup, append the new alerts to `alerts.jsonl`, triage, wake, log,
-//! then commit the copy and save it. Any failure before the commit (a
+//! then commit the copy and save it. After the append, each `architect_*`
+//! alert is a macOS notification; a failed one is a `notify ERROR` log line
+//! and changes nothing (#9801). Any failure before the commit (a
 //! sensor, the append, a phase hook) commits nothing, so the same alerts
 //! come out again next cycle; dedup keys repeat identically. A `list-panes`
 //! failure logs `panes=? ERROR ...; cycle skipped`. [`Runner::run_loop`]
@@ -32,6 +34,8 @@ use super::pyfmt::py_int;
 use super::session::PollSession;
 use super::sink::{append_alerts, append_log};
 use super::state::save_state;
+use super::steps::notify_macos::{Notifier, notifies, notify_watchdog_alerts};
+use super::steps::usage::ProbeLauncher;
 use super::triage::Triage;
 use super::wake::Waker;
 use crate::classify::Alert;
@@ -104,6 +108,10 @@ pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     pub triage: &'a dyn Triage,
     /// Paths and thresholds.
     pub config: &'a Config,
+    /// Starts the usage step's `/usage` probe (#9801).
+    pub usage_probe: &'a dyn ProbeLauncher,
+    /// Shows the macOS notification for `architect_*` alerts (#9801).
+    pub notifier: &'a dyn Notifier,
     /// One cycle that writes nothing and sends nothing.
     pub dry_run: bool,
 }
@@ -159,6 +167,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             tmux: self.tmux,
             probe: self.probe,
             config: self.config,
+            usage_probe: self.usage_probe,
             dry_run: self.dry_run,
         };
         // #9171 A3b-2: work on a copy; nothing is committed before the append.
@@ -185,17 +194,19 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             }
         };
         if self.dry_run {
-            log.extend(
-                found
-                    .new
-                    .iter()
-                    .map(|a| format!("  would alert: {}", a.display)),
-            );
+            for a in &found.new {
+                log.push(format!("  would alert: {}", a.display));
+                if notifies(a) {
+                    log.push(format!("  would notify: {}", a.display)); // #9801
+                }
+            }
         } else {
             append_alerts(&self.config.alerts(), &found.new).map_err(|source| RunError::Io {
                 what: "append alerts".to_owned(),
                 source,
             })?;
+            // #9801: notify_macos after the append; a failure is a log line.
+            log.extend(notify_watchdog_alerts(self.notifier, &found.new));
         }
         hook(Phase::AlertsAppended).map_err(phase(Phase::AlertsAppended))?;
         let (woken, logged) = self.triage.triage(&found.new, now, &mut next, self.dry_run);

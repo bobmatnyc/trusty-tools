@@ -13,14 +13,17 @@
 //! the prototype's behaviour; for `LOAD_FACTOR` it is Architect ruling Q4
 //! (#9171 A3b-2): the prototype's `host_alerts` raises on it and aborts the
 //! whole cycle, the port turns off host alerts only. A bad `BAND_*` value
-//! falls back to its default (the prototype's `_env_float`).
+//! falls back to its default (the prototype's `_env_float`). #9801 adds
+//! [`Config::usage`], the usage step's paths.
 //! Test: `config_reads_env_once_like_the_prototype`,
+//! `usage_paths_default_like_the_prototype` (tests/steps_cycle.rs),
 //! `bad_ctx_variables_switch_off_their_sensor_and_are_reported`,
 //! `bad_load_factor_disables_host_alerts_only`.
 
 use std::path::{Path, PathBuf};
 
 use super::band::BandConfig;
+use super::steps::usage::UsagePaths;
 use super::pyfmt::{py_float, py_int};
 use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
@@ -68,6 +71,8 @@ pub struct Config {
     /// The poller's own session, never watched: `tm-architect-poll` here;
     /// `tm architect poll` sets `ARCHITECT_POLL_SESSION` (#9822).
     pub poll_session: String,
+    /// The usage step's ledger, cache, account file and probe (#9801).
+    pub usage: UsagePaths,
 }
 
 impl Config {
@@ -119,8 +124,18 @@ impl Config {
         let pane_ctx_window = int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
         let self_ctx_window = int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
         let self_ctx_threshold = int("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT);
+        let inbox = path("SUPERVISOR_INBOX_DIR", root.join("inbox"));
+        // #9801: usage.py's paths, read as usage.py reads them.
+        let claude_dir = path("CLAUDE_CONFIG_DIR", config.clone());
+        let usage = UsagePaths {
+            ledger: path("USAGE_LEDGER", root.join("local/usage/ledger.jsonl")),
+            cache: path("USAGE_STATUSLINE_CACHE", inbox.join("statusline-usage.json")),
+            claude_json: path("USAGE_CLAUDE_JSON", claude_dir.join(".claude.json")),
+            probe_script: root.join("scripts/usage-probe.sh"),
+            probe_log: inbox.join("usage-probe.log"),
+        };
         Ok(Self {
-            inbox: path("SUPERVISOR_INBOX_DIR", root.join("inbox")),
+            inbox,
             sessions_dir: path("SESSIONS_DIR", config.join("sessions")),
             transcript_base: path("TRANSCRIPT_BASE", projects_dir(home)),
             self_ctx_dir: path("SELF_CTX_DIR", default_dir(home, &root_text)),
@@ -150,6 +165,7 @@ impl Config {
             quiet_sessions: root.join("local").join("quiet-sessions.txt"),
             supervisor: SUPERVISOR.to_owned(),
             poll_session: format!("{SUPERVISOR}-poll"),
+            usage,
         })
     }
 

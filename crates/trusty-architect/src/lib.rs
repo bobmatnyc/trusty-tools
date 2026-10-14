@@ -45,7 +45,8 @@ pub mod verbs;
 pub use classify::input_state_for_send;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use error::{
-    ConfigError, CycleError, RunError, SelfCtxError, SendError, StateError, TmuxError, WakeError,
+    ConfigError, CycleError, NotifyError, RunError, SelfCtxError, SendError, StateError, TmuxError,
+    UsageError, WakeError,
 };
 pub use fake::FakeTmux;
 pub use input::{InputState, SendReading, UnknownInputState, classify_input, send_guarded};

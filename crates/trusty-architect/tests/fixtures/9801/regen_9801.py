@@ -334,7 +334,7 @@ def run_poll(sc):
         now_ts = st["now"] if "now" in st else NOW0 + st["dt"]
         got = outcome(ruled, u.poll_step, state, now_ts, [tuple(p) for p in st["idle"]], st.get("dry_run", False),
                       lambda *a: launched.append(list(a)))
-        ledger = open(u.LEDGER).read() if os.path.exists(u.LEDGER) else None
+        ledger = open(u.LEDGER, newline="").read() if os.path.exists(u.LEDGER) else None  # the bytes, untranslated
         res = {"step": i, "now": now_ts, "state": json.loads(json.dumps(state.get("usage"))),
                "has_usage": "usage" in state,
                "launched": launched, "ledger": ledger}

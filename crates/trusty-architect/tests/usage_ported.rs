@@ -267,6 +267,7 @@ fn test_poll_step_probes_on_account_change_and_failure_cannot_break_cycle() -> T
     assert_eq!(probe.launched().len(), 2); // no idle pane: never types
 
     // The prototype injects a raising sampler; here the ledger is not UTF-8.
+    fs::create_dir_all(paths.ledger.parent().ok_or("ledger dir")?)?;
     fs::write(&paths.ledger, b"\xff\xfe\n")?;
     let (alerts, log) = usage_step(&paths, &probe as &dyn ProbeLauncher, &mut Map::new(), 0.0, &[], false);
     assert!(alerts.is_empty());
