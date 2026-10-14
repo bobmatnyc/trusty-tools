@@ -121,6 +121,7 @@ pub(crate) mod issue;
 pub(crate) mod launch;
 // #8406: `tm launch --detach` reports the session instead of attaching.
 pub(crate) mod launch_handoff;
+mod launch_notices;
 // #8545: launch/connect user-home writes, under a caller-named home.
 pub(crate) mod launch_home;
 // #8878: `tm launch --twin` arming.

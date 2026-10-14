@@ -267,9 +267,8 @@ pub(crate) async fn launch(
                     );
                 }
                 // #6649: silent on a clean worktree; one line per unclean kind.
-                for notice in &report.asset_notices {
-                    println!("  assets: {notice}");
-                }
+                // #8406: stderr, so `--detach` stdout stays one line.
+                super::launch_notices::emit_asset_notices(&report.asset_notices);
             }
             // #4752: a compiled-prompt write failure is FATAL — refuse the
             // launch rather than start a session whose instructions cannot be
@@ -567,9 +566,8 @@ pub(crate) async fn connect(
                 );
             }
             // #6649: silent on a clean checkout; one line per unclean kind.
-            for notice in &report.asset_notices {
-                println!("  assets: {notice}");
-            }
+            // #8406: stderr, so `--detach` stdout stays one line.
+            super::launch_notices::emit_asset_notices(&report.asset_notices);
         }
         // #4752: fatal — refuse the connect rather than attach to a session
         // whose compiled instructions could not be written.
