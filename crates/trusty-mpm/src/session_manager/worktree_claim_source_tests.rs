@@ -25,6 +25,7 @@ use crate::session_manager::worktree_reclaim_claim::ClaimLiveness;
 /// reading the state field, which #2919 forbids.
 fn tombstoned(tmux_name: &str, workspace: &Path) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::for_adopted_tmux_name(tmux_name),
         tmux_name: tmux_name.to_owned(),
         cwd: workspace.to_path_buf(),

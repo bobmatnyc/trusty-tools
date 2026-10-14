@@ -244,6 +244,7 @@ mod tests {
     /// Build a minimal `SessionRecord` for a workspace-rooted session.
     fn make_record(workspace: Option<PathBuf>, cwd: PathBuf) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: "tm-test".to_string(),
             cwd,

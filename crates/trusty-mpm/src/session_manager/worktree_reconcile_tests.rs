@@ -49,6 +49,7 @@ fn canonical(p: &std::path::Path) -> PathBuf {
 /// building them inline would bury the two fields that actually matter.
 fn record_at(state: ManagedSessionState, workspace: Option<PathBuf>) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-reconcile-test".into(),
         cwd: PathBuf::from("/tmp"),

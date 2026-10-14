@@ -615,6 +615,21 @@ pub struct SessionRecord {
     /// `#[serde(default)]` loads an older record as `None`; skipped when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_prompt: Option<super::blocked_prompt::BlockedPrompt>,
+
+    /// The session's latest context-window and plan figures (#8394).
+    ///
+    /// Why: a fleet poller needs `ctx %` and the plan figures without scraping
+    /// a pane the status line truncates.
+    /// What: NOT kept by the session store — the statusline writes the figures
+    /// to their own per-session file, and a reader attaches them with
+    /// [`crate::supervisor::metrics::attach_context_usage`]. `None` when nothing
+    /// attached them, the session has no `claude_session_id`, or no tick has
+    /// recorded a reading. `#[serde(default)]` loads every older record as
+    /// `None`; skipped when `None`, so the store file is unchanged.
+    /// Test: `attach_reads_the_reading_keyed_by_claude_session_id`,
+    /// `a_session_record_lacking_context_usage_still_deserializes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<crate::core::context_usage::ContextUsage>,
 }
 
 impl SessionRecord {

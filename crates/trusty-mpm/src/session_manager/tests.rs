@@ -1288,6 +1288,7 @@ async fn decommission_full_still_terminates_the_runtime() {
 // otherwise carry a third copy.
 pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp"),
@@ -1423,6 +1424,7 @@ async fn manager_reconcile_skips_decommissioned() {
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     let tombstone = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-decomm".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1490,6 +1492,7 @@ async fn manager_reconcile_skips_deleted() {
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     let deleted = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-deleted".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1565,6 +1568,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     let stale = SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-stale-decision".into(),
         cwd: PathBuf::from("/tmp"),
@@ -2155,6 +2159,7 @@ pub(super) async fn seed_record(
         ManagedSessionState::Active | ManagedSessionState::Provisioning
     );
     let record = SessionRecord {
+        context_usage: None,
         id,
         tmux_name: tmux_name.clone(),
         cwd: root.path().to_path_buf(),
@@ -2683,6 +2688,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
         let ws = root.path().join(format!("aged-{id}"));
         std::fs::create_dir_all(&ws).expect("mk ws");
         let record = SessionRecord {
+            context_usage: None,
             id,
             tmux_name: format!("tmpm-aged-{id}"),
             cwd: root.path().to_path_buf(),
@@ -2778,6 +2784,7 @@ async fn manager_decommission_unowned_skips_deletion() {
     // spawn (#1502) that sets workspace_path to the real directory.
     let id = ManagedSessionId::new();
     let record = SessionRecord {
+        context_usage: None,
         id,
         tmux_name: format!("tmpm-local-{id}"),
         cwd: repo_path.clone(),

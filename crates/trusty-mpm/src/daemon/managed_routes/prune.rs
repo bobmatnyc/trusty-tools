@@ -848,6 +848,7 @@ mod tests {
             .await
             .expect("seed session record");
         let stopped = SessionRecord {
+            context_usage: None,
             state: ManagedSessionState::Stopped,
             ..record
         };

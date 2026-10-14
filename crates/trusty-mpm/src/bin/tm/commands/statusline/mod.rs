@@ -22,6 +22,8 @@ pub(crate) mod account;
 // `tmux_session_name` probe rather than growing a second copy of it.
 pub(crate) mod branch;
 pub(crate) mod compaction;
+// #8394: persists the tick's context-window and plan figures.
+mod context_usage;
 // #6958: the estimated token-savings segment, folded from the usage ledger.
 mod savings;
 mod usage;
@@ -139,6 +141,8 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
     let _ = std::io::stdin().read_to_string(&mut raw);
     let input: StatusInput = serde_json::from_str(&raw).unwrap_or_default();
     println!("{}", render_statusline(&input));
+    // #8394: after the line is out, so a slow or failed write never costs it.
+    context_usage::persist_context_usage(&raw);
     Ok(())
 }
 

@@ -578,6 +578,7 @@ mod cores_tests {
         workspace_path: &std::path::Path,
     ) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id,
             tmux_name: format!("tm-7877-{id}"),
             cwd: workspace_path.to_path_buf(),
