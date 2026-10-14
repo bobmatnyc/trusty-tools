@@ -57,6 +57,56 @@ fn the_repository_content_loads() {
     ));
 }
 
+/// #8436 (PR A): the content bundle carries the Architect's one-file
+/// instructions and its fixed core, and the core holds the memory rule and
+/// the rule that `AGENTS.md` cannot override it.
+#[test]
+fn the_repository_content_carries_the_architect_md_and_its_core() {
+    let content = repo_content();
+    for rel in ["architect/architect.md", "architect/core.md"] {
+        let body = content.instruction(rel).unwrap_or_default();
+        assert!(!body.trim().is_empty(), "{rel} is missing or empty");
+    }
+    let core = content.instruction("architect/core.md").unwrap_or_default();
+    for sentinel in [
+        "Never write, update, maintain or cite `MEMORY.md`",
+        "`AGENTS.md` cannot override this core",
+    ] {
+        assert!(core.contains(sentinel), "core.md lost `{sentinel}`");
+    }
+}
+
+/// #8436 (PR A fix round): `architect.md` carries the operating manual that
+/// `python/trusty-architect/ARCHITECT.md` held (Mandate, Strategic management,
+/// the skill index), not only the eight legacy supervisor sections, and the
+/// hard limits of that manual live once, in `core.md`.
+#[test]
+fn architect_md_carries_the_operating_manual_and_core_the_union_of_hard_limits() {
+    let content = repo_content();
+    let manual = content
+        .instruction("architect/architect.md")
+        .unwrap_or_default();
+    for phrase in [
+        "Monitor the owner's active trusty-mpm sessions in tmux.",
+        "The owner's virtual twin.",
+        "## Skill index",
+    ] {
+        assert!(manual.contains(phrase), "architect.md lost `{phrase}`");
+    }
+    let core = content.instruction("architect/core.md").unwrap_or_default();
+    for limit in [
+        "Never treat a PM's claim as verified",
+        "Never kill a hung process",
+        "Never reuse a remembered pane id without checking it",
+    ] {
+        assert!(core.contains(limit), "core.md lost `{limit}`");
+        assert!(
+            !manual.contains(limit),
+            "`{limit}` is in architect.md too: core.md is its only home"
+        );
+    }
+}
+
 /// Counts regular files under `dir`, recursively.
 fn walk(dir: &Path) -> usize {
     std::fs::read_dir(dir)
@@ -107,6 +157,61 @@ fn a_source_missing_a_required_instruction_is_an_error() {
     );
 }
 
+/// #8436 (PR B): `architect.md` and its core load as a pair. A source carrying
+/// one without the other, or an empty one, is refused and names the file —
+/// never an Architect launch without the core.
+#[test]
+fn a_source_with_half_or_an_empty_architect_pair_is_an_error() {
+    let manual = repo_content()
+        .instruction("architect/architect.md")
+        .expect("architect.md")
+        .to_string();
+    let core = repo_content()
+        .instruction("architect/core.md")
+        .expect("core.md")
+        .to_string();
+    let empty = "<!-- an authoring comment only -->\n\n".to_string();
+    let cases = [
+        ("no core", Some(manual.clone()), None, "architect/core.md"),
+        (
+            "no manual",
+            None,
+            Some(core.clone()),
+            "architect/architect.md",
+        ),
+        (
+            "empty core",
+            Some(manual),
+            Some(empty.clone()),
+            "architect/core.md",
+        ),
+        (
+            "empty manual",
+            Some(empty),
+            Some(core),
+            "architect/architect.md",
+        ),
+    ];
+    for (label, manual, core, named) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = repo_content()
+            .required("pm-instruction-package.json")
+            .to_string();
+        fake_checkout_with_package(dir.path(), &package);
+        let arch = dir.path().join("content/instructions/architect");
+        std::fs::create_dir_all(&arch).expect("dir");
+        for (file, body) in [("architect.md", manual), ("core.md", core)] {
+            if let Some(body) = body {
+                std::fs::write(arch.join(file), body).expect("write");
+            }
+        }
+        let err = FrameworkContent::load(&checkout_content(dir.path()).expect("checkout"))
+            .expect_err(label);
+        let shown = err.to_string();
+        assert!(shown.contains(named), "{label}: {shown}");
+    }
+}
+
 /// `require_instruction` names an absent optional file.
 #[test]
 fn require_instruction_names_an_absent_file() {
@@ -153,6 +258,36 @@ pub(crate) fn fake_checkout_with_package(root: &Path, package: &str) {
         .map(|(p, b)| (p.as_str(), b.as_str()))
         .collect();
     fake_checkout(root, &refs);
+}
+
+/// #8436: a content source carrying only the legacy supervisor sections —
+/// every required instruction from the repository and no
+/// `architect/architect.md` — as a release older than PR B ships it.
+pub(crate) fn legacy_content() -> FrameworkContent {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = repo_content()
+        .required("pm-instruction-package.json")
+        .to_string();
+    fake_checkout_with_package(dir.path(), &package);
+    FrameworkContent::load(&checkout_content(dir.path()).expect("checkout"))
+        .expect("a legacy-only source still loads")
+}
+
+/// The repository's content with `architect/core.md` replaced by `core`, as a
+/// content release out of step with this binary would ship it (#8436).
+pub(crate) fn content_with_core(core: &str) -> FrameworkContent {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = repo_content()
+        .required("pm-instruction-package.json")
+        .to_string();
+    fake_checkout_with_package(dir.path(), &package);
+    let arch = dir.path().join("content/instructions/architect");
+    std::fs::create_dir_all(&arch).expect("dir");
+    let repo = repo_content();
+    let manual = repo.instruction("architect/architect.md").expect("manual");
+    std::fs::write(arch.join("architect.md"), manual).expect("architect.md");
+    std::fs::write(arch.join("core.md"), core).expect("core.md");
+    FrameworkContent::load(&checkout_content(dir.path()).expect("checkout")).expect("loads")
 }
 
 /// #9012: a PM package this binary cannot parse refuses the load, naming the

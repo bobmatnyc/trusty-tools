@@ -81,6 +81,55 @@ pub const REQUIRED_INSTRUCTIONS: &[&str] = &[
     "sm_instructions/BASE_SM.md",
 ];
 
+/// The Architect's one-file instructions and its core, required as a pair.
+///
+/// Why: #8436 (Q7a) — a content release older than PR B has neither file, and
+/// the Architect then gets the eight legacy sections, so they cannot sit in
+/// [`REQUIRED_INSTRUCTIONS`] without refusing every launch on that release.
+/// Half a pair, or an empty half, would launch an Architect without its core,
+/// so [`FrameworkContent::load`] refuses it instead.
+/// What: `architect.md`, then `core.md`, relative to `instructions/`. A source
+/// carries both, each non-empty once folded, or neither.
+/// Test: `a_source_with_half_or_an_empty_architect_pair_is_an_error`,
+/// `a_source_without_architect_md_composes_the_legacy_sections`.
+pub const ARCHITECT_INSTRUCTIONS: [&str; 2] = [
+    crate::core::architect_prompt::ARCHITECT_MD,
+    crate::core::architect_prompt::ARCHITECT_CORE_MD,
+];
+
+/// Refuses a source carrying half, or an empty half, of
+/// [`ARCHITECT_INSTRUCTIONS`].
+///
+/// # Errors
+/// [`AgentContentError::Missing`] naming the absent file, or
+/// [`AgentContentError::Invalid`] naming the empty one.
+fn check_architect_pair(
+    instructions: &BTreeMap<String, String>,
+    origin: &str,
+) -> Result<(), AgentContentError> {
+    let found = ARCHITECT_INSTRUCTIONS.map(|rel| lookup(instructions, rel));
+    if found.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let path = |rel: &str| format!("{INSTRUCTIONS_CLASS}/{rel}");
+    for (rel, body) in ARCHITECT_INSTRUCTIONS.iter().zip(found) {
+        let Some(body) = body else {
+            return Err(AgentContentError::Missing {
+                origin: origin.to_owned(),
+                path: path(rel),
+            });
+        };
+        if crate::core::instruction_fold::fold_block(body.trim()).is_empty() {
+            return Err(AgentContentError::Invalid {
+                origin: origin.to_owned(),
+                path: path(rel),
+                reason: "the file is empty; the Architect would launch without it".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The skills and instructions of one resolved content source.
 ///
 /// Why: replaces the compiled-in skill table, section constants, package,
@@ -106,7 +155,8 @@ impl FrameworkContent {
     /// [`REQUIRED_INSTRUCTIONS`] file; [`AgentContentError::Invalid`] when its
     /// PM instruction package does not parse or validate (#9012: a content
     /// release newer than this binary); [`AgentContentError::Content`] when a
-    /// listed file cannot be read.
+    /// listed file cannot be read. #8436: `Missing` or `Invalid` too for half,
+    /// or an empty half, of [`ARCHITECT_INSTRUCTIONS`].
     pub fn load(content: &ResolvedContent) -> Result<Self, AgentContentError> {
         let origin = describe_source(content.source());
         let mut skills = Vec::new();
@@ -137,6 +187,7 @@ impl FrameworkContent {
                 path: format!("{prefix}{missing}"),
             });
         }
+        check_architect_pair(&instructions, &origin)?;
         // #9012: validated here, once, so no launch composes from a package it
         // cannot parse and no caller needs a degraded fallback for one.
         let pm_package =

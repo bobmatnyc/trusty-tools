@@ -205,8 +205,19 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
 
 #[test]
 fn the_architect_prompt_is_never_empty() {
+    // #8436: architect.md first, the core last; both non-empty, and the
+    // legacy sections stay non-empty for an older content bundle (Q7a).
     let prompt = architect_prompt(rc());
-    assert!(prompt.starts_with("# Trusty Fleet Supervisor"), "{prompt}");
+    assert!(
+        prompt.starts_with("# The Architect — operating manual"),
+        "{prompt}"
+    );
+    for rel in crate::core::framework_content::ARCHITECT_INSTRUCTIONS {
+        assert!(
+            !rc().instruction(rel).unwrap_or_default().trim().is_empty(),
+            "{rel}"
+        );
+    }
     for (name, body) in ARCHITECT_SECTIONS {
         assert!(!body.trim().is_empty(), "{name}");
     }
@@ -216,24 +227,28 @@ fn the_architect_prompt_is_never_empty() {
 
 #[test]
 fn every_kept_item_reaches_the_architect_prompt() {
-    // The Keep list of #8453, one marker per item.
+    // The Keep list of #8453, one marker per item; #8436 moved each item into
+    // architect.md or the core.
     let prompt = architect_prompt(rc());
     for (item, marker) in [
         ("identity", "You are a direct-action supervisor"),
-        ("hard limits", "## Hard Limits"),
+        ("hard limits", "### Hard Limits"),
         ("relay marker", "`[<Name> supervisor HH:MMZ]`"),
         ("two-step send", "Send with the two-step pattern"),
-        ("exact tmux targets", "`=<session>:`"),
+        ("exact tmux targets", "`-t '=<session>:'`"),
         ("evidence labels", "**reported**"),
         ("evidence labels", "**verified**"),
         ("decisions as options", "\"(Recommended)\""),
         // #9289: the question-id rule, pinned by its hex wrap step.
         ("question ids", "`ff` is followed by `01`"),
         ("completion standard", "Clear a PR when Done items 1-3 hold"),
-        ("monitoring", "## Monitoring and Heartbeat"),
+        ("monitoring", "## Monitoring and heartbeat"),
         ("heartbeat", "Run exactly one heartbeat"),
-        ("trusty tool priority", "## Trusty Tool Priority"),
-        ("prose style", "## Prose Style"),
+        ("trusty tool priority", "## Trusty tool priority"),
+        (
+            "prose style",
+            "\"Communication — Write Plainly\" section governs",
+        ),
     ] {
         assert!(prompt.contains(marker), "{item}: `{marker}` missing");
     }
@@ -254,7 +269,7 @@ fn no_pm_delegation_text_reaches_an_architect_session() {
             SessionProfile::Architect,
         );
         assert!(
-            delivered.contains("# Trusty Fleet Supervisor"),
+            delivered.contains("# The Architect — operating manual"),
             "{delivered}"
         );
         assert_eq!(

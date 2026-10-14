@@ -22,7 +22,9 @@
 //! | `pm-prompt-roster-absent.md` | no agent deployed in any tier | legacy assembly |
 //! | `pm-prompt-claude-md-override.md` | `CLAUDE.md` named sections (#4286) | `InstructionPackage` |
 //! | `pm-prompt-launch-with-style.md` | roster present, default style injected (#8453) | `InstructionPackage` + style |
-//! | `supervisor-prompt.md` | `profile = "supervisor"` (#8453) | `session_profile` |
+//! | `architect-prompt.md` | Architect profile, no `AGENTS.md` (#8436) | `architect_prompt` |
+//! | `architect-prompt-agents-md.md` | Architect profile with an `AGENTS.md` (#8436) | `architect_prompt` |
+//! | `supervisor-prompt.md` | Architect profile, legacy content without `architect.md` (#8453) | `architect_prompt` |
 //!
 //! The second is not redundant. It is the check that a project composing through
 //! the string assembly still receives the *same* Core/Memory/Search/Workflow and
@@ -229,24 +231,58 @@ fn golden_pm_launch_prompt_with_output_style() {
     assert_golden("pm-prompt-launch-with-style.md", &styled);
 }
 
-#[test]
-fn golden_architect_prompt() {
-    // #8453: the supervisor profile's composed instructions — what a
-    // `profile = "supervisor"` project receives in place of the PM prompt.
+/// The Architect prompt `content` composes for a project whose `AGENTS.md`
+/// is `agents_md` (none when `None`).
+fn architect_golden_prompt(
+    content: &crate::core::framework_content::FrameworkContent,
+    agents_md: Option<&str>,
+) -> String {
     let tmp = TempDir::new().expect("tempdir");
     std::fs::write(
         tmp.path().join(".trusty-mpm.toml"),
         "profile = \"supervisor\"\n",
     )
     .expect("write config");
-    let (prompt, _) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
-        rc(),
+    if let Some(body) = agents_md {
+        std::fs::write(tmp.path().join("AGENTS.md"), body).expect("write AGENTS.md");
+    }
+    crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
+        content,
         tmp.path(),
         crate::core::session_profile::SessionProfile::Architect,
         || Some(FIXED_ROSTER.to_string()),
-    );
+    )
+    .0
+}
+
+#[test]
+fn golden_architect_prompt() {
+    // #8436: what an Architect project with no AGENTS.md receives in place of
+    // the PM prompt — architect.md, then the Architect core.
+    let prompt = architect_golden_prompt(rc(), None);
     assert_eq!(prompt, crate::core::session_profile::architect_prompt(rc()));
-    assert_golden("supervisor-prompt.md", &prompt);
+    assert_golden("architect-prompt.md", &prompt);
+}
+
+#[test]
+fn golden_architect_prompt_with_agents_md() {
+    // #8436 (Q2a): the owner's AGENTS.md sits between architect.md and the core.
+    let agents_md = "# Owner overrides\n\nOwner: Bob. Report in UTC.\n";
+    assert_golden(
+        "architect-prompt-agents-md.md",
+        &architect_golden_prompt(rc(), Some(agents_md)),
+    );
+}
+
+#[test]
+fn golden_legacy_architect_prompt() {
+    // #8453, kept by #8436 (Q7a): a content source without architect.md still
+    // delivers the eight supervisor sections, byte for byte as before.
+    let legacy = crate::core::framework_content::tests::legacy_content();
+    assert_golden(
+        "supervisor-prompt.md",
+        &architect_golden_prompt(&legacy, Some("ignored by the legacy sections\n")),
+    );
 }
 
 /// The memory section as DELIVERED, or `None` when the heading is absent.
