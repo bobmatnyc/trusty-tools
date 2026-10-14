@@ -725,6 +725,7 @@ mod restart_pane_selection_tests {
             proposed_default: None,
             pending_decision_id: None,
             last_answer: None,
+            blocked_prompt: None,
             correlation: crate::driver::SessionCorrelation::new(),
             runtime: crate::runtime::RuntimeKind::default(),
             ephemeral: true,

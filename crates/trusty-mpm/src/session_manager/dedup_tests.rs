@@ -67,6 +67,7 @@ fn rec(
         proposed_default: None,
         pending_decision_id: None,
         last_answer: None,
+        blocked_prompt: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,

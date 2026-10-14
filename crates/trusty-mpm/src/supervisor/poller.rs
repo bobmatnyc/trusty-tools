@@ -8,18 +8,21 @@
 //! (2) auto-resumes each `stopped` session whose stop nobody asked for when
 //! `auto_resume` is set — a session an operator stopped or killed is left down
 //! (#6194) — and (3) classifies idle `active` sessions through the activity
-//! monitor when a classifier is supplied. It is a passive observer: it never
-//! answers a `pending_decision`.
+//! monitor when a classifier is supplied, mirroring a confident
+//! `blocked_on_permission` verdict into the record's `blocked_prompt` (#8393).
+//! It never answers or clears a `pending_decision`.
 //! Test: `tick_auto_resumes_stopped`, `tick_skips_resume_when_disabled`,
 //! `tick_fleet_of_n_resumed`, `tick_classifies_active`,
 //! `tick_never_answers_pending_decision`,
 //! `tick_never_resumes_a_deliberately_stopped_session`,
-//! `tick_still_resumes_a_session_whose_runtime_exited` in `super::tests`.
+//! `tick_still_resumes_a_session_whose_runtime_exited`,
+//! `a_blocked_verdict_raises_a_pending_decision` in `super::tests`.
 
 use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
+use crate::activity::cache::{ActivityState, ActivityVerdict};
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
 use crate::session_manager::manager::ManagedError;
 use crate::session_manager::{ManagedSessionState, SessionManager, SessionRecord};
@@ -59,8 +62,9 @@ pub struct TickReport {
 /// session is left down), counting successes and — on failure —
 /// marking the session `Errored` so the fleet snapshot shows it (#5208); for each
 /// `Active` session, classifies its pane through `monitor` when `cfg.classify_idle`
-/// is true and a `monitor` is supplied. Never touches `pending_decision` — the
-/// supervisor surfaces decisions via metrics but never answers them. Returns a
+/// is true and a `monitor` is supplied. Never answers or clears a
+/// `pending_decision`; it mirrors the classifier's verdict into `blocked_prompt`
+/// (#8393, [`record_blocked_prompt`]), which the metrics surface. Returns a
 /// [`TickReport`]. #8335: each `resume_auto` and classification is bounded by
 /// `cfg.step_timeout` ([`step_bounded`]); an expired resume counts as a
 /// failure but is not marked errored, so the next sweep retries it.
@@ -259,9 +263,12 @@ pub(super) async fn settle_failed_resume(
 /// quietly without aborting the whole sweep — an unattended supervisor must never
 /// die because one session's tmux pane was momentarily unreadable.
 /// What: captures the last 60 pane lines, runs `monitor.check`, logs the verdict
-/// at debug, and returns `true` iff a classification was produced (cache hit or
-/// fresh LLM verdict). Capture / classify errors log a warning and return `false`.
-/// Test: `tick_classifies_active` (via `run_tick`).
+/// at debug, hands it to [`record_blocked_prompt`], and returns `true` iff a
+/// classification was produced (cache hit or fresh LLM verdict) and any
+/// decision it owed was recorded. Capture / classify errors log a warning and
+/// return `false`.
+/// Test: `tick_classifies_active` (via `run_tick`),
+/// `a_failed_decision_write_is_not_counted_and_is_retried`.
 async fn classify_active<C: LlmClassifier>(
     mgr: &Arc<SessionManager>,
     monitor: &ActivityMonitor<C>,
@@ -284,10 +291,74 @@ async fn classify_active<C: LlmClassifier>(
                 cache_hit = result.cache_hit,
                 "supervisor: classified idle session"
             );
-            true
+            // #8393: a confident blocked verdict surfaces as the record's
+            // pending decision; an unpersisted one is not counted as handled.
+            record_blocked_prompt(mgr, id, tmux_name, &result.verdict).await
         }
         Err(e) => {
             warn!(id = %id, name = %tmux_name, "supervisor: classification failed: {e}");
+            false
+        }
+    }
+}
+
+/// Lowest classifier confidence at which a `BlockedOnPermission` verdict is
+/// raised as a pending decision (#8393). A reply with no confidence parses as
+/// 0.5 and stays below it.
+const BLOCKED_CONFIDENCE_FLOOR: f32 = 0.7;
+
+/// Decision text used when a blocked verdict carries an empty summary.
+const BLOCKED_FALLBACK_QUESTION: &str = "session is blocked on a permission prompt (classifier)";
+
+/// Mirror the classifier's verdict into the session's `blocked_prompt` (#8393).
+///
+/// Why: `pending_decision` was set only by the `[Y/n]` / `(yes/no)` regex
+/// parser, so a free-text "which option?" prompt the LLM classifier caught
+/// never reached `supervisor-metrics.json` or `supervisor_status`. The verdict
+/// goes in its own `blocked_prompt` field, not `pending_decision`: that is the
+/// front gate's hold, and a classifier-written one made `resume`, the answer
+/// route and reconcile refuse the session.
+/// What: for a `BlockedOnPermission` verdict at or above
+/// [`BLOCKED_CONFIDENCE_FLOOR`], stores the verdict summary (or a fixed
+/// fallback) through [`SessionManager::sync_blocked_prompt`], replacing a
+/// different earlier text; a repeat of the same text writes nothing. Any other
+/// verdict, or a blocked one below the floor, clears the field, because the
+/// pane no longer shows the prompt that was raised. The setter takes one store
+/// guard and writes only an `Active` record. Nothing answers the field: it
+/// goes when the pane stops reading as blocked, and the metrics hide it once
+/// the session is not `Active`. Returns `false` when the write fails, after
+/// logging at `error`, so the sweep does not count the session as classified;
+/// the next sweep retries from the verdict cache. A clear on a cache hit is as
+/// safe as on a fresh verdict: an unchanged pane that last read as not blocked
+/// cannot own a blocked prompt.
+/// Test: `a_blocked_verdict_raises_a_pending_decision`,
+/// `a_fresh_verdict_clears_or_replaces_the_raised_prompt`,
+/// `a_low_confidence_or_unblocked_verdict_raises_nothing`,
+/// `a_failed_decision_write_is_not_counted_and_is_retried`,
+/// `a_raised_blocked_verdict_does_not_wedge_stop_and_resume`.
+async fn record_blocked_prompt(
+    mgr: &Arc<SessionManager>,
+    id: &crate::session_manager::ManagedSessionId,
+    tmux_name: &str,
+    verdict: &ActivityVerdict,
+) -> bool {
+    let blocked = verdict.state == ActivityState::BlockedOnPermission
+        && verdict.confidence >= BLOCKED_CONFIDENCE_FLOOR;
+    let summary = verdict.summary.trim();
+    let question = match (blocked, summary.is_empty()) {
+        (false, _) => None,
+        (true, true) => Some(BLOCKED_FALLBACK_QUESTION),
+        (true, false) => Some(summary),
+    };
+    match mgr.sync_blocked_prompt(id, question).await {
+        Ok(changed) => {
+            if changed && question.is_some() {
+                info!(id = %id, name = %tmux_name, "supervisor: surfaced blocked session prompt");
+            }
+            true
+        }
+        Err(e) => {
+            error!(id = %id, name = %tmux_name, "supervisor: blocked prompt not recorded: {e}");
             false
         }
     }

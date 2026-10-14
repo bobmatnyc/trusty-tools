@@ -133,6 +133,7 @@ fn stub_record(
         proposed_default: None, correlation: Default::default(),
         pending_decision_id: None,
         last_answer: None,
+        blocked_prompt: None,
         runtime: Default::default(),
         ephemeral: false, workspace_owned: false,
         source_id: source_id.map(str::to_owned),

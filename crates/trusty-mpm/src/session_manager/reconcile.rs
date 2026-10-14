@@ -464,6 +464,7 @@ impl SessionManager {
                 proposed_default: None,
                 pending_decision_id: None,
                 last_answer: None,
+                blocked_prompt: None,
                 correlation: Default::default(),
                 // Externally-created tmux sessions have unknown provenance;
                 // assume the default (claude-code) backend.
