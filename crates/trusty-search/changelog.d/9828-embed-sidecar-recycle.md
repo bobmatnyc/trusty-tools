@@ -1,0 +1,2 @@
+Added
+- `/health` reports `embedder_recycle` (embed-sidecar recycles by trigger, failed footprint reads, the last recycle's trigger and pids, and the recycle back-off level, cause and end time), and the MCP `search_health` result now carries `embedderd_rss_mb` (`null` when no sidecar runs) and `embedder_recycle`. Both sidecar arms recycle by footprint, age and call count; see the `TRUSTY_EMBEDDERD_RECYCLE_*` rows in the embedder tables (#9828).

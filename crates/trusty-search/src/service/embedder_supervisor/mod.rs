@@ -156,6 +156,8 @@ impl SupervisorConfig {
             // Production spawns go through do_spawn, which sets Some(batch).
             sidecar_batch_size: None,
             wedge_reset_secs: self.wedge_reset_secs,
+            // #9828: recycle knobs come straight from env, both arms alike.
+            recycle: trusty_common::embedder_client::RecycleConfig::from_env(),
         }
     }
 }
@@ -729,6 +731,9 @@ async fn do_spawn(
         // from_env), not the trusty-common default — this is the field the
         // running daemon actually respects.
         wedge_reset_secs: config.wedge_reset_secs,
+        // #9828: footprint / age / call-count recycle, read from the
+        // TRUSTY_EMBEDDERD_RECYCLE_* env vars for both sidecar arms.
+        recycle: trusty_common::embedder_client::RecycleConfig::from_env(),
     };
 
     let (supervisor, client_slot, child_pid_slot) =

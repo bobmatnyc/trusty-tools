@@ -99,6 +99,46 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def make_encode(model, batch_size: int, device: str, torch_mod, np_mod, log=lambda _m: None):
+    """Wrap ``model.encode`` and free the MPS cache after every call.
+
+    Why (#9828): each request has a different (batch, padded length) shape, and
+    torch's MPS caching allocator keeps the driver memory of every shape it has
+    seen. Nothing released it, and the sidecar's footprint grew for as long as
+    it lived. ``torch.mps.empty_cache()`` returns the cached blocks to the
+    driver; it does not touch the model weights.
+    What: returns ``encode(texts) -> List[List[float]]``. After each encode on
+    ``device == "mps"`` it calls ``torch_mod.mps.empty_cache()`` when that
+    exists; CPU and CUDA never call it. A missing ``torch.mps`` is skipped; a
+    raising ``empty_cache`` is logged once and never fails the encode.
+    Test: ``tests/test_mps_cache_release.py``.
+    """
+    empty_cache = None
+    if device == "mps":
+        empty_cache = getattr(getattr(torch_mod, "mps", None), "empty_cache", None)
+    failed_once = []
+
+    def encode(texts: List[str]) -> List[List[float]]:
+        vecs = model.encode(
+            texts,
+            batch_size=batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+        out = [v.astype(np_mod.float32).tolist() for v in vecs]
+        if empty_cache is not None:
+            try:
+                empty_cache()
+            except Exception as e:  # noqa: BLE001 - never fail an encode on cache release
+                if not failed_once:
+                    failed_once.append(True)
+                    log(f"WARNING: torch.mps.empty_cache() failed: {e!r}")
+        return out
+
+    return encode
+
+
 def build_encoder(log=lambda _m: None) -> Callable[[List[str]], List[List[float]]]:
     """Load the model, select the device, warm up, and return an ``encode`` fn.
 
@@ -139,15 +179,7 @@ def build_encoder(log=lambda _m: None) -> Callable[[List[str]], List[List[float]
     )
     t_load = time.perf_counter() - t1
 
-    def encode(texts: List[str]) -> List[List[float]]:
-        vecs = model.encode(
-            texts,
-            batch_size=batch_size,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        return [v.astype(np.float32).tolist() for v in vecs]
+    encode = make_encode(model, batch_size, device, torch, np, log=log)
 
     # One real warmup embed to trigger MPS kernel compilation before the first
     # request is ever read.

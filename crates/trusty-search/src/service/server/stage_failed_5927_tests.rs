@@ -413,6 +413,8 @@ async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
         ("transport", "object"),
         // #9030: additive; always present, false when no chat provider.
         ("chat_available", "bool"),
+        // #9828: additive embed-sidecar recycle counters; always present.
+        ("embedder_recycle", "object"),
     ];
     for (key, kind) in expected {
         let value = obj

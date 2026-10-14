@@ -1107,6 +1107,104 @@ exit 1
         );
     }
 
+    /// Ceiling on a pid crossing both forwarders (lazy handle, then AppState),
+    /// each ticking every 500 ms (#9828).
+    const FORWARD_CEILING: Duration = Duration::from_secs(10);
+
+    /// Wait until `state` reports `pid` as the sidecar pid; true on success.
+    async fn wait_for_state_pid(state: &crate::service::server::SearchAppState, pid: u32) -> bool {
+        tokio::time::timeout(FORWARD_CEILING, async {
+            while state.current_embedderd_pid() != Some(pid) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Why (#9828): with a lazily spawned sidecar `search.health` never
+    /// reported `embedderd_rss_mb`; the AppState forwarder was installed while
+    /// the lazy slot read 0 and stopped there.
+    /// What: install the lazy handle's slot on a `SearchAppState` before any
+    /// spawn, as the `TRUSTY_EMBEDDER=python` arm does, spawn through
+    /// `embed_via`, then SIGKILL the child. `search.health` must report the
+    /// live child's RSS after the first spawn and after the respawn.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::parallel]
+    async fn search_health_reports_embedderd_rss_for_a_lazy_spawn_and_its_respawn() {
+        use crate::service::server::{health_report, SearchAppState};
+        let (_dir, binary) = write_mock_embedderd();
+        wait_until_mock_answers(&binary).await;
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: MOCK_WAIT_CEILING_SECS,
+                backoff_max_secs: 2,
+                max_restarts: 3,
+                idle_shutdown_secs: 0,
+                ..SupervisorConfig::default()
+            },
+        );
+        let state = Arc::new(SearchAppState::new(
+            crate::core::registry::IndexRegistry::new(),
+        ));
+        let public = handle.app_pid_slot();
+        state.install_embedderd_pid_slot(Arc::clone(&public)).await;
+
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("mock embed_batch must succeed");
+        let first = public.load(Ordering::Acquire);
+        let saw_first = wait_for_state_pid(&state, first).await;
+        let first_report = health_report(Arc::clone(&state)).await;
+
+        let killed = std::process::Command::new("kill")
+            .args(["-KILL", &first.to_string()])
+            .status()
+            .expect("send SIGKILL to owned fixture child");
+        let replacement =
+            tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
+                loop {
+                    let pid = public.load(Ordering::Acquire);
+                    if pid != 0 && pid != first {
+                        return pid;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or(0);
+        let saw_replacement = replacement != 0 && wait_for_state_pid(&state, replacement).await;
+        let second_report = health_report(Arc::clone(&state)).await;
+        handle.shutdown().await;
+
+        assert!(first > 0 && killed.success());
+        assert!(
+            saw_first,
+            "the lazy first spawn (pid {first}) never reached the state: {:?}",
+            state.current_embedderd_pid()
+        );
+        assert!(
+            first_report.get("embedderd_rss_mb").is_some(),
+            "search.health must report embedderd_rss_mb after a lazy spawn: {first_report}"
+        );
+        assert!(
+            replacement != 0,
+            "the supervisor never respawned the sidecar"
+        );
+        assert!(
+            saw_replacement,
+            "the respawned sidecar (pid {replacement}) never reached the state: {:?}",
+            state.current_embedderd_pid()
+        );
+        assert!(
+            second_report.get("embedderd_rss_mb").is_some(),
+            "search.health must report embedderd_rss_mb after a respawn: {second_report}"
+        );
+    }
+
     /// Why: shutdown and replacement must retire forwarding tasks (#829).
     /// What: shut down a real child, immediately respawn, and verify only the
     /// new task remains; final shutdown must stop that task and clear the PID.

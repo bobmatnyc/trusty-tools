@@ -523,57 +523,57 @@ impl SearchAppState {
     }
 
     /// Install the live `child_pid_slot` Arc from the `EmbedderSupervisor`
-    /// after the sidecar spawns (issue #282).
+    /// or a `LazyEmbedderHandle` (issue #282).
     ///
-    /// Why: `build_embedder` in `start.rs` obtains the pid-slot Arc from
-    /// `spawn_stdio` and calls this method from the background init task.
-    /// The supervisor loop updates the same Arc on every respawn and clears
-    /// it to 0 on final exit, so the daemon always reads the current PID
-    /// without holding any lock.
-    ///
-    /// Issue #829 (pid-slot task leak): each call previously spawned a NEW
-    /// forwarder task without cancelling the previous one. On idle-shutdown
-    /// cycles the old slot's PID never resets to 0 (the supervisor moves on
-    /// to a fresh slot), so the old forwarder runs forever, leaking one task
-    /// per embedder lifecycle. The fix: store the previous forwarder's
-    /// `AbortHandle` in an `Arc<Mutex<Option<AbortHandle>>>` field and abort
-    /// it before spawning the new task.
-    ///
-    /// What: atomically copies the PID from the new slot into the field's
-    /// existing Arc, then spawns exactly one forwarder that copies future
-    /// PID updates. Any previous forwarder is aborted first.
-    /// Test: `pid_slot_forwarder_does_not_leak_tasks` in `tests_state.rs`.
+    /// Why: `/health` and the reindex RSS poller read `embedderd_pid_slot`
+    /// lock-free, while the supervisor owns the slot that changes on a first
+    /// lazy spawn, a recycle, a crash restart and an idle shutdown. #829: one
+    /// forwarder per install, the previous one aborted. #9828: a 0 is "no
+    /// sidecar for now" (not yet spawned, restart gap, idle shutdown), never a
+    /// reason to stop forwarding; the lazy arm installs its slot while it
+    /// still reads 0.
+    /// What: under the handle lock, aborts the previous forwarder, copies the
+    /// slot's current pid, and spawns one forwarder that copies it every
+    /// 500 ms. The forwarder holds the destination weakly, so it ends when
+    /// the last `SearchAppState` clone drops; [`Self::stop_embedderd_pid_forwarder`]
+    /// ends it at shutdown.
+    /// Test: `pid_slot_forwarder_does_not_leak_tasks`,
+    /// `pid_forwarder_follows_a_lazy_first_spawn_then_a_recycle`,
+    /// `pid_forwarder_survives_a_zero_gap_and_follows_the_respawn`,
+    /// `search_health_reports_embedderd_rss_for_a_lazy_spawn_and_its_respawn`.
     pub async fn install_embedderd_pid_slot(&self, slot: Arc<std::sync::atomic::AtomicU32>) {
         use std::sync::atomic::Ordering;
-        let initial_pid = slot.load(Ordering::Acquire);
-        self.embedderd_pid_slot
-            .store(initial_pid, Ordering::Release);
-
-        // Issue #829: cancel any previously-running forwarder before spawning
-        // a new one. We keep the AbortHandle in a Mutex stored inside the same
-        // Arc so callers holding a clone of `SearchAppState` share the handle.
-        // On the first call the Mutex is empty and no abort is needed.
-        let src = Arc::clone(&slot);
-        let dst = Arc::clone(&self.embedderd_pid_slot);
-        let handle = Arc::clone(&self.embedderd_pid_forwarder_handle);
-        let join = tokio::spawn(async move {
-            loop {
-                let pid = src.load(Ordering::Acquire);
-                dst.store(pid, Ordering::Release);
-                if pid == 0 {
-                    // Sidecar exited for the last time; stop forwarding.
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        });
-        // Abort the OLD forwarder after the new one is already running so
-        // there is never a gap in forwarding.
-        let mut guard = handle.lock().await;
+        let mut guard = self.embedderd_pid_forwarder_handle.lock().await;
         if let Some(old) = guard.take() {
             old.abort();
         }
+        self.embedderd_pid_slot
+            .store(slot.load(Ordering::Acquire), Ordering::Release);
+        let dst = Arc::downgrade(&self.embedderd_pid_slot);
+        let join = tokio::spawn(async move {
+            // #9828: no break on 0; only a dropped state or an abort ends it.
+            while let Some(dst) = dst.upgrade() {
+                dst.store(slot.load(Ordering::Acquire), Ordering::Release);
+                drop(dst);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
         *guard = Some(join.abort_handle());
+    }
+
+    /// Stop the pid forwarder and report no sidecar (#9828).
+    ///
+    /// Why: the forwarder no longer ends at a 0 pid, so daemon shutdown ends
+    /// it explicitly.
+    /// What: aborts the installed forwarder, if any, and stores 0. A later
+    /// `install_embedderd_pid_slot` starts a fresh one.
+    /// Test: `pid_forwarder_stops_on_shutdown`.
+    pub async fn stop_embedderd_pid_forwarder(&self) {
+        if let Some(old) = self.embedderd_pid_forwarder_handle.lock().await.take() {
+            old.abort();
+        }
+        self.embedderd_pid_slot
+            .store(0, std::sync::atomic::Ordering::Release);
     }
 
     /// Current OS PID of the embedderd sidecar, or `None` if no sidecar is
