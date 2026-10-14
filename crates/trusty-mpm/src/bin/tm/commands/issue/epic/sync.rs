@@ -41,9 +41,9 @@
 //! `sync_is_a_no_op_when_the_block_already_matches`,
 //! `sync_propagates_a_failed_body_write`.
 
-use crate::commands::issue::config::StateModel;
+use crate::commands::issue::config::{ModelSource, StateModel, builtin_for_labels};
 
-use super::backend::EpicBackend;
+use super::backend::{ChildIssue, EpicBackend};
 use super::render::{self, PHASES_END, PHASES_START};
 
 /// What one `sync` run did.
@@ -76,6 +76,40 @@ pub(crate) fn sync<B: EpicBackend>(
     tracker: u64,
     model: &StateModel,
 ) -> anyhow::Result<SyncReport> {
+    sync_with(backend, tracker, |_| Ok(model.clone()))
+}
+
+/// [`sync`] under the model as loaded, before a lifecycle is chosen (#9579).
+///
+/// Why: the standalone `epic sync` and `epic create` have no transition target
+/// to pick a built-in lifecycle by, so in a no-file repo they rendered every
+/// `status:*` row as `open` under the Unicorn default.
+/// What: picks the model from the children's labels through
+/// [`builtin_for_labels`] on every round, then syncs as [`sync`] does.
+/// Test: `sync_under_the_embedded_default_renders_a_status_label_9579`,
+/// `create_under_the_embedded_default_renders_a_status_label_9579`.
+pub(crate) fn sync_resolved<B: EpicBackend>(
+    backend: &B,
+    tracker: u64,
+    model: &StateModel,
+    source: &ModelSource,
+) -> anyhow::Result<SyncReport> {
+    sync_with(backend, tracker, |children| {
+        let labels = children
+            .iter()
+            .flat_map(|c| c.labels.iter().map(String::as_str));
+        let (model, _source) = builtin_for_labels((model.clone(), source.clone()), labels)?;
+        Ok(model)
+    })
+}
+
+/// The shared read-render-recheck-write loop behind [`sync`] and
+/// [`sync_resolved`]; `pick` chooses the model from the children it read.
+fn sync_with<B: EpicBackend>(
+    backend: &B,
+    tracker: u64,
+    pick: impl Fn(&[ChildIssue]) -> anyhow::Result<StateModel>,
+) -> anyhow::Result<SyncReport> {
     // #9578: each attempt re-reads the body just before writing; a body that
     // moved since the attempt's first read is re-rendered from fresh reads
     // instead of overwritten with the stale copy.
@@ -87,7 +121,7 @@ pub(crate) fn sync<B: EpicBackend>(
             .filter(|c| render::phase_number_of(&c.title).is_some())
             .count();
         // #8696: the whole model, not its prefix — see `render::state_cell`.
-        let table = render::phases_table(&children, model);
+        let table = render::phases_table(&children, &pick(&children)?);
         let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
             .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
         let unchanged = next == body;

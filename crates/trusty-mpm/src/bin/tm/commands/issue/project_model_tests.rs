@@ -13,8 +13,8 @@
 use std::cell::RefCell;
 
 use super::config::{
-    DEFAULT_MODEL_YAML, ModelSource, STATUS_LIFECYCLE_YAML, StateModel, builtin_for_target,
-    describe_source,
+    DEFAULT_MODEL_YAML, ModelSource, STATUS_LIFECYCLE_YAML, StateModel, builtin_for_labels,
+    builtin_for_target, describe_source,
 };
 use super::ops;
 use super::state::{CurrentState, StateMachine};
@@ -587,6 +587,28 @@ fn builtin_for_target_keeps_a_file_model_and_unicorn_targets_8609() {
     }
     let file = ModelSource::File(std::path::PathBuf::from("/repo/issue-state.yaml"));
     let (_, source) = builtin_for_target((embedded_default().0, file.clone()), "status:coded")
+        .expect("file model");
+    assert_eq!(source, file);
+}
+
+/// #9579: the label-driven pick takes the `status:*` lifecycle for a no-file
+/// repo whose issues carry its labels, and keeps a file model and a set
+/// carrying a Unicorn label as loaded.
+#[test]
+fn builtin_for_labels_selects_the_status_lifecycle_9579() {
+    let (_, source) =
+        builtin_for_labels(embedded_default(), ["bug", "status:coded"]).expect("pick");
+    assert!(
+        matches!(source, ModelSource::EmbeddedStatusLifecycle { .. }),
+        "{source:?}"
+    );
+    let (_, source) = builtin_for_labels(embedded_default(), ["bug"]).expect("no state label");
+    assert!(
+        matches!(source, ModelSource::EmbeddedDefault { .. }),
+        "{source:?}"
+    );
+    let file = ModelSource::File(std::path::PathBuf::from("/repo/issue-state.yaml"));
+    let (_, source) = builtin_for_labels((embedded_default().0, file.clone()), ["status:coded"])
         .expect("file model");
     assert_eq!(source, file);
 }

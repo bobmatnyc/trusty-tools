@@ -52,7 +52,7 @@ use std::path::PathBuf;
 use super::backend::{ChildIssue, EpicBackend, NewIssue, PUBLISH_REF};
 use super::plan::{self, EpicPlan};
 use super::render;
-use crate::commands::issue::config::StateModel;
+use crate::commands::issue::config::{ModelSource, StateModel};
 use crate::commands::issue::standard_live::one_line;
 
 /// The comment prefix recording on the issue why it carries no project.
@@ -112,6 +112,9 @@ pub(crate) struct CreateOptions {
     /// The state model the final sync renders the State cell through
     /// (#8448, #8696).
     pub(crate) model: StateModel,
+    /// Where `model` came from; an embedded default lets the final sync pick
+    /// the `status:*` lifecycle from the children's labels (#9579).
+    pub(crate) source: ModelSource,
 }
 
 /// What one `create` run did.
@@ -224,7 +227,8 @@ pub(crate) fn create<B: EpicBackend>(
         report.filed.push((number, filed));
     }
 
-    super::sync::sync(backend, tracker, &opts.model)?;
+    // #9579: the lifecycle the children's labels name, as `epic sync` picks it.
+    super::sync::sync_resolved(backend, tracker, &opts.model, &opts.source)?;
     Ok(report)
 }
 
