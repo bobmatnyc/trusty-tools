@@ -45,9 +45,10 @@ use crate::commands::pm_guard_architect_reason::{
     NotArchitect, architect_main_thread, with_identity,
 };
 use crate::commands::pm_guard_bash::{
-    ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
-    evaluate_architect_pane, evaluate_d4_floor, evaluate_destructive_delete_command,
-    evaluate_tmux_exact_target, unclassifiable_reason,
+    ARCHITECT_PANE_RULE, GUARD_LIFT_INIT_RULE, GitProbe, LiveGit, LivePanes, PaneProbe,
+    TMUX_TARGET_RULE, evaluate_architect_pane, evaluate_d4_floor,
+    evaluate_destructive_delete_command, evaluate_guard_lift_init, evaluate_tmux_exact_target,
+    unclassifiable_reason,
 };
 use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use crate::commands::pm_guard_response::build_pm_guard_deny_response;
@@ -210,6 +211,13 @@ pub(crate) fn evaluate_floors(
         return Some(FloorDeny {
             rule: ARCHITECT_PANE_RULE,
             reason: with_identity(reason, why),
+        });
+    }
+    // #8436 PR C: the guard lift is the owner's choice; every caller is bound.
+    if let Some(reason) = command.and_then(evaluate_guard_lift_init) {
+        return Some(FloorDeny {
+            rule: GUARD_LIFT_INIT_RULE,
+            reason,
         });
     }
     // #9001: a tmux target must resolve exactly; every caller is bound.

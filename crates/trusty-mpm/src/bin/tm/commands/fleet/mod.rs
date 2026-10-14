@@ -347,6 +347,8 @@ pub(crate) fn init_with_session(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir)?);
+    // #8436 PR C (M5): the statusLine `scripts/init.sh` seeds, before the launch.
+    report.steps.push(seed::statusline_step(dir));
     // #8436 PR C: before the launch, so a chosen lift reaches the new session.
     report.steps.push(guard_lift::step(dir, lift));
     // #8942 ruling 2: before the launch writes this run's sidecar.

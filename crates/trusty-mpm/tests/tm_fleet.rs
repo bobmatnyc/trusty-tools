@@ -81,6 +81,9 @@ impl FleetEnv {
             // #5784: the scratch HOME trips the host-state guard; the private
             // TMUX_TMPDIR above is what keeps tmux off the operator's server.
             .env("TRUSTY_MPM_ALLOW_HOST_STATE", "1")
+            // The fake `claude` sleeps 600 s; the poller's Haiku triage calls
+            // (`claude -p`) would each leave one running past the test.
+            .env("TRIAGE_HAIKU", "off")
             .env("PATH", path)
             .output()
             .expect("spawn tm")
@@ -991,7 +994,10 @@ fn a_non_tty_run_without_a_flag_is_no() {
         "{}",
         text(&out)
     );
-    assert_eq!(std::fs::read_to_string(env.settings_path()).unwrap(), body);
+    // `init` seeds the statusLine (M5); the lift key stays absent, the rest stays.
+    let settings = env.settings();
+    assert_eq!(settings["model"], "opus", "{settings}");
+    assert!(settings.get("env").is_none(), "{settings}");
 }
 
 /// Plan §4: `--guard-lift` merges the key, keeps every other key, leaves no
@@ -1056,11 +1062,14 @@ fn an_unusable_settings_file_fails_the_lift_and_is_left_untouched() {
             "{case}: {}",
             text(&out)
         );
-        assert_eq!(
-            std::fs::read_to_string(env.settings_path()).unwrap(),
-            body,
-            "{case}"
-        );
+        let after = std::fs::read_to_string(env.settings_path()).unwrap();
+        if case == "env not an object" {
+            // Valid JSON, so the statusLine seed (M5) writes; the lift refuses.
+            let doc: serde_json::Value = serde_json::from_str(&after).unwrap();
+            assert_eq!(doc["env"], "x", "{case}: {after}");
+        } else {
+            assert_eq!(after, body, "{case}");
+        }
         assert!(
             env.dir().join("AGENTS.md").is_file(),
             "{case}: seeding undone"
