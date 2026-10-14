@@ -721,10 +721,11 @@ fn repair_reuses_the_reachability_the_launch_resolved() {
         serde_json::json!(false),
         "a repair told trusty-memory is up must turn the auto-memory fallback OFF"
     );
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14).
     assert_eq!(
         unreachable,
-        serde_json::json!(true),
-        "a repair told trusty-memory is down must leave the auto-memory fallback ON"
+        serde_json::json!(false),
+        "a repair told trusty-memory is down must still turn auto memory OFF"
     );
 }
 

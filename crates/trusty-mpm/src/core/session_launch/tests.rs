@@ -977,11 +977,11 @@ fn prepare_session_disables_auto_memory_when_trusty_memory_is_reachable() {
 
 #[test]
 #[serial_test::serial]
-fn prepare_session_restores_auto_memory_when_trusty_memory_is_down() {
-    // #7685 r3: the launch write is TWO-WAY. Seed the project with the `false` a
-    // previous healthy-trusty-memory launch would have left — the state the
-    // "leave the key alone" rule could never recover from — and assert this
-    // launch reverts it.
+fn prepare_session_keeps_auto_memory_off_when_trusty_memory_is_down() {
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14). The
+    // failure branch: trusty-memory does not answer, and the project carries the
+    // `true` the retired #7685 fallback wrote. The launch must still turn auto
+    // memory OFF — there is no fallback any more.
     let tmp_home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
@@ -990,11 +990,11 @@ fn prepare_session_restores_auto_memory_when_trusty_memory_is_down() {
     std::fs::create_dir_all(project.join(".claude")).unwrap();
     std::fs::write(
         project.join(".claude").join("settings.json"),
-        r#"{"autoMemoryEnabled":false}"#,
+        r#"{"autoMemoryEnabled":true}"#,
     )
     .unwrap();
 
-    let report = crate::core::session_launch::prepare_session_with_memory_reachable(
+    crate::core::session_launch::prepare_session_with_memory_reachable(
         &fw,
         project,
         Some(tmp_home.path()),
@@ -1008,17 +1008,13 @@ fn prepare_session_restores_auto_memory_when_trusty_memory_is_down() {
     .unwrap();
     assert_eq!(
         value["autoMemoryEnabled"],
-        serde_json::json!(true),
-        "with trusty-memory down the fallback must be turned back ON: {value}"
+        serde_json::json!(false),
+        "auto memory is off for every session, trusty-memory down included: {value}"
     );
     assert_eq!(
         value["outputStyle"],
         serde_json::json!("trusty-mpm"),
         "the auto-memory write must not skip the rest of the launch"
-    );
-    assert!(
-        !report.memory_reachable,
-        "the report must carry the reachability the adapter will reuse"
     );
 }
 

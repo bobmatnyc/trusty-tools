@@ -1606,33 +1606,46 @@ fn spawn_resume_sends_prompt_file_when_binary_available() {
     );
 }
 
-/// #7685: the adapter must use the reachability the LAUNCH resolved rather than
-/// probing trusty-memory a second time.
+/// #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14). The
+/// failure branch — trusty-memory down — must still carry the kill switch on a
+/// fresh spawn AND on a resume.
 #[test]
 #[serial_test::serial]
-fn spawn_uses_the_launch_resolved_reachability() {
+fn spawn_and_resume_disable_auto_memory_when_trusty_memory_is_down() {
     let home = HomeGuard::set();
     let bin_dir = home.home().join("bin");
     std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
     plant_fake_claude(&bin_dir);
     let _path = PathGuard::prepend(&bin_dir);
+    let root = home.home().join(".trusty-mpm");
 
-    let fake = FakeTmux::new();
-    let adapter =
-        ClaudeCodeAdapter::new(fake.clone(), Some(false), &home.home().join(".trusty-mpm"));
-    adapter
+    let spawned = FakeTmux::new();
+    ClaudeCodeAdapter::new(spawned.clone(), Some(false), &root)
         .spawn("tm-sess", home.home(), "task", TEST_SESSION_ID, &[])
         .expect("spawn must succeed");
+    let resumed = FakeTmux::new();
+    ClaudeCodeAdapter::new(resumed.clone(), Some(false), &root)
+        .spawn_resume(
+            "tm-sess",
+            None,
+            home.home(),
+            "task",
+            None,
+            TEST_SESSION_ID,
+            &[],
+        )
+        .expect("resume must succeed");
 
-    let spec = sent_spec(&only_line(&fake));
-    assert!(
-        !spec
-            .env_set
-            .iter()
-            .any(|(k, _)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
-        "an unreachable trusty-memory must leave auto memory on: {:?}",
-        spec.env_set
-    );
+    for (path, fake) in [("spawn", &spawned), ("resume", &resumed)] {
+        let spec = sent_spec(&only_line(fake));
+        assert!(
+            spec.env_set
+                .iter()
+                .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && v == "1"),
+            "{path}: auto memory must be off with trusty-memory down: {:?}",
+            spec.env_set
+        );
+    }
 }
 
 /// Write `yaml` as the config under the redirected home's state root — the

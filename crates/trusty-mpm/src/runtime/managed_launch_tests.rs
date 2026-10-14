@@ -183,11 +183,11 @@ fn env_set_disables_auto_memory_when_trusty_memory_answers() {
 }
 
 #[test]
-fn env_set_keeps_auto_memory_when_trusty_memory_is_unreachable() {
-    // #7685 / owner ruling 2026-09-12: auto memory is the FALLBACK, so a session
-    // must not lose it while trusty-memory is down.
+fn env_set_disables_auto_memory_when_trusty_memory_is_unreachable() {
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) — the
+    // trusty-memory-down branch carries the kill switch too.
     let set = managed_env_set(None, None, &[], false, &[]);
-    assert_eq!(value_of(&set, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), None);
+    assert_eq!(value_of(&set, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), Some("1"));
 }
 
 #[test]
