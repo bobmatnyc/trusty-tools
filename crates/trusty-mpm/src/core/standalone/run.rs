@@ -41,7 +41,8 @@ use super::registry::ManagedRegistry;
 /// session is always connected to the terminal, even if a future caller switches
 /// from `.status()` to `.output()`.
 /// What: returns a `Command` with program `"claude"`, cwd `repo_path`,
-/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, stdin/stdout/stderr set to
+/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>` and
+/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (#8436), stdin/stdout/stderr set to
 /// `Stdio::inherit()`, `--dangerously-skip-permissions`, and (when `api_key` is
 /// `Some(s)` with a non-empty `s`) the `--bare` arg. Does NOT spawn.
 ///
@@ -68,6 +69,7 @@ use super::registry::ManagedRegistry;
 /// Test: `test_build_launch_command_carries_the_mcp_config_flag_and_not_strict`,
 /// `test_build_launch_command_omits_the_mcp_config_flag_without_a_file`,
 /// `test_build_launch_command_sets_env_and_cwd`,
+/// `test_build_launch_command_disables_auto_memory`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`,
 /// `test_build_launch_command_includes_bypass_permissions`,
@@ -94,6 +96,8 @@ pub fn build_launch_command_configured(
     // #6495/#8405: the config-decided renderer, whatever this shell exports.
     crate::core::alt_screen::apply_configured_to_command(&mut cmd, alternate_screen);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
+    // #8436: auto memory is off for every session (owner ruling Q5a).
+    cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
