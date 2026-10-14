@@ -451,6 +451,46 @@ assignee_model: { strategy: unchanged, per_state: {} }
         );
     }
 
+    /// FAILS BEFORE #9580: a model mapping state `status:in-progress` to the
+    /// label `in-progress` beside `status:*` labels loaded, and transitions
+    /// then wrote a label the lifecycle does not use (owner ruling 2026-10-09).
+    /// Test: itself.
+    #[test]
+    fn validate_rejects_a_state_label_missing_the_status_prefix_9580() {
+        let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "status:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "status:in-progress", label: { name: "in-progress", color: "FBCA04" }, order: 1 }
+  - { name: "status:coded", label: { name: "status:coded", color: "AABBCC" }, order: 2 }
+  - { name: closed, gh_state: closed, order: 3 }
+transitions:
+  - { from: open, to: "status:in-progress", trigger: executor_start }
+  - { from: "status:in-progress", to: "status:coded", trigger: executor_start }
+  - { from: "status:coded", to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        let m: StateModel = serde_yaml::from_str(yaml).expect("synthetic parses");
+        let message = validate_model(&m)
+            .expect_err("a mixed-prefix model must be rejected")
+            .to_string();
+        assert!(
+            message.contains("`status:in-progress`")
+                && message.contains("`in-progress`")
+                && message.contains("`status:`"),
+            "the error must name the state, the label and the prefix: {message}"
+        );
+        // Every bundled model still loads (AC2).
+        for yaml in [
+            DEFAULT_MODEL_YAML,
+            super::super::config::STATUS_LIFECYCLE_YAML,
+        ] {
+            let bundled: StateModel = serde_yaml::from_str(yaml).expect("bundled parses");
+            assert!(validate_model_inner(&bundled).is_ok());
+        }
+    }
+
     #[test]
     fn validate_accepts_one_labelless_state_per_gh_state() {
         // One `open` + one `closed` label-less state IS resolvable.
