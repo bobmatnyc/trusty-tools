@@ -21,6 +21,14 @@
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
 #   TRUSTY_EMBEDDERD_BIN.
+#   Embedder knobs (#9828; pass through only when exported with a non-empty
+#   value): TRUSTY_EMBEDDER, TRUSTY_DEVICE, TRUSTY_UV_BIN, and every
+#   TRUSTY_EMBEDDERD_PY_* and TRUSTY_EMBEDDERD_RECYCLE_* name except one
+#   holding TOKEN, KEY, SECRET, PASSWORD, CREDENTIAL or AUTH. With
+#   TRUSTY_EMBEDDER=python the daemon finds `uv` through TRUSTY_UV_BIN, else
+#   PATH, else /opt/homebrew/bin, /usr/local/bin and <dir>/home's .local/bin
+#   and .cargo/bin; PATH stays /usr/bin:/bin. Its venv (~3 GB on first use)
+#   and uv's cache land under <dir>/home, as HOME decides both.
 #   Auto-discovery: `--no-auto-discover` is passed unless `--auto-discover` is
 #   given, which omits it so a live check of #8176 can see the daemon's own
 #   default on an explicit data dir. It does NOT pass the daemon's
@@ -345,6 +353,16 @@ for name in $KNOBS; do
   if [ "${EXPORTED#* "$name" }" != "$EXPORTED" ]; then
     ENV_WORDS+=("$name=${!name}")
   fi
+done
+# #9828: the embedder knobs, so a soak can run the Python sidecar. Non-empty
+# values only; a credential-shaped name under the two prefixes is skipped.
+for name in $EXPORTED; do
+  case "$name" in
+    TRUSTY_EMBEDDER|TRUSTY_DEVICE|TRUSTY_UV_BIN|TRUSTY_EMBEDDERD_PY_*|TRUSTY_EMBEDDERD_RECYCLE_*) ;;
+    *) continue ;;
+  esac
+  case "$name" in *TOKEN*|*KEY*|*SECRET*|*PASSWORD*|*CREDENTIAL*|*AUTH*) continue ;; esac
+  [ -z "${!name}" ] || ENV_WORDS+=("$name=${!name}")
 done
 # #8176: --auto-discover leaves the flag off; the daemon's own default decides.
 if [ "$AUTO_DISCOVER" -eq 1 ]; then
