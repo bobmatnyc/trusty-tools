@@ -36,8 +36,8 @@
 #     - two rows share a path and kind, or one path has a public row and an
 #       absent row (the message names the path);
 #     - the listing is missing or empty, has no `trusty_memory` path, or has a
-#       `pub` line the parser cannot cut to a `trusty_memory` path (the
-#       message names the line).
+#       `pub` line the parser cannot cut to a `trusty_memory` path, such as a
+#       generic group it cannot strip (the message names the line).
 #
 # Usage:
 #   bash scripts/check_engine_api_audit.sh --api-file <listing>
@@ -56,7 +56,8 @@
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path (in an engine module,
 #   at the crate root, under `transport`, sharing a row's stem, on a generic
-#   type, and each generic shape), a missing KEEP or DEPRECATE row, a field
+#   type, each generic shape, and generics carrying `->`), a missing KEEP or
+#   DEPRECATE row, a field
 #   and method sharing a path, the malformed-row, duplicate-row and
 #   conflicting-row errors, and the missing, empty, crate-less and unparsable
 #   listing errors.
@@ -151,9 +152,15 @@ if ! awk '{
   sub(/^((unsafe|async|const|extern "[^"]*") )*fn /, "", s)
   sub(/^(struct|enum|union|trait|unsafe trait|type|mod|const|static|use|macro) /, "", s)
   # #9278: strip generic groups (nested too) before the cut, so `X<T>::m` is
-  # `X::m`, not a collapse into the row of the type itself.
+  # `X::m`, not a collapse into the row of the type itself. A1: hide `->`
+  # first, or `<fn() -> u8>` ends the group at its `>`.
+  gsub(/->/, "\001", s)
   while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
-  sub(/[({].*/, "", s); sub(/: .*/, "", s); sub(/ .*/, "", s); sub(/:$/, "", s)
+  sub(/[({].*/, "", s); sub(/: .*/, "", s)
+  # A1: a `<` or `>` left in the path part is a group the strip could not
+  # read (e.g. `<{ N > 1 }>`); fail closed rather than cut it at a space.
+  if (s ~ /[<>]/) { bad_line(); next }
+  sub(/ .*/, "", s); sub(/:$/, "", s)
   if (s ~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*$/) print s
   else bad_line()
 }
