@@ -11,9 +11,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::engine::PalaceRegistry;
 use crate::engine::palace::{Drawer, Palace, PalaceId};
+use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::Triple;
-use crate::engine::{PalaceHandle, PalaceRegistry};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use uuid::Uuid;

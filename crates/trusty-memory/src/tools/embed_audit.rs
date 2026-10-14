@@ -54,7 +54,7 @@ use crate::AppState;
 /// distinct_ids)`, plus the #9275 `short` count and `chunk_check` state. `key_rows`/`distinct_ids` are `None` — never `0` — when the
 /// audit could not run, because a zero standing in for "I could not tell" is the
 /// false all-clear #5005 documents.
-fn coverage(handle: &crate::engine::PalaceHandle) -> Value {
+fn coverage(handle: &crate::engine::retrieval::PalaceHandle) -> Value {
     let health = handle.embed_health();
     json!({
         "palace": health.palace_id,

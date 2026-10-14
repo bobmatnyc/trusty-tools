@@ -13,9 +13,11 @@ use crate::kg_write::{CachePolicy, KgWriteError};
 use crate::{ActivityFilter, ActivitySource, DaemonEvent};
 use std::sync::Arc;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
+use crate::engine::PalaceRegistry;
+use crate::engine::palace_not_found::PalaceNotFound;
+use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::kg::{ExpandDirection, Triple};
 use crate::engine::store::palace_format::is_format_refusal;
-use crate::engine::{PalaceHandle, PalaceNotFound, PalaceRegistry};
 
 use super::MemoryService;
 use super::core::KG_GRAPH_MAX_TRIPLES;

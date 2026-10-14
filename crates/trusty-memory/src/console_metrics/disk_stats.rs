@@ -203,7 +203,8 @@ fn active_triple_count(rtx: &redb::ReadTransaction) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Palace, PalaceId, PalaceRegistry};
+    use crate::engine::PalaceRegistry;
+    use crate::engine::palace::{Palace, PalaceId};
 
     /// Build a palace at `root/<name>` and put `drawers` drawers in it, then
     /// let the registry drop so no handle holds the redb lock.
@@ -220,8 +221,10 @@ mod tests {
             .create_palace(root, palace)
             .unwrap_or_else(|e| panic!("create_palace({name}): {e:#}"));
         for i in 0..drawers {
-            let drawer =
-                crate::engine::Drawer::new(uuid::Uuid::new_v4(), format!("seeded drawer {i}"));
+            let drawer = crate::engine::palace::Drawer::new(
+                uuid::Uuid::new_v4(),
+                format!("seeded drawer {i}"),
+            );
             handle
                 .kg
                 .store()

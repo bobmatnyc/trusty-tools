@@ -191,7 +191,7 @@ impl From<crate::service::ServiceError> for ApiError {
 pub fn open_handle(
     state: &AppState,
     id: &str,
-) -> Result<std::sync::Arc<crate::engine::PalaceHandle>, ApiError> {
+) -> Result<std::sync::Arc<crate::engine::retrieval::PalaceHandle>, ApiError> {
     state
         .registry
         .open_palace(&state.data_root, &PalaceId::new(id))

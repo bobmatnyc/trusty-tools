@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use crate::engine::PalaceHandle;
+use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::kg::Triple;
 
 use crate::AppState;
@@ -182,7 +182,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let state = AppState::new(root).with_default_palace(Some(name.to_string()));
-        let palace = crate::engine::Palace {
+        let palace = crate::engine::palace::Palace {
             id: PalaceId::new(name),
             name: name.to_string(),
             description: None,

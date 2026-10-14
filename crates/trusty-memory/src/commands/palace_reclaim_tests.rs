@@ -3,7 +3,8 @@
 //! writes nothing under the palace root.
 
 use super::*;
-use crate::engine::{Palace, PalaceId, PalaceRegistry};
+use crate::engine::PalaceRegistry;
+use crate::engine::palace::{Palace, PalaceId};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 

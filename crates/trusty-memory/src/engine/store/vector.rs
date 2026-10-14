@@ -633,7 +633,7 @@ impl UsearchStore {
     /// collision on one chunk row frees every row of that drawer (#9275), in
     /// the same transaction, so no drawer is left half-present. The freed
     /// drawers then read as ordinary "missing" to `embed_health`. Callers should route
-    /// through [`PalaceHandle::repair_aliases`](crate::engine::PalaceHandle::repair_aliases), which adds the dry run and the
+    /// through [`PalaceHandle::repair_aliases`](crate::engine::retrieval::PalaceHandle::repair_aliases), which adds the dry run and the
     /// post-repair verification; this is the raw primitive.
     /// Test: `unalias_marks_the_whole_group_for_reembed`,
     /// `repair_aliases_never_reports_success_over_a_partial_repair`,

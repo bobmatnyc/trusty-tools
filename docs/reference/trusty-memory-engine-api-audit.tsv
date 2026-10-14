@@ -1,95 +1,67 @@
 path	kind	disposition	consumer_or_reason	batch
-trusty_memory::engine::Drawer	struct	KEEP	duplicate re-export of palace::Drawer; ruling needed: no outside caller names the engine-root path	A4
+trusty_memory::engine::Drawer	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Drawer::access_count	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::Drawer::completed_at	field	KEEP	duplicate re-export of palace::Drawer::completed_at	A4
-trusty_memory::engine::Drawer::created_at	field	KEEP	duplicate re-export of palace::Drawer::created_at	A4
-trusty_memory::engine::Drawer::drawer_type	field	KEEP	duplicate re-export of palace::Drawer::drawer_type	A4
-trusty_memory::engine::Drawer::expires_at	field	KEEP	duplicate re-export of palace::Drawer::expires_at	A4
-trusty_memory::engine::Drawer::fact_key	field	KEEP	duplicate re-export of palace::Drawer::fact_key	A4
-trusty_memory::engine::Drawer::id	field	KEEP	duplicate re-export of palace::Drawer::id	A4
-trusty_memory::engine::Drawer::importance	field	KEEP	duplicate re-export of palace::Drawer::importance	A4
+trusty_memory::engine::Drawer::completed_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::drawer_type	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::expires_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::fact_key	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Drawer::importance	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Drawer::last_accessed_at	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::Drawer::room_id	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::Drawer::source_file	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::Drawer::tags	field	KEEP	duplicate re-export of palace::Drawer::tags	A4
-trusty_memory::engine::DrawerType	enum	KEEP	duplicate re-export of palace::DrawerType; ruling needed: no outside caller names the engine-root path	A4
-trusty_memory::engine::DrawerType::AgentNote	variant	KEEP	duplicate re-export of palace::DrawerType::AgentNote	A4
-trusty_memory::engine::DrawerType::Commit	variant	KEEP	duplicate re-export of palace::DrawerType::Commit	A4
-trusty_memory::engine::DrawerType::Decision	variant	KEEP	duplicate re-export of palace::DrawerType::Decision	A4
-trusty_memory::engine::DrawerType::Reference	variant	KEEP	duplicate re-export of palace::DrawerType::Reference	A4
-trusty_memory::engine::DrawerType::Ruling	variant	KEEP	duplicate re-export of palace::DrawerType::Ruling	A4
-trusty_memory::engine::DrawerType::SessionEvent	variant	KEEP	duplicate re-export of palace::DrawerType::SessionEvent	A4
-trusty_memory::engine::DrawerType::Status	variant	KEEP	duplicate re-export of palace::DrawerType::Status	A4
-trusty_memory::engine::DrawerType::Task	variant	KEEP	duplicate re-export of palace::DrawerType::Task	A4
-trusty_memory::engine::DrawerType::Turn	variant	KEEP	duplicate re-export of palace::DrawerType::Turn	A4
-trusty_memory::engine::DrawerType::Unknown	variant	KEEP	duplicate re-export of palace::DrawerType::Unknown	A4
-trusty_memory::engine::DrawerType::UserFact	variant	KEEP	duplicate re-export of palace::DrawerType::UserFact	A4
-trusty_memory::engine::Palace	struct	KEEP	duplicate re-export of palace::Palace; ruling needed: no outside caller names the engine-root path	A4
-trusty_memory::engine::Palace::created_at	field	KEEP	duplicate re-export of palace::Palace::created_at	A4
-trusty_memory::engine::Palace::data_dir	field	KEEP	duplicate re-export of palace::Palace::data_dir	A4
-trusty_memory::engine::Palace::description	field	KEEP	duplicate re-export of palace::Palace::description	A4
-trusty_memory::engine::Palace::id	field	KEEP	duplicate re-export of palace::Palace::id	A4
-trusty_memory::engine::Palace::name	field	KEEP	duplicate re-export of palace::Palace::name	A4
-trusty_memory::engine::PalaceHandle	struct	KEEP	engine-root re-export of retrieval::PalaceHandle; the listing names the PalaceHandle methods under this path; ruling needed: no outside caller names the engine-root path	A4
-trusty_memory::engine::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
-trusty_memory::engine::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::Drawer::tags	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType	enum	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::AgentNote	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Commit	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Decision	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Reference	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Ruling	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::SessionEvent	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Status	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Task	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::data_dir	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::description	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::Palace::name	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::PalaceHandle::closets	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::PalaceHandle::commit_mutex	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::compact_vector_orphans	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::PalaceHandle::data_dir	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::PalaceHandle::decay_config	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::PalaceHandle::drawer_load_degraded	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::drawers	field	KEEP	duplicate re-export of retrieval::PalaceHandle::drawers	A4
-trusty_memory::engine::PalaceHandle::embed_health	method	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::PalaceHandle::flush	method	KEEP	tests/memory_palace.rs	A4
-trusty_memory::engine::PalaceHandle::forget	method	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::PalaceHandle::forget_for_maintenance	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::id	field	KEEP	duplicate re-export of retrieval::PalaceHandle::id	A4
-trusty_memory::engine::PalaceHandle::identity	field	KEEP	duplicate re-export of retrieval::PalaceHandle::identity	A4
-trusty_memory::engine::PalaceHandle::idle_secs	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::is_compacting	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::is_read_only	method	KEEP	trusty-mpm src/daemon/manager/memory_tests.rs	A4
-trusty_memory::engine::PalaceHandle::kg	field	KEEP	duplicate re-export of retrieval::PalaceHandle::kg	A4
-trusty_memory::engine::PalaceHandle::l1_drawers	field	KEEP	duplicate re-export of retrieval::PalaceHandle::l1_drawers	A4
+trusty_memory::engine::PalaceHandle::drawers	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::id	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::identity	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::kg	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceHandle::l1_drawers	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::PalaceHandle::last_accessed	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::list_drawers	method	KEEP	trusty-mpm src/core/sm/memory.rs	A4
-trusty_memory::engine::PalaceHandle::new	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
-trusty_memory::engine::PalaceHandle::open	method	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
-trusty_memory::engine::PalaceHandle::open_with_intent	method	KEEP	tests/kg_triple_key_migration_tests.rs	A4
-trusty_memory::engine::PalaceHandle::open_with_intent_purging	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
-trusty_memory::engine::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::PalaceHandle::recall_log	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::reembed_slice	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
-trusty_memory::engine::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
-trusty_memory::engine::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
-trusty_memory::engine::PalaceHandle::remember_with_options_within	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::repair_aliases	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::snapshot	method	KEEP	tests/palace_backup_9282.rs	A4
-trusty_memory::engine::PalaceHandle::touch	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::PalaceHandle::vector_store	field	KEEP	duplicate re-export of retrieval::PalaceHandle::vector_store	A4
-trusty_memory::engine::PalaceHandle::with_decay_config	method	NARROW	removed: no caller anywhere	A4
-trusty_memory::engine::PalaceHandle::with_recall_log	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
-trusty_memory::engine::PalaceHandle::without_idle_touch	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::PalaceHandle::vector_store	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::PalaceHandle::write_mutex	field	NARROW	re-export; no consumer outside the library	A4
-trusty_memory::engine::PalaceId	struct	KEEP	duplicate re-export of palace::PalaceId; ruling needed: no outside caller names the engine-root path	A4
+trusty_memory::engine::PalaceId	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::PalaceRegistry	struct	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::Room	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Room::id	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Room::room_type	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Room::wing_id	field	NARROW	removed: no caller anywhere	A4
-trusty_memory::engine::RoomType	enum	KEEP	duplicate re-export of palace::RoomType; ruling needed: no outside caller names the engine-root path	A4
-trusty_memory::engine::RoomType::Backend	variant	KEEP	duplicate re-export of palace::RoomType::Backend	A4
-trusty_memory::engine::RoomType::Configuration	variant	KEEP	duplicate re-export of palace::RoomType::Configuration	A4
-trusty_memory::engine::RoomType::Custom	variant	KEEP	duplicate re-export of palace::RoomType::Custom	A4
-trusty_memory::engine::RoomType::Documentation	variant	KEEP	duplicate re-export of palace::RoomType::Documentation	A4
-trusty_memory::engine::RoomType::Frontend	variant	KEEP	duplicate re-export of palace::RoomType::Frontend	A4
-trusty_memory::engine::RoomType::General	variant	KEEP	duplicate re-export of palace::RoomType::General	A4
-trusty_memory::engine::RoomType::Meetings	variant	KEEP	duplicate re-export of palace::RoomType::Meetings	A4
-trusty_memory::engine::RoomType::Planning	variant	KEEP	duplicate re-export of palace::RoomType::Planning	A4
-trusty_memory::engine::RoomType::Research	variant	KEEP	duplicate re-export of palace::RoomType::Research	A4
-trusty_memory::engine::RoomType::Testing	variant	KEEP	duplicate re-export of palace::RoomType::Testing	A4
+trusty_memory::engine::RoomType	enum	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Backend	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Configuration	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Custom	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Documentation	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Frontend	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::General	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Meetings	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Planning	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Research	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::RoomType::Testing	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Wing	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::id	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::name	field	NARROW	removed: no caller anywhere	A4
@@ -294,7 +266,7 @@ trusty_memory::engine::retrieval::AliasRepairReport::outcome	field	NARROW	no con
 trusty_memory::engine::retrieval::AliasRepairReport::palace_id	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::AliasRepairReport::reembed_required	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::AliasRepairReport::unnameable_keys	field	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::CHUNK_MARKER_FILE	const	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
+trusty_memory::engine::retrieval::CHUNK_MARKER_FILE	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::ChunkCheck	enum	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::ChunkCheck::Ran	variant	KEEP	member of ChunkCheck	A4
 trusty_memory::engine::retrieval::ChunkCheck::Unavailable	variant	KEEP	member of ChunkCheck	A4
@@ -306,30 +278,30 @@ trusty_memory::engine::retrieval::ChunkCommitError::LockWait::waited	field	NARRO
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert	variant	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert::palace	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::ChunkCommitError::Upsert::reason	field	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::ChunkMarker	struct	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::failed	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::from_progress	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::last_error	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::needs_scan	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::pending	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::read	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::state	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::total	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::updated_at	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::version	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::window	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkMarker::write	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress	struct	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress::done	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress::failed	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress::pending	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress::state	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkProgress::total	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkState	enum	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkState::Backfilling	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkState::Complete	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkState::CompleteWithFailures	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::ChunkState::Unknown	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
+trusty_memory::engine::retrieval::ChunkMarker	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::from_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::last_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::needs_scan	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::read	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::updated_at	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::version	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::window	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkMarker::write	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::done	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::pending	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::state	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkProgress::total	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Backfilling	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Complete	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::CompleteWithFailures	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::ChunkState::Unknown	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall	struct	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall::failed	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::CrossPalaceRecall::results	field	NARROW	no consumer outside the library	A4
@@ -340,7 +312,7 @@ trusty_memory::engine::retrieval::DEFAULT_RELEVANCE_FLOOR	const	NARROW	no consum
 trusty_memory::engine::retrieval::EmbedHealth	struct	KEEP	PalaceHandle::embed_health return type; tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::EmbedHealth::alias_audit	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::chunk_check	field	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::retrieval::EmbedHealth::chunk_progress	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
+trusty_memory::engine::retrieval::EmbedHealth::chunk_progress	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::EmbedHealth::drawer_count	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::embedder_ready	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::EmbedHealth::is_healthy	method	KEEP	tests/chunked_embed_9275.rs	A4
@@ -363,22 +335,50 @@ trusty_memory::engine::retrieval::L0Identity	struct	NARROW	removed: no caller an
 trusty_memory::engine::retrieval::L0Identity::content	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::retrieval::L1Essential	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::retrieval::L1Essential::drawers	field	NARROW	removed: no caller anywhere	A4
-trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
+trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::PalaceHandle	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::closets	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::commit_mutex	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::compact_vector_orphans	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::data_dir	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::decay_config	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::drawer_load_degraded	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::drawers	field	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::embed_health	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget_for_maintenance	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::id	field	KEEP	tests/alias_lane/mod.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::identity	field	KEEP	tests/bm25_alias_recall.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::idle_secs	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::is_compacting	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::is_compacting	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::is_read_only	method	KEEP	trusty-mpm src/daemon/manager/memory_tests.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::kg	field	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::l1_drawers	field	KEEP	tests/bm25_alias_recall.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::last_accessed	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::list_drawers	method	KEEP	trusty-mpm src/core/sm/memory.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::new	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	tests/kg_triple_key_migration_tests.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent_purging	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::recall_log	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options_within	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::repair_aliases	method	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::PalaceHandle::snapshot	method	KEEP	tests/palace_backup_9282.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::touch	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::vector_store	field	KEEP	tests/chunked_embed_9275.rs, tests/hnsw_abandoned_health_9487.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::with_decay_config	method	NARROW	removed: no caller anywhere	A4
+trusty_memory::engine::retrieval::PalaceHandle::with_recall_log	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
+trusty_memory::engine::retrieval::PalaceHandle::without_idle_touch	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::write_mutex	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::RecallResult	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
 trusty_memory::engine::retrieval::RecallResult::drawer	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/core/sm/agent/mod.rs	A4
@@ -411,37 +411,37 @@ trusty_memory::engine::retrieval::RetryPolicy	struct	KEEP	VectorBackfillOptions:
 trusty_memory::engine::retrieval::RetryPolicy::attempts	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::RetryPolicy::base_delay	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::RetryPolicy::default	trait_method	KEEP	member of RetryPolicy (Default impl)	A4
-trusty_memory::engine::retrieval::SliceBounds	struct	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::budget	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::default	trait_method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::embed_timeout	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::from_env	method	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::host_failures	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::ledger_backoff	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::lock_wait	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::max_chunks	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::max_drawers	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceBounds::min_age	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport	struct	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::attempted	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::chunks_embedded	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::failed	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::host_failure	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::ledger_error	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::repaired	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::stale	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceReport::stop	field	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop	enum	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::Budget	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::ChunkCap	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::ChunkCheckUnavailable	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::DrawerCap	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::EmbedTimeout	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::HostFailure	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::LockTimeout	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::QueueEmpty	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::ReadOnly	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
-trusty_memory::engine::retrieval::SliceStop::StoreError	variant	KEEP	ruling needed: production code whose only callers are unit tests; the #9735 background re-embed caller (PR 2 of 2) has not landed, so cfg(test) would gate that subsystem	A4
+trusty_memory::engine::retrieval::SliceBounds	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::budget	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::default	trait_method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::embed_timeout	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::from_env	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::host_failures	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::ledger_backoff	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::lock_wait	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::max_chunks	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::max_drawers	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceBounds::min_age	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport	struct	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::attempted	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::chunks_embedded	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::failed	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::host_failure	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::ledger_error	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::repaired	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::stale	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceReport::stop	field	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop	enum	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::Budget	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ChunkCheckUnavailable	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::DrawerCap	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::EmbedTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::HostFailure	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::LockTimeout	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::QueueEmpty	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::ReadOnly	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
+trusty_memory::engine::retrieval::SliceStop::StoreError	variant	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::TIER_C_DEFAULT_TTL_HOURS	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::TierCAdmission	enum	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::TierCAdmission::Admitted	variant	NARROW	no consumer outside the library	A4

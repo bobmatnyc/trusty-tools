@@ -186,7 +186,7 @@ pub(crate) fn blocklist_gate(content: &str) -> Option<&'static str> {
 /// empty after trimming (the content gate handles that case separately)
 /// or if the palace has no recent drawers.
 /// Test: `dedup_skips_near_duplicate`, `dedup_allows_different_content`.
-pub(crate) fn dedup_gate(handle: &crate::engine::PalaceHandle, content: &str) -> bool {
+pub(crate) fn dedup_gate(handle: &crate::engine::retrieval::PalaceHandle, content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return false;
@@ -450,7 +450,7 @@ pub(crate) fn require_maintenance_lease(state: &AppState) -> Result<()> {
 pub(crate) fn open_palace_handle(
     state: &AppState,
     palace_id: &str,
-) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
+) -> Result<std::sync::Arc<crate::engine::retrieval::PalaceHandle>> {
     let _tracked = state.worker_liveness.track();
     open_within(
         state,
@@ -484,7 +484,7 @@ pub(crate) fn open_palace_handle_within(
     state: &AppState,
     palace_id: &str,
     budget: OpBudget,
-) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
+) -> Result<std::sync::Arc<crate::engine::retrieval::PalaceHandle>> {
     open_within(state, palace_id, budget, true)
 }
 
@@ -496,7 +496,7 @@ pub(crate) fn open_palace_handle_within(
 /// palace ids (a rename keeps the directory, #9544), so a names-only read
 /// cannot stand in for the walk.
 /// What: opens the palace within `budget`. A genuine absence fails with the
-/// [`crate::engine::PalaceNotFound`] listing the palaces when `list_existing`,
+/// [`crate::engine::palace_not_found::PalaceNotFound`] listing the palaces when `list_existing`,
 /// else with the registry's bare one; the type survives either way for the
 /// -32004 wire code. Any other failure gets `open palace <id>` context.
 /// Test: `memory_remember_and_note_name_a_missing_palace_without_its_path`,
@@ -506,7 +506,7 @@ fn open_within(
     palace_id: &str,
     budget: OpBudget,
     list_existing: bool,
-) -> Result<std::sync::Arc<crate::engine::PalaceHandle>> {
+) -> Result<std::sync::Arc<crate::engine::retrieval::PalaceHandle>> {
     // #4001: untracked here so one write is not counted twice in `in_flight`.
     let pid = PalaceId::new(palace_id);
     state
@@ -632,7 +632,7 @@ pub(crate) struct WriteGuard<'a> {
 /// `auto_kg_extraction_no_op_does_not_fail_remember`,
 /// `web::tests::http_create_drawer_runs_auto_kg_extraction`.
 pub(crate) async fn auto_extract_and_assert(
-    handle: &std::sync::Arc<crate::engine::PalaceHandle>,
+    handle: &std::sync::Arc<crate::engine::retrieval::PalaceHandle>,
     drawer_id: Uuid,
     content: &str,
     tags: &[String],

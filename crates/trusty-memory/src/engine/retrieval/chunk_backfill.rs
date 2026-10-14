@@ -38,28 +38,28 @@ use uuid::Uuid;
 /// `slice_embed_is_bounded_by_the_slice_timeout`,
 /// `slice_defaults_and_recall_contention_measured` (the numbers above).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SliceBounds {
+pub(crate) struct SliceBounds {
     /// Wall-clock budget, checked between drawers. Env
     /// `TRUSTY_CHUNK_BACKFILL_SLICE_MS`, default 20 000.
-    pub budget: Duration,
+    pub(crate) budget: Duration,
     /// Drawers started per slice. Env `TRUSTY_CHUNK_BACKFILL_MAX_DRAWERS`, default 8.
-    pub max_drawers: usize,
+    pub(crate) max_drawers: usize,
     /// Chunks embedded per slice. Env `TRUSTY_CHUNK_BACKFILL_MAX_CHUNKS`, default 64.
-    pub max_chunks: usize,
+    pub(crate) max_chunks: usize,
     /// Ceiling on one drawer's embed. Env `TRUSTY_CHUNK_BACKFILL_EMBED_SECS`, default 120.
-    pub embed_timeout: Duration,
+    pub(crate) embed_timeout: Duration,
     /// Ceiling on one commit's `write_mutex` wait. Env
     /// `TRUSTY_CHUNK_BACKFILL_LOCK_WAIT_SECS`, default 5.
-    pub lock_wait: Duration,
+    pub(crate) lock_wait: Duration,
     /// A missing-vector drawer younger than this is left to the deferred lane.
     /// Env `TRUSTY_CHUNK_BACKFILL_MIN_AGE_SECS`, default 120.
-    pub min_age: Duration,
+    pub(crate) min_age: Duration,
     /// A drawer with a ledger row younger than this is skipped. Env
     /// `TRUSTY_CHUNK_BACKFILL_BACKOFF_SECS`, default 86 400.
-    pub ledger_backoff: Duration,
+    pub(crate) ledger_backoff: Duration,
     /// Consecutive embed errors that end the slice as host-level; a timeout
     /// never counts. Env `TRUSTY_CHUNK_BACKFILL_HOST_FAILURES`, default 2.
-    pub host_failures: usize,
+    pub(crate) host_failures: usize,
 }
 
 impl Default for SliceBounds {
@@ -81,7 +81,8 @@ impl SliceBounds {
     /// The defaults, each overridable by its env var; a malformed value keeps
     /// the default.
     /// Test: `slice_bounds_read_their_env_overrides`.
-    pub fn from_env() -> Self {
+    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    pub(crate) fn from_env() -> Self {
         let d = Self::default();
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         Self {
@@ -114,7 +115,7 @@ fn secs(name: &str, default: Duration) -> Duration {
 
 /// Why a slice ended.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum SliceStop {
+pub(crate) enum SliceStop {
     /// Every queued drawer was visited.
     #[default]
     QueueEmpty,
@@ -142,25 +143,25 @@ pub enum SliceStop {
 /// What one slice did. Progress itself is never read from here: it is
 /// recomputed from the index by [`EmbedHealth::chunk_progress`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SliceReport {
+pub(crate) struct SliceReport {
     /// Drawers embedded or failed (a stale drawer is not counted).
-    pub attempted: usize,
+    pub(crate) attempted: usize,
     /// Drawers whose new group committed.
-    pub repaired: usize,
+    pub(crate) repaired: usize,
     /// Drawers that could not be split, embedded or stored.
-    pub failed: usize,
+    pub(crate) failed: usize,
     /// Drawers forgotten or rewritten while their embed ran; nothing written.
-    pub stale: usize,
+    pub(crate) stale: usize,
     /// Chunks embedded successfully in this slice.
-    pub chunks_embedded: usize,
+    pub(crate) chunks_embedded: usize,
     /// `host_failures` or more embed errors and no success: the fault is
     /// the host's, so no ledger row was written for those errors.
-    pub host_failure: bool,
+    pub(crate) host_failure: bool,
     /// The ledger write or clear that failed at slice end, if any. Every
     /// other row was still attempted, and the clear still ran.
-    pub ledger_error: Option<String>,
+    pub(crate) ledger_error: Option<String>,
     /// Why the slice ended.
-    pub stop: SliceStop,
+    pub(crate) stop: SliceStop,
 }
 
 /// Outcome of [`PalaceHandle::commit_if_current`] that wrote or skipped.
@@ -210,7 +211,8 @@ impl PalaceHandle {
     /// Test: `chunk_backfill_tests` (e.g. `crash_midway_through_n_drawers_resumes_and_finishes`,
     /// `host_level_slice_failure_writes_no_ledger_rows`,
     /// `a_timed_out_drawer_is_ledgered_and_the_next_slice_moves_past_it`).
-    pub async fn reembed_slice(
+    #[cfg_attr(not(test), allow(dead_code))] // #9735 PR 2: background caller pending
+    pub(crate) async fn reembed_slice(
         &self,
         embedder: &Arc<dyn Embedder + Send + Sync>,
         bounds: &SliceBounds,

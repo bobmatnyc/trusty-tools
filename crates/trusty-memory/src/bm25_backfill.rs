@@ -656,7 +656,7 @@ pub(crate) fn release_swept_palace(
     state: &AppState,
     id: &crate::engine::palace::PalaceId,
     was_resident_before: bool,
-    handle: std::sync::Arc<crate::engine::PalaceHandle>,
+    handle: std::sync::Arc<crate::engine::retrieval::PalaceHandle>,
     permit: crate::startup_budget::StartupOpenPermit,
 ) {
     drop(handle);

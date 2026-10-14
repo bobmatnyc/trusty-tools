@@ -108,11 +108,11 @@ pub use handle::PalaceHandle;
 pub use deferred_embed::RetryPolicy;
 // #9275: the chunk-count verdict on `EmbedHealth`, and the chunked embed
 // primitive trusty-memory's kuzu import writes a drawer's vectors with.
-pub use chunk_backfill::{SliceBounds, SliceReport, SliceStop};
+// #9278 (ruling 2026-10-14): the chunk backfill surface is crate-only until
+// its background caller lands (#9735 PR 2); the dream tests name `SliceBounds`.
+#[cfg(test)]
+pub(crate) use chunk_backfill::SliceBounds;
 pub use chunk_health::ChunkCheck;
-pub use chunk_progress::{
-    CHUNK_MARKER_FILE, ChunkMarker, ChunkProgress, ChunkState, MARKER_RESCAN_AFTER,
-};
 #[cfg(feature = "server")]
 pub(crate) use embed_repair::{AliasAudit, AliasRepairOptions, AliasRepairOutcome};
 pub use embed_repair::{EmbedHealth, VectorBackfillOptions, VectorBackfillReport};

@@ -729,7 +729,7 @@ pub(crate) fn ensure_health_probe_palace(state: &AppState) -> Result<(), HealthP
 /// the sentinel was already present.
 /// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142).
 pub(crate) async fn seed_probe_sentinel_if_absent(
-    handle: &std::sync::Arc<crate::engine::PalaceHandle>,
+    handle: &std::sync::Arc<crate::engine::retrieval::PalaceHandle>,
 ) -> Result<bool, HealthProbeError> {
     // Issue #1156: use a prefix match rather than exact equality so that
     // future content changes (e.g. appending a version tag) don't make older
@@ -841,11 +841,11 @@ pub(crate) async fn run_health_round_trip(state: &AppState) -> Result<(), Health
 /// `health_probe_cleans_up_on_recall_error` exercise both failure modes with
 /// a stubbed recall; `health_probe_cleans_up_on_success` covers the happy path.
 pub(crate) async fn run_health_round_trip_inner<F, Fut>(
-    handle: std::sync::Arc<crate::engine::PalaceHandle>,
+    handle: std::sync::Arc<crate::engine::retrieval::PalaceHandle>,
     recall: F,
 ) -> Result<(), HealthProbeError>
 where
-    F: FnOnce(std::sync::Arc<crate::engine::PalaceHandle>, String) -> Fut,
+    F: FnOnce(std::sync::Arc<crate::engine::retrieval::PalaceHandle>, String) -> Fut,
     Fut: std::future::Future<
             Output = Result<Vec<crate::engine::retrieval::RecallResult>, HealthProbeError>,
         >,
