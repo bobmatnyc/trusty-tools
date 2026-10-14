@@ -28,6 +28,7 @@ use crate::core::agent_skill_codeploy::log_declared_skills;
 use crate::core::doctor_repair::{RepairMode, StepStatus};
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
+use crate::core::project_skill_tier::architect_skills;
 use crate::core::project_tier_strays::remove_project_tier_strays;
 use crate::core::skill_deployer::DeployStats;
 use crate::core::skill_tiers::{
@@ -136,13 +137,16 @@ pub(super) fn sweep_project_tier_strays(fw: &FrameworkPaths, project_dir: &Path)
 /// within each destination the precedence is still project-custom >
 /// user-custom > bundled, #2816), then sweeps every deploy tier for skills no
 /// source ships any more (#5224). A deploy failure at EITHER destination is
-/// recorded in `roster_errors` and yields empty stats.
+/// recorded in `roster_errors` and yields empty stats. #9540: an Architect
+/// launch also gets [`architect_skills::deploy_for_launch`]; its errors are
+/// `roster_errors` lines and are not counted in the returned stats.
 ///
 /// #6754: the sequence now OPENS with
 /// [`sweep_project_tier_strays`] — removing before deploying, the same order
 /// `tm doctor --fix-skills` uses, so no run can refresh a copy it is about to
 /// delete.
-/// Test: `session_launch::tests`, `skills_tests.rs`, plus
+/// Test: `session_launch::tests`, `skills_tests.rs`,
+/// `an_architect_launch_writes_both_skills_byte_equal`, plus
 /// `crate::core::skill_retire`'s own suite.
 pub(super) fn deploy_session_skills(
     fw: &FrameworkPaths,
@@ -241,6 +245,17 @@ pub(super) fn deploy_session_skills(
         }
     };
 
+    // #9540: the Architect's shipped skills, into its own project tier only.
+    // Fail-open like every skill deploy: errors reach `roster_errors`.
+    if let Some(report) = architect_skills::deploy_for_launch(&fw.root, project_dir) {
+        roster_errors.extend(
+            report
+                .errors
+                .into_iter()
+                .map(|err| format!("architect skills not deployed: {err}")),
+        );
+    }
+
     // #5224: the deploy above only WRITES, so a skill this binary stopped
     // shipping keeps its deployed directory and its ledger entry — and that
     // orphaned entry pins `tm doctor`'s `skill_staleness` check to Unknown.
@@ -254,3 +269,7 @@ pub(super) fn deploy_session_skills(
 #[cfg(test)]
 #[path = "skills_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "skills_architect_9540_tests.rs"]
+mod architect_9540_tests;

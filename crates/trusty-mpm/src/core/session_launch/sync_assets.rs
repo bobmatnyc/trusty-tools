@@ -238,6 +238,9 @@ pub fn sync_session_assets(
     .stats;
     skill_deploy.deployed.extend(project_skills.deployed);
     skill_deploy.skipped.extend(project_skills.skipped);
+    // #9540: a mid-session refresh restores the Architect's shipped skills.
+    // Non-fatal; the call logs its own errors.
+    crate::core::project_skill_tier::architect_skills::deploy_for_launch(&fw.root, project_dir);
     skill_deploy.unchanged.extend(project_skills.unchanged);
 
     // Non-fatal, mirroring `prepare_session_inner`'s own treatment of this step.

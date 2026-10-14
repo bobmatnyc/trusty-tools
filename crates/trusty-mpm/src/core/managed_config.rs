@@ -225,9 +225,28 @@ pub fn ensure_managed_config_dir_with_root(
 /// What: forwards `exe_override` to
 /// [`super::standalone::global_config::ensure_global_config_dir_with_exe`], then
 /// runs the phases [`ensure_managed_config_dir_with_root`] documents unchanged.
+/// #9540: after the phases, success or failure, the Architect's shipped skills
+/// are deployed, so a failure in an unrelated earlier phase cannot leave a
+/// deleted Architect skill missing on a resume or relaunch. The phases' result
+/// is returned unchanged.
 /// Test: `ensure_managed_config_dir_is_idempotent`,
-/// `ensure_managed_config_dir_deploys_full_roster`.
+/// `ensure_managed_config_dir_deploys_full_roster`,
+/// `an_earlier_phase_failure_still_restores_a_deleted_architect_skill`.
 pub fn ensure_managed_config_dir_with_root_and_exe(
+    fw: &FrameworkPaths,
+    config_dir: &Path,
+    project_dir: &Path,
+    exe_override: Option<&Path>,
+) -> anyhow::Result<()> {
+    let phases = ensure_managed_config_dir_phases(fw, config_dir, project_dir, exe_override);
+    // Non-fatal; the call logs its own errors.
+    crate::core::project_skill_tier::architect_skills::deploy_for_launch(&fw.root, project_dir);
+    phases
+}
+
+/// Phases 1 to 3 of [`ensure_managed_config_dir_with_root_and_exe`]; the early
+/// `?` returns stay here so the Architect deploy runs after them either way.
+fn ensure_managed_config_dir_phases(
     fw: &FrameworkPaths,
     config_dir: &Path,
     project_dir: &Path,
