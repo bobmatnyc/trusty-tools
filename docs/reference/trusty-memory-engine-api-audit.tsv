@@ -139,7 +139,7 @@ trusty_memory::engine::store::kg_redb::KgStoreRedb::adopt_snapshot_drawers	metho
 trusty_memory::engine::store::kg_redb::KgStoreRedb::apply_batch	method	KEEP	tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::assert	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::count_active_triples	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::count_active_triples	method	KEEP	crates/trusty-memory/contracts.json (pre-publish Gate 5 Code Contract)	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_by_subject	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a

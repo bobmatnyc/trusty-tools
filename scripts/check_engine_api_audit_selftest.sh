@@ -12,7 +12,9 @@
 #   listing whose lines carry an attribute prefix, a generic fn, a field, a
 #   variant and an impl header; an out-of-scope path and a path that only
 #   shares a scope prefix's stem, both with no row. Errors: an empty listing,
-#   a listing with no in-scope path, and a bad argument.
+#   a listing with no in-scope path, and a bad argument. Malformed table rows
+#   (an unknown or mixed-case disposition, a space-separated row, a 4-field
+#   row) are exit 2 naming the line; a DEPRECATE row not listed is MISSING.
 #
 # Usage: bash scripts/check_engine_api_audit_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -116,6 +118,25 @@ echo 'pub fn trusty_memory::engine::palace::Drawer::new() -> Self' > "$TMP/none.
 run_case no-scoped-path 2 'no listed path under any scope prefix' "$TMP/none.api"
 
 run_case bad-argument 2 'unknown argument' "$TMP/base.api" --bogus
+
+# Malformed table rows fail closed (exit 2, naming the line). Each case drops
+# the Store::open row from the base table and appends one bad row as line 9.
+OPEN_ROW="$K::Store::open"
+bad_row_case() {
+  local name="$1" row="$2" want="$3" needle="$4"
+  grep -v '::Store::open' "$TMP/base.tsv" > "$TMP/case.tsv"
+  printf '%s\n' "$row" >> "$TMP/case.tsv"
+  run_case "$name" "$want" "$needle" "$TMP/base.api"
+}
+bad_row_case unknown-disposition "$(printf '%s\tmethod\tnarrow\tnone\tA3a' "$OPEN_ROW")" 2 'line 9'
+bad_row_case mixed-case-disposition "$(printf '%s\tmethod\tKeep\ttests/a.rs\tA3a' "$OPEN_ROW")" 2 'line 9'
+bad_row_case space-separated-row "$OPEN_ROW method KEEP tests/a.rs A3a" 2 'line 9'
+bad_row_case four-field-row "$(printf '%s\tmethod\tKEEP\ttests/a.rs' "$OPEN_ROW")" 2 'line 9'
+
+# A DEPRECATE row is public: absent from the listing it is MISSING.
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+printf '%s::Store::old\tmethod\tDEPRECATE\ttests/a.rs\tA3a\n' "$K" >> "$TMP/case.tsv"
+run_case deprecate-missing 1 "MISSING $K::Store::old" "$TMP/base.api"
 
 echo "check_engine_api_audit_selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

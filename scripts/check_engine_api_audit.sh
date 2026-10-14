@@ -22,8 +22,10 @@
 #   Each failure prints one line naming the path. A path matches a prefix
 #   when it equals it or continues with `::`.
 #
-#   Fails CLOSED: an empty listing, or a listing with no path under any scope
-#   prefix, is exit 2, never a pass over nothing.
+#   Fails CLOSED: an empty listing, a listing with no path under any scope
+#   prefix, or a table row that does not have exactly 5 tab-separated fields
+#   and a disposition in {KEEP, NARROW, HIDE, DEPRECATE} (the message names the
+#   line) is exit 2, never a pass over nothing.
 #
 # Usage:
 #   bash scripts/check_engine_api_audit.sh --api-file <listing>
@@ -41,8 +43,8 @@
 #
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path, a missing KEEP row, an
-#   out-of-scope path, a prefix that only shares a stem, and the empty-listing
-#   and bad-argument errors.
+#   out-of-scope path, a prefix that only shares a stem, a DEPRECATE row not
+#   listed, malformed table rows, and the empty-listing and bad-argument errors.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); awk, sort, comm.
 
@@ -83,6 +85,20 @@ done
 
 [ -f "$AUDIT" ] || { echo "check_engine_api_audit: no audit table at $AUDIT" >&2; exit 2; }
 
+# Fail closed on a malformed table: every row past the header, comments and
+# blank lines aside, has exactly 5 tab-separated fields and a disposition in
+# {KEEP, NARROW, HIDE, DEPRECATE}. Checked before any comparison, so a typo
+# (`narrow`, `Keep`) or a space-separated row is never read as "audited".
+if ! awk -F '\t' '
+  NR == 1 || $0 == "" || $0 ~ /^#/ { next }
+  NF != 5 || $3 !~ /^(KEEP|NARROW|HIDE|DEPRECATE)$/ {
+    printf "check_engine_api_audit: malformed row at line %d in %s: %s\n", NR, FILENAME, $0 > "/dev/stderr"
+    bad = 1
+  }
+  END { exit bad }' "$AUDIT"; then
+  exit 2
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -122,7 +138,7 @@ if [ ! -s "$WORK/listed" ]; then
   exit 2
 fi
 
-awk -F '\t' 'NR > 1 && $1 !~ /^#/ && NF >= 3 { print $1 "\t" $3 }' "$AUDIT" \
+awk -F '\t' 'NR > 1 && $1 !~ /^#/ && NF == 5 { print $1 "\t" $3 }' "$AUDIT" \
   | in_scope > "$WORK/rows"
 cut -f1 "$WORK/rows" | LC_ALL=C sort -u > "$WORK/audited"
 awk -F '\t' '$2 == "NARROW" || $2 == "HIDE" { print $1 }' "$WORK/rows" \

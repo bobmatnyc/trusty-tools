@@ -214,7 +214,7 @@ impl KgStoreRedb {
     /// - Counts only ACTIVE triples — a superseded or retracted triple is
     ///   excluded even though its history row survives.
     /// - The sum saturates rather than overflowing `u64`.
-    pub(crate) fn count_active_triples(&self) -> Result<u64> {
+    pub fn count_active_triples(&self) -> Result<u64> {
         // #5384: propagate instead of returning 0 — a failed read must not be
         // reportable as an empty graph.
         let rtx = self
