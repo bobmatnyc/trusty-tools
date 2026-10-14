@@ -1,5 +1,6 @@
 //! Managed-session target resolution for `pause`, `events`, `run` and
-//! `activity` (#9834).
+//! `activity` (#9834), and the combined project + managed resolution for
+//! `info` (#9862).
 //!
 //! Why: those verbs resolved only project sessions or sent the raw argument,
 //! so a managed session name read "not found" or reached the wrong route.
@@ -7,10 +8,11 @@
 //! What: [`resolve`] classifies a target against the managed list and fails
 //! closed on a list error; [`project_only`] refuses a managed target for a
 //! verb with no managed route; [`activity`] reads a managed session's activity
-//! by canonical id; [`not_found`] is the shared 404 wording.
+//! by canonical id; [`not_found`] is the shared 404 wording; [`info`]
+//! resolves over both session lists at once.
 //! Test: `target_tests.rs`.
 
-use trusty_mpm::client::{DaemonClient, TargetMatch, classify_target};
+use trusty_mpm::client::{DaemonClient, Resolvable, TargetMatch, classify_target};
 
 /// How a target classified against the managed session list.
 enum Resolved {
@@ -128,6 +130,113 @@ pub(crate) async fn activity(daemon: &DaemonClient, id_or_name: String) -> anyho
         Resolved::Unmanaged => id_or_name,
     };
     crate::commands::managed::session_activity(daemon, id).await
+}
+
+/// A `{ "sessions": [...] }` list body, kept as raw JSON rows.
+#[derive(serde::Deserialize)]
+struct ListBody {
+    sessions: Vec<serde_json::Value>,
+}
+
+/// One session row `info` resolves over (#9862): its id, its name, and the
+/// raw JSON printed on a match, so unknown fields survive.
+struct Row {
+    id: String,
+    name: String,
+    raw: serde_json::Value,
+}
+
+impl Resolvable for Row {
+    fn id_matches(&self, query: &str) -> bool {
+        self.id == query
+    }
+    fn resolve_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Key each raw row by its string `id` and its `name_key` field.
+fn rows(list: ListBody, name_key: &str) -> Vec<Row> {
+    let text = |raw: &serde_json::Value, key: &str| {
+        raw.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    list.sessions
+        .into_iter()
+        .map(|raw| Row {
+            id: text(&raw, "id"),
+            name: text(&raw, name_key),
+            raw,
+        })
+        .collect()
+}
+
+/// The project session list; a failure is an error, as before #9862.
+async fn project_rows(daemon: &DaemonClient) -> anyhow::Result<Vec<Row>> {
+    let list: ListBody = daemon
+        .get("/sessions")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(rows(list, "tmux_name"))
+}
+
+/// The managed session list; every failure is the list error (#9862).
+async fn managed_rows(daemon: &DaemonClient, id_or_name: &str) -> anyhow::Result<Vec<Row>> {
+    let fail = |cause: &dyn std::fmt::Display| {
+        anyhow::anyhow!("could not list managed sessions to resolve '{id_or_name}': {cause}")
+    };
+    let resp = daemon
+        .get("/api/v1/sessions/managed")
+        .send()
+        .await
+        .map_err(|e| fail(&e))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(fail(
+            &"the daemon has no managed-session route (HTTP 404); it is older than this CLI, so update and restart it",
+        ));
+    }
+    let list: ListBody = resp
+        .error_for_status()
+        .map_err(|e| fail(&e))?
+        .json()
+        .await
+        .map_err(|e| fail(&e))?;
+    Ok(rows(list, "name"))
+}
+
+/// `tm sessions info <id|name|prefix>`: the raw JSON of the one matching
+/// project or managed session.
+///
+/// Why (#9862): `info` matched only an exact id or name, read the project id
+/// at a field the bare-string UUID never has, and turned every managed-list
+/// failure into "not found".
+/// What: fetches both lists, then runs ONE [`classify_target`] over the
+/// project rows followed by the managed rows: id-exact, name-exact, unique
+/// name-prefix, with a project row winning an exact tie. A prefix matching
+/// two or more rows in either store is an error naming them. A project-list
+/// failure is the HTTP error; a managed-list failure, 404 included, is
+/// `could not list managed sessions to resolve '<x>': <cause>`.
+/// Test: `info_*_9862` in `target_tests.rs`.
+pub(crate) async fn info(
+    daemon: &DaemonClient,
+    id_or_name: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let (project, managed) = tokio::join!(project_rows(daemon), managed_rows(daemon, id_or_name));
+    let mut all = project?;
+    all.extend(managed?);
+    match classify_target(&all, id_or_name) {
+        TargetMatch::Found(row) => Ok(row.raw.clone()),
+        TargetMatch::Ambiguous(rows) => {
+            let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+            Err(not_found(id_or_name, Some(names.join(", "))))
+        }
+        TargetMatch::NotFound => Err(not_found(id_or_name, None)),
+    }
 }
 
 #[cfg(test)]
