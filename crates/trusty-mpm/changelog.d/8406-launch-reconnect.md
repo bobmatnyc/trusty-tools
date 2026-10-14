@@ -1,0 +1,2 @@
+Fixed
+- `tm launch` and `tm connect` find a project's running session again. They read the daemon's `GET /sessions` reply as a bare list, while the daemon sends `{"sessions": [...]}`, so the read failed every time: a second launch for a running project registered another session record and tried to start the session again instead of reattaching. A second `tm launch --detach` now reports the running session (#8406).

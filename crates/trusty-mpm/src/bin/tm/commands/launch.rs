@@ -9,8 +9,7 @@
 
 use serde::Deserialize;
 
-use crate::commands::launch_handoff::Handoff;
-use crate::commands::{launch_home::launch_files, project::resolve_dir};
+use crate::commands::{launch_handoff::Handoff, launch_home::launch_files, project::resolve_dir};
 use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
 
 /// RAII guard that kills a tmux session on drop unless explicitly disarmed.
@@ -910,7 +909,13 @@ fn first_live_session(
         #[serde(default)]
         tmux_name: String,
     }
-    let rows: Vec<Row> = serde_json::from_slice(body).ok()?;
+    // #8406: the daemon answers `{"sessions": [...]}` (`SessionsResponse`); a
+    // bare-array read failed on every body, so no launch ever reconnected.
+    #[derive(Deserialize)]
+    struct Body {
+        sessions: Vec<Row>,
+    }
+    let rows = serde_json::from_slice::<Body>(body).ok()?.sessions;
     rows.into_iter()
         .find(|r| {
             !r.tmux_name.is_empty()
