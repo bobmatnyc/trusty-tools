@@ -1814,3 +1814,125 @@ async fn todo_write_is_registered_and_reaches_the_roster() {
     assert_eq!(row.todos[1].content, "add a test");
     assert_eq!(row.todos[1].status, crate::events::TodoStatus::InProgress);
 }
+
+/// #8158: the daemon path records a delegated turn under the agent the PM
+/// actually delegated to.
+///
+/// Why: `build_engineer_runner` bound the engineer's recorder to the fixed
+/// `ENGINEER_AGENT_NAME`, so `session.get_transcript` — and every report built
+/// from it — labelled each delegated turn `python-engineer`.
+/// What: the PM delegates to the fixture `engineer`; asserts the stored
+/// transcript carries an `engineer` turn and no `python-engineer` turn.
+/// FAILS at c69c8e01be.
+/// Test: this test.
+#[tokio::test]
+async fn delegated_turns_carry_the_delegated_agents_role() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = engineer_agents_dir("read_file, write_file, finish_task");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_response("engineer", "create role.py"),
+        write_file_tool_call_response("call_1", "role.py", "print('role')"),
+        stop_response("engineer: done"),
+        stop_response("pm: task complete"),
+    ]));
+    spawn_task_run(
+        Arc::clone(&registry),
+        llm,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let transcript = registry
+        .get_transcript(&session.id)
+        .expect("transcript must exist");
+    let roles: Vec<&str> = transcript.turns.iter().map(|t| t.role.as_str()).collect();
+    assert!(
+        roles.contains(&"engineer"),
+        "the delegated turns must carry the delegated agent's name; roles: {roles:?}"
+    );
+    assert!(
+        !roles.contains(&"python-engineer"),
+        "no turn ran as python-engineer, so none may be labelled so; roles: {roles:?}"
+    );
+}
+
+// ── #8288: a delegating PM writes no source itself ──────────────────────────
+
+/// A `delegate_to_agent` call naming `agent` (#8288).
+/// Test: `delegating_pm_cannot_write_source_through_itself`.
+fn delegate_to_response(agent: &str, task: &str) -> Value {
+    json!({
+        "id": "gen-delegate-to",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-del-to",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_to_agent",
+                        "arguments": json!({"agent_name": agent, "task": task}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62 }
+    })
+}
+
+/// #8288: the delegating stock `pm` cannot reach source through its own card.
+///
+/// Why: owner ruling 2026-09-19 — a delegating PM must never write source;
+/// the coding work goes through a delegated agent. The stock `pm` card grants
+/// `write_file`/`edit` as `ask`, and `--permission-mode allow-asks` turns
+/// every `ask` into an allow, so `delegate_to_agent(agent_name: "pm")` ran the
+/// PM's own card with its own write tools and the source landed.
+/// What: an EMPTY agents dir (the embedded `pm.md`), a delegating run under
+/// `AllowAsks`, scripted [PM delegate to `pm`, PM stop]. Asserts the
+/// self-delegation is refused at dispatch (no `pm` sub-agent spawns) and that
+/// nothing reached the disk. FAILS at c69c8e01be and 97038f5a23: the
+/// sub-agent spawns. The PM's direct `write_file` denial is NOT covered here
+/// (it passes pre-fix); that is `delegator_write_is_denied_before_any_rule`.
+/// Test: this test.
+#[tokio::test]
+async fn delegating_pm_cannot_write_source_through_itself() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = tempfile::tempdir().expect("empty agents tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_response("pm", "create self.py"),
+        write_file_tool_call_response("call_self", "self.py", "print('pm again')"),
+        stop_response("pm sub-agent: done"),
+        stop_response("pm: task complete"),
+    ]));
+    let p = TaskRunParams {
+        permission_mode: crate::permissions::PermissionMode::AllowAsks,
+        task: "write the source".to_string(),
+        ..params(&agents, &project, &session.id)
+    };
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let spawned_self = registry
+        .replay(&session.id)
+        .expect("session must exist")
+        .iter()
+        .any(|e| matches!(&e.event, crate::events::Event::AgentSpawned { agent, .. } if agent == "pm"));
+    assert!(
+        !spawned_self,
+        "a delegator must not run its own card as a sub-agent"
+    );
+    assert!(
+        !project.path().join("self.py").exists(),
+        "a delegating PM must not write source by delegating to its own card"
+    );
+}

@@ -1,0 +1,2 @@
+Security
+- A delegating PM can no longer write the bound project's source: its own `write_file`, `write_files`, `edit` and `bash` calls are denied, not asked, on both `run-task` paths. `delegate_to_agent` naming the delegator's own card (in any letter case) is refused at dispatch with guidance to use a specialist, so a delegator never runs its own card as a sub-agent and its `finish_task` gate cannot wedge. `--permission-mode allow-asks` and a remembered grant do not lift the lock. A `--no-delegate` run keeps those tools (#8288, #8206).

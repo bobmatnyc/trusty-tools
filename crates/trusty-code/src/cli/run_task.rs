@@ -17,7 +17,8 @@
 //! and `cli_client::render::exit_code_for_status` for the process exit code.
 //! `--json` suppresses the live per-event lines and prints only the final
 //! `Session` snapshot as pretty JSON, matching the legacy path's `--json`
-//! contract (a single JSON document on stdout). `--mode` (#2059) is passed
+//! contract (a single JSON document on stdout). #8155: that snapshot also
+//! carries the run's `transcript`, `turns`, `usage` and `cost_usd`. `--mode` (#2059) is passed
 //! straight through as `task.run`'s own `mode` param — this function does
 //! NOT resolve or validate it; the daemon's `crate::mode::resolve_mode`
 //! (highest to lowest: `TRUSTY_CODE_MODE` > this param >
@@ -139,10 +140,21 @@ pub async fn run(
         }
     }
 
-    let status_result = client
+    let mut status_result = client
         .call("session.status", json!({"session_id": session_id}))
         .await?;
+    // #8155: read the run record while THIS daemon still holds it — the
+    // ephemeral `serve --stdio` child takes its in-memory session with it on
+    // exit. A failed read warns and leaves the snapshot as it was rather than
+    // failing a run that finished.
+    let run_record = client
+        .call("session.get_transcript", json!({"session_id": session_id}))
+        .await;
     client.shutdown(Duration::from_secs(5)).await?;
+    match &run_record {
+        Ok(record) => merge_run_record(&mut status_result, record),
+        Err(e) => eprintln!("tcode run-task: could not read the run's usage and transcript: {e}"),
+    }
 
     let session: Session = serde_json::from_value(status_result.clone())
         .map_err(|e| anyhow::anyhow!("tcode run-task: malformed daemon response: {e}"))?;
@@ -165,9 +177,56 @@ pub async fn run(
             session.status.as_str(),
             session.mode.map(|m| m.as_str()).unwrap_or("unknown")
         );
+        if let Some(usage) = status_result.get("usage") {
+            println!(
+                "usage: {} turns, {} prompt / {} completion tokens, cost {}",
+                status_result["turns"],
+                usage["prompt_tokens"],
+                usage["completion_tokens"],
+                status_result["cost_usd"]
+                    .as_f64()
+                    .map(|c| format!("${c:.4}"))
+                    .unwrap_or_else(|| "unavailable".to_string())
+            );
+        }
     }
 
     Ok(exit_code_for_status(session.status).code())
+}
+
+/// Fold a `session.get_transcript` record into the `--json` document (#8155).
+///
+/// Why: the `--legacy-in-process` report carries `transcript`, `usage` and
+/// `cost_usd`; the daemon path printed only the session snapshot, so a caller
+/// had no per-run cost without falling back to the legacy path.
+/// What: adds `transcript` (the record's turns), `turns` (their count),
+/// `usage` (the four token counts, the legacy report's shape) and `cost_usd`
+/// (`null` when unpriced). `snapshot` keys are otherwise left untouched; a
+/// non-object `snapshot` is left as it is.
+/// Test: `cli::run_task::tests::run_record_merges_the_legacy_report_keys`,
+/// `tests/cli_e2e.rs::run_task_json_carries_turns_usage_cost_and_transcript`.
+fn merge_run_record(snapshot: &mut serde_json::Value, record: &serde_json::Value) {
+    let Some(doc) = snapshot.as_object_mut() else {
+        return;
+    };
+    let turns = record
+        .get("turns")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let count = turns.as_array().map_or(0, Vec::len);
+    let usage = &record["usage"];
+    doc.insert("transcript".to_string(), turns);
+    doc.insert("turns".to_string(), json!(count));
+    doc.insert(
+        "usage".to_string(),
+        json!({
+            "prompt_tokens": usage["prompt_tokens"].as_u64().unwrap_or(0),
+            "completion_tokens": usage["completion_tokens"].as_u64().unwrap_or(0),
+            "cache_read_tokens": usage["cache_read_tokens"].as_u64().unwrap_or(0),
+            "cache_creation_tokens": usage["cache_creation_tokens"].as_u64().unwrap_or(0),
+        }),
+    );
+    doc.insert("cost_usd".to_string(), record["cost_usd"].clone());
 }
 
 /// Build the `task.run` request body this subcommand sends.
@@ -248,5 +307,27 @@ mod tests {
         let unset = build_run_params("pm", "do it", None, None, None, false, None, None);
         assert_eq!(unset["pm_model"], serde_json::Value::Null);
         assert_eq!(unset["max_turns"], serde_json::Value::Null);
+    }
+
+    /// #8155: the merged document carries the legacy report's keys, keeps the
+    /// snapshot's own, and passes a `null` cost through rather than inventing
+    /// one.
+    /// Test: this test.
+    #[test]
+    fn run_record_merges_the_legacy_report_keys() {
+        let mut doc = serde_json::json!({"id": "s-1", "status": "finished"});
+        let record = serde_json::json!({
+            "turns": [{"role": "pm"}, {"role": "engineer"}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10,
+                      "cache_read_tokens": 0, "cache_creation_tokens": 0, "cost_usd": null},
+            "cost_usd": null,
+        });
+        super::merge_run_record(&mut doc, &record);
+        assert_eq!(doc["status"], "finished");
+        assert_eq!(doc["turns"], 2);
+        assert_eq!(doc["transcript"][1]["role"], "engineer");
+        assert_eq!(doc["usage"]["prompt_tokens"], 40);
+        assert_eq!(doc["usage"]["completion_tokens"], 10);
+        assert!(doc.get("cost_usd").is_some_and(serde_json::Value::is_null));
     }
 }

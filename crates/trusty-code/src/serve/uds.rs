@@ -282,6 +282,9 @@ pub async fn run_daemon_on(
         binding = binding.state(),
         project = binding.label().unwrap_or_else(|| "<projectless>".into()),
         socket = %socket.display(),
+        // #8203: the build this process will run for its whole life, so a
+        // stale daemon is visible in its own log.
+        build = crate::build_info::GIT_HASH,
         "tcode serve: starting"
     );
     eprintln!("tcode serve: listening on {}", socket.display());

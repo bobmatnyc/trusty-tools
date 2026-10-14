@@ -176,7 +176,16 @@ pub struct InProcessAgentRunner {
     /// `None` (the default) means no project is bound, which makes the gate's
     /// refusal arm unreachable — see `verify_gate::default_finish_gate`.
     work_root: Option<PathBuf>,
+    /// (#8158) Wraps `llm` per delegation with the delegated agent's name, so
+    /// a recorder labels each turn with the agent that actually ran it. `None`
+    /// drives every delegation through `llm` unchanged.
+    agent_llm: Option<AgentLlmFn>,
 }
+
+/// Builds the adapter one delegation runs on, given the shared adapter and
+/// the delegated agent's name (#8158).
+pub type AgentLlmFn =
+    Arc<dyn Fn(Arc<dyn InferenceAdapter>, &str) -> Arc<dyn InferenceAdapter> + Send + Sync>;
 
 impl InProcessAgentRunner {
     /// Construct a runner from its collaborators.
@@ -205,7 +214,22 @@ impl InProcessAgentRunner {
             skills_catalog: None,
             permissions: None,
             work_root: None,
+            agent_llm: None,
         }
+    }
+
+    /// Wrap the shared adapter per delegation with the delegated agent's name.
+    ///
+    /// Why (#8158): `run_task` and `task::executor` recorded every delegated
+    /// turn under one role fixed at construction, so a `rust-engineer`
+    /// delegation was reported as `python-engineer`.
+    /// What: `run_pipeline` calls `wrap(llm, agent_name)` once per delegation
+    /// and drives that delegation's loop on the result.
+    /// Test: `run_task::tests::delegated_turns_carry_the_delegated_agents_role`,
+    /// `task::executor::tests::delegated_turns_carry_the_delegated_agents_role`.
+    pub fn with_agent_llm(mut self, wrap: AgentLlmFn) -> Self {
+        self.agent_llm = Some(wrap);
+        self
     }
 
     /// Attach the session-scoped permission context every delegated sub-agent
@@ -379,7 +403,7 @@ impl InProcessAgentRunner {
     /// `AgentLoop` — attaching (#2279) `verify_gate::default_finish_gate` so a
     /// premature `finish_task` gets a recoverable retry rather than
     /// terminating the loop — and maps any loop error to `RunnerError::Loop`.
-    /// Test: `runner::tests::*`.
+    /// Test: `runner::tests::*`, `runner::tests::a_delegator_cannot_delegate_to_its_own_card`.
     async fn run_pipeline(
         &self,
         agent_name: &str,
@@ -387,6 +411,23 @@ impl InProcessAgentRunner {
         ctx: &RunContext,
     ) -> Result<AgentOutput, RunnerError> {
         let agent = self.load_agent(agent_name)?;
+
+        // #8288/#8206: a delegator never runs its own card as a sub-agent. The
+        // gate lock would leave it no `bash` while `finish_task` still expects
+        // one (a wedge to the turn cap). Names compare without regard to case
+        // (a case-insensitive filesystem loads `pm.md` for "PM"), on both the
+        // requested slug and the card's own name.
+        if let Some(delegator) = self
+            .permissions
+            .as_ref()
+            .and_then(|p| p.delegator.as_deref())
+            && (delegator.eq_ignore_ascii_case(agent_name)
+                || delegator.eq_ignore_ascii_case(&agent.agent.name))
+        {
+            return Err(RunnerError::SelfDelegation {
+                name: agent_name.to_string(),
+            });
+        }
 
         // Build the agent's full tool set, then gate it by `tools.allowed`.
         // #8031: via the shared helper `--no-delegate` also calls, so a
@@ -459,7 +500,12 @@ impl InProcessAgentRunner {
         // `AgentLoop::with_agent_id`'s docs.
         let agent_id = uuid::Uuid::new_v4().to_string();
 
-        let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry)
+        // #8158: this delegation's adapter, labelled with its own agent.
+        let llm = match &self.agent_llm {
+            Some(wrap) => wrap(Arc::clone(&self.llm), agent_name),
+            None => Arc::clone(&self.llm),
+        };
+        let mut agent_loop = AgentLoop::new(loop_config, llm, registry)
             // #2279: every sub-agent this runner drives gets the default
             // verify-before-finish gate — its own `bash` calls land in its
             // own `Transcript`, so no external state is needed. This is the
