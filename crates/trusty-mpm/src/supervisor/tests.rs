@@ -47,6 +47,9 @@ struct FakeTmux {
     sessions: Mutex<HashMap<String, String>>,
     create_calls: Mutex<u32>,
     kill_calls: Mutex<u32>,
+    /// #8393: pane text `capture` returns instead of the default, so a test
+    /// can change the pane between sweeps and defeat the verdict cache.
+    pane: Mutex<Option<String>>,
 }
 
 impl FakeTmux {
@@ -55,7 +58,13 @@ impl FakeTmux {
             sessions: Mutex::new(HashMap::new()),
             create_calls: Mutex::new(0),
             kill_calls: Mutex::new(0),
+            pane: Mutex::new(None),
         })
+    }
+
+    /// #8393: make the next `capture` return `text`.
+    fn set_pane(&self, text: &str) {
+        *self.pane.lock().expect("lock") = Some(text.to_owned());
     }
 }
 
@@ -80,6 +89,9 @@ impl ManagedTmuxDriver for FakeTmux {
     }
 
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        if let Some(text) = self.pane.lock().expect("lock").clone() {
+            return Ok(text);
+        }
         Ok("working on the task...\n$ cargo test".to_owned())
     }
 
@@ -768,8 +780,7 @@ const BLOCKED_QUESTION: &str = "Which option: rebase or merge?";
 /// `a_low_confidence_or_unblocked_verdict_raises_nothing`,
 /// `a_failed_decision_write_is_not_counted_and_is_retried`.
 struct VerdictClassifier {
-    state: ActivityState,
-    confidence: f32,
+    script: Arc<Mutex<(ActivityState, String, f32)>>,
 }
 
 impl LlmClassifier for VerdictClassifier {
@@ -777,11 +788,12 @@ impl LlmClassifier for VerdictClassifier {
         &self,
         _pane_text: &str,
     ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+        let (state, summary, confidence) = self.script.lock().expect("lock").clone();
         Ok((
             ActivityVerdict {
-                state: self.state.clone(),
-                summary: BLOCKED_QUESTION.into(),
-                confidence: self.confidence,
+                state,
+                summary,
+                confidence,
             },
             10,
             2,
@@ -791,7 +803,35 @@ impl LlmClassifier for VerdictClassifier {
 
 /// A monitor whose classifier answers `state` at `confidence`.
 fn verdict_monitor(state: ActivityState, confidence: f32) -> ActivityMonitor<VerdictClassifier> {
-    ActivityMonitor::new(VerdictClassifier { state, confidence }, "test-model")
+    scripted_monitor(state, BLOCKED_QUESTION, confidence).0
+}
+
+/// The verdict a scripted classifier answers next: state, summary, confidence.
+type Script = Arc<Mutex<(ActivityState, String, f32)>>;
+
+/// A monitor plus the handle that changes its next verdict (#8393).
+fn scripted_monitor(
+    state: ActivityState,
+    summary: &str,
+    confidence: f32,
+) -> (ActivityMonitor<VerdictClassifier>, Script) {
+    let script = Arc::new(Mutex::new((state, summary.to_owned(), confidence)));
+    let monitor = ActivityMonitor::new(
+        VerdictClassifier {
+            script: script.clone(),
+        },
+        "test-model",
+    );
+    (monitor, script)
+}
+
+/// The questions `FleetMetrics` surfaces for the fleet, in order (#8393).
+async fn surfaced_questions(mgr: &Arc<SessionManager>) -> Vec<String> {
+    let m = FleetMetrics::from_records(&mgr.list().await);
+    m.pending_decisions
+        .into_iter()
+        .map(|d| d.question)
+        .collect()
 }
 
 /// A config that classifies idle sessions and resumes nothing.
@@ -888,6 +928,62 @@ async fn a_failed_decision_write_is_not_counted_and_is_retried() {
     assert_eq!(report.classified, 1);
     let retried = mgr.get(&ids[0]).await.expect("record");
     assert_eq!(retried.pending_decision.as_deref(), Some(BLOCKED_QUESTION));
+}
+
+/// #8393 round 2: the classifier's verdict must not wedge the session. It is
+/// surfaced in the metrics but kept out of the front-gate `pending_decision`,
+/// so the session stops and resumes, and an answer is still refused.
+#[tokio::test]
+async fn a_raised_blocked_verdict_does_not_wedge_stop_and_resume() {
+    use crate::session_manager::AnswerClaim;
+
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec![BLOCKED_QUESTION]);
+    let raised = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(raised.pending_decision, None, "front-gate field untouched");
+    assert_eq!(raised.pending_decision_id, None);
+
+    let refused = mgr
+        .answer_decision(&ids[0], "merge", &AnswerClaim::by("alice"))
+        .await;
+    assert!(refused.is_err(), "no decision to answer: {refused:?}");
+
+    mgr.stop(&ids[0]).await.expect("a blocked session stops");
+    let resumed = mgr.resume(&ids[0]).await.expect("and resumes");
+    assert_eq!(resumed.state, ManagedSessionState::Active);
+}
+
+/// #8393 round 2: a fresh verdict that is not blocked clears what the
+/// supervisor raised, and a fresh blocked verdict with a new summary
+/// replaces it.
+#[tokio::test]
+async fn a_fresh_verdict_clears_or_replaces_the_raised_prompt() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let (monitor, script) = scripted_monitor(ActivityState::BlockedOnPermission, "first?", 0.9);
+
+    tmux.set_pane("pane one");
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec!["first?"]);
+
+    tmux.set_pane("pane two");
+    script.lock().expect("lock").1 = "second?".into();
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec!["second?"]);
+
+    tmux.set_pane("pane three");
+    *script.lock().expect("lock") = (ActivityState::Working, "busy".into(), 0.9);
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert!(surfaced_questions(&mgr).await.is_empty());
 }
 
 // ── Supervisor struct tests ──────────────────────────────────────────────────
