@@ -1,2 +1,2 @@
-Changed
-- `FleetMetrics`, `PublishedMetrics` and `SupervisorMetricsStatus` no longer implement `Eq`, because the new context figures are `f64`; `PartialEq` is unchanged (#8394).
+Breaking
+- `FleetMetrics`, `PublishedMetrics` and `SupervisorMetricsStatus` no longer implement `Eq`, because the new context figures are `f64`; `PartialEq` is unchanged. `FleetMetrics` and `SessionRecord` also gain new public fields, so code that builds either with a struct literal no longer compiles. Migration: compare these types field by field or with `PartialEq`, and add `..Default::default()` or the new fields to struct literals (#8394).
