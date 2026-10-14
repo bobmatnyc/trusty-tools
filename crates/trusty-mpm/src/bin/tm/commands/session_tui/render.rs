@@ -51,7 +51,7 @@ const FOOTER_ARCHITECT_STOPPED: &str =
 /// write-back; nothing else about the state changes here. On an Architect row
 /// the footer and help drop open and delete (#9000).
 /// Test: `render_at_eighty_by_twentyfour_drops_the_widest_columns`,
-/// `render_footer_drops_open_and_delete_on_an_architect_row`,
+/// `render_footer_on_an_architect_row_says_what_enter_does`,
 /// `render_at_two_hundred_by_fifty_shows_every_column`,
 /// `render_tiny_terminal_does_not_panic`, `render_*_overlay_*`.
 pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], state: &mut TuiState) {
