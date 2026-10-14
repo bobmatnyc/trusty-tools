@@ -6,7 +6,6 @@
 //! here is a fake program written by the test, or the recording fake.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -154,10 +153,22 @@ fn an_alert_failure_after_a_probe_keeps_the_probe_record() -> TestResult {
     Ok(())
 }
 
+/// Why: a test must never exec a file its own process wrote. A sibling test
+/// thread that forks while the write fd is open hands its child a copy, held
+/// until that child execs, so the exec fails with ETXTBSY (#9801, same race
+/// as #9718 / #7524).
+/// What: stages the text under `<name>.src`, then a child `cp` installs the
+/// executable, so this process never holds a write fd to the installed file.
 fn script(dir: &Path, name: &str, body: &str) -> TestResult<PathBuf> {
+    let staged = dir.join(format!("{name}.src"));
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    fs::write(&staged, format!("#!/bin/sh\n{body}\n"))?;
+    let installed = std::process::Command::new("/bin/sh")
+        .args(["-c", "cp \"$1\" \"$2\" && chmod 755 \"$2\"", "sh"])
+        .arg(&staged)
+        .arg(&path)
+        .status()?;
+    assert!(installed.success(), "install {name}: {installed}");
     Ok(path)
 }
 
