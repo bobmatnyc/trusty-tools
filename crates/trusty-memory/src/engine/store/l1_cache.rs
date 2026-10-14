@@ -50,7 +50,7 @@ pub enum L1CacheError {
         source: serde_json::Error,
     },
     // #9278: only the test-only `L1Cache::is_stale` constructs it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     #[error("system time error: {0}")]
     Time(String),
 }

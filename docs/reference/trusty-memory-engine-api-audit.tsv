@@ -1,4 +1,5 @@
 path	kind	disposition	consumer_or_reason	batch
+trusty_memory::engine::store	mod	KEEP	path of every kept store item (trusty-agents, tests/)	A3b
 trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::observed	field	NARROW	re-export; no consumer outside the library	A3b
