@@ -1,0 +1,2 @@
+Added
+- `instructions/architect/architect.md` holds the Architect's instructions in one file, consolidated from the eight `instructions/supervisor/` sections; `instructions/architect/core.md` holds the Architect core (hard limits, no `MEMORY.md` or other static memory file, `AGENTS.md` as the only owner override and unable to override the core, the memory and search protocol, the Completion Standard bar). No binary reads them yet, and the eight legacy sections stay in the bundle (#8436).
