@@ -27,18 +27,35 @@ fn fleet_with(kind: SessionKind, state: &str) -> (Vec<ManagedSessionSummary>, Tu
     (sessions, tui)
 }
 
+// #9000: Enter on a stopped or errored Architect row would be a resume.
 #[test]
-fn state_enter_on_an_architect_row_sends_no_resume() {
+fn state_enter_on_a_stopped_architect_row_sends_no_resume() {
+    for kind in PROTECTED {
+        for row_state in ["stopped", "errored"] {
+            let (sessions, mut state) = fleet_with(kind, row_state);
+            assert_eq!(
+                state.apply(Input::Enter, &sessions),
+                Action::Redraw,
+                "{kind:?} {row_state}"
+            );
+            let (text, severity) = state.message().expect("a refusal line");
+            assert_eq!(severity, Severity::Error, "{kind:?}");
+            assert!(text.contains("tm does not resume it"), "{kind:?}: {text}");
+        }
+    }
+}
+
+// #9000: Enter on a live Architect row attaches (no daemon call) as before.
+#[test]
+fn state_enter_on_a_live_architect_row_attaches() {
     for kind in PROTECTED {
         let (sessions, mut state) = fleet_with(kind, "active");
         assert_eq!(
             state.apply(Input::Enter, &sessions),
-            Action::Redraw,
+            Action::Open(0),
             "{kind:?}"
         );
-        let (text, severity) = state.message().expect("a refusal line");
-        assert_eq!(severity, Severity::Error, "{kind:?}");
-        assert!(text.contains("tm does not resume it"), "{kind:?}: {text}");
+        assert!(state.message().is_none(), "{kind:?}");
     }
 }
 
@@ -74,21 +91,30 @@ fn state_ordinary_and_terminal_architect_rows_keep_their_verbs() {
 }
 
 #[test]
-fn render_footer_drops_open_and_delete_on_an_architect_row() {
+fn render_footer_on_an_architect_row_says_what_enter_does() {
+    // Live: Enter attaches, delete is gone, `? keys` stays.
     let (sessions, mut state) = fleet_with(SessionKind::Architect, "active");
-    let screen = draw(80, 24, &sessions, &mut state).join("\n");
+    let screen = draw(100, 24, &sessions, &mut state).join("\n");
+    assert!(screen.contains("Enter attach"), "{screen}");
+    assert!(screen.contains("? keys"), "{screen}");
     assert!(!screen.contains("Enter open"), "{screen}");
     assert!(!screen.contains("d delete"), "{screen}");
-    assert!(screen.contains("Architect row: no open/delete"), "{screen}");
+
+    // Stopped: Enter would be a resume, so it is not offered.
+    let (sessions, mut state) = fleet_with(SessionKind::Architect, "stopped");
+    let screen = draw(100, 24, &sessions, &mut state).join("\n");
+    assert!(screen.contains("no resume/delete"), "{screen}");
+    assert!(screen.contains("? keys"), "{screen}");
+    assert!(!screen.contains("Enter attach"), "{screen}");
 
     state.apply(Input::Down, &sessions);
-    let screen = draw(80, 24, &sessions, &mut state).join("\n");
+    let screen = draw(100, 24, &sessions, &mut state).join("\n");
     assert!(screen.contains("Enter open"), "{screen}");
     assert!(screen.contains("d delete"), "{screen}");
 }
 
 #[test]
-fn render_help_drops_open_and_delete_on_an_architect_row() {
+fn render_help_on_an_architect_row_says_what_enter_does() {
     let (sessions, mut state) = fleet_with(SessionKind::ArchitectAux, "active");
     state.apply(Input::Char('?'), &sessions);
     let screen = draw(100, 30, &sessions, &mut state).join("\n");
@@ -98,7 +124,16 @@ fn render_help_drops_open_and_delete_on_an_architect_row() {
         "{screen}"
     );
     assert!(
-        screen.contains("not offered on an Architect row"),
+        screen.contains("attach to the running Architect"),
+        "{screen}"
+    );
+    assert!(screen.contains("d              not offered"), "{screen}");
+
+    let (sessions, mut state) = fleet_with(SessionKind::ArchitectAux, "errored");
+    state.apply(Input::Char('?'), &sessions);
+    let screen = draw(100, 30, &sessions, &mut state).join("\n");
+    assert!(
+        screen.contains("Enter          not offered on an Architect row"),
         "{screen}"
     );
 }
