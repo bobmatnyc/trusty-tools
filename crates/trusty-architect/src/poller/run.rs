@@ -99,15 +99,24 @@ fn sensor_off(name: &str) -> &'static str {
 }
 
 /// #9801: a `/usage` probe launched in a cycle that then failed has already
-/// typed into a pane, so the usage state (`last_probe`, `tries`) survives the
-/// discarded copy; otherwise the probe repeats every cycle and the three-try
-/// cap never holds. Nothing else of the copy is kept.
+/// typed into a pane, so its record (the `usage` state with the new
+/// `last_probe`) survives the discarded copy; otherwise the probe repeats
+/// every cycle and the three-try cap never holds. A copy whose `last_probe`
+/// is unchanged, and the rest of the copy, are dropped as before.
 fn carry_usage(session: &mut PollSession, next: &PollState) {
-    if let Some(usage) = next.other.get("usage") {
-        session
-            .state
-            .other
-            .insert("usage".to_owned(), usage.clone());
+    let probe = |s: &PollState| {
+        s.other
+            .get("usage")
+            .and_then(|u| u.get("last_probe"))
+            .cloned()
+    };
+    if probe(next) != probe(&session.state) {
+        if let Some(usage) = next.other.get("usage") {
+            session
+                .state
+                .other
+                .insert("usage".to_owned(), usage.clone());
+        }
     }
 }
 
