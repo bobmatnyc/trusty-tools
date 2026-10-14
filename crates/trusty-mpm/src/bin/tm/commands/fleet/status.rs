@@ -283,7 +283,10 @@ pub(crate) fn guard_lift_check(dir: &Path) -> Check {
     use trusty_mpm::core::architect_guard_lift::{LiftState, read_state};
     let state = read_state(dir);
     let detail = match &state {
-        LiftState::Lifted => "lifted (owner choice at init)".to_owned(),
+        LiftState::Lifted => format!(
+            "lifted (owner choice; set in {})",
+            trusty_mpm::core::architect_guard_lift::lifted_label(dir)
+        ),
         other => other.describe(),
     };
     Check {

@@ -48,8 +48,9 @@ impl Request {
 /// The consent question's text: what the lift covers.
 fn prompt_text() -> String {
     format!(
-        "Lift the PM guard for the Architect ({LIFT_KEY}=1 in .claude/settings.json)? It lets \
-         the Architect act on other sessions' panes directly."
+        "Lift the PM guard for the Architect ({LIFT_KEY}=1 in .claude/settings.json)? The \
+         pm-guard rules the Architect profile keeps (destructive-command checks, worktree \
+         discipline) then stop applying to it. The tmux pane and target floors still hold."
     )
 }
 
@@ -87,22 +88,48 @@ pub(crate) fn step_with(dir: &Path, request: Request, ask: impl FnOnce() -> bool
         (Request::NoLift, LiftState::Off | LiftState::Other(_)) => {
             Step::Unchanged(format!("guard lift: {}", state.describe()))
         }
-        (Request::NoLift, _) => match lift::remove(dir) {
-            Ok(LiftChange::Unchanged) => Step::Unchanged("guard lift: off".to_owned()),
-            Ok(LiftChange::Written { .. }) => Step::Changed(format!(
-                "guard lift: removed {LIFT_KEY} (the PM guard is on)"
-            )),
-            Err(why) => Step::Failed(format!(
-                "guard lift: could not be removed, so the lift may still be on: {why}"
-            )),
-        },
-        (_, LiftState::Lifted) => Step::Unchanged(
-            "guard lift: lifted (existing; `tm fleet init --no-guard-lift` removes it)".to_owned(),
-        ),
+        (Request::NoLift, _) => remove_lift(dir),
+        (_, LiftState::Lifted) => Step::Unchanged(format!(
+            "guard lift: lifted (existing, in {}; `tm fleet init --no-guard-lift` removes it \
+             from settings.json)",
+            lift::lifted_label(dir)
+        )),
         (_, LiftState::Unknown(_)) => Step::Skipped(format!("guard lift: {}", state.describe())),
         (Request::Ask, _) if ask() => apply_lift(dir),
         (_, LiftState::Other(_)) => Step::Unchanged(format!("guard lift: {}", state.describe())),
         (_, LiftState::Off) => Step::Unchanged("guard lift: off (no choice given)".to_owned()),
+    }
+}
+
+/// Remove the key from `settings.json`, then report what the files say now.
+///
+/// Why: `settings.local.json` is the owner's file and tm never edits it, so a
+/// lift there survives the removal; "the PM guard is on" is only true when no
+/// file lifts it and every file could be read (Fail-Open Check, M3).
+/// Test: `a_lift_in_settings_local_json_is_reported_and_not_claimed_removed`.
+fn remove_lift(dir: &Path) -> Step {
+    let removed = match lift::remove(dir) {
+        Ok(change) => change,
+        Err(why) => {
+            return Step::Failed(format!(
+                "guard lift: could not be removed, so the lift may still be on: {why}"
+            ));
+        }
+    };
+    match lift::read_state(dir) {
+        LiftState::Lifted => Step::Failed(format!(
+            "guard lift: still lifted by {}; tm does not edit that file, remove {LIFT_KEY} there",
+            lift::lifted_label(dir)
+        )),
+        LiftState::Unknown(why) => Step::Failed(format!(
+            "guard lift: removed from settings.json, but the state is now unknown ({why})"
+        )),
+        _ => match removed {
+            LiftChange::Unchanged => Step::Unchanged("guard lift: off".to_owned()),
+            LiftChange::Written { .. } => Step::Changed(format!(
+                "guard lift: removed {LIFT_KEY} (the PM guard is on)"
+            )),
+        },
     }
 }
 

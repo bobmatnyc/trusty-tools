@@ -212,25 +212,30 @@ fn architect_report(
 /// Why: the lift is the owner's choice; an unreadable file must never read as
 /// a pass, and a lift on a project that is not the Architect opens the whole
 /// PM guard.
-/// What: for an Architect, one line always (`off`, `lifted (owner choice at
-/// init)`, another value, or `lift state unknown` with a warning). For any
-/// other project, a line and a warning only when the key is `"1"`.
+/// What: reads `settings.json` and `settings.local.json`. For an Architect,
+/// one line always (`off`, `lifted (owner choice; set in <file>)`, another
+/// value, or `lift state unknown` with a warning). For any other project, a
+/// line and a warning only when the key is `"1"`.
 /// Test: `doctor_session_profile_reports_the_lift_state`.
 fn lift_line(project: &Path, architect: bool) -> Option<(bool, String)> {
     let state = architect_guard_lift::read_state(project);
     match (architect, &state) {
         (true, LiftState::Lifted) => Some((
             false,
-            "guard lift: lifted (owner choice at init)".to_owned(),
+            format!(
+                "guard lift: lifted (owner choice; set in {})",
+                architect_guard_lift::lifted_label(project)
+            ),
         )),
         (true, LiftState::Unknown(_)) => Some((true, format!("guard lift: {}", state.describe()))),
         (true, _) => Some((false, format!("guard lift: {}", state.describe()))),
         (false, LiftState::Lifted) => Some((
             true,
             format!(
-                "guard lift: {} is \"1\" but this project does not run the Architect profile, so \
-                 the whole PM guard is open — remove it from .claude/settings.json",
-                architect_guard_lift::LIFT_KEY
+                "guard lift: {} is \"1\" in {} but this project does not run the Architect profile, \
+                 so the whole PM guard is open — remove it from there",
+                architect_guard_lift::LIFT_KEY,
+                architect_guard_lift::lifted_label(project)
             ),
         )),
         (false, _) => None,
@@ -464,7 +469,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("guard lift: lifted (owner choice at init)"),
+                .contains("guard lift: lifted (owner choice; set in settings.json)"),
             "{}",
             check.message
         );

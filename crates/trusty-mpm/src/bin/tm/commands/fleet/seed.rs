@@ -157,6 +157,30 @@ pub(crate) fn deploy(dir: &Path) -> anyhow::Result<Vec<Step>> {
     Ok(steps)
 }
 
+/// Seed `.claude/settings.json`'s `statusLine` with `scripts/statusline-tee.sh`.
+///
+/// Why: `scripts/init.sh` seeds it, so `scripts/doctor.sh` checks it and the
+/// usage tee writes `inbox/statusline-usage.json` (#8436 PR C, M5).
+/// What: [`architect_guard_lift::seed_statusline`] under the settings lock,
+/// idempotent; an existing different value is kept and reported. A failure is
+/// [`Step::Failed`] and undoes no earlier step.
+/// Test: `init_seeds_the_statusline_tee_and_keeps_an_existing_one`.
+pub(crate) fn statusline_step(dir: &Path) -> Step {
+    use trusty_mpm::core::architect_guard_lift::{StatusLineChange, seed_statusline};
+    let tee = dir.join("scripts").join("statusline-tee.sh");
+    match seed_statusline(dir, &tee) {
+        Ok(StatusLineChange::Written) => Step::Changed(format!(
+            "statusLine -> {} in .claude/settings.json",
+            tee.display()
+        )),
+        Ok(StatusLineChange::Unchanged) => Step::Unchanged("statusLine".to_owned()),
+        Ok(StatusLineChange::KeptExisting) => Step::Unchanged(
+            "statusLine (existing value kept; scripts/doctor.sh will flag it)".to_owned(),
+        ),
+        Err(why) => Step::Failed(format!("statusLine not seeded: {why}")),
+    }
+}
+
 /// Write one file when absent; never replace bytes that differ.
 fn deploy_file(dir: &Path, file: &Seeded) -> anyhow::Result<Step> {
     let path = dir.join(&file.dest);

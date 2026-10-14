@@ -62,9 +62,12 @@
 //! round 2 code-critic review (PR #3978) established that Guards 1/4 are
 //! automatic markers a spawn helper stamps on every nested/dispatched
 //! subagent process (no human decides per-invocation whether they're set),
-//! while `TRUSTY_MPM_PM_UNRESTRICTED` is never set programmatically (#8878:
+//! while `TRUSTY_MPM_PM_UNRESTRICTED` is set by no spawn helper (#8878:
 //! `TRUSTY_MPM_DISABLE_HOOKS` is — `divert_worker` stamps it on its worker, and
-//! the trust-anchor floor runs ahead of both) — see [`pm_guard`]'s body for the exact reordering this
+//! the trust-anchor floor runs ahead of both). The one tool that writes it is
+//! `tm fleet init --guard-lift` / `scripts/init.sh --guard-lift`, the owner's
+//! choice for the Architect project (#8436 PR C); a hook-guarded session cannot
+//! run either, because the guard-lift floor denies it — see [`pm_guard`]'s body for the exact reordering this
 //! required (Guard 1's check moved after the stdin payload read, specifically
 //! so this worktree check — which needs the payload — can run first). **This
 //! is NOT the same as "operator-only"**: Claude Code's `settings.json`
@@ -376,8 +379,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // round 2 finding on PR #3978). #8878: `TRUSTY_MPM_DISABLE_HOOKS` IS set
     // programmatically — `divert_worker::spawn_worker_at` stamps it on the
     // `claude -p` worker it spawns — while `TRUSTY_MPM_PM_UNRESTRICTED` is
-    // not. Both keep lifting every rule below, including the ABSOLUTE
-    // worktree-tmp guard: whoever sets either gets exactly that, bar the
+    // set only by the owner's `tm fleet init --guard-lift` (the floor denies a
+    // session running it, #8436 PR C). Both keep lifting every rule below,
+    // including the ABSOLUTE worktree-tmp guard: whoever sets either gets exactly that, bar the
     // trust-anchor floor above. That is a narrower claim than "operator-only",
     // though: Claude Code's `settings.json` `env` object can set either var
     // for every hook invocation, and a write to `.claude/settings.json` is

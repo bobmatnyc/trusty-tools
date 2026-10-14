@@ -6,8 +6,10 @@
 //! the project's `.claude/settings.json`, which `pm_guard` reads as exactly
 //! `"1"`. Every doubt resolves to not lifted, and a failure never leaves a
 //! half-written settings file (plan §4).
-//! What: [`read_state`] classifies the file read-only; [`set`] and [`remove`]
-//! change only that one key under the same `.lock` sidecar the launch's
+//! What: [`read_state`] classifies `settings.json` and `settings.local.json`
+//! read-only (a lift in either is a lift; an unreadable one is unknown, never
+//! off); [`set`] and [`remove`] change only that one key in `settings.json`
+//! under the same `.lock` sidecar the launch's
 //! settings merge holds, and publish atomically. A symlinked `.claude/` or
 //! settings file, a file that is not a JSON object and an `env` that is not an
 //! object are refused with the file untouched. Known gap (#3981): any
@@ -70,20 +72,64 @@ pub fn local_settings_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude").join("settings.local.json")
 }
 
-/// The settings files (by file name) in which the key is `"1"`. Red stub.
-pub fn lifted_in(_project_dir: &Path) -> Vec<&'static str> {
-    Vec::new()
-}
+/// The two files Claude Code merges `env` from, by file name.
+const SETTINGS_FILES: [&str; 2] = ["settings.json", "settings.local.json"];
 
-/// The guard-lift state of `project_dir`; writes nothing.
-///
-/// Test: `the_state_reader_covers_every_shape`.
-pub fn read_state(project_dir: &Path) -> LiftState {
-    match load(project_dir) {
+/// The state of one settings file; an unreadable one is `Unknown`, never `Off`.
+fn file_state(project_dir: &Path, name: &str) -> LiftState {
+    let path = project_dir.join(".claude").join(name);
+    match load_file(project_dir, &path) {
         Ok(None) => LiftState::Off,
         Ok(Some(doc)) => state_of(&doc),
         Err(why) => LiftState::Unknown(why),
     }
+}
+
+/// The settings files (by file name) in which the key is `"1"`, in file order.
+///
+/// Test: `a_lift_in_either_settings_file_is_a_lift`.
+pub fn lifted_in(project_dir: &Path) -> Vec<&'static str> {
+    SETTINGS_FILES
+        .into_iter()
+        .filter(|name| file_state(project_dir, name) == LiftState::Lifted)
+        .collect()
+}
+
+/// The lifting files as one phrase for a report, e.g. `settings.local.json`;
+/// empty when none lifts.
+pub fn lifted_label(project_dir: &Path) -> String {
+    lifted_in(project_dir).join(" and ")
+}
+
+/// The guard-lift state of `project_dir` over `settings.json` and
+/// `settings.local.json`; writes nothing.
+///
+/// What: `Lifted` when either file sets the key to `"1"` (Claude Code merges
+/// both into the session env); else `Unknown` when either cannot be read (an
+/// unreadable file never reads as off); else `Other` when either holds another
+/// value; else `Off`.
+/// Test: `the_state_reader_covers_every_shape`,
+/// `a_lift_in_either_settings_file_is_a_lift`,
+/// `an_unreadable_local_file_is_unknown_never_off`.
+pub fn read_state(project_dir: &Path) -> LiftState {
+    let states = SETTINGS_FILES.map(|name| file_state(project_dir, name));
+    if states.contains(&LiftState::Lifted) {
+        return LiftState::Lifted;
+    }
+    let unknown: Vec<&str> = states
+        .iter()
+        .filter_map(|s| match s {
+            LiftState::Unknown(why) => Some(why.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !unknown.is_empty() {
+        return LiftState::Unknown(unknown.join("; "));
+    }
+    states
+        .into_iter()
+        .find(|s| matches!(s, LiftState::Other(_)))
+        .unwrap_or(LiftState::Off)
 }
 
 /// The state a parsed settings object carries.
@@ -101,7 +147,12 @@ fn state_of(doc: &Map<String, Value>) -> LiftState {
 
 /// Refuse a symlinked `.claude/` or settings file; `Ok` when neither is one.
 fn refuse_symlinks(project_dir: &Path) -> Result<(), String> {
-    for path in [project_dir.join(".claude"), settings_path(project_dir)] {
+    refuse_symlinks_for(project_dir, &settings_path(project_dir))
+}
+
+/// [`refuse_symlinks`] for any file under `.claude/`.
+fn refuse_symlinks_for(project_dir: &Path, file: &Path) -> Result<(), String> {
+    for path in [project_dir.join(".claude"), file.to_path_buf()] {
         if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(format!(
                 "{} is a symlink; tm does not write through it",
@@ -112,11 +163,15 @@ fn refuse_symlinks(project_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The settings object, `None` when the file is absent.
+/// The `settings.json` object, `None` when the file is absent.
 fn load(project_dir: &Path) -> Result<Option<Map<String, Value>>, String> {
-    refuse_symlinks(project_dir)?;
-    let path = settings_path(project_dir);
-    let raw = match std::fs::read_to_string(&path) {
+    load_file(project_dir, &settings_path(project_dir))
+}
+
+/// The settings object in `path`, `None` when the file is absent.
+fn load_file(project_dir: &Path, path: &Path) -> Result<Option<Map<String, Value>>, String> {
+    refuse_symlinks_for(project_dir, path)?;
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
@@ -163,6 +218,27 @@ fn edit(
     project_dir: &Path,
     change: impl FnOnce(&mut Map<String, Value>) -> Option<Option<String>>,
 ) -> Result<LiftChange, String> {
+    edit_doc(project_dir, |doc| {
+        let env = match doc
+            .entry("env")
+            .or_insert_with(|| Value::Object(Map::new()))
+        {
+            Value::Object(env) => env,
+            _ => return Err("`env` is not an object".to_owned()),
+        };
+        Ok(match change(env) {
+            Some(was) => (LiftChange::Written { was }, true),
+            None => (LiftChange::Unchanged, false),
+        })
+    })
+}
+
+/// Apply `change` to the whole `settings.json` object under the settings
+/// lock; `change` returns the result to hand back and whether to publish it.
+fn edit_doc<R>(
+    project_dir: &Path,
+    change: impl FnOnce(&mut Map<String, Value>) -> Result<(R, bool), String>,
+) -> Result<R, String> {
     refuse_symlinks(project_dir)?;
     let claude = project_dir.join(".claude");
     std::fs::create_dir_all(&claude)
@@ -171,21 +247,51 @@ fn edit(
     let outcome = crate::core::settings_lock::with_settings_lock(&path, || {
         // Re-read inside the lock: nothing can publish between it and the write.
         let mut doc = load(project_dir)?.unwrap_or_default();
-        let env = match doc
-            .entry("env")
-            .or_insert_with(|| Value::Object(Map::new()))
-        {
-            Value::Object(env) => env,
-            _ => return Err("`env` is not an object".to_owned()),
-        };
-        let Some(was) = change(env) else {
-            return Ok(LiftChange::Unchanged);
-        };
-        crate::core::settings_lock::publish(&path, &Value::Object(doc))
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        Ok(LiftChange::Written { was })
+        let (done, write) = change(&mut doc)?;
+        if write {
+            crate::core::settings_lock::publish(&path, &Value::Object(doc))
+                .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        }
+        Ok(done)
     });
     outcome.map_err(|err| format!("cannot lock {}: {err}", path.display()))?
+}
+
+/// What [`seed_statusline`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusLineChange {
+    /// The key was absent and is now the tee command.
+    Written,
+    /// The key already is the tee command.
+    Unchanged,
+    /// The key holds another value, which is kept.
+    KeptExisting,
+}
+
+/// Seed `statusLine` with `tee`, as `scripts/init.sh` does (#8436 PR C, M5).
+///
+/// Why: the Architect's usage tee (`inbox/statusline-usage.json`) and
+/// `scripts/doctor.sh` need the `statusLine` command `init.sh` writes; without
+/// it a `tm fleet init` project fails the manual path's check.
+/// What: sets `statusLine = {type: command, command: <tee>, padding: 0}` only
+/// when the key is absent or null, under the settings lock, keeping every
+/// other key and an existing different value. A file that is not a JSON
+/// object, or a symlinked one, is refused untouched.
+/// Test: `init_seeds_the_statusline_tee_and_keeps_an_existing_one`.
+pub fn seed_statusline(project_dir: &Path, tee: &Path) -> Result<StatusLineChange, String> {
+    let want = serde_json::json!({
+        "type": "command",
+        "command": tee.display().to_string(),
+        "padding": 0,
+    });
+    edit_doc(project_dir, |doc| match doc.get("statusLine") {
+        None | Some(Value::Null) => {
+            doc.insert("statusLine".to_owned(), want);
+            Ok((StatusLineChange::Written, true))
+        }
+        Some(cur) if *cur == want => Ok((StatusLineChange::Unchanged, false)),
+        Some(_) => Ok((StatusLineChange::KeptExisting, false)),
+    })
 }
 
 #[cfg(test)]
