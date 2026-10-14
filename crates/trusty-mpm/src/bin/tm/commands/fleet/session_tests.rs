@@ -86,7 +86,14 @@ impl Home {
 
     fn init(&self, session: Option<&str>, probe: Probe) -> anyhow::Result<InitReport> {
         let names = session.map(|s| SessionNames::new(s).expect("valid name"));
-        init_with_session(&self.dir(), self.home(), false, probe, names.as_ref())
+        init_with_session(
+            &self.dir(),
+            self.home(),
+            false,
+            probe,
+            names.as_ref(),
+            super::super::guard_lift::Request::Unset,
+        )
     }
 
     fn status(&self, session: Option<&str>, probe: Probe) -> StatusReport {

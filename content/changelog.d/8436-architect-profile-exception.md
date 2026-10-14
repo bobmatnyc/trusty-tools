@@ -1,0 +1,2 @@
+Changed
+- `instructions/sections/README.md` and the `tm-workflow` skill state that the "`CLAUDE.md` is the only non-dynamic instruction source" rule is scoped by profile: an Architect also reads the owner's `AGENTS.md`. `architect/architect.md` names `tm-fleet-check`, `tm-context-refresh` and `tm-fleet-restart`, reads the user profile from `AGENTS.md` and the owner model from the `owner` palace, and no longer points at `local/user.md` or `owner/`. `tm-architect-setup` describes the `local/` layout, `AGENTS.md` and the guard-lift choice (#8436).

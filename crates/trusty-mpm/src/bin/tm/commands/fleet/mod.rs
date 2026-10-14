@@ -19,6 +19,8 @@
 //! `tests/tm_fleet.rs`.
 
 mod config;
+// #8436 PR C: the owner-chosen PM-guard lift, off by default.
+mod guard_lift;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
 mod poller;
@@ -60,11 +62,15 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             dir,
             no_launch,
             session,
+            guard_lift,
+            no_guard_lift,
         } => {
             // #8878 R1: a bad name refuses before anything is read or written.
             let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let mut report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            let lift = guard_lift::Request::from_flags(guard_lift, no_guard_lift);
+            let mut report =
+                init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref(), lift)?;
             // #8942: after the poller step, so its pane can be placed.
             if let Some(reg) = report.registration.take() {
                 report.steps.push(register::register(&reg).await);
@@ -252,7 +258,7 @@ pub(crate) fn init(
     launch: bool,
     probe: Probe,
 ) -> anyhow::Result<InitReport> {
-    init_with_session(dir, home, launch, probe, None)
+    init_with_session(dir, home, launch, probe, None, guard_lift::Request::Unset)
 }
 
 /// `init`, with the `--session` choice (#8878 R1); the production entry point.
@@ -264,7 +270,9 @@ pub(crate) fn init(
 /// refuses while either recorded session exists or tmux cannot say
 /// ([`refuse_rename`]), and is otherwise recorded after the allowlist write.
 /// Every later step (the one-Architect check, the launch, the stamp, the
-/// launch record, the poller) uses the chosen names.
+/// launch record, the poller) uses the chosen names. `lift` is the
+/// guard-lift choice ([`guard_lift::step`], #8436 PR C); it runs after the
+/// seed and before the launch, and its failure undoes no earlier step.
 /// Test: `init_with_a_session_records_it_and_status_reads_it_back`,
 /// `a_rename_is_refused_while_the_recorded_session_runs`,
 /// `a_malformed_recorded_name_refuses_init_and_fails_status`,
@@ -275,6 +283,7 @@ pub(crate) fn init_with_session(
     launch: bool,
     probe: Probe,
     session: Option<&SessionNames>,
+    lift: guard_lift::Request,
 ) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
@@ -338,6 +347,8 @@ pub(crate) fn init_with_session(
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir)?);
+    // #8436 PR C: before the launch, so a chosen lift reaches the new session.
+    report.steps.push(guard_lift::step(dir, lift));
     // #8942 ruling 2: before the launch writes this run's sidecar.
     report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;

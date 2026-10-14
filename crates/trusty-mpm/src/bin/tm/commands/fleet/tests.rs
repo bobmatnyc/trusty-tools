@@ -79,11 +79,15 @@ fn cli_parses_fleet_init() {
                     dir,
                     no_launch,
                     session,
+                    guard_lift,
+                    no_guard_lift,
                 },
         } => {
             assert_eq!(dir.as_deref(), Some("/x/a"));
             assert!(no_launch);
             assert_eq!(session, None);
+            // #8436 PR C: the lift is off unless asked for.
+            assert!(!guard_lift && !no_guard_lift);
         }
         other => panic!("expected fleet init, got {other:?}"),
     }
@@ -527,12 +531,23 @@ fn a_nested_claude_under_the_architect_is_not_this_session() {
 
 // --- #8436 P4: the seeded fleet files and the poller start ---
 
-/// The two Architect-only skills, as shipped.
-fn ported_skills() -> Vec<&'static super::seed::Seeded> {
-    super::seed::FILES
-        .iter()
-        .filter(|f| f.dest.starts_with(".claude/skills/"))
+/// The Architect-only `tm-*` skills, as seeded (the `architect-*` ones are
+/// procedures the operating manual points at; see `architect_skills`).
+fn ported_skills() -> Vec<super::seed::Seeded> {
+    super::seed::files()
+        .into_iter()
+        .filter(|f| f.dest.starts_with(".claude/skills/tm-"))
         .collect()
+}
+
+/// The seeded text at `dest`.
+fn seeded(dest: &str) -> String {
+    super::seed::files()
+        .into_iter()
+        .find(|f| f.dest == dest)
+        .unwrap_or_else(|| panic!("{dest} is not seeded"))
+        .text()
+        .to_owned()
 }
 
 /// #8436 PR C: the seeded tree is the source layout — `AGENTS.md`, the
@@ -641,13 +656,11 @@ fn a_first_run_seeds_the_architect_project() {
 /// deployed poller fails at import.
 #[test]
 fn every_script_a_seeded_script_loads_by_path_is_seeded() {
-    let seeded: Vec<&str> = super::seed::FILES.iter().map(|f| f.dest).collect();
+    let files = super::seed::files();
+    let seeded: Vec<&str> = files.iter().map(|f| f.dest.as_str()).collect();
     let mut checked = 0;
-    for file in super::seed::FILES
-        .iter()
-        .filter(|f| f.dest.ends_with(".py"))
-    {
-        for call in file.contents.split("_load_by_path(").skip(1) {
+    for file in files.iter().filter(|f| f.dest.ends_with(".py")) {
+        for call in file.text().split("_load_by_path(").skip(1) {
             let args = call.split(')').next().unwrap_or_default();
             let Some(arg) = args.split(',').nth(1).map(str::trim) else {
                 continue;
@@ -680,7 +693,7 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     for (rel, text) in edited {
         std::fs::write(dir.join(rel), text).unwrap();
     }
-    std::fs::remove_file(dir.join("records/actions.md")).unwrap();
+    std::fs::remove_file(dir.join("local/actions.md")).unwrap();
     let report = fx.init().unwrap();
     for (rel, text) in edited {
         assert_eq!(
@@ -699,7 +712,7 @@ fn an_edited_seed_or_script_is_never_overwritten() {
     assert!(
         report
             .steps
-            .contains(&Step::Changed("wrote records/actions.md".to_owned()))
+            .contains(&Step::Changed("wrote local/actions.md".to_owned()))
     );
     assert!(!report.failed(), "{}", report.render());
     let again = fx.init().unwrap();
@@ -717,18 +730,19 @@ fn every_path_a_ported_skill_names_exists_after_init() {
     for skill in ported_skills() {
         let mut checked = 0;
         for raw in skill
-            .contents
+            .text()
             .split(|c: char| c.is_whitespace() || "`'\"(),".contains(c))
         {
             let word = raw.trim_end_matches(['.', ':', ';']);
-            let architect_path = ["scripts/", "records/", ".claude/"]
+            let architect_path = ["scripts/", "local/", ".claude/", "docs/", "templates/"]
                 .iter()
                 .any(|p| word.starts_with(p))
-                || word == "CLAUDE.md";
+                || word == "CLAUDE.md"
+                || word == "AGENTS.md";
             if !architect_path {
                 continue;
             }
-            // `records/projects/<project>.md` names a directory of per-project files.
+            // `<placeholder>` paths name a directory of files.
             let path = match word.find('<') {
                 Some(i) => dir.join(&word[..i]),
                 None => dir.join(word),
@@ -753,7 +767,7 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
             .into_iter()
             .find(|s| s.dest.contains(name))
             .unwrap()
-            .contents
+            .text()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -766,7 +780,8 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
     ] {
         assert!(check.contains(needle), "missing: {needle}");
     }
-    assert!(text("tm-context-refresh").contains("Threshold: 50% context by default"));
+    // #8436 PR C (Q2): the ported procedure's bar is about 250k tokens.
+    assert!(text("tm-context-refresh").contains("Threshold: about 250k tokens of context"));
 }
 
 /// #8878 R1 critic MEDIUM: the seeded instructions derive the poller's
@@ -774,21 +789,11 @@ fn the_fleet_check_skill_runs_a_full_poll_without_events() {
 /// real poller name; only the scripts' env defaults may name the default.
 #[test]
 fn the_seeded_instructions_never_hard_code_the_poller_session() {
-    let seeded = |dest: &str| {
-        super::seed::FILES
-            .iter()
-            .find(|f| f.dest == dest)
-            .unwrap_or_else(|| panic!("{dest} is not seeded"))
-            .contents
-    };
     for dest in ["CLAUDE.md", ".claude/skills/tm-fleet-check/SKILL.md"] {
-        let text = seeded(dest);
-        assert!(!text.contains("tm-architect-poll"), "{dest}");
-        assert!(
-            text.contains("-poll`") || text.contains("-poll\""),
-            "{dest}"
-        );
+        assert!(!seeded(dest).contains("tm-architect-poll"), "{dest}");
     }
+    let check = seeded(".claude/skills/tm-fleet-check/SKILL.md");
+    assert!(check.contains("-poll`") || check.contains("-poll\""));
     assert!(
         seeded(".claude/skills/tm-fleet-check/SKILL.md")
             .contains(r#"has-session -t "=$(tmux display-message -p '#S')-poll""#)
@@ -941,13 +946,6 @@ fn the_start_command_drops_tmux_socket() {
 /// `input-state.py`. The poller itself still runs `fleet-poll.py`.
 #[test]
 fn the_seeded_skills_run_tm_architect_input_state_not_python() {
-    let seeded = |dest: &str| {
-        super::seed::FILES
-            .iter()
-            .find(|f| f.dest == dest)
-            .unwrap()
-            .contents
-    };
     for dest in [
         ".claude/skills/tm-fleet-check/SKILL.md",
         ".claude/skills/tm-context-refresh/SKILL.md",
@@ -989,28 +987,43 @@ fn a_pane_answer_parses_to_its_state() {
 #[test]
 fn every_architect_skill_asset_is_seeded() {
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/skills");
+    // #8436 PR C: `tm-*` assets are flat `<stem>.md`; `architect-*` are `<stem>/SKILL.md`.
+    let asset_of = |stem: &str| {
+        let flat = assets.join(format!("{stem}.md"));
+        if flat.is_file() {
+            flat
+        } else {
+            assets.join(stem).join("SKILL.md")
+        }
+    };
     let mut on_disk: Vec<String> = std::fs::read_dir(&assets)
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".md").map_or(name.clone(), str::to_owned)
+        })
         .collect();
     on_disk.sort();
-    let mut seeded: Vec<String> = ported_skills()
+    let skills: Vec<_> = super::seed::files()
+        .into_iter()
+        .filter(|f| f.dest.starts_with(".claude/skills/"))
+        .collect();
+    let mut seeded: Vec<String> = skills
         .iter()
         .map(|f| {
-            let name = f
-                .dest
+            f.dest
                 .strip_prefix(".claude/skills/")
                 .and_then(|rest| rest.strip_suffix("/SKILL.md"))
-                .unwrap_or_else(|| panic!("{} is not a SKILL.md", f.dest));
-            format!("{name}.md")
+                .unwrap_or_else(|| panic!("{} is not a SKILL.md", f.dest))
+                .to_owned()
         })
         .collect();
     seeded.sort();
     assert_eq!(on_disk, seeded);
-    for skill in ported_skills() {
-        let name = skill.dest.split('/').nth(2).unwrap();
-        let asset = std::fs::read_to_string(assets.join(format!("{name}.md"))).unwrap();
-        assert_eq!(asset, skill.contents, "{}", skill.dest);
+    for skill in &skills {
+        let stem = skill.dest.split('/').nth(2).unwrap();
+        let asset = std::fs::read(asset_of(stem)).unwrap();
+        assert_eq!(asset, *skill.contents, "{}", skill.dest);
     }
 }
 

@@ -486,6 +486,10 @@ trusty-progress = { workspace = true }
 # #9822: `tm architect poll|classify|input-state|quiet|self-ctx`, the Rust
 # stand-ins for the Architect's Python scripts. A leaf crate (#9171).
 trusty-architect = { workspace = true }
+# #8436 PR C: `tm fleet init` seeds the Architect project by walking the
+# embedded `src/assets/architect/` tree. `debug-embed` embeds in debug builds
+# too, so a test and an installed binary seed the same bytes.
+rust-embed = { workspace = true, features = ["debug-embed"] }
 # rusqlite: formerly a direct dep for the claude-mpm session-registry reader
 # (DOC-28 cutover bridge, #1762). Now consumed transitively via
 # trusty-common/catchup feature — removed from direct deps (PR1, refs #1762).

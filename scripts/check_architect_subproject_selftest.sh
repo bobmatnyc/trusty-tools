@@ -14,7 +14,9 @@
 #   "FAIL <CLASS>" text. The clean tree holds every pair the gate lists
 #   (`--list-pairs`), and each shipped copy gets its own planted-drift case.
 #   Near misses must pass: a root Cargo.toml that names the Rust crate
-#   crates/trusty-architect is not a sub-project membership (#9822).
+#   crates/trusty-architect is not a sub-project membership (#9822), and a
+#   crates.io API URL is not a main-tree path (#8436 PR C). A new source file
+#   under a shipped directory with no copy must fail (the derived pair rule).
 #   Token-shaped strings are assembled at run time so this file carries no
 #   literal credential shape.
 #
@@ -35,9 +37,10 @@ PAIRS="$("$GATE" --list-pairs)"
 [ -n "$PAIRS" ] || { echo "FAIL: the gate lists no shipped-copy pairs" >&2; exit 1; }
 
 clean="$WORK/clean"
-mkdir -p "$clean/python/trusty-architect/scripts"
+mkdir -p "$clean/python/trusty-architect/scripts" "$clean/python/trusty-architect/tests"
 printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >"$clean/Cargo.toml"
-printf 'import os\nROOT = os.path.dirname(__file__)\n' >"$clean/python/trusty-architect/scripts/ok.py"
+# tests/ is not a shipped directory, so this file needs no copy (#8436 PR C).
+printf 'import os\nROOT = os.path.dirname(__file__)\n' >"$clean/python/trusty-architect/tests/ok.py"
 for pair in $PAIRS; do
   src="$clean/python/trusty-architect/${pair%%|*}"
   dst="$clean/${pair#*|}"
@@ -84,6 +87,9 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
       printf '[workspace]\nmembers = ["crates/*"]\ndefault-members = ["crates/trusty-architect"]\n%s\n%s\n' \
         '[workspace.dependencies]' \
         'trusty-architect = { path = "crates/trusty-architect", version = "0.1" }' >"$t/Cargo.toml" ;;
+    # #8436 PR C: a crates.io API URL in a test is not a main-tree path.
+    crates-io-url)
+      printf 'URL = "https://crates.io/api/v1/crates/x"\n' >"$sub/tests/test_url.py" ;;
   esac
 }
 
@@ -146,7 +152,7 @@ EOF
 
 # Planted trees that must stay clean (exit 0): a near miss the gate once
 # reported (#9822: a root Cargo.toml naming the crate, not the sub-project).
-for name in crate-dependency; do
+for name in crate-dependency crates-io-url; do
   cp -R "$clean" "$WORK/$(case_dir "$name")"
   plant "$name"
   rc=0

@@ -126,6 +126,11 @@ deliberate placement decision by the same authority who made the ruling above,
 not a routine protection-seeking promotion. It is not precedent for moving
 other content into `core.md`.
 
+**Profile exception, #8436:** the "`CLAUDE.md` is the only non-dynamic
+instruction source" rule is scoped by profile. A PM reads `CLAUDE.md` alone; an
+Architect (the `supervisor` profile) also reads the owner's `AGENTS.md`, which tm
+composes between `architect.md` and the Architect core.
+
 **Second owner-directed exception, #9182:** the Completion Standard core bar
 (Done, the fix bar, the round limit) moved from `workflow` to `core.md`, so a
 `WORKFLOW` override cannot drop it. The fuller text stays in `tm-workflow`.

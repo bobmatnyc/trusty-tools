@@ -11,6 +11,8 @@
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
 //! [`skills_check`] adds whether the Architect's shipped skills are current
 //! in its project tier (#9540); like `binding` it is never part of `complete`.
+//! [`guard_lift_check`] names the owner-chosen PM-guard lift (#8436 PR C),
+//! informational and never part of `complete`.
 //! Test: `status_reports_incomplete_setup`,
 //! `fleet_status_names_why_this_session_is_not_bound`,
 //! `the_skills_row_names_a_missing_or_custom_skill`,
@@ -60,6 +62,9 @@ pub(crate) struct StatusReport {
     /// Whether the Architect's shipped skills are current in its project
     /// tier (#9540); informational, never part of `complete`.
     pub(crate) skills: Check,
+    /// The PM-guard lift state (#8436 PR C); informational, never part of
+    /// `complete`. `ok` is false only when the state cannot be read.
+    pub(crate) guard_lift: Check,
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
@@ -78,6 +83,15 @@ impl StatusReport {
         out.push_str(&format!(
             "  {mark}  {:<12} {}\n",
             self.skills.name, self.skills.detail
+        ));
+        let mark = if self.guard_lift.ok {
+            "info   "
+        } else {
+            "WARN   "
+        };
+        out.push_str(&format!(
+            "  {mark}  {:<12} {}\n",
+            self.guard_lift.name, self.guard_lift.detail
         ));
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
@@ -131,6 +145,7 @@ pub(crate) fn status(
     StatusReport {
         binding: binding_check(&dir, home, probe, &names),
         skills: skills_check(&dir),
+        guard_lift: guard_lift_check(&dir),
         session: names
             .as_ref()
             .map(|n| n.architect().to_owned())
@@ -257,6 +272,23 @@ pub(crate) fn skills_check(dir: &Path) -> Check {
     Check {
         name: "skills",
         ok,
+        detail,
+    }
+}
+
+/// The PM-guard lift in `dir` (#8436 PR C): what the owner chose at init.
+///
+/// Test: `init_with_guard_lift_sets_the_key_and_keeps_other_keys`.
+pub(crate) fn guard_lift_check(dir: &Path) -> Check {
+    use trusty_mpm::core::architect_guard_lift::{LiftState, read_state};
+    let state = read_state(dir);
+    let detail = match &state {
+        LiftState::Lifted => "lifted (owner choice at init)".to_owned(),
+        other => other.describe(),
+    };
+    Check {
+        name: "guard_lift",
+        ok: !matches!(state, LiftState::Unknown(_)),
         detail,
     }
 }

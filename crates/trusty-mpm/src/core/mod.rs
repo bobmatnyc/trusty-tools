@@ -418,6 +418,8 @@ pub mod twin_arming;
 pub mod architect_compat;
 // #8436: the Architect's fixed core and its composed prompt.
 pub mod architect_core;
+// #8436 PR C: the owner-chosen PM-guard lift in `.claude/settings.json`.
+pub mod architect_guard_lift;
 pub mod architect_launch;
 pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
