@@ -53,7 +53,7 @@ fn malformed_delivery_line_is_named_and_a_torn_last_line_is_skipped() {
     std::fs::write(dir.join(DELIVERY_FILE), "not json\n").expect("write");
     record_delivery(&dir, &failed).expect("after the bad line");
     let trace = read_deliveries(&dir).expect("read");
-    assert_eq!(trace.lines, [failed.clone()]);
+    assert_eq!(trace.lines, std::slice::from_ref(&failed));
     assert_eq!(trace.malformed.len(), 1, "{:?}", trace.malformed);
     assert!(trace.malformed[0].starts_with("delivery.jsonl line 1: malformed"));
     std::fs::write(dir.join(DELIVERY_FILE), "{\"v\":1,\"ts").expect("torn");
