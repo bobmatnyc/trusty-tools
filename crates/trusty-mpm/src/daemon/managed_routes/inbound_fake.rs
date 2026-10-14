@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use trusty_channels::policy::Channel;
 
 use super::inbound::{inbound_op, reply};
@@ -44,26 +44,51 @@ pub struct FakeInbound {
     pub text: String,
 }
 
-/// RED STUB (#9873 S7): serves whatever `sandboxed` says and always answers
-/// 200; the next commit replaces it.
+/// The sandbox-only sub-router; empty unless `sandboxed`.
+///
+/// Why: see the module doc. The latch is a parameter so a test can build
+/// both routers without setting the process-wide latch under its siblings;
+/// `channels_router` passes `secret_source::sandboxed()`.
+/// What: a served channel name and an [`InboundEvent`] built from the body,
+/// then `inbound_op` and its `reply`. An unknown channel is a 422
+/// `channel_not_served`; a body with a missing or unknown field is axum's
+/// JSON rejection.
+/// Test: `inbound_fake_route_is_absent_outside_the_sandbox`,
+/// `inbound_fake_route_status_map`.
 pub fn router(sandboxed: bool) -> Router<Arc<DaemonState>> {
-    let _ = (sandboxed, inbound_op, reply, Channel::Slack);
+    if !sandboxed {
+        return Router::new();
+    }
     Router::new().route(
         INBOUND_FAKE_ROUTE,
-        post(|Json(req): Json<FakeInbound>| async move {
-            let _ = InboundEvent {
-                channel: Channel::Slack,
-                sender: req.sender,
-                conversation: Conversation {
-                    dm_channel_id: req.dm_channel_id,
-                    thread_ts: req.thread_ts,
-                },
-                text: req.text,
-            };
-            let _: Option<State<Arc<DaemonState>>> = None;
-            (StatusCode::OK, Json::<Value>(json!({})))
-        }),
+        post(
+            |State(state): State<Arc<DaemonState>>, Json(req): Json<FakeInbound>| async move {
+                let Some(channel) = served_channel(&req.channel) else {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "channel_not_served", "resolved": false })),
+                    );
+                };
+                let ev = InboundEvent {
+                    channel,
+                    sender: req.sender,
+                    conversation: Conversation {
+                        dm_channel_id: req.dm_channel_id,
+                        thread_ts: req.thread_ts,
+                    },
+                    text: req.text,
+                };
+                reply(&inbound_op(&state, ev).await)
+            },
+        ),
     )
+}
+
+/// The daemon-served channel named `name`; gchat-mcp serves gchat.
+fn served_channel(name: &str) -> Option<Channel> {
+    [Channel::Slack, Channel::Telegram]
+        .into_iter()
+        .find(|c| c.as_str() == name)
 }
 
 #[cfg(test)]

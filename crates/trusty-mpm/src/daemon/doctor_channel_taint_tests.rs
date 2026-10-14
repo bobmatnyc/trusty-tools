@@ -108,15 +108,26 @@ fn delivery_pending_without_settle_is_a_doctor_fail() {
         ],
     );
     let ok = channel_taint_row(&dir, &live);
-    assert_eq!(ok.status, CheckStatus::Ok, "a settled delivery: {}", ok.message);
+    assert_eq!(
+        ok.status,
+        CheckStatus::Ok,
+        "a settled delivery: {}",
+        ok.message
+    );
     trace(
         &dir,
-        &[DeliveryLine::new(DeliveryState::Pending, "7", "live-1", None)],
+        &[DeliveryLine::new(
+            DeliveryState::Pending,
+            "7",
+            "live-1",
+            None,
+        )],
     );
     let row = channel_taint_row(&dir, &live);
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(
-        row.message.contains("Q-7 to asker live-1: delivery unconfirmed"),
+        row.message
+            .contains("Q-7 to asker live-1: delivery unconfirmed"),
         "{}",
         row.message
     );
@@ -198,7 +209,12 @@ fn resolved_question_without_a_delivery_line_is_a_doctor_fail() {
     };
     table.open(id, ask).expect("open");
     let ok = channel_taint_row(&dir, &live);
-    assert_eq!(ok.status, CheckStatus::Ok, "an open question: {}", ok.message);
+    assert_eq!(
+        ok.status,
+        CheckStatus::Ok,
+        "an open question: {}",
+        ok.message
+    );
     assert_eq!(
         table.resolve(id, "U0OWNER1", &conversation, "yes"),
         ResolveOutcome::Resolved
@@ -206,8 +222,9 @@ fn resolved_question_without_a_delivery_line_is_a_doctor_fail() {
     let row = channel_taint_row(&dir, &live);
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(
-        row.message
-            .contains(&format!("Q-{id} to asker m-arch: resolved with no delivery record")),
+        row.message.contains(&format!(
+            "Q-{id} to asker m-arch: resolved with no delivery record"
+        )),
         "{}",
         row.message
     );

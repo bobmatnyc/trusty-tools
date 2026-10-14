@@ -173,7 +173,11 @@ pub async fn deliver(env: &impl DeliverEnv, resolved: &Resolved) -> Delivery {
     let question = resolved.question();
     let asker = question.ask.asker_managed_session.as_str();
     let id = question.id.to_string();
-    let step = Step { env, id: &id, asker };
+    let step = Step {
+        env,
+        id: &id,
+        asker,
+    };
     let view = match env.asker(asker).await {
         Ok(view) => view,
         Err(why) => return step.refuse("asker_missing", &why).await,

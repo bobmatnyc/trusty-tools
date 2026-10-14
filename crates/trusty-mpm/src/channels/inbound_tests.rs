@@ -20,8 +20,8 @@ use trusty_channels::policy::{
 };
 
 use super::{
-    AnswerTable, InboundEnv, InboundEvent, InboundLimiter, MAX_ANSWER_BYTES, RateBucket,
-    RateTake, Verdict, decide,
+    AnswerTable, InboundEnv, InboundEvent, InboundLimiter, MAX_ANSWER_BYTES, RateBucket, RateTake,
+    Verdict, decide,
 };
 use crate::channels::audit_log::{ChannelAudit, audit_path};
 use crate::channels::question_table::{
@@ -341,7 +341,10 @@ fn unknown_sender_changes_no_state_and_is_logged() {
     assert_eq!(lines[0]["sender"], STRANGER);
     assert_eq!(lines[0]["length"], SECRET_TEXT.len());
     let raw = std::fs::read_to_string(audit_path(&fake.home)).expect("audit");
-    assert!(!raw.contains(SECRET_TEXT), "the text reached the audit: {raw}");
+    assert!(
+        !raw.contains(SECRET_TEXT),
+        "the text reached the audit: {raw}"
+    );
 }
 
 /// 🔴 #9873: a routed sender with no open question in the thread resolves
@@ -415,9 +418,15 @@ fn non_owner_dm_never_resolves_a_decision() {
 fn answer_from_another_thread_never_resolves() {
     let fake = Fake::new();
     let id = fake.open("owner-0", OWNER, &conv("D0OWNERDM", "1700000000.000100"));
-    let verdict = decide(&fake, &ev(OWNER, &conv("D0OWNERDM", "1700000000.000999"), "yes"));
+    let verdict = decide(
+        &fake,
+        &ev(OWNER, &conv("D0OWNERDM", "1700000000.000999"), "yes"),
+    );
     assert_eq!(dropped(&verdict), "no_open_question");
-    let verdict = decide(&fake, &ev(OWNER, &conv("D0ELSEWHERE", "1700000000.000100"), "yes"));
+    let verdict = decide(
+        &fake,
+        &ev(OWNER, &conv("D0ELSEWHERE", "1700000000.000100"), "yes"),
+    );
     assert_eq!(dropped(&verdict), "no_open_question");
     assert_eq!(fake.resolves(), 0);
     assert!(!answered(&fake, id));
@@ -431,7 +440,10 @@ fn reply_with_no_matching_thread_never_binds_to_the_latest_question() {
     let older = fake.open("owner-0", OWNER, &conv("D0OWNERDM", "1700000000.000100"));
     let latest = fake.open("owner-0", OWNER, &conv("D0OWNERDM", "1700000000.000200"));
     let text = format!("[Q-{latest}] yes");
-    let verdict = decide(&fake, &ev(OWNER, &conv("D0OWNERDM", "1700000000.000300"), &text));
+    let verdict = decide(
+        &fake,
+        &ev(OWNER, &conv("D0OWNERDM", "1700000000.000300"), &text),
+    );
     assert_eq!(dropped(&verdict), "no_open_question");
     assert_eq!(fake.resolves(), 0);
     assert!(!answered(&fake, older) && !answered(&fake, latest));

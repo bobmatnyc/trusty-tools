@@ -150,8 +150,12 @@ pub trait InboundEnv {
     fn preflight(&self, question: &Question) -> Result<(), String>;
     /// Write one audit line for `ev`, dropped for `code`; `rate_limited`
     /// marks a rate-window drop.
-    fn audit(&self, ev: &InboundEvent, code: &'static str, rate_limited: bool)
-    -> Result<(), String>;
+    fn audit(
+        &self,
+        ev: &InboundEvent,
+        code: &'static str,
+        rate_limited: bool,
+    ) -> Result<(), String>;
 }
 
 /// A dropped message: the rule, and the first answer for `already_resolved`.
@@ -310,7 +314,9 @@ pub fn decide(env: &dyn InboundEnv, ev: &InboundEvent) -> Verdict {
             answerer,
             text: ev.text.clone(),
         }),
-        ResolveOutcome::AlreadyResolved { first } => drop_with("already_resolved", Some(first), false),
+        ResolveOutcome::AlreadyResolved { first } => {
+            drop_with("already_resolved", Some(first), false)
+        }
         ResolveOutcome::NotRecipient => refuse("not_recipient"),
         ResolveOutcome::Unknown => refuse("unknown_question"),
         // #9873 (F5): durability unknown; the reopen's replay decides.

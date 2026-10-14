@@ -144,6 +144,7 @@ fn inbound_never_runs_a_tool() {
         "channels/inbound.rs",
         "channels/deliver.rs",
         "daemon/managed_routes/inbound.rs",
+        "daemon/managed_routes/inbound_fake.rs",
     ];
     for file in files {
         let text = std::fs::read_to_string(src().join(file)).expect("source");
@@ -159,7 +160,12 @@ fn inbound_never_runs_a_tool() {
 }
 
 /// The names that mean a file can reach the question table.
-const TABLE_NAMES: &[&str] = &["QuestionTable", "question_table", "AnswerTable", "ResolveOutcome"];
+const TABLE_NAMES: &[&str] = &[
+    "QuestionTable",
+    "question_table",
+    "AnswerTable",
+    "ResolveOutcome",
+];
 
 /// Whether `source` both names the question table and calls a `resolve`.
 fn resolves_a_question(source: &str) -> bool {
@@ -177,7 +183,9 @@ fn production_sources(dir: &Path, out: &mut Vec<PathBuf>) {
             if name != "tests" {
                 production_sources(&path, out);
             }
-        } else if name.ends_with(".rs") && !name.ends_with("tests.rs") && !name.ends_with("_test.rs")
+        } else if name.ends_with(".rs")
+            && !name.ends_with("tests.rs")
+            && !name.ends_with("_test.rs")
         {
             out.push(path);
         }
@@ -191,7 +199,11 @@ fn resolve_is_called_only_from_inbound() {
     let root = src();
     let mut files = Vec::new();
     production_sources(&root, &mut files);
-    assert!(files.len() > 100, "the walk found the crate: {}", files.len());
+    assert!(
+        files.len() > 100,
+        "the walk found the crate: {}",
+        files.len()
+    );
     let allowed = [
         root.join("channels/inbound.rs"),
         root.join("channels/question_table.rs"),
@@ -206,5 +218,7 @@ fn resolve_is_called_only_from_inbound() {
     let second = "use crate::channels::question_table::QuestionTable;\n\
                   fn f(t: &QuestionTable) { t.resolve(1, \"U1\", &c, \"yes\"); }";
     assert!(resolves_a_question(second));
-    assert!(!resolves_a_question("fn g() { ManifestSources::resolve(a, b); }"));
+    assert!(!resolves_a_question(
+        "fn g() { ManifestSources::resolve(a, b); }"
+    ));
 }

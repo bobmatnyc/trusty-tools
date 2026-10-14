@@ -72,13 +72,21 @@ async fn inbound_fake_route_is_absent_outside_the_sandbox() {
         "no lib test sets the latch"
     );
     let (state, _tmp) = daemon().await;
-    let (status, _) = post(super::super::channels_router(), &state, &event_body("slack")).await;
+    let (status, _) = post(
+        super::super::channels_router(),
+        &state,
+        &event_body("slack"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "the production router");
     let (status, _) = post(router(false), &state, &event_body("slack")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "not sandboxed");
     let (status, json) = post(router(true), &state, &event_body("slack")).await;
     assert_ne!(status, StatusCode::NOT_FOUND, "sandboxed: {json}");
-    assert!(json["error"].is_string(), "a hermetic daemon refuses: {json}");
+    assert!(
+        json["error"].is_string(),
+        "a hermetic daemon refuses: {json}"
+    );
 }
 
 /// 🔴 #9873 (plan §4, Q6, AC3, AC9): every outcome's status and body.
@@ -130,7 +138,10 @@ async fn inbound_fake_route_status_map() {
         sent: false,
     });
     assert_eq!(got, StatusCode::BAD_GATEWAY);
-    assert_eq!((body.0["resolved"].clone(), body.0["delivered"].clone()), (true.into(), false.into()));
+    assert_eq!(
+        (body.0["resolved"].clone(), body.0["delivered"].clone()),
+        (true.into(), false.into())
+    );
     let (got, _) = reply(&InboundReply::Delivered { question_id: 7 });
     assert_eq!(got, StatusCode::OK);
     let (got, body) = reply(&InboundReply::Aborted("join error".into()));
