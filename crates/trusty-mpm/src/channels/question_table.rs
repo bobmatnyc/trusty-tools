@@ -453,6 +453,16 @@ impl QuestionTable {
         state.book.questions.get(&id).map(|e| e.question.clone())
     }
 
+    /// RED STUB (#9873 S1): replaced by the real lookup in the next commit.
+    pub fn find_by_conversation(&self, _conversation: &Conversation) -> Option<QuestionId> {
+        None
+    }
+
+    /// RED STUB (#9873 S1): replaced by the real lookup in the next commit.
+    pub fn answer(&self, _id: QuestionId) -> Option<Answer> {
+        None
+    }
+
     /// True once an append failed or the lock was poisoned.
     pub fn is_poisoned(&self) -> bool {
         // #8433: a poisoned mutex refuses for good, so its flock can go.
