@@ -1,4 +1,6 @@
 path	kind	disposition	consumer_or_reason	batch
+trusty_memory	mod	KEEP	crate root: path of engine, transport and socket_path, the ADR-0066 D1.4 no-default-features library	A6
+trusty_memory::engine	mod	KEEP	ADR-0066 frozen engine path: every dependent imports trusty_memory::engine::* (trusty-mpm, trusty-crate-contracts, tests/)	A6
 trusty_memory::engine::CONTENT_HASH_VERSION	const	KEEP	re-export of content_hash::CONTENT_HASH_VERSION (KEEP)	A5
 trusty_memory::engine::ConsolidationAction	enum	KEEP	re-export of semantic_consolidation::ConsolidationAction (KEEP)	A5
 trusty_memory::engine::ConsolidationAction::Alias	variant	KEEP	member of ConsolidationAction (re-export of semantic_consolidation::ConsolidationAction, KEEP)	A5
@@ -1035,11 +1037,11 @@ trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::mode
 trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::similarity_threshold	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidator	struct	KEEP	Dreamer::with_consolidator signature (a deletion candidate)	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidator::config	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::inference_available	trait_method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
-trusty_memory::engine::semantic_consolidation::parse_consolidation_actions	trait_method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::resolve_consolidation_provider	trait_method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::resolve_openrouter_api_key	trait_method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::validate_ollama_model	trait_method	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::inference_available	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::semantic_consolidation::parse_consolidation_actions	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::resolve_consolidation_provider	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::resolve_openrouter_api_key	fn	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::validate_ollama_model	fn	NARROW	no consumer outside the library	A5
 trusty_memory::engine::share	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::ImportOutcome	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::ImportOutcome::Inserted	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
@@ -2227,3 +2229,15 @@ trusty_memory::engine::wing_identity::WING_NAMESPACE	const	KEEP	ADR-0027 id help
 trusty_memory::engine::wing_identity::canonical_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
 trusty_memory::engine::wing_identity::default_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
 trusty_memory::engine::wing_identity::mint_wing_id	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
+trusty_memory::socket_path	fn	KEEP	re-export of transport::socket_path: trusty-agents src/memory/trusty_client/tests.rs:76 (default-features off, mcp-schema), src/main.rs:1029	A6
+trusty_memory::transport	mod	KEEP	path of uds and socket_path (tests/uds_consumer_contract.rs, tests/concurrent_perf.rs)	A6
+trusty_memory::transport::FOLDED_METHODS	const	KEEP	re-export of uds::FOLDED_METHODS; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): no caller names this path	A6
+trusty_memory::transport::METHOD_HEALTH	const	KEEP	re-export of uds::METHOD_HEALTH; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): no caller names this path	A6
+trusty_memory::transport::STREAM_METHODS	const	KEEP	re-export of uds::STREAM_METHODS; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): callers name uds::STREAM_METHODS	A6
+trusty_memory::transport::socket_path	fn	KEEP	re-export of uds::socket_path; src/lib.rs:230 re-exports it as trusty_memory::socket_path	A6
+trusty_memory::transport::uds	mod	KEEP	path of the wire constants and socket_path (tests/uds_consumer_contract.rs, tests/concurrent_perf.rs)	A6
+trusty_memory::transport::uds::FOLDED_METHODS	const	KEEP	deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): build_router (server) and uds_tests only; trusty-mcp src/bin/trusty-mcp.rs:89 names it in a comment	A6
+trusty_memory::transport::uds::MAX_FRAME_BYTES	const	KEEP	wire constant pinned against trusty_common::uds::MAX_FRAME_BYTES: tests/uds_consumer_contract.rs:408, tests/concurrent_perf.rs:344 (A6 Q4)	A6
+trusty_memory::transport::uds::METHOD_HEALTH	const	KEEP	deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): build_router (server) and uds_tests only; trusty-installer src/commands/probe_http.rs:269,282 name it in comments	A6
+trusty_memory::transport::uds::STREAM_METHODS	const	KEEP	wire table pinned against the stdio bridge's list: tests/uds_consumer_contract.rs:427	A6
+trusty_memory::transport::uds::socket_path	fn	KEEP	the daemon socket resolver: tests via trusty_memory::socket_path; trusty-console src/memory_uds/mod.rs:283 names it as the shared resolver	A6
