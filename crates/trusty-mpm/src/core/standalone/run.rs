@@ -494,6 +494,19 @@ mod tests {
         }
     }
 
+    /// #8436 (owner ruling Q5a): auto memory is off for every session, so the
+    /// interactive `tm run` session gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+    #[test]
+    fn test_build_launch_command_disables_auto_memory() {
+        let tmp = TempDir::new().unwrap();
+        let cmd = build_launch_command_configured(tmp.path(), tmp.path(), None, None, false);
+        let value = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY"))
+            .and_then(|(_, v)| v);
+        assert_eq!(value, Some(std::ffi::OsStr::new("1")));
+    }
+
     // WI-10: `--bare` MUST be present when api_key is supplied (API-key path).
     #[test]
     fn test_build_launch_command_adds_bare_with_api_key() {
