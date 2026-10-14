@@ -873,8 +873,11 @@ unreachable; an issue that already has two is refused with a pointer to
 `tm issue repair N`. `tm issue states` lists the model, `tm issue current N`
 reads an issue's state back. On a host with no `tm` — and only there — fall back
 to `gh issue edit N --add-label status:merged --remove-label status:coded`, both
-flags in one call. The `ticketing` agent runs every one of these; the PM never
-runs `gh issue` or `tm issue` itself.
+flags in one call. When `tm issue transition` refuses a target, report the
+refusal to the PM or owner; never author or edit a repo `issue-state.yaml`, and
+never swap the status label by hand to get past it (#9580). The `ticketing`
+agent runs every one of these; the PM never runs `gh issue` or `tm issue`
+itself.
 
 **Claim at dispatch.** `status:in-progress` goes on when the work is dispatched,
 with a dated comment naming the claiming session ("Claimed by session `<name>`,

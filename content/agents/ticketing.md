@@ -402,6 +402,8 @@ two of them.
   ```bash
   gh issue edit N --add-label status:merged --remove-label status:coded
   ```
+- **A refused transition** goes to the PM; never edit `issue-state.yaml` or
+  swap the label by hand (#9580).
 
 ### Claim at dispatch
 

@@ -384,17 +384,65 @@ pub(crate) fn builtin_for_target(
     if model.states.iter().any(|s| s.name == to) {
         return Ok((model, source));
     }
-    let lifecycle: StateModel = serde_yaml::from_str(STATUS_LIFECYCLE_YAML)
-        .map_err(|e| anyhow::anyhow!("failed to parse the built-in status:* lifecycle: {e}"))?;
+    let lifecycle = status_lifecycle()?;
     if !lifecycle.states.iter().any(|s| s.name == to) {
         return Ok((model, source));
     }
-    super::validate::validate_model(&lifecycle)?;
     let searched_from = searched_from.clone();
     Ok((
         lifecycle,
         ModelSource::EmbeddedStatusLifecycle { searched_from },
     ))
+}
+
+/// Pick the built-in model an issue set's labels belong to (#9579).
+///
+/// Why: `epic sync` and `epic create` have no transition target, so
+/// [`builtin_for_target`] cannot choose for them; their children's labels can.
+/// Without this a no-file repo rendered every `status:*` row as `open` under
+/// the Unicorn default, undoing the row `tm issue transition` had just written.
+/// What: returns `loaded` unchanged unless its source is
+/// [`ModelSource::EmbeddedDefault`], no label names one of its states, and some
+/// label names a state of [`STATUS_LIFECYCLE_YAML`]; then returns that model as
+/// [`ModelSource::EmbeddedStatusLifecycle`]. A model read from a file is never
+/// replaced.
+/// Test: `builtin_for_labels_selects_the_status_lifecycle_9579`,
+/// `sync_under_the_embedded_default_renders_a_status_label_9579`.
+pub(crate) fn builtin_for_labels<'a>(
+    loaded: (StateModel, ModelSource),
+    labels: impl IntoIterator<Item = &'a str> + Clone,
+) -> anyhow::Result<(StateModel, ModelSource)> {
+    let (model, source) = loaded;
+    let ModelSource::EmbeddedDefault { searched_from } = &source else {
+        return Ok((model, source));
+    };
+    let names_a_state = |m: &StateModel| {
+        labels.clone().into_iter().any(|l| {
+            m.states
+                .iter()
+                .any(|s| s.label.as_ref().is_some_and(|lab| lab.name == l))
+        })
+    };
+    if names_a_state(&model) {
+        return Ok((model, source));
+    }
+    let lifecycle = status_lifecycle()?;
+    if !names_a_state(&lifecycle) {
+        return Ok((model, source));
+    }
+    let searched_from = searched_from.clone();
+    Ok((
+        lifecycle,
+        ModelSource::EmbeddedStatusLifecycle { searched_from },
+    ))
+}
+
+/// The validated built-in `status:*` lifecycle (#8609).
+fn status_lifecycle() -> anyhow::Result<StateModel> {
+    let lifecycle: StateModel = serde_yaml::from_str(STATUS_LIFECYCLE_YAML)
+        .map_err(|e| anyhow::anyhow!("failed to parse the built-in status:* lifecycle: {e}"))?;
+    super::validate::validate_model(&lifecycle)?;
+    Ok(lifecycle)
 }
 
 /// Resolve which config path to load, by precedence (RFC §6).

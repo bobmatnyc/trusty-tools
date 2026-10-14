@@ -34,6 +34,8 @@ pub(crate) mod body;
 // #8614: the failing/running checks gate `tm pr merge` applies.
 pub(crate) mod check_gate;
 pub(crate) mod cleanup;
+// #9749: a closed inherited project is skipped, not a failed open.
+pub(crate) mod closed_project;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 pub(crate) mod metadata_apply;

@@ -93,7 +93,7 @@ pub(crate) fn transition_with_tracker_sync<S: TicketSystem, B: EpicBackend>(
 /// `tm issue epic sync <n>` repair.
 /// Test: `transition_hook_fails_the_command_when_the_sync_fails`,
 /// `transition_hook_names_the_tracker_when_the_parent_read_fails`,
-/// `transition_hook_regenerates_a_row_for_a_prefix_less_label`.
+/// `transition_hook_regenerates_a_row_for_a_relabelled_state`.
 pub(crate) fn sync_tracker_of_phase<B: EpicBackend>(
     epic: &B,
     issue: u64,
