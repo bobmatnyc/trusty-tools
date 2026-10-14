@@ -1,0 +1,2 @@
+Breaking
+- The struct-like variants `engine::semantic_consolidation::ConsolidationAction::Alias` (also `engine::ConsolidationAction::Alias`) and `engine::store::kg_redb::BatchWriteOp::Retract` are `#[non_exhaustive]`. Outside trusty-memory a `ConsolidationAction::Alias { .. }` or `BatchWriteOp::Retract { .. }` literal no longer compiles, and a pattern on either variant needs `..`. Matching the variant, reading its fields and the serde shape of `ConsolidationAction` are unchanged ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
