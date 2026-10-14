@@ -13,7 +13,7 @@
 
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use super::common;
@@ -128,7 +128,7 @@ fn a_sandbox_daemon_without_its_socket_dir_spawns_no_tmux() {
     let log = root.path().join("tmux-calls.log");
     write_fake_tmux(&bin_dir, &log);
 
-    let mut child = Command::new(common::tm_bin())
+    let mut child = common::tm_command_in(&home)
         .current_dir(&home)
         .env_clear()
         .env("HOME", &home)
