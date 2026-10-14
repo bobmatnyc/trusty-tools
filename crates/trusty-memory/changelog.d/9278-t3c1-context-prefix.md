@@ -1,0 +1,2 @@
+Breaking
+- A KG, vector-store or verify-record error that a `PalaceHandle` write path wraps in a context message stays in `EngineError::Other` and keeps that message in its text. For example, a failed drawer-metadata delete in `forget` reads `forget <id>: drawer metadata delete failed, drawer NOT deleted: <cause>`. Provisional (#9278 Q7b) ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))

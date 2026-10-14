@@ -4,7 +4,7 @@ marker	slice	initial	ceiling
 # lowers its own ceilings to the markers left in the audit table (0 when the slice is done).
 anyhow	T1	25	0
 anyhow	T2	7	0
-anyhow	T3	41	15
+anyhow	T3	41	11
 anyhow	T4	12	12
 variant	T1	3	0
 variant	T2	16	0

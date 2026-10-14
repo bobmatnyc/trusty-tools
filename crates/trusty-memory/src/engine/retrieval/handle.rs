@@ -4,8 +4,8 @@
 //! cap (#607). Owns the struct definition and all its `impl` methods.
 //! What: `PalaceHandle` struct plus `new`, `open`, `flush`, `remember`,
 //! `remember_with_options`, `forget`, `list_drawers`, `purge_expired`,
-//! `rebuild_closets`, `is_compacting`, `is_read_only` (`refresh_l1` is in
-//! `l1.rs`).
+//! `is_compacting`, `is_read_only` (`refresh_l1` is in `l1.rs`,
+//! `rebuild_closets` in `closets.rs`).
 //! Test: `registry_create_and_open`, `cli_remember_and_recall`, and
 //! the full retrieval test suite in retrieval::tests.
 
@@ -17,7 +17,6 @@ use super::write_pipeline;
 use crate::engine::EngineError;
 use crate::engine::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::engine::decay::DecayConfig;
-use crate::engine::dream::extract_keywords;
 use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::format_migration;
@@ -652,8 +651,14 @@ impl PalaceHandle {
     /// What: Re-sorts the drawer table by importance descending, snapshots
     /// the top-15 to `l1_cache.json`, and re-writes `identity.txt`. No-op when
     /// `data_dir` is `None` (in-memory test handles).
+    /// Errors (#9278 T3c-1): [`EngineError`]; a failed save is `Other`.
     /// Test: `registry_create_and_open` confirms identity survives a flush+reopen.
-    pub fn flush(&self) -> Result<()> {
+    pub fn flush(&self) -> std::result::Result<(), EngineError> {
+        self.flush_inner().map_err(EngineError::from_internal)
+    }
+
+    /// [`Self::flush`]'s `anyhow` body.
+    fn flush_inner(&self) -> Result<()> {
         let Some(data_dir) = self.data_dir.as_ref() else {
             return Ok(());
         };
@@ -700,6 +705,7 @@ impl PalaceHandle {
     /// What: Builds a `Drawer` with a fresh UUID, embeds via `FastEmbedder`,
     /// inserts the vector keyed by the drawer id, pushes onto the in-memory
     /// drawer table, refreshes L1, and flushes the snapshot to disk.
+    /// Errors: as [`Self::remember_with_options`].
     /// Test: `cli_remember_and_recall` round-trips through this method.
     pub async fn remember(
         &self,
@@ -707,7 +713,7 @@ impl PalaceHandle {
         room: RoomType,
         tags: Vec<String>,
         importance: f32,
-    ) -> Result<Uuid> {
+    ) -> std::result::Result<Uuid, EngineError> {
         self.remember_with_options(content, room, tags, importance, RememberOptions::default())
             .await
     }
@@ -734,10 +740,15 @@ impl PalaceHandle {
     ///
     /// **An over-budget error does not mean the write did not land** — see
     /// [`Self::remember_with_options_within`] for the retry contract (#6366).
+    /// Errors (#9278 T3c-1): a bare KG or vector-store error is
+    /// [`EngineError::Kg`] or [`EngineError::Hnsw`]; a committed slot whose
+    /// verify command was not stored is [`EngineError::VerifyNotStored`]; a
+    /// filter refusal, a timeout and a contexted store error are `Other`.
     /// Test: `remember_rejects_short_content`,
     /// `remember_force_bypasses_filter`, `remember_classifies_session_events`,
     /// `remember_force_still_blocks_secret`,
-    /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`.
+    /// `remember_force_and_allow_secret_like_stores_secret_shaped_content`,
+    /// `the_write_paths_return_engine_error_with_a_typed_verify_miss`.
     pub async fn remember_with_options(
         &self,
         content: String,
@@ -745,7 +756,7 @@ impl PalaceHandle {
         tags: Vec<String>,
         importance: f32,
         opts: RememberOptions,
-    ) -> Result<Uuid> {
+    ) -> std::result::Result<Uuid, EngineError> {
         self.remember_with_options_within(
             content,
             room,
@@ -755,6 +766,7 @@ impl PalaceHandle {
             timeouts::write_pipeline_timeout(),
         )
         .await
+        .map_err(EngineError::from_internal)
     }
 
     /// Store a new memory under an explicit ceiling on the write critical
@@ -880,25 +892,6 @@ impl PalaceHandle {
         }
     }
 
-    /// Rebuild the closet keyword index from the current in-memory drawer table.
-    ///
-    /// Why: Keep the closet index current after every write so L2 tag-boosting
-    /// works without waiting for a dream cycle.
-    /// What: Rebuilds keyword -> Vec<drawer_id> map by tokenizing each drawer's
-    /// content via `extract_keywords` (whitespace + stop-word filter).
-    /// Test: `closet_updated_after_remember`.
-    pub(crate) fn rebuild_closets(&self) {
-        let snapshot: Vec<Drawer> = self.drawers.read().clone();
-        let mut new_index: HashMap<String, Vec<Uuid>> = HashMap::new();
-        for drawer in snapshot.iter() {
-            for kw in extract_keywords(drawer.content()) {
-                new_index.entry(kw).or_default().push(drawer.id);
-            }
-        }
-        let mut closets = self.closets.write();
-        *closets = new_index;
-    }
-
     /// Remove a drawer by id, reporting whether one was actually there.
     ///
     /// Why: Surface forget as a first-class op so CLI/MCP can drop stale data
@@ -924,8 +917,16 @@ impl PalaceHandle {
     /// `open_with_intent` reloads from: a drawer whose row survives comes back
     /// on the next open, so reporting it deleted would be the same lie #5231 is
     /// about. Nothing else has been mutated at that point, so the drawer is
-    /// left wholly intact rather than half-deleted.
-    pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
+    /// left wholly intact rather than half-deleted. #9278 T3c-1: the error is
+    /// [`EngineError`]; each of these cases is `Other` and keeps its text.
+    pub async fn forget(&self, id: Uuid) -> std::result::Result<ForgetOutcome, EngineError> {
+        self.forget_inner(id)
+            .await
+            .map_err(EngineError::from_internal)
+    }
+
+    /// [`Self::forget`]'s `anyhow` body.
+    async fn forget_inner(&self, id: Uuid) -> Result<ForgetOutcome> {
         let (removed, l1_saved) = self.forget_removing(id).await?;
         // #9283: every user forget is journalled, hash only (#9172: a dedup
         // survivor keeps its copy).

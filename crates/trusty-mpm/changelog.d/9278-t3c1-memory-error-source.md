@@ -1,0 +1,2 @@
+Changed
+- The `source` of a `SmMemoryError::Operation` from `remember`, `note` or `remember_tagged`, and of a `PortfolioMemoryError::Operation` from `remember`, now wraps trusty-memory's `engine::EngineError`. The field is still an `anyhow::Error`; a `downcast_ref` to a trusty-memory store error on it returns `None`, so downcast to `EngineError` instead ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))
