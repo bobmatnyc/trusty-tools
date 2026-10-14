@@ -23,16 +23,27 @@
 //! wiped [#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445) when
 //! the hand-run procedure accepted an empty `awk` result as a body.
 //!
+//! # Concurrent writers (#9578)
+//!
+//! The body read, the child reads and the write are separate `gh` calls, and
+//! GitHub offers no conditional issue update. So the sync re-reads the body
+//! just before writing and, when it moved, starts the round again from fresh
+//! reads; after [`SYNC_ATTEMPTS`] moved rounds it refuses and writes nothing.
+//! An edit made outside the markers during the read-render window therefore
+//! survives. The window left is the one between that re-read and the write.
+//!
 //! Test: `sync_replaces_the_whole_block_and_discards_a_hand_edited_row`,
+//! `sync_keeps_a_tracker_edit_made_between_its_read_and_its_write`,
+//! `sync_refuses_and_writes_nothing_when_the_tracker_keeps_changing`,
 //! `sync_leaves_every_byte_outside_the_markers_identical`,
 //! `sync_refuses_a_body_with_no_markers_and_writes_nothing`,
 //! `sync_refuses_a_body_with_two_start_markers_and_writes_nothing`,
 //! `sync_is_a_no_op_when_the_block_already_matches`,
 //! `sync_propagates_a_failed_body_write`.
 
-use crate::commands::issue::config::StateModel;
+use crate::commands::issue::config::{ModelSource, StateModel, builtin_for_labels};
 
-use super::backend::EpicBackend;
+use super::backend::{ChildIssue, EpicBackend};
 use super::render::{self, PHASES_END, PHASES_START};
 
 /// What one `sync` run did.
@@ -55,7 +66,8 @@ pub(crate) struct SyncReport {
 /// should contain.
 /// What: reads the body and the children, renders the table (its State cell
 /// resolves each child's labels through `model`'s states, #8448/#8696),
-/// replaces the marker region, and writes the result only when it differs.
+/// replaces the marker region, and writes the result only when it differs
+/// and the body has not moved since it was read (#9578, see the module doc).
 /// Every refusal is propagated with the tracker named, and no write happens
 /// on any of them.
 /// Test: see the module doc.
@@ -64,27 +76,77 @@ pub(crate) fn sync<B: EpicBackend>(
     tracker: u64,
     model: &StateModel,
 ) -> anyhow::Result<SyncReport> {
-    let body = backend.body(tracker)?;
-    let children = backend.children(tracker)?;
-    let rows = children
-        .iter()
-        .filter(|c| render::phase_number_of(&c.title).is_some())
-        .count();
-    // #8696: the whole model, not its prefix — see `render::state_cell`.
-    let table = render::phases_table(&children, model);
-    let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
-        .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
-    if next == body {
+    sync_with(backend, tracker, |_| Ok(model.clone()))
+}
+
+/// [`sync`] under the model as loaded, before a lifecycle is chosen (#9579).
+///
+/// Why: the standalone `epic sync` and `epic create` have no transition target
+/// to pick a built-in lifecycle by, so in a no-file repo they rendered every
+/// `status:*` row as `open` under the Unicorn default.
+/// What: picks the model from the children's labels through
+/// [`builtin_for_labels`] on every round, then syncs as [`sync`] does.
+/// Test: `sync_under_the_embedded_default_renders_a_status_label_9579`,
+/// `create_under_the_embedded_default_renders_a_status_label_9579`.
+pub(crate) fn sync_resolved<B: EpicBackend>(
+    backend: &B,
+    tracker: u64,
+    model: &StateModel,
+    source: &ModelSource,
+) -> anyhow::Result<SyncReport> {
+    sync_with(backend, tracker, |children| {
+        let labels = children
+            .iter()
+            .flat_map(|c| c.labels.iter().map(String::as_str));
+        let (model, _source) = builtin_for_labels((model.clone(), source.clone()), labels)?;
+        Ok(model)
+    })
+}
+
+/// The shared read-render-recheck-write loop behind [`sync`] and
+/// [`sync_resolved`]; `pick` chooses the model from the children it read.
+fn sync_with<B: EpicBackend>(
+    backend: &B,
+    tracker: u64,
+    pick: impl Fn(&[ChildIssue]) -> anyhow::Result<StateModel>,
+) -> anyhow::Result<SyncReport> {
+    // #9578: each attempt re-reads the body just before writing; a body that
+    // moved since the attempt's first read is re-rendered from fresh reads
+    // instead of overwritten with the stale copy.
+    for _ in 0..SYNC_ATTEMPTS {
+        let body = backend.body(tracker)?;
+        let children = backend.children(tracker)?;
+        let rows = children
+            .iter()
+            .filter(|c| render::phase_number_of(&c.title).is_some())
+            .count();
+        // #8696: the whole model, not its prefix — see `render::state_cell`.
+        let table = render::phases_table(&children, &pick(&children)?);
+        let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
+            .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
+        let unchanged = next == body;
+        if !unchanged {
+            if backend.body(tracker)? != body {
+                continue;
+            }
+            backend.set_body(tracker, &next)?;
+        }
         return Ok(SyncReport {
             tracker,
             rows,
-            unchanged: true,
+            unchanged,
         });
     }
-    backend.set_body(tracker, &next)?;
-    Ok(SyncReport {
-        tracker,
-        rows,
-        unchanged: false,
-    })
+    anyhow::bail!(
+        "#{tracker}: the tracker body changed while its phases block was being regenerated, \
+         {SYNC_ATTEMPTS} times in a row — nothing was written, so no edit was overwritten. \
+         Re-run `tm issue epic sync {tracker}` once the other writer is done"
+    )
 }
+
+/// How many read-render-recheck rounds [`sync`] makes before refusing (#9578).
+///
+/// Why: a concurrent writer (an operator, or a sibling phase's own sync)
+/// usually finishes within one round; a body still moving after three is a
+/// writer the sync should not race, so it refuses instead of writing.
+const SYNC_ATTEMPTS: usize = 3;

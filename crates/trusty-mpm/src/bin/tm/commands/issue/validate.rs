@@ -7,7 +7,8 @@
 //! What: [`validate_model`] runs every load-time rule — known version, unique
 //! state names, transition refs resolve, 6-hex colors, generic terminal-edge
 //! check, at most one label-less state per `gh_state`, `bot` strategy
-//! requires an identity, and label names are unique case-insensitively.
+//! requires an identity, label names are unique case-insensitively, and state
+//! labels carry the status prefix all or none (#9580).
 //! Test: the `validate_*` tests in this file cover each rejection path.
 
 use std::collections::BTreeSet;
@@ -103,6 +104,24 @@ pub(crate) enum ModelError {
         /// The second (conflicting) one.
         second: String,
     },
+
+    /// A state label lacks the status prefix other state labels carry (#9580).
+    ///
+    /// A transition writes the label verbatim, so a mixed model puts a label
+    /// on the repo that the `status:*` lifecycle and a hand relabel never use.
+    #[error(
+        "state `{state}` uses the label `{label}`, but other state labels carry the \
+         status prefix `{prefix}`; every state label must carry it — rename the label \
+         to `{prefix}{label}`"
+    )]
+    MixedStatusPrefix {
+        /// The state whose label lacks the prefix.
+        state: String,
+        /// That label's name.
+        label: String,
+        /// `label_config.status_prefix`.
+        prefix: String,
+    },
 }
 
 /// Whether `s` is exactly six hexadecimal digits (no `#`).
@@ -124,7 +143,8 @@ fn is_six_hex(s: &str) -> bool {
 /// 6-hex colors (states + extra labels), terminal states have no outbound edge,
 /// at most one label-less state per `gh_state`, (for the `bot` strategy) an
 /// identity is present, and no two labelled states share a label name in any
-/// case (#8703).
+/// case (#8703), and no state label lacks a status prefix another carries
+/// (#9580).
 /// Test: `validate_default_ok` and the `validate_rejects_*` tests.
 pub(crate) fn validate_model(model: &StateModel) -> anyhow::Result<()> {
     validate_model_inner(model).map_err(|e| anyhow::anyhow!(e))
@@ -259,6 +279,20 @@ fn validate_model_inner(model: &StateModel) -> Result<(), ModelError> {
                 second: (*second).to_string(),
             });
         }
+    }
+
+    // 9. #9580: once one state label carries `status_prefix`, every state
+    //    label must (owner ruling 2026-10-09: an error, not a warning).
+    let prefix = model.label_config.status_prefix.as_str();
+    if !prefix.is_empty()
+        && labelled.iter().any(|(_, l)| l.starts_with(prefix))
+        && let Some((state, label)) = labelled.iter().find(|(_, l)| !l.starts_with(prefix))
+    {
+        return Err(ModelError::MixedStatusPrefix {
+            state: (*state).to_string(),
+            label: (*label).to_string(),
+            prefix: prefix.to_string(),
+        });
     }
 
     Ok(())
@@ -449,6 +483,46 @@ assignee_model: { strategy: unchanged, per_state: {} }
             message.contains("`coded`") && message.contains("`shipped`"),
             "the error must name both states: {message}"
         );
+    }
+
+    /// FAILS BEFORE #9580: a model mapping state `status:in-progress` to the
+    /// label `in-progress` beside `status:*` labels loaded, and transitions
+    /// then wrote a label the lifecycle does not use (owner ruling 2026-10-09).
+    /// Test: itself.
+    #[test]
+    fn validate_rejects_a_state_label_missing_the_status_prefix_9580() {
+        let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "status:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "status:in-progress", label: { name: "in-progress", color: "FBCA04" }, order: 1 }
+  - { name: "status:coded", label: { name: "status:coded", color: "AABBCC" }, order: 2 }
+  - { name: closed, gh_state: closed, order: 3 }
+transitions:
+  - { from: open, to: "status:in-progress", trigger: executor_start }
+  - { from: "status:in-progress", to: "status:coded", trigger: executor_start }
+  - { from: "status:coded", to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        let m: StateModel = serde_yaml::from_str(yaml).expect("synthetic parses");
+        let message = validate_model(&m)
+            .expect_err("a mixed-prefix model must be rejected")
+            .to_string();
+        assert!(
+            message.contains("`status:in-progress`")
+                && message.contains("`in-progress`")
+                && message.contains("`status:`"),
+            "the error must name the state, the label and the prefix: {message}"
+        );
+        // Every bundled model still loads (AC2).
+        for yaml in [
+            DEFAULT_MODEL_YAML,
+            super::super::config::STATUS_LIFECYCLE_YAML,
+        ] {
+            let bundled: StateModel = serde_yaml::from_str(yaml).expect("bundled parses");
+            assert!(validate_model_inner(&bundled).is_ok());
+        }
     }
 
     #[test]

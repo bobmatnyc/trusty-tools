@@ -63,7 +63,7 @@ pub(crate) const REQ_PHASE_LINKAGE: &str = "phase linkage";
 /// backend failure is propagated — an audit that could not enumerate must not
 /// print PASS.
 /// Test: see the module doc, plus
-/// `audit_rows_fail_a_stale_block_hidden_behind_a_prefix_less_label`.
+/// `audit_rows_fail_a_stale_block_hidden_behind_a_relabelled_state`.
 pub(crate) fn epic_rows<B: EpicBackend>(
     backend: &B,
     tracker: u64,

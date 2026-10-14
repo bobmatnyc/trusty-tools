@@ -117,7 +117,8 @@ fn pr_9571_an_unreadable_issue_reports_the_title_missing() {
         "an unknown phase tag is a partial apply, never a silent success"
     );
     let missing =
-        metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #9572")).missing();
+        metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #9572"), None)
+            .missing();
     assert!(
         missing.iter().any(|m| m.starts_with("title")),
         "`title` is named missing: {missing:?}"
@@ -137,7 +138,8 @@ fn pr_9571_a_failed_title_edit_reports_the_title_missing() {
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
 
     let missing =
-        metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #9572")).missing();
+        metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #9572"), None)
+            .missing();
     assert!(
         missing
             .iter()

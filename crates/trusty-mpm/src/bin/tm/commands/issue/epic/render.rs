@@ -21,7 +21,7 @@
 //! `state_cell_reads_the_status_label_of_an_open_child`,
 //! `state_cell_reads_open_for_an_unlabelled_open_child`,
 //! `phases_table_uses_the_configured_status_prefix`,
-//! `state_cell_resolves_a_label_whose_name_lacks_the_prefix`,
+//! `state_cell_resolves_a_label_whose_name_differs_from_the_state`,
 //! `outcomes_of_folds_wrapped_continuation_lines`.
 
 use std::fmt::Write as _;
@@ -355,7 +355,7 @@ pub(crate) fn phases_table(children: &[ChildIssue], model: &StateModel) -> Strin
 /// `state_cell_reads_the_status_label_of_an_open_child`,
 /// `state_cell_reads_open_for_an_unlabelled_open_child`,
 /// `phases_table_uses_the_configured_status_prefix`,
-/// `state_cell_resolves_a_label_whose_name_lacks_the_prefix`,
+/// `state_cell_resolves_a_label_whose_name_differs_from_the_state`,
 /// `state_cell_resolves_a_label_name_unrelated_to_the_state_name`,
 /// `state_cell_reads_open_for_a_prefixed_label_the_model_lacks`,
 /// `state_cell_under_an_empty_prefix_reads_only_model_labels`,

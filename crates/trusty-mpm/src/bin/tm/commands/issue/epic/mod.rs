@@ -54,7 +54,8 @@ use create::{CreateOptions, CreateReport};
 /// What: builds a [`GhEpicBackend`] over a runner bound to the resolved
 /// per-project GitHub identity (#1265), then dispatches. The two verbs that
 /// render the `phases` block (`create`, `sync`) load the state model the way
-/// `tm issue transition` does, and render through it (#8448, #8696);
+/// `tm issue transition` does, and render through it (#8448, #8696); with no
+/// model file, the children's labels pick the built-in lifecycle (#9579);
 /// `lifecycle` is the configured `agents.ticketing.lifecycle_model`.
 /// Test: `epic_create_requires_a_milestone`, `epic_create_requires_a_component`,
 /// `epic_create_requires_a_session_name`.
@@ -75,6 +76,8 @@ pub(crate) fn run(
             tracker,
             dry_run,
         } => {
+            // #9579: keep the source, so the final sync can pick the lifecycle.
+            let (model, source) = load_model_with_source(None, lifecycle)?;
             let opts = CreateOptions {
                 plan_path: from,
                 milestone: require_milestone(milestone)?,
@@ -84,13 +87,16 @@ pub(crate) fn run(
                 session: require_session(session)?,
                 tracker,
                 dry_run,
-                model: state_model(lifecycle)?,
+                model,
+                source,
             };
             let report = create::create(&backend, &opts)?;
             print_create(&report);
         }
         EpicCmd::Sync { epic } => {
-            let report = sync::sync(&backend, epic, &state_model(lifecycle)?)?;
+            // #9579: the lifecycle the children's labels name, not Unicorn's.
+            let (model, source) = load_model_with_source(None, lifecycle)?;
+            let report = sync::sync_resolved(&backend, epic, &model, &source)?;
             if report.unchanged {
                 println!(
                     "#{}: phases block already matches its {} child issue(s) — nothing written",

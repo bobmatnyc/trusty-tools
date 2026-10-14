@@ -165,7 +165,7 @@ impl<'a> StateMachine<'a> {
     /// matches. No fallback — the caller decides what an empty result means.
     /// Test: `sm_resolve_one`, `sm_resolve_many`, `sm_resolve_none`,
     /// `sm_resolve_matches_a_label_in_any_case_8703`,
-    /// `state_cell_resolves_a_label_whose_name_lacks_the_prefix`.
+    /// `state_cell_resolves_a_label_whose_name_differs_from_the_state`.
     pub(crate) fn labelled_states(&self, issue_labels: &[String]) -> Vec<&'a str> {
         self.model
             .states

@@ -2278,17 +2278,97 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
         .on_fail("pr edit 4242", "'mpm 1.6' not found");
     let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
 
-    let missing = match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"))
-    {
-        ApplyOutcome::Partial(missing) => missing,
-        ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
-    };
+    let missing =
+        match metadata_apply::apply(&gh, &args, &pre, "4242", &body_linking("Refs #7274"), None) {
+            ApplyOutcome::Partial(missing) => missing,
+            ApplyOutcome::Applied => panic!("a failed milestone step must not read as Applied"),
+        };
     let joined = missing.join("; ");
     assert!(joined.contains("milestone \"mpm 1.6\""), "{joined}");
     assert!(joined.contains("inherited from #7274"), "{joined}");
     assert!(
         !joined.contains("component labels"),
         "the label DID apply on retry, so it is not missing: {joined}"
+    );
+}
+
+/// An issue on one CLOSED project (#9749: #22/#25 were superseded by #45).
+const CLOSED_PROJECT_ISSUE_JSON: &str = r#"{"number":7274,"milestone":{"title":"mpm 1.6"},
+    "projectItems":[{"title":"trusty-mpm"}],"labels":[],"comments":[],"state":"OPEN"}"#;
+
+/// The owner's project list with `--closed`: the inherited one is closed.
+const CLOSED_PROJECT_LIST_JSON: &str = r#"{"projects":[
+    {"number":25,"title":"trusty-mpm","closed":true},
+    {"number":45,"title":"trusty-tools-master","closed":false}],"totalCount":2}"#;
+
+/// REGRESSION (#9749): `gh pr edit --add-project` cannot resolve a closed
+/// project, so a PR linking an issue still on #22/#25 exited 3 every time.
+/// Red before the fix: the project step fails twice and the run exits
+/// `EXIT_PARTIAL`.
+#[test]
+fn pr_9749_a_closed_inherited_project_does_not_fail_the_open() {
+    let (_d, path) = scratch_body(&body_linking("Refs #7274"));
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/7639\n")
+        .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
+        .on("repo view", "o\n")
+        .on("project list", CLOSED_PROJECT_LIST_JSON)
+        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
+        .on("pr edit 7639", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("the PR exists"),
+        super::EXIT_OK,
+        "a closed inherited project is skipped, not a partial apply"
+    );
+}
+
+/// #9749: the skipped closed project is replaced by the configured
+/// `agents.ticketing.default_project`, and only a closed one is skipped.
+#[test]
+fn pr_9749_a_closed_project_falls_back_to_the_default_project() {
+    let gh = FakeGh::new()
+        .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
+        .on("project list", CLOSED_PROJECT_LIST_JSON)
+        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
+        .on("pr edit 4242", "");
+    let mut args = open_args("unused");
+    args.repo = Some("o/r".to_string());
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+    let body = body_linking("Refs #7274");
+
+    let outcome =
+        metadata_apply::apply(&gh, &args, &pre, "4242", &body, Some("trusty-tools-master"));
+    assert_eq!(outcome, ApplyOutcome::Applied);
+    let calls: Vec<String> = gh.calls().into_iter().map(|c| c.join(" ")).collect();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "project list --owner o --closed -L 200 --format json"),
+        "the owner comes from --repo: {calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "pr edit 4242 --repo o/r --add-project trusty-tools-master"),
+        "{calls:?}"
+    );
+
+    // An open project that fails stays missing: only a closed one is skipped.
+    let gh = FakeGh::new()
+        .on("issue view 7274", ISSUE_JSON)
+        .on("project list", CLOSED_PROJECT_LIST_JSON)
+        .on_fail("--add-project Harness", "'Harness' not found")
+        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
+        .on("pr edit 4242", "");
+    let missing = metadata_apply::apply(&gh, &args, &pre, "4242", &body, None);
+    assert_eq!(
+        missing,
+        ApplyOutcome::Partial(vec![
+            "project \"Harness\" (inherited from #7274)".to_string()
+        ])
     );
 }
 
