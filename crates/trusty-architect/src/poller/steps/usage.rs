@@ -30,9 +30,9 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
@@ -54,6 +54,8 @@ use crate::input::InputState;
 pub const PROBE_EVERY: f64 = 60.0 * 60.0;
 /// A probe still running after this long is killed.
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(120);
+/// How often the reaper checks whether the probe has exited.
+const REAP_POLL: Duration = Duration::from_millis(100);
 /// Probe tries after an account change before falling back to hourly.
 const PENDING_TRIES: f64 = 3.0;
 
@@ -86,6 +88,8 @@ pub trait ProbeLauncher {
 /// The real launcher: `usage-probe.sh <session> <pane> <account>` in a new
 /// session, stdin closed, output appended to `usage-probe.log`, reaped by a
 /// thread when it exits (the prototype's `Popen(..., start_new_session=True)`).
+/// The thread kills the probe's process group when it is still running after
+/// [`PROBE_DEADLINE`] (the prototype never waits).
 #[derive(Debug, Clone)]
 pub struct ScriptProbe {
     script: PathBuf,
@@ -132,13 +136,37 @@ impl ProbeLauncher for ScriptProbe {
             });
         }
         let mut child = cmd.spawn()?;
-        // Reap it when it exits; a failed thread spawn leaves a zombie until
-        // the poller exits, never a failed probe.
+        // Reap it when it exits, or kill its process group at the deadline
+        // (#9801); a failed thread spawn leaves a zombie until the poller
+        // exits, never a failed probe.
+        let deadline = self.deadline;
         let _ = std::thread::Builder::new()
             .name("usage-probe-reaper".to_owned())
-            .spawn(move || child.wait());
+            .spawn(move || reap(&mut child, deadline));
         Ok(())
     }
+}
+
+/// Waits for `child` to exit; at `deadline` kills its process group (it is a
+/// session leader, so its pid is the group id) and reaps it.
+fn reap(child: &mut Child, deadline: Duration) {
+    let end = Instant::now() + deadline;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < end => std::thread::sleep(REAP_POLL),
+            Ok(None) => break,
+            Err(_) => return,
+        }
+    }
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: kill(2) on a process group this launcher created.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A launcher for tests: records each launch; [`RecordingProbe::failing`]

@@ -11,9 +11,9 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 use trusty_architect::classify::{DETAIL_MAX, alert};
 use trusty_architect::poller::steps::usage::{
-    Pct, ProbeLauncher, Reading, RecordingProbe, UsagePaths, UtcTime, Window, append_ledger,
-    burn_rate, effective, plan, poll_step, project, rows_from_values, runway, sample_cache,
-    UsageError, usage_alerts, usage_step,
+    Pct, ProbeLauncher, Reading, RecordingProbe, UsageError, UsagePaths, UtcTime, Window,
+    append_ledger, burn_rate, effective, plan, poll_step, project, rows_from_values, runway,
+    sample_cache, usage_alerts, usage_step,
 };
 use trusty_architect::{Clock, SystemClock};
 

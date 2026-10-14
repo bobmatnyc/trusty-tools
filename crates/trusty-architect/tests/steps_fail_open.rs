@@ -345,6 +345,9 @@ fn a_probe_past_its_deadline_is_killed_with_its_group_and_reaped() -> TestResult
         .args(["-KILL", "--", &format!("-{}", both[0])])
         .stderr(std::process::Stdio::null())
         .status();
-    assert!(gone, "the probe and its child outlived the deadline: {line:?}");
+    assert!(
+        gone,
+        "the probe and its child outlived the deadline: {line:?}"
+    );
     Ok(())
 }

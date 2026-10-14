@@ -66,8 +66,13 @@ impl UtcTime {
             us += 1e6;
             secs -= 1.0;
         }
-        // Both are integral and far inside i64 after the bound above.
-        Self::from_micros(secs as i64 * US_PER_S + us as i64)
+        // #9801: both are integral and inside i64, but their product is not
+        // (a time above about 9.2e12 s overflowed and panicked in debug).
+        let total = (secs as i64)
+            .checked_mul(US_PER_S)
+            .and_then(|whole| whole.checked_add(us as i64))
+            .ok_or(UsageError::OutOfRange)?;
+        Self::from_micros(total)
     }
 
     /// `.timestamp()`: seconds since the epoch.

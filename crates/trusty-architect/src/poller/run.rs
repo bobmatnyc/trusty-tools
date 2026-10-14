@@ -10,7 +10,9 @@
 //! alert is a macOS notification; a failed one is a `notify ERROR` log line
 //! and changes nothing (#9801). Any failure before the commit (a
 //! sensor, the append, a phase hook) commits nothing, so the same alerts
-//! come out again next cycle; dedup keys repeat identically. A `list-panes`
+//! come out again next cycle; dedup keys repeat identically. The one
+//! exception is the usage state: a `/usage` probe that started stays
+//! recorded in memory, so a failing cycle never repeats it (#9801). A `list-panes`
 //! failure logs `panes=? ERROR ...; cycle skipped`. [`Runner::run_loop`]
 //! checks the interval before any tmux call, takes `poll.lock`, loads the
 //! state ([`PollSession::load`]) and sleeps the interval exactly once after
@@ -33,7 +35,7 @@ use super::lock::PollLock;
 use super::pyfmt::py_int;
 use super::session::PollSession;
 use super::sink::{append_alerts, append_log};
-use super::state::save_state;
+use super::state::{PollState, save_state};
 use super::steps::notify_macos::{Notifier, notifies, notify_watchdog_alerts};
 use super::steps::usage::ProbeLauncher;
 use super::triage::Triage;
@@ -93,6 +95,19 @@ fn sensor_off(name: &str) -> &'static str {
         "LOAD_FACTOR" => "host alerts (load, disk, swap, band)",
         "PANE_CTX_WINDOW" => "pane ctx",
         _ => "self_ctx",
+    }
+}
+
+/// #9801: a `/usage` probe launched in a cycle that then failed has already
+/// typed into a pane, so the usage state (`last_probe`, `tries`) survives the
+/// discarded copy; otherwise the probe repeats every cycle and the three-try
+/// cap never holds. Nothing else of the copy is kept.
+fn carry_usage(session: &mut PollSession, next: &PollState) {
+    if let Some(usage) = next.other.get("usage") {
+        session
+            .state
+            .other
+            .insert("usage".to_owned(), usage.clone());
     }
 }
 
@@ -183,6 +198,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             }
             Err(Stopped::Failed(e, lines)) => {
                 log.extend(lines);
+                carry_usage(session, &next);
                 return Err(e.into());
             }
         };
@@ -201,14 +217,20 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
                 }
             }
         } else {
-            append_alerts(&self.config.alerts(), &found.new).map_err(|source| RunError::Io {
-                what: "append alerts".to_owned(),
-                source,
-            })?;
+            if let Err(source) = append_alerts(&self.config.alerts(), &found.new) {
+                carry_usage(session, &next);
+                return Err(RunError::Io {
+                    what: "append alerts".to_owned(),
+                    source,
+                });
+            }
             // #9801: notify_macos after the append; a failure is a log line.
             log.extend(notify_watchdog_alerts(self.notifier, &found.new));
         }
-        hook(Phase::AlertsAppended).map_err(phase(Phase::AlertsAppended))?;
+        if let Err(source) = hook(Phase::AlertsAppended) {
+            carry_usage(session, &next);
+            return Err(phase(Phase::AlertsAppended)(source));
+        }
         let (woken, logged) = self.triage.triage(&found.new, now, &mut next, self.dry_run);
         let alerts = self.config.alerts();
         let waker = Waker {
