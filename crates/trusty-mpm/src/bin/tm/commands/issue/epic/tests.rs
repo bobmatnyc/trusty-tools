@@ -11,6 +11,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 
 use super::audit_rows::{self, REQ_PHASE_LINKAGE, REQ_PHASES_BLOCK};
 use super::backend::{
@@ -25,7 +26,7 @@ use super::render::{
     self, DEFERRED_END, DEFERRED_START, FOLLOWUPS_END, FOLLOWUPS_START, PHASES_END, PHASES_START,
 };
 use super::sync;
-use crate::commands::issue::config::{DEFAULT_MODEL_YAML, StateModel};
+use crate::commands::issue::config::{DEFAULT_MODEL_YAML, ModelSource, StateModel};
 use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
 use crate::commands::ticket::system::{Issue, TicketSystem};
 use trusty_mpm::core::issue_audit::Verdict;
@@ -572,6 +573,7 @@ fn opts_for(dir: &tempfile::TempDir, project: Option<u64>) -> CreateOptions {
         tracker: None,
         dry_run: false,
         model: status_model(),
+        source: ModelSource::File(PathBuf::from("/repo/issue-state.yaml")),
     }
 }
 
@@ -1718,6 +1720,73 @@ fn sync_refuses_and_writes_nothing_when_the_tracker_keeps_changing() {
     let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
     assert!(err.to_string().contains("changed while"), "{err}");
     assert_eq!(backend.calls("set_body"), 0, "nothing may be written");
+}
+
+/// The embedded Unicorn default as a no-file repo loads it (#9579).
+fn embedded_default_loaded() -> (StateModel, ModelSource) {
+    let model: StateModel = serde_yaml::from_str(DEFAULT_MODEL_YAML).expect("default parses");
+    let source = ModelSource::EmbeddedDefault {
+        searched_from: PathBuf::from("/repo"),
+    };
+    (model, source)
+}
+
+/// #9579: in a repo with no `issue-state.yaml`, a standalone `epic sync`
+/// renders a `status:*`-labelled phase through the `status:*` lifecycle — the
+/// same model `tm issue transition` used to write the label — not as `open`.
+#[test]
+fn sync_under_the_embedded_default_renders_a_status_label_9579() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(
+        100,
+        "[EPIC 100] An outcome",
+        &tracker_fixture(
+            "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
+        ),
+    );
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "OPEN",
+        "## Gate\n\ng\n",
+    );
+    backend
+        .issues
+        .borrow_mut()
+        .get_mut(&101)
+        .expect("phase")
+        .labels = vec!["status:coded".to_string()];
+
+    let (model, source) = embedded_default_loaded();
+    sync::sync_resolved(&backend, 100, &model, &source).expect("syncs");
+    let after = backend.issue(100).body;
+    assert!(after.contains("| 1 | p | #101 | coded | g |"), "{after}");
+}
+
+/// #9579: `epic create`'s final sync resolves the lifecycle the same way, so
+/// a re-run over an adopted `status:coded` phase keeps that row.
+#[test]
+fn create_under_the_embedded_default_renders_a_status_label_9579() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let backend = FakeBackend::new().fails("create_issue:3");
+    let (model, source) = embedded_default_loaded();
+    let mut opts = opts_for(&dir, None);
+    opts.model = model;
+    opts.source = source;
+    create::create(&backend, &opts).expect_err("the second phase fails");
+    backend
+        .issues
+        .borrow_mut()
+        .get_mut(&101)
+        .expect("phase 1")
+        .labels
+        .push("status:coded".to_string());
+
+    backend.clear_failures();
+    create::create(&backend, &opts).expect("the re-run completes");
+    let after = backend.issue(100).body;
+    assert!(after.contains("| #101 | coded |"), "{after}");
 }
 
 // ------------------------------------------------------- the `gh`/`git` layer
