@@ -453,14 +453,31 @@ impl QuestionTable {
         state.book.questions.get(&id).map(|e| e.question.clone())
     }
 
-    /// RED STUB (#9873 S1): replaced by the real lookup in the next commit.
-    pub fn find_by_conversation(&self, _conversation: &Conversation) -> Option<QuestionId> {
-        None
+    /// The question posted in `conversation`, open or answered.
+    ///
+    /// Why: #9873 Q2: an owner's thread reply carries no `[Q-n]` token, so
+    /// the conversation is the binding; text is never trusted to bind.
+    /// What: the one opened question whose conversation equals it. `None`
+    /// for no match, for two (fail closed), and on a poisoned table. A
+    /// reserved-only id has no conversation, so it is never found.
+    /// Test: `conversation_lookup_finds_the_question_posted_there`,
+    /// `conversation_lookup_on_a_poisoned_table_is_none`.
+    pub fn find_by_conversation(&self, conversation: &Conversation) -> Option<QuestionId> {
+        let state = self.lock().ok()?;
+        let mut found = state
+            .book
+            .questions
+            .values()
+            .filter(|e| e.question.ask.conversation == *conversation);
+        let id = found.next()?.question.id;
+        found.next().is_none().then_some(id)
     }
 
-    /// RED STUB (#9873 S1): replaced by the real lookup in the next commit.
-    pub fn answer(&self, _id: QuestionId) -> Option<Answer> {
-        None
+    /// The first answer to question `id`; `None` when unanswered, unknown or
+    /// poisoned. #9873: a second answer reports who won, and when.
+    pub fn answer(&self, id: QuestionId) -> Option<Answer> {
+        let state = self.lock().ok()?;
+        state.book.questions.get(&id)?.answer.clone()
     }
 
     /// True once an append failed or the lock was poisoned.
