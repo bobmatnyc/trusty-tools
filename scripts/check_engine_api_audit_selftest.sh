@@ -45,6 +45,22 @@
 #   an empty field, an unknown kind, a path outside the crate or carrying
 #   generics); a duplicate path-and-kind row; a path with a public and an
 #   absent row; a bad argument.
+#   T0 (cases 101 on): every case gets a ratchet table generated from its own
+#   marker counts unless it sets RATCHET_FIXTURE. A path whose line holds the
+#   token `anyhow::` (return, argument, type alias, field, async-trait shape,
+#   each re-export path) without an `anyhow-pending T<n>: ` marker fails
+#   (exit 1); a word that only contains `anyhow` and a marked fn or field
+#   pass. A stale anyhow marker (clean or unlisted path), a misplaced one
+#   (NARROW row, variant kind) or a malformed one (no tag, T5, empty or blank
+#   reason, glued tag) fails closed, as does a pending marker on a unit
+#   variant (exit 2). Ratchet: count above or below the ceiling, ceiling above
+#   initial, a ceiling above or an initial different from --base-ratchet, a
+#   later slice with progress while an earlier one is open, and one enum with
+#   two tags fail (exit 1); equal counts, a lower ceiling than base, an
+#   earlier slice at zero and one tag on two paths pass. A missing, misheaded,
+#   non-integer, duplicate-row or short ratchet file, a missing base file and
+#   a bare --base-ratchet fail closed (exit 2). --final fails on any marker of
+#   either kind and passes a table with none.
 #
 # Usage: bash scripts/check_engine_api_audit_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -75,11 +91,12 @@ pub $K::Step::Copy
 #[non_exhaustive] pub struct $K::Store
 pub $K::Store::path: std::path::PathBuf
 impl $K::Store
-pub fn $K::Store::open<P: core::convert::AsRef<std::path::Path>>(P) -> anyhow::Result<Self>
+pub fn $K::Store::open<P: core::convert::AsRef<std::path::Path>>(P) -> std::io::Result<Self>
 pub fn trusty_memory::socket_path() -> anyhow::Result<std::path::PathBuf>
 EOF
 
-# The table that matches base.api, plus one NARROW and one HIDE row.
+# The table that matches base.api, plus one NARROW and one HIDE row. The
+# anyhow-returning root fn carries its `anyhow-pending` marker (T0).
 {
   printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch\n'
   printf '%s\tmod\tKEEP\ttests/a.rs\tA3a\n' "$K"
@@ -90,15 +107,52 @@ EOF
   printf '%s::Store::open\tmethod\tKEEP\ttests/a.rs\tA3a\n' "$K"
   printf '%s::Store::compact\tmethod\tNARROW\tno consumer\tA3a\n' "$K"
   printf '%s::LAYOUT\tconst\tHIDE\ttests/b.rs\tA3a\n' "$K"
-  printf 'trusty_memory::socket_path\tfn\tKEEP\ttrusty-agents tests\tA6\n'
+  printf 'trusty_memory::socket_path\tfn\tKEEP\tanyhow-pending T4: trusty-agents tests\tA6\n'
 } > "$TMP/base.tsv"
+
+# gen_ratchet: a ratchet table whose initial and ceiling are the marker counts
+# of case.tsv per kind and slice, so a case that is not about the ratchet
+# passes it (T0). A case about the ratchet sets RATCHET_FIXTURE instead.
+RATCHET_FIXTURE=''
+gen_ratchet() {
+  local src="$TMP/case.tsv"
+  [ -f "$src" ] || src=/dev/null
+  awk -F '\t' '
+    BEGIN { print "marker\tslice\tinitial\tceiling" }
+    NR > 1 && $4 ~ /^(anyhow|variant)-pending T[1-4]:/ {
+      m = $4; sub(/-pending.*/, "", m)
+      t = $4; sub(/^[a-z]+-pending /, "", t); c[m, substr(t, 1, 2)]++
+    }
+    END {
+      split("anyhow variant", ms, " ")
+      for (i = 1; i <= 2; i++) for (j = 1; j <= 4; j++) {
+        k = c[ms[i], "T" j] + 0
+        printf "%s\tT%d\t%d\t%d\n", ms[i], j, k, k
+      }
+    }' "$src" > "$TMP/ratchet.tsv"
+}
+
+# ratchet_file <file> <aT1> <aT2> <aT3> <aT4> <vT1> <vT2> <vT3> <vT4>: each
+# argument is `initial:ceiling` for anyhow then variant, T1 to T4.
+ratchet_file() {
+  local f="$1" m t i=0 a
+  shift
+  printf 'marker\tslice\tinitial\tceiling\n' > "$f"
+  for a in "$@"; do
+    if [ "$i" -lt 4 ]; then m=anyhow; else m=variant; fi
+    t=$((i % 4 + 1))
+    printf '%s\tT%d\t%s\t%s\n' "$m" "$t" "${a%%:*}" "${a#*:}" >> "$f"
+    i=$((i + 1))
+  done
+}
 
 # run_case <name> <want-exit> <needle-or-empty> <listing> [gate args...]
 run_case() {
-  local name="$1" want="$2" needle="$3" listing="$4" out status
+  local name="$1" want="$2" needle="$3" listing="$4" out status rf
   shift 4
   status=0
-  out="$(ENGINE_API_AUDIT_TSV="$TMP/case.tsv" "$BASH" "$GATE" --api-file "$listing" "$@" 2>&1)" \
+  if [ -n "$RATCHET_FIXTURE" ]; then rf="$RATCHET_FIXTURE"; else gen_ratchet; rf="$TMP/ratchet.tsv"; fi
+  out="$(ENGINE_API_AUDIT_TSV="$TMP/case.tsv" ENGINE_API_RATCHET_TSV="$rf" "$BASH" "$GATE" --api-file "$listing" "$@" 2>&1)" \
     || status=$?
   if [ "$status" -ne "$want" ]; then
     echo "FAIL $name: exit $status, want $want"
@@ -191,9 +245,9 @@ pub fn $R::Frame<'a, alloc::vec::Vec<T>>::len(&self) -> usize
 EOF
 {
   printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch\n'
-  printf '%s::timeouts::lock_with_timeout\tfn\tKEEP\ttests/a.rs\tA5\n' "$E"
+  printf '%s::timeouts::lock_with_timeout\tfn\tKEEP\tanyhow-pending T3: tests/a.rs\tA5\n' "$E"
   printf '%s::content_hash::ContentHash::deserialize\ttrait_method\tKEEP\ttests/a.rs\tA5\n' "$E"
-  printf '%s::semantic_consolidation::Inference::consolidate\ttrait_method\tKEEP\ttests/a.rs\tA5\n' "$E"
+  printf '%s::semantic_consolidation::Inference::consolidate\ttrait_method\tKEEP\tanyhow-pending T3: tests/a.rs\tA5\n' "$E"
   printf '%s::dream::AfterCycle\ttype\tKEEP\ttests/a.rs\tA5\n' "$E"
   printf '%s::lock_root\tfn\tKEEP\ttests/a.rs\tA6\n' "$R"
   printf '%s::RootHook\ttype\tKEEP\ttests/a.rs\tA6\n' "$R"
@@ -501,6 +555,144 @@ run_case conflicting-rows 2 "conflicting rows for $K::Store::path" "$TMP/base.ap
 cp "$TMP/base.tsv" "$TMP/case.tsv"
 printf '%s::Store::old\tmethod\tDEPRECATE\ttests/a.rs\tA3a\n' "$K" >> "$TMP/case.tsv"
 run_case deprecate-missing 1 "MISSING $K::Store::old" "$TMP/base.api"
+
+# Cases 101 on (#9278 T0). 101: a pending marker on a unit variant is stale.
+pending_case p-unit "enum=$K::Ev" "$K::Ev::Done" variant KEEP 'variant-pending T1: member of Ev' \
+  "$EVL_U" "pub $K::Ev::Done"
+run_case variant-pending-on-unit-variant 2 "stale pending $K::Ev::Done: the variant has no field line" "$TMP/p-unit.api"
+
+# 102-110: a listed path whose line holds the token `anyhow::` (return,
+# argument, type alias, field, the async-trait shape, each re-export path)
+# needs `anyhow-pending T<n>: <reason>` on its KEEP row, else ANYHOW. A word
+# that only contains `anyhow` is not the token.
+LOAD="$K::Store::load"
+LOADL="pub fn $LOAD(&self) -> anyhow::Result<u8>"
+AP2='anyhow-pending T2: tests/a.rs'
+struct_case a-ret "method=$LOAD" "$LOADL"
+run_case anyhow-return-unmarked 1 "ANYHOW $LOAD${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/a-ret.api"
+pending_case a-ok '' "$LOAD" method KEEP "$AP2" "$LOADL"
+run_case anyhow-return-pending-marker 0 '8 audited path(s) match' "$TMP/a-ok.api"
+struct_case a-arg "method=$K::Store::feed" "pub fn $K::Store::feed(&self, anyhow::Error) -> u8"
+run_case anyhow-in-argument 1 "ANYHOW $K::Store::feed" "$TMP/a-arg.api"
+struct_case a-type "type=$K::Hook" "pub type $K::Hook = alloc::sync::Arc<(dyn core::ops::function::Fn(u8) -> anyhow::Result<()> + core::marker::Send)>"
+run_case anyhow-in-type-alias 1 "ANYHOW $K::Hook" "$TMP/a-type.api"
+struct_case a-field "field=$K::Store::err" "pub $K::Store::err: anyhow::Error"
+run_case anyhow-in-field-type 1 "ANYHOW $K::Store::err" "$TMP/a-field.api"
+struct_case a-trait "trait=$K::Vs trait_method=$K::Vs::upsert" "pub trait $K::Vs" \
+  "pub fn $K::Vs::upsert<'life0, 'async_trait>(&'life0 self, uuid::Uuid, alloc::vec::Vec<f32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = anyhow::Result<()>> + core::marker::Send + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait"
+run_case anyhow-in-async-trait-shape 1 "ANYHOW $K::Vs::upsert" "$TMP/a-trait.api"
+pending_case a-two "method=trusty_memory::engine::Store::load" "$LOAD" method KEEP "$AP2" \
+  "$LOADL" 'pub fn trusty_memory::engine::Store::load(&self) -> anyhow::Result<u8>'
+run_case anyhow-reexport-two-paths-one-marked 1 "ANYHOW trusty_memory::engine::Store::load${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/a-two.api"
+struct_case a-word "method=$K::Store::a method=$K::Store::b" \
+  "pub fn $K::Store::a(&self) -> not_anyhow::Result<u8>" "pub fn $K::Store::b(&self) -> anyhow_like::Error"
+run_case anyhow-substring-not-token 0 '9 audited path(s) match' "$TMP/a-word.api"
+pending_case a-field-ok '' "$K::Store::err" field KEEP "$AP2" "pub $K::Store::err: anyhow::Error"
+run_case anyhow-marker-on-field-passes 0 '8 audited path(s) match' "$TMP/a-field-ok.api"
+
+# 111-119: a stale, misplaced or malformed `anyhow-pending` marker fails
+# closed (exit 2), so a converted path cannot keep its marker.
+pending_case a-clean '' "$K::Store::size" method KEEP 'anyhow-pending T1: tests/a.rs' "pub fn $K::Store::size(&self) -> u64"
+run_case anyhow-marker-on-clean-path 2 "stale pending $K::Store::size: the path holds no anyhow" "$TMP/a-clean.api"
+pending_case a-unlisted '' "$K::Store::gone" method KEEP 'anyhow-pending T1: gone'
+run_case anyhow-marker-on-unlisted-path 2 "stale pending $K::Store::gone: not a listed path" "$TMP/a-unlisted.api"
+AKINDS='anyhow-pending is only for a KEEP row of kind fn, method, trait_method, type or field'
+pending_case a-narrow '' "$K::Store::old" method NARROW 'anyhow-pending T1: narrowed'
+run_case anyhow-marker-on-narrow-row 2 "stale pending $K::Store::old: $AKINDS (method NARROW)" "$TMP/a-narrow.api"
+pending_case a-variant "enum=$K::Ev" "$K::Ev::Fail" variant KEEP 'anyhow-pending T1: member of Ev' \
+  "$EVL_U" "pub $K::Ev::Fail(anyhow::Error)"
+run_case anyhow-marker-on-variant-kind 2 "stale pending $K::Ev::Fail: $AKINDS (variant KEEP)" "$TMP/a-variant.api"
+ATAG="stale pending $LOAD: anyhow-pending needs a T1-T4 tag and a reason"
+for bad in 'no-tier=anyhow-pending: tests/a.rs' 'tier-out-of-range=anyhow-pending T5: tests/a.rs' \
+  'empty-reason=anyhow-pending T2: ' 'blank-reason=anyhow-pending T2:    ' 'glued-tag=anyhow-pendingT2: tests/a.rs'; do
+  pending_case "a-${bad%%=*}" '' "$LOAD" method KEEP "${bad#*=}" "$LOADL"
+  run_case "anyhow-marker-${bad%%=*}" 2 "$ATAG" "$TMP/a-${bad%%=*}.api"
+done
+
+# 120-123: the ratchet. The table's marker count per kind and slice equals
+# the ceiling (R1), and the ceiling never exceeds the initial count (R2).
+# Every fixture keeps anyhow T4 at 1:1 for the socket_path marker in base.tsv.
+pending_case a-r1 '' "$LOAD" method KEEP "$AP2" "$LOADL"
+RATCHET_FIXTURE="$TMP/r.tsv"
+ratchet_file "$RATCHET_FIXTURE" 0:0 1:1 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-count-equals-ceiling 0 '8 audited path(s) match' "$TMP/a-r1.api"
+pending_case a-r2 '' "$LOAD" method KEEP "$AP2" "$LOADL" "pub fn $K::Store::load2(&self) -> anyhow::Result<u8>"
+printf '%s::Store::load2\tmethod\tKEEP\t%s\tT0\n' "$K" "$AP2" >> "$TMP/case.tsv"
+run_case ratchet-table-above-ceiling 1 "RATCHET anyhow T2: table has 2, ceiling 1" "$TMP/a-r2.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 1:2 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-ceiling-above-initial 1 "RATCHET anyhow T2: ceiling 2 above initial 1${NL}check_engine_api_audit: FAIL — 0 path(s) and 1 ratchet line(s)" "$TMP/a-r2.api"
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+ratchet_file "$RATCHET_FIXTURE" 0:0 1:1 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-table-below-ceiling 1 "RATCHET anyhow T2: table has 0, ceiling 1" "$TMP/base.api"
+
+# 124-129: --base-ratchet compares with the base branch's ratchet file. A
+# ceiling may only fall and `initial` never changes (R3); a slice shows
+# progress only while every earlier slice is at zero for both kinds (R4).
+pending_case a-r4 '' "$LOAD" method KEEP "$AP2" "$LOADL"
+ratchet_file "$RATCHET_FIXTURE" 0:0 1:1 0:0 1:1 0:0 0:0 0:0 0:0
+ratchet_file "$TMP/base-r.tsv" 0:0 1:0 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-base-increase 1 "RATCHET anyhow T2: ceiling 1 above base 0" "$TMP/a-r4.api" --base-ratchet "$TMP/base-r.tsv"
+ratchet_file "$RATCHET_FIXTURE" 0:0 2:1 0:0 1:1 0:0 0:0 0:0 0:0
+ratchet_file "$TMP/base-r.tsv" 0:0 2:2 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-base-equal-or-lower 0 '8 audited path(s) match' "$TMP/a-r4.api" --base-ratchet "$TMP/base-r.tsv"
+ratchet_file "$TMP/base-r.tsv" 0:0 3:2 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-base-initial-changed 1 "RATCHET anyhow T2: initial 2 differs from base 3" "$TMP/a-r4.api" --base-ratchet "$TMP/base-r.tsv"
+pending_case a-r5 '' "$LOAD" method KEEP "$AP2" "$LOADL" "pub fn $K::Store::load2(&self) -> anyhow::Result<u8>"
+printf '%s::Store::load2\tmethod\tKEEP\tanyhow-pending T1: tests/a.rs\tT0\n' "$K" >> "$TMP/case.tsv"
+ratchet_file "$RATCHET_FIXTURE" 1:1 2:1 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-order-later-slice-moves-first 1 "RATCHET order: T1 is open while T2 has progress" "$TMP/a-r5.api"
+ratchet_file "$RATCHET_FIXTURE" 1:1 1:1 0:0 1:1 0:0 0:0 3:0 0:0
+run_case ratchet-order-variant-later-slice 1 "RATCHET order: T1 is open while T3 has progress" "$TMP/a-r5.api"
+pending_case a-r6 '' "$LOAD" method KEEP "$AP2" "$LOADL"
+ratchet_file "$RATCHET_FIXTURE" 1:0 2:1 0:0 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-order-earlier-slice-zero 0 '8 audited path(s) match' "$TMP/a-r6.api"
+RATCHET_FIXTURE=''
+
+# 130-131: every `variant-pending` row of one enum (keyed by its name, so a
+# re-export path counts) carries one tag.
+EVR="$EVF enum=trusty_memory::engine::Ev field=trusty_memory::engine::Ev::Moved::from"
+pending_case v-mixed "$EVR" "$MV" variant KEEP 'variant-pending T1: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8" \
+  '#[non_exhaustive] pub enum trusty_memory::engine::Ev' 'pub trusty_memory::engine::Ev::Moved' 'pub trusty_memory::engine::Ev::Moved::from: u8'
+printf 'trusty_memory::engine::Ev::Moved\tvariant\tKEEP\tvariant-pending T3: member of Ev\tA2c\n' >> "$TMP/case.tsv"
+run_case variant-mixed-tags-one-enum-two-paths 1 "RATCHET enum Ev: mixed tags T1 at $MV, T3 at trusty_memory::engine::Ev::Moved" "$TMP/v-mixed.api"
+pending_case v-one "$EVR" "$MV" variant KEEP 'variant-pending T3: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8" \
+  '#[non_exhaustive] pub enum trusty_memory::engine::Ev' 'pub trusty_memory::engine::Ev::Moved' 'pub trusty_memory::engine::Ev::Moved::from: u8'
+printf 'trusty_memory::engine::Ev::Moved\tvariant\tKEEP\tvariant-pending T3: member of Ev\tA2c\n' >> "$TMP/case.tsv"
+run_case variant-one-tag-two-paths 0 '13 audited path(s) match' "$TMP/v-one.api"
+
+# 132-138: the ratchet file and the flags fail closed (exit 2).
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+RATCHET_FIXTURE="$TMP/r.tsv"
+rm -f "$RATCHET_FIXTURE"
+run_case ratchet-file-missing 2 'no ratchet table at' "$TMP/base.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 0:0 0:0 1:1 0:0 0:0 0:0 0:0
+sed '1s/ceiling/limit/' "$RATCHET_FIXTURE" > "$TMP/r-bad.tsv"
+mv "$TMP/r-bad.tsv" "$RATCHET_FIXTURE"
+run_case ratchet-file-bad-header 2 'bad ratchet header at line 1' "$TMP/base.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 0:0 0:x 1:1 0:0 0:0 0:0 0:0
+run_case ratchet-file-non-integer 2 'malformed ratchet row at line 4' "$TMP/base.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 0:0 0:0 1:1 0:0 0:0 0:0 0:0
+printf 'anyhow\tT2\t0\t0\n' >> "$RATCHET_FIXTURE"
+run_case ratchet-file-duplicate-row 2 'duplicate ratchet row anyhow T2' "$TMP/base.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 0:0 0:0 1:1 0:0 0:0 0:0
+run_case ratchet-file-missing-row 2 'ratchet table lacks variant T4' "$TMP/base.api"
+ratchet_file "$RATCHET_FIXTURE" 0:0 0:0 0:0 1:1 0:0 0:0 0:0 0:0
+run_case base-ratchet-file-missing 2 'no ratchet table at' "$TMP/base.api" --base-ratchet "$TMP/no-base.tsv"
+run_case base-ratchet-without-path 2 '--base-ratchet needs a path' "$TMP/base.api" --base-ratchet
+RATCHET_FIXTURE=''
+
+# 139-141: --final (the T4 end state) fails on any pending marker of either
+# kind, and passes a table with none.
+pending_case a-final '' "$LOAD" method KEEP "$AP2" "$LOADL"
+run_case final-fails-on-anyhow-marker 1 "PENDING $LOAD: anyhow-pending T2${NL}PENDING trusty_memory::socket_path: anyhow-pending T4" "$TMP/a-final.api" --final
+pending_case p-ok "$EVF" "$MV" variant KEEP 'variant-pending T3: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8"
+run_case final-fails-on-variant-marker 1 "PENDING $MV: variant-pending T3" "$TMP/p-ok.api" --final
+grep -v 'socket_path' "$TMP/base.api" > "$TMP/final-clean.api"
+grep -v 'socket_path' "$TMP/base.tsv" > "$TMP/case.tsv"
+run_case final-passes-with-no-marker 0 '6 audited path(s) match' "$TMP/final-clean.api" --final
 
 echo "check_engine_api_audit_selftest: $PASSED passed, $FAILED failed (bash $BASH_VERSION)"
 [ "$FAILED" -eq 0 ]
