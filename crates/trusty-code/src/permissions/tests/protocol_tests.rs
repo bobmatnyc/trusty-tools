@@ -142,6 +142,7 @@ async fn respond_resolves_a_pending_request() {
         ask: Some(broker.session("s-rpc")),
         events: Some(Arc::clone(&events) as Arc<dyn PermissionEvents>),
         root: None,
+        delegator: None,
     };
     let gate = ctx.gate_for(
         Arc::new(agent_with_permissions("permissions:\n  bash: ask\n")),

@@ -384,6 +384,9 @@ async fn run_and_record(
         // #7948: the run's working root, so a relative path rule also decides
         // the absolute in-root spelling `tools::fs::scoped_path` accepts.
         root: Some(work_root.clone()),
+        // #8288: a delegating PM writes no source — not itself, and not by
+        // delegating to its own card. A solo run keeps its tools.
+        delegator: (!params.no_delegate).then(|| pm_config.agent.name.clone()),
     };
 
     let project_context = load_project_context(&work_root);

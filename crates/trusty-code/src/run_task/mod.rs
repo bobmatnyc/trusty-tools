@@ -359,6 +359,18 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     // catalog string) so `ProjectToolFactory` can register `use_skill` against
     // the SAME resolver instance the catalog was rendered from (experimental,
     // refs #2892).
+    // #7948: headless — no broker, so an `ask` resolves at once per
+    // `params.permission_mode`; the project root lets a relative path rule
+    // decide the absolute in-root spelling. #8288: a delegating PM writes no
+    // source, itself or through its own card. One context gates the PM and
+    // every delegation.
+    let mut permission_ctx =
+        crate::permissions::PermissionContext::headless(params.permission_mode)
+            .with_root(params.project.clone());
+    if !params.no_delegate {
+        permission_ctx = permission_ctx.with_delegator(pm_config.agent.name.clone());
+    }
+
     let engineer_runner = build_engineer_runner(
         wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
@@ -367,6 +379,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
         Arc::clone(&transcript),
         deadline_secs,
         redelegation_signal.clone(),
+        permission_ctx.clone(),
     );
 
     // The PM's tool registry: the delegate tool (the PM orchestrates; the
@@ -504,9 +517,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
         // run's working root, so a relative path rule also decides the absolute
         // in-root spelling of the same file.
         .with_permission_gate(Arc::new(
-            crate::permissions::PermissionContext::headless(params.permission_mode)
-                .with_root(params.project.clone())
-                .gate_for(Arc::new(pm_config.clone()), "pm"),
+            permission_ctx.gate_for(Arc::new(pm_config.clone()), "pm"),
         ))
         // #2279: the PM never calls `bash` itself (its registry above is
         // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
@@ -583,6 +594,10 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`,
 /// `run_task::tests::use_skill_on_legacy_path_reaches_engineer_and_transcript`.
+// #8288: the permission context is the eighth argument because the PM's own
+// gate shares it; bundling it with the prompt or lifecycle values would group
+// unrelated concerns only to satisfy the arity lint.
+#[allow(clippy::too_many_arguments)]
 fn build_engineer_runner(
     llm: Arc<dyn InferenceAdapter>,
     params: &RunTaskParams,
@@ -591,6 +606,7 @@ fn build_engineer_runner(
     transcript: SharedTranscript,
     deadline_secs: u64,
     redelegation_signal: RedelegationCapSignal,
+    permissions: crate::permissions::PermissionContext,
 ) -> Arc<dyn AgentRunner> {
     let engineer_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
         llm,
@@ -609,13 +625,8 @@ fn build_engineer_runner(
         // always resolves as `HarnessMode::DailyDriver` (see
         // `daily_driver_skills_catalog`'s docs).
         .with_mode(HarnessMode::DailyDriver)
-        // #7948: headless — no broker, so a delegated agent's `ask` resolves
-        // at once per `params.permission_mode`. The root is the project the
-        // engineer's tools are scoped to, matching its gate's path rules.
-        .with_permissions(
-            crate::permissions::PermissionContext::headless(params.permission_mode)
-                .with_root(params.project.clone()),
-        );
+        // #7948/#8288: the run's one headless context, built by the caller.
+        .with_permissions(permissions);
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }

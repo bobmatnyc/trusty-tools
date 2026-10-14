@@ -600,6 +600,67 @@ async fn delegated_turns_carry_the_delegated_agents_role() {
     );
 }
 
+/// #8288: the legacy path's delegating PM writes no source through its own
+/// card either — the sibling of
+/// `task::executor::tests::delegating_pm_cannot_write_source_directly_or_through_itself`.
+///
+/// What: a disk `pm.md` granting `write_file` as `ask`, `AllowAsks`, the PM
+/// delegating to `pm`; asserts the sub-agent ran and its write never landed.
+/// Test: this test.
+#[tokio::test]
+async fn delegating_pm_cannot_write_source_through_itself() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    std::fs::write(
+        agents.path().join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\ntcode_tools: [read_file, write_file, finish_task]\npermissions:\n  write_file: ask\n---\n\nYou are the PM.\n",
+    )
+    .expect("write pm.md");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let delegate_to_self = json!({
+        "id": "gen-delegate-self",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-del-self",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_to_agent",
+                        "arguments": json!({"agent_name": "pm", "task": "create self.py"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62}
+    });
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_self,
+        write_file_response("self.py", "print('pm')"),
+        stop_response("pm sub-agent: done"),
+        stop_response("pm: task complete"),
+    ]));
+    let p = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::AllowAsks,
+        ..params(&agents, &project, None)
+    };
+
+    let report = execute_run_task(p, llm).await;
+
+    // Two PM turns plus the sub-agent's two: the delegation was dispatched.
+    assert_eq!(
+        report.transcript.len(),
+        4,
+        "test premise: the self-delegation must run a sub-agent loop: {:?}",
+        report.transcript
+    );
+    assert!(
+        !project.path().join("self.py").exists(),
+        "a delegating PM must not write source by delegating to its own card"
+    );
+}
+
 /// The PM's configured `[llm].max_tokens` reaches its `ChatRequest` via
 /// `execute_run_task` — the exact entry point of the run_task max-tokens bug.
 ///
