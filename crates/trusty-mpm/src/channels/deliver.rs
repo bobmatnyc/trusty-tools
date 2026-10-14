@@ -260,6 +260,7 @@ impl<E: DeliverEnv> Step<'_, E> {
     }
 }
 
+// #9873: the daemon glue's tests reuse this module's recorder.
 #[cfg(test)]
 #[path = "deliver_tests.rs"]
-mod tests;
+pub(crate) mod tests;

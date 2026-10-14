@@ -66,6 +66,8 @@ pub(crate) enum TableMode {
     /// The real table, but `state` reports every question unanswered, so
     /// only the CAS can catch a second answer.
     StaleState,
+    /// The real `resolve` runs, then the caller's task panics (F16).
+    PanicsAfterResolve,
 }
 
 /// A counting wrapper over the real table.
@@ -110,7 +112,11 @@ impl AnswerTable for Counting {
         if let TableMode::Resolves(outcome) = &self.mode {
             return outcome.clone();
         }
-        self.inner.resolve(id, answerer, conversation, text)
+        let outcome = self.inner.resolve(id, answerer, conversation, text);
+        if matches!(self.mode, TableMode::PanicsAfterResolve) {
+            panic!("the decision task dies after resolve: {outcome:?}");
+        }
+        outcome
     }
 
     fn is_poisoned(&self) -> bool {
@@ -132,6 +138,8 @@ pub(crate) struct Fake {
     pub(crate) audits: Mutex<Vec<(&'static str, bool)>>,
     pub(crate) resolves: Arc<AtomicUsize>,
     pub(crate) table_reads: AtomicUsize,
+    /// Released together at the preflight, so racing answers meet at `resolve`.
+    pub(crate) gate: Option<Arc<std::sync::Barrier>>,
     _tmp: Arc<tempfile::TempDir>,
 }
 
@@ -154,6 +162,7 @@ impl Fake {
             audits: Mutex::new(Vec::new()),
             resolves: Arc::new(AtomicUsize::new(0)),
             table_reads: AtomicUsize::new(0),
+            gate: None,
             _tmp: Arc::new(tmp),
         }
     }
@@ -223,6 +232,9 @@ impl InboundEnv for Fake {
     }
 
     fn preflight(&self, _question: &Question) -> Result<(), String> {
+        if let Some(gate) = &self.gate {
+            gate.wait();
+        }
         self.preflight.clone()
     }
 

@@ -42,6 +42,9 @@ pub mod files;
 pub mod fleet;
 mod foreign_harness;
 pub mod front_gate;
+// #9873: the daemon body of an inbound channel answer (P5).
+#[cfg(feature = "channels")]
+pub mod inbound;
 // #9843: the FRONT gate's answer — launch or deny the withheld runtime.
 mod front_gate_answer;
 pub mod inproject;

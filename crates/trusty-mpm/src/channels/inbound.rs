@@ -418,6 +418,7 @@ impl InboundLimiter {
     }
 }
 
+// #9873: the daemon glue's tests reuse this module's fakes.
 #[cfg(test)]
 #[path = "inbound_tests.rs"]
-mod tests;
+pub(crate) mod tests;
