@@ -241,6 +241,11 @@ pub(super) const D4_REMEDY: &str = "This floor binds every session but the Archi
      thread, and `TRUSTY_MPM_PM_UNRESTRICTED` / `TRUSTY_MPM_DISABLE_HOOKS` do not lift it. \
      Ask the operator, or run it from the Architect session.";
 
+// #8436 PR C: the guard-lift-at-init floor reads the same segments.
+#[path = "guard_lift_init.rs"]
+mod guard_lift_init;
+pub(crate) use guard_lift_init::{GUARD_LIFT_INIT_RULE, evaluate_guard_lift_init};
+
 #[cfg(test)]
 #[path = "floor_d4_tests.rs"]
 mod tests;
