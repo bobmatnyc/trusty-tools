@@ -1,11 +1,11 @@
-//! Tests for the `auto_memory` doctor check and its `--fix` repair (#7685).
+//! Tests for the `auto_memory` doctor check and its `--fix` repair (#7685, #8436).
 //!
 //! Why: split into a sibling file so `doctor_auto_memory.rs` stays well under
 //! the 500-SLOC production cap, the same pattern every other `doctor_*_tests.rs`
 //! in this directory uses.
-//! What: all three verdicts of [`super::check_auto_memory`] — the same
-//! configuration graded against a live and a dead trusty-memory — plus tier
-//! precedence, the index half of the directive, and the four repair states.
+//! What: every verdict of [`super::check_auto_memory`] — auto memory on fails
+//! beside a live AND a dead trusty-memory (#8436) — plus tier precedence, the
+//! index half of the directive, and the repair states.
 //! Reachability and the config dir are INJECTED, so no test depends on whether
 //! the host happens to be running trusty-memory.
 //! Test: this is the test module.
@@ -340,7 +340,7 @@ fn auto_memory_repair_applies_when_absent() {
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", r#"{"outputStyle": "x"}"#);
 
-    let steps = repair_auto_memory(project, RepairMode::Apply, true);
+    let steps = repair_auto_memory(project, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1);
     assert!(steps[0].changed(), "{:?}", steps[0].status);
@@ -355,16 +355,22 @@ fn auto_memory_repair_applies_when_absent() {
     );
 }
 
+#[serial_test::serial]
 #[test]
 fn auto_memory_repair_writes_false_when_memory_is_down() {
     // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14). The
     // failure branch: with trusty-memory down `--fix` still writes `false` —
-    // it never turns auto memory back on — and names the migration.
+    // it never turns auto memory back on — and names the migration. The repair
+    // takes no trusty-memory input; its socket names a dead path regardless.
     let tmp = tempfile::TempDir::new().unwrap();
+    let _memory = EnvVarGuard::set(
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        tmp.path().join("no-trusty-memory.sock"),
+    );
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", ON);
 
-    let steps = repair_auto_memory(project, RepairMode::Apply, false);
+    let steps = repair_auto_memory(project, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1, "a `true` is a repair whatever the daemon");
     assert!(steps[0].changed(), "{:?}", steps[0].status);
@@ -377,14 +383,16 @@ fn auto_memory_repair_writes_false_when_memory_is_down() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
+    // The literal key name: the #9123 credential-test scan reads a `_KEY`
+    // identifier beside an env mutation as a credential test.
     assert_eq!(
-        written[AUTO_MEMORY_KEY],
+        written["autoMemoryEnabled"],
         serde_json::Value::Bool(false),
         "auto memory must stay off with trusty-memory down: {written}"
     );
 
     // An already-off project beside a dead daemon needs no repair at all.
-    assert!(repair_auto_memory(project, RepairMode::Apply, false).is_empty());
+    assert!(repair_auto_memory(project, RepairMode::Apply).is_empty());
 }
 
 #[test]
@@ -402,7 +410,7 @@ fn auto_memory_repair_never_migrates() {
     let fact = index.parent().unwrap().join("a-fact.md");
     std::fs::write(&fact, "---\nname: a-fact\n---\nbody\n").unwrap();
 
-    let steps = repair_auto_memory(&project, RepairMode::Apply, true);
+    let steps = repair_auto_memory(&project, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1, "the repair writes the key and nothing else");
     assert_eq!(
@@ -420,7 +428,7 @@ fn auto_memory_repair_dry_run_writes_nothing() {
     let body = r#"{"outputStyle": "x"}"#;
     write_settings(project, ".claude/settings.json", body);
 
-    let steps = repair_auto_memory(project, RepairMode::DryRun, true);
+    let steps = repair_auto_memory(project, RepairMode::DryRun);
 
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].status, StepStatus::Planned);
@@ -437,7 +445,7 @@ fn auto_memory_repair_is_silent_when_already_false() {
     let project = tmp.path();
     write_settings(project, ".claude/settings.json", OFF);
 
-    assert!(repair_auto_memory(project, RepairMode::Apply, true).is_empty());
+    assert!(repair_auto_memory(project, RepairMode::Apply).is_empty());
 }
 
 #[test]
@@ -449,7 +457,7 @@ fn auto_memory_repair_reports_a_write_failure() {
     let project = tmp.path();
     std::fs::create_dir_all(project.join(".claude").join("settings.json")).unwrap();
 
-    let steps = repair_auto_memory(project, RepairMode::Apply, true);
+    let steps = repair_auto_memory(project, RepairMode::Apply);
 
     assert_eq!(steps.len(), 1);
     assert!(

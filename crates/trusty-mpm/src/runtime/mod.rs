@@ -252,13 +252,9 @@ impl FromStr for RuntimeKind {
 /// factory keeps that mapping in a single place so adding a backend touches only
 /// this function and the enum.
 /// What: returns a boxed adapter wrapping the shared tmux driver — a
-/// [`ClaudeCodeAdapter`] or [`TcodeAdapter`]. `memory_reachable` is what the
-/// caller's `prepare_session*` already resolved about trusty-memory (#7685);
-/// `None` from a caller that ran no preparation leaves the adapter to probe, so
-/// the answer is never simply guessed. `TcodeAdapter` has no auto memory to
-/// decide about and ignores it.
-/// Test: `build_adapter_returns_matching_identify`,
-/// `spawn_uses_the_launch_resolved_reachability`.
+/// [`ClaudeCodeAdapter`] or [`TcodeAdapter`]. #8436: it takes no trusty-memory
+/// verdict — a Claude Code launch turns auto memory off unconditionally.
+/// Test: `build_adapter_returns_matching_identify`.
 ///
 /// #8233: `framework_root` is the `…/.trusty-mpm` directory the launch reads and
 /// writes — `DaemonState::framework_root()` on every daemon route,
@@ -270,15 +266,10 @@ impl FromStr for RuntimeKind {
 pub fn build_adapter(
     kind: RuntimeKind,
     tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
-    memory_reachable: Option<bool>,
     framework_root: &std::path::Path,
 ) -> Box<dyn RuntimeAdapter> {
     match kind {
-        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(
-            tmux,
-            memory_reachable,
-            framework_root,
-        )),
+        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(tmux, framework_root)),
         RuntimeKind::Tcode => Box::new(TcodeAdapter::new(tmux)),
     }
 }
@@ -367,9 +358,9 @@ mod tests {
         let root = std::env::temp_dir()
             .join("tm-inert-root")
             .join(".trusty-mpm");
-        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), None, &root);
+        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone(), &root);
         assert_eq!(claude.identify(), "claude-code");
-        let tcode = build_adapter(RuntimeKind::Tcode, tmux, None, &root);
+        let tcode = build_adapter(RuntimeKind::Tcode, tmux, &root);
         assert_eq!(tcode.identify(), "tcode");
     }
 }

@@ -655,7 +655,7 @@ async fn handler_spawn_wires_provision_and_spawn() {
     // #8233: a temp framework root, so this wiring test provisions nothing into
     // the operator's own `~/.trusty-mpm`.
     let root_dir = tempfile::tempdir().expect("framework root tempdir");
-    let adapter = ClaudeCodeAdapter::new(tmux.clone(), None, &root_dir.path().join(".trusty-mpm"));
+    let adapter = ClaudeCodeAdapter::new(tmux.clone(), &root_dir.path().join(".trusty-mpm"));
     // `spawn` calls `which claude` — it may fail in CI where `claude` is
     // absent. We tolerate that error here since we're testing the wiring,
     // not the binary availability.
@@ -916,7 +916,6 @@ async fn tcode_session_spawns_and_accepts_commands() {
     let adapter = build_adapter(
         record.runtime,
         mgr.tmux_driver(),
-        None,
         &root_dir.path().join(".trusty-mpm"),
     );
     assert_eq!(adapter.identify(), "tcode");

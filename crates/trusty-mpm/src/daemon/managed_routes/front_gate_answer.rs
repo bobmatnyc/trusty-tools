@@ -36,12 +36,7 @@ pub async fn spawn_runtime_for(
     record: &SessionRecord,
 ) -> Result<(), String> {
     let mgr = state.session_manager().await;
-    let adapter = build_adapter(
-        record.runtime,
-        mgr.tmux_driver(),
-        None,
-        state.framework_root(),
-    );
+    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), state.framework_root());
     let gh_env = super::lifecycle::resolve_gh_env(state, &launch_workspace(record)).await;
     let spec_dir = crate::runtime::launch_spec::LaunchSpec::root();
     launch_withheld(&mgr, record, adapter.as_ref(), &gh_env, spec_dir.as_deref()).await

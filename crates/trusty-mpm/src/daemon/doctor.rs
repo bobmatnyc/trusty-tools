@@ -886,9 +886,8 @@ pub async fn run_doctor_for_manager(
 /// branches are adding checks to that list — and keeps the check free of
 /// ambient reads.
 /// What: probes trusty-memory through
-/// [`crate::core::memory_reachable::probe_memory_reachability`] (the same gate the
-/// launch path consults, so a session and the row grading it cannot disagree)
-/// and resolves the managed Claude config dir, then calls
+/// [`crate::core::memory_reachable::probe_memory_reachability`] and resolves the
+/// managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
 /// this wiring is covered by `run_doctor_produces_seventy_five_checks`.

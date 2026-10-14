@@ -91,7 +91,6 @@ impl Worst {
             mcp_env: &self.mcp_env,
             mcp_config: Some(&self.mcp_config),
             settings: None,
-            memory_reachable: true,
             // #8405: the worst case carries the configured renderer too.
             alternate_screen: true,
             profile: Default::default(),
@@ -113,7 +112,6 @@ fn bare_launch<'a>(cwd: &'a Path, gh_env: &'a [(String, String)]) -> ManagedLaun
         // #8233: `config_dir: None`, so no scoped file was provisioned.
         mcp_config: None,
         settings: None,
-        memory_reachable: false,
         alternate_screen: false,
         profile: Default::default(),
     }
@@ -170,24 +168,28 @@ fn env_unset_clears_nothing_without_a_gh_identity_binding() {
 #[test]
 fn env_set_enables_todo_tools_unconditionally() {
     // #8066: nothing about the host decides this one.
-    for reachable in [true, false] {
-        let set = managed_env_set(None, None, &[], reachable, &[]);
-        assert_eq!(value_of(&set, "CLAUDE_CODE_ENABLE_TODO_TOOLS"), Some("1"));
+    let set = managed_env_set(None, None, &[], &[]);
+    assert_eq!(value_of(&set, "CLAUDE_CODE_ENABLE_TODO_TOOLS"), Some("1"));
+}
+
+#[test]
+fn env_set_disables_auto_memory_unconditionally() {
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14). The
+    // builder takes no trusty-memory input at all, so no state of the daemon can
+    // drop the kill switch; the minimal and the fully-populated launch both carry
+    // it. The daemon-down branch is driven end to end by
+    // `spawn_and_resume_disable_auto_memory_when_trusty_memory_is_down`.
+    let bare = managed_env_set(None, None, &[], &[]);
+    let gh = vec![("GH_TOKEN".to_owned(), "gho_x".to_owned())];
+    let full = managed_env_set(
+        Some(Path::new("/managed/claude-config")),
+        Some("tok"),
+        &[("TRUSTY_INDEX".to_owned(), "i".to_owned())],
+        &gh,
+    );
+    for set in [bare, full] {
+        assert_eq!(value_of(&set, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), Some("1"));
     }
-}
-
-#[test]
-fn env_set_disables_auto_memory_when_trusty_memory_answers() {
-    let set = managed_env_set(None, None, &[], true, &[]);
-    assert_eq!(value_of(&set, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), Some("1"));
-}
-
-#[test]
-fn env_set_disables_auto_memory_when_trusty_memory_is_unreachable() {
-    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) — the
-    // trusty-memory-down branch carries the kill switch too.
-    let set = managed_env_set(None, None, &[], false, &[]);
-    assert_eq!(value_of(&set, "CLAUDE_CODE_DISABLE_AUTO_MEMORY"), Some("1"));
 }
 
 #[test]
@@ -195,7 +197,7 @@ fn env_set_relocates_the_config_dir() {
     // #4451/#4455: this relocation is what puts the bundled agent roster in the
     // `user` settings tier the spawn's --setting-sources flag loads.
     let dir = PathBuf::from("/managed/claude-config");
-    let set = managed_env_set(Some(&dir), None, &[], true, &[]);
+    let set = managed_env_set(Some(&dir), None, &[], &[]);
     assert_eq!(
         value_of(&set, "CLAUDE_CONFIG_DIR"),
         Some("/managed/claude-config")
@@ -207,14 +209,14 @@ fn env_set_carries_a_non_empty_mcp_env() {
     // #4181: the per-project pins the shared user-scope declarations cannot
     // carry as arguments.
     let mcp = vec![("TRUSTY_INDEX".to_owned(), "idx".to_owned())];
-    let set = managed_env_set(None, None, &mcp, true, &[]);
+    let set = managed_env_set(None, None, &mcp, &[]);
     assert_eq!(value_of(&set, "TRUSTY_INDEX"), Some("idx"));
 }
 
 #[test]
 fn env_set_carries_the_oauth_token_when_available() {
     // #2246: bypasses the CLAUDE_CONFIG_DIR-keyed Keychain divergence.
-    let set = managed_env_set(None, Some("tok"), &[], true, &[]);
+    let set = managed_env_set(None, Some("tok"), &[], &[]);
     assert_eq!(
         value_of(&set, crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR),
         Some("tok")
@@ -223,7 +225,7 @@ fn env_set_carries_the_oauth_token_when_available() {
 
 #[test]
 fn env_set_omits_the_oauth_token_when_absent() {
-    let set = managed_env_set(None, None, &[], true, &[]);
+    let set = managed_env_set(None, None, &[], &[]);
     assert_eq!(
         value_of(&set, crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR),
         None
@@ -235,7 +237,7 @@ fn env_set_carries_the_gh_identity() {
     // #3025: the pinned account must reach `claude`'s environment — it just no
     // longer travels through a sourced temp file to get there.
     let gh = vec![("GH_TOKEN".to_owned(), "gho_x".to_owned())];
-    let set = managed_env_set(None, None, &[], true, &gh);
+    let set = managed_env_set(None, None, &[], &gh);
     assert_eq!(value_of(&set, "GH_TOKEN"), Some("gho_x"));
 }
 
