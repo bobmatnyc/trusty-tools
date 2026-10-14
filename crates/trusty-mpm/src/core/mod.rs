@@ -407,6 +407,8 @@ pub mod stop_spool;
 pub mod statusline_settings;
 pub mod stray_mcp;
 pub mod tmux;
+// #9557: which tmux server a process may reach; a sandbox reaches only its own.
+pub mod tmux_access;
 // #6542: each test binary's private default tmux server; test support only.
 #[doc(hidden)]
 pub mod tmux_test_isolation;

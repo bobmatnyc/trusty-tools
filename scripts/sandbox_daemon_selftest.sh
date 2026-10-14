@@ -60,7 +60,9 @@ LAUNCHER="$SCRIPT_DIR/sandbox_daemon.sh"
 PASSED=0
 FAILED=0
 # Physical, so it compares equal to the stub's `pwd -P` (macOS TMPDIR is a symlink).
-TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+# Under /tmp (#9557): the launcher refuses a tmux socket path over sun_path, and
+# macOS's per-user TMPDIR plus a case dir is past it.
+TMP_ROOT="$(cd "$(mktemp -d /tmp/tmsbx.XXXXXX)" && pwd -P)"
 # chmod first: the mode-000 cases leave directories rm cannot descend into.
 trap 'chmod -R u+rwx "$TMP_ROOT" 2>/dev/null; rm -rf "$TMP_ROOT"' EXIT
 
@@ -162,7 +164,7 @@ if [ "$STATUS2" -ne 0 ]; then
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
 elif ! printf '%s' "$OUT2" \
-    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX LANG RUST_LOG"; then
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG"; then
   fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in
@@ -332,8 +334,7 @@ fi
 # 10. teardown (#9557): after the daemon exits the launcher kills the server
 # on the sandbox's own socket, by `-S` path, and touches no other server.
 if command -v python3 >/dev/null 2>&1; then
-  # Under /tmp: a socket path must fit `sun_path` (104 bytes on macOS).
-  DIR10="$(cd "$(mktemp -d /tmp/tmsbx.XXXXXX)" && pwd -P)"
+  DIR10="$TMP_ROOT/case10"
   FAKE_BIN="$TMP_ROOT/fake-tmux-bin"
   mkdir -p "$DIR10/data/tmux/tmux-$(id -u)" "$FAKE_BIN"
   chmod 700 "$DIR10/data/tmux" "$DIR10/data/tmux/tmux-$(id -u)"
@@ -346,7 +347,6 @@ if command -v python3 >/dev/null 2>&1; then
   STATUS10=$?
   set -e
   CALLS10="$(cat "$TMP_ROOT/tmux-calls" 2>/dev/null || true)"
-  rm -rf "$DIR10"
   if [ "$STATUS10" -ne 0 ]; then
     fail teardown "launcher exit $STATUS10"
     printf '%s\n' "$OUT10" | sed 's/^/    /'

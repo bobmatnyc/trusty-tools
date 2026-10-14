@@ -261,7 +261,8 @@ impl TmuxDriver {
     /// found anywhere.
     ///
     /// Scratch-environment gate (#5784): before resolving anything, this asks
-    /// [`crate::core::host_state_gate::host_state_access`] whether the process
+    /// [`crate::core::tmux_access::tmux_access`] (#9557: in a sandbox, only its
+    /// own server) whether the process
     /// is running in the operator's real environment. It is not when `$HOME`
     /// has been reassigned away from this uid's password-database home, and a
     /// tmux server is keyed to the uid, not to `$HOME` — so a scratch daemon
@@ -288,7 +289,7 @@ impl TmuxDriver {
     /// `tmux_backend_constructs_without_spawning` resolves through a
     /// `with_tmux_binary` scope.
     pub fn discover() -> Result<Self> {
-        let access = crate::core::host_state_gate::host_state_access();
+        let access = crate::core::tmux_access::tmux_access(); // #9557
         if let Some(reason) = access.skip_reason() {
             tracing::warn!("#5784: tmux access refused — {reason}");
             return Err(Error::Protocol(format!("tmux access refused: {reason}")));

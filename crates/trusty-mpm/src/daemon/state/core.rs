@@ -929,10 +929,11 @@ impl DaemonState {
                 // responds (operations that need tmux will surface a typed error).
                 // #6348: a scratch framework root refuses here too, not just a
                 // scratch $HOME.
-                let refusal =
+                let refusal = crate::core::tmux_access::tmux_access_for_root(&self.framework_root)
+                    .skip_reason(); // #9557: a sandbox reaches its own server
+                let host =
                     crate::core::host_state_gate::host_state_access_for_root(&self.framework_root)
-                        .skip_reason();
-                let host = refusal.is_none();
+                        .is_allowed();
                 let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
                     match refusal {
                         Some(reason) => {

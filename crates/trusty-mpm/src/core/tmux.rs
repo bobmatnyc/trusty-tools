@@ -267,8 +267,8 @@ pub fn run_tmux_with_bin(
 /// [`create_managed_session`] and [`run_tmux`] without ever constructing one —
 /// so the check also belongs at the spawn itself, which this module already
 /// owns as the crate's single tmux-spawning point.
-/// What: `Ok(())` when [`crate::core::host_state_gate::host_state_access`]
-/// allows; otherwise an `io::Error` of kind `PermissionDenied` carrying the
+/// What: `Ok(())` when [`crate::core::tmux_access::tmux_access`] allows (the
+/// host-state gate, or a sandbox's own server, #9557); otherwise an `io::Error` of kind `PermissionDenied` carrying the
 /// reason, so a caller that only prints the error still tells its operator
 /// which variable lifts the gate. Logged at `debug!` rather than `warn!`
 /// because one operation issues many spawns — the loud line belongs at the
@@ -279,7 +279,8 @@ pub fn run_tmux_with_bin(
 /// and a `run_tmux(KillSession)` through this guard and asserts each is
 /// refused with `PermissionDenied` and no subprocess.
 fn host_state_guard() -> std::io::Result<()> {
-    match crate::core::host_state_gate::host_state_access().skip_reason() {
+    // #9557: a sandbox reaches only its own server (`core::tmux_access`).
+    match crate::core::tmux_access::tmux_access().skip_reason() {
         None => Ok(()),
         Some(reason) => {
             tracing::debug!("#5784: tmux spawn refused — {reason}");
@@ -626,7 +627,7 @@ fn create_managed_session_inner(
     // for by name, so it is the one that earns a `warn!` — and refusing here
     // skips the retried apply-and-verify cycle that would otherwise emit a
     // dozen refusals for one `tm launch`.
-    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+    if let Some(reason) = crate::core::tmux_access::tmux_access().skip_reason() {
         warn!("#5784: refusing to create tmux session '{name}' — {reason}");
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
