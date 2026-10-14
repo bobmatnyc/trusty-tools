@@ -14,6 +14,7 @@
 //! Test: palace_format_tests.rs — `n_plus_one_palace_is_refused_and_bytes_unchanged`,
 //! and the other arms listed on each function below.
 
+use super::kg::KgError;
 use super::kg_store::{
     DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker,
     TRIPLES, decode_value, encode_value,
@@ -451,11 +452,23 @@ pub(crate) fn stamp_format(wtx: &redb::WriteTransaction, format: u32) -> anyhow:
 ///
 /// Why: a refusal never resolves by waiting, so the open retry loops stop on
 /// it (#9274), as they do for `is_incompatible_format_refusal`.
-/// Test: `format_errors_are_not_retried`.
+/// Test: `format_errors_are_not_retried`,
+/// `format_refusal_is_seen_through_kg_error`.
 pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
-    err.chain()
-        .filter_map(|e| e.downcast_ref::<PalaceStoreError>())
-        .any(PalaceStoreError::is_format_refusal)
+    palace_store_errors(err).any(PalaceStoreError::is_format_refusal)
+}
+
+/// Every `PalaceStoreError` in an error's chain, bare or inside a `KgError`.
+///
+/// Why (#9278 Q4): `KgError::Palace` is transparent, so `chain()` steps past
+/// its payload; only the `KgError` accessor reaches it.
+/// Test: `format_refusal_is_seen_through_kg_error`,
+/// `count_refusal_sees_a_kg_error_palace`.
+pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &PalaceStoreError> {
+    err.chain().filter_map(|e| {
+        e.downcast_ref::<PalaceStoreError>()
+            .or_else(|| e.downcast_ref::<KgError>()?.as_palace_store())
+    })
 }
 
 #[cfg(test)]

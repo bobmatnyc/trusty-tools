@@ -16,8 +16,9 @@ use crate::engine::store::write_deadline::WriteTxnError;
 /// What: the typed variants carry engine-owned errors and display them as-is.
 /// `Storage` (redb, io), `Codec` (postcard, serde_json) and `Other` box the
 /// whole internal error, so `{e}` and `{e:#}` print the same text as before.
-/// `Closed` and `Other` are message-only and not a stable match target.
-/// Test: `boxed_variant_keeps_the_display_chain`,
+/// They are opaque: no source type is promised, so match the variant and read
+/// the text (#9278 Q3). `Other` is message-only and not a stable match target.
+/// Test: `from_internal_maps_each_variant_and_keeps_display`,
 /// `kg_store_open_format_refusal_is_recoverable_as_palace_store`,
 /// `kg_store_redb_paths_return_kg_error`.
 #[derive(Debug, thiserror::Error)]
@@ -41,9 +42,6 @@ pub enum KgError {
     /// A stored row did not encode or decode.
     #[error(transparent)]
     Codec(Box<dyn std::error::Error + Send + Sync>),
-    /// The KG writer is gone.
-    #[error("kg writer closed: {0}")]
-    Closed(String),
     /// Any other failure.
     #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),

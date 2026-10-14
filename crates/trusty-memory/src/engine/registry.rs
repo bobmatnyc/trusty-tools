@@ -750,23 +750,31 @@ impl PalaceRegistry {
     /// `load_palace` stopped making one layer down. This is the only place that
     /// knows which of `open_palace`'s failure modes is absence, so the answer
     /// lives here instead of being re-derived at each call site.
-    /// What: `true` for a root [`PalaceStoreError::NotFound`] or a root
-    /// [`PalaceNotFound`], the crate-only form of that variant `open_palace`
-    /// raises (#9751: the variant carries the metadata path, which callers
-    /// relayed). Every other failure — including `Io` and `Json` from
-    /// `load_palace` — returns `false`.
+    /// What: `true` for a root [`PalaceStoreError::NotFound`] (bare or in a
+    /// `KgError::Palace`) or a root [`PalaceNotFound`], the crate-only form of
+    /// that variant `open_palace` raises (#9751: the variant carries the
+    /// metadata path, which callers relayed). Every other failure — including
+    /// `Io` and `Json` from `load_palace` — returns `false`.
     /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
     /// read and the path-free absence; `open_error_is_not_absent_for_an_unstattable_palace_json`
-    /// covers a denied stat, the shape #5574 turned from `NotFound` into `Io`.
+    /// covers a denied stat, the shape #5574 turned from `NotFound` into `Io`;
+    /// `open_error_is_absent_sees_a_kg_error_palace` covers a `KgError` root.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn open_error_is_absent(err: &anyhow::Error) -> bool {
         // #9278 rebase ruling: `PalaceNotFound` is the crate-only, path-free
         // form of `PalaceStoreError::NotFound`; both are one absence.
-        err.downcast_ref::<PalaceNotFound>().is_some()
-            || matches!(
-                err.downcast_ref::<PalaceStoreError>(),
-                Some(PalaceStoreError::NotFound(_))
-            )
+        if err.downcast_ref::<PalaceNotFound>().is_some() {
+            return true;
+        }
+        // #9278 Q4: the root may be a `KgError::Palace`; the rule stays root-only.
+        let kg = || {
+            err.downcast_ref::<crate::engine::store::kg::KgError>()?
+                .as_palace_store()
+        };
+        matches!(
+            err.downcast_ref::<PalaceStoreError>().or_else(kg),
+            Some(PalaceStoreError::NotFound(_))
+        )
     }
 
     /// Register a `ROOMS` row for every room the palace's drawers already use.
