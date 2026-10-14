@@ -2292,6 +2292,39 @@ fn pr_7646_a_failed_step_is_reported_missing_never_applied() {
     );
 }
 
+/// An issue on one CLOSED project (#9749: #22/#25 were superseded by #45).
+const CLOSED_PROJECT_ISSUE_JSON: &str = r#"{"number":7274,"milestone":{"title":"mpm 1.6"},
+    "projectItems":[{"title":"trusty-mpm"}],"labels":[],"comments":[],"state":"OPEN"}"#;
+
+/// The owner's project list with `--closed`: the inherited one is closed.
+const CLOSED_PROJECT_LIST_JSON: &str = r#"{"projects":[
+    {"number":25,"title":"trusty-mpm","closed":true},
+    {"number":45,"title":"trusty-tools-master","closed":false}],"totalCount":2}"#;
+
+/// REGRESSION (#9749): `gh pr edit --add-project` cannot resolve a closed
+/// project, so a PR linking an issue still on #22/#25 exited 3 every time.
+/// Red before the fix: the project step fails twice and the run exits
+/// `EXIT_PARTIAL`.
+#[test]
+fn pr_9749_a_closed_inherited_project_does_not_fail_the_open() {
+    let (_d, path) = scratch_body(&body_linking("Refs #7274"));
+    let args = open_args(&path.to_string_lossy());
+    let gh = FakeGh::new()
+        .on("pr create", "https://github.com/o/r/pull/7639\n")
+        .on("issue view 7274", CLOSED_PROJECT_ISSUE_JSON)
+        .on("repo view", "o\n")
+        .on("project list", CLOSED_PROJECT_LIST_JSON)
+        .on_fail("--add-project trusty-mpm", "'trusty-mpm' not found")
+        .on("pr edit 7639", "");
+    let pre = FakePreflight::ok().with_diff(&["crates/trusty-mpm/src/lib.rs"]);
+
+    assert_eq!(
+        open::run(&gh, &args, &pre).expect("the PR exists"),
+        super::EXIT_OK,
+        "a closed inherited project is skipped, not a partial apply"
+    );
+}
+
 /// REGRESSION (#7868): `tm pr merge` re-ran the nine-field OPEN gate, so a body
 /// written to the sparse prose rules (defect / evidence / resolution, no filled
 /// headings for fields the change does not touch) could not be merged by the one
