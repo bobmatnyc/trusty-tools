@@ -43,7 +43,7 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot, TmuxDriver};
 /// scratch `$HOME` and asserts the error names the gate, not a missing
 /// session.
 fn discover_or_session_error(name: &str) -> Result<TmuxDriver, DaemonError> {
-    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+    if let Some(reason) = crate::core::tmux_access::tmux_access().skip_reason() {
         return Err(DaemonError::TmuxUnavailable(reason));
     }
     TmuxDriver::discover().map_err(|_| DaemonError::SessionNotFound {

@@ -56,6 +56,7 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
         "SHELL",
         "RUST_LOG",
         "TRUSTY_SANDBOX",
+        "TMUX_TMPDIR",
     ];
     let refused = [
         "TELEGRAM_BOT_TOKEN",
@@ -67,6 +68,10 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
         "TRUSTY_BUGREPORT_TOKEN_FILE",
         "SSH_AUTH_SOCK",
         "TELEGRAM_BOT_TOKEN",
+        // #9557: `$TMUX` names another server's socket; the host-state hatch
+        // would reach the default one. Both stay refused.
+        "TMUX",
+        "TRUSTY_MPM_ALLOW_HOST_STATE",
     ];
     let names = allowed.iter().chain(refused.iter()).map(OsString::from);
 
@@ -79,7 +84,9 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
             "OPENAI_API_KEY",
             "SSH_AUTH_SOCK",
             "TELEGRAM_BOT_TOKEN",
+            "TMUX",
             "TRUSTY_BUGREPORT_TOKEN_FILE",
+            "TRUSTY_MPM_ALLOW_HOST_STATE",
             "home",
         ]
     );

@@ -1,0 +1,2 @@
+Fixed
+- On a fresh tmux server, the first tm session now gets tm's `history-limit`, `mouse` and `alternate-screen` options. tm sends the `set-option` calls and `new-session` as one tmux invocation, so the server that `new-session` starts is the one the options land on; before, a separate `set-option -g` found no server ("no server running") on all three attempts, and the `tmux_options` doctor row stayed red. When tmux rejects an option, the session is still created and reported as unverified (#9461).

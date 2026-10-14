@@ -11,11 +11,12 @@
 #   and arguments it received, from a caller environment (built with `env -i`,
 #   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the five pinned names (HOME, PATH,
-#                   TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR, TRUSTY_SANDBOX) plus the
-#                   forwarded names the caller set (LANG, RUST_LOG), never the
-#                   fake secrets or `LC_API_KEY` (plus the names /bin/sh adds
-#                   itself), and `daemon --sandbox`
+#     allowlist     the stub sees exactly the six pinned names (HOME, PATH,
+#                   TMUX_TMPDIR, TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR,
+#                   TRUSTY_SANDBOX) plus the forwarded names the caller set
+#                   (LANG, RUST_LOG), never the fake secrets or `LC_API_KEY`
+#                   (plus the names /bin/sh adds itself), `daemon --sandbox`,
+#                   and TMUX_TMPDIR=<dir>/data/tmux (#9557)
 #     no-leak       no fake secret value appears in the launcher's output
 #     dry-run       prints the names, creates and starts nothing
 #     subset        with every name the daemon allows set, the launcher passes
@@ -41,6 +42,9 @@
 #                   000) refuses before the walk falls back to <dir>
 #     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
 #                   enter; it exits 1 and the daemon never starts
+#     teardown      after the daemon exits, the launcher runs
+#                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
+#                   and no other tmux call (#9557); skips without python3
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -56,7 +60,9 @@ LAUNCHER="$SCRIPT_DIR/sandbox_daemon.sh"
 PASSED=0
 FAILED=0
 # Physical, so it compares equal to the stub's `pwd -P` (macOS TMPDIR is a symlink).
-TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+# Under /tmp (#9557): the launcher refuses a tmux socket path over sun_path, and
+# macOS's per-user TMPDIR plus a case dir is past it.
+TMP_ROOT="$(cd "$(mktemp -d /tmp/tmsbx.XXXXXX)" && pwd -P)"
 # chmod first: the mode-000 cases leave directories rm cannot descend into.
 trap 'chmod -R u+rwx "$TMP_ROOT" 2>/dev/null; rm -rf "$TMP_ROOT"' EXIT
 
@@ -75,6 +81,7 @@ cat > "$STUB" <<'STUB_EOF'
 env | cut -d= -f1 | sort > "$HOME/stub-env-names"
 printf '%s\n' "$@" > "$HOME/stub-args"
 pwd -P > "$HOME/stub-pwd"
+printf '%s\n' "${TMUX_TMPDIR-unset}" > "$HOME/stub-tmux-tmpdir"
 STUB_EOF
 chmod +x "$STUB"
 
@@ -128,11 +135,14 @@ elif [ ! -f "$DIR1/home/stub-env-names" ]; then
 else
   # /bin/sh exports PWD, SHLVL, OLDPWD and _ on its own; they are not inherited.
   GOT="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR1/home/stub-env-names" | tr '\n' ' ')"
-  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX "
+  WANT="HOME LANG PATH RUST_LOG TMUX_TMPDIR TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX "
   if [ "$GOT" != "$WANT" ]; then
     fail allowlist "stub saw [$GOT], want [$WANT]"
   elif [ "$(tr '\n' ' ' < "$DIR1/home/stub-args")" != "daemon --sandbox " ]; then
     fail allowlist "stub args were not 'daemon --sandbox'"
+  elif [ "$(cat "$DIR1/home/stub-tmux-tmpdir")" != "$DIR1/data/tmux" ]; then
+    # #9557: the sandbox's own tmux socket directory, never the default.
+    fail allowlist "TMUX_TMPDIR was not <dir>/data/tmux"
   else
     pass allowlist
   fi
@@ -154,7 +164,7 @@ if [ "$STATUS2" -ne 0 ]; then
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
 elif ! printf '%s' "$OUT2" \
-    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX LANG RUST_LOG"; then
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG"; then
   fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in
@@ -319,6 +329,36 @@ else
   else
     pass cd-fails
   fi
+fi
+
+# 10. teardown (#9557): after the daemon exits the launcher kills the server
+# on the sandbox's own socket, by `-S` path, and touches no other server.
+if command -v python3 >/dev/null 2>&1; then
+  DIR10="$TMP_ROOT/case10"
+  FAKE_BIN="$TMP_ROOT/fake-tmux-bin"
+  mkdir -p "$DIR10/data/tmux/tmux-$(id -u)" "$FAKE_BIN"
+  chmod 700 "$DIR10/data/tmux" "$DIR10/data/tmux/tmux-$(id -u)"
+  SOCK10="$DIR10/data/tmux/tmux-$(id -u)/default"
+  python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK10"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
+  chmod +x "$FAKE_BIN/tmux"
+  set +e
+  OUT10="$(env -i PATH="$FAKE_BIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIR10" 2>&1)"
+  STATUS10=$?
+  set -e
+  CALLS10="$(cat "$TMP_ROOT/tmux-calls" 2>/dev/null || true)"
+  if [ "$STATUS10" -ne 0 ]; then
+    fail teardown "launcher exit $STATUS10"
+    printf '%s\n' "$OUT10" | sed 's/^/    /'
+  elif [ "$CALLS10" != "-S $SOCK10 kill-server" ]; then
+    fail teardown "tmux calls were [$CALLS10], want [-S $SOCK10 kill-server]"
+  elif ! printf '%s' "$OUT10" | grep -qF "tmux socket: $SOCK10"; then
+    fail teardown "the launcher did not name the sandbox socket"
+  else
+    pass teardown
+  fi
+else
+  echo "skip teardown: no python3 to bind a fake socket"
 fi
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"

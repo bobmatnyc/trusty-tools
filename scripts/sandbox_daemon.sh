@@ -9,13 +9,13 @@
 #   exported credential is inherited, and the Keychain belongs to the OS user,
 #   not to HOME. This script is the one sanctioned way to start an isolated
 #   daemon; hand-built `tm daemon` sandboxes are forbidden.
-# What: validates, then execs, in the foreground:
+# What: validates, then runs, in the foreground:
 #     env -i HOME=<dir>/home PATH=<caller's PATH> \
 #            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data TRUSTY_MPM_ADDR=127.0.0.1:<port> \
-#            TRUSTY_SANDBOX=1 \
+#            TRUSTY_SANDBOX=1 TMUX_TMPDIR=<dir>/data/tmux \
 #            [<FORWARDED names the caller has set>] \
 #            <tm> daemon --sandbox
-#   The five pinned names are always set; FORWARDED names (locale, terminal,
+#   The six pinned names are always set; FORWARDED names (locale, terminal,
 #   account name, temp dir, log filter) pass through only when the caller set
 #   them. No other variable reaches the daemon. Both lists are a subset of the
 #   daemon's own closed allowlist (`ENV_ALLOWLIST` and `LOCALE_CATEGORIES` in
@@ -33,6 +33,15 @@
 #   It does not rely on the daemon's sandbox latch to ignore that file.
 #   TRUSTY_SANDBOX=1 (#9178) also tells that loader to read no `.env.local`,
 #   project or $HOME tier, as a second layer behind the refusal above.
+#   tmux (#9557): the daemon gets a tmux server of its own. TMUX_TMPDIR is
+#   <dir>/data/tmux (mode 0700), so tmux's socket is
+#   <dir>/data/tmux/tmux-<uid>/default, never the default /tmp/tmux-<uid>/default.
+#   The daemon admits tmux only on a TMUX_TMPDIR inside its data dir
+#   (crates/trusty-mpm/src/core/tmux_access.rs). The socket path must fit
+#   sun_path, so a --dir whose socket path exceeds 103 bytes refuses; pick a
+#   shorter --dir (e.g. under /tmp). Teardown: when the daemon exits, the script
+#   runs `tmux -S <that socket> kill-server`, which stops only the sandbox's
+#   server. SIGINT, SIGTERM and SIGHUP are passed to the daemon first.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
@@ -56,7 +65,8 @@ set -euo pipefail
 
 # Always set by this script. Keep in step with the exec below.
 # #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
-PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX"
+# #9557: TMUX_TMPDIR gives the daemon its own tmux server.
+PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX TMUX_TMPDIR"
 # Passed through from the caller only when set — never a credential.
 FORWARDED="LANG LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
 LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE \
@@ -160,6 +170,12 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
 fi
 
 ADDR="127.0.0.1:$PORT"
+# #9557: the sandbox's own tmux socket directory and socket.
+TMUX_DIR="$SANDBOX/data/tmux"
+SOCK="$TMUX_DIR/tmux-$(id -u)/default"
+if [ "${SANDBOX#<}" = "$SANDBOX" ] && [ "${#SOCK}" -gt 103 ]; then
+  die "the tmux socket path is ${#SOCK} bytes, over the 103-byte sun_path limit: $SOCK; pick a shorter --dir"
+fi
 
 # The FORWARDED names the caller exported, as NAME=value words for env -i.
 # `compgen -e` lists exported names only: bash itself sets SHELL and TERM as
@@ -179,6 +195,7 @@ echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon address: $ADDR"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
 echo "sandbox_daemon: working directory: $SANDBOX/home"
+echo "sandbox_daemon: tmux socket: $SOCK"
 echo "sandbox_daemon: command: env -i $PASSED_NAMES $BIN daemon --sandbox"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -190,12 +207,35 @@ mkdir -p "$SANDBOX/home" "$SANDBOX/data"
 # #9161: never the caller's cwd; see the Working directory note in the header.
 # CDPATH stays set: the path is absolute, and CDPATH never rewrites one.
 cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"
+# #9557: 0700, since the daemon refuses a socket dir others can write.
+{ mkdir -p "$TMUX_DIR" && chmod 700 "$TMUX_DIR"; } || die "cannot create the tmux socket dir: $TMUX_DIR"
+
+# teardown: stop the sandbox's own tmux server, addressed by socket path only.
+teardown() {
+  if [ -S "$SOCK" ] && command -v tmux >/dev/null 2>&1; then
+    env -i PATH="$PATH" tmux -S "$SOCK" kill-server >/dev/null 2>&1 || true
+  fi
+}
+
 # `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
-exec env -i \
+env -i \
   HOME="$SANDBOX/home" \
   PATH="$PATH" \
   TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
   TRUSTY_MPM_ADDR="$ADDR" \
   TRUSTY_SANDBOX=1 \
+  TMUX_TMPDIR="$TMUX_DIR" \
   ${EXTRA[@]+"${EXTRA[@]}"} \
-  "$BIN" daemon --sandbox
+  "$BIN" daemon --sandbox &
+DAEMON_PID=$!
+trap 'kill -TERM "$DAEMON_PID" 2>/dev/null || true' INT TERM HUP
+# A trapped signal ends `wait` early; wait again until the daemon is reaped.
+while :; do
+  set +e
+  wait "$DAEMON_PID"
+  STATUS=$?
+  set -e
+  kill -0 "$DAEMON_PID" 2>/dev/null || break
+done
+teardown
+exit "$STATUS"

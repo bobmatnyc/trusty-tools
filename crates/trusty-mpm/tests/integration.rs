@@ -46,6 +46,8 @@ mod relocated_interactive_config_4181;
 mod resume_unresumable_mapping;
 // #9121: `tm daemon --sandbox` refuses secret-carrying envs, never printing values.
 mod sandbox_daemon_9121;
+// #9557: a sandbox daemon reaches only its own tmux server.
+mod sandbox_tmux_9557;
 mod services_integration;
 mod session_control_api;
 mod session_lifecycle;

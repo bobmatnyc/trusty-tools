@@ -267,8 +267,8 @@ pub fn run_tmux_with_bin(
 /// [`create_managed_session`] and [`run_tmux`] without ever constructing one —
 /// so the check also belongs at the spawn itself, which this module already
 /// owns as the crate's single tmux-spawning point.
-/// What: `Ok(())` when [`crate::core::host_state_gate::host_state_access`]
-/// allows; otherwise an `io::Error` of kind `PermissionDenied` carrying the
+/// What: `Ok(())` when [`crate::core::tmux_access::tmux_access`] allows (the
+/// host-state gate, or a sandbox's own server, #9557); otherwise an `io::Error` of kind `PermissionDenied` carrying the
 /// reason, so a caller that only prints the error still tells its operator
 /// which variable lifts the gate. Logged at `debug!` rather than `warn!`
 /// because one operation issues many spawns — the loud line belongs at the
@@ -279,7 +279,8 @@ pub fn run_tmux_with_bin(
 /// and a `run_tmux(KillSession)` through this guard and asserts each is
 /// refused with `PermissionDenied` and no subprocess.
 fn host_state_guard() -> std::io::Result<()> {
-    match crate::core::host_state_gate::host_state_access().skip_reason() {
+    // #9557: a sandbox reaches only its own server (`core::tmux_access`).
+    match crate::core::tmux_access::tmux_access().skip_reason() {
         None => Ok(()),
         Some(reason) => {
             tracing::debug!("#5784: tmux spawn refused — {reason}");
@@ -468,10 +469,9 @@ fn managed_session_command_sequence(
 /// caller who happens to read the log.
 /// What: `output` is the `new-session` process output — callers classify
 /// session-creation success/failure from it exactly as before
-/// (`output.status.success()`); `options_verified` is `true` only when an
-/// apply-and-verify cycle (server-up, `set-option -g` x2, `show-options`
-/// probe) confirmed `history-limit` landed on the server before this
-/// `new-session` call ran.
+/// (`output.status.success()`); `options_verified` is `true` only when the
+/// `set-option` calls ran in the same invocation before `new-session` (#9461)
+/// and the `show-options` probes read them back afterwards.
 #[derive(Debug)]
 pub struct ManagedSessionOutcome {
     /// Raw `tmux new-session` process output.
@@ -527,13 +527,14 @@ pub fn warn_if_options_unverified(outcome: &ManagedSessionOutcome, session_name:
 /// What: resolves the tmux binary (`tmux_bin` if given, else
 /// [`resolve_tmux_binary_or_bare`]), loads
 /// [`crate::core::trusty_tools_config::TrustyToolsConfig`] and resolves the
-/// `tmux:` section, then runs [`apply_and_verify_scrollback_options`] (#3386
-/// — retries the WHOLE apply-and-verify cycle, not just server-up, since a
-/// successful `start-server` does not prove the following `set-option -g`
-/// landed) before issuing `new-session`. Never blocks session creation on a
-/// degraded outcome — `new-session` always still runs — but the returned
-/// [`ManagedSessionOutcome::options_verified`] tells the caller whether it
-/// can trust the ergonomics landed.
+/// `tmux:` section, then sends the `set-option` calls and `new-session` as ONE
+/// `;`-joined invocation (#9461: on a fresh server only `new-session` keeps the
+/// server alive for the options). When that invocation fails, `new-session`
+/// runs alone. On a created session, [`apply_and_verify_scrollback_options`]
+/// re-applies and reads the options back (#3386). Never blocks session
+/// creation on a degraded outcome, but the returned
+/// [`ManagedSessionOutcome::options_verified`] is `true` only when the options
+/// landed before the pane AND read back.
 /// Test: argv construction and the ordering guarantee are covered once in
 /// `trusty_common::tmux`'s own tests; this crate's config-resolved call is
 /// covered by `managed_session_command_sequence_matches_shared_layer`. The
@@ -541,8 +542,10 @@ pub fn warn_if_options_unverified(outcome: &ManagedSessionOutcome, session_name:
 /// transitively by every migrated call site (daemon `#[ignore]` integration
 /// tests; CLI/TUI paths are exercised end-to-end by the existing `tm
 /// launch`/`tm connect` integration coverage); the #3386 apply-and-verify
-/// behavior itself is covered by `create_managed_session_confirms_server_before_applying_options`
-/// and the `apply_and_verify_scrollback_options_*` tests.
+/// behavior itself is covered by `create_managed_session_confirms_server_before_applying_options`,
+/// `a_fresh_server_gets_the_options_before_the_first_pane`,
+/// `a_failed_option_still_creates_the_pane_unverified` and the
+/// `apply_and_verify_scrollback_options_*` tests.
 pub fn create_managed_session(
     tmux_bin: Option<&str>,
     name: &str,
@@ -624,7 +627,7 @@ fn create_managed_session_inner(
     // for by name, so it is the one that earns a `warn!` — and refusing here
     // skips the retried apply-and-verify cycle that would otherwise emit a
     // dozen refusals for one `tm launch`.
-    if let Some(reason) = crate::core::host_state_gate::host_state_access().skip_reason() {
+    if let Some(reason) = crate::core::tmux_access::tmux_access().skip_reason() {
         warn!("#5784: refusing to create tmux session '{name}' — {reason}");
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -651,33 +654,69 @@ fn create_managed_session_inner(
     );
     let split = commands.len().saturating_sub(1);
     let (options, new_session) = commands.split_at(split);
+    let new_session = new_session
+        .first()
+        .expect("managed_session_command_sequence always ends with NewSession");
+    new_session
+        .validate_targets()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
-    let options_verified = apply_and_verify_scrollback_options(
+    // #9461: one invocation, so the `new-session` that starts a fresh server
+    // also holds it while the options land. A separate `set-option -g` finds
+    // no server: tmux stops an empty server as soon as `start-server` returns.
+    let chained = run_tmux_argv_with_bin(bin, &chained_argv(options, new_session))?;
+    let applied_before_pane = chained.status.success();
+    let output = if applied_before_pane {
+        chained
+    } else {
+        // A failed command ends the list, so `new-session` did not run. Create
+        // the pane without the options; `options_verified` stays false.
+        warn!(
+            "#9461: tmux options + new-session for '{name}' failed: {}",
+            String::from_utf8_lossy(&chained.stderr).trim()
+        );
+        run_tmux_with_bin(bin, new_session)?
+    };
+    if !output.status.success() {
+        return Ok(ManagedSessionOutcome {
+            output,
+            options_verified: false,
+        });
+    }
+    // The server now holds a session, so it outlives these calls. Re-applying
+    // also repairs the server globals for later panes after the fallback.
+    let landed = apply_and_verify_scrollback_options(
         bin,
         options,
         opts.history_limit,
         opts.alternate_screen,
     );
+    let options_verified = applied_before_pane && landed;
     if !options_verified {
         warn!(
-            "#3386: tmux scrollback ergonomics could not be verified after \
-             {APPLY_VERIFY_MAX_ATTEMPTS} attempts for session '{name}' — the pane about to be \
-             created may be capped at tmux's factory history-limit of 2000; returning \
+            "#3386: tmux scrollback ergonomics could not be verified for session '{name}' \
+             (applied before the pane: {applied_before_pane}; read back: {landed}) — the pane \
+             may be capped at tmux's factory history-limit of 2000; returning \
              options_verified=false for the caller to surface"
         );
     }
-
-    let output = run_tmux_with_bin(
-        bin,
-        new_session
-            .first()
-            .expect("managed_session_command_sequence always ends with NewSession"),
-    )?;
-
     Ok(ManagedSessionOutcome {
         output,
         options_verified,
     })
+}
+
+/// `options` then `new_session` as ONE tmux argv, joined by `;` (#9461).
+///
+/// Test: `a_fresh_server_gets_the_options_before_the_first_pane`.
+fn chained_argv(options: &[TmuxCommand], new_session: &TmuxCommand) -> Vec<String> {
+    let mut argv = Vec::new();
+    for cmd in options {
+        argv.extend(tmux_argv(cmd));
+        argv.push(";".to_string());
+    }
+    argv.extend(tmux_argv(new_session));
+    argv
 }
 
 /// Number of attempts [`ensure_server_up`] makes before giving up (#3386).
