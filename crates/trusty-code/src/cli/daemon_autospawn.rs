@@ -191,6 +191,55 @@ async fn ensure_daemon_with(
     tcode_exe: &Path,
     socket: &Path,
 ) -> Result<PathBuf> {
+    let chosen = resolve_daemon_socket(project, tcode_exe, socket).await?;
+    // #8203: whichever branch chose it, never drive a daemon of another build.
+    check_build(&chosen).await?;
+    Ok(chosen)
+}
+
+/// Refuse a daemon whose build differs from this client's (#8203).
+///
+/// Why: a daemon keeps running the code it was started with. After a
+/// reinstall, `tcode tui` attached to the old daemon and reproduced a fixed
+/// defect for six hours with nothing naming the mismatch. The refusal does not
+/// stop the daemon itself: other clients may be attached to it, and the TUI
+/// never ends a daemon's live work (module docs).
+/// What: `Ok` only when `health.build` equals [`trusty_code::build_info::GIT_HASH`].
+/// A different build, no `build` field (a daemon older than #8164) or a failed
+/// `health` call is an error naming both builds, the daemon's pid and the
+/// restart steps.
+/// Test: `daemon_autospawn_tests::refuses_a_daemon_from_a_different_build`.
+async fn check_build(socket: &Path) -> Result<()> {
+    let health = UdsRpcClient::new(socket)
+        .call("health", serde_json::json!({}))
+        .await
+        .ok();
+    let client = trusty_code::build_info::GIT_HASH;
+    let daemon = health.as_ref().and_then(|h| h["build"].as_str());
+    if daemon == Some(client) {
+        return Ok(());
+    }
+    let pid = health
+        .as_ref()
+        .and_then(|h| h["pid"].as_u64())
+        .map_or_else(|| "<pid>".to_string(), |p| p.to_string());
+    Err(anyhow!(
+        "the tcode daemon on {socket} (pid {pid}) runs build {daemon}, but this tcode is \
+         build {client}. A daemon keeps running the code it started with, so `tcode tui` \
+         will not attach to it. Restart it: `kill {pid}` (it finishes in-flight work, then \
+         exits), then run `tcode tui` again to start a daemon from this build.",
+        socket = socket.display(),
+        daemon = daemon.unwrap_or("<unreported>"),
+    ))
+}
+
+/// The attach-or-spawn decision behind [`ensure_daemon_with`], before the
+/// build check (#8203 split it out so the check covers every branch once).
+async fn resolve_daemon_socket(
+    project: Option<&Path>,
+    tcode_exe: &Path,
+    socket: &Path,
+) -> Result<PathBuf> {
     // #4600: this project's own socket first, so a daemon an earlier launch
     // put there is reused instead of a second one starting on the shared path.
     let own = trusty_code::serve::uds::project_socket_path(socket, project);
