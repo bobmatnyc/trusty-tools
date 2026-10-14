@@ -45,6 +45,9 @@ pub mod front_gate;
 // #9873: the daemon body of an inbound channel answer (P5).
 #[cfg(feature = "channels")]
 pub mod inbound;
+// #9873 Q1: the sandbox-only inbound source; see `channels_router`.
+#[cfg(feature = "channels")]
+pub mod inbound_fake;
 // #9843: the FRONT gate's answer — launch or deny the withheld runtime.
 mod front_gate_answer;
 pub mod inproject;
@@ -150,6 +153,8 @@ pub fn channels_router() -> axum::Router<Arc<DaemonState>> {
     let router = egress_verdict_router();
     #[cfg(feature = "channels")]
     let router = router.merge(ask_owner::router());
+    #[cfg(feature = "channels")]
+    let router = router.merge(inbound_fake::router(true));
     router
 }
 
