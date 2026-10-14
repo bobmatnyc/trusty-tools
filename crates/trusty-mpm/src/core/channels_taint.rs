@@ -368,7 +368,9 @@ pub fn taint_managed_session(
     mark: &TaintMark,
 ) -> Result<(), TaintError> {
     write_taint(dir, &mark.record_for(claude_session_id, managed))?;
-    mark_managed(dir, managed, mark)
+    mark_managed(dir, managed, mark)?;
+    handshake_gap();
+    Ok(())
 }
 
 /// Re-apply `managed`'s taint to a new Claude id; `Ok(true)` when written.
@@ -382,6 +384,7 @@ pub fn taint_managed_session(
 /// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`,
 /// `session_start_for_untainted_managed_session_writes_nothing`.
 pub fn reapply(dir: &Path, managed: &str, claude_session_id: &str) -> Result<bool, TaintError> {
+    handshake_gap();
     let Some(mark) = managed_mark(dir, managed)? else {
         return Ok(false);
     };
@@ -648,5 +651,33 @@ fn write_fault() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The step [`at_handshake_gap`] runs once at the next handshake gap.
+    static HANDSHAKE_GAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam (#9877): run `step` once, on this thread, at the next gap
+/// between the two halves of the seen-id handshake ([`reapply`] or
+/// [`taint_managed_session`]), to force one interleaving of the two.
+#[cfg(test)]
+pub(crate) fn at_handshake_gap(step: impl FnOnce() + 'static) {
+    HANDSHAKE_GAP.with(|gap| *gap.borrow_mut() = Some(Box::new(step)));
+}
+
+/// The gap between the two halves of the seen-id handshake; a no-op outside
+/// a test that armed [`at_handshake_gap`].
+fn handshake_gap() {
+    #[cfg(test)]
+    if let Some(step) = HANDSHAKE_GAP.with(|gap| gap.borrow_mut().take()) {
+        step();
+    }
+}
+
+#[cfg(test)]
 #[path = "channels_taint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "channels_taint_seen_tests.rs"]
+mod seen_tests;
