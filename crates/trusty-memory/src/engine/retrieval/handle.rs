@@ -740,10 +740,11 @@ impl PalaceHandle {
     ///
     /// **An over-budget error does not mean the write did not land** — see
     /// [`Self::remember_with_options_within`] for the retry contract (#6366).
-    /// Errors (#9278 T3c-1): a bare KG or vector-store error is
-    /// [`EngineError::Kg`] or [`EngineError::Hnsw`]; a committed slot whose
-    /// verify command was not stored is [`EngineError::VerifyNotStored`]; a
-    /// filter refusal, a timeout and a contexted store error are `Other`.
+    /// Errors (#9278 T3c-1): a `KgError` or `HnswStoreError` is
+    /// [`EngineError::Kg`] or [`EngineError::Hnsw`], without the pipeline's
+    /// context prefix (Q7b, provisional); a committed slot whose verify
+    /// command was not stored is [`EngineError::VerifyNotStored`]; a filter
+    /// refusal and a timeout are `Other`.
     /// Test: `remember_rejects_short_content`,
     /// `remember_force_bypasses_filter`, `remember_classifies_session_events`,
     /// `remember_force_still_blocks_secret`,
@@ -918,7 +919,8 @@ impl PalaceHandle {
     /// on the next open, so reporting it deleted would be the same lie #5231 is
     /// about. Nothing else has been mutated at that point, so the drawer is
     /// left wholly intact rather than half-deleted. #9278 T3c-1: the error is
-    /// [`EngineError`]; each of these cases is `Other` and keeps its text.
+    /// [`EngineError`]; a `KgError` from the metadata delete is
+    /// [`EngineError::Kg`] and prints only its own text (Q7b, provisional).
     pub async fn forget(&self, id: Uuid) -> std::result::Result<ForgetOutcome, EngineError> {
         self.forget_inner(id)
             .await

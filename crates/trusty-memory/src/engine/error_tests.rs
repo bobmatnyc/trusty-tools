@@ -87,21 +87,21 @@ fn engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix() {
     assert!(is_format_refusal(&anyhow::Error::from(e)));
 }
 
-/// #9278 T3c-1, Q7b not applied: a `KgError`, `HnswStoreError` or
-/// `VerifyNotStored` under a `.context()` is `Other` and keeps the prefix;
-/// the classifiers still see a refusal inside.
+/// #9278 T3c-1, Q7b (provisional): a `KgError`, `HnswStoreError` or
+/// `VerifyNotStored` under a `.context()` is its own variant and prints only
+/// its own text; the classifiers still see a refusal inside.
 #[test]
-fn typed_roots_under_a_context_stay_other_with_their_prefix() {
+fn a_contexted_typed_root_is_its_variant_without_its_prefix() {
     let ctx = |e: anyhow::Error| EngineError::from_internal(e.context("ctx"));
     let e = ctx(KgError::Palace(too_new()).into());
-    assert!(matches!(e, EngineError::Other(_)), "{e:?}");
-    assert_eq!(format!("{e:#}"), format!("ctx: {}", too_new()));
+    assert!(matches!(e, EngineError::Kg(_)), "{e:?}");
+    assert_eq!(format!("{e:#}"), too_new().to_string());
     assert!(is_format_refusal(&anyhow::Error::from(e)));
     let e = ctx(HnswStoreError::ReadOnly.into());
-    assert!(matches!(e, EngineError::Other(_)), "{e:?}");
-    assert_eq!(format!("{e:#}"), format!("ctx: {READ_ONLY_ERROR_MSG}"));
+    assert!(matches!(e, EngineError::Hnsw(_)), "{e:?}");
+    assert_eq!(format!("{e:#}"), READ_ONLY_ERROR_MSG);
     let e = ctx(VerifyNotStored::new(uuid::Uuid::nil(), "r").into());
-    assert!(matches!(e, EngineError::Other(_)), "{e:?}");
+    assert!(matches!(e, EngineError::VerifyNotStored(_)), "{e:?}");
 }
 
 /// #9278 T3c-1: both classifiers find a refusal inside `EngineError::Kg` and

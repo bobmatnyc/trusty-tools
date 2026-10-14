@@ -60,18 +60,11 @@ impl EngineError {
         }
     }
 
-    /// A root `KgError`, `HnswStoreError` or `VerifyNotStored` as its variant;
-    /// the rest is `Other`, which keeps the whole chain's text (#9278 T3c-1).
-    /// Test: `typed_roots_under_a_context_stay_other_with_their_prefix`.
+    /// A root `KgError`, `HnswStoreError` or `VerifyNotStored` (under any
+    /// `.context()`) as its variant, without the context prefix (#9278 Q7b,
+    /// provisional); the rest is `Other`, which keeps the whole chain's text.
+    /// Test: `a_contexted_typed_root_is_its_variant_without_its_prefix`.
     fn from_wrapper(e: anyhow::Error) -> Self {
-        // #9278 Q7b (provisional): a typed root under a `.context()` stays in
-        // `Other`, so its prefix is kept.
-        let bare = e.chain().next().is_some_and(|c| {
-            c.is::<KgError>() || c.is::<HnswStoreError>() || c.is::<VerifyNotStored>()
-        });
-        if !bare {
-            return Self::Other(Box::new(Internal(e)));
-        }
         let e = match e.downcast::<KgError>() {
             Ok(k) => return Self::Kg(k),
             Err(e) => e,

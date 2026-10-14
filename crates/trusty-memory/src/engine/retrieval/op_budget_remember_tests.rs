@@ -110,5 +110,21 @@ mod tests {
             "a failed remember must not advance the drawer table or the KG"
         );
         assert!(store.op_breaker().is_tripped());
+
+        // #9278 T3c-1: the typed path's error still yields the op budget.
+        let typed = handle
+            .remember_with_options(
+                "a third fact".into(),
+                RoomType::General,
+                vec![],
+                0.5,
+                opts(),
+            )
+            .await
+            .expect_err("a tripped store refuses the vector step");
+        assert!(
+            matches!(op_budget_error(&typed), Some(OpBudgetError::Wedged { .. })),
+            "{typed:?}"
+        );
     }
 }
