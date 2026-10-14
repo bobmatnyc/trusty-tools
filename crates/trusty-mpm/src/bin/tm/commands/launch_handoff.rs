@@ -87,7 +87,7 @@ impl Handoff {
                 let pane = session_pane_id_with(name, tmux).ok_or_else(|| {
                     anyhow::anyhow!(
                         "tmux session {name} is running, but its pane id could not be read \
-                         (try `tmux list-panes -t {name}`)"
+                         (try `tmux list-panes -t ={name}:`)"
                     )
                 })?;
                 writeln!(out, "{}", detached_line(name, &pane))?;
