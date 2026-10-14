@@ -74,6 +74,7 @@ pub(super) fn pm_record(tmux_name: &str, current: &str) -> SessionRecord {
         proposed_default: None,
         pending_decision_id: None,
         last_answer: None,
+        blocked_prompt: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,

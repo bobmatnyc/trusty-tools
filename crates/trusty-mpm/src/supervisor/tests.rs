@@ -47,6 +47,9 @@ struct FakeTmux {
     sessions: Mutex<HashMap<String, String>>,
     create_calls: Mutex<u32>,
     kill_calls: Mutex<u32>,
+    /// #8393: pane text `capture` returns instead of the default, so a test
+    /// can change the pane between sweeps and defeat the verdict cache.
+    pane: Mutex<Option<String>>,
 }
 
 impl FakeTmux {
@@ -55,7 +58,13 @@ impl FakeTmux {
             sessions: Mutex::new(HashMap::new()),
             create_calls: Mutex::new(0),
             kill_calls: Mutex::new(0),
+            pane: Mutex::new(None),
         })
+    }
+
+    /// #8393: make the next `capture` return `text`.
+    fn set_pane(&self, text: &str) {
+        *self.pane.lock().expect("lock") = Some(text.to_owned());
     }
 }
 
@@ -80,6 +89,9 @@ impl ManagedTmuxDriver for FakeTmux {
     }
 
     fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        if let Some(text) = self.pane.lock().expect("lock").clone() {
+            return Ok(text);
+        }
         Ok("working on the task...\n$ cargo test".to_owned())
     }
 
@@ -229,6 +241,7 @@ async fn seed_sessions(
             proposed_default: None,
             pending_decision_id: None,
             last_answer: None,
+            blocked_prompt: None,
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
@@ -457,6 +470,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         proposed_default: None,
         pending_decision_id: None,
         last_answer: None,
+        blocked_prompt: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,
@@ -751,6 +765,228 @@ async fn tick_never_answers_pending_decision() {
         Some("Force-push to main?"),
         "supervisor must never answer or clear a pending decision"
     );
+}
+
+// ── #8393: a `blocked_on_permission` verdict raises a pending decision ───────
+
+/// The question a [`VerdictClassifier`] reports as its verdict summary.
+const BLOCKED_QUESTION: &str = "Which option: rebase or merge?";
+
+/// A classifier returning one fixed verdict (#8393).
+///
+/// Why: the #8393 tests need a `BlockedOnPermission` verdict at a chosen
+/// confidence, and [`StubClassifier`] always answers `Working`.
+/// What: answers `state` at `confidence`, with [`BLOCKED_QUESTION`] as the
+/// summary, and never touches the network.
+/// Test: `a_blocked_verdict_raises_a_pending_decision`,
+/// `a_low_confidence_or_unblocked_verdict_raises_nothing`,
+/// `a_failed_decision_write_is_not_counted_and_is_retried`.
+struct VerdictClassifier {
+    script: Arc<Mutex<(ActivityState, String, f32)>>,
+}
+
+impl LlmClassifier for VerdictClassifier {
+    async fn classify(
+        &self,
+        _pane_text: &str,
+    ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+        let (state, summary, confidence) = self.script.lock().expect("lock").clone();
+        Ok((
+            ActivityVerdict {
+                state,
+                summary,
+                confidence,
+            },
+            10,
+            2,
+        ))
+    }
+}
+
+/// A monitor whose classifier answers `state` at `confidence`.
+fn verdict_monitor(state: ActivityState, confidence: f32) -> ActivityMonitor<VerdictClassifier> {
+    scripted_monitor(state, BLOCKED_QUESTION, confidence).0
+}
+
+/// The verdict a scripted classifier answers next: state, summary, confidence.
+type Script = Arc<Mutex<(ActivityState, String, f32)>>;
+
+/// A monitor plus the handle that changes its next verdict (#8393).
+fn scripted_monitor(
+    state: ActivityState,
+    summary: &str,
+    confidence: f32,
+) -> (ActivityMonitor<VerdictClassifier>, Script) {
+    let script = Arc::new(Mutex::new((state, summary.to_owned(), confidence)));
+    let monitor = ActivityMonitor::new(
+        VerdictClassifier {
+            script: script.clone(),
+        },
+        "test-model",
+    );
+    (monitor, script)
+}
+
+/// The questions `FleetMetrics` surfaces for the fleet, in order (#8393).
+async fn surfaced_questions(mgr: &Arc<SessionManager>) -> Vec<String> {
+    let m = FleetMetrics::from_records(&mgr.list().await);
+    m.pending_decisions
+        .into_iter()
+        .map(|d| d.question)
+        .collect()
+}
+
+/// A config that classifies idle sessions and resumes nothing.
+fn classify_cfg() -> SupervisorConfig {
+    SupervisorConfig {
+        auto_resume: false,
+        classify_idle: true,
+        ..SupervisorConfig::default()
+    }
+}
+
+/// #8393: a confident `blocked_on_permission` verdict on a pane no regex
+/// matches lands in the record's `blocked_prompt`, so `FleetMetrics` (and
+/// with it `supervisor-metrics.json` / `supervisor_status`) surfaces it. A
+/// second sweep over the same blocked pane leaves the record as it was.
+#[tokio::test]
+async fn a_blocked_verdict_raises_a_pending_decision() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(report.classified, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    let prompt = after.blocked_prompt.clone().expect("a raised prompt");
+    assert_eq!(prompt.question, BLOCKED_QUESTION);
+    assert_eq!(after.pending_decision, None);
+    assert_eq!(after.state, ManagedSessionState::Active);
+    let m = FleetMetrics::from_records(&mgr.list().await);
+    assert_eq!(m.pending_decisions.len(), 1, "{:?}", m.pending_decisions);
+    assert_eq!(m.pending_decisions[0].question, BLOCKED_QUESTION);
+
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    let again = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        again.blocked_prompt,
+        Some(prompt),
+        "a repeat verdict must not re-stamp the prompt"
+    );
+}
+
+/// #8393: a `blocked_on_permission` verdict below the confidence floor, and
+/// a verdict of any other state, leave `blocked_prompt` unset.
+#[tokio::test]
+async fn a_low_confidence_or_unblocked_verdict_raises_nothing() {
+    for (state, confidence) in [
+        (ActivityState::BlockedOnPermission, 0.3),
+        (ActivityState::Working, 1.0),
+        (ActivityState::Idle, 1.0),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let mgr = make_manager(&dir, FakeTmux::new()).await;
+        let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+        let monitor = verdict_monitor(state.clone(), confidence);
+
+        let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+        assert_eq!(report.classified, 1, "{state:?} at {confidence}");
+        let after = mgr.get(&ids[0]).await.expect("record");
+        assert_eq!(after.blocked_prompt, None, "{state:?} at {confidence}");
+    }
+}
+
+/// #8393 fail-open check: a decision write that fails is logged, the
+/// session is not counted as classified, and the next sweep — served from
+/// the verdict cache — retries the write instead of losing it.
+#[tokio::test]
+async fn a_failed_decision_write_is_not_counted_and_is_retried() {
+    use crate::session_manager::decision_tests::set_mode;
+
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    set_mode(dir.path(), 0o555);
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    set_mode(dir.path(), 0o755);
+    assert_eq!(
+        report.classified, 0,
+        "a verdict whose decision never persisted must not count as handled"
+    );
+    let failed = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(failed.blocked_prompt, None, "an unpersisted prompt stuck");
+
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(report.classified, 1);
+    let retried = mgr.get(&ids[0]).await.expect("record");
+    let prompt = retried.blocked_prompt.expect("the retry persisted it");
+    assert_eq!(prompt.question, BLOCKED_QUESTION);
+}
+
+/// #8393 round 2: the classifier's verdict must not wedge the session. It is
+/// surfaced in the metrics but kept out of the front-gate `pending_decision`,
+/// so the session stops and resumes, and an answer is still refused.
+#[tokio::test]
+async fn a_raised_blocked_verdict_does_not_wedge_stop_and_resume() {
+    use crate::session_manager::AnswerClaim;
+
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec![BLOCKED_QUESTION]);
+    let raised = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(raised.pending_decision, None, "front-gate field untouched");
+    assert_eq!(raised.pending_decision_id, None);
+
+    let refused = mgr
+        .answer_decision(&ids[0], "merge", &AnswerClaim::by("alice"))
+        .await;
+    assert!(refused.is_err(), "no decision to answer: {refused:?}");
+
+    mgr.stop(&ids[0]).await.expect("a blocked session stops");
+    assert!(
+        surfaced_questions(&mgr).await.is_empty(),
+        "a stopped session surfaces no prompt"
+    );
+    let resumed = mgr.resume(&ids[0]).await.expect("and resumes");
+    assert_eq!(resumed.state, ManagedSessionState::Active);
+}
+
+/// #8393 round 2: a fresh verdict that is not blocked clears what the
+/// supervisor raised, and a fresh blocked verdict with a new summary
+/// replaces it.
+#[tokio::test]
+async fn a_fresh_verdict_clears_or_replaces_the_raised_prompt() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let tmux = FakeTmux::new();
+    let mgr = make_manager(&dir, tmux.clone()).await;
+    seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let (monitor, script) = scripted_monitor(ActivityState::BlockedOnPermission, "first?", 0.9);
+
+    tmux.set_pane("pane one");
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec!["first?"]);
+
+    tmux.set_pane("pane two");
+    script.lock().expect("lock").1 = "second?".into();
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(surfaced_questions(&mgr).await, vec!["second?"]);
+
+    tmux.set_pane("pane three");
+    *script.lock().expect("lock") = (ActivityState::Working, "busy".into(), 0.9);
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert!(surfaced_questions(&mgr).await.is_empty());
 }
 
 // ── Supervisor struct tests ──────────────────────────────────────────────────
