@@ -753,6 +753,143 @@ async fn tick_never_answers_pending_decision() {
     );
 }
 
+// ── #8393: a `blocked_on_permission` verdict raises a pending decision ───────
+
+/// The question a [`VerdictClassifier`] reports as its verdict summary.
+const BLOCKED_QUESTION: &str = "Which option: rebase or merge?";
+
+/// A classifier returning one fixed verdict (#8393).
+///
+/// Why: the #8393 tests need a `BlockedOnPermission` verdict at a chosen
+/// confidence, and [`StubClassifier`] always answers `Working`.
+/// What: answers `state` at `confidence`, with [`BLOCKED_QUESTION`] as the
+/// summary, and never touches the network.
+/// Test: `a_blocked_verdict_raises_a_pending_decision`,
+/// `a_low_confidence_or_unblocked_verdict_raises_nothing`,
+/// `a_failed_decision_write_is_not_counted_and_is_retried`.
+struct VerdictClassifier {
+    state: ActivityState,
+    confidence: f32,
+}
+
+impl LlmClassifier for VerdictClassifier {
+    async fn classify(
+        &self,
+        _pane_text: &str,
+    ) -> Result<(ActivityVerdict, u32, u32), ActivityError> {
+        Ok((
+            ActivityVerdict {
+                state: self.state.clone(),
+                summary: BLOCKED_QUESTION.into(),
+                confidence: self.confidence,
+            },
+            10,
+            2,
+        ))
+    }
+}
+
+/// A monitor whose classifier answers `state` at `confidence`.
+fn verdict_monitor(state: ActivityState, confidence: f32) -> ActivityMonitor<VerdictClassifier> {
+    ActivityMonitor::new(VerdictClassifier { state, confidence }, "test-model")
+}
+
+/// A config that classifies idle sessions and resumes nothing.
+fn classify_cfg() -> SupervisorConfig {
+    SupervisorConfig {
+        auto_resume: false,
+        classify_idle: true,
+        ..SupervisorConfig::default()
+    }
+}
+
+/// #8393: a confident `blocked_on_permission` verdict on a pane no regex
+/// matches lands in the record's `pending_decision`, so `FleetMetrics` (and
+/// with it `supervisor-metrics.json` / `supervisor_status`) surfaces it. A
+/// second sweep over the same blocked pane keeps the same decision id.
+#[tokio::test]
+async fn a_blocked_verdict_raises_a_pending_decision() {
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(report.classified, 1);
+    let after = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(after.pending_decision.as_deref(), Some(BLOCKED_QUESTION));
+    assert!(
+        after.pending_decision_id.is_some(),
+        "a raised decision is answerable"
+    );
+    assert_eq!(after.state, ManagedSessionState::Active);
+    let m = FleetMetrics::from_records(&mgr.list().await);
+    assert_eq!(m.pending_decisions.len(), 1, "{:?}", m.pending_decisions);
+    assert_eq!(m.pending_decisions[0].question, BLOCKED_QUESTION);
+
+    run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    let again = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        again.pending_decision_id, after.pending_decision_id,
+        "a repeat verdict must not re-mint the decision"
+    );
+}
+
+/// #8393: a `blocked_on_permission` verdict below the confidence floor, and
+/// a verdict of any other state, leave `pending_decision` unset.
+#[tokio::test]
+async fn a_low_confidence_or_unblocked_verdict_raises_nothing() {
+    for (state, confidence) in [
+        (ActivityState::BlockedOnPermission, 0.3),
+        (ActivityState::Working, 1.0),
+        (ActivityState::Idle, 1.0),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let mgr = make_manager(&dir, FakeTmux::new()).await;
+        let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+        let monitor = verdict_monitor(state.clone(), confidence);
+
+        let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+        assert_eq!(report.classified, 1, "{state:?} at {confidence}");
+        let after = mgr.get(&ids[0]).await.expect("record");
+        assert_eq!(after.pending_decision, None, "{state:?} at {confidence}");
+    }
+}
+
+/// #8393 fail-open check: a decision write that fails is logged, the
+/// session is not counted as classified, and the next sweep — served from
+/// the verdict cache — retries the write instead of losing it.
+#[tokio::test]
+async fn a_failed_decision_write_is_not_counted_and_is_retried() {
+    use crate::session_manager::decision_tests::set_mode;
+
+    let dir = TempDir::new().unwrap();
+    let ws = TempDir::new().unwrap();
+    let mgr = make_manager(&dir, FakeTmux::new()).await;
+    let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
+    let monitor = verdict_monitor(ActivityState::BlockedOnPermission, 0.9);
+
+    set_mode(dir.path(), 0o555);
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    set_mode(dir.path(), 0o755);
+    assert_eq!(
+        report.classified, 0,
+        "a verdict whose decision never persisted must not count as handled"
+    );
+    let failed = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(
+        failed.pending_decision, None,
+        "an unpersisted decision stuck"
+    );
+
+    let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
+    assert_eq!(report.classified, 1);
+    let retried = mgr.get(&ids[0]).await.expect("record");
+    assert_eq!(retried.pending_decision.as_deref(), Some(BLOCKED_QUESTION));
+}
+
 // ── Supervisor struct tests ──────────────────────────────────────────────────
 
 #[tokio::test]
