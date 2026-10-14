@@ -317,6 +317,33 @@ mod tests {
         }
     }
 
+    /// #8436: the core check reads `core.md` alone. An `AGENTS.md` that copies
+    /// a dropped rule's marker sentence must not make the core look complete.
+    #[test]
+    fn an_agents_md_carrying_a_dropped_core_marker_does_not_hide_it() {
+        let (project, home) = allow_listed();
+        let marker = crate::core::architect_core::ARCHITECT_CORE[0].marker;
+        let repo = crate::core::content_source::test_support::rc();
+        let core = repo
+            .instruction(architect_prompt::ARCHITECT_CORE_MD)
+            .unwrap();
+        assert!(
+            core.contains(marker),
+            "the marker is in the repository core"
+        );
+        let content =
+            crate::core::framework_content::tests::content_with_core(&core.replace(marker, ""));
+        std::fs::write(project.path().join("AGENTS.md"), format!("{marker}\n")).unwrap();
+        let check =
+            check_session_profile_with(Some(project.path()), home.path(), |_| Ok(content.clone()));
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert!(
+            check.message.contains("the Architect core lacks"),
+            "{}",
+            check.message
+        );
+    }
+
     /// #8436 (Q7a): a content source without `architect.md` is named, and an
     /// `AGENTS.md` it cannot apply warns; an unloadable source warns too.
     #[test]

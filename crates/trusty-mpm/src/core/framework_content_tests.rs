@@ -273,6 +273,23 @@ pub(crate) fn legacy_content() -> FrameworkContent {
         .expect("a legacy-only source still loads")
 }
 
+/// The repository's content with `architect/core.md` replaced by `core`, as a
+/// content release out of step with this binary would ship it (#8436).
+pub(crate) fn content_with_core(core: &str) -> FrameworkContent {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = repo_content()
+        .required("pm-instruction-package.json")
+        .to_string();
+    fake_checkout_with_package(dir.path(), &package);
+    let arch = dir.path().join("content/instructions/architect");
+    std::fs::create_dir_all(&arch).expect("dir");
+    let repo = repo_content();
+    let manual = repo.instruction("architect/architect.md").expect("manual");
+    std::fs::write(arch.join("architect.md"), manual).expect("architect.md");
+    std::fs::write(arch.join("core.md"), core).expect("core.md");
+    FrameworkContent::load(&checkout_content(dir.path()).expect("checkout")).expect("loads")
+}
+
 /// #9012: a PM package this binary cannot parse refuses the load, naming the
 /// file, the defect and the remedy — never a prompt missing its rules.
 #[test]
