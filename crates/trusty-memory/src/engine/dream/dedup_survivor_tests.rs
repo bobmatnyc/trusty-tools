@@ -10,7 +10,6 @@
 //! Test: itself.
 
 use super::cycle::dedup_pass_with_embedder;
-use crate::engine::embed::{EMBED_DIM, Embedder};
 use crate::engine::maintenance_log::{DeletionReason, read_journal};
 use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
 use crate::engine::retrieval::{ForgetOutcome, PalaceHandle, seed_shared_embedder_with_mock};
@@ -21,6 +20,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::{TempDir, tempdir};
+use trusty_common::embedder::{EMBED_DIM, Embedder};
 use uuid::Uuid;
 
 /// Every text embeds to the same unit vector, so every pair scores 1.0.

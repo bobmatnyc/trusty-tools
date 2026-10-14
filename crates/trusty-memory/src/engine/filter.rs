@@ -19,13 +19,17 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use thiserror::Error;
 
 // #6199: the credential detector lives in a submodule so this gate module stays
-// under the 500-SLOC production cap. `check_secret`/`find_secret_token` are the
-// public surface; the predicate internals are re-exported only for the test
+// under the 500-SLOC production cap. `check_secret` is the crate-wide
+// surface; the predicate internals are re-exported only for the test
 // suite (`filter_tests.rs`, `use super::*`).
 mod secret;
-pub use secret::{
-    MaskError, SECRET_FILTER_VERSION, SecretRule, SecretShape, SecretSpan, check_secret,
-    classify_secret, find_secret_spans, find_secret_token, mask_content,
+// #9278 (A5): crate-only; `SecretShape` and `find_secret_token` have no caller
+// outside `secret`, so the test glob below is their only re-export.
+pub(crate) use secret::check_secret;
+#[cfg(feature = "server")]
+pub(crate) use secret::{
+    MaskError, SECRET_FILTER_VERSION, SecretRule, SecretSpan, classify_secret, find_secret_spans,
+    mask_content,
 };
 // The detector's predicate internals are re-exported only for the test suite
 // (`filter_tests.rs`, `use super::*`), which reaches into them directly.
@@ -37,12 +41,13 @@ pub(crate) use secret::*;
 /// borderline-short content. The MCP `memory_remember` tool overrides this
 /// with the stricter `MCP_MIN_TOKENS` (8) to match the issue #61 policy
 /// applied to auto-capture hooks.
-pub const DEFAULT_MIN_TOKENS: u8 = 3;
+pub(crate) const DEFAULT_MIN_TOKENS: u8 = 3;
 
 /// Stricter threshold applied at the MCP boundary where auto-capture hooks
 /// fire. Matches the issue #61 spec — content shorter than this should be
 /// stored via `memory_note` or `kg_assert` instead.
-pub const MCP_MIN_TOKENS: u8 = 8;
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) const MCP_MIN_TOKENS: u8 = 8;
 
 /// Default reject patterns covering the common auto-capture noise sources.
 ///
@@ -79,7 +84,7 @@ const DEFAULT_REJECT_PATTERNS: &[&str] = &[
 /// floor matches git's own default abbreviation length.
 /// What: inclusive minimum hex-digit count for a token to count as a SHA.
 /// Test: `git_sha_like_recognises_short_and_full`.
-pub const GIT_SHA_MIN_LEN: usize = 7;
+pub(crate) const GIT_SHA_MIN_LEN: usize = 7;
 
 /// Upper bound on git-SHA-shaped hex token length recognised by
 /// [`is_git_sha_like`].
@@ -101,7 +106,7 @@ pub const GIT_SHA_MIN_LEN: usize = 7;
 /// be aware the allowlist is broader than strictly "git SHA". See issue #1484.
 /// What: inclusive maximum hex-digit count for a token to count as a SHA.
 /// Test: `git_sha_like_recognises_sha256`, `git_sha_like_rejects_overlong_and_nonhex`.
-pub const GIT_SHA_MAX_LEN: usize = 64;
+pub(crate) const GIT_SHA_MAX_LEN: usize = 64;
 
 /// Substring patterns whose presence at the START of drawer content marks it
 /// as low-value auto-capture noise (Claude Code tool-use captures, session
@@ -121,7 +126,7 @@ pub const GIT_SHA_MAX_LEN: usize = 64;
 /// the auto-capture hooks always emit the exact English prefix.
 /// Test: `blocklist_match_blocks_known_prefixes`,
 /// `blocklist_match_ignores_quoted_mid_text`.
-pub const BLOCKLIST_PATTERNS: &[&str] = &[
+pub(crate) const BLOCKLIST_PATTERNS: &[&str] = &[
     "Tool use: ",          // Claude Code tool-use captures
     "Claude Code session", // Session lifecycle events
 ];
@@ -143,7 +148,7 @@ pub const BLOCKLIST_PATTERNS: &[&str] = &[
 /// where `content.trim_start().starts_with(pat)`, else `None`.
 /// Test: `blocklist_match_blocks_known_prefixes`,
 /// `blocklist_match_ignores_quoted_mid_text`.
-pub fn blocklist_match(content: &str) -> Option<&'static str> {
+pub(crate) fn blocklist_match(content: &str) -> Option<&'static str> {
     let trimmed = content.trim_start();
     BLOCKLIST_PATTERNS
         .iter()
@@ -160,7 +165,7 @@ pub fn blocklist_match(content: &str) -> Option<&'static str> {
 /// Test: `reject_messages_are_actionable`.
 #[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
-pub enum FilterReject {
+pub(crate) enum FilterReject {
     /// Content has fewer meaningful tokens than the configured minimum.
     #[error(
         "Content too short to be worth storing ({tokens} tokens). Use memory_note for brief \
@@ -214,12 +219,12 @@ pub enum FilterReject {
 #[derive(Debug, Clone)]
 pub struct FilterConfig {
     /// Minimum meaningful tokens required for `memory_remember`.
-    pub min_tokens: u8,
+    pub(crate) min_tokens: u8,
     /// String form of each reject regex (compiled lazily).
-    pub reject_patterns: Vec<String>,
+    pub(crate) reject_patterns: Vec<String>,
     /// Maximum allowed ratio of non-alphabetic chars before treating the
     /// content as raw code/JSON. Range `[0.0, 1.0]`. Default `0.80`.
-    pub max_non_alpha_ratio: f32,
+    pub(crate) max_non_alpha_ratio: f32,
 }
 
 impl Default for FilterConfig {
@@ -284,7 +289,11 @@ impl FilterConfig {
     /// heuristic. Returns `Ok(())` on accept, `Err(FilterReject)` on reject.
     /// Test: `filter_config_default_blocks_known_noise`,
     /// `note_mode_allows_short_content`.
-    pub fn apply(&self, content: &str, enforce_min_tokens: bool) -> Result<(), FilterReject> {
+    pub(crate) fn apply(
+        &self,
+        content: &str,
+        enforce_min_tokens: bool,
+    ) -> Result<(), FilterReject> {
         let trimmed = content.trim();
         // Noise patterns fire first so callers see the most specific
         // diagnosis (e.g. "Tool use: x" is flagged as a known noise source
@@ -405,7 +414,7 @@ pub(crate) fn custom_patterns_cached(patterns: &[String]) -> bool {
 /// the minimum-length requirement.
 /// What: Splits on Unicode whitespace, keeps tokens with any alphanumeric.
 /// Test: `meaningful_tokens_ignore_pure_punctuation`.
-pub fn count_meaningful_tokens(s: &str) -> usize {
+pub(crate) fn count_meaningful_tokens(s: &str) -> usize {
     s.split_whitespace()
         .filter(|t| t.chars().any(|c| c.is_alphanumeric()))
         .count()
@@ -418,7 +427,7 @@ pub fn count_meaningful_tokens(s: &str) -> usize {
 /// What: `non_alpha / total` over non-whitespace characters. Returns `0.0`
 /// for empty input.
 /// Test: `non_alpha_ratio_detects_json`.
-pub fn non_alphabetic_ratio(s: &str) -> f32 {
+pub(crate) fn non_alphabetic_ratio(s: &str) -> f32 {
     let mut total = 0usize;
     let mut non_alpha = 0usize;
     for c in s.chars() {
@@ -449,7 +458,7 @@ pub fn non_alphabetic_ratio(s: &str) -> f32 {
 /// match) so quoted SHAs from different tools are all allowlisted.
 /// Test: `git_sha_like_recognises_short_and_full`,
 /// `git_sha_like_rejects_overlong_and_nonhex`.
-pub fn is_git_sha_like(token: &str) -> bool {
+pub(crate) fn is_git_sha_like(token: &str) -> bool {
     let len = token.len();
     (GIT_SHA_MIN_LEN..=GIT_SHA_MAX_LEN).contains(&len)
         && token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -507,7 +516,7 @@ fn mask_git_shas(s: &str) -> String {
 /// `UserFact` on its own; that label is reserved for the explicit
 /// `memory_note` tool path.
 /// Test: `classify_detects_commit_and_tool_use`.
-pub fn classify(content: &str, fallback: DrawerType) -> DrawerType {
+pub(crate) fn classify(content: &str, fallback: DrawerType) -> DrawerType {
     let trimmed = content.trim();
     if is_commit_like(trimmed) {
         return DrawerType::Commit;

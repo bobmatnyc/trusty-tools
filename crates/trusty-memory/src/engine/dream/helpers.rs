@@ -59,7 +59,7 @@ pub(crate) fn normalize_keyword(raw: &str) -> String {
 /// tokens shorter than [`MIN_KEYWORD_CHARS`] characters, and dedups within a
 /// single drawer.
 /// Test: `extract_keywords_keeps_short_id_tokens`, `closet_refresh_builds_index`.
-pub fn extract_keywords(content: &str) -> Vec<String> {
+pub(crate) fn extract_keywords(content: &str) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for raw in content.split_whitespace() {

@@ -46,17 +46,17 @@ const PREVIEW_MAX_CHARS: usize = 120;
 pub struct FadingParams {
     /// Only memories whose *base* importance is at least this are candidates.
     /// Default: 0.7 (we only care about resurfacing originally high-value ones).
-    pub resurface_min_base: f32,
+    pub(crate) resurface_min_base: f32,
     /// A candidate is fading when its *effective* importance has fallen below
     /// this. Default: 0.3.
-    pub resurface_threshold: f32,
+    pub(crate) resurface_threshold: f32,
     /// Accumulated access boost below which a drawer is treated as "not accessed
     /// recently". Access recency is not tracked as an independently-decaying
     /// signal, so we approximate it via the accumulated boost: a value below
     /// this epsilon means essentially no recall reinforcement. Default: 0.01.
-    pub resurface_boost_epsilon: f32,
+    pub(crate) resurface_boost_epsilon: f32,
     /// Cap on the number of ranked entries returned. Default: 10.
-    pub resurface_top_n: usize,
+    pub(crate) resurface_top_n: usize,
 }
 
 impl Default for FadingParams {
@@ -80,17 +80,17 @@ impl Default for FadingParams {
 /// days, and a short content preview.
 /// Test: `flags_high_base_aged_unaccessed_drawer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FadingMemory {
+pub(crate) struct FadingMemory {
     /// Id of the fading drawer (use with `memory_forget` / recall).
-    pub drawer_id: Uuid,
+    pub(crate) drawer_id: Uuid,
     /// Original (undecayed) importance the memory was written with.
-    pub base_importance: f32,
+    pub(crate) base_importance: f32,
     /// Current effective importance after decay + boost.
-    pub effective_importance: f32,
+    pub(crate) effective_importance: f32,
     /// Age of the memory in fractional days.
-    pub age_days: f32,
+    pub(crate) age_days: f32,
     /// Short preview of the drawer content (see `PREVIEW_MAX_CHARS`).
-    pub content_preview: String,
+    pub(crate) content_preview: String,
 }
 
 /// Truncate `content` to at most `PREVIEW_MAX_CHARS` characters, char-safe.
@@ -121,7 +121,7 @@ fn preview(content: &str) -> String {
 /// `rejects_low_base_drawer`, `rejects_recently_boosted_drawer`,
 /// `rejects_protected_task_drawer`, `ranks_and_caps`,
 /// `boundary_conditions_table`, `rank_fading_honours_custom_half_life_override`.
-pub fn rank_fading(
+pub(crate) fn rank_fading(
     drawers: &[Drawer],
     decay: &DecayConfig,
     params: &FadingParams,
@@ -187,7 +187,10 @@ pub fn rank_fading(
 /// auto-boost). The guard drops at the end of the call.
 /// Test: covered via `rank_fading` unit tests (pure core) and the
 /// `palace_dream` MCP response-shape test in trusty-memory.
-pub fn detect_fading(handle: &Arc<PalaceHandle>, params: &FadingParams) -> Vec<FadingMemory> {
+pub(crate) fn detect_fading(
+    handle: &Arc<PalaceHandle>,
+    params: &FadingParams,
+) -> Vec<FadingMemory> {
     rank_fading(&handle.drawers.read(), &handle.decay_config, params)
 }
 

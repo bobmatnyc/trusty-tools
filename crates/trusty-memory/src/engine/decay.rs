@@ -11,13 +11,13 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Clone)]
 pub struct DecayConfig {
     /// Days for importance to halve. Default: 90.0
-    pub half_life_days: f32,
+    pub(crate) half_life_days: f32,
     /// Minimum effective importance (floor). Default: 0.05
-    pub floor: f32,
+    pub(crate) floor: f32,
     /// Importance added per recall hit. Default: 0.05
-    pub access_boost: f32,
+    pub(crate) access_boost: f32,
     /// Maximum accumulated access boost. Default: 0.3
-    pub access_boost_cap: f32,
+    pub(crate) access_boost_cap: f32,
 }
 
 impl Default for DecayConfig {
@@ -38,7 +38,12 @@ impl DecayConfig {
     /// in decay here keeps retrieval code free of time arithmetic.
     /// What: `(base * 2^(-age_days / half_life) + boost).clamp(floor, 1.0)`
     /// Test: See unit tests — half-life, floor, boost all verified.
-    pub fn effective_importance(&self, base: f32, age_days: f32, accumulated_boost: f32) -> f32 {
+    pub(crate) fn effective_importance(
+        &self,
+        base: f32,
+        age_days: f32,
+        accumulated_boost: f32,
+    ) -> f32 {
         let decayed = base * 2f32.powf(-age_days / self.half_life_days);
         let boost = accumulated_boost.min(self.access_boost_cap);
         (decayed + boost).clamp(self.floor, 1.0)
@@ -50,7 +55,7 @@ impl DecayConfig {
     /// `effective_importance` without juggling `Duration` arithmetic.
     /// What: Returns `(now - created_at).seconds / 86_400`, clamped to >= 0.
     /// Test: A fresh `Utc::now()` returns ~0; a timestamp from yesterday returns ~1.0.
-    pub fn age_days(created_at: DateTime<Utc>) -> f32 {
+    pub(crate) fn age_days(created_at: DateTime<Utc>) -> f32 {
         let elapsed = Utc::now().signed_duration_since(created_at);
         elapsed.num_seconds().max(0) as f32 / 86_400.0
     }

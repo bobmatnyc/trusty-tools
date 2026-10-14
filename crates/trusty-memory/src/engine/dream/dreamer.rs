@@ -53,7 +53,7 @@ pub type AfterCycle = Arc<dyn Fn(&PalaceId, Option<&DreamStats>) + Send + Sync>;
 /// `SemanticConsolidator` without touching the real LLM.
 /// Test: `dreamer_touch_resets_idle` plus the cycle tests below.
 pub struct Dreamer {
-    pub config: DreamConfig,
+    pub(crate) config: DreamConfig,
     pub(super) last_activity: Arc<AtomicU64>,
     /// Injected semantic consolidator (used in tests via `with_consolidator`).
     /// When `None`, `semantic_consolidation_pass` builds the consolidator from
@@ -142,7 +142,8 @@ impl Dreamer {
     }
 
     /// Has the palace been idle longer than `idle_secs`?
-    pub fn is_idle(&self) -> bool {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn is_idle(&self) -> bool {
         let last = self.last_activity.load(Ordering::Relaxed);
         now_secs().saturating_sub(last) >= self.config.idle_secs
     }
@@ -183,7 +184,8 @@ impl Dreamer {
     /// `concurrency_tests::a_dream_loop_waits_its_stagger_before_the_first_cycle`.
     /// Maintenance lease (#8733):
     /// `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
-    pub fn start_with_shutdown(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn start_with_shutdown(
         self: Arc<Self>,
         registry: PalaceRegistry,
         palace_id: PalaceId,
@@ -505,6 +507,7 @@ fn changed_nothing(stats: &DreamStats) -> bool {
 /// What: on `Ok`, logs the full `DreamStats` field set at `info`; on `Err`,
 /// logs a `warn` naming the palace. Pure logging — no return value.
 /// Test: exercised by every dream-loop test that spawns `start_with_shutdown`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
     match outcome {
         Ok(stats) => tracing::info!(

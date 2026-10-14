@@ -25,11 +25,15 @@ pub(crate) use github_node_id::*;
 // #8623: span-level detection and the rule set, shared with trusty-memory.
 mod private_key;
 mod spans;
+// #9278 (A5): the server's kuzu import and the filter tests are the callers.
+#[cfg(any(test, feature = "server"))]
 pub use spans::{SECRET_FILTER_VERSION, SecretRule, SecretSpan, find_secret_spans};
 pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block, rule_of_flagged};
 // #8624: secret shape and the one marker builder, for the kuzu review export.
 mod mask;
-pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
+// #9278 (A5): the server's kuzu import and the filter tests are the callers.
+#[cfg(any(test, feature = "server"))]
+pub use mask::{MaskError, classify_secret, mask_content};
 
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly

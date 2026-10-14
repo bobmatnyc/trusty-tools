@@ -32,20 +32,20 @@ pub struct SemanticConsolidationConfig {
     /// Whether the phase runs at all. Defaults to `false` — a config key must
     /// turn it on explicitly, and it still needs a resolvable provider (see
     /// [`resolve_consolidation_provider`]).
-    pub enabled: bool,
+    pub(crate) enabled: bool,
     /// Model id used for consolidation prompts. An `ollama/` or `local/`
     /// prefix — and only that prefix — selects a local model server; anything
     /// else routes to OpenRouter and needs an API key.
-    pub model: String,
+    pub(crate) model: String,
     /// Cosine-similarity threshold above which two drawers are considered
     /// candidates for LLM-based consolidation (distinct from the NLP dedup
     /// threshold; lower here to catch near-synonyms the embedding model can
     /// see but the strict dedup pass ignores).
     pub similarity_threshold: f32,
     /// Maximum drawers in a single LLM prompt batch (keeps prompts short).
-    pub max_batch_size: usize,
+    pub(crate) max_batch_size: usize,
     /// Maximum total LLM calls per dream cycle (cost ceiling).
-    pub max_calls_per_cycle: usize,
+    pub(crate) max_calls_per_cycle: usize,
 }
 
 impl Default for SemanticConsolidationConfig {
@@ -99,19 +99,19 @@ pub enum ConsolidationAction {
 /// get a `superseded_by` link in the KG.
 /// Test: tested via `SemanticConsolidator` unit tests.
 #[derive(Debug, Default)]
-pub struct ConsolidationResult {
+pub(crate) struct ConsolidationResult {
     /// New canonical drawers to add to the palace.
-    pub canonical_drawers: Vec<CanonicalDrawer>,
+    pub(crate) canonical_drawers: Vec<CanonicalDrawer>,
     /// Alias pairs discovered: `(from_term, to_canonical_term)`.
-    pub aliases: Vec<(String, String)>,
+    pub(crate) aliases: Vec<(String, String)>,
     /// Drawer ids that are now superseded by a canonical drawer.
-    pub superseded_ids: Vec<Uuid>,
+    pub(crate) superseded_ids: Vec<Uuid>,
     /// Drawer ids flagged for human review (contradiction / uncertainty).
-    pub flagged_ids: Vec<(Uuid, String)>,
+    pub(crate) flagged_ids: Vec<(Uuid, String)>,
     /// Number of LLM calls consumed.
-    pub llm_calls: usize,
+    pub(crate) llm_calls: usize,
     /// Response cache hits (saved LLM calls).
-    pub cache_hits: usize,
+    pub(crate) cache_hits: usize,
 }
 
 /// A new canonical drawer produced by the LLM from a cluster.
@@ -122,12 +122,12 @@ pub struct ConsolidationResult {
 /// What: plain struct; `canonical_for` is sorted for deterministic hashing.
 /// Test: checked through `SemanticConsolidator`.
 #[derive(Debug, Clone)]
-pub struct CanonicalDrawer {
-    pub content: String,
-    pub importance: f32,
-    pub tags: Vec<String>,
+pub(crate) struct CanonicalDrawer {
+    pub(crate) content: String,
+    pub(crate) importance: f32,
+    pub(crate) tags: Vec<String>,
     /// Ids of the drawers this canonical entry replaces.
-    pub canonical_for: Vec<Uuid>,
+    pub(crate) canonical_for: Vec<Uuid>,
 }
 
 // ─── Effective OpenRouter API key resolution ───────────────────────────────
@@ -155,7 +155,7 @@ pub struct CanonicalDrawer {
 /// consistent with it.
 /// Test: `resolve_openrouter_api_key_prefers_configured_value`,
 /// `resolve_openrouter_api_key_falls_back_to_env`.
-pub fn resolve_openrouter_api_key(configured: &str) -> String {
+pub(crate) fn resolve_openrouter_api_key(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
@@ -207,15 +207,15 @@ pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) 
 /// prefix is stripped before the id goes on the wire, so
 /// `"ollama/qwen3:30b"` requests `qwen3:30b`.
 /// Test: `resolve_provider_local_requires_explicit_prefix`.
-pub const LOCAL_MODEL_PREFIXES: &[&str] = &["ollama/", "local/"];
+pub(crate) const LOCAL_MODEL_PREFIXES: &[&str] = &["ollama/", "local/"];
 
 /// Base URL used for a local model server when nothing overrides it.
-pub const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
+pub(crate) const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
 
 /// Env var overriding [`DEFAULT_LOCAL_BASE_URL`]. Takes a bare host with no
 /// `/v1` suffix, matching `inference::providers::local::LOCAL_HOST_ENV` and
 /// `trusty-agents`' legacy Ollama adapter so one setting moves every caller.
-pub const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
+pub(crate) const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
 
 /// Which backend the semantic-consolidation phase resolves to.
 ///
@@ -231,7 +231,7 @@ pub const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
 /// the reason for the single warn the caller logs.
 /// Test: `resolve_provider_*` in `semantic_consolidation::tests`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConsolidationProvider {
+pub(crate) enum ConsolidationProvider {
     /// OpenRouter with a resolved, non-empty API key.
     OpenRouter { api_key: String, model: String },
     /// A local OpenAI-compatible server, explicitly requested.
@@ -277,7 +277,7 @@ fn local_base_url() -> String {
 /// `resolve_provider_local_requires_explicit_prefix`,
 /// `resolve_provider_local_prefix_vetoed_when_disabled`,
 /// `resolve_provider_openrouter_when_key_present`.
-pub fn resolve_consolidation_provider(
+pub(crate) fn resolve_consolidation_provider(
     model: &str,
     configured_api_key: &str,
     local_model_enabled: bool,
@@ -383,7 +383,7 @@ const CLOUD_VENDOR_PREFIXES: &[&str] = &[
 /// Test: `validate_ollama_model_rejects_cloud_prefix`,
 /// `validate_ollama_model_accepts_local_tag`,
 /// `validate_ollama_model_accepts_tagged_vendor_namespaced_pull`.
-pub fn validate_ollama_model(model: &str) -> Result<()> {
+pub(crate) fn validate_ollama_model(model: &str) -> Result<()> {
     let Some(prefix) = CLOUD_VENDOR_PREFIXES
         .iter()
         .find(|p| model.starts_with(**p))
@@ -452,7 +452,7 @@ pub(super) struct OpenAiMessage {
 /// so the dream cycle degrades gracefully instead of failing.
 /// Test: `parse_consolidation_actions_round_trips`, `parse_handles_markdown_fence`,
 /// `parse_returns_empty_on_garbage`.
-pub fn parse_consolidation_actions(raw: &str) -> Result<Vec<ConsolidationAction>> {
+pub(crate) fn parse_consolidation_actions(raw: &str) -> Result<Vec<ConsolidationAction>> {
     // Strip markdown code fences if present.
     let stripped = raw
         .trim()
