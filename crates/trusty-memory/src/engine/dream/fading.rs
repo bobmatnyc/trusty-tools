@@ -43,6 +43,7 @@ const PREVIEW_MAX_CHARS: usize = 120;
 /// "not accessed recently"; `resurface_top_n` caps the ranked output.
 /// Test: `default_params_match_spec`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct FadingParams {
     /// Only memories whose *base* importance is at least this are candidates.
     /// Default: 0.7 (we only care about resurfacing originally high-value ones).

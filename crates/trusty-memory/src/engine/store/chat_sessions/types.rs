@@ -22,6 +22,7 @@ use thiserror::Error;
 /// What: Plain struct, JSON-serialised in the stored `history` blob.
 /// Test: Exercised by every session round-trip test.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A2b: build with `ChatMessage::new`.
 pub struct ChatMessage {
     pub role: String,
     pub content: String,

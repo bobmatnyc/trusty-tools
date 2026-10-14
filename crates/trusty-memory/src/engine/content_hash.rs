@@ -109,6 +109,7 @@ impl ContentHash {
 /// A digest string that is not 32 bytes of hex.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("not a 64-character hex SHA-256 digest: {got:?}")]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct ContentHashParseError {
     /// The offending input, truncated for the message.
     pub got: String,

@@ -28,6 +28,7 @@ use crate::engine::palace::Drawer;
 /// and per-cycle call budget.
 /// Test: `semantic_config_defaults` asserts the default field values.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct SemanticConsolidationConfig {
     /// Whether the phase runs at all. Defaults to `false` — a config key must
     /// turn it on explicitly, and it still needs a resolvable provider (see

@@ -34,6 +34,7 @@ use std::collections::HashMap;
 /// Test: Every test in `community_tests.rs` constructs and inspects this
 /// type.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct KnowledgeGap {
     /// Entity names in this community.
     pub entities: Vec<String>,

@@ -186,6 +186,7 @@ impl AliasAudit {
 /// embedder is dropping writes".
 /// Test: `health_reports_the_drawer_with_no_vector`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct EmbedHealth {
     pub(crate) palace_id: String,
     /// Live drawers considered (expired non-Tier-C rows are excluded — they are
@@ -246,6 +247,7 @@ impl EmbedHealth {
 /// per-drawer policy.
 /// Test: `backfill_dry_run_repairs_nothing`.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive] // #9278 A2b: build with `Default`, then assign.
 pub struct VectorBackfillOptions {
     pub dry_run: bool,
     pub limit: Option<usize>,
@@ -270,6 +272,7 @@ impl Default for VectorBackfillOptions {
 /// Test: `backfill_reembeds_a_marked_drawer`.
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct VectorBackfillReport {
     pub(crate) palace_id: String,
     pub(crate) dry_run: bool,

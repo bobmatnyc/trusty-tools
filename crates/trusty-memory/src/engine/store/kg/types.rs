@@ -36,6 +36,7 @@ pub(crate) type UndirectedSnapshot = (Vec<String>, Vec<(usize, usize)>);
 /// Test: Indirect — every `kg_graph_tests.rs` test asserts on `KgEdge` values
 /// returned by `KnowledgeGraph::neighbors`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct KgEdge {
     pub predicate: String,
     pub(crate) confidence: f32,
@@ -101,6 +102,7 @@ pub enum AdjacencyDesync {
 
 /// A temporal knowledge graph fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive] // #9278 A2b: build with `Triple::new`.
 pub struct Triple {
     pub subject: String,
     pub predicate: String,

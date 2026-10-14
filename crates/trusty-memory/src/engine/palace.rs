@@ -61,6 +61,7 @@ impl std::fmt::Display for PalaceId {
 
 /// Top-level namespace for a project or domain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive] // #9278 A2b: build with `Palace::new`.
 pub struct Palace {
     pub id: PalaceId,
     pub name: String,
@@ -73,13 +74,14 @@ impl Palace {
     /// Why: other crates build a `Palace` without a struct literal (#9278).
     /// What: sets `id`, `name`, `data_dir`; no description, `created_at` now.
     /// Test: `palace_new_has_no_description_and_a_current_creation_time`.
-    pub fn new(id: PalaceId, name: impl Into<String>, data_dir: PathBuf) -> Self {
+    // #9278 A2b Q3: `data_dir` takes `impl Into<PathBuf>`, like `name`.
+    pub fn new(id: PalaceId, name: impl Into<String>, data_dir: impl Into<PathBuf>) -> Self {
         Self {
             id,
             name: name.into(),
             description: None,
             created_at: Utc::now(),
-            data_dir,
+            data_dir: data_dir.into(),
         }
     }
 
