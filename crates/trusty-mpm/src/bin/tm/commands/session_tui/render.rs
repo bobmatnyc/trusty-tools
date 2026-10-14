@@ -31,6 +31,10 @@ use super::state::{Mode, Severity, TuiState};
 const FOOTER: &str =
     "↑↓ move · Enter open · n new · r rename · d delete · R refresh · ? keys · q quit";
 
+/// #9000: the legend on an Architect row, without the verbs the daemon refuses.
+const FOOTER_ARCHITECT: &str =
+    "Architect row: no open/delete · ↑↓ move · n new · r rename · R refresh · q quit";
+
 /// Draw one frame of the session TUI.
 ///
 /// Why: one entry point so the modal overlay can never be drawn without the
@@ -40,8 +44,10 @@ const FOOTER: &str =
 /// table for the columns that fit, records the scroll offset it used back into
 /// `state` (so the next frame holds still), then overlays a modal for any mode
 /// other than [`Mode::Browse`]. Takes `&mut TuiState` only for that scroll
-/// write-back; nothing else about the state changes here.
+/// write-back; nothing else about the state changes here. On an Architect row
+/// the footer and help drop open and delete (#9000).
 /// Test: `render_at_eighty_by_twentyfour_drops_the_widest_columns`,
+/// `render_footer_drops_open_and_delete_on_an_architect_row`,
 /// `render_at_two_hundred_by_fifty_shows_every_column`,
 /// `render_tiny_terminal_does_not_panic`, `render_*_overlay_*`.
 pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], state: &mut TuiState) {
@@ -69,14 +75,19 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
     );
     render_table(frame, body, sessions, state);
     frame.render_widget(Paragraph::new(status_text), status);
+    // #9000: an Architect row offers no open (resume) and no delete.
+    let architect = sessions
+        .get(state.selected())
+        .is_some_and(super::state::is_architect_row);
+    let legend = if architect { FOOTER_ARCHITECT } else { FOOTER };
     frame.render_widget(
-        Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(legend).style(Style::default().fg(Color::DarkGray)),
         footer,
     );
 
     match state.mode() {
         Mode::Browse => {}
-        Mode::Help => overlay(frame, area, "keys", help_body()),
+        Mode::Help => overlay(frame, area, "keys", help_body(architect)),
         Mode::Confirm {
             index,
             force,
@@ -409,24 +420,30 @@ fn new_session_hint(flow: &super::new_session::NewSessionFlow) -> String {
     parts.join("  ·  ")
 }
 
-/// The `?` key reference.
-fn help_body() -> Vec<Line<'static>> {
-    [
+/// The `?` key reference; `architect` (#9000) swaps the Enter and `d` lines
+/// for one saying why an Architect row offers neither.
+fn help_body(architect: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
         "↑ / k, ↓ / j   move the selection",
         "g / G          first / last row",
         "PgUp / PgDn    move ten rows",
-        "Enter          open (resume + attach) the selected session",
+        match architect {
+            true => "Enter, d       not offered on an Architect row: the daemon refuses",
+            false => "Enter          open (resume + attach) the selected session",
+        },
         "n              new session — pick a project, or type a path, a clone",
         "               URL, owner/repo, or domain/owner/repo",
         "Ctrl-N         in that project list: name the new session first",
         "r              rename it",
-        "d              delete it, with a confirm step",
+    ];
+    if !architect {
+        lines.push("d              delete it, with a confirm step");
+    }
+    lines.extend([
         "R              refresh the list from the daemon",
         "q / Esc        quit",
         "",
         "Any key closes this help.",
-    ]
-    .into_iter()
-    .map(|l| Line::from(l.to_string()))
-    .collect()
+    ]);
+    lines.into_iter().map(Line::from).collect()
 }

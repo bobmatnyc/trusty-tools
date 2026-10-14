@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::architect_floor::ArchitectFloor;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord, StopCause};
+use super::session_kind::SessionKind;
 
 /// An operator verb the daemon refuses on a protected session (#8942).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,39 +45,57 @@ impl ProtectedVerb {
     }
 }
 
+/// Whether the daemon refuses every [`ProtectedVerb`] on a record (#8942).
+///
+/// Why: #9000 — the session picker hides the verbs the daemon refuses, so
+/// both must ask one rule.
+/// What: `true` for a protected `kind` whose `state` is not terminal.
+/// Test: `only_a_live_protected_record_refuses_the_verbs`.
+pub fn refuses_verbs(kind: SessionKind, state: &ManagedSessionState) -> bool {
+    kind.is_protected() && !state.is_terminal()
+}
+
+/// The sentence the daemon answers a refused `verb` with (#8942).
+///
+/// What: names the session, its kind, and the way out; the picker shows the
+/// same text instead of sending a request the daemon refuses (#9000).
+/// Test: `resume_refuses_an_architect_record`.
+pub fn refusal(name: &str, kind: SessionKind, verb: ProtectedVerb) -> String {
+    let (verb, way_out) = verb.describe();
+    format!(
+        "session '{name}' is the Architect's (kind {kind:?}); tm does not {verb} it — {way_out}"
+    )
+}
+
 /// Refuse `verb` on a live record of a protected kind (#8942).
 ///
 /// Why: ruling 1 — the only stops for the Architect are exiting claude or a
 /// manual `tmux kill-session`; the daemon's own verbs all refuse.
-/// What: `Err(InvalidState)` naming the kind and the way out when the record
-/// is protected and not terminal; `Ok(())` otherwise.
+/// What: `Err(InvalidState)` carrying [`refusal`] when [`refuses_verbs`]
+/// holds; `Ok(())` otherwise.
 /// Test: `stop_refuses_an_architect_record_and_never_signals_it`,
 /// `resume_refuses_an_architect_record`, `delete_refuses_a_live_architect_record`.
 pub(crate) fn refuse_protected(
     record: &SessionRecord,
     verb: ProtectedVerb,
 ) -> Result<(), ManagedError> {
-    if !record.kind.is_protected() || record.state.is_terminal() {
+    if !refuses_verbs(record.kind, &record.state) {
         return Ok(());
     }
-    let (verb, way_out) = verb.describe();
     Err(ManagedError::InvalidState(
         record.id.to_string(),
-        format!(
-            "session '{}' is the Architect's (kind {:?}); tm does not {verb} it — {way_out}",
-            record.tmux_name, record.kind
-        ),
+        refusal(&record.tmux_name, record.kind, verb),
     ))
 }
 
 /// Whether a daemon sweep named `path` must leave `record` alone (#8942).
 ///
-/// What: `true`, logged at debug, for a live record of a protected kind.
+/// What: `true`, logged at debug, when [`refuses_verbs`] holds.
 /// Test: `idle_reaper_never_stops_an_architect_record`,
 /// `shutdown_skips_an_architect_session`,
 /// `prune_include_active_never_decommissions_an_architect_record`.
 pub(crate) fn skip_protected(record: &SessionRecord, path: &str) -> bool {
-    let skip = record.kind.is_protected() && !record.state.is_terminal();
+    let skip = refuses_verbs(record.kind, &record.state);
     if skip {
         debug!(id = %record.id, name = %record.tmux_name, kind = ?record.kind, "{path}: left the Architect's session alone (#8942)");
     }
