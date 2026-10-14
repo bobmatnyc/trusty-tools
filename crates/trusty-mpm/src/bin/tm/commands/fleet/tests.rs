@@ -1209,7 +1209,7 @@ fn a_seeded_agents_md_is_composed_into_the_architect_prompt() {
     let prompt = architect_prompt::architect_prompt_for(&content, &fx.dir());
     let heading = |text: &str| -> String {
         text.lines()
-            .find(|l| l.starts_with("# "))
+            .find(|l| l.starts_with('#'))
             .unwrap_or_else(|| panic!("no heading in:\n{text}"))
             .to_owned()
     };
