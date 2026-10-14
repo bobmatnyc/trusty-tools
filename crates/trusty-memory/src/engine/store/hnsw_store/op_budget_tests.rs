@@ -70,7 +70,7 @@ async fn an_upsert_behind_a_parked_graph_lock_exceeds_its_budget() {
     let err = outcome.expect_err("an upsert that cannot take the graph lock must fail");
     assert!(
         matches!(
-            op_budget_error(&err),
+            op_budget_error(&*err),
             Some(OpBudgetError::BudgetExceeded { op: "upsert", .. })
         ),
         "expected BudgetExceeded for upsert, got {err:#}"
@@ -112,7 +112,7 @@ async fn a_tripped_store_refuses_the_next_call_without_spawning() {
     for outcome in outcomes {
         let err = outcome.expect_err("a tripped store must refuse every operation");
         assert!(
-            matches!(op_budget_error(&err), Some(OpBudgetError::Wedged { .. })),
+            matches!(op_budget_error(&*err), Some(OpBudgetError::Wedged { .. })),
             "expected Wedged, got {err:#}"
         );
     }

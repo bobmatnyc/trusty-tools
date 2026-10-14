@@ -26,7 +26,9 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
+use crate::engine::store::kg::Internal;
 use crate::engine::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
+use crate::engine::store::palace_store::PalaceStoreError;
 use crate::engine::store::write_deadline::{DeadlinedWrite, WriteTxnError};
 use crate::engine::timeouts;
 
@@ -91,9 +93,12 @@ const MAX_ALLOC_PROBES: u8 = 8;
 /// Why: A structured error type lets callers distinguish redb failures
 /// from postcard decode failures and from UUID parse failures without
 /// pattern-matching on stringly-typed `anyhow::Error` payloads.
-/// What: `thiserror` enum carrying the underlying source error.
+/// What: `thiserror` enum carrying the underlying source error. `Palace` and
+/// `Other` carry what a vector-store open or write met outside this module
+/// (#9278 T2); `Other` is opaque: match the variant and read the text.
 /// Test: Indirectly via the unit tests below (each variant is reached when
-/// the corresponding subsystem returns an error).
+/// the corresponding subsystem returns an error);
+/// `vector_store_paths_return_hnsw_store_error`.
 #[derive(Debug, Error)]
 // #9487: `OpBudget` was a semver break; non_exhaustive keeps the next variant additive.
 #[non_exhaustive]
@@ -117,6 +122,7 @@ pub enum HnswStoreError {
     #[error("invalid uuid in vector_keys table: {0}")]
     InvalidUuid(#[from] uuid::Error),
     #[error("vector dimension mismatch: expected {expected}, got {got}")]
+    #[non_exhaustive]
     DimensionMismatch { expected: usize, got: usize },
     /// The allocator could not find a free `vector_id` within
     /// [`MAX_ALLOC_PROBES`]. Fails the upsert rather than overwriting a live
@@ -126,9 +132,11 @@ pub enum HnswStoreError {
          (last candidate {last_candidate} is already present in VECTORS); \
          refusing to overwrite a live vector — the palace index needs a rebuild"
     )]
+    #[non_exhaustive]
     IdAllocationFailed { probes: u8, last_candidate: u64 },
     /// #9275: a drawer write named no chunk, or more than the cap allows.
     #[error("a drawer holds 1..={max} chunk vectors, got {got}")]
+    #[non_exhaustive]
     ChunkCount { got: usize, max: usize },
     /// #9275: a drawer-level call named a row key (`#`) or an empty key.
     #[error("drawer key {0:?} is empty or contains '#'")]
@@ -152,6 +160,32 @@ pub enum HnswStoreError {
     /// #9487: an operation exceeded its budget, or the store is wedged.
     #[error(transparent)]
     OpBudget(#[from] op_budget::OpBudgetError),
+    /// #9278 T2: the palace format refused the open, or another palace fault.
+    #[error(transparent)]
+    Palace(PalaceStoreError),
+    /// #9278 T2: any other failure; message-only, not a stable match target.
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl HnswStoreError {
+    /// Map an internal `anyhow` error to its variant (#9278 T2).
+    ///
+    /// What: a `HnswStoreError` in the error (under any `.context()`) comes
+    /// back as-is, then a root `PalaceStoreError` is `Palace`; the rest is
+    /// `Other`, which keeps the whole chain's text.
+    /// Test: `vector_store_paths_return_hnsw_store_error`,
+    /// `format_refusal_is_seen_through_kg_error`.
+    pub(crate) fn from_internal(e: anyhow::Error) -> Self {
+        let e = match e.downcast::<HnswStoreError>() {
+            Ok(h) => return h,
+            Err(e) => e,
+        };
+        match e.downcast::<PalaceStoreError>() {
+            Ok(p) => Self::Palace(p),
+            Err(e) => Self::Other(Box::new(Internal(e))),
+        }
+    }
 }
 
 mod alloc;

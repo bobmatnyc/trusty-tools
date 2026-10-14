@@ -14,6 +14,8 @@
 //! Test: palace_format_tests.rs — `n_plus_one_palace_is_refused_and_bytes_unchanged`,
 //! and the other arms listed on each function below.
 
+use super::chat_sessions::ChatSessionStoreError;
+use super::hnsw_store::HnswStoreError;
 use super::kg::KgError;
 use super::kg_store::{
     DRAWERS, KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker,
@@ -469,16 +471,26 @@ pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
     palace_store_errors(err).any(PalaceStoreError::is_format_refusal)
 }
 
-/// Every `PalaceStoreError` in an error's chain, bare or inside a `KgError`.
+/// Every `PalaceStoreError` in an error's chain, bare or inside a `KgError`,
+/// a `ChatSessionStoreError` or a `HnswStoreError`.
 ///
-/// Why (#9278 Q4): `KgError::Palace` is transparent, so `chain()` steps past
-/// its payload; only the `KgError` accessor reaches it.
+/// Why (#9278 Q4, T2): each `Palace` variant is transparent, so `chain()`
+/// steps past its payload; only a match on the wrapper reaches it.
 /// Test: `format_refusal_is_seen_through_kg_error`,
-/// `count_refusal_sees_a_kg_error_palace`.
+/// `count_refusal_sees_a_kg_error_palace`,
+/// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`.
 pub(crate) fn palace_store_errors(err: &anyhow::Error) -> impl Iterator<Item = &PalaceStoreError> {
     err.chain().filter_map(|e| {
         e.downcast_ref::<PalaceStoreError>()
             .or_else(|| e.downcast_ref::<KgError>()?.as_palace_store())
+            .or_else(|| match e.downcast_ref::<ChatSessionStoreError>()? {
+                ChatSessionStoreError::Palace(p) => Some(p),
+                _ => None,
+            })
+            .or_else(|| match e.downcast_ref::<HnswStoreError>()? {
+                HnswStoreError::Palace(p) => Some(p),
+                _ => None,
+            })
     })
 }
 

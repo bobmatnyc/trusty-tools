@@ -133,8 +133,9 @@ impl KgError {
 
 /// The internal error a boxed variant carries. anyhow's own boxed form prints
 /// only the outer message under `{:#}`; this keeps the whole chain (#9278).
+/// #9278 T2: `HnswStoreError::from_internal` boxes it too.
 #[derive(Debug)]
-struct Internal(anyhow::Error);
+pub(crate) struct Internal(pub(crate) anyhow::Error);
 
 impl std::fmt::Display for Internal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

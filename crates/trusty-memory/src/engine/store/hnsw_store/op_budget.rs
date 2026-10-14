@@ -52,8 +52,8 @@ pub(crate) const OP_BUDGET_TXN_DEADLINES: u32 = 2;
 /// Why: a caller has to tell "this palace's vector store is stuck" apart from
 /// an ordinary redb or encoding failure, so a remember can fail closed and the
 /// health surface can name the palace.
-/// What: carried by [`HnswStoreError::OpBudget`]; recover it from an
-/// `anyhow::Error` chain with [`op_budget_error`].
+/// What: carried by [`HnswStoreError::OpBudget`]; recover it from any error
+/// chain with [`op_budget_error`].
 /// Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
 /// `a_tripped_store_refuses_the_next_call_without_spawning`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -65,6 +65,7 @@ pub enum OpBudgetError {
          (TRUSTY_HNSW_OP_BUDGET_SECS); this vector store now refuses every \
          operation until the palace is reopened or the daemon restarts"
     )]
+    #[non_exhaustive]
     BudgetExceeded {
         op: &'static str,
         palace: String,
@@ -75,21 +76,29 @@ pub enum OpBudgetError {
         "hnsw vector store for palace '{palace}' is wedged: an earlier operation \
          exceeded its budget; reopen the palace or restart the daemon"
     )]
+    #[non_exhaustive]
     Wedged { palace: String },
 }
 
-/// Find the [`OpBudgetError`] inside an `anyhow` chain, if one caused it.
+/// Find the [`OpBudgetError`] inside an error chain, if one caused it.
 ///
 /// Why: the vector layer and the remember pipeline wrap store errors in
 /// context, so callers need one place that sees through it.
-/// What: downcasts to [`HnswStoreError`] (anyhow searches context layers) and
-/// returns its `OpBudget` payload.
-/// Test: `a_remember_whose_vector_step_exceeds_its_budget_commits_nothing`.
-pub fn op_budget_error(err: &anyhow::Error) -> Option<&OpBudgetError> {
-    match err.downcast_ref::<HnswStoreError>()? {
-        HnswStoreError::OpBudget(e) => Some(e),
-        _ => None,
-    }
+/// What: walks `err` and its sources, and returns the first `OpBudget`
+/// payload of a [`HnswStoreError`] or a bare [`OpBudgetError`]. #9278 T2:
+/// the API no longer names `anyhow`; pass an `anyhow::Error` as `&*err`.
+/// Test: `a_remember_whose_vector_step_exceeds_its_budget_commits_nothing`,
+/// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
+pub fn op_budget_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a OpBudgetError> {
+    std::iter::successors(Some(err), |e| e.source()).find_map(|e| {
+        match e.downcast_ref::<HnswStoreError>() {
+            Some(HnswStoreError::OpBudget(b)) => Some(b),
+            Some(_) => None,
+            None => e.downcast_ref::<OpBudgetError>(),
+        }
+    })
 }
 
 /// The default budget for a given redb write-transaction deadline (#9487).
@@ -435,12 +444,15 @@ impl HnswStore {
     /// `a_tripped_store_refuses_the_next_call_without_spawning`,
     /// `a_dropped_caller_still_trips_the_breaker_at_the_budget`,
     /// `a_hung_closure_exceeds_the_join_budget_without_any_lock`.
-    pub async fn run_bounded<T, F>(&self, op: &'static str, work: F) -> anyhow::Result<T>
+    pub async fn run_bounded<T, F>(&self, op: &'static str, work: F) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+        F: FnOnce() -> Result<T> + Send + 'static,
     {
-        self.run_bounded_progress(op, move |_| work()).await
+        // #9278 T2: typed at the public edge; the internal runner stays anyhow.
+        self.run_bounded_progress(op, move |_| Ok(work()?))
+            .await
+            .map_err(HnswStoreError::from_internal)
     }
 
     /// Run `work` on the blocking pool under a stall watchdog (#9487, #9728).
@@ -494,7 +506,7 @@ impl HnswStore {
         let _detached = tokio::task::spawn_blocking(move || {
             let result = work(progress);
             end.overrun = matches!(
-                result.as_ref().map_err(op_budget_error),
+                result.as_ref().map_err(|e| op_budget_error(&**e)),
                 Err(Some(OpBudgetError::BudgetExceeded { .. }))
             );
             // Settle (and count an inner overrun) before the caller sees it.

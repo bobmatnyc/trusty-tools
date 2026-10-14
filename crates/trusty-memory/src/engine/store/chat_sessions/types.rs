@@ -9,6 +9,7 @@
 //! alias.
 //! Test: exercised by every round-trip test in `mod.rs`.
 
+use crate::engine::store::palace_store::PalaceStoreError;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -114,8 +115,11 @@ pub(super) struct ChatSessionRecord {
 /// operator. `NotFound` is a value not an error path — missing rows surface
 /// as `Ok(None)` instead.
 /// What: Wraps the error sources (redb storage, transaction, table, postcard,
-/// JSON, timestamp parsing).
-/// Test: Covered indirectly by the round-trip and missing-row tests.
+/// JSON, timestamp parsing) and a palace-format refusal. #9278 T2: public, the
+/// error of `ChatSessionStore::{open, create_session}`; every struct variant
+/// is `#[non_exhaustive]`.
+/// Test: `chat_session_store_paths_return_chat_session_store_error`; the
+/// round-trip and missing-row tests.
 //
 // Why (boxing): redb's error types are large enums; box them so the parent
 // `Result<_, ChatSessionStoreError>` size stays small and Clippy's
@@ -124,48 +128,56 @@ pub(super) struct ChatSessionRecord {
 #[non_exhaustive]
 pub enum ChatSessionStoreError {
     #[error("chat session store io error at {path}: {source}")]
+    #[non_exhaustive]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("chat session store redb database error at {path}: {source}")]
+    #[non_exhaustive]
     Database {
         path: PathBuf,
         #[source]
         source: Box<redb::DatabaseError>,
     },
     #[error("chat session store redb transaction error at {path}: {source}")]
+    #[non_exhaustive]
     Transaction {
         path: PathBuf,
         #[source]
         source: Box<redb::TransactionError>,
     },
     #[error("chat session store redb table error at {path}: {source}")]
+    #[non_exhaustive]
     Table {
         path: PathBuf,
         #[source]
         source: Box<redb::TableError>,
     },
     #[error("chat session store redb storage error at {path}: {source}")]
+    #[non_exhaustive]
     Storage {
         path: PathBuf,
         #[source]
         source: Box<redb::StorageError>,
     },
     #[error("chat session store redb commit error at {path}: {source}")]
+    #[non_exhaustive]
     Commit {
         path: PathBuf,
         #[source]
         source: Box<redb::CommitError>,
     },
     #[error("chat session store postcard codec error: {source}")]
+    #[non_exhaustive]
     Postcard {
         #[source]
         source: postcard::Error,
     },
     #[error("chat session store json error: {source}")]
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    #[non_exhaustive]
     Json {
         #[source]
         source: Box<serde_json::Error>,
@@ -179,13 +191,18 @@ pub enum ChatSessionStoreError {
     /// session". Carries `id` so the operator knows which row is corrupt.
     #[error("chat session {id} has corrupt history json: {source}")]
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    #[non_exhaustive]
     CorruptHistory {
         id: String,
         #[source]
         source: Box<serde_json::Error>,
     },
+    /// #9278 T2: the palace format refused the open.
+    #[error(transparent)]
+    Palace(PalaceStoreError),
     #[error("chat session store timestamp parse error for {field}: {source}")]
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    #[non_exhaustive]
     Timestamp {
         field: &'static str,
         #[source]
