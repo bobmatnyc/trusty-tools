@@ -10,6 +10,7 @@
 //! `KgStoreRedb`) and reads the result through raw redb and JSON.
 //! Test: this file.
 
+use crate::engine::EngineError;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
@@ -178,7 +179,7 @@ pub(super) fn open(
     v0: &Fixture,
     intent: OpenIntent,
 ) -> anyhow::Result<std::sync::Arc<PalaceHandle>> {
-    PalaceHandle::open_with_intent(&v0.palace, intent)
+    PalaceHandle::open_with_intent(&v0.palace, intent).map_err(anyhow::Error::from)
 }
 
 /// AC1, ADR-0067 D4 (#9275 T1): a v1 palace migrates to 2 at its first
@@ -224,14 +225,14 @@ fn a_format_1_palace_migrates_to_2_at_first_writer_open() {
 fn a_read_only_open_of_a_format_1_palace_is_refused_and_writes_nothing() {
     let v0 = build_v1("v1-read-only");
     let before = hash_tree(v0.dir());
-    let err = open(&v0, OpenIntent::ReadOnlyClient)
+    // #9278 T3b-1: the typed open returns the refusal as `EngineError::Palace`.
+    let err = PalaceHandle::open_with_intent(&v0.palace, OpenIntent::ReadOnlyClient)
         .err()
         .expect("a read-only open of format 1 is refused");
-    assert!(is_format_refusal(&err), "{err:#}");
     assert!(
         matches!(
-            err.downcast_ref::<PalaceStoreError>(),
-            Some(PalaceStoreError::FormatNeedsMigration {
+            err,
+            EngineError::Palace(PalaceStoreError::FormatNeedsMigration {
                 found: 1,
                 supported: 2,
                 ..
@@ -239,6 +240,8 @@ fn a_read_only_open_of_a_format_1_palace_is_refused_and_writes_nothing() {
         ),
         "{err:#}"
     );
+    let err = anyhow::Error::from(err);
+    assert!(is_format_refusal(&err), "{err:#}");
     assert_eq!(before, hash_tree(v0.dir()), "a byte changed");
     assert!(complete_backups(&v0).is_empty());
 }

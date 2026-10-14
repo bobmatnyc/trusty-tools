@@ -136,13 +136,16 @@ fn n_plus_one_in_palace_json_mirror_is_refused_before_redb_opens() {
     let err = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
         .err()
         .expect("a newer mirror must refuse the open");
+    // #9278 T3b-1: the typed open returns the refusal as `EngineError::Palace`.
     assert!(
         matches!(
-            store_error(&err),
-            PalaceStoreError::FormatTooNew { found, .. } if *found == PALACE_FORMAT_SUPPORTED + 1
+            &err,
+            crate::engine::EngineError::Palace(PalaceStoreError::FormatTooNew { found, .. })
+                if *found == PALACE_FORMAT_SUPPORTED + 1
         ),
         "{err:#}"
     );
+    assert!(is_format_refusal(&anyhow::Error::from(err)));
     assert_eq!(
         before,
         hash_tree(&palace.data_dir),

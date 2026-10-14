@@ -24,6 +24,8 @@ pub mod dream;
 // #9278 (A5, Q3): `Embedder` is trusty-common's; callers outside the crate
 // name `trusty_common::embedder`.
 pub(crate) mod embed;
+#[cfg(test)]
+mod error_tests;
 pub mod filter;
 // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
 #[cfg(test)]
