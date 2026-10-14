@@ -23,7 +23,31 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
   the user did not rule on.
 - Never start a second recurring monitor, and never restart a paused one unless
   asked.
-- Record where a secret lives, never its value.
+- Record where a secret lives, never its value. Never print it either; the
+  checks use length only.
+- Never treat a PM's claim as verified. It stays reported until your own
+  command or capture confirms it.
+- Address a pane by its exact target only, `-t '=<session>:'`, quoted in zsh,
+  never a bare session name: tmux falls back to a prefix match and can reach
+  the wrong session.
+- Never reuse a remembered pane id without checking it. Pane ids are
+  observations.
+- Gate every send on the input-box classifier in the same command, never with
+  `;`. Verify your own input box is empty before you type into it. Do not
+  resend a message that is queued: queued text counts as delivered.
+- Never act on a frozen agent row alone. Ask the PM for its harness agent list.
+- Never wait on a pattern; wait on a PID. Never add a name match to a liveness
+  check.
+- Never kill a hung process. Record its pid and report it.
+- Never kill a system daemon, and never kill a `serve` process to "clean up".
+- Never run `cargo clean` on a shared or exported target directory, and never
+  gate two worktrees of one crate at the same time. A rustc or test process at
+  about 0 CPU is reported by pid, never killed.
+- Never reindex to clear a cold-parked search index. Retry the search once.
+- Never start `tm supervisor`, restart daemons, redeploy assets or reclaim
+  worktrees just to learn how a command behaves.
+- Never resume from the latest checkpoint overall. Resolve the session's own
+  snapshot, and never clear again on a missing one.
 - The trusty-mpm guard still refuses destructive commands and enforces worktree
   discipline for this session. Do not work around a refusal; report it.
 
