@@ -1863,7 +1863,7 @@ async fn delegated_turns_carry_the_delegated_agents_role() {
 // ── #8288: a delegating PM writes no source itself ──────────────────────────
 
 /// A `delegate_to_agent` call naming `agent` (#8288).
-/// Test: `delegating_pm_cannot_write_source_directly_or_through_itself`.
+/// Test: `delegating_pm_cannot_write_source_through_itself`.
 fn delegate_to_response(agent: &str, task: &str) -> Value {
     json!({
         "id": "gen-delegate-to",
@@ -1886,8 +1886,7 @@ fn delegate_to_response(agent: &str, task: &str) -> Value {
     })
 }
 
-/// #8288 FAIL-OPEN CHECK: the delegating stock `pm` writes no bound-project
-/// source — not by a direct `write_file`, and not by delegating to itself.
+/// #8288: the delegating stock `pm` cannot reach source through its own card.
 ///
 /// Why: owner ruling 2026-09-19 — a delegating PM must never write source;
 /// the coding work goes through a delegated agent. The stock `pm` card grants
@@ -1895,20 +1894,20 @@ fn delegate_to_response(agent: &str, task: &str) -> Value {
 /// every `ask` into an allow, so `delegate_to_agent(agent_name: "pm")` ran the
 /// PM's own card with its own write tools and the source landed.
 /// What: an EMPTY agents dir (the embedded `pm.md`), a delegating run under
-/// `AllowAsks`, scripted [PM write_file, PM delegate to `pm`, sub-agent
-/// write_file, sub-agent stop, PM stop]. Asserts the self-delegation really
-/// spawned (so the test cannot pass on a refused delegation) and that neither
-/// file reached the disk. FAILS at c69c8e01be: `self.py` is written.
+/// `AllowAsks`, scripted [PM delegate to `pm`, PM stop]. Asserts the
+/// self-delegation is refused at dispatch (no `pm` sub-agent spawns) and that
+/// nothing reached the disk. FAILS at c69c8e01be and 97038f5a23: the
+/// sub-agent spawns. The PM's direct `write_file` denial is NOT covered here
+/// (it passes pre-fix); that is `delegator_write_is_denied_before_any_rule`.
 /// Test: this test.
 #[tokio::test]
-async fn delegating_pm_cannot_write_source_directly_or_through_itself() {
+async fn delegating_pm_cannot_write_source_through_itself() {
     let registry = Arc::new(SessionRegistry::new());
     let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     let agents = tempfile::tempdir().expect("empty agents tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
 
     let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&[
-        write_file_tool_call_response("call_direct", "direct.py", "print('pm')"),
         delegate_to_response("pm", "create self.py"),
         write_file_tool_call_response("call_self", "self.py", "print('pm again')"),
         stop_response("pm sub-agent: done"),
@@ -1929,12 +1928,8 @@ async fn delegating_pm_cannot_write_source_directly_or_through_itself() {
         .iter()
         .any(|e| matches!(&e.event, crate::events::Event::AgentSpawned { agent, .. } if agent == "pm"));
     assert!(
-        spawned_self,
-        "test premise: the PM's self-delegation must reach a sub-agent loop"
-    );
-    assert!(
-        !project.path().join("direct.py").exists(),
-        "a delegating PM's direct write_file must not reach the disk"
+        !spawned_self,
+        "a delegator must not run its own card as a sub-agent"
     );
     assert!(
         !project.path().join("self.py").exists(),

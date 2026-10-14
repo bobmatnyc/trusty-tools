@@ -378,6 +378,27 @@ async fn delegator_write_is_denied_before_any_rule() {
     );
 }
 
+/// #8288: the delegator lock ignores case. A disk card with no `name:` takes
+/// its name from the requested file stem, so on a case-insensitive filesystem
+/// `delegate_to_agent("PM")` loads `pm.md` named "PM".
+/// FAILS at 97038f5a23: the exact comparison misses and the `ask` is allowed.
+/// Test: this test.
+#[tokio::test]
+async fn delegator_lock_ignores_case() {
+    let ctx = PermissionContext::headless(PermissionMode::AllowAsks).with_delegator("pm");
+    let mut card = agent_with_permissions("permissions:\n  write_file: ask\n");
+    card.agent.name = "PM".into();
+    assert_eq!(
+        gate(&ctx, card)
+            .resolve("write_file", &json!({"path": "src/lib.rs", "content": "x"}))
+            .await,
+        Outcome::Denied {
+            rule: crate::permissions::gate::DELEGATOR_DENY_RULE.to_string(),
+            source: DenySource::Policy,
+        }
+    );
+}
+
 /// A gate for an agent with no map allows everything.
 #[tokio::test]
 async fn gate_for_agent_without_a_map_allows_everything() {

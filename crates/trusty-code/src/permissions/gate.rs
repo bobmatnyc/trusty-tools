@@ -305,7 +305,7 @@ pub struct PermissionContext {
 /// What: denied by [`PermissionGate::resolve`] before any rule, mode or grant
 /// is consulted, for every gate whose agent is the context's `delegator`.
 /// Test: `delegator_write_is_denied_before_any_rule`,
-/// `task::executor::tests::delegating_pm_cannot_write_source_directly_or_through_itself`.
+/// `task::executor::tests::delegating_pm_cannot_write_source_through_itself`.
 pub const DELEGATOR_DENIED_TOOLS: &[&str] = &["write_file", "write_files", "edit", "bash"];
 
 /// The `Outcome::Denied.rule` a [`DELEGATOR_DENIED_TOOLS`] refusal reports.

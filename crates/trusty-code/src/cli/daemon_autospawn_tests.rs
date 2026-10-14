@@ -96,6 +96,18 @@ fn stub_daemon_with_build(
     binding: Option<serde_json::Value>,
     build: Option<&'static str>,
 ) {
+    stub_daemon_full(socket, binding, build, trusty_code::VERSION, false);
+}
+
+/// [`stub_daemon_with_build`] with the published `version` chosen, and with
+/// `fail_health` answering `health` with a JSON-RPC error (#8203).
+fn stub_daemon_full(
+    socket: &Path,
+    binding: Option<serde_json::Value>,
+    build: Option<&'static str>,
+    version: &'static str,
+    fail_health: bool,
+) {
     let dir = socket.parent().expect("a socket path has a parent");
     // `connect_hardened` refuses a socket whose containing directory is wider
     // than `0700`, and `tempfile` creates one at the process umask.
@@ -121,8 +133,22 @@ fn stub_daemon_with_build(
                     Ok(request) => request,
                     Err(_) => return,
                 };
-                let mut result =
-                    serde_json::json!({"server": "tcode", "status": "ok", "pid": 4242});
+                if fail_health {
+                    let body = format!(
+                        "{}\n",
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request["id"].clone(),
+                            "error": {"code": -32603, "message": "health is broken"},
+                        })
+                    );
+                    let _ = reader.get_mut().write_all(body.as_bytes()).await;
+                    let _ = reader.get_mut().flush().await;
+                    return;
+                }
+                let mut result = serde_json::json!({
+                    "server": "tcode", "status": "ok", "pid": 4242, "version": version,
+                });
                 if let Some(build) = build {
                     result["build"] = serde_json::json!(build);
                 }
@@ -465,6 +491,68 @@ async fn refuses_a_daemon_from_a_different_build() {
         }
         assert!(!marker.exists(), "a refusal must not spawn anything");
     }
+}
+
+/// **The "unknown" build hole.** `build.rs` falls back to `"unknown"` without
+/// git, so two different releases can both report it. The versions must be
+/// compared too: a daemon of the same build string but another version is
+/// refused, naming both versions, and nothing is spawned.
+/// FAILS at 97038f5a23: the equal builds attach.
+/// Test: this test.
+#[tokio::test]
+async fn refuses_a_different_version_when_the_builds_match() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let canonical = project.path().canonicalize().expect("canonicalize");
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+    stub_daemon_full(
+        &socket,
+        Some(binding_json(Some(&canonical))),
+        Some(trusty_code::build_info::GIT_HASH),
+        "0.0.1-stale",
+        false,
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("spawned");
+    let stub = marker_stub(dir.path(), &marker);
+
+    let err = ensure_daemon_with(Some(&canonical), &stub, &socket)
+        .await
+        .expect_err("a daemon of another version must be refused")
+        .to_string();
+    for needle in ["0.0.1-stale", trusty_code::VERSION, "4242"] {
+        assert!(err.contains(needle), "refusal must name {needle:?}: {err}");
+    }
+    assert!(!marker.exists(), "a refusal must not spawn anything");
+}
+
+/// A `health` call that fails at the build check is its own message, not
+/// "build <unreported>". `ensure_daemon_with` reads the binding first, so this
+/// drives `check_build` directly.
+/// FAILS at 97038f5a23: the error says the daemon runs build `<unreported>`.
+/// Test: this test.
+#[tokio::test]
+async fn a_failed_health_call_is_not_reported_as_an_unreported_build() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let sock_dir = tempfile::tempdir().expect("socket dir");
+    let socket = sock_dir.path().join("tcode.sock");
+    stub_daemon_full(
+        &socket,
+        None,
+        Some(trusty_code::build_info::GIT_HASH),
+        trusty_code::VERSION,
+        true,
+    );
+
+    let err = check_build(&socket)
+        .await
+        .expect_err("a daemon that cannot answer health is refused")
+        .to_string();
+    assert!(err.contains("`health` call failed"), "wrong message: {err}");
+    assert!(!err.contains("<unreported>"), "wrong message: {err}");
 }
 
 /// This project's own socket beside the shared `socket` (#4600).

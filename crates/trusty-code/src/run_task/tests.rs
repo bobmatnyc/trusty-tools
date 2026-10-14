@@ -602,10 +602,12 @@ async fn delegated_turns_carry_the_delegated_agents_role() {
 
 /// #8288: the legacy path's delegating PM writes no source through its own
 /// card either — the sibling of
-/// `task::executor::tests::delegating_pm_cannot_write_source_directly_or_through_itself`.
+/// `task::executor::tests::delegating_pm_cannot_write_source_through_itself`.
 ///
 /// What: a disk `pm.md` granting `write_file` as `ask`, `AllowAsks`, the PM
-/// delegating to `pm`; asserts the sub-agent ran and its write never landed.
+/// delegating to `pm`; asserts the delegation is refused at dispatch (no
+/// sub-agent turns) and that no write landed. FAILS at 97038f5a23: the
+/// sub-agent runs.
 /// Test: this test.
 #[tokio::test]
 async fn delegating_pm_cannot_write_source_through_itself() {
@@ -648,11 +650,12 @@ async fn delegating_pm_cannot_write_source_through_itself() {
 
     let report = execute_run_task(p, llm).await;
 
-    // Two PM turns plus the sub-agent's two: the delegation was dispatched.
+    // Delegate, a refused-then-denied write, stop: three PM turns and no
+    // sub-agent turns (a dispatched self-delegation adds a fourth).
     assert_eq!(
         report.transcript.len(),
-        4,
-        "test premise: the self-delegation must run a sub-agent loop: {:?}",
+        3,
+        "the self-delegation must be refused, not run: {:?}",
         report.transcript
     );
     assert!(
