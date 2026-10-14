@@ -16,13 +16,25 @@
 #   crate root); a method on a type whose generics carry `->` (fn pointer,
 #   `Fn` bound); a KEEP or DEPRECATE row not listed; a public enum without
 #   `#[non_exhaustive]` (plain, re-exported, generic, or with another
-#   attribute only).
+#   attribute only); a struct with a public field and no `#[non_exhaustive]`
+#   (plain, re-exported, field line first, a tuple field first or later,
+#   generic, another attribute only); an exemption reason without the
+#   `exhaustive: ` prefix; a struct-like variant without `#[non_exhaustive]`
+#   (plain, re-exported, field line first, another attribute only).
 #   Passing cases: a matching listing whose lines carry an attribute prefix, a
 #   generic fn, a field, a variant and an impl header; the generic shapes
 #   against a matching table; a fn-pointer generic method with its row; marked
-#   enums; a field and a method sharing one path.
+#   enums; a field and a method sharing one path; marked structs (plain,
+#   generic, either attribute order); opaque, unit and private-tuple structs;
+#   a marked struct-like variant whose field is not a struct field; a struct
+#   name that prefixes another; `exhaustive:` exemptions with a reason; tuple
+#   and unit variants.
 #   Errors (exit 2, naming the line or path): a missing, empty, crate-less or
-#   unparsable listing (a generic group the strip cannot read included); a
+#   unparsable listing (a generic group the strip cannot read, or an
+#   attribute glued to `pub`, included); a stale exemption (on a marked
+#   struct, an opaque struct, an unlisted path) or a misplaced one (a non-struct
+#   kind, a NARROW row); an exemption with an empty, blank or bare reason, on
+#   an unmarked or a marked struct; a
 #   missing or header-only table; a header line that is deleted, misspelled,
 #   six columns wide or CRLF-terminated; a malformed row (an
 #   unknown or mixed-case disposition, a space-separated row, a 4-field row,
@@ -272,8 +284,9 @@ struct_case s-generic "$GEN" "pub struct $K::Wrap<T>" "pub $K::Wrap::inner: T" "
 run_case generic-struct-unmarked 1 "UNMARKED $K::Tup${NL}UNMARKED $K::Wrap${NL}check_engine_api_audit: FAIL — 2 path(s)" "$TMP/s-generic.api"
 struct_case s-generic-marked "$GEN" "#[non_exhaustive] pub struct $K::Wrap<T>" "pub $K::Wrap::inner: T" "#[non_exhaustive] pub struct $K::Tup<'a, T: core::clone::Clone>(pub &'a T)"
 run_case generic-struct-marked 0 '10 audited path(s) match' "$TMP/s-generic-marked.api"
-struct_case s-variant "enum=$K::Ev variant=$K::Ev::Moved field=$K::Ev::Moved::from" \
-  "#[non_exhaustive] pub enum $K::Ev" "pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
+EV="enum=$K::Ev variant=$K::Ev::Moved field=$K::Ev::Moved::from"
+struct_case s-variant "$EV" \
+  "#[non_exhaustive] pub enum $K::Ev" "#[non_exhaustive] pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
 run_case variant-field-not-a-struct-field 0 '10 audited path(s) match' "$TMP/s-variant.api"
 struct_case s-prefix "struct=$K::A struct=$K::A2 field=$K::A2::f" \
   "pub struct $K::A" "#[non_exhaustive] pub struct $K::A2" "pub $K::A2::f: u8"
@@ -303,6 +316,47 @@ run_case exempt-prefix-on-non-struct-kind 2 "stale exemption $K::Store::path: ex
 struct_case s-no-prefix '' "pub struct $K::Id(pub alloc::string::String)"
 printf '%s\tstruct\tKEEP\tnewtype; exhaustive: by design\tA2b\n' "$K::Id" >> "$TMP/case.tsv"
 run_case exempt-reason-without-prefix 1 "UNMARKED $K::Id" "$TMP/s-no-prefix.api"
+
+# #9278 A2c: an `exhaustive:` row needs a reason after the colon. An empty or
+# blank reason fails closed (exit 2) whether or not the struct is marked.
+empty_exempt_row() { printf '%s\tstruct\tKEEP\t%s\tA2c\n' "$X" "$1" >> "$TMP/case.tsv"; }
+struct_case s-empty-reason "field=$X::n" "pub struct $X" "pub $X::n: u8"
+empty_exempt_row 'exhaustive: '
+run_case exempt-row-empty-reason 2 "stale exemption $X: exhaustive: needs a reason" "$TMP/s-empty-reason.api"
+struct_case s-blank-reason "field=$X::n" "pub struct $X" "pub $X::n: u8"
+empty_exempt_row 'exhaustive:    '
+run_case exempt-row-blank-reason 2 "stale exemption $X: exhaustive: needs a reason" "$TMP/s-blank-reason.api"
+struct_case s-bare-prefix "field=$X::n" "pub struct $X" "pub $X::n: u8"
+empty_exempt_row 'exhaustive:'
+run_case exempt-row-bare-prefix 2 "stale exemption $X: exhaustive: needs a reason" "$TMP/s-bare-prefix.api"
+struct_case s-empty-reason-marked "field=$X::n" "#[non_exhaustive] pub struct $X" "pub $X::n: u8"
+empty_exempt_row 'exhaustive: '
+run_case exempt-row-empty-reason-on-marked-struct 2 "stale exemption $X: the struct is #[non_exhaustive]" "$TMP/s-empty-reason-marked.api"
+
+# #9278 A2c: the tuple check reads every field, not only the first.
+struct_case s-tuple-later "struct=$K::Pair struct=$K::Triple" \
+  "pub struct $K::Pair(_, pub u8)" "pub struct $K::Triple(_, _, pub alloc::string::String)"
+run_case tuple-later-pub-field-unmarked 1 "UNMARKED $K::Pair${NL}UNMARKED $K::Triple${NL}check_engine_api_audit: FAIL — 2 path(s)" "$TMP/s-tuple-later.api"
+struct_case s-tuple-all-private "struct=$K::Pair" "pub struct $K::Pair(_, _)"
+run_case tuple-all-private-fields-pass 0 '8 audited path(s) match' "$TMP/s-tuple-all-private.api"
+
+# #9278 A2c: a struct-like enum variant (a variant line with field lines under
+# it) carries `#[non_exhaustive]`, at every path it is listed under. Tuple and
+# unit variants print no field line and pass. The join runs in END, so a field
+# line before its variant line still counts.
+struct_case v-unmarked "$EV" "#[non_exhaustive] pub enum $K::Ev" "pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
+run_case unmarked-struct-variant 1 "UNMARKED $K::Ev::Moved${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/v-unmarked.api"
+struct_case v-reexport "$EV enum=trusty_memory::engine::Ev variant=trusty_memory::engine::Ev::Moved field=trusty_memory::engine::Ev::Moved::from" \
+  "#[non_exhaustive] pub enum $K::Ev" "#[non_exhaustive] pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8" \
+  '#[non_exhaustive] pub enum trusty_memory::engine::Ev' 'pub trusty_memory::engine::Ev::Moved' 'pub trusty_memory::engine::Ev::Moved::from: u8'
+run_case unmarked-struct-variant-reexport 1 "UNMARKED trusty_memory::engine::Ev::Moved${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/v-reexport.api"
+struct_case v-field-first "$EV" "#[non_exhaustive] pub enum $K::Ev" "pub $K::Ev::Moved::from: u8" "pub $K::Ev::Moved"
+run_case struct-variant-field-before-variant-line 1 "UNMARKED $K::Ev::Moved" "$TMP/v-field-first.api"
+struct_case v-tuple-unit "enum=$K::Ev variant=$K::Ev::Pair variant=$K::Ev::Done" \
+  "#[non_exhaustive] pub enum $K::Ev" "pub $K::Ev::Pair(u8, alloc::string::String)" "pub $K::Ev::Done"
+run_case tuple-and-unit-variants-pass 0 '10 audited path(s) match' "$TMP/v-tuple-unit.api"
+struct_case v-other-attr "$EV" "#[non_exhaustive] pub enum $K::Ev" "#[doc(alias = \"m\")] pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
+run_case struct-variant-other-attribute-unmarked 1 "UNMARKED $K::Ev::Moved" "$TMP/v-other-attr.api"
 
 # #9278 A1 LOW gaps, for enums and structs: an attribute glued to `pub`
 # fails closed, and `#[non_exhaustive]` counts in either attribute order.
