@@ -1,8 +1,8 @@
 ---
 name: tm-fleet-check
-description: The Architect's supervision pass. Discover the live tmux sessions, read the poller's alerts and any push events, capture the panes that need it (a full poll when there are no events), answer high-confidence prompts, escalate the rest to the user, and update the records in `records/`. Architect only.
+description: The Architect's supervision pass. Verify the tmux observation channel, read the poller's alerts and any push events, capture the panes that need it (a full poll when there are no events), verify PM claims, answer high-confidence prompts, escalate the rest to the user, check goals and capacity, and update the records in `local/`. Architect only.
 user-invocable: true
-version: "0.1.0"
+version: "0.2.0"
 category: monitoring
 tags: [architect, fleet, monitoring, tmux]
 effort: high
@@ -10,19 +10,21 @@ effort: high
 
 # tm-fleet-check — One Supervision Pass
 
-One pass of the Architect's supervision loop. Your Architect instructions set
-the rules: the hard limits, the relay protocol, decisions as options and the
-evidence labels. This skill is the checklist. This project's `CLAUDE.md` holds
-the fleet specifics: the watch set, the user's name for the relay marker, and
-the full-poll cadence. Read it before the first pass of a session.
+One pass of the Architect's supervision loop. Your Architect instructions
+(architect.md, composed into your instructions by tm) set the rules: the hard
+limits, the relay protocol, decisions as options and the evidence labels. This
+skill is the checklist. `AGENTS.md` holds the instance facts: the user's name
+for the relay marker, the host and the fleet. `local/state.md` holds the watch
+set. Load `architect-tmux-ops` before step 1 and before any capture or send.
 
 Every path below is relative to this project's root, the directory that holds
-its `CLAUDE.md`.
+its `AGENTS.md`.
 
 ## Steps
 
-1. **Discover.** List the live sessions and panes with raw tmux, then
-   cross-check the manager's inventory:
+1. **Verify the observation channel, every pass.** Never assume last pass's
+   working or broken state still holds. List the live sessions and panes with
+   raw tmux, then cross-check the manager's inventory:
 
    ```sh
    tmux list-panes -a -F '#{session_name} #{pane_id} #{pane_current_command} #{pane_current_path}'
@@ -31,12 +33,13 @@ its `CLAUDE.md`.
 
    The two are separate sources. The manager can omit a live session or keep
    a stopped one, and it never lists this session. Native tmux decides what
-   runs. Note a disagreement in `records/actions.md`; it is not evidence that
-   a session failed.
+   runs. When an MCP tmux tool is loaded and under-reports against raw tmux,
+   use the tmux CLI alone for this pass. Note a disagreement in
+   `local/actions.md`; it is not evidence that a session failed.
 2. **Read the alerts.** The poller, `scripts/fleet-poll.py`, runs in the tmux
    session named after this one plus `-poll`. It appends each new alert as one
    JSON line to `inbox/alerts.jsonl` and types a one-line pointer into this
-   pane. Read the lines newer than `last_alert_ts` in `records/state.md`; each
+   pane. Read the lines newer than `last_alert_ts` in `local/state.md`; each
    line's `display` field already starts with `[<tmux-session>]:`. Check that
    the poller runs, reading this session's name from tmux, never assuming it:
 
@@ -55,10 +58,19 @@ its `CLAUDE.md`.
    until the hooks are installed (trusty-tools #8392), and absent is the
    normal case: this pass is then a full poll (step 4). When the file exists,
    read the lines whose `ts` is after `last_consumed_ts` in
-   `records/state.md`, group them by `(project, tmux_session, tmux_pane)`,
-   and log each by its `display` field. Never truncate or delete the file.
+   `local/state.md`, group them by `(project, tmux_session, tmux_pane)`,
+   and log each by its `display` field. Lines with `kind` and no `type` are
+   extractor records; skip them in the grouping. Never truncate or delete the
+   file.
+   **PM-message claims.** When a PM message claims a merge, close, deploy,
+   publish, CI run or head SHA, write one event JSON (schema in the
+   `scripts/verify-claim.py` docstring; unknown values null, SHAs copied
+   verbatim) and run `scripts/verify-claim.py '<json>'`. The claim is verified
+   only on its MATCH line; a MISMATCH goes back to the PM; UNCHECKED stays
+   reported. For a batch of three or more messages, or one over about 3k
+   tokens, dispatch `event-extractor` once instead.
 4. **Capture: targeted, with a full-poll fallback.**
-   - Add one to `poll_count` in `records/state.md`.
+   - Add one to `poll_count` in `local/state.md`.
    - Run a full poll when `events.jsonl` is absent, when it has no new lines
      this pass (an empty inbox), on every 4th pass (`poll_count % 4 == 0`),
      and on the first pass after this session started. A full poll captures
@@ -66,7 +78,7 @@ its `CLAUDE.md`.
    - Otherwise capture only the panes the alerts and events named.
    - Capture a bounded tail with an exact target:
      `tmux capture-pane -p -t '=<session>:' -S -80`.
-   - Record the mode (targeted or full poll) and why in `records/actions.md`.
+   - Record the mode (targeted or full poll) and why in `local/actions.md`.
    - Look for the user's own turns: a submitted `❯` line without your relay
      marker, or a dialog answer you did not select. Each is a user ruling.
      Record it, skip any question it already answered, and never relay a
@@ -91,7 +103,7 @@ its `CLAUDE.md`.
 7. **Send with the two-step pattern**, never in one call:
 
    ```sh
-   tmux send-keys -t '=<session>:' -l '[<Name> supervisor HH:MMZ] Supervisor answer: … (basis: …)'
+   tmux send-keys -t '=<session>:' -l '[<Name> Architect HH:MMZ] Architect answer: … (basis: …)'
    tm architect input-state '=<session>:'    # typed | <the start of your text>
    tmux send-keys -t '=<session>:' Enter
    tmux capture-pane -p -t '=<session>:' -S -20    # a submitted turn and an acknowledgement
@@ -104,31 +116,41 @@ its `CLAUDE.md`.
    `HH:MMZ` comes from `date -u`. When the fleet runs on a non-default tmux
    server, add `-S "$TMUX_SOCKET"` to each `tmux` call and export
    `TMUX_SOCKET` for `tm architect input-state`.
-8. **Check context.** A pane whose status line shows `ctx` at or above 50%
-   needs a refresh; 45 to 49% is approaching. 50% is the default; this
-   project's `CLAUDE.md` may set another threshold. Run `tm-context-refresh`
-   at a safe boundary. Never force it over active work or a draft: queue it
-   in `records/state.md` and record the deferral. A `self_ctx` alert is your
-   own context; refresh yourself the same way at a quiet moment.
-9. **Update the records before you end the pass.**
-   - `records/projects/<project>.md`: what each project is doing, with
-     every fact labelled reported or verified.
-   - `records/state.md`: `poll_count`, `last_consumed_ts`, `last_alert_ts`,
-     the pending questions and the context-refresh queue.
-   - `records/actions.md`: one entry stamped with `date -u`: the mode, what
-     you sent and where, and what is still pending.
-   - Commit them to this project's local repository:
-     `git add records && git commit -q -m "records: pass HH:MMZ"`. The
-     repository has no remote; never add one.
-   - Never write a secret or a raw terminal dump into a record.
-10. **Notify only on signal.** A quiet, unchanged pass needs no message to
+8. **Check context.** Keep watched PMs below about 250k tokens of context;
+   220k to 249k is approaching. Run `tm-context-refresh` at a safe boundary.
+   Never force it over active work or a draft: queue it in `local/state.md`
+   and record the deferral. A `self_ctx` alert is your own context; refresh
+   yourself the same way at a quiet moment.
+9. **Check goals and capacity.** Read `local/goals.md`. Map each live
+   session and its work to a goal. Compare capacity (load against cores,
+   builder slots, disk) with the goal order, and pace lower-ranked PMs when
+   the top goal needs room. Order pending questions by goal rank. Run a board
+   sweep when one is due (start of day, after a restart, a PM with an empty
+   queue). On a full-poll pass, add any optimization proposal and name drift.
+   Update `local/goals.md` (details: `architect-strategy`).
+10. **Update the records before you end the pass.**
+    - Each project's state goes to that project's memory palace with
+      `memory_remember`, every fact labelled reported or verified.
+    - `local/state.md`: `poll_count`, `last_consumed_ts`, `last_alert_ts`,
+      the pending questions and the context-refresh queue.
+    - `local/actions.md`: one entry stamped with `date -u`: the mode, what
+      you sent and where, and what is still pending.
+    - Write the changed sessions, goals and owner items to the dashboard in
+      one batch (`architect-dashboard`).
+    - Commit them to this project's local repository:
+      `git add local && git commit -q -m "local: pass HH:MMZ"`. The
+      repository has no remote; never add one.
+    - Never write a secret or a raw terminal dump into a record.
+11. **Notify only on signal.** A quiet, unchanged pass needs no message to
     the user. Report meaningful change, completion, failure, or a decision
-    the user owes, and never re-ask a pending question.
+    the user owes, and never re-ask a pending question. Messages to the user
+    use the voice guide (`docs/architect/voice.md`); relays to PMs and every
+    record stay plain.
 
 ## Anti-patterns
 
-- Treating one source, the poller or `tm ls`, as ground truth without the raw
-  `tmux` check.
+- Treating one source, the poller, an MCP tool or `tm ls`, as ground truth
+  without the raw `tmux` check.
 - Restarting or killing a session because the manager reports it errored
   while tmux shows a live pane.
 - Re-asking a question that is escalated and still unanswered.
@@ -136,5 +158,7 @@ its `CLAUDE.md`.
 
 ## Related skills
 
+- `architect-tmux-ops`: the tmux read and send commands this pass uses.
 - `tm-context-refresh`: the pause, clear and resume procedure step 8 starts.
+- `tm-fleet-restart`: a relaunch, resume or Remote Control restore.
 - `tm-architect-setup`: how this project and its poller were set up.

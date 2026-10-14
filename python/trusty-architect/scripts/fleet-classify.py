@@ -1,12 +1,14 @@
+#!/usr/bin/env python3
 """fleet-classify.py — pure pane parsing and alert evaluation for fleet-poll.py.
 
 Why: fleet-poll.py grew past the 500-SLOC production cap (#8891). Its pure half
 splits off cleanly: nothing here calls tmux, reads a file, or sends keys.
 What: parse_pane() turns one pane capture into a dict of facts (input box via
-scripts/input-state.py `classify`, dialog, question, ctx, plan, limit,
-errors). evaluate() and fleet_plan_alerts() turn those facts into alert
-dicts; dedup() splits alerts into new and suppressed. fleet-poll.py loads this
-file by path and re-exports these names, so its callers see no change.
+scripts/input-state.py `classify`, dialog, question, waiting agents, ctx, plan,
+limit, account, Remote Control, errors). evaluate() and fleet_plan_alerts() turn
+those facts into alert dicts; dedup() splits alerts into new and suppressed.
+fleet-poll.py loads this file by path and re-exports these names, so its callers
+see no change.
 Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports)
 """
 import hashlib
@@ -17,13 +19,6 @@ import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
-REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
-          "self_ctx": 1800}
-CTX_WARN, CTX_HIGH = 45, 50
-PLAN_HIGH = 90
-DETAIL_MAX = 200
 
 
 def _load_by_path(name, filename):
@@ -36,26 +31,80 @@ def _load_by_path(name, filename):
 
 input_state = _load_by_path("input_state", "input-state.py")
 
-# --- pane parsing (pure) ----------------------------------------------------
+IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
+
+
+REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
+          "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
+          "architect_frozen": 1800, "token": 3600}  # "band" is absent on purpose: it fires once per change
+
+
+# Ruling b7 2026-10-07: refresh at ~250k tokens (25% of a 1M window); warn at 22%.
+CTX_WARN, CTX_HIGH = 22, 25
+
+
+PLAN_HIGH = 90
+
+
+DETAIL_MAX = 200
+
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]")
+
+
 RULE = re.compile(r"^\s*[─━]{10,}\s*$")
+
+
 # The box's own TOP rule only: Claude Code now draws a short label (e.g. a
 # date) before the trailing rule run on days the input hasn't changed
 # ("──…── 9-26/2026 ─"); the bottom rule and every dialog rule stay plain.
 BOX_TOP_RULE = re.compile(r"^\s*[─━]{10,}(?:\s.{1,30}[─━]+)?\s*$")
+
+
 OPTION = re.compile(r"^\s*❯\s*\d+\.")              # dialog cursor on a numbered option
+
+
 SPINNER = re.compile(r"^[·✢✳✶✻✽*∗] ")               # status line glyph, column 0
+
+
 ACTIVE = re.compile(r"…|esc to interrupt")          # a running turn, not "✻ Worked for 3m"
+
+
+DONE_SUMMARY = "· done "                            # finished-turn summary: "✻ Brewed for 9s · done 7:14 AM"
+
+
 WAITING = re.compile(r"Waiting for \d+ background agent")
-AGENT_ROW = re.compile(r"^\s*◯ ")
+
+
+# A running background agent: "◯ name  task  6m 34s · ↓ 52.9k tokens".
+AGENT_ROW = re.compile(r"^\s*◯ \S.*\b\d+(?:m \d+)?s\b")
+
+
 DIALOG_MARKERS = ("Do you want to proceed?", "Esc to cancel", "Enter to select")
+
+
 FOOTER_NOISE = re.compile(r"^\s*TM \d|bypass permissions|/rc\s*$|Update installed|^\s*[◯⏺] ")
+
+
 LIMIT = re.compile(r"(?i)usage limit reached|limit reached|hit your (?:usage )?limit|"
                    r"resets at|limit will reset")
+
+
+ACCOUNT = re.compile(r"\|\s*✻(\S+)\s+\|")           # status line `✻<account>` field; needs the closing `|` so a truncated line never matches
+
+
+RC_FAILED = re.compile(r"/rc failed")                # status line after Remote Control drops
+
+
 ERROR = re.compile(r"Traceback|API Error|Error: Exit code")
+
+
 TIMERS = re.compile(r"\d+m \d+s|\b\d+s\b|↓ [\d.]+k tokens|\d+:\d\d(?: [AP]M)?")
+
+
 SECRET = re.compile(r"(?i)\b(\w*(?:key|token|secret|passw(?:or)?d|auth)\w*)\s*[=:]\s*\S+")
+
+
 LONG_TOKEN = re.compile(r"\b(?=\w*\d)\w{32,}\b")    # API keys, hex digests
 
 
@@ -122,6 +171,25 @@ def current_status(lines, top):
     return ""
 
 
+COMPLETED = re.compile(r"^[·✢✳✶✻✽*∗] .*\bfor \d+\s*[smh]\b|· done ")  # "✻ Brewed for 42s · done 1:13 AM"
+
+
+def current_waiting(lines, top):
+    """True when the newest "Waiting for N background agent" line is of the current turn.
+
+    Why: the capture carries scrollback, so stale WAITING lines made idle panes read busy.
+    What: a WAITING line counts only if no completed-turn line and no submitted
+    "❯ " turn (above the input box) follows it.
+    Test: test_stale_waiting_lines_are_not_busy, test_newest_waiting_line_is_busy
+    """
+    end = top if top is not None else len(lines)
+    w = max((i for i in range(end) if WAITING.search(lines[i])), default=None)
+    if w is None:
+        return False
+    return not any(COMPLETED.search(l) or l.lstrip().startswith("❯")
+                   for l in lines[w + 1:end])
+
+
 def last_question(lines, top):
     """The last line of the latest PM turn when it ends in '?', else None."""
     last, seen_status = None, False
@@ -167,8 +235,10 @@ def parse_pane(capture):
     footer = lines[bottom + 1:] if box else lines[-10:]
     dialog = find_dialog(lines, bottom)
     status = current_status(lines, top) if box else ""
-    agents = sum(1 for l in footer if AGENT_ROW.match(l))
-    waiting = bool(WAITING.search(status))
+    # Scan the whole capture, not just the footer: a box with no bottom rule
+    # leaves the footer empty and the pane read as idle (false "idle" alert).
+    agents = sum(1 for l in lines if AGENT_ROW.match(l))
+    waiting = bool(WAITING.search(status)) or current_waiting(lines, top)
     spinning = bool(status) and bool(ACTIVE.search(status))
     busy = agents > 0 or waiting or spinning
     ftext = "\n".join(footer)
@@ -181,20 +251,16 @@ def parse_pane(capture):
         "status": status,
         "agents": agents,
         "busy": busy,
+        "turn_active": spinning or waiting,
         "ctx": _pct(r"\bctx (\d+)%", ftext),
         "plan5h": _pct(r"⏳\s*(\d+)%", ftext),
         "planwk": _pct(r"📅\s*(\d+)%", ftext),
         "question": None if (busy or dialog or not box) else last_question(lines, top),
+        "account": (ACCOUNT.search(ftext) or [None, None])[1],
+        "rc_failed": any(RC_FAILED.search(l) for l in lines[-12:]),
         "limit": next((l.strip() for l in reversed(tail) if LIMIT.search(l)), None),
         "errors": sorted({l.strip() for l in tail if ERROR.search(l)}),
     }
-
-
-# --- alert evaluation (pure) ------------------------------------------------
-
-def iso(t=None):
-    t = time.time() if t is None else t
-    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def alert(kind, fingerprint, detail, session="", pane="", now=None):
@@ -277,3 +343,8 @@ def dedup(state, candidates, now):
             active[k] = prev
     state["alerts"] = active
     return new, suppressed
+
+
+def iso(t=None):
+    t = time.time() if t is None else t
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -1,0 +1,69 @@
+{
+  "_doc": "Maintained by the Architect. holds[]: an alert on a listed session with an unexpired hold is logged, not woken, when its kind is in the hold's optional 'kinds' list (default [\"idle\"]; add \"ctx\" to also log ctx-at-bar alerts while a refresh is already scheduled). 'session' matches with or without the tm- prefix. 'until' is a UTC timestamp; a hold with only 'until_event' stays until removed. Read each poll cycle by scripts/alert_triage.py; no restart needed.",
+  "holds": [
+    {
+      "session": "alpha-01",
+      "reason": "waits an owner ruling",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "beta",
+      "reason": "waits code-owner reviews",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "beta-companion",
+      "reason": "waits a production gate",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "gamma-01",
+      "reason": "on hold; two PRs wait a reviewer",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "delta-01",
+      "reason": "waits reviewers on two PRs",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "epsilon",
+      "reason": "waits the owner's reply",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "epsilon-ops-01",
+      "reason": "parked until the next release",
+      "until": "2026-10-10T15:00:00Z",
+      "until_event": null,
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    },
+    {
+      "session": "utils-01",
+      "reason": "waits a dependency release",
+      "until": null,
+      "until_event": "the dependency release ships",
+      "set_by": "architect",
+      "set_at": "2026-10-09T20:15:00Z"
+    }
+  ]
+}

@@ -1,0 +1,3106 @@
+<title>Architect Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#b7410e">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%232B1C12'/%3E%3Cpath d='M32 21V13' stroke='%23E9B98A' stroke-width='3' stroke-linecap='round'/%3E%3Ccircle cx='32' cy='10' r='3.5' fill='%23E9B98A'/%3E%3Crect x='12' y='21' width='40' height='36' rx='8' fill='%23D97742'/%3E%3Crect x='21' y='32' width='6' height='6' rx='1.5' fill='%232B1C12'/%3E%3Crect x='37' y='32' width='6' height='6' rx='1.5' fill='%232B1C12'/%3E%3Cpath d='M23 45L27 48L23 51' fill='none' stroke='%232B1C12' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M30 51H41' stroke='%232B1C12' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: one narrow column; a header line, then four accordion sections (Decisions, Asks, Goals, Sessions), each a flat list of one-line rows that expand in place */
+/* Theme: Trusty Foundry v2 "rust-on-paper" (light) and "night shift" (dark), after the trusty-console UI theme in trusty-tools (ui/src/theme.css) and docs/design/UI/design-system/tokens.css. Console token -> local name: content-bg=bg, card-bg=surface, text-primary=fg, text-secondary=muted, border=line, accent=accent, text-inverse=accent-ink, accent-soft=rec-bg, warning=warn, danger=bad, surface-raised=done-bg. Light --warn is darkened from the console's #b07d10 (3.2:1 on paper) to 4.9:1 for text; light --rec-bg and --bad-bg are lighter than the console's soft tints so accent and danger text on them reach 4.5:1. */
+:root {
+  --bg: #f5efe7;
+  --surface: #fffdf9;
+  --fg: #2b1c12;
+  --muted: #6e5843;
+  --line: #d8c9b4;
+  --accent: #b7410e;
+  --accent-ink: #ffffff;
+  --rec-bg: #f7e5da;
+  --warn: #8a6008;
+  --warn-bg: #f5e7c4;
+  --bad: #c2331f;
+  --bad-bg: #f9e6e1;
+  --conf-low: #b3261e; --conf-med: #8a6008; --conf-high: #2e6b2f;   /* ETA confidence: red / amber / green */
+  --done-bg: #efe6d8;
+  --mark-face: #fffdf9;
+  --faded-opacity: 0.55;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Chakra Petch", "IBM Plex Sans", "Arial Narrow", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #201612; --surface: #2b1c12; --fg: #f0e7d8; --muted: #cbb69c; --line: #46311f;
+    --accent: #d97742; --accent-ink: #201612; --rec-bg: #3b2416; --warn: #d9a83a; --warn-bg: #3a2c14;
+    --bad: #e06a52; --bad-bg: #3a2119; --done-bg: #382513; --mark-face: #201612;
+    --conf-low: #e8806b; --conf-med: #e6bd45; --conf-high: #7fcf84;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #201612; --surface: #2b1c12; --fg: #f0e7d8; --muted: #cbb69c; --line: #46311f;
+  --accent: #d97742; --accent-ink: #201612; --rec-bg: #3b2416; --warn: #d9a83a; --warn-bg: #3a2c14;
+  --bad: #e06a52; --bad-bg: #3a2119; --done-bg: #382513; --mark-face: #201612;
+  --conf-low: #e8806b; --conf-med: #e6bd45; --conf-high: #7fcf84;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 760px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: block; }
+header { display: grid; gap: 4px; padding-block: 0 14px; }
+.brand { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-block: 4px 6px; }
+.mark { flex: none; width: 44px; height: 44px; display: block; }
+.mark .chassis { fill: var(--accent); }
+.mark .chassis-stroke { stroke: var(--accent); }
+.mark .face { fill: var(--mark-face); }
+.mark .face-stroke { stroke: var(--mark-face); }
+h1, h2 { font-family: var(--font-display); }
+h1 { flex: 1 1 0; min-width: 0; font-size: 1.45rem; font-weight: 700; margin: 0; text-wrap: balance; letter-spacing: 0.05em; text-transform: uppercase; line-height: 1.1; }
+.console-link { flex: none; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 5px; padding: 5px 10px; white-space: nowrap; }
+.console-link:hover { background: var(--rec-bg); }
+.collapse-all { flex: none; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 5px; padding: 5px 10px; white-space: nowrap; cursor: pointer; }
+.collapse-all:hover { background: var(--rec-bg); }
+.collapse-all:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Settings (the owner 2026-10-09): a gear in the header opens the settings pane; the chip shows the user state. */
+.gear-btn { display: inline-flex; align-items: center; justify-content: center; padding: 5px 8px; }
+.gear-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.state-chip { flex: none; align-self: center; color: var(--muted); }
+.state-chip.st-active { color: var(--accent); border-color: var(--accent); }
+dialog.settings-pane { padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); width: min(30rem, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; }
+dialog.settings-pane::backdrop { background: rgba(0, 0, 0, 0.45); }
+.sp-body { padding: 14px 16px 16px; display: grid; gap: 14px; }
+.sp-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.sp-head h2 { margin: 0; font-size: 1.05rem; }
+.sp-group { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; margin: 0; min-width: 0; }
+.sp-group legend { font-weight: 600; padding: 0 6px; }
+.sp-note { margin: 0; font-size: 0.84rem; color: var(--muted); }
+.sp-opt { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 6px 0; cursor: pointer; }
+.sp-opt input { flex: none; margin: 0; align-self: center; }
+.sp-name { font-weight: 600; }
+.sp-desc { color: var(--muted); font-size: 0.86rem; }
+.sp-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.fleet { margin: 0; font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fleet .sep { padding-inline: 6px; opacity: 0.6; }
+.fleet b { color: var(--fg); font-weight: 500; }
+
+/* Accordion: every summary is one row with a leading chevron */
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+.chev { flex: none; width: 1rem; text-align: center; color: var(--muted); font-size: 0.8rem; }
+.chev::before { content: "▸"; }
+details[open] > summary > .chev::before { content: "▾"; }
+
+/* Sections: full-width header rows separated by thin rules */
+.sec { border-top: 1px solid var(--line); }
+.sec:last-of-type { border-bottom: 1px solid var(--line); }
+.sec > summary { display: flex; align-items: center; gap: 10px; padding: 12px 4px; min-height: 48px; }
+.sec > summary:hover { background: var(--surface); }
+.sec > summary h2 { font-size: 1.15rem; margin: 0; flex: none; letter-spacing: -0.005em; }
+.sec-sum { flex: 1 1 0; min-width: 0; text-align: right; color: var(--muted); font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec-body { display: block; padding-block: 0 10px; min-width: 0; }
+.count { flex: none; font-family: var(--font-mono); font-size: 0.76rem; font-weight: 700; border: 1px solid var(--line); border-radius: 10px; padding: 0 8px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.count.hot { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+/* Subsections: a small header row, indented one level */
+.sub > summary { display: flex; gap: 8px; align-items: center; padding: 8px 4px 8px 14px; min-height: 36px; }
+.sub > summary:hover { background: var(--surface); }
+.sub > summary h3 { font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin: 0; }
+.sub > summary .n { font-family: var(--font-mono); font-size: 0.78rem; color: var(--fg); }
+.rows { min-width: 0; }
+.rows > .item, .rows > .goal-row { border-top: 1px solid var(--line); }
+.sub > .rows, .sub > .note, .sub > .err { margin-left: 14px; }
+.cbar[hidden] { display: none; }
+.cbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 6px 14px; padding-right: 16px; min-width: 0; }
+.cbar input[type=search] { flex: 1 1 180px; min-width: 0; font: inherit; font-size: 0.9rem; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg); }
+.cbar input[type=search]:focus-visible, .cbar .pg:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cbar .pg { font: inherit; font-size: 0.86rem; color: var(--accent); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 5px 11px; cursor: pointer; }
+.cbar .pg:hover:not(:disabled) { border-color: var(--accent); }
+.cbar .pg:disabled { opacity: 0.55; cursor: default; }
+.cbar .pg-label { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+.empty { color: var(--muted); font-style: italic; margin: 0; padding: 8px 4px 8px 28px; font-size: 0.9rem; border-top: 1px solid var(--line); }
+.sec-body > .empty { padding-left: 4px; }
+
+/* Rows: one compact line when closed, details in place when open */
+.item { min-width: 0; }
+.item > summary { padding: 7px 4px; display: flex; gap: 8px; align-items: center; min-height: 36px; }
+.item > summary:hover { background: var(--surface); }
+.item > summary::before { content: "▸"; color: var(--muted); font-size: 0.8rem; width: 1rem; text-align: center; flex: none; }
+.item[open] > summary::before { content: "▾"; }
+.item > summary .title { flex: 1 1 0; min-width: 0; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item[open] > summary .title { white-space: normal; overflow: visible; }
+.item > summary .chip, .item > summary .state, .item > summary .tok { flex: none; }
+.tok { font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip.agents { color: var(--accent); border-color: var(--accent); }
+.item.done .title, .item.sess.parked .title { color: var(--muted); }
+.item.answered > summary { flex-wrap: wrap; row-gap: 0; }
+.item.answered > summary .ans { flex: 1 1 100%; min-width: 0; padding-left: 1.5rem; font-size: 0.85rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item.answered[open] > summary .ans { display: none; }
+.item.answered > summary .ans b { color: var(--fg); }
+/* Weight marks what needs the owner: open items and owner/blocked sessions are bold; everything else is regular. Answered and done items fade (full opacity on hover, focus or when expanded). */
+.item.needs .title, .item.sess.owner .title { font-weight: 700; }
+.item .title .id, .item .name .id { font-weight: 400; }
+.item.needs .title .id, .item.sess.owner .title .id { font-weight: 700; }
+.item .name { font-weight: 400; }
+.item.sess.owner .name { font-weight: 700; }
+.item.faded { opacity: var(--faded-opacity); transition: opacity .2s; }
+.item.faded:hover, .item.faded:focus-within, .item.faded[open] { opacity: 1; }
+.item.faded b { font-weight: 400; }
+.item.urgent > summary, .item.sess.owner > summary { box-shadow: inset 3px 0 0 var(--warn); }
+.item.sess.blocked > summary, .item.sess.exited > summary { box-shadow: inset 3px 0 0 var(--bad); }
+/* Goal reordering: a compact grip (move up, drag handle, move down) at the right of each goal row */
+.goal-row { display: flex; gap: 4px; align-items: flex-start; min-width: 0; }
+.goal-row > details { flex: 1 1 auto; min-width: 0; }
+.grip { display: flex; flex-direction: row; align-items: center; gap: 2px; flex: none; padding-top: 4px; }
+.mv { font: inherit; font-size: 0.68rem; line-height: 1; width: 28px; height: 28px; padding: 0; border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 4px; cursor: pointer; }
+.mv:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mv:disabled { opacity: 0.35; cursor: default; }
+.handle { width: 28px; height: 28px; display: grid; place-items: center; font-size: 1.1rem; color: var(--muted); border-radius: 4px; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.handle:hover { background: var(--rec-bg); color: var(--accent); }
+.handle.off { opacity: 0.35; cursor: default; }
+.goal-row.dragging { background: var(--rec-bg); box-shadow: inset 0 0 0 2px var(--accent); }
+.goal-row.dragging .handle { cursor: grabbing; color: var(--accent); }
+body.is-dragging { user-select: none; -webkit-user-select: none; cursor: grabbing; }
+.reorder-note { margin: 0 0 4px; }
+.reorder-err { margin-bottom: 4px; }
+.item.prio > summary { padding: 5px 4px; min-height: 30px; }
+.item.prio .title { font-size: 0.9rem; }
+.sub.prios > summary { padding-left: 0; }
+.sub.prios > .rows { margin-left: 0; }
+.chip.rank { color: var(--muted); }
+.name .id { font-weight: 700; }
+.item.flash { background: var(--rec-bg); }
+.body { padding: 2px 4px 12px 28px; display: grid; gap: 10px; min-width: 0; }
+.line { margin: 0; color: var(--muted); font-size: 0.9rem; overflow-wrap: anywhere; }
+.name { font-family: var(--font-mono); font-weight: 700; font-size: 0.92rem; overflow-wrap: anywhere; min-width: 0; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 0.8rem; color: var(--muted); }
+.id { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
+.chip { font-family: var(--font-mono); font-size: 0.74rem; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; white-space: nowrap; }
+.chip.due { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.title { font-weight: 400; margin: 0; text-wrap: balance; overflow-wrap: anywhere; }
+
+/* Session state chips: semantic color, separate from the accent */
+.state { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
+.state.st-owner { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.state.st-blocked { color: var(--bad); border-color: var(--bad); background: var(--bad-bg); }
+.state.st-working { color: var(--accent); border-color: var(--accent); background: var(--rec-bg); }
+.state.st-refreshing { color: var(--accent); border-color: var(--accent); border-style: dashed; }
+.state.st-parked { background: var(--done-bg); }
+.state.st-exited { color: var(--bad); border-color: var(--bad); border-style: dashed; background: var(--bad-bg); }
+
+/* Key/value details */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; margin: 0; font-size: 0.92rem; }
+.kv dt { color: var(--muted); font-size: 0.8rem; padding-top: 2px; }
+.kv dd { margin: 0; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.kv dd.list { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; }
+.kv a { color: var(--accent); }
+.xref { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.xref:hover { background: var(--rec-bg); }
+.rm { font: inherit; font-size: 0.8rem; font-weight: 400; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 9px; cursor: pointer; }
+.rm:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+.rm:disabled { opacity: 0.55; cursor: default; }
+.rm-confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 0.86rem; }
+.item.rm-pending .title { text-decoration: line-through; }
+.chip.rmp { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+.drop-ph { height: 3px; margin: 2px 0 2px 14px; background: var(--accent); border-radius: 2px; }
+.sub.drop-target { outline: 2px dashed var(--accent); outline-offset: -2px; background: var(--rec-bg); }
+/* Steps checklist */
+.tsteps { margin: 0; padding-left: 1.5rem; display: grid; gap: 3px; font-size: 0.9rem; }
+.tstep.done { color: var(--muted); text-decoration: line-through; }
+.steps { display: grid; gap: 8px; min-width: 0; }
+.steps-head { display: flex; gap: 10px; align-items: center; font-size: 0.86rem; color: var(--muted); }
+.steps-head progress { flex: 1 1 auto; height: 6px; min-width: 0; accent-color: var(--accent); }
+.step { display: grid; gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); min-width: 0; }
+.step-top { display: flex; gap: 8px; align-items: flex-start; }
+.step-top input[type=checkbox] { flex: none; width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); }
+.step-title { font-weight: 400; overflow-wrap: anywhere; min-width: 0; }
+.step.done .step-title { color: var(--muted); text-decoration: line-through; }
+.step-body { padding-left: 26px; display: grid; gap: 5px; min-width: 0; }
+.step-body p { margin: 0; font-size: 0.88rem; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-body a { color: var(--accent); }
+.step-links, .step-vals { display: flex; flex-wrap: wrap; gap: 6px; }
+.cp { font: inherit; font-family: var(--font-mono); font-size: 0.78rem; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px dashed var(--line); border-radius: 4px; padding: 1px 7px; cursor: pointer; overflow-wrap: anywhere; text-align: left; }
+.cp:hover { border-color: var(--accent); }
+.step-note { font-size: 0.84rem; }
+.step-note-form { display: flex; gap: 6px; flex-wrap: wrap; }
+.step-note-form input { flex: 1 1 180px; min-width: 0; font: inherit; font-size: 0.86rem; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg); }
+.warn-text { color: var(--warn); font-weight: 700; }
+.jump { font: inherit; font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 4px; padding: 1px 7px; cursor: pointer; }
+.jump:hover { background: var(--rec-bg); }
+.ghost-name { font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); border: 1px dashed var(--line); border-radius: 4px; padding: 1px 7px; }
+@media (max-width: 440px) {
+  .kv { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .kv dd { margin-bottom: 8px; }
+  .body { padding-left: 16px; }
+  .sec > summary { flex-wrap: wrap; row-gap: 0; }
+  .item.sess > summary { flex-wrap: wrap; row-gap: 2px; }
+  .item.sess > summary .title { flex: 1 1 8rem; }
+  .sec-sum { flex: 1 1 100%; text-align: left; white-space: normal; padding-left: calc(1rem + 10px); padding-bottom: 2px; }
+}
+
+/* Answer flow */
+.detail { margin: 0; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail a { color: var(--accent); }
+.opts { display: grid; gap: 8px; }
+.opt { display: grid; gap: 2px; text-align: left; width: 100%; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 9px 12px; cursor: pointer; }
+.opt:hover { border-color: var(--accent); }
+.opt.rec { background: var(--rec-bg); border-color: var(--accent); }
+.opt .lab { font-weight: 700; }
+.opt .tag { font-family: var(--font-mono); font-size: 0.72rem; color: var(--accent); margin-left: 6px; }
+.opt .d { font-size: 0.86rem; color: var(--muted); }
+.other { display: flex; gap: 8px; flex-wrap: wrap; }
+.other input, .row input { flex: 1 1 200px; min-width: 0; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
+.btn { font: inherit; font-weight: 700; border-radius: 5px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn:disabled, .opt:disabled { opacity: 0.55; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.answer { font-size: 0.92rem; margin: 0; }
+.answer b { font-family: var(--font-mono); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.note { font-size: 0.82rem; color: var(--muted); }
+.err { color: var(--warn); font-size: 0.86rem; }
+.err:empty { display: none; }
+footer { font-size: 0.8rem; color: var(--muted); border-top: 1px solid var(--line); padding-block: 14px 0; }
+@media (prefers-reduced-motion: no-preference) { .item { transition: background-color .3s; } }
+/* Progress fill: a subtle left-to-right bar behind the collapsed row (tasks, sessions); --pct is set inline. No height change. */
+.item.has-pct > summary, .item.has-pct > summary:hover { background-image: linear-gradient(90deg, var(--rec-bg) var(--pct), transparent var(--pct)); background-image: linear-gradient(90deg, color-mix(in srgb, var(--accent) 15%, transparent) var(--pct), transparent var(--pct)); }
+.item.has-ctx > summary, .item.has-ctx > summary:hover { background-image: linear-gradient(90deg, color-mix(in srgb, var(--accent) 22%, transparent) var(--ctx), transparent var(--ctx)); }
+.item.has-ctx.ctx-hot > summary, .item.has-ctx.ctx-hot > summary:hover { background-image: linear-gradient(90deg, color-mix(in srgb, var(--bad) 30%, transparent) var(--ctx), transparent var(--ctx)); }
+.pbar { flex: none; width: 0; height: 0; overflow: hidden; }   /* no visible text: the row fill is the bar; this carries the accessible label */
+.sess-sum { flex: 2 1 0; min-width: 0; font-size: 0.84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item[open] > summary .sess-sum { white-space: normal; overflow: visible; }
+.item.sess > summary .title { flex: 0 1 auto; }
+@media (max-width: 440px) { .item.sess > summary .sess-sum { flex: 1 1 100%; order: 9; padding-left: 1.5rem; } }
+/* Owner cancel of an open Architect task */
+.cancel-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cancel-form input { flex: 1 1 200px; min-width: 0; font: inherit; font-size: 0.9rem; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg); }
+.status-note { margin: 0; font-size: 0.9rem; color: var(--fg); overflow-wrap: anywhere; border-left: 3px solid var(--accent); padding-left: 8px; }
+.cancel-note { margin: 0; font-size: 0.9rem; color: var(--muted); overflow-wrap: anywhere; }
+.chip.cancelled { color: var(--bad); border-color: var(--bad); }
+.chip.wontdo { color: var(--bad); border-color: var(--bad); }
+.chip.reopened { color: var(--warn); border-color: var(--warn); }
+.wd-form { display: grid; gap: 8px; font-size: 0.9rem; min-width: 0; }
+.wd-form textarea { font: inherit; font-size: 0.9rem; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg); min-width: 0; width: 100%; box-sizing: border-box; min-height: 4.5rem; resize: vertical; }
+.wd-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fb-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 0.9rem; }
+.fb-form select, .fb-form input { font: inherit; font-size: 0.9rem; padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--fg); min-width: 0; }
+.fb-form input { flex: 1 1 200px; }
+.chip.cmd-chip { color: var(--warn); border-color: var(--warn); }
+.chip.goal-chip { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.fb-chip { color: var(--warn); border-color: var(--warn); }
+.chip.park-chip { color: var(--muted); }
+.acct { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.6fr) minmax(0, 1.6fr) minmax(0, 1fr); gap: 8px 14px; align-items: start; padding: 8px 4px; border-top: 1px solid var(--line); min-width: 0; }
+.acct:first-child { border-top: 0; }
+.acct .acct-name { font-family: var(--font-mono); font-size: 0.86rem; overflow-wrap: anywhere; }
+.acct .meter { display: grid; gap: 3px; min-width: 0; font-size: 0.84rem; }
+.acct .meter progress { width: 100%; height: 8px; accent-color: var(--accent); }
+.acct .meter.low progress { accent-color: var(--bad); }
+.acct .meter .sub-t { color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+.acct .asof { font-size: 0.8rem; color: var(--muted); }
+.acct .asof.stale { color: var(--warn); }
+.gprog { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto; }
+.gbar { position: relative; flex: none; width: 7rem; height: 1.15rem; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); overflow: hidden; }
+.gbar .gfill { position: absolute; inset: 0 auto 0 0; background: color-mix(in srgb, var(--accent) 45%, transparent); }
+.gbar .gpct { position: relative; display: block; text-align: center; font-family: var(--font-mono); font-size: 0.72rem; line-height: 1.05rem; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; }
+.gprog .geta { font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.chip.gstale { color: var(--muted); }
+.conf-low { color: var(--conf-low); }
+.conf-medium { color: var(--conf-med); }
+.conf-high { color: var(--conf-high); }
+.gprog .geta.conf-low { color: var(--conf-low); }
+.gprog .geta.conf-medium { color: var(--conf-med); }
+.gprog .geta.conf-high { color: var(--conf-high); }   /* outranks `.gprog .geta` (muted) */
+.chip.goverdue { color: var(--bad); border-color: var(--bad); }
+.item > summary .gprog { flex: 0 1 auto; }
+.gbar.effort { width: 8.5rem; }
+.gbias { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; color: var(--fg); font-variant-numeric: tabular-nums; }
+.tune { display: flex; gap: 8px; flex-wrap: wrap; }
+.gbar.effort .gfill { background: color-mix(in srgb, var(--muted) 35%, transparent); }
+@media (max-width: 440px) { .item > summary .gprog { flex: 1 1 100%; order: 9; padding-left: 1.5rem; } .gbar { width: 5.5rem; } .gbar.effort { width: 7rem; } }
+@media (max-width: 640px) { .acct { grid-template-columns: minmax(0, 1fr); } }
+.chip.park-due { color: var(--warn); border-color: var(--warn); }
+/* Mark done and Won't do share one size on every viewport (owner 2026-10-09). */
+.act-btn { box-sizing: border-box; flex: 0 0 9rem; width: 9rem; min-height: 36px; padding: 6px 12px; font-size: 0.9rem; text-align: center; }
+.park-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 0.86rem; color: var(--muted); }
+.updates { display: grid; gap: 4px; font-size: 0.88rem; min-width: 0; }
+.updates ul { margin: 0; padding-left: 18px; }
+.updates li { overflow-wrap: anywhere; }
+/* Plans and links */
+.plan { display: grid; gap: 4px; min-width: 0; }
+.plan-head { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.plan-list, .lsteps-list { margin: 0; padding-left: 1.5rem; display: grid; gap: 6px; }
+.plan-title strong { font-weight: 700; }
+.plan-step.done .plan-title strong { text-decoration: line-through; color: var(--muted); }
+.plan-mark { margin-left: 8px; font-family: var(--font-mono); font-size: 0.74rem; color: var(--accent); }
+.plan-detail { margin: 0; font-size: 0.88rem; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.plan-links { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.plan-link { color: var(--accent); font-size: 0.86rem; overflow-wrap: anywhere; }
+.lsteps { display: grid; gap: 6px; min-width: 0; }
+.lsteps-head { font-size: 0.86rem; color: var(--muted); }
+.lsteps-list { list-style: none; padding-left: 0; gap: 3px; }
+.lstep { display: flex; gap: 8px; font-size: 0.9rem; }
+.step-missing { color: var(--muted); font-style: italic; }
+.lstep.done .lstep-title { color: var(--muted); text-decoration: line-through; }
+.lstep.done /* Update pulse: a glow that flashes three times over about 2 s on a row whose data just changed; an overlay, so no layout shift. Reduced motion: one static highlight that fades. */
+.pulse { position: relative; }
+.pulse::after { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: 4px; opacity: 0; box-shadow: inset 0 0 0 2px var(--accent), 0 0 12px 1px var(--accent); animation: pulse-flash 2s linear var(--pulse-delay, 0s) 1 both; }
+@keyframes pulse-flash { 0%, 100% { opacity: 0; } 10% { opacity: 0.95; } 25% { opacity: 0; } 45% { opacity: 0.95; } 60% { opacity: 0; } 80% { opacity: 0.95; } }
+@keyframes pulse-fade { 0% { opacity: 0.25; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pulse::after { box-shadow: none; background: var(--accent); animation-name: pulse-fade; animation-timing-function: ease-out; } }
+/* Decision attention frame: a fixed, click-through inset outline around the viewport (no layout shift). New or changed open decision: 3 pulses over 3 s, then a thin steady border until seen. Reduced motion: steady border only. */
+#attn-frame { position: fixed; inset: 0; z-index: 90; pointer-events: none; opacity: 0; box-shadow: inset 0 0 0 2px var(--accent); }
+body.attn #attn-frame { opacity: 1; }
+body.attn-flash #attn-frame { animation: attn-pulse 3s linear 1 both; }
+@keyframes attn-pulse { 0%, 100% { box-shadow: inset 0 0 0 2px var(--accent); } 8%, 42%, 75% { box-shadow: inset 0 0 0 9px var(--accent), inset 0 0 24px 6px var(--accent); } 25%, 58%, 92% { box-shadow: inset 0 0 0 2px var(--accent); } }
+@media (prefers-reduced-motion: reduce) { body.attn-flash #attn-frame { animation: none; } }
+.seen-btn { flex: none; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
+.seen-btn[hidden] { display: none; }
+/* Reminder pulse (brief 2026-10-09-dashboard-reminder-pulse-beep.md): the frame shows for about 3 s every 5 minutes while the owner has undone items. Reduced motion: one static highlight. */
+body.attn-remind #attn-frame { opacity: 1; animation: attn-pulse 3s linear 1 both; }
+@media (prefers-reduced-motion: reduce) { body.attn-remind #attn-frame { animation: none; box-shadow: inset 0 0 0 6px var(--accent); } }
+.beep-btn[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.beep-btn[aria-pressed="true"]:hover { background: var(--accent); }
+/* Mobile, tablet, desktop (brief 2026-10-08-dashboard-mobile.md). Mobile-first overrides: nothing here sets a fixed width above 360 px on a main container. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html, body { max-width: 100%; overflow-x: clip; }
+body { overflow-wrap: anywhere; -webkit-tap-highlight-color: transparent; }
+.wrap { padding-inline: max(16px, env(safe-area-inset-left), env(safe-area-inset-right)); padding-bottom: max(48px, env(safe-area-inset-bottom)); }
+a { overflow-wrap: anywhere; word-break: break-word; }
+button, summary, .opt { touch-action: manipulation; }
+.step-hit { display: inline-grid; place-items: center; flex: none; margin: -4px 0 -4px -6px; cursor: pointer; }
+.step-hit input[type=checkbox] { margin: 0; }
+/* Touch targets: 44 px minimum on phones and on any coarse pointer */
+@media (max-width: 600px), (pointer: coarse) {
+  .btn, .rm, .opt, .cp, .jump, .collapse-all, .console-link, .cbar .pg, .mv, .handle, .step-hit, .tap { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  .opt { display: grid; justify-content: stretch; align-items: start; }
+  .item > summary, .sub > summary, .sec > summary { min-height: 44px; }
+  .item.prio > summary { min-height: 44px; }
+  .step-top { min-height: 44px; align-items: center; }
+  .cbar input[type=search], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
+}
+@media (max-width: 600px) {
+  .brand { gap: 8px; }
+  h1 { flex: 1 1 100%; font-size: 1.2rem; }
+  .console-link, .collapse-all { flex: 1 1 auto; text-align: center; }
+  /* rows wrap: the title takes the full line, chips and progress sit under it */
+  .item > summary { flex-wrap: wrap; row-gap: 4px; align-items: flex-start; padding-block: 9px; }
+  .item > summary::before { margin-top: 2px; }
+  .item > summary .title, .item.sess > summary .title { flex: 1 1 calc(100% - 2rem); white-space: normal; overflow: visible; text-overflow: clip; }
+  .item > summary .chip, .item > summary .state, .item > summary .tok { margin-left: 1.5rem; }
+  .item > summary .chip ~ .chip, .item > summary .chip ~ .state, .item > summary .state ~ .chip, .item > summary .state ~ .tok { margin-left: 0; }
+  .item.answered > summary .ans { white-space: normal; overflow: visible; }
+  .sec-sum { white-space: normal; }
+  .body { padding-left: 16px; padding-right: 0; }
+  .opts { grid-template-columns: minmax(0, 1fr); }
+  .act-btn { flex: 1 1 100%; width: 100%; min-height: 44px; }
+  .park-row > span { flex: 1 1 100%; }
+  .row > .btn, .other > .btn, .cancel-form > .btn, .fb-form > .btn, .wd-btns > .btn, .step-note-form > .btn { flex: 1 1 100%; }
+  .row input, .other input, .cancel-form input, .fb-form input, .fb-form select, .step-note-form input { flex: 1 1 100%; }
+  .goal-row { flex-wrap: wrap; }
+  .goal-row > details { flex: 1 1 100%; }
+  .grip { flex: 1 1 100%; justify-content: flex-end; padding-top: 0; }
+  .cbar { margin-left: 0; padding-right: 0; }
+  .cbar input[type=search] { flex: 1 1 100%; }
+  .sub > .rows, .sub > .note, .sub > .err { margin-left: 0; }
+  .step-body { padding-left: 0; }
+}
+/* Tablet and desktop: a wider readable column, two key/value pairs per line */
+@media (min-width: 700px) {
+  .wrap { max-width: 880px; }
+  .kv { grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr); gap: 5px 18px; }
+  .kv dd.list { align-content: flex-start; }
+}
+@media (min-width: 1100px) { .wrap { max-width: 960px; } }
+/* Reduced motion: no transitions or smooth scrolling (the update pulse already switches to one static fade above) */
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition-duration: 0.01ms !important; } }
+</style>
+
+<div id="attn-frame" aria-hidden="true"></div>
+<dialog id="settings-pane" class="settings-pane" aria-labelledby="settings-title">
+  <div class="sp-body">
+    <div class="sp-head"><h2 id="settings-title">Settings</h2><button type="button" class="collapse-all" id="settings-close" aria-label="Close settings">Close</button></div>
+    <fieldset class="sp-group">
+      <legend>User state</legend>
+      <p class="sp-note">Tunes how the Architect engages you and how many tokens it spends.</p>
+      <label class="sp-opt"><input type="radio" name="user-state" value="active"><span class="sp-name">Active</span><span class="sp-desc">on computer</span></label>
+      <label class="sp-opt"><input type="radio" name="user-state" value="remote"><span class="sp-name">Remote</span><span class="sp-desc">on device</span></label>
+      <label class="sp-opt"><input type="radio" name="user-state" value="away"><span class="sp-name">Away</span><span class="sp-desc">not engaged</span></label>
+      <label class="sp-opt"><input type="radio" name="user-state" value="sleeping"><span class="sp-name">Sleeping</span><span class="sp-desc">sleeping or not available</span></label>
+      <p class="err" id="user-state-err" role="status"></p>
+    </fieldset>
+    <fieldset class="sp-group">
+      <legend>Beep</legend>
+      <div class="sp-row">
+        <button type="button" class="collapse-all beep-btn" id="beep-toggle" aria-pressed="false" aria-label="Quiet beep, off" title="Quiet beep for a new decision request, or when the 5-hour window hits 95% or resets">Beep: off</button>
+        <button type="button" class="collapse-all" id="beep-test" aria-label="Play a test beep" title="Play one beep now, whatever the setting, to check the sound">Test beep</button>
+      </div>
+    </fieldset>
+  </div>
+</dialog>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg class="mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Trusty">
+        <path class="chassis-stroke" d="M32 13V6" fill="none" stroke-width="3"/>
+        <rect class="chassis" x="29" y="1" width="6" height="6" rx="1.5"/>
+        <rect class="chassis" x="12" y="13" width="40" height="30" rx="6"/>
+        <rect class="face" x="20" y="23" width="7" height="7" rx="1"/>
+        <rect class="face" x="37" y="23" width="7" height="7" rx="1"/>
+        <path class="face-stroke" d="M25 35h14" fill="none" stroke-width="3" stroke-linecap="square"/>
+        <rect class="chassis" x="15" y="41" width="5" height="8" rx="2"/>
+        <rect class="chassis" x="44" y="41" width="5" height="8" rx="2"/>
+        <rect class="chassis" x="4" y="47" width="56" height="13" rx="4"/>
+        <rect class="face" x="10" y="51" width="12" height="5" rx="1"/>
+        <rect class="face" x="26" y="51" width="12" height="5" rx="1"/>
+        <rect class="face" x="42" y="51" width="12" height="5" rx="1"/>
+      </svg>
+      <h1>Architect Dashboard</h1>
+      <a class="console-link" href="http://127.0.0.1:7788/" target="trusty-console">Trusty Console &#8599;</a>
+      <button type="button" class="collapse-all" id="collapse-all" aria-label="Collapse all sections and rows">Collapse all</button>
+      <button type="button" class="collapse-all gear-btn" id="settings-btn" aria-label="Settings" title="Settings" aria-haspopup="dialog" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      <span class="chip state-chip st-active" id="user-state-chip" title="User state: Active (on computer)">Active</span>
+    </div>
+    <p class="fleet" id="fleet">Loading…</p>
+    <p class="fleet" id="asks-note" hidden></p>
+  </header>
+
+  <details class="sec" id="sec-decisions">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Decisions</h2><span class="count" id="n-decisions">·</span><button type="button" class="tap seen-btn" id="attn-seen" hidden aria-label="Mark decisions as seen">Seen</button><span class="sec-sum" id="decisions-sum">Loading…</span></summary>
+    <div class="sec-body">
+      <div class="rows" id="list-q"><p class="empty">Loading…</p></div>
+      <details class="sub" id="sub-qp">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-qp">·</span></summary>
+        <div class="rows" id="list-qp"><p class="empty">Nothing parked.</p></div>
+      </details>
+      <details class="sub" id="sub-qx">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-qx">·</span></summary>
+        <div class="cbar" id="cbar-qx">
+          <input type="search" id="q-qx" placeholder="Search id, title, answer" aria-label="Search completed decisions" autocomplete="off">
+          <button type="button" class="pg" id="pg-newer-qx" aria-label="Newer completed decisions">Newer</button>
+          <span class="pg-label" id="pg-label-qx" aria-live="polite"></span>
+          <button type="button" class="pg" id="pg-older-qx" aria-label="Older completed decisions">Older</button>
+        </div>
+        <div class="rows" id="list-qx"><p class="empty">Loading…</p></div>
+      </details>
+    </div>
+  </details>
+
+  <details class="sec" id="sec-asks">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Asks</h2><span class="count" id="n-asks">·</span><span class="sec-sum" id="asks-sum">Loading…</span></summary>
+    <div class="sec-body">
+      <div class="rows" id="list-a"><p class="empty">Loading…</p></div>
+      <details class="sub" id="sub-ap">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-ap">·</span></summary>
+        <div class="rows" id="list-ap"><p class="empty">Nothing parked.</p></div>
+      </details>
+      <details class="sub" id="sub-ax">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-ax">·</span></summary>
+        <div class="cbar" id="cbar-ax">
+          <input type="search" id="q-ax" placeholder="Search id, title, answer" aria-label="Search completed asks" autocomplete="off">
+          <button type="button" class="pg" id="pg-newer-ax" aria-label="Newer completed asks">Newer</button>
+          <span class="pg-label" id="pg-label-ax" aria-live="polite"></span>
+          <button type="button" class="pg" id="pg-older-ax" aria-label="Older completed asks">Older</button>
+        </div>
+        <div class="rows" id="list-ax"><p class="empty">Loading…</p></div>
+      </details>
+    </div>
+  </details>
+
+  <details class="sec" id="sec-tasks">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Tasks</h2><span class="count" id="n-tasks">·</span><span class="sec-sum" id="tasks-sum">Loading…</span></summary>
+    <div class="sec-body">
+      <div class="rows" id="list-t"><p class="empty">Loading…</p></div>
+      <details class="sub" id="sub-tp">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Parked</h3><span class="n" id="n-tp">·</span></summary>
+        <div class="rows" id="list-tp"><p class="empty">Nothing parked.</p></div>
+      </details>
+      <details class="sub" id="sub-tx">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Completed</h3><span class="n" id="n-tx">·</span></summary>
+        <div class="cbar" id="cbar-tx">
+          <input type="search" id="q-tx" placeholder="Search id, title, answer" aria-label="Search completed tasks" autocomplete="off">
+          <button type="button" class="pg" id="pg-newer-tx" aria-label="Newer completed tasks">Newer</button>
+          <span class="pg-label" id="pg-label-tx" aria-live="polite"></span>
+          <button type="button" class="pg" id="pg-older-tx" aria-label="Older completed tasks">Older</button>
+        </div>
+        <div class="rows" id="list-tx"><p class="empty">Loading…</p></div>
+      </details>
+    </div>
+  </details>
+
+  <details class="sec" id="sec-goals">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Goals</h2><span class="count" id="n-goals">·</span><span class="sec-sum" id="goals-sum">Loading…</span></summary>
+    <div class="sec-body">
+      <details class="sub" id="sub-gd">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Directed</h3><span class="n" id="n-gd">·</span></summary>
+        <p class="note pool-note" id="pool-gd"></p>
+        <p class="note reorder-note" id="note-gd" hidden></p>
+        <div class="err reorder-err" id="err-gd" role="status"></div>
+        <div class="rows" id="list-gd"><p class="empty">Loading…</p></div>
+      </details>
+      <details class="sub" id="sub-gs">
+        <summary><span class="chev" aria-hidden="true"></span><h3>Standing</h3><span class="n" id="n-gs">·</span></summary>
+        <p class="note pool-note" id="pool-gs"></p>
+        <p class="note reorder-note" id="note-gs" hidden></p>
+        <div class="err reorder-err" id="err-gs" role="status"></div>
+        <div class="rows" id="list-gs"><p class="empty">Loading…</p></div>
+      </details>
+    </div>
+  </details>
+
+  <details class="sec" id="sec-sessions">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Sessions</h2><span class="count" id="n-sessions">·</span><span class="sec-sum" id="sessions-sum">Loading…</span></summary>
+    <div class="sec-body" id="sessions-body">
+      <p class="empty" id="sessions-empty">Loading…</p>
+    </div>
+  </details>
+
+  <details class="sec" id="sec-accounts">
+    <summary><span class="chev" aria-hidden="true"></span><h2>Accounts</h2><span class="count" id="n-accounts">·</span><span class="sec-sum" id="accounts-sum">Loading…</span></summary>
+    <div class="sec-body" id="accounts-body">
+      <p class="empty">Loading…</p>
+    </div>
+  </details>
+
+  <footer>Times are shown in your local time. The Architect rewrites this page's data at the end of each pass; your answers reach it on its next pass.</footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  /* Named window so the Trusty Console link back (target="architect-dashboard") reuses this tab. */
+  if (window.name !== "architect-dashboard") window.name = "architect-dashboard";
+  /* BEGIN clearOpener */
+  /* The console opens this tab without noopener (trusty-tools #9474); drop the opener so named-tab reuse keeps working. */
+  try { window.opener = null; } catch (e) { /* read-only in some browsers */ }
+  /* END clearOpener */
+  const $ = (id) => document.getElementById(id);
+  let db = null, readOnly = false;
+  let removals = [], userCap = null;
+  const optimisticKind = new Map();   /* goal id -> kind set by this viewer's move, until the store echoes it */
+  const progress = new Map();         /* item id -> step_progress doc */
+  const optimisticSteps = new Map();  /* item id -> {steps, updated} written by this viewer, until the store echoes it */
+  const noteOpen = new Set(), noteDrafts = new Map();
+  const confirmRm = new Set();        /* goal ids showing the inline "Confirm / Cancel" step */
+  const optimisticRm = new Map();     /* goal id -> removal doc id written by this viewer, until the store echoes it */
+  let accounts = [], items = [], meta = null, settings = null, optimisticState = null, goals = [], sessions = [], priorities = [], reorders = [];
+  const optimisticRank = new Map();   /* goal id -> rank written by this viewer, until the store echoes it */
+  const localReorderAt = {};          /* kind -> ISO time of this viewer's last reorder */
+  let savingOrder = false, drag = null, renderPending = false;
+  let offlineMsg = "";
+
+  /* ---------- helpers: every field is optional, every value is rendered as text ---------- */
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null && text !== "") e.textContent = text;
+    return e;
+  }
+  function txt(v) {
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    try { return JSON.stringify(v); } catch (_) { return ""; }
+  }
+  /* BEGIN localTime */
+  /* One absolute-time form for the whole page: the viewer's local time, "Wed 9:45 PM". Weekday and hour both come from the same local Date. */
+  function localTime(iso) {
+    const d = new Date(iso || "");
+    if (isNaN(d.getTime())) return "";
+    const h = d.getHours(), mm = d.getMinutes();
+    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()] + " " + (h % 12 || 12) + ":" + (mm < 10 ? "0" : "") + mm + " " + (h < 12 ? "AM" : "PM");
+  }
+  /* END localTime */
+  function utc(iso) {   /* name kept for its callers; renders local time. An unparseable value is shown as given. */
+    const s = txt(iso);
+    return s ? localTime(s) || s : "";
+  }
+  function num(v) { if (v == null || v === "") return null; const n = Number(v); return isFinite(n) ? n : null; }
+  function tok(n) {   /* 950, 12.4k, 1.2M */
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1e6) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+    return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  }
+  function hm(iso) { return localTime(txt(iso)); }
+  function usageOf(v) { return v && typeof v === "object" && !Array.isArray(v) ? v : null; }
+  function pbar(pct) {   /* empty progressbar node: screen-reader label only, no visible count or percent */
+    const b = el("span", "pbar"); b.setAttribute("role", "progressbar"); b.setAttribute("aria-valuemin", "0"); b.setAttribute("aria-valuemax", "100"); b.setAttribute("aria-valuenow", String(pct));
+    b.setAttribute("aria-label", "progress about " + pct + "%"); b.title = "progress about " + pct + "%"; return b;
+  }
+  function ctxOf(s) {   /* sessions.<doc>.context {tokens, pct, measured_at}; null when it carries neither number */
+    const c = usageOf(s.context);
+    if (!c) return null;
+    const t = num(c.tokens), p = num(c.pct);
+    if (t == null && p == null) return null;
+    return { tokens: t, pct: p, at: c.measured_at };
+  }
+  function ctxText(c) { return [c.tokens != null ? tok(c.tokens) : "", c.pct != null ? Math.round(c.pct) + "%" : ""].filter(Boolean).join(" / "); }
+  /* BEGIN ctxFill */
+  /* Session row bar = context USE, empty to full as it grows. Source: context.pct (percent of window), else usage.ctx_k against the 250k refresh bar. hot from 80%. Task progress is a separate labelled chip, never the bar. */
+  const CTX_FULL_K = 250, CTX_HOT = 80;
+  function ctxFill(s) {
+    const c = s && s.context && typeof s.context === "object" ? s.context : null;
+    const u = s && s.usage && typeof s.usage === "object" ? s.usage : null;
+    const nz = (v) => (v == null || v === "" || !isFinite(Number(v)) ? null : Number(v));
+    let pct = c ? nz(c.pct) : null, label = null;
+    if (pct == null) { const k = u ? nz(u.ctx_k) : null; if (k == null || k <= 0) return null; pct = k / CTX_FULL_K * 100; label = Math.round(k) + "k of " + CTX_FULL_K + "k"; }
+    pct = Math.max(0, Math.min(100, Math.round(pct)));
+    return { pct: pct, hot: pct >= CTX_HOT, label: label || pct + "% of window" };
+  }
+  /* END ctxFill */
+  function agentsText(u) {   /* "2 active · 1 parked", or "" when there are none */
+    const a = num(u.agents_active), p = num(u.agents_parked);
+    if (!a && !p) return "";
+    return (a || 0) + " active · " + (p || 0) + " parked";
+  }
+  /* BEGIN linkSplit */
+  const BRIEFS_ABS = "/path/to/architect/local/briefs/";
+  /* Splits text into [{t, href?}]: briefs paths -> /files/local/briefs/..., https URLs -> themselves. Trailing . , ; : are not part of a link. */
+  function linkSplit(text) {
+    const out = [];
+    const re = /(\/path\/to\/architect\/local\/briefs\/[^\s)<>"']+|https?:\/\/[^\s)<>"']+)/g;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      let tok = m[0];
+      const trail = tok.match(/[.,;:]+$/);
+      if (trail) tok = tok.slice(0, tok.length - trail[0].length);
+      if (!tok.startsWith("http") && tok.length === BRIEFS_ABS.length) continue;
+      if (m.index > last) out.push({ t: text.slice(last, m.index) });
+      const href = tok.startsWith("http") ? tok : "/files/local/briefs/" + tok.slice(BRIEFS_ABS.length).split("/").map(encodeURIComponent).join("/");
+      out.push({ t: tok, href });
+      last = m.index + tok.length;
+      re.lastIndex = last;
+    }
+    if (last < text.length) out.push({ t: text.slice(last) });
+    return out;
+  }
+  /* END linkSplit */
+  function linkify(p, text) {
+    for (const part of linkSplit(txt(text))) {
+      if (part.href) {
+        const a = el("a", null, part.t); a.href = part.href; a.target = "_blank"; a.rel = "noopener"; p.appendChild(a);
+      } else if (part.t) addText(p, part.t);
+    }
+    return p;
+  }
+  /* ---------- in-page references: dashboard ids (D13, S05, G0a ...) and session names become links to their rows ---------- */
+  const refRows = new Map();      /* ref (doc id) -> row element, filled while rendering */
+  const refIds = new Set();       /* ids present in the loaded data */
+  const nameToRef = new Map();    /* session name -> session doc id */
+  let refRe = null, pendingHash = "";
+  function buildRefs() {
+    refRows.clear(); refIds.clear(); nameToRef.clear();
+    [items, goals, priorities, sessions].forEach((arr) => arr.forEach((r) => { if (r && r.id) refIds.add(txt(r.id)); }));
+    sessions.forEach((x) => { const n = txt(x.name); if (n && x.id) nameToRef.set(n, txt(x.id)); });
+    const names = Array.from(nameToRef.keys()).sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    refRe = new RegExp("(?<![\\w-])(?:" + (names.length ? "(" + names.join("|") + ")|" : "()") + "([GPADTSR][0-9a-f]{2}))(?![\\w-])", "g");
+  }
+  /* Appends text to parent; each known id or session name becomes an anchor built from DOM nodes (never innerHTML). */
+  /* BEGIN refMatches */
+  /* Pure: every id or session name in str that has a row. An id with no item (a next id not yet used) is not a match. */
+  function refMatches(str, re, nameToRef, ids) {
+    const out = [];
+    if (re) for (const m of str.matchAll(re)) {
+      const target = m[1] ? nameToRef.get(m[1]) : (ids.has(m[2]) ? m[2] : null);
+      if (target) out.push({ index: m.index, text: m[0], target: target });
+    }
+    return out;
+  }
+  /* END refMatches */
+  function addText(parent, text) {
+    const str = txt(text);
+    if (!str) return parent;
+    let last = 0;
+    for (const m of refMatches(str, refRe, nameToRef, refIds)) {
+      const target = m.target;
+      if (m.index > last) parent.appendChild(document.createTextNode(str.slice(last, m.index)));
+      const a = el("a", "xref", m.text);
+      a.href = "#" + encodeURIComponent(target);
+      a.addEventListener("click", (ev) => { ev.preventDefault(); gotoRef(target); });
+      parent.appendChild(a);
+      last = m.index + m.text.length;
+    }
+    if (last < str.length) parent.appendChild(document.createTextNode(str.slice(last)));
+    return parent;
+  }
+  function rich(tag, cls, text) { return addText(el(tag, cls), text); }
+  /* Opens every collapsed ancestor and the row itself, scrolls it into view and flashes it. */
+  function revealRow(row) {
+    for (let d = row.parentElement && row.parentElement.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
+    if (row.tagName === "DETAILS") row.open = true;
+    let reduce = false;
+    try { reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (_) {}
+    row.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+    const sm = row.querySelector("summary");
+    if (sm) try { sm.focus({ preventScroll: true }); } catch (_) {}
+    const hl = row.classList.contains("goal-row") ? row : row;
+    hl.classList.add("flash");
+    setTimeout(() => hl.classList.remove("flash"), 1400);
+  }
+  function showRef(ref) { const row = refRows.get(ref); if (!row) return false; revealRow(row); return true; }
+  /* Click: put the id in the hash (back/forward work); hashchange then shows the row. If the hash cannot change, show it directly. */
+  function gotoRef(ref) {
+    const want = "#" + encodeURIComponent(ref);
+    if (location.hash !== want) { try { location.hash = want; } catch (_) {} }
+    if (location.hash !== want || !hashFired) showRef(ref);
+    hashFired = false;
+  }
+  let hashFired = false;
+  window.addEventListener("hashchange", () => {
+    hashFired = true;
+    let ref = ""; try { ref = decodeURIComponent(location.hash.slice(1)); } catch (_) {}
+    pendingHash = "";
+    if (ref && !showRef(ref)) pendingHash = ref;
+    setTimeout(() => { hashFired = false; }, 0);
+  });
+  function bodyOf(snap) {
+    try { const v = snap.data(); return v && typeof v === "object" ? v : {}; } catch (_) { return {}; }
+  }
+  function ownerName() {
+    const n = meta && typeof meta.owner_name === "string" ? meta.owner_name.trim() : "";
+    return n || "";
+  }
+
+  /* ---------- per-viewer open state (localStorage, optional) ---------- */
+  const OPEN_KEY = "architect-dashboard-open";
+  const openState = Object.create(null);
+  try {
+    const raw = JSON.parse(localStorage.getItem(OPEN_KEY) || "{}");
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const k in raw) openState[k] = !!raw[k];
+  } catch (_) {}
+  try { /* carry over row state saved by the earlier queue page */
+    const legacy = JSON.parse(localStorage.getItem("aq-open") || "[]");
+    if (Array.isArray(legacy)) legacy.forEach((id) => { const k = "item:" + id; if (!(k in openState)) openState[k] = true; });
+  } catch (_) {}
+  function saveOpen() { try { localStorage.setItem(OPEN_KEY, JSON.stringify(openState)); } catch (_) {} }
+  function bindOpen(d, key, def) {
+    d.open = key in openState ? openState[key] : !!def;
+    d.addEventListener("toggle", () => {
+      const was = key in openState ? openState[key] : !!def;
+      if (was === d.open) return;
+      openState[key] = d.open; saveOpen();
+    });
+  }
+
+  /* ---------- collapse all / expand sections (header control) ---------- */
+  (function () {
+    const btn = $("collapse-all");
+    if (!btn) return;
+    const anyOpen = () => document.querySelector("details[open]") !== null;
+    function label() {
+      const t = anyOpen() ? "Collapse all" : "Expand sections";
+      btn.textContent = t; btn.setAttribute("aria-label", anyOpen() ? "Collapse all sections and rows" : "Expand top-level sections");
+    }
+    btn.addEventListener("click", () => {
+      if (anyOpen()) document.querySelectorAll("details[open]").forEach((d) => { d.open = false; });
+      else document.querySelectorAll("details.sec").forEach((d) => { d.open = true; });
+      label();
+    });
+    /* toggle does not bubble; capture keeps the label current as rows open and close. bindOpen persists each change. */
+    document.addEventListener("toggle", label, true);
+    label();
+  })();
+
+  /* ---------- static accordion parts ---------- */
+  bindOpen($("sec-decisions"), "sec:decisions", true);
+  bindOpen($("sec-asks"), "sec:asks", true);
+  bindOpen($("sec-tasks"), "sec:tasks", true);
+  bindOpen($("sec-goals"), "sec:goals", false);
+  bindOpen($("sec-sessions"), "sec:sessions", false);
+  bindOpen($("sec-accounts"), "sec:accounts", true);
+  bindOpen($("sub-qx"), "sub:decisions:done", false);
+  bindOpen($("sub-ax"), "sub:asks:done", false);
+  bindOpen($("sub-tx"), "sub:tasks:done", false);
+  bindOpen($("sub-gd"), "sub:goals:directed", true);
+  bindOpen($("sub-gs"), "sub:goals:standing", true);
+
+  const GROUPS = [
+    { key: "owner", states: ["waiting-owner"], def: true, label: () => "Needs " + (ownerName() || "you") },
+    { key: "working", states: ["working", "refreshing"], def: true, label: () => "Working" },
+    { key: "waiting", states: ["blocked", "waiting-ci", "idle"], def: true, label: () => "Waiting" },
+    { key: "exited", states: ["exited"], def: true, label: () => "Exited" },
+    { key: "parked", states: ["parked"], def: false, label: () => "Parked" },
+    { key: "other", states: null, def: true, label: () => "Not classified" }
+  ];
+  GROUPS.forEach((g) => {
+    const d = el("details", "sub"); d.hidden = true;
+    const sum = el("summary");
+    g.h = el("h3"); g.n = el("span", "n");
+    sum.append(el("span", "chev"), g.h, g.n); d.appendChild(sum);
+    g.list = el("div", "rows"); d.appendChild(g.list);
+    bindOpen(d, "sub:sessions:" + g.key, g.def);
+    g.el = d;
+    $("sessions-body").appendChild(d);
+  });
+  function groupOf(state) {
+    for (const g of GROUPS) if (g.states && g.states.indexOf(state) !== -1) return g;
+    return GROUPS[GROUPS.length - 1];
+  }
+  function stateLabel(state) {
+    switch (state) {
+      case "waiting-owner": return "Needs " + (ownerName() || "you");
+      case "blocked": return "Blocked";
+      case "working": return "Working";
+      case "refreshing": return "Refreshing";
+      case "waiting-ci": return "Waiting on CI";
+      case "idle": return "Idle";
+      case "parked": return "Parked";
+      case "exited": return "Exited";
+      default: return state ? state : "Unknown";
+    }
+  }
+  function stateClass(state) {
+    return { "waiting-owner": "owner", blocked: "blocked", working: "working", refreshing: "refreshing", parked: "parked", exited: "exited" }[state] || "plain";
+  }
+
+  /* BEGIN progressCore */
+  /* Step text: title, else text, else detail; a step with none shows a muted marker so a gap is never blank. */
+  function stepMissing(s) { return !(s && (txt(s.title) || txt(s.text) || txt(s.detail))); }
+  function stepLabel(s) { return stepMissing(s) ? "(step text missing)" : (txt(s.title) || txt(s.text) || txt(s.detail)); }
+  /* Pure helpers (no DOM): row progress, session rollup, owner cancel, change tracking for the update pulse. */
+  function clampPct(v) { if (v == null || v === "") return null; const n = Number(v); return isFinite(n) ? Math.max(0, Math.min(100, n)) : null; }
+  /* Task progress {done, total, pct} or null (no fill). Steps win: done steps / total steps from map (step id -> {done}); else the explicit it.progress (0-100). */
+  function taskProgress(it, map) {
+    const steps = Array.isArray(it.steps) ? it.steps.filter((x) => x && typeof x === "object") : [];
+    if (steps.length) {
+      const m = map || {};
+      let done = 0;
+      steps.forEach((x, i) => { const id = x.id != null && x.id !== "" ? String(x.id) : String(i + 1); if (m[id] && m[id].done) done++; });
+      return { done: done, total: steps.length, pct: Math.round(100 * done / steps.length) };
+    }
+    const p = clampPct(it.progress);
+    return p == null ? null : { done: p / 100, total: 1, pct: Math.round(p) };
+  }
+  /* Session summary and progress. Summary: sessions/<S>.summary, else the open tasks' titles joined. Progress: sessions/<S>.progress, else sum(done steps) / sum(total steps) over the open tasks (an explicit task progress counts as one step). */
+  function sessionRollup(s, tasks, mapOf) {
+    const own = typeof s.summary === "string" ? s.summary.trim() : "";
+    const summary = own || tasks.map((t) => String(t.title == null || t.title === "" ? t.id : t.title)).join(" · ");
+    let pct = clampPct(s.progress);
+    if (pct == null) {
+      let d = 0, t = 0;
+      tasks.forEach((i) => { const p = taskProgress(i, mapOf(i.id)); if (p) { d += p.done; t += p.total; } });
+      pct = t ? Math.round(100 * d / t) : null;
+    } else pct = Math.round(pct);
+    return { summary: summary, pct: pct };
+  }
+  /* The write the Cancel task control makes (the page adds nothing else but if_version). */
+  function cancelPatch(note, by, nowIso) {
+    return { status: "cancelled", cancelled_at: nowIso, cancel_note: String(note == null ? "" : note).trim(), cancelled_by: String(by == null ? "" : by), updated: nowIso };
+  }
+  /* The write the Status Update button makes: a request for the Architect, never a status change. */
+  function statusRequestPatch(by, nowIso) {
+    return { status_request: { at: nowIso, by: String(by == null ? "" : by) }, updated: nowIso };
+  }
+  /* Button label and state: disabled "Requested HH:MM" (local) from the request time until the Architect clears status_request. */
+  function statusButtonState(it) {
+    const r = it && it.status_request, at = r && typeof r === "object" ? r.at : null;
+    if (!at) return { label: "Status Update", disabled: false };
+    const d = new Date(at), p = (n) => (n < 10 ? "0" : "") + n;
+    return { label: "Requested" + (isNaN(d.getTime()) ? "" : " " + p(d.getHours()) + ":" + p(d.getMinutes())), disabled: true };
+  }
+  /* Open / answered / closed buckets. Cancelled and Won't do items sit in the closed bucket with done ones, newest first; they are never open. */
+  function bucketItems(list) {
+    const s = (v) => (v == null ? "" : String(v));
+    const closedAt = (i) => (i.status === "cancelled" ? s(i.cancelled_at) : i.status === "wont_do" ? s(i.wont_do && i.wont_do.at) : s(i.done_at));
+    return {
+      open: list.filter((i) => i.status === "open" && !(i.parked && i.parked.until)),   /* parked items leave the active lists */
+      answered: list.filter((i) => i.status === "answered").sort((x, y) => s(y.answered_at).localeCompare(s(x.answered_at))),
+      done: list.filter((i) => i.status === "done" || i.status === "cancelled" || i.status === "wont_do").sort((x, y) => closedAt(y).localeCompare(closedAt(x)))
+    };
+  }
+  /* Change tracking: prev is the previous snapshot's id -> signature map, or null on the first load (nothing pulses on first load). */
+  function changedDocs(prev, docs) {
+    const next = new Map(), changed = [];
+    /* A Status Update request (status_request set or cleared, which also bumps `updated`) alone does not pulse; the answer (status_at) does. */
+    const core = (sig) => { const o = JSON.parse(sig); delete o.status_request; delete o.updated; return JSON.stringify(o); };
+    const req = (sig) => JSON.stringify(JSON.parse(sig).status_request || null);
+    docs.forEach((d) => {
+      const sig = JSON.stringify(d); next.set(d.id, sig);
+      if (!prev || prev.get(d.id) === sig) return;
+      const old = prev.get(d.id);
+      if (old !== undefined && core(old) === core(sig) && req(old) !== req(sig)) return;
+      changed.push(d.id);
+    });
+    return { next: next, changed: changed };
+  }
+  /* ancestorOpen[0] is the row's nearest ancestor <details>, the last is the outermost. Returns 0 when the row itself is visible, else the 1-based index of the outermost closed ancestor (the nearest one still visible). */
+  function pulseIndex(ancestorOpen) {
+    for (let i = ancestorOpen.length - 1; i >= 0; i--) if (!ancestorOpen[i]) return i + 1;
+    return 0;
+  }
+  /* END progressCore */
+  /* BEGIN planView */
+  /* it.plan = [{title, detail?, done?}] (+ it.plan_title); it.links = [{label, item?, url?}]. Needs el, txt, rich, taskProgress. */
+  function planOf(it) {
+    if (!Array.isArray(it.plan)) return [];
+    return it.plan.map((x) => (typeof x === "string" ? { title: x } : x)).filter((x) => x && typeof x === "object" && txt(x.title))
+      .map((x, i) => ({ n: i + 1, title: txt(x.title), detail: txt(x.detail), done: x.done === true }));
+  }
+  function planBlock(parent, it) {
+    const steps = planOf(it);
+    if (!steps.length) return;
+    const box = el("div", "plan");
+    box.appendChild(rich("div", "plan-head", txt(it.plan_title) || "Plan"));
+    const ol = el("ol", "plan-list");
+    steps.forEach((s) => {
+      const li = el("li", "plan-step" + (s.done ? " done" : ""));
+      const t = el("div", "plan-title");
+      t.appendChild(rich("strong", null, s.title));
+      if (s.done) t.appendChild(el("span", "plan-mark", "✓ done"));
+      li.appendChild(t);
+      if (s.detail) li.appendChild(rich("p", "plan-detail", s.detail));
+      ol.appendChild(li);
+    });
+    box.appendChild(ol);
+    parent.appendChild(box);
+  }
+  /* Resolves one link: an item id on the page, a missing item id, an https url, or a local/briefs path (served by /files). Anything else is dropped. */
+  function linkTarget(l, ids) {
+    if (!l || typeof l !== "object") return null;
+    const label = txt(l.label), id = txt(l.item).trim();
+    if (id) return { kind: ids.has(id) ? "item" : "missing", item: id, label: label || id };
+    const url = txt(l.url).trim();
+    if (/^https?:\/\/[^\s]+$/.test(url)) return { kind: "url", href: url, label: label || url };
+    const m = /^(?:\/path\/to\/architect\/)?(local\/briefs\/[^\s?#]+)$/.exec(url);
+    if (m && m[1].indexOf("..") === -1) return { kind: "url", href: "/files/" + m[1].split("/").map(encodeURIComponent).join("/"), label: label || url };
+    return null;
+  }
+  function linksOf(it, ids) { return Array.isArray(it.links) ? it.links.map((l) => linkTarget(l, ids)).filter(Boolean) : []; }
+  function linksRow(parent, it, ids, jump) {
+    const ls = linksOf(it, ids);
+    if (!ls.length) return;
+    const row = el("div", "plan-links");
+    row.appendChild(el("span", "note", "Linked:"));
+    ls.forEach((l) => {
+      if (l.kind === "item") {
+        const b = el("button", "jump", l.label); b.type = "button"; b.dataset.item = l.item;
+        b.setAttribute("aria-label", "Show " + l.item);
+        b.addEventListener("click", () => jump(l.item));
+        row.appendChild(b);
+      } else if (l.kind === "missing") {
+        const s = el("span", "ghost-name", l.label); s.title = "No item " + l.item + " on this page"; row.appendChild(s);
+      } else {
+        const a = el("a", "plan-link", l.label); a.href = l.href; a.target = "_blank"; a.rel = "noopener"; row.appendChild(a);
+      }
+    });
+    parent.appendChild(row);
+  }
+  /* Read-only step list of a linked task that carries steps, with its progress. byId: id -> item; mapOf: id -> step progress map. */
+  function linkedSteps(parent, it, byId, mapOf) {
+    const seen = new Set();
+    (Array.isArray(it.links) ? it.links : []).forEach((l) => {
+      const id = l && typeof l === "object" ? txt(l.item).trim() : "";
+      const t = id && byId.get(id);
+      if (!t || seen.has(id) || !Array.isArray(t.steps) || !t.steps.length) return;
+      seen.add(id);
+      const m = mapOf(id) || {};
+      const box = el("div", "lsteps");
+      box.appendChild(el("div", "lsteps-head", id + " · " + (txt(t.title) || id)));
+      const ol = el("ol", "lsteps-list");
+      t.steps.filter((x) => x && typeof x === "object").forEach((x, i) => {
+        const sid = x.id != null && x.id !== "" ? String(x.id) : String(i + 1), done = !!(m[sid] && m[sid].done);
+        const li = el("li", "lstep" + (done ? " done" : ""));
+        li.appendChild(rich("span", "lstep-title" + (stepMissing(x) ? " step-missing" : ""), stepLabel(x)));
+        ol.appendChild(li);
+      });
+      box.appendChild(ol);
+      parent.appendChild(box);
+    });
+  }
+  /* END planView */
+  /* BEGIN attention */
+  /* Decision attention: the ids of open, unparked decisions the viewer has not yet opened or answered. First load marks the existing ones without a flash; a decision that is added or changed afterwards marks itself and asks for a flash. */
+  function attentionUpdate(st, docs, changed, first, seenMap) {
+    const open = new Set(docs.filter((d) => d.status === "open" && askKind(d) === "D" && !isParked(d)).map((d) => d.id));
+    const sigs = {}; docs.forEach((d) => { sigs[d.id] = JSON.stringify([d.status, d.kind, d.title, d.detail, d.options, d.due, d.parked]); });
+    /* seenMap: id -> a signature, or an array of signatures (this browser's cache and the server's record). A decision whose current signature is in it is seen, whatever the origin the owner saw it on. */
+    const isSeen = (id) => { const v = seenMap && seenMap[id]; return Array.isArray(v) ? v.indexOf(sigs[id]) !== -1 : v === sigs[id]; };
+    const pending = new Set(Array.from(st.pending).filter((id) => open.has(id) && !isSeen(id)));   /* answered, parked, removed or seen elsewhere: cleared */
+    let flash = false, beep = false;
+    /* The signature covers what the owner reads and acts on, never the updated stamp or the Architect's notes: a note edit must not re-flag a seen decision. */
+    if (first) open.forEach((id) => { if (!isSeen(id)) pending.add(id); });   /* seen on an earlier load and unchanged since: stays seen */
+    else changed.forEach((id) => { if (open.has(id) && !isSeen(id) && (st.sigs || {})[id] !== sigs[id]) { pending.add(id); flash = true; if (!(id in (st.sigs || {}))) beep = true; } });   /* beep: only a decision id never seen before; an edit flashes silently */
+    return { pending: pending, flash: flash, beep: beep, sigs: sigs };
+  }
+  let attn = { pending: new Set(), flash: false, sigs: {} };
+  /* Seen survives a reload: id -> the owner-relevant signature of the doc when the owner saw it. A decision whose signature changes is unseen again. */
+  const SEEN_KEY = "architect-dashboard-seen";
+  function seenLoad() { try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; } catch (_) { return {}; } }
+  /* The server record (meta/seen, id -> signature) follows the owner across origins and devices (localhost, tailnet, phone); localStorage is this browser's cache. seenPersist is set where the store is reachable. */
+  let seenServer = {}, seenPersist = () => {};
+  function seenMerged() {
+    const m = {}, add = (src) => Object.keys(src || {}).forEach((id) => { (m[id] = m[id] || []).indexOf(src[id]) === -1 && m[id].push(src[id]); });
+    add(seenLoad()); add(seenServer); return m;
+  }
+  function seenStore(ids) {
+    if (!ids.length) return;
+    const add = {}; ids.forEach((id) => { add[id] = (attn.sigs || {})[id] || ""; });
+    try { const m = seenLoad(); Object.assign(m, add); localStorage.setItem(SEEN_KEY, JSON.stringify(m)); } catch (_) {}
+    seenServer = Object.assign({}, seenServer, add); seenPersist(add);
+  }
+  function paintAttention(flash, beep) {
+    const b = document.body, on = attn.pending.size > 0;
+    b.classList.toggle("attn", on);
+    b.classList.remove("attn-flash");
+    if (on && flash) { void b.offsetWidth; b.classList.add("attn-flash"); noteFlash(beep); }
+    const s = $("attn-seen"); if (s) s.hidden = !on;
+  }
+  function trackAttention(docs, tracked) {
+    attn = attentionUpdate(attn, docs, tracked.changed, tracked.first, seenMerged());
+    paintAttention(attn.flash, attn.beep);
+  }
+  /* The first item snapshot waits for the server's seen record, so a decision seen on another origin never flashes here. */
+  let seenReady = false, deferredAttn = null;
+  function gateAttention(docs, tracked) {
+    if (seenReady) { trackAttention(docs, tracked); return; }
+    deferredAttn = { docs: docs, first: !!(deferredAttn && deferredAttn.first) || tracked.first, changed: ((deferredAttn && deferredAttn.changed) || []).concat(tracked.changed) };
+  }
+  function seenOpen() {
+    if (!seenReady) { seenReady = true; if (deferredAttn) { const d = deferredAttn; deferredAttn = null; trackAttention(d.docs, { first: d.first, changed: d.changed }); return; } }
+    if (items.length) trackAttention(items, { first: false, changed: [] });   /* another origin marked something seen */
+  }
+  /* Seen is the owner's own act: a trusted event only. A script, a restore or a re-render never counts. */
+  function ownerEvent(ev) { return !!(ev && ev.isTrusted === true); }
+  function seenDecision(id, ev) { if (ownerEvent(ev) && attn.pending.delete(id)) { seenStore([id]); paintAttention(false); } }
+  /* The Seen button marks only decisions the owner can see (isVisible(id) true): a decision hidden in a collapsed section or an unrendered row stays unseen. */
+  function seenAll(ev, isVisible) {
+    if (!ownerEvent(ev)) return;
+    const ids = Array.from(attn.pending).filter((id) => !isVisible || isVisible(id));
+    ids.forEach((id) => attn.pending.delete(id)); seenStore(ids); paintAttention(false);
+  }
+  /* Capture-phase click on a summary runs before the toggle, so details.open is still the old state: only closed -> open marks seen. */
+  function expandSeen(ev, row) { if (row && !row.open && row.dataset && row.dataset.pid) seenDecision(row.dataset.pid, ev); }
+  /* END attention */
+  /* Write the seen record to meta/seen (id -> signature), keeping only open decisions plus the ids just seen; a racing write is re-read once. */
+  seenPersist = async (add) => {
+    if (!db || readOnly) return;
+    const live = new Set(items.filter((d) => d.status === "open" && askKind(d) === "D").map((d) => d.id));
+    const ref = db.doc("meta/seen");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const snap = await ref.get(), exists = !!(snap && snap.exists), cur = exists && bodyOf(snap).map ? bodyOf(snap).map : {}, map = {};
+        Object.keys(cur).concat(Object.keys(add)).forEach((id) => { if (id in add) map[id] = add[id]; else if (live.has(id)) map[id] = cur[id]; });
+        await ref.set({ map: map, updated: new Date().toISOString() }, exists ? (snap.version != null ? { if_version: snap.version } : undefined) : { if_version: 0 });
+        return;
+      } catch (e) { if (!(e && e.status === 409)) return; }
+    }
+  };
+  /* BEGIN reminder */
+  /* Reminder pulse and quiet beep (brief 2026-10-09-dashboard-reminder-pulse-beep.md). Undone = open, unparked decisions and asks, the same set as the "to decide" and "to do" badges; tasks never count. */
+  const REMIND_MS = 300000;
+  const BEEP_KEY = "aq-beep";
+  function undoneCount(list) {
+    return bucketItems(list).open.filter((i) => { const k = askKind(i); return k === "D" || k === "A"; }).length;
+  }
+  /* One tick of the reminder timer. st = { next, due }. Returns the next state and whether to pulse now. A zero count clears the timer; a hidden tab keeps the reminder due and fires it once on return. */
+  function reminderStep(st, now, count, hidden) {
+    if (!(count > 0)) return { st: { next: null, due: false }, fire: false };
+    const next = st.next == null ? now + REMIND_MS : st.next;
+    const due = st.due || now >= next;
+    if (due && !hidden) return { st: { next: now + REMIND_MS, due: false }, fire: true };
+    return { st: { next: next, due: due }, fire: false };
+  }
+  function beepLoad(storage) { try { return storage.getItem(BEEP_KEY) === "1"; } catch (_) { return false; } }
+  function beepSave(storage, on) { try { storage.setItem(BEEP_KEY, on ? "1" : "0"); } catch (_) {} }
+  /* A browser keeps an AudioContext suspended until a user gesture. Build it (if missing) and resume it (if suspended); called from every gesture and from the toggle, so a reload with beep saved as on still gets a running context. Returns the context, or null with no Web Audio. */
+  function beepCtxEnsure(ctx, AC) {
+    try {
+      if (!ctx && AC) ctx = new AC();
+      if (ctx && ctx.state !== "running") { const p = ctx.resume(); if (p && p.catch) p.catch(() => {}); }
+    } catch (_) {}
+    return ctx || null;
+  }
+  /* One soft tone: sine, 660 Hz, 120 ms, peak gain 0.05 with a short fade in and out. Silent when off or the context is missing or not running; a hidden tab still plays, since the owner is usually elsewhere. Returns whether it played. */
+  function beepPlay(on, ctx) {
+    if (!on || !ctx || ctx.state !== "running") return false;
+    try {
+      const t = ctx.currentTime, osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = "sine"; osc.frequency.value = 660;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.05, t + 0.02);
+      g.gain.setValueAtTime(0.05, t + 0.10);
+      g.gain.linearRampToValueAtTime(0, t + 0.12);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t); osc.stop(t + 0.12);
+      return true;
+    } catch (_) { return false; }
+  }
+  /* END reminder */
+  /* BEGIN acctBeep */
+  /* Session-reset beep (the owner 2026-10-09 14:36Z): "session" = the active account's 5-hour window. One beep when it crosses 95% used (a switch or reset is needed) and one when it resets (reset5h passes, or pct5h falls 30 points or more). Active = the freshest reading. Each event has a key (account + reset5h) kept in st.fired, so polls and reloads never repeat it. The first evaluation only seeds. */
+  const ACCT_BEEP_KEY = "aq-acct-beep", ACCT_BEEP_PCT = 95, ACCT_DROP = 30;
+  function acctBeepStep(st, docs, nowMs) {
+    const list = (Array.isArray(docs) ? docs : []).filter((d) => d && d.account && !isNaN(Date.parse(d.ts || "")));
+    if (!list.length) return { st: st, beep: false };
+    const a = list.reduce((x, y) => (Date.parse(y.ts) > Date.parse(x.ts) ? y : x));
+    const pct = Number(a.pct5h), have = a.pct5h != null && a.pct5h !== "" && isFinite(pct);
+    const events = [], last = st.last;
+    if (have && pct >= ACCT_BEEP_PCT && nowMs - Date.parse(a.ts) <= ACCT_STALE_MS) events.push("hi|" + a.account + "|" + (a.reset5h || ""));
+    if (last && last.account === a.account && last.reset5) {
+      const passed = Date.parse(last.reset5) <= nowMs, drop = have && last.pct != null && last.pct - pct >= ACCT_DROP;
+      if (passed || drop) events.push("rs|" + a.account + "|" + last.reset5);
+    }
+    const fresh = events.filter((k) => st.fired.indexOf(k) < 0);
+    return { st: { fired: st.fired.concat(fresh).slice(-50), last: { account: a.account, reset5: a.reset5h || "", pct: have ? pct : null } }, beep: !!last && fresh.length > 0 };
+  }
+  function acctBeepLoad(storage) { try { const v = JSON.parse(storage.getItem(ACCT_BEEP_KEY) || "null"); return v && Array.isArray(v.fired) ? v : { fired: [], last: null }; } catch (_) { return { fired: [], last: null }; } }
+  function acctBeepSave(storage, st) { try { storage.setItem(ACCT_BEEP_KEY, JSON.stringify(st)); } catch (_) {} }
+  /* END acctBeep */
+  let undone = 0, remind = { next: null, due: false }, remindTimer = 0;
+  let beepOn = false, audioCtx = null;
+  try { beepOn = beepLoad(window.localStorage); } catch (_) {}
+  const pageHidden = () => document.visibilityState === "hidden";
+  function paintBeep() {
+    const b = $("beep-toggle"); if (!b) return;
+    b.textContent = "Beep: " + (beepOn ? "on" : "off");
+    b.setAttribute("aria-pressed", beepOn ? "true" : "false");
+    b.setAttribute("aria-label", "Quiet beep, " + (beepOn ? "on" : "off"));
+  }
+  function remindPulse() {
+    const b = document.body;
+    b.classList.remove("attn-remind"); void b.offsetWidth; b.classList.add("attn-remind");
+    clearTimeout(remindTimer);
+    remindTimer = setTimeout(() => b.classList.remove("attn-remind"), 3200);
+  }
+  /* A decision flash resets the 5-minute timer so the two never stack; it beeps once only when beep is true (a new decision). */
+  function noteFlash(beep) {
+    remind = { next: Date.now() + REMIND_MS, due: false };
+    if (beep) beepPlay(beepOn, audioCtx);
+  }
+  function remindTick() {
+    const r = reminderStep(remind, Date.now(), undone, pageHidden());
+    remind = r.st;
+    if (r.fire) remindPulse();   /* the reminder pulses silently: a beep is for a new decision only */
+  }
+  let acctBeepSt = null;
+  function acctBeepCheck() {   /* a beep only on a crossing or a reset; storage keeps it from repeating across reloads */
+    if (!accounts.length) return;
+    if (!acctBeepSt) acctBeepSt = acctBeepLoad(window.localStorage);
+    const r = acctBeepStep(acctBeepSt, accounts, Date.now());
+    acctBeepSt = r.st; acctBeepSave(window.localStorage, acctBeepSt);
+    if (r.beep) beepPlay(beepOn, audioCtx);
+  }
+  setInterval(acctBeepCheck, 60000);
+  setInterval(remindTick, 1000);
+  document.addEventListener("visibilitychange", remindTick);
+  paintBeep();
+  /* Unlock on any gesture while beep is on (a reload keeps the saved setting but not the context), and when the tab returns. */
+  function beepUnlock() { if (beepOn) audioCtx = beepCtxEnsure(audioCtx, window.AudioContext || window.webkitAudioContext); }
+  ["pointerdown", "keydown", "touchstart"].forEach((n) => document.addEventListener(n, beepUnlock, { capture: true, passive: true }));
+  document.addEventListener("visibilitychange", beepUnlock);
+  (function () {
+    const b = $("beep-toggle"); if (!b) return;
+    b.addEventListener("click", () => {
+      beepOn = !beepOn;
+      beepSave(window.localStorage, beepOn);
+      paintBeep();
+      if (beepOn) { beepUnlock(); setTimeout(() => beepPlay(beepOn, audioCtx), 60); }   /* a confirming tone proves the unlock */
+    });
+    const t = $("beep-test");
+    if (t) t.addEventListener("click", () => {
+      audioCtx = beepCtxEnsure(audioCtx, window.AudioContext || window.webkitAudioContext);
+      t.textContent = "Test beep";
+      setTimeout(() => { if (!beepPlay(true, audioCtx)) t.textContent = "Test beep: audio blocked"; }, 60);
+    });
+  })();
+  /* BEGIN pulseView */
+  /* Update pulse: a row whose doc changed after the first load glows for about 2 s. A row hidden inside a closed parent pulses its outermost closed ancestor instead. Rows carry data-pid (the doc id). */
+  const PULSE_MS = 2000;
+  const pulses = new Map();      /* doc id -> start time (ms) */
+  const watched = {};            /* collection -> previous id -> signature map */
+  function trackDocs(name, docs) {
+    const first = !watched[name];
+    const r = changedDocs(watched[name] || null, docs);
+    watched[name] = r.next;
+    const now = Date.now();
+    r.changed.forEach((id) => pulses.set(id, now));
+    return { first: first, changed: r.changed };
+  }
+  function pulseRow(id) {
+    const esc = window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/"/g, "");
+    const row = document.querySelector('[data-pid="' + esc + '"]');
+    if (row) return row;
+    const m = /^([DAT])[0-9a-f]{2}$/i.exec(id);
+    const sub = m ? { D: "sub-qx", A: "sub-ax", T: "sub-tx" }[m[1].toUpperCase()] : null;
+    return sub ? document.getElementById(sub) : null;   /* a closed Completed page: the Completed block itself */
+  }
+  function applyPulses() {
+    const now = Date.now();
+    pulses.forEach((t, id) => {
+      if (now - t >= PULSE_MS) { pulses.delete(id); return; }
+      const row = pulseRow(id);
+      if (!row) return;
+      const chain = [];
+      for (let d = row.parentElement && row.parentElement.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) chain.push(d);
+      const k = pulseIndex(chain.map((d) => d.open));
+      const target = k ? chain[k - 1] : row;
+      target.classList.remove("pulse");
+      void target.offsetWidth;
+      target.style.setProperty("--pulse-delay", "-" + (now - t) + "ms");
+      target.classList.add("pulse");
+      setTimeout(() => { target.classList.remove("pulse"); }, PULSE_MS - (now - t) + 50);
+    });
+  }
+  /* END pulseView */
+
+  function userName() { return userCap && typeof userCap.name === "string" ? userCap.name : ""; }
+  function jumpToItem(id) { gotoRef(id); }
+
+  /* Items an open session row summarises: its open task (T) items. */
+  function sessionTasks(s) {
+    return items.filter((i) => i.status === "open" && !isParked(i) && askKind(i) === "T" && (txt(i.session) === s.name || txt(i.session) === s.id));
+  }
+  function planExtras(body, it) {   /* plan, links and linked tasks' steps, between the detail paragraph and the steps/options */
+    planBlock(body, it);
+    const ids = new Set(items.map((x) => x.id));
+    linksRow(body, it, ids, jumpToItem);
+    linkedSteps(body, it, new Map(items.map((x) => [x.id, x])), stepMap);
+  }
+  /* ---------- owner cancel of an open Architect task ---------- */
+  const cancelOpen = new Set();       /* task ids showing the comment field and Confirm / Back */
+  function cancelControl(body, it) {
+    if (!db || readOnly) return;
+    const row = el("div", "row");
+    if (!cancelOpen.has(it.id)) {
+      const sb = el("button", "rm status-btn"); sb.type = "button";
+      const ss = statusButtonState(it); sb.textContent = ss.label; sb.disabled = ss.disabled;
+      sb.addEventListener("click", () => { if (!sb.disabled) { sb.disabled = true; requestStatus(it); } });
+      row.appendChild(sb);
+      const b = el("button", "rm", "Cancel task"); b.type = "button";
+      b.addEventListener("click", () => { cancelOpen.add(it.id); render(); });
+      row.appendChild(b);
+    } else {
+      const f = el("form", "cancel-form");
+      const inp = el("input"); inp.type = "text"; inp.id = "cancel-note-" + it.id; inp.placeholder = "Why are you cancelling it? (optional)";
+      inp.setAttribute("aria-label", "Reason for cancelling " + it.id);
+      const yes = el("button", "btn", "Confirm cancel"); yes.type = "submit";
+      const no = el("button", "btn ghost", "Back"); no.type = "button";
+      no.addEventListener("click", () => { cancelOpen.delete(it.id); render(); });
+      f.append(inp, yes, no);
+      f.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        yes.disabled = true; no.disabled = true;
+        const card = f.closest("details.item");
+        if (card) collapseItem(card, it.id);   /* optimistic: the row closes at once; a failed write reopens it */
+        cancelItem(it, inp.value).then((ok) => {
+          if (ok) cancelOpen.delete(it.id);
+          else { yes.disabled = false; no.disabled = false; if (card) reopenItem(rowFor(it.id, card), it.id); }
+        });
+      });
+      row.appendChild(f);
+    }
+    body.appendChild(row);
+  }
+  /* Writes the cancel with if_version when the store reports the doc's version, so a concurrent Architect write is not overwritten. */
+  async function cancelItem(it, note) {
+    let opts;
+    try { const snap = await db.collection("items").doc(it.id).get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+    return write(it.id, cancelPatch(note, userName(), new Date().toISOString()), opts);
+  }
+  /* Writes the status request with if_version, the same way cancelItem does; a second click while one is pending is a no-op. */
+  async function requestStatus(it) {
+    if (statusButtonState(it).disabled) return false;
+    let opts;
+    try { const snap = await db.collection("items").doc(it.id).get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+    return write(it.id, statusRequestPatch(userName(), new Date().toISOString()), opts);
+  }
+  function renderCancelled(it) {
+    const [card, body] = shell(it, "done cancelled");
+    body.appendChild(metaRow(it));
+    planExtras(body, it);
+    const a = el("p", "answer");
+    a.append("Cancelled");
+    if (it.cancelled_by) a.append(" by " + txt(it.cancelled_by));
+    if (it.cancelled_at) a.append(" " + utc(it.cancelled_at));
+    body.appendChild(a);
+    const n = el("p", "cancel-note");
+    if (it.cancel_note) { n.append("Reason: "); addText(n, txt(it.cancel_note)); } else n.append("No reason given.");
+    body.appendChild(n);
+    return card;
+  }
+
+  /* ---------- Won't do: the owner closes an ask or decision with a reason (brief 2026-10-09-dashboard-wont-do.md) ---------- */
+  /* BEGIN wontDo */
+  const WD_MAX = 3;                    /* the 3rd Send without a reason closes the item anyway */
+  const wontDoOpen = new Map();        /* item id -> {note, attempts} while the inline form is open */
+  const wdN = (v) => (isFinite(Number(v)) ? Number(v) : 0);
+  /* Empty sends so far: the stored count, or this viewer's own newer count before the store echoes it. */
+  function wontDoAttempts(it, st) { return Math.max(wdN(it && it.wont_do_attempts), wdN(st && st.attempts)); }
+  function wontDoCloses(it, st, note) { return !!String(note == null ? "" : note).trim() || wontDoAttempts(it, st) + 1 >= WD_MAX; }
+  /* The write that closes the item (the page adds nothing else but if_version). `prior` = empty sends so far. */
+  function wontDoPatch(note, by, nowIso, prior) {
+    const t = String(note == null ? "" : note).trim();
+    const wd = { note: t, at: nowIso, by: String(by == null ? "" : by), attempts: wdN(prior) + 1 };
+    if (!t) wd.reason_missing = true;
+    return { status: "wont_do", wont_do: wd, updated: nowIso };
+  }
+  /* The write for an empty Send before the limit: the item stays open and the count persists. */
+  function wontDoMissPatch(prior, nowIso) { return { wont_do_attempts: wdN(prior) + 1, updated: nowIso }; }
+  function wontDoMsg(n) { return n > 0 ? "Add a reason so the Architect can act on it (attempt " + n + " of " + WD_MAX + ")" : ""; }
+  /* True while an open item carries the Architect's reopen history. */
+  function wasReopened(it) { return !!it && it.status === "open" && Array.isArray(it.wont_do_history) && it.wont_do_history.length > 0; }
+  function wontDoControl(body, it) {
+    if (!db || readOnly || it.status !== "open") return;
+    const row = el("div", "row wd");
+    const st = wontDoOpen.get(it.id);
+    if (!st) {
+      const b = el("button", "rm wd-open act-btn", "Won't do"); b.type = "button";
+      b.setAttribute("aria-label", "Won't do " + it.id + ": say why");
+      b.addEventListener("click", () => { wontDoOpen.set(it.id, { note: "", attempts: 0 }); render(); });
+      row.appendChild(b);
+    } else {
+      const f = el("form", "wd-form");
+      const lab = el("label", null, "Why won't you? (the Architect acts on the reason)"); lab.setAttribute("for", "wd-note-" + it.id);
+      const ta = el("textarea"); ta.id = "wd-note-" + it.id; ta.rows = 3;
+      ta.setAttribute("aria-label", "Why won't you do " + it.id);
+      ta.value = st.note;
+      ta.addEventListener("input", () => { st.note = ta.value; });
+      const msg = el("p", "err wd-msg", wontDoMsg(wontDoAttempts(it, st))); msg.id = "wd-msg-" + it.id; msg.setAttribute("role", "alert");
+      const btns = el("div", "wd-btns");
+      const yes = el("button", "btn", "Send"); yes.type = "submit";
+      const no = el("button", "btn ghost", "Back"); no.type = "button";
+      no.addEventListener("click", () => { wontDoOpen.delete(it.id); render(); });
+      btns.append(yes, no);
+      f.append(lab, ta, msg, btns);
+      f.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        st.note = ta.value;
+        const closes = wontDoCloses(it, st, ta.value);
+        const card = f.closest("details.item");
+        yes.disabled = true; no.disabled = true;
+        if (closes && card) collapseItem(card, it.id);   /* optimistic: the row closes at once; a failed write reopens it */
+        wontDoSend(it, st, ta.value).then((ok) => {
+          if (ok) { if (closes) wontDoOpen.delete(it.id); }
+          else { yes.disabled = false; no.disabled = false; if (closes && card) reopenItem(rowFor(it.id, card), it.id); }
+        });
+      });
+      row.appendChild(f);
+    }
+    body.appendChild(row);
+  }
+  /* Writes with if_version when the store reports the doc's version. An empty Send below the limit only bumps wont_do_attempts. */
+  async function wontDoSend(it, st, note) {
+    let opts;
+    try { const snap = await db.collection("items").doc(it.id).get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+    const prior = wontDoAttempts(it, st), now = new Date().toISOString();
+    if (wontDoCloses(it, st, note)) return write(it.id, wontDoPatch(note, userName(), now, prior), opts);
+    const ok = await write(it.id, wontDoMissPatch(prior, now), opts);
+    if (ok) { st.attempts = prior + 1; render(); }
+    return ok;
+  }
+  /* END wontDo */
+  function renderWontDo(it) {
+    const [card, body] = shell(it, "done wontdo");
+    body.appendChild(metaRow(it));
+    planExtras(body, it);
+    const wd = it.wont_do && typeof it.wont_do === "object" ? it.wont_do : {};
+    const a = el("p", "answer");
+    a.append("Won't do");
+    if (wd.by) a.append(" by " + txt(wd.by));
+    if (wd.at) a.append(" " + utc(wd.at));
+    body.appendChild(a);
+    const n = el("p", "cancel-note");
+    if (wd.note) { n.append("Reason: "); addText(n, txt(wd.note)); } else n.append(wd.reason_missing ? "No reason given (closed after " + WD_MAX + " sends without one)." : "No reason given.");
+    body.appendChild(n);
+    if (it.answer_note) { const r = el("p", "cancel-note"); r.append("Architect: "); addText(r, txt(it.answer_note)); body.appendChild(r); }
+    return card;
+  }
+
+  /* ---------- owner feedback: reclassify an item and send the Architect a note ---------- */
+  /* BEGIN feedback */
+  const FB_KINDS = [["question", "Decision"], ["action", "Ask"], ["task", "Architect task"]];
+  const KIND_TO = { D: "question", A: "action", T: "task" };
+  const feedbackOpen = new Map();        /* item id -> {to, note} while the inline form is open */
+  const optimisticFeedback = new Map();  /* item id -> feedback written by this viewer, until the store echoes it */
+  /* The write the Send button makes (the page adds nothing else but if_version). */
+  function feedbackPatch(to, note, by, nowIso) {
+    const t = to === "question" || to === "task" ? to : "action";
+    return { feedback: { to: t, note: String(note == null ? "" : note).trim(), at: nowIso, by: String(by == null ? "" : by), status: "new" }, updated: nowIso };
+  }
+  /* Overlay this viewer's pending feedback on a store row; the entry is dropped once the store carries it (same or later `at`). */
+  function withFeedback(row, pending) {
+    const o = pending.get(row.id);
+    if (!o) return row;
+    const s = row.feedback && typeof row.feedback === "object" ? row.feedback : null;
+    if (s && String(s.at || "") >= o.at) { pending.delete(row.id); return row; }
+    return Object.assign({}, row, { feedback: o });
+  }
+  function feedbackControl(body, it, into) {   /* into: the Park row; the closed button joins it, the open form takes its own row */
+    if (!db || readOnly || it.status !== "open") return;
+    const row = el("div", "row fb");
+    const st = feedbackOpen.get(it.id);
+    if (!st) {
+      const b = el("button", "rm fb-open", "Feedback"); b.type = "button";
+      b.setAttribute("aria-label", "Feedback on " + it.id + ": reclassify it or send a note");
+      b.addEventListener("click", () => { feedbackOpen.set(it.id, { to: KIND_TO[askKind(it)], note: "" }); render(); });
+      if (into) { into.appendChild(b); return; }
+      row.appendChild(b);
+    } else {
+      const f = el("form", "fb-form");
+      const lab = el("label", null, "Should be"); lab.setAttribute("for", "fb-to-" + it.id);
+      const sel = el("select"); sel.id = "fb-to-" + it.id;
+      FB_KINDS.forEach((k) => { const o = el("option", null, k[1]); o.value = k[0]; sel.appendChild(o); });
+      sel.value = st.to;
+      sel.addEventListener("change", () => { st.to = sel.value; });
+      const inp = el("input"); inp.type = "text"; inp.id = "fb-note-" + it.id; inp.placeholder = "Note to the Architect (optional)";
+      inp.setAttribute("aria-label", "Note to the Architect about " + it.id);
+      inp.value = st.note;
+      inp.addEventListener("input", () => { st.note = inp.value; });
+      const yes = el("button", "btn", "Send"); yes.type = "submit";
+      const no = el("button", "btn ghost", "Cancel"); no.type = "button";
+      no.addEventListener("click", () => { feedbackOpen.delete(it.id); render(); });
+      f.append(lab, sel, inp, yes, no);
+      f.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        if (st.to === KIND_TO[askKind(it)] && !st.note.trim()) {
+          const m = $("err-" + it.id); if (m) m.textContent = "Pick a different kind or write a note.";
+          return;
+        }
+        yes.disabled = true; no.disabled = true;
+        feedbackItem(it, st).then((ok) => { if (!ok) { yes.disabled = false; no.disabled = false; } });
+      });
+      row.appendChild(f);
+    }
+    body.appendChild(row);
+  }
+  /* Optimistic: the row moves to the chosen section at once; a failed write puts the form back with the error shown. */
+  async function feedbackItem(it, st) {
+    const patch = feedbackPatch(st.to, st.note, userName(), new Date().toISOString());
+    optimisticFeedback.set(it.id, patch.feedback);
+    feedbackOpen.delete(it.id);
+    render();
+    let opts;
+    try { const snap = await db.collection("items").doc(it.id).get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+    const ok = await write(it.id, patch, opts);
+    if (!ok) { optimisticFeedback.delete(it.id); feedbackOpen.set(it.id, st); render(); }
+    return ok;
+  }
+  /* END feedback */
+
+  /* ---------- park: set an open item aside until a later day ---------- */
+  /* BEGIN park */
+  const PARK_CHOICES = [["tomorrow", "Tomorrow"], ["nextweek", "Next week (Monday)"], ["nextmonth", "Next month (the 1st)"]];
+  const optimisticPark = new Map();   /* item id -> parked object (or null for unpark) written by this viewer, until the store echoes it */
+  /* 09:00 local on the target day, as a UTC ISO string. Next week = the coming Monday; next month = the 1st. */
+  function parkUntil(choice, now) {
+    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+    if (choice === "nextmonth") return new Date(y, m + 1, 1, 9, 0, 0).toISOString();
+    if (choice === "nextweek") return new Date(y, m, d + (8 - (now.getDay() || 7)), 9, 0, 0).toISOString();
+    return new Date(y, m, d + 1, 9, 0, 0).toISOString();
+  }
+  /* The write a Park button makes (status stays open; the page adds nothing else but if_version). */
+  function parkPatch(choice, by, now) {
+    const c = PARK_CHOICES.some((x) => x[0] === choice) ? choice : "tomorrow";
+    const at = now.toISOString();
+    return { parked: { until: parkUntil(c, now), choice: c, at: at, by: String(by == null ? "" : by) }, updated: at };
+  }
+  function unparkPatch(now) { return { parked: null, updated: now.toISOString() }; }
+  function isParked(it) { return !!it && it.status === "open" && !!(it.parked && it.parked.until); }
+  /* The item's updates, newest first. */
+  function updatesOf(it) {
+    const u = Array.isArray(it && it.updates) ? it.updates.filter((x) => x && typeof x === "object" && x.text) : [];
+    return u.slice().sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+  }
+  function updatesSinceParked(it) {
+    if (!isParked(it)) return 0;
+    return updatesOf(it).filter((x) => String(x.at || "") > String(it.parked.at || "")).length;
+  }
+  function parkDate(until) {
+    const d = new Date(until);
+    return isNaN(d.getTime()) ? String(until) : d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }
+  /* Overlay this viewer's pending park/unpark on a store row; dropped once the store shows it. */
+  function withPark(row, pending) {
+    if (!pending.has(row.id)) return row;
+    const o = pending.get(row.id), s = row.parked && typeof row.parked === "object" ? row.parked : null;
+    if (o === null ? !s : (s && String(s.at || "") >= o.at)) { pending.delete(row.id); return row; }
+    return Object.assign({}, row, { parked: o });
+  }
+  function parkControl(body, it) {
+    if (!db || readOnly || it.status !== "open") return;
+    const row = el("div", "park-row");
+    body.appendChild(row);
+    if (isParked(it)) {
+      const b = el("button", "rm", "Unpark"); b.type = "button";
+      b.setAttribute("aria-label", "Unpark " + it.id);
+      b.addEventListener("click", () => { b.disabled = true; parkItem(it, unparkPatch(new Date())); });
+      row.appendChild(b);
+    } else {
+      row.appendChild(el("span", null, "Park until"));
+      PARK_CHOICES.forEach((c) => {
+        const b = el("button", "rm", c[1]); b.type = "button";
+        b.setAttribute("aria-label", "Park " + it.id + ": " + c[1]);
+        b.addEventListener("click", () => { row.querySelectorAll("button").forEach((x) => (x.disabled = true)); parkItem(it, parkPatch(c[0], userName(), new Date())); });
+        row.appendChild(b);
+      });
+    }
+    return row;
+  }
+  async function parkItem(it, patch) {
+    optimisticPark.set(it.id, patch.parked);
+    render();
+    let opts;
+    try { const snap = await db.collection("items").doc(it.id).get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+    const ok = await write(it.id, patch, opts);
+    if (!ok) { optimisticPark.delete(it.id); render(); }
+    return ok;
+  }
+  /* Everything related that emerged while the item sat parked, kept on the item itself. */
+  function updatesBlock(body, it) {
+    const ups = updatesOf(it);
+    if (!ups.length) return;
+    const box = el("div", "updates");
+    box.appendChild(el("strong", null, "Updates (" + ups.length + ")"));
+    const ul = el("ul");
+    ups.forEach((u) => {
+      const li = el("li");
+      li.append(utc(u.at) + (u.by || u.source ? " · " + txt(u.by || u.source) : "") + ": ");
+      addText(li, txt(u.text));
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+    body.appendChild(box);
+  }
+  /* END park */
+
+  /* ---------- accounts: plan usage (percent used) per account (docs written by the poller's feed step) ---------- */
+  /* BEGIN accounts */
+  const ACCT_STALE_MS = 30 * 60 * 1000;
+  function pctUsed(used) {
+    if (used == null || used === "") return null;
+    const n = Number(used);
+    return isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : null;
+  }
+  function untilText(iso, nowMs) {   /* "in 1h 12m", "in 3d 4h", "passed", or "" when unusable */
+    const t = Date.parse(iso || "");
+    if (isNaN(t)) return "";
+    const m = Math.round((t - nowMs) / 60000);
+    if (m <= 0) return "passed";
+    const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+    return "in " + (d ? d + "d " + h + "h" : h ? h + "h " + mm + "m" : mm + "m");
+  }
+  /* One view row per account doc, tightest 5-hour window first; a missing field is null (shown as an em dash). */
+  function accountRows(docs, nowMs) {
+    const rows = (Array.isArray(docs) ? docs : []).filter((d) => d && typeof d === "object" && d.account).map((d) => {
+      const ts = Date.parse(d.ts || "");
+      return { account: String(d.account), use5: pctUsed(d.pct5h), useWk: pctUsed(d.pctwk),
+        reset5: localTime(d.reset5h), in5: untilText(d.reset5h, nowMs), resetWk: localTime(d.resetwk), inWk: untilText(d.resetwk, nowMs),
+        asOf: isNaN(ts) ? "" : localTime(d.ts), stale: isNaN(ts) || nowMs - ts > ACCT_STALE_MS };
+    });
+    const key = (r) => (r.use5 == null ? -1 : r.use5);
+    return rows.sort((a, b) => key(b) - key(a) || a.account.localeCompare(b.account));
+  }
+  /* END accounts */
+  function meter(label, used, at, inT) {
+    const m = el("div", "meter" + (used != null && used >= 85 ? " low" : ""));
+    m.appendChild(el("span", null, label + ": " + (used == null ? "—" : used + "% used")));
+    if (used != null) { const p = el("progress"); p.max = 100; p.value = used; p.setAttribute("aria-label", label + " used"); m.appendChild(p); }
+    m.appendChild(el("span", "sub-t", at ? "resets " + at + (inT ? " (" + inT + ")" : "") : "reset —"));
+    return m;
+  }
+  function renderAccounts() {
+    const box = $("accounts-body"), nowMs = Date.now();
+    const rows = accountRows(accounts, nowMs);
+    $("n-accounts").textContent = String(rows.length);
+    $("accounts-sum").textContent = rows.length ? rows.length + " account" + (rows.length === 1 ? "" : "s") : "No usage readings yet";
+    box.replaceChildren();
+    if (!rows.length) { box.appendChild(el("p", "empty", "No usage readings yet.")); return; }
+    rows.forEach((r) => {
+      const row = el("div", "acct");
+      row.appendChild(el("span", "acct-name", r.account));
+      row.appendChild(meter("5-hour", r.use5, r.reset5, r.in5));
+      row.appendChild(meter("Week", r.useWk, r.resetWk, r.inWk));
+      row.appendChild(el("span", "asof" + (r.stale ? " stale" : ""), "as of " + (r.asOf || "—") + (r.stale ? " · stale" : "")));
+      box.appendChild(row);
+    });
+  }
+  setInterval(() => { if (accounts.length) renderAccounts(); }, 60000);   /* keep "in 1h 12m" and the stale flag current */
+
+  /* ---------- asks: writes ---------- */
+  /* Resolves true when the write succeeded; the caller collapses the item then. A failure leaves it open with the error shown. */
+  async function write(id, patch, opts) {
+    if (!db) return false;
+    try {
+      await db.collection("items").doc(id).update(Object.assign({ updated: new Date().toISOString() }, patch), opts);
+      return true;
+    } catch (e) {
+      if (e && e.code === "invalid_argument") readOnly = true;
+      const msg = $("err-" + id);
+      if (msg) msg.textContent = "Could not save: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect your answer in the terminal.";
+      return false;
+    }
+  }
+  /* Optimistic write: the row collapses at once; a failed write reopens it with the error shown, then the store reconciles. */
+  async function commitNow(card, id, patch, opts) {
+    seenDecision(id, window.event);
+    collapseItem(card, id);
+    const ok = await write(id, patch, opts);
+    if (!ok) reopenItem(rowFor(id, card), id);
+    return ok;
+  }
+  function rowFor(id, fallback) { return document.querySelector('[data-pid="' + String(id).replace(/"/g, "") + '"]') || fallback; }
+  function reopenItem(card, id) {
+    openState["item:" + id] = true; saveOpen();
+    card.open = true;
+    card.classList.remove("faded"); card.classList.add("needs");
+  }
+  /* Collapse an item after a successful write; the per-item expand state is reset so the next render keeps it closed. */
+  function collapseItem(card, id) {
+    delete openState["item:" + id]; saveOpen();
+    card.open = false;
+    card.classList.remove("needs"); card.classList.add("faded");   /* status is now answered; fade at once, before the live sync re-renders */
+  }
+  /* Per-item status last rendered in this page session, keyed by doc id. A change of status (or first sight of an
+     answered/done item) resets the item's expand state: answered/done start collapsed, a reopened item starts expanded.
+     Between status changes a viewer's own expand/collapse survives every live refresh. */
+  const seenStatus = new Map();
+  /* BEGIN keepView */
+  /* Row expand state and unsent drafts survive a store update: the expand state changes only when an item's status changes. */
+  function syncOpen(openState, seen, id, status) {
+    const key = "item:" + id, prev = seen.get(id);
+    if (prev === status) return false;
+    seen.set(id, status);
+    const closed = (x) => x === "answered" || x === "done" || x === "cancelled" || x === "wont_do";
+    if (closed(status)) delete openState[key];
+    else if (closed(prev)) openState[key] = true;
+    return true;
+  }
+  function captureDrafts(inputs) {   /* inputs: anything with id and value; returns id -> unsent text */
+    const drafts = {};
+    inputs.forEach((i) => { if (i.id && i.value) drafts[i.id] = i.value; });
+    return drafts;
+  }
+  function restoreDrafts(drafts, lookup) {   /* lookup(id) -> the rebuilt field; a field the store already filled is left alone */
+    for (const id in drafts) { const i = lookup(id); if (i && !i.value) i.value = drafts[id]; }
+  }
+  /* END keepView */
+  document.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t && t.closest && t.closest("#attn-seen")) { e.preventDefault(); e.stopPropagation();
+      const sec = t.closest("details"), shown = (id) => { const r = document.querySelector('[data-pid="' + String(id).replace(/"/g, "") + '"]'); return !!(r && r.offsetParent); };
+      if (sec && !sec.open) { sec.open = true; return; }   /* a closed section: the click opens it; the next click marks what is on screen */
+      seenAll(e, shown); return; }
+    const sm = t && t.closest ? t.closest("details.item > summary") : null;
+    if (sm && !(t.closest("button, a, input, select, textarea") && sm.contains(t.closest("button, a, input, select, textarea")))) expandSeen(e, sm.parentNode);
+  }, true);
+  function syncItemState(it) { if (syncOpen(openState, seenStatus, it.id, it.status)) saveOpen(); }
+
+  /* ---------- asks: rows ---------- */
+  function shell(it, cls) {
+    const card = el("details", "item" + (cls ? " " + cls : "") + (it.status === "open" ? " needs" : "") + (it.status === "answered" || it.status === "done" || it.status === "cancelled" || it.status === "wont_do" ? " faded" : ""));
+    syncItemState(it);
+    refRows.set(it.id, card);
+    card.dataset.pid = it.id;
+    bindOpen(card, "item:" + it.id, false);
+    const sum = el("summary");
+    sum.appendChild(idTitle(it.id, txt(it.title)));
+    const stp = stepsOf(it);
+    const prog = it.status === "open" && (askKind(it) === "T" || stp.length) ? taskProgress(it, stepMap(it.id)) : null;
+    if (prog) { card.classList.add("has-pct"); card.style.setProperty("--pct", prog.pct + "%"); sum.appendChild(pbar(prog.pct)); }
+    if (it.status === "answered") {
+      sum.appendChild(el("span", "chip", "answered"));
+      const ans = el("span", "ans"); ans.append("Answer: ");
+      ans.appendChild(rich("b", null, txt(it.answer) || "(none)"));
+      if (it.answer_note) { ans.append(" — "); addText(ans, it.answer_note); }
+      sum.appendChild(ans);
+    }
+    else if (it.status === "done") sum.appendChild(el("span", "chip", "done"));
+    else if (it.status === "cancelled") sum.appendChild(el("span", "chip cancelled", "cancelled"));
+    else if (it.status === "wont_do") sum.appendChild(el("span", "chip wontdo", "won't do"));
+    else if (it.due) sum.appendChild(el("span", "chip due", "by " + utc(it.due)));
+    if (wasReopened(it)) sum.appendChild(el("span", "chip reopened", "reopened by the Architect"));
+    if (isParked(it)) {
+      sum.appendChild(el("span", "chip park-chip" + (new Date(it.parked.until) <= new Date() ? " park-due" : ""), "parked until " + parkDate(it.parked.until)));
+      const nu = updatesSinceParked(it);
+      if (nu) sum.appendChild(el("span", "chip park-due", nu + " update" + (nu === 1 ? "" : "s") + " since parked"));
+    }
+    if (it.status === "open" && feedbackKind(it)) sum.appendChild(el("span", "chip fb-chip", feedbackKind(it) !== storedKind(it) ? "reclassified \u2014 waiting for the Architect" : "feedback sent"));
+    const ep = askKind(it) === "T" ? etaProgress(it, true, Date.now()) : null;   /* Tasks: bar, ETA and the expanded lines */
+    if (ep) sum.appendChild(etaSummary(ep));
+    card.appendChild(sum);
+    const body = el("div", "body");
+    if (ep) { const kv = el("dl", "kv"); etaDetailRows(ep).forEach((r) => addKV(kv, r[0], r[1], r[2])); body.appendChild(kv); }
+    card.appendChild(body);
+    return [card, body];
+  }
+  function metaRow(it) {
+    const m = el("div", "meta");
+    if (it.session) m.appendChild(rich("span", "chip", txt(it.session)));
+    if (it.goal) m.appendChild(rich("span", null, txt(it.goal)));
+    if (it.created) m.appendChild(el("span", null, "raised " + utc(it.created)));
+    return m;
+  }
+  /* Every row title reads "<id> · <title>", e.g. "D04 · Push the proposal?" */
+  function idTitle(id, title, cls, plain) {
+    const t = el("span", cls || "title");
+    t.appendChild(addText(el("span", "id"), id));   /* the row's own id links too: it opens and scrolls to this row */
+    if (title && title !== id) { t.append(" · "); if (plain) t.append(title); else addText(t, title); }
+    return t;
+  }
+  /* D = decision (question), A = ask (owner action), T = task (owner request to the Architect).
+     The doc id prefix wins; older ids fall back to kind. */
+  /* BEGIN askKind */
+  function storedKind(it) {
+    const m = /^([DAT])[0-9a-f]{2}$/i.exec(it.id);
+    if (m) return m[1].toUpperCase();
+    if (it.kind === "question") return "D";
+    if (it.kind === "task" || /^R\d/.test(it.id)) return "T";
+    return "A";
+  }
+  /* The kind the owner asked for in new feedback, or null. The page shows the item there at once; the stored kind is not changed. */
+  function feedbackKind(it) {
+    const f = it && it.feedback;
+    if (!f || typeof f !== "object" || f.status !== "new") return null;
+    return f.to === "question" ? "D" : f.to === "task" ? "T" : f.to === "action" ? "A" : null;
+  }
+  function askKind(it) { return feedbackKind(it) || storedKind(it); }
+  /* END askKind */
+  /* ---------- steps: the Architect writes it.steps; the owner's progress lives in step_progress/<item id> ---------- */
+  function stepsOf(it) {
+    if (!Array.isArray(it.steps)) return [];
+    return it.steps.filter((x) => x && typeof x === "object").map((x, i) => Object.assign({}, x, { id: txt(x.id) || String(i + 1) }));
+  }
+  function stepMap(itemId) {   /* the progress map as the viewer should see it: own pending write first, else the stored doc */
+    const o = optimisticSteps.get(itemId);
+    if (o) return o.steps;
+    const d = progress.get(itemId);
+    return d && d.steps && typeof d.steps === "object" && !Array.isArray(d.steps) ? d.steps : {};
+  }
+  function doneCount(it, steps) { const m = stepMap(it.id); return steps.filter((x) => m[x.id] && m[x.id].done).length; }
+  function stepsComplete(it) {   /* every non-optional step done; false when there are no steps */
+    const st = stepsOf(it), m = stepMap(it.id);
+    return st.length > 0 && st.every((x) => x.optional || (m[x.id] && m[x.id].done));
+  }
+  async function saveStep(it, sid, patch) {
+    if (!db || readOnly) return;
+    const prior = optimisticSteps.get(it.id);
+    const base = stepMap(it.id), next = Object.assign({}, base);
+    next[sid] = Object.assign({}, base[sid] || {}, patch);
+    const updated = new Date().toISOString();
+    optimisticSteps.set(it.id, { steps: next, updated });
+    const msg = $("err-" + it.id); if (msg) msg.textContent = "";
+    render();
+    try {
+      const ref = db.collection("step_progress").doc(it.id);
+      if (progress.has(it.id)) await ref.update({ steps: next, updated });
+      else await ref.set({ item: it.id, steps: next, updated });
+    } catch (e) {
+      if (prior) optimisticSteps.set(it.id, prior); else optimisticSteps.delete(it.id);
+      if (e && e.code === "invalid_argument") readOnly = true;
+      const m2 = $("err-" + it.id);
+      if (m2) m2.textContent = "Could not save the step: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect in the terminal.";
+    }
+    render();
+  }
+  function copyValue(btn, v, label) {
+    const select = () => { try { const r = document.createRange(); r.selectNodeContents(label); const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r); } catch (_) {} };
+    const ok = () => { const old = label.textContent; label.textContent = "Copied"; setTimeout(() => { label.textContent = old; }, 1200); };
+    try { navigator.clipboard.writeText(v).then(ok, select); } catch (_) { select(); }
+  }
+  /* BEGIN stepNotes */
+  /* Tasks (T) carry no note control: the owner 2026-10-09. Decisions and asks keep it. */
+  function stepNotes(body, it, st, prog, can) {
+    if (askKind(it) === "T") return;
+    const nkey = it.id + "-" + st.id, nid = "note-" + nkey;
+    if (prog.note && !noteOpen.has(nkey)) {
+      const n = el("div", "step-note note"); n.append("Note: "); addText(n, txt(prog.note));
+      if (prog.note_at) n.append(" · " + utc(prog.note_at));
+      body.appendChild(n);
+    }
+    if (can) {
+      if (noteOpen.has(nkey)) {
+        const f = el("form", "step-note-form");
+        const inp = el("input"); inp.type = "text"; inp.id = nid; inp.placeholder = "Note for step " + st.id;
+        inp.setAttribute("aria-label", "Note for step " + st.id + " of " + it.id);
+        inp.value = noteDrafts.has(nid) ? noteDrafts.get(nid) : txt(prog.note);
+        inp.addEventListener("input", () => noteDrafts.set(nid, inp.value));
+        const save = el("button", "btn ghost", "Save"); save.type = "submit";
+        f.append(inp, save);
+        f.addEventListener("submit", (ev) => {
+          ev.preventDefault();
+          noteOpen.delete(nkey); noteDrafts.delete(nid);
+          saveStep(it, st.id, { note: inp.value.trim(), note_at: new Date().toISOString() });
+        });
+        body.appendChild(f);
+      } else {
+        const tg = el("button", "rm", prog.note ? "Edit note" : "Add note"); tg.type = "button";
+        tg.addEventListener("click", () => { noteOpen.add(nkey); render(); });
+        body.appendChild(tg);
+      }
+    }
+  }
+  /* END stepNotes */
+  function stepRow(it, st, m) {
+    const prog = m[st.id] || {}, can = !!db && !readOnly;
+    const row = el("div", "step" + (prog.done ? " done" : ""));
+    const top = el("div", "step-top");
+    const cb = el("input"); cb.type = "checkbox"; cb.id = "step-" + it.id + "-" + st.id; cb.checked = !!prog.done; cb.disabled = !can;
+    cb.setAttribute("aria-label", "Step " + st.id + " done");
+    cb.addEventListener("change", () => saveStep(it, st.id, { done: cb.checked, done_at: cb.checked ? new Date().toISOString() : "" }));
+    const hit = el("label", "step-hit"); hit.appendChild(cb); top.appendChild(hit);
+    const t = el("span", "step-title"); t.append(st.id + ". "); addText(t, stepLabel(st)); if (stepMissing(st)) t.classList.add("step-missing"); top.appendChild(t);
+    if (st.optional) top.appendChild(el("span", "chip", "optional"));
+    row.appendChild(top);
+    const body = el("div", "step-body");
+    if (st.detail) body.appendChild(linkify(el("p"), st.detail));
+    const links = Array.isArray(st.links) ? st.links.filter((l) => l && /^https?:\/\//.test(txt(l.url))) : [];
+    if (links.length) {
+      const box = el("div", "step-links");
+      links.forEach((l) => { const a = el("a", null, txt(l.label) || txt(l.url)); a.href = txt(l.url); a.target = "_blank"; a.rel = "noopener"; box.appendChild(a); });
+      body.appendChild(box);
+    }
+    const vals = Array.isArray(st.values) ? st.values.map(txt).filter(Boolean) : [];
+    if (vals.length) {
+      const box = el("div", "step-vals");
+      vals.forEach((v) => {
+        const b = el("button", "cp"); b.type = "button"; b.title = "Copy";
+        const lab = el("span", null, v); b.appendChild(lab);
+        b.addEventListener("click", () => copyValue(b, v, lab));
+        box.appendChild(b);
+      });
+      body.appendChild(box);
+    }
+    stepNotes(body, it, st, prog, can);
+    row.appendChild(body);
+    return row;
+  }
+  /* BEGIN stepsView */
+  function stepsBlock(parent, it) {
+    const steps = stepsOf(it);
+    if (!steps.length) return;
+    const m = stepMap(it.id), n = doneCount(it, steps);
+    if (storedKind(it) === "T") {   /* Tasks: read-only list, no header, no checkboxes */
+      const ul = el("ul", "tsteps");
+      steps.forEach((st) => ul.appendChild(el("li", "tstep" + (m[st.id] && m[st.id].done ? " done" : "") + (stepMissing(st) ? " step-missing" : ""), stepLabel(st))));
+      parent.appendChild(ul);
+      return;
+    }
+    const box = el("div", "steps");
+    const head = el("div", "steps-head");
+    head.appendChild(el("span", null, "Steps · " + n + " of " + steps.length + " done"));
+    const bar = el("progress"); bar.max = steps.length; bar.value = n;
+    bar.setAttribute("aria-label", n + " of " + steps.length + " steps done");
+    head.appendChild(bar);
+    box.appendChild(head);
+    steps.forEach((st) => box.appendChild(stepRow(it, st, m)));
+    parent.appendChild(box);
+  }
+  /* END stepsView */
+  function errBox(it) { const e = el("div", "err"); e.id = "err-" + it.id; e.setAttribute("role", "status"); return e; }
+
+  function renderQuestion(it) {
+    const [card, body] = shell(it, it.due ? "urgent" : "");
+    body.appendChild(metaRow(it));
+    if (it.detail) body.appendChild(linkify(el("p", "detail"), it.detail));
+    planExtras(body, it);
+    updatesBlock(body, it);
+    stepsBlock(body, it);
+    const opts = el("div", "opts");
+    (Array.isArray(it.options) ? it.options : []).forEach((o) => {
+      if (!o || typeof o !== "object") return;
+      const b = el("button", "opt" + (o.recommended ? " rec" : ""));
+      b.type = "button";
+      const lab = el("span", "lab", txt(o.label));
+      if (o.recommended) lab.appendChild(el("span", "tag", "RECOMMENDED"));
+      b.appendChild(lab);
+      if (o.desc) b.appendChild(el("span", "d", txt(o.desc)));
+      b.disabled = readOnly;
+      b.addEventListener("click", () => {
+        opts.querySelectorAll("button").forEach((x) => (x.disabled = true));
+        commitNow(card, it.id, { status: "answered", answer: txt(o.label), answer_note: "", answered_at: new Date().toISOString() })
+          .then((ok) => { if (!ok) opts.querySelectorAll("button").forEach((x) => (x.disabled = readOnly)); });
+      });
+      opts.appendChild(b);
+    });
+    body.appendChild(opts);
+    const other = el("form", "other");
+    const inp = el("input"); inp.type = "text"; inp.id = "other-" + it.id; inp.placeholder = "Other answer or a note";
+    inp.setAttribute("aria-label", "Other answer for " + it.id);
+    const send = el("button", "btn ghost", "Send"); send.type = "submit"; send.disabled = readOnly;
+    other.append(inp, send);
+    other.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const v = inp.value.trim(); if (!v) return;
+      send.disabled = true;
+      commitNow(card, it.id, { status: "answered", answer: "Other", answer_note: v, answered_at: new Date().toISOString() })
+        .then((ok) => { if (!ok) send.disabled = readOnly; });
+    });
+    body.appendChild(other);
+    feedbackControl(body, it, parkControl(body, it));
+    wontDoControl(body, it);
+    body.appendChild(errBox(it));
+    return card;
+  }
+
+  function renderAction(it) {
+    const [card, body] = shell(it, it.due ? "urgent" : "");
+    body.appendChild(metaRow(it));
+    if (it.detail) body.appendChild(linkify(el("p", "detail"), it.detail));
+    planExtras(body, it);
+    updatesBlock(body, it);
+    stepsBlock(body, it);
+    const row = el("div", "row");
+    const done = el("button", "btn act-btn" + (stepsOf(it).length && !stepsComplete(it) ? " ghost" : ""), "Mark done"); done.type = "button"; done.disabled = readOnly;
+    const later = el("input"); later.type = "text"; later.id = "note-" + it.id; later.placeholder = "Optional note";
+    later.setAttribute("aria-label", "Note for " + it.id);
+    done.addEventListener("click", () => {
+      done.disabled = true;
+      commitNow(card, it.id, { status: "answered", answer: "Done", answer_note: later.value.trim(), answered_at: new Date().toISOString() })
+        .then((ok) => { if (!ok) done.disabled = readOnly; });
+    });
+    row.append(done, later);
+    body.appendChild(row);
+    feedbackControl(body, it, parkControl(body, it));
+    wontDoControl(body, it);
+    body.appendChild(errBox(it));
+    return card;
+  }
+
+  function renderAnswered(it) {
+    const [card, body] = shell(it, "answered");
+    body.appendChild(metaRow(it));
+    planExtras(body, it);
+    stepsBlock(body, it);
+    const a = el("p", "answer");
+    a.append("Your answer: ");
+    a.appendChild(rich("b", null, txt(it.answer)));
+    if (it.answer_note) { a.append(" — "); addText(a, it.answer_note); }
+    body.appendChild(a);
+    const row = el("div", "row");
+    row.appendChild(el("span", "note", "Sent " + utc(it.answered_at) + ". The Architect moves this to Done once the work is finished."));
+    const undo = el("button", "btn ghost", "Change answer"); undo.type = "button"; undo.disabled = readOnly;
+    undo.addEventListener("click", () => { undo.disabled = true; write(it.id, { status: "open", answer: "", answer_note: "", answered_at: "" }); });
+    row.appendChild(undo);
+    body.appendChild(row);
+    body.appendChild(errBox(it));
+    return card;
+  }
+
+  function renderTask(it) {
+    const [card, body] = shell(it, "");
+    body.appendChild(metaRow(it));
+    if (txt(it.status_note)) {   /* the Architect's last answer to a Status Update request */
+      const sn = el("p", "status-note"); addText(sn, txt(it.status_note));
+      if (it.status_at) sn.append(" (" + utc(it.status_at) + ")");
+      body.appendChild(sn);
+    }
+    if (it.detail) body.appendChild(linkify(el("p", "detail"), it.detail));
+    planExtras(body, it);
+    updatesBlock(body, it);
+    stepsBlock(body, it);
+    body.appendChild(el("span", "note", "The Architect is working on this and moves it to Done when it is finished."));
+    cancelControl(body, it);
+    feedbackControl(body, it, parkControl(body, it));
+    body.appendChild(errBox(it));
+    return card;
+  }
+
+  function renderDone(it) {
+    if (it.status === "cancelled") return renderCancelled(it);
+    if (it.status === "wont_do") return renderWontDo(it);
+    const [card, body] = shell(it, "done");
+    body.appendChild(metaRow(it));
+    planExtras(body, it);
+    stepsBlock(body, it);
+    const a = el("p", "answer");
+    a.append("Outcome: ");
+    a.appendChild(rich("b", null, txt(it.answer) || "Done"));
+    if (it.answer_note) { a.append(" — "); addText(a, it.answer_note); }
+    body.appendChild(a);
+    if (it.outcome) body.appendChild(linkify(el("p", "detail"), it.outcome));
+    if (it.done_at) body.appendChild(el("span", "note", "Closed " + utc(it.done_at)));
+    return card;
+  }
+
+  function fillList(box, nodes, emptyText) {
+    box.replaceChildren();
+    if (!nodes.length) { box.appendChild(el("p", "empty", emptyText)); return; }
+    nodes.forEach((n) => box.appendChild(n));
+  }
+  function byRank(a, b) {
+    const ra = a.rank == null || a.rank === "" ? null : txt(a.rank);
+    const rb = b.rank == null || b.rank === "" ? null : txt(b.rank);
+    if (ra !== rb) {
+      if (ra == null) return 1;
+      if (rb == null) return -1;
+      const c = ra.localeCompare(rb, undefined, { numeric: true, sensitivity: "base" });
+      if (c) return c;
+    }
+    return 0;
+  }
+  /* BEGIN partitionItems */
+  /* D -> decisions, A -> asks, T/R -> Tasks (kept out of the owner's Asks and open count). */
+  function partitionItems(open, answered, done) {
+    const by = (list, k) => list.filter((i) => askKind(i) === k);
+    return { q: by(open, "D"), qa: by(answered, "D"), qx: by(done, "D"),
+             qc: by(answered, "D").concat(by(done, "D")),   /* Completed blocks: answered first, then done */
+             ac: by(answered, "A").concat(by(done, "A")),
+             tc: by(answered, "T").concat(by(done, "T")),
+             a: by(open, "A"), aa: by(answered, "A"), ax: by(done, "A"),
+             t: by(open, "T"), ta: by(answered, "T"), tx: by(done, "T") };
+  }
+  /* END partitionItems */
+  /* BEGIN completedPage */
+  /* Completed block: newest first by the later of answered_at / done_at, filtered by id, title, answer and answer_note (case-insensitive), then sliced to one page. The page is clamped into range. */
+  function completedPage(list, query, page, size) {
+    const stamp = (i) => { const a = txt(i.answered_at), d = txt(i.done_at) || txt(i.cancelled_at) || txt(i.wont_do && i.wont_do.at); return a > d ? a : d; };
+    const q = txt(query).trim().toLowerCase();
+    const hit = (i) => !q || [i.id, i.title, i.answer, i.answer_note, i.cancel_note, (i.wont_do && i.wont_do.note) || ""].some((v) => txt(v).toLowerCase().indexOf(q) !== -1);
+    const all = list.filter(hit).sort((x, y) => stamp(y).localeCompare(stamp(x)));
+    const pages = Math.max(1, Math.ceil(all.length / size));
+    const p = Math.min(Math.max(0, page | 0), pages - 1);
+    return { rows: all.slice(p * size, (p + 1) * size), page: p, pages: pages, total: all.length, from: all.length ? p * size + 1 : 0, to: Math.min(all.length, (p + 1) * size) };
+  }
+  /* END completedPage */
+  const COMPLETED_PAGE = 20;
+  /* One Completed block per section (x = qx decisions, ax asks, tx tasks); search text and page are not persisted. */
+  const comp = { qx: { q: "", page: 0, list: [], none: "decision" }, ax: { q: "", page: 0, list: [], none: "ask" }, tx: { q: "", page: 0, list: [], none: "task" } };
+  function renderCompleted(x) {
+    const c = comp[x];
+    const r = completedPage(c.list, c.q, c.page, COMPLETED_PAGE);
+    c.page = r.page;
+    fillList($("list-" + x), r.rows.map((i) => (i.status === "answered" ? renderAnswered(i) : renderDone(i))), c.q.trim() ? "No completed " + c.none + " matches." : "Nothing completed yet.");
+    $("pg-label-" + x).textContent = r.total ? r.from + "\u2013" + r.to + " of " + r.total : "0 of 0";
+    $("pg-newer-" + x).disabled = r.page <= 0;
+    $("pg-older-" + x).disabled = r.page >= r.pages - 1;
+    $("cbar-" + x).hidden = !c.list.length;
+    $("n-" + x).textContent = String(c.list.length);
+  }
+  Object.keys(comp).forEach((x) => {
+    $("q-" + x).addEventListener("input", (e) => { comp[x].q = e.target.value; comp[x].page = 0; renderCompleted(x); });
+    $("pg-newer-" + x).addEventListener("click", () => { comp[x].page -= 1; renderCompleted(x); });
+    $("pg-older-" + x).addEventListener("click", () => { comp[x].page += 1; renderCompleted(x); });
+  });
+  function sortKey(a, b) {
+    return byRank(a, b) || txt(a.created).localeCompare(txt(b.created));
+  }
+  /* BEGIN decisionOrder */
+  /* Open decisions: oldest created first; equal stamps keep the rank order. */
+  function oldestFirst(a, b) {
+    return txt(a.created).localeCompare(txt(b.created)) || byRank(a, b);
+  }
+  /* END decisionOrder */
+  function newest(field) { return (x, y) => txt(y[field]).localeCompare(txt(x[field])); }
+
+  /* Parked items sit in one collapsed bucket per section, soonest wake date first; they use the normal rows so answers still work. */
+  function renderParked() {
+    const by = { D: [], A: [], T: [] };
+    items.filter(isParked).forEach((i) => by[askKind(i)].push(i));
+    [["D", "q", renderQuestion], ["A", "a", renderAction], ["T", "t", renderTask]].forEach((k) => {
+      const list = by[k[0]].sort((x, y) => txt(x.parked.until).localeCompare(txt(y.parked.until)));
+      fillList($("list-" + k[1] + "p"), list.map(k[2]), "Nothing parked.");
+      $("n-" + k[1] + "p").textContent = String(list.length);
+    });
+  }
+
+  /* BEGIN autoCollapse */
+  /* A section whose open count falls from at least 1 to 0 collapses once; it never expands, and the first count seen (first load) never collapses. The toggle listener in bindOpen records the change like a manual one. */
+  const lastOpenCount = {};
+  function autoCollapse(key, n, d) {
+    const prev = lastOpenCount[key];
+    lastOpenCount[key] = n;
+    if (prev === undefined || !(prev >= 1) || n !== 0 || !d || !d.open) return false;
+    d.open = false;
+    return true;
+  }
+  /* END autoCollapse */
+  function renderAsks() {
+    const { open, answered, done } = bucketItems(items);   /* cancelled items are closed, never open */
+    const P = partitionItems(open, answered, done);
+    renderParked();
+    const q = P.q.sort(oldestFirst), qa = P.qa;
+    const a = P.a.sort(sortKey), aa = P.aa;
+    const t = P.t.sort(sortKey), ta = P.ta;
+    fillList($("list-q"), q.map(renderQuestion), "Nothing to decide right now.");
+    fillList($("list-a"), a.map(renderAction), "Nothing for you to do right now.");
+    fillList($("list-t"), t.map(renderTask), "The Architect has no open tasks.");
+    comp.qx.list = P.qc; comp.ax.list = P.ac; comp.tx.list = P.tc;
+    Object.keys(comp).forEach(renderCompleted);
+    const badge = (id, n, label) => { const c = $(id); c.textContent = String(n); c.className = "count" + (n ? " hot" : ""); c.setAttribute("aria-label", n + " " + label); };
+    badge("n-decisions", q.length, "to decide");
+    badge("n-asks", a.length, "to do");
+    undone = undoneCount(items);
+    const nt = $("n-tasks"); nt.textContent = String(t.length); nt.className = "count"; nt.setAttribute("aria-label", t.length + " in progress");   /* never "hot": tasks are not the owner's work */
+    autoCollapse("decisions", q.length, $("sec-decisions"));
+    autoCollapse("asks", a.length, $("sec-asks"));
+    autoCollapse("tasks", t.length, $("sec-tasks"));
+    const dParts = [q.length + " to decide"];
+    if (qa.length) dParts.push(qa.length + " answered, waiting for the Architect");
+    $("decisions-sum").textContent = dParts.join(" · ");
+    const aParts = [a.length + " to do"];
+    if (aa.length) aParts.push(aa.length + " answered, waiting for the Architect");
+    $("asks-sum").textContent = aParts.join(" · ");
+    const tParts = [t.length + " in progress"];
+    if (ta.length) tParts.push(ta.length + " answered, waiting for the Architect");
+    $("tasks-sum").textContent = tParts.join(" · ");
+    ["decisions-sum", "asks-sum", "tasks-sum"].forEach((id) => { $(id).title = $(id).textContent; });
+    const note = $("asks-note");
+    const NEXT_PFX = ["G", "P", "A", "D", "T", "S"];
+    const ni = nextIds([items, goals, priorities, sessions], NEXT_PFX);
+    note.textContent = "";
+    if (items.length || goals.length || sessions.length) {
+      addText(note, "Next ids: " + NEXT_PFX.map((k) => (ni[k].next || k + "--") + " (" + ni[k].free + " free)").join(" · "));
+      note.title = "Next free id per prefix, wrapping past ff, from the store. Free counts below 64 mean done items should be retired.";
+      note.hidden = false;
+    } else note.hidden = true;
+  }
+
+  /* ---------- goals ---------- */
+  /* BEGIN nextIds */
+  /* Pure: per prefix, the next free 2-digit hex id after the highest used (wrapping past ff to the lowest free; null when full) and the free count. Mirrors scripts/dashboard_ids.py. */
+  function nextIds(lists, prefixes) {
+    const used = {};
+    prefixes.forEach((p) => { used[p] = new Set(); });
+    lists.forEach((arr) => (arr || []).forEach((r) => {
+      const m = /^([A-Z])([0-9a-f]{2})$/.exec(txt(r && r.id));
+      if (m && used[m[1]]) used[m[1]].add(parseInt(m[2], 16));
+    }));
+    const out = {};
+    prefixes.forEach((p) => {
+      const u = used[p]; let top = -1, next = null;
+      u.forEach((n) => { if (n > top) top = n; });
+      for (let k = 1; k <= 256 && next === null; k++) { const c = (top + k) % 256; if (!u.has(c)) next = p + (c < 16 ? "0" : "") + c.toString(16); }
+      out[p] = { next: next, free: 256 - u.size };
+    });
+    return out;
+  }
+  /* END nextIds */
+  /* BEGIN etaProgress */
+  /* Tasks only: items/<T>.progress {pct, eta, eta_low?, eta_high?, confidence, basis, estimated_at}, written by the Architect. Absent, numeric or otherwise unusable progress is null: the row renders nothing. */
+  const ETA_STALE_MS = 24 * 3600 * 1000;
+  function shortDate(iso) {   /* "Oct 14 18:00", local 24-hour; "" when unparseable */
+    const d = new Date(iso || "");
+    if (isNaN(d.getTime())) return "";
+    return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()] + " " + d.getDate() + " " + (d.getHours() < 10 ? "0" : "") + d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
+  }
+  function agoText(iso, nowMs) {   /* "just now", "12m ago", "5h ago", "3d ago"; "" when unparseable */
+    const t = Date.parse(iso || "");
+    if (isNaN(t)) return "";
+    const m = Math.floor((nowMs - t) / 60000);
+    return m < 1 ? "just now" : m < 60 ? m + "m ago" : m < 1440 ? Math.floor(m / 60) + "h ago" : Math.floor(m / 1440) + "d ago";
+  }
+  function confClass(c) { c = txt(c).trim().toLowerCase(); return c === "low" || c === "medium" || c === "high" ? "conf-" + c : ""; }
+  function taskClosed(it) { return ["done", "cancelled", "wont_do"].indexOf(txt(it && it.status)) >= 0; }
+  function etaProgress(it, isTask, nowMs) {
+    const p = it && it.progress;
+    if (!isTask || !p || typeof p !== "object" || Array.isArray(p)) return null;
+    const raw = Number(p.pct);
+    if (p.pct == null || p.pct === "" || !isFinite(raw)) return null;
+    const eta = Date.parse(p.eta || ""), est = Date.parse(p.estimated_at || "");
+    const lo = shortDate(p.eta_low), hi = shortDate(p.eta_high);
+    return { pct: Math.max(0, Math.min(100, Math.round(raw))), etaText: isNaN(eta) ? "" : shortDate(p.eta),
+      range: lo && hi ? lo + " – " + hi : "", confidence: txt(p.confidence), confClass: confClass(p.confidence), basis: txt(p.basis),
+      estText: isNaN(est) ? "" : agoText(p.estimated_at, nowMs), stale: !isNaN(est) && nowMs - est > ETA_STALE_MS,
+      overdue: !isNaN(eta) && eta < nowMs && !taskClosed(it) };
+  }
+  function barNode(cls, pct, label, text) {   /* a bar with its text inside; role=progressbar carries the value for assistive tech */
+    const b = el("span", cls); b.setAttribute("role", "progressbar"); b.setAttribute("aria-valuemin", "0"); b.setAttribute("aria-valuemax", "100"); b.setAttribute("aria-valuenow", String(pct));
+    b.setAttribute("aria-label", label);
+    const f = el("span", "gfill"); f.style.width = pct + "%";
+    b.append(f, el("span", "gpct", text));
+    return b;
+  }
+  function etaBar(gp) { return barNode("gbar", gp.pct, "task progress about " + gp.pct + "%", gp.pct + "%"); }
+  function etaChips(gp) {
+    const out = [];
+    if (gp.overdue) out.push(el("span", "chip goverdue", "overdue"));
+    if (gp.stale) out.push(el("span", "chip gstale", "stale"));
+    return out;
+  }
+  function etaSummary(gp) {   /* collapsed row: bar with the percent inside, then "est. Oct 14 18:00" */
+    const w = el("span", "gprog");
+    w.append(etaBar(gp));
+    if (gp.etaText) { const e = el("span", ("geta " + gp.confClass).trim(), "est. " + gp.etaText); const t = "estimated finish " + gp.etaText + (gp.confidence ? ", " + gp.confidence + " confidence" : ""); e.title = t; e.setAttribute("aria-label", t); w.appendChild(e); }
+    etaChips(gp).forEach((c) => w.appendChild(c));
+    return w;
+  }
+  function etaFlags(gp) { const cs = etaChips(gp); if (!cs.length) return ""; const w = el("span"); cs.forEach((c) => w.append(c, " ")); return w; }
+  function etaDetailRows(gp) {   /* [label, value, cls?] for the expanded row; empty values are skipped by addKV */
+    return [["Progress", gp.pct + "%"], ["Estimated finish", gp.etaText ? "est. " + gp.etaText : "", gp.confClass], ["ETA range", gp.range, gp.confClass],
+      ["Confidence", gp.confidence, gp.confClass], ["Basis", gp.basis], ["Estimated", gp.estText ? "estimated " + gp.estText : ""], ["Flags", etaFlags(gp)]];
+  }
+  /* END etaProgress */
+  /* BEGIN goalEffort */
+  /* Relative effort: a goal's share of its own category's (Directed or Standing) 24 h token spend; each pool sums to 100%. A session's spend is usage.units_24h, else usage.out_tokens_24h; goals list sessions by tmux name; a session listed by k goals splits equally. */
+  function effNum(v) { if (v == null || v === "") return null; const n = Number(v); return isFinite(n) && n >= 0 ? n : null; }
+  function effSpend(s) {
+    const u = s && s.usage && typeof s.usage === "object" ? s.usage : {};
+    const un = effNum(u.units_24h);
+    if (un != null) return { n: un, unit: "units" };
+    const t = effNum(u.out_tokens_24h);
+    return t != null ? { n: t, unit: "tokens" } : { n: 0, unit: "" };
+  }
+  function effAmt(n, unit) { return (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(Math.round(n * 100) / 100)) + (unit ? " " + unit : ""); }
+  function effUnit(units) { const us = Array.from(new Set(units.filter(Boolean))); return us.length === 1 ? us[0] : us.length ? "mixed" : ""; }
+  function pctSplit(vals) {   /* whole percents that sum to 100 (largest remainder); all zeros when the pool is empty */
+    const t = vals.reduce((a, b) => a + b, 0);
+    if (!(t > 0)) return vals.map(() => 0);
+    const raw = vals.map((v) => 100 * v / t), fl = raw.map(Math.floor);
+    const left = 100 - fl.reduce((a, b) => a + b, 0);
+    raw.map((r, i) => [r - fl[i], i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]).slice(0, Math.max(0, left)).forEach((x) => { fl[x[1]]++; });
+    return fl;
+  }
+  function effortShares(dirGoals, stdGoals, sessionList) {
+    const spend = new Map(), owners = new Map(), byGoal = new Map(), pools = {};
+    (Array.isArray(sessionList) ? sessionList : []).forEach((s) => { const nm = txt(s && s.name); if (nm) spend.set(nm, effSpend(s)); });
+    const cats = [["directed", Array.isArray(dirGoals) ? dirGoals : []], ["standing", Array.isArray(stdGoals) ? stdGoals : []]];
+    cats.forEach((c) => c[1].forEach((g) => {
+      byGoal.set(g.id, { spend: 0, share: 0, unit: "", rows: [] });
+      new Set((Array.isArray(g.sessions) ? g.sessions : []).map(txt).filter(Boolean)).forEach((nm) => owners.set(nm, (owners.get(nm) || []).concat(g.id)));
+    }));
+    const loose = [];
+    spend.forEach((v, nm) => { if (!owners.has(nm)) loose.push(v); });
+    owners.forEach((ids, nm) => {
+      const v = spend.get(nm);
+      if (!v) return;
+      ids.forEach((id) => { const e = byGoal.get(id), part = v.n / ids.length; e.spend += part; e.rows.push({ name: nm, n: part, unit: v.unit, split: ids.length }); });
+    });
+    cats.forEach((c) => {
+      const es = c[1].map((g) => byGoal.get(g.id)), sh = pctSplit(es.map((e) => e.spend));
+      es.forEach((e, i) => { e.share = sh[i]; e.unit = effUnit(e.rows.map((r) => r.unit)); });
+      pools[c[0]] = { total: es.reduce((a, e) => a + e.spend, 0), unit: effUnit([].concat(...es.map((e) => e.rows.map((r) => r.unit)))), n: es.length };
+    });
+    return { byGoal: byGoal, pools: pools, unassigned: { n: loose.reduce((a, v) => a + v.n, 0), unit: effUnit(loose.map((v) => v.unit)) } };
+  }
+  function poolText(label, pool) { return label + " · 24 h spend " + effAmt(pool ? pool.total : 0, pool ? pool.unit : ""); }
+  function effortSummary(e, bias, pending) {   /* collapsed goal row: a neutral bar labelled "effort 23%", the tune bias beside it, a chip while a tune waits */
+    const w = el("span", "gprog");
+    w.appendChild(barNode("gbar effort", e.share, "effort about " + e.share + "% of its category's 24 h token spend", "effort " + e.share + "%"));
+    if (bias) { const b = el("span", "gbias", biasText(bias)); b.title = "Effort bias " + biasText(bias); b.setAttribute("aria-label", "effort bias " + biasText(bias)); w.appendChild(b); }
+    if (pending) w.appendChild(el("span", "chip gstale", "tune pending"));
+    return w;
+  }
+  function effortDetailRows(e, bias) {   /* [label, value] pairs for the expanded row */
+    return [["Effort (24 h token spend)", e.share + "% · " + (e.rows.length ? effAmt(e.spend, e.unit) : "no mapped spend")],
+      ["Per session", e.rows.map((r) => r.name + " " + effAmt(r.n, r.unit) + (r.split > 1 ? " (split " + r.split + " ways)" : "")).join(" · ")],
+      ["Effort bias", bias ? biasText(bias) : ""]];
+  }
+  /* Tuner: More / Less effort moves goals/<G>.effort_bias by one step within -3..+3 and records one effort_tunes doc. */
+  const BIAS_MAX = 3;
+  function clampBias(v) { const n = Math.round(Number(v)); return isFinite(n) ? Math.max(-BIAS_MAX, Math.min(BIAS_MAX, n)) : 0; }
+  function biasText(b) { return b > 0 ? "+" + b : b < 0 ? "\u2212" + (-b) : ""; }
+  function tuneTrusted(ev) { return !!(ev && ev.isTrusted === true); }
+  function tunePayloads(goalId, direction, prevBias, by, at) {   /* null when the press changes nothing (already at the limit) */
+    const prev = clampBias(prevBias), after = clampBias(prev + (direction === "more" ? 1 : -1));
+    if (after === prev) return null;
+    return { patch: { effort_bias: after, effort_bias_at: at, effort_bias_by: by }, doc: { goal: goalId, direction: direction, bias_after: after, at: at, by: by, status: "new" } };
+  }
+  function tunePending(tunes, goalId) { return (Array.isArray(tunes) ? tunes : []).some((t) => t && txt(t.goal) === goalId && t.status === "new"); }
+  /* END goalEffort */
+  function addKV(dl, label, value, cls) {
+    if (value == null || value === "" || (Array.isArray(value) && !value.length)) return null;
+    dl.appendChild(el("dt", null, label));
+    const dd = el("dd", cls || null);
+    if (value instanceof Node) dd.appendChild(value); else addText(dd, txt(value));
+    dl.appendChild(dd);
+    return dd;
+  }
+  const sessionRows = new Map();
+  let effort = null, tunes = [];   /* effortShares() result for the current render; effort_tunes docs */
+  const tuning = new Set(), optimisticTune = new Set();   /* goal ids: a tune write in flight / written by this viewer and not yet echoed */
+  function tuneControl(g, kind) {
+    const box = el("div", "row tune");
+    const bias = clampBias(g.effort_bias);
+    [["more", "More effort"], ["less", "Less effort"]].forEach((p) => {
+      const b = el("button", "rm", p[1]); b.type = "button";
+      b.disabled = !canReorder() || tuning.has(g.id) || (p[0] === "more" ? bias >= BIAS_MAX : bias <= -BIAS_MAX);
+      b.addEventListener("click", (ev) => { if (tuneTrusted(ev)) tuneEffort(g, p[0], kind); });
+      box.appendChild(b);
+    });
+    return box;
+  }
+  async function tuneEffort(g, direction, kind) {
+    const err = errFor(kind); err.textContent = "";
+    if (!canReorder() || tuning.has(g.id)) return;
+    tuning.add(g.id); render();
+    try {
+      let by = ""; try { by = userCap && typeof userCap.name === "string" ? userCap.name : ""; } catch (_) {}
+      const ref = db.collection("goals").doc(g.id);
+      let opts, prev = clampBias(g.effort_bias);
+      try { const snap = await ref.get(); if (snap && snap.version != null) opts = { if_version: snap.version }; if (snap && snap.exists) prev = clampBias(bodyOf(snap).effort_bias); } catch (_) {}
+      const p = tunePayloads(g.id, direction, prev, by || ownerName(), new Date().toISOString());
+      if (p) { await ref.update(p.patch, opts); await db.collection("effort_tunes").add(p.doc); optimisticTune.add(g.id); }
+    } catch (e) {
+      err.textContent = "Could not save the effort tune: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect the effort change you want in the terminal.";
+    }
+    tuning.delete(g.id);
+    render();
+  }
+
+  function renderGoal(g, i, n, kind) {
+    const d = el("details", "item goal");
+    d.dataset.pid = g.id;
+    const rmDoc = pendingRemoval(g.id);
+    if (rmDoc) d.classList.add("faded", "rm-pending");
+    refRows.set(g.id, d);
+    bindOpen(d, "goal:" + g.id, false);
+    const sum = el("summary");
+    sum.appendChild(idTitle(g.id, txt(g.title)));
+    if (rmDoc) sum.appendChild(el("span", "chip rmp", "removal pending"));
+    if (g.rank != null && g.rank !== "") sum.appendChild(el("span", "chip rank", "rank " + txt(g.rank)));
+    const ef = effort && effort.byGoal.get(g.id) || { spend: 0, share: 0, unit: "", rows: [] };
+    sum.appendChild(effortSummary(ef, clampBias(g.effort_bias), tunePending(tunes, g.id) || optimisticTune.has(g.id)));
+    d.appendChild(sum);
+    const body = el("div", "body");
+    if (g.status) body.appendChild(rich("p", "line", txt(g.status)));
+    const kv = el("dl", "kv");
+    addKV(kv, "Kind", g.kind);
+    addKV(kv, "Finish line", g.finish_line);
+    addKV(kv, "Next milestone", g.next_milestone);
+    const names = Array.isArray(g.sessions) ? g.sessions.map(txt).filter(Boolean) : [];
+    if (names.length) {
+      const dd = addKV(kv, "Sessions", " ", "list");
+      dd.replaceChildren();
+      names.forEach((name) => {
+        if (sessionRows.has(name)) {
+          const rid = sessionRows.get(name).dataset.id;
+          const b = el("button", "jump", rid && rid !== name ? rid + " · " + name : name); b.type = "button";
+          b.setAttribute("aria-label", "Show session " + name);
+          b.addEventListener("click", () => jumpToSession(name));
+          dd.appendChild(b);
+        } else {
+          const s = el("span", "ghost-name", name); s.title = "No session row for this name";
+          dd.appendChild(s);
+        }
+      });
+    }
+    effortDetailRows(ef, clampBias(g.effort_bias)).forEach((r) => addKV(kv, r[0], r[1]));
+    addKV(kv, "Updated", utc(g.updated));
+    const prios = priorities.filter((p) => txt(p.goal) === g.id).sort((a, b) => byRank(a, b) || a.id.localeCompare(b.id));
+    if (!g.status && !kv.childNodes.length && !prios.length) body.appendChild(el("p", "line", "No details recorded yet."));
+    if (kv.childNodes.length) body.appendChild(kv);
+    body.appendChild(tuneControl(g, kind));
+    if (prios.length) {
+      const sub = el("details", "sub prios");
+      const ss = el("summary");
+      ss.append(el("span", "chev"), el("h3", null, "Priorities (P)"), el("span", "n", String(prios.length)));
+      sub.appendChild(ss);
+      const list = el("div", "rows");
+      prios.forEach((p) => list.appendChild(renderPriority(p)));
+      sub.appendChild(list);
+      bindOpen(sub, "goal-prios:" + g.id, true);
+      body.appendChild(sub);
+    }
+    body.appendChild(moveControl(g, kind, rmDoc));
+    body.appendChild(removeControl(g, kind, rmDoc));
+    d.appendChild(body);
+    const row = el("div", "goal-row");
+    row.dataset.id = g.id;
+    row.appendChild(d);
+    if (canReorder() && n > 1) row.appendChild(gripFor(g, i, n, kind, row));
+    return row;
+  }
+
+  /* ---------- goal removal (owner): writes a goal_removals request doc; the goal doc itself is never touched ---------- */
+  /* The open request for a goal: a stored goal_removals doc with status new, else this viewer's own just-written one. */
+  function pendingRemoval(goalId) {
+    const doc = removals.find((r) => txt(r.goal) === goalId && r.status === "new");
+    if (doc) return doc;
+    return optimisticRm.has(goalId) ? { id: optimisticRm.get(goalId), goal: goalId, status: "new" } : null;
+  }
+  function removeControl(g, kind, rmDoc) {
+    const box = el("div", "row");
+    const err = () => errFor(kind);
+    if (rmDoc) {
+      box.appendChild(el("span", "note", "Removal requested. The Architect records it on its next pass."));
+      const undo = el("button", "rm", "Undo"); undo.type = "button"; undo.disabled = !canReorder() || !rmDoc.id;
+      undo.addEventListener("click", () => { undo.disabled = true; cancelRemoval(g, kind, rmDoc); });
+      box.appendChild(undo);
+    } else if (confirmRm.has(g.id)) {
+      const c = el("div", "rm-confirm");
+      c.appendChild(rich("span", null, "Remove " + g.id + "?"));
+      const yes = el("button", "rm", "Confirm"); yes.type = "button";
+      const no = el("button", "rm", "Cancel"); no.type = "button";
+      yes.addEventListener("click", () => { yes.disabled = true; no.disabled = true; requestRemoval(g, kind); });
+      no.addEventListener("click", () => { confirmRm.delete(g.id); render(); });
+      c.append(yes, no); box.appendChild(c);
+    } else {
+      const b = el("button", "rm", "Remove"); b.type = "button"; b.disabled = !canReorder();
+      b.setAttribute("aria-label", "Remove goal " + g.id);
+      b.addEventListener("click", () => { confirmRm.add(g.id); render(); });
+      box.appendChild(b);
+    }
+    return box;
+  }
+  /* Keyboard path for moving a goal to the other list; it lands at the end of that list. */
+  function moveControl(g, kind, rmDoc) {
+    const to = kind === "standing" ? "directed" : "standing";
+    const b = el("button", "rm", "Move to " + to); b.type = "button";
+    b.disabled = !canReorder() || savingOrder || !!rmDoc;
+    b.addEventListener("click", () => { b.disabled = true; commitMove(g.id, kind, to, goalsOf(to).map((x) => x.id).concat(g.id)); });
+    const box = el("div", "row"); box.appendChild(b);
+    return box;
+  }
+  async function requestRemoval(g, kind) {
+    const err = errFor(kind); err.textContent = "";
+    let by = "";
+    try { by = userCap && typeof userCap.name === "string" ? userCap.name : ""; } catch (_) {}
+    try {
+      const ref = await db.collection("goal_removals").add({ goal: g.id, title: txt(g.title), status: "new", created: new Date().toISOString(), by: by || ownerName() });
+      optimisticRm.set(g.id, ref && ref.id ? ref.id : "");
+    } catch (e) {
+      err.textContent = "Could not save the removal: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect to remove " + g.id + " in the terminal.";
+    }
+    confirmRm.delete(g.id);
+    render();
+  }
+  async function cancelRemoval(g, kind, rmDoc) {
+    const err = errFor(kind); err.textContent = "";
+    try {
+      const ref = db.collection("goal_removals").doc(rmDoc.id);
+      await ref.update({ status: "cancelled", updated: new Date().toISOString() });
+      optimisticRm.delete(g.id);
+    } catch (e) {
+      err.textContent = "Could not cancel the removal: " + (e && e.message ? e.message : "unknown error") + ".";
+    }
+    render();
+  }
+
+  /* ---------- goal reordering (owner): pointer drag for touch and mouse, buttons for keyboard ---------- */
+  function canReorder() { return !!db && !readOnly; }
+  function kindOf(g) { const k = optimisticKind.has(g.id) ? optimisticKind.get(g.id) : g.kind; return k === "standing" ? "standing" : "directed"; }
+  function listFor(kind) { return $(kind === "standing" ? "list-gs" : "list-gd"); }
+  function errFor(kind) { return $(kind === "standing" ? "err-gs" : "err-gd"); }
+  function effRank(g) { return optimisticRank.has(g.id) ? optimisticRank.get(g.id) : g.rank; }
+  function goalsOf(kind) {
+    return goals.filter((g) => kindOf(g) === kind && txt(g.status).toLowerCase() !== "removed")
+      .map((g) => Object.assign({}, g, { rank: effRank(g) }))
+      .sort((a, b) => byRank(a, b) || a.id.localeCompare(b.id));
+  }
+  function rowIds(list) { return Array.from(list.children).filter((r) => r.classList.contains("goal-row")).map((r) => r.dataset.id); }
+
+  function gripFor(g, i, n, kind, row) {
+    const grip = el("div", "grip");
+    const up = el("button", "mv", "▲"); up.type = "button"; up.id = "up-" + g.id;
+    up.setAttribute("aria-label", "Move " + g.id + " up");
+    up.disabled = i === 0;
+    up.addEventListener("click", () => moveBy(kind, g.id, -1));
+    const handle = el("div", "handle" + (savingOrder ? " off" : ""), "⠿");
+    handle.title = "Drag to reorder";
+    handle.setAttribute("aria-hidden", "true");
+    if (pendingRemoval(g.id)) { handle.classList.add("off"); handle.title = "Removal pending"; }
+    else handle.addEventListener("pointerdown", (e) => startDrag(e, kind, row, handle));
+    const down = el("button", "mv", "▼"); down.type = "button"; down.id = "down-" + g.id;
+    down.setAttribute("aria-label", "Move " + g.id + " down");
+    down.disabled = i === n - 1;
+    down.addEventListener("click", () => moveBy(kind, g.id, 1));
+    grip.append(up, handle, down);
+    return grip;
+  }
+
+  function moveBy(kind, id, delta) {
+    if (savingOrder) return;
+    const order = rowIds(listFor(kind));
+    const i = order.indexOf(id), j = i + delta;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    order[i] = order[j]; order[j] = id;
+    commitOrder(kind, order);
+  }
+
+  function startDrag(e, kind, row, handle) {
+    if (savingOrder || drag || !canReorder()) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+    drag = { kind, row, id: row.dataset.id, target: null, ph: null, list: row.parentElement, pointerId: e.pointerId, before: rowIds(row.parentElement).join(",") };
+    row.classList.add("dragging");
+    document.body.classList.add("is-dragging");
+    window.addEventListener("pointermove", onDragMove, { passive: false });
+    window.addEventListener("pointerup", onDragEnd);
+    window.addEventListener("pointercancel", onDragCancel);
+  }
+  function onDragMove(e) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    e.preventDefault();
+    const y = e.clientY, list = drag.list, row = drag.row;
+    /* Over the other list's block (header, rows or empty note): show a drop marker there and leave this list alone. */
+    const other = drag.kind === "standing" ? "directed" : "standing";
+    const osub = $(other === "standing" ? "sub-gs" : "sub-gd"), orect = osub.getBoundingClientRect();
+    if (y >= orect.top && y <= orect.bottom) {
+      const tl = listFor(other);
+      if (!drag.ph) drag.ph = el("div", "drop-ph");
+      drag.target = other; osub.classList.add("drop-target");
+      const rows = Array.from(tl.children).filter((r) => r.classList.contains("goal-row"));
+      const at = rows.find((r) => { const b = r.getBoundingClientRect(); return y < b.top + b.height / 2; });
+      tl.insertBefore(drag.ph, at || null);
+      return;
+    }
+    if (drag.target) { drag.target = null; if (drag.ph) drag.ph.remove(); osub.classList.remove("drop-target"); }
+    /* Move the neighbours, never the dragged row itself: removing it from the document would drop the pointer capture. */
+    let prev = row.previousElementSibling;
+    while (prev && prev.classList.contains("goal-row")) {
+      const r = prev.getBoundingClientRect();
+      if (y >= r.top + r.height / 2) break;
+      list.insertBefore(prev, row.nextSibling);
+      prev = row.previousElementSibling;
+    }
+    let next = row.nextElementSibling;
+    while (next && next.classList.contains("goal-row")) {
+      const r = next.getBoundingClientRect();
+      if (y <= r.top + r.height / 2) break;
+      list.insertBefore(next, row);
+      next = row.nextElementSibling;
+    }
+    const edge = 56, vh = window.innerHeight || document.documentElement.clientHeight;
+    if (y < edge) window.scrollBy(0, -14); else if (y > vh - edge) window.scrollBy(0, 14);
+  }
+  function endDrag() {
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragCancel);
+    document.body.classList.remove("is-dragging");
+    const d = drag; drag = null;
+    if (d) {
+      d.row.classList.remove("dragging");
+      if (d.target) {
+        d.targetOrder = Array.from(listFor(d.target).children).map((r) => (r === d.ph ? d.id : r.classList.contains("goal-row") ? r.dataset.id : null)).filter(Boolean);
+      }
+      if (d.ph) d.ph.remove();
+      $("sub-gd").classList.remove("drop-target"); $("sub-gs").classList.remove("drop-target");
+    }
+    return d;
+  }
+  function onDragEnd(e) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    const d = endDrag();
+    if (d.target) { commitMove(d.id, d.kind, d.target, d.targetOrder); return; }
+    const order = rowIds(d.list);
+    if (order.join(",") !== d.before) commitOrder(d.kind, order);
+    else if (renderPending) render();
+  }
+  function onDragCancel(e) {
+    if (!drag || e.pointerId !== drag.pointerId) return;
+    endDrag();
+    render();
+  }
+
+  async function commitOrder(kind, order) {
+    if (!canReorder() || savingOrder) return;
+    const byId = new Map(goalsOf(kind).map((g) => [g.id, g]));
+    const at = new Date().toISOString();
+    const changes = order.map((id, i) => ({ id, rank: i + 1 })).filter((c) => byId.has(c.id) && byId.get(c.id).rank !== c.rank);
+    const err = errFor(kind); err.textContent = "";
+    if (!changes.length) { render(); return; }
+    changes.forEach((c) => optimisticRank.set(c.id, c.rank));
+    const prevAt = localReorderAt[kind];
+    localReorderAt[kind] = at;
+    savingOrder = true;
+    render();
+    try {
+      for (const c of changes) {
+        await db.collection("goals").doc(c.id).update({ rank: c.rank, rank_set_by: "owner", rank_set_at: at });
+      }
+      await db.collection("goal_reorders").add({ kind, order: order.slice(), at, status: "new" });
+    } catch (e) {
+      changes.forEach((c) => optimisticRank.delete(c.id));
+      if (prevAt) localReorderAt[kind] = prevAt; else delete localReorderAt[kind];
+      err.textContent = "Could not save the new order: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect the order you want in the terminal.";
+    }
+    savingOrder = false;
+    render();
+  }
+
+  /* Moves a goal between Directed and Standing: sets its kind, re-ranks both lists 1..n, then records one goal_reorders doc with moved {goal, from, to}. */
+  async function commitMove(id, from, to, orderTo) {
+    if (!canReorder() || savingOrder || pendingRemoval(id) || from === to) { render(); return; }
+    const at = new Date().toISOString();
+    const orderFrom = goalsOf(from).map((g) => g.id).filter((x) => x !== id);
+    const byId = new Map(goals.map((g) => [g.id, Object.assign({}, g, { rank: effRank(g) })]));
+    const changes = [];
+    orderTo.forEach((gid, i) => { const g = byId.get(gid); if (g && (gid === id || g.rank !== i + 1)) changes.push({ id: gid, rank: i + 1 }); });
+    orderFrom.forEach((gid, i) => { const g = byId.get(gid); if (g && g.rank !== i + 1) changes.push({ id: gid, rank: i + 1 }); });
+    const errs = [errFor(from), errFor(to)]; errs.forEach((x) => { x.textContent = ""; });
+    const prevRank = new Map(changes.map((c) => [c.id, optimisticRank.has(c.id) ? optimisticRank.get(c.id) : undefined]));
+    const prevAt = { from: localReorderAt[from], to: localReorderAt[to] };
+    changes.forEach((c) => optimisticRank.set(c.id, c.rank));
+    optimisticKind.set(id, to);
+    localReorderAt[from] = at; localReorderAt[to] = at;
+    savingOrder = true;
+    render();
+    try {
+      for (const c of changes) {
+        const patch = { rank: c.rank, rank_set_by: "owner", rank_set_at: at };
+        if (c.id === id) patch.kind = to;
+        await db.collection("goals").doc(c.id).update(patch);
+      }
+      await db.collection("goal_reorders").add({ kind: to, order: orderTo.slice(), at, status: "new", moved: { goal: id, from: from, to: to } });
+    } catch (e) {
+      changes.forEach((c) => { if (prevRank.get(c.id) === undefined) optimisticRank.delete(c.id); else optimisticRank.set(c.id, prevRank.get(c.id)); });
+      optimisticKind.delete(id);
+      if (prevAt.from) localReorderAt[from] = prevAt.from; else delete localReorderAt[from];
+      if (prevAt.to) localReorderAt[to] = prevAt.to; else delete localReorderAt[to];
+      const msg = "Could not move " + id + ": " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect the move you want in the terminal.";
+      errs.forEach((x) => { x.textContent = msg; });
+    }
+    savingOrder = false;
+    render();
+  }
+
+  function reorderNote(kind, noteId) {
+    let latest = localReorderAt[kind] || "";
+    reorders.forEach((r) => { if (r.kind === kind && typeof r.at === "string" && r.at > latest) latest = r.at; });
+    const note = $(noteId);
+    const applied = latest && meta && meta.updated && new Date(txt(meta.updated)) > new Date(latest);
+    if (latest && !applied) {
+      note.textContent = "Reordered by you " + utc(latest) + ". The Architect applies it on its next pass.";
+      note.hidden = false;
+    } else note.hidden = true;
+  }
+
+  /* Priorities: the owner's order and focus rulings under a goal (P<hex>) */
+  function renderPriority(p) {
+    const d = el("details", "item prio");
+    d.dataset.pid = p.id;
+    refRows.set(p.id, d);
+    bindOpen(d, "prio:" + p.id, false);
+    const sum = el("summary");
+    sum.appendChild(idTitle(p.id, txt(p.title)));
+    if (p.rank != null && p.rank !== "") sum.appendChild(el("span", "chip rank", "rank " + txt(p.rank)));
+    d.appendChild(sum);
+    const body = el("div", "body");
+    const kv = el("dl", "kv");
+    addKV(kv, "Goal", txt(p.goal));
+    addKV(kv, "Status", txt(p.status));
+    addKV(kv, "Updated", utc(p.updated));
+    body.appendChild(kv.childNodes.length ? kv : el("p", "line", "No details recorded yet."));
+    d.appendChild(body);
+    return d;
+  }
+
+  function renderGoals() {
+    const dir = goalsOf("directed");
+    const std = goalsOf("standing");
+    effort = effortShares(dir, std, sessions);
+    $("pool-gd").textContent = poolText("Directed", effort.pools.directed); $("pool-gs").textContent = poolText("Standing", effort.pools.standing);
+    const unassigned = effort.unassigned.n > 0 ? " · Unassigned spend " + effAmt(effort.unassigned.n, effort.unassigned.unit) : "";
+    fillList($("list-gd"), dir.map((g, i, a) => renderGoal(g, i, a.length, "directed")), "No directed goals recorded yet.");
+    fillList($("list-gs"), std.map((g, i, a) => renderGoal(g, i, a.length, "standing")), "No standing goals recorded yet.");
+    reorderNote("directed", "note-gd");
+    reorderNote("standing", "note-gs");
+    $("n-gd").textContent = String(dir.length);
+    $("n-gs").textContent = String(std.length);
+    $("n-goals").textContent = String(dir.length + std.length);
+    if (!goals.length) { $("goals-sum").textContent = "No goals recorded yet. The Architect writes them on its next pass."; return; }
+    const top = dir[0];
+    const gsum = $("goals-sum"); gsum.textContent = "";
+    addText(gsum, (top ? "Top: " + top.id + " · " + (txt(top.title) || top.id) + (top.status ? " — " + txt(top.status) : "") : std.length + " standing goals") + unassigned);
+  }
+
+  /* ---------- session controls: activate an idle session, prioritize its work ---------- */
+  /* BEGIN sessionCmd */
+  /* Which buttons a session row offers, by state. The Architect's own rows never get Park or Restart. */
+  const ARCHITECT_ROWS = ["tm-architect", "tm-architect-poll"];
+  const CMD_LABEL = { park: "Park", restart: "Restart", activate: "Activate", prioritize: "Prioritize" };
+  function sessionActions(s) {
+    const st = String(s && s.state || "");
+    let a = st === "idle" ? ["park", "activate", "prioritize"] : st === "parked" ? ["activate", "prioritize"] : st === "exited" ? ["restart", "park"] : ["prioritize"];
+    if (ARCHITECT_ROWS.indexOf(String(s && s.name || "")) >= 0) a = a.filter((t) => t !== "park" && t !== "restart");
+    return a;
+  }
+  const cmdOpen = new Map();         /* session id -> {type, text, goal, note} while an inline form is open */
+  const optimisticCmd = new Map();   /* session id -> command written by this viewer, until the store echoes it */
+  /* The command a Send button writes to sessions/<S>.command (the page adds only updated and if_version). */
+  function sessionCommand(type, f, by, nowIso) {
+    const c = { type: ["prioritize", "park", "restart"].indexOf(type) >= 0 ? type : "activate", at: nowIso, by: String(by == null ? "" : by), status: "new" };
+    if (c.type === "activate") c.text = String(f && f.text != null ? f.text : "").trim();
+    else {
+      if (c.type === "prioritize") c.goal = String(f && f.goal != null ? f.goal : "");
+      c.note = String(f && f.note != null ? f.note : "").trim();
+    }
+    return c;
+  }
+  /* Overlay this viewer's pending command on a store row; dropped once the store carries it (same or later `at`). */
+  function withCommand(row, pending) {
+    const o = pending.get(row.id);
+    if (!o) return row;
+    const s = row.command && typeof row.command === "object" ? row.command : null;
+    if (s && String(s.at || "") >= o.at) { pending.delete(row.id); return row; }
+    return Object.assign({}, row, { command: o });
+  }
+  function cmdChipText(c) { return c && c.type === "park" ? "Park requested" : c && c.type === "restart" ? "Restart requested" : "sent to the Architect"; }
+  function commandSent(s) { return !!(s && s.command && typeof s.command === "object" && s.command.status === "new"); }
+  function sessionCommandControl(body, s, goalList) {
+    if (!db || readOnly) return;
+    const box = el("div", "row cmd");
+    if (commandSent(s)) {
+      const c = s.command;
+      box.appendChild(el("span", "chip cmd-chip", cmdChipText(c)));
+      box.appendChild(el("span", "line", (c.type === "prioritize" ? "Prioritize " + txt(c.goal) : CMD_LABEL[c.type] || "Activate") + (c.text || c.note ? ": " + txt(c.text || c.note) : "")));
+      body.appendChild(box);
+      return;
+    }
+    const st = cmdOpen.get(s.id);
+    if (!st) {
+      sessionActions(s).forEach((t) => {
+        const b = el("button", "rm cmd-" + t, CMD_LABEL[t]); b.type = "button";
+        b.setAttribute("aria-label", t === "prioritize" ? "Prioritize work for " + txt(s.name) + ": pick a goal"
+          : t === "park" ? "Park " + txt(s.name) + ": the Architect checkpoints it, then holds it"
+          : t === "restart" ? "Restart " + txt(s.name) + ": the Architect relaunches it and resumes its snapshot"
+          : "Activate " + txt(s.name) + ": tell the Architect to start it working");
+        b.addEventListener("click", () => { cmdOpen.set(s.id, { type: t, text: "", goal: t === "prioritize" && goalList && goalList.length ? goalList[0].id : "", note: "" }); render(); });
+        box.appendChild(b);
+      });
+      if (s.command && s.command.status === "applied") box.appendChild(el("span", "line", "Last command applied" + (s.command.reply ? ": " + txt(s.command.reply) : ".")));
+    } else {
+      const f = el("form", "fb-form");
+      let sel = null;
+      if (st.type === "prioritize") {
+        const lab = el("label", null, "Goal"); lab.setAttribute("for", "cmd-goal-" + s.id);
+        sel = el("select"); sel.id = "cmd-goal-" + s.id;
+        (goalList || []).forEach((g) => { const o = el("option", null, g.id + " · " + (g.title || "")); o.value = g.id; sel.appendChild(o); });
+        sel.value = st.goal;
+        sel.addEventListener("change", () => { st.goal = sel.value; });
+        f.append(lab, sel);
+      }
+      const inp = el("input"); inp.type = "text"; inp.id = "cmd-note-" + s.id;
+      inp.placeholder = st.type === "activate" ? "What to work on (optional): an issue number or a goal" : "Note (optional)";
+      inp.setAttribute("aria-label", st.type === "activate" ? "What " + txt(s.name) + " should work on" : "Note for " + txt(s.name));
+      inp.value = st.type === "activate" ? st.text : st.note;
+      inp.addEventListener("input", () => { if (st.type === "activate") st.text = inp.value; else st.note = inp.value; });
+      const yes = el("button", "btn", "Send"); yes.type = "submit";
+      const no = el("button", "btn ghost", "Cancel"); no.type = "button";
+      no.addEventListener("click", () => { cmdOpen.delete(s.id); render(); });
+      const err = el("p", "err"); err.id = "err-cmd-" + s.id;
+      f.append(inp, yes, no);
+      f.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        if (st.type === "prioritize" && !st.goal) { err.textContent = "Pick a goal."; return; }
+        yes.disabled = true; no.disabled = true;
+        sendSessionCommand(s, st).then((ok) => { if (!ok) { yes.disabled = false; no.disabled = false; } });
+      });
+      box.appendChild(f);
+      box.appendChild(err);
+    }
+    body.appendChild(box);
+  }
+  /* Optimistic: the row shows "sent to the Architect" at once; a failed write puts the form back with the error shown. */
+  async function sendSessionCommand(s, st) {
+    const cmd = sessionCommand(st.type, st, userName(), new Date().toISOString());
+    optimisticCmd.set(s.id, cmd);
+    cmdOpen.delete(s.id);
+    render();
+    let ok = false, msg = "";
+    try {
+      const ref = db.collection("sessions").doc(s.id);
+      let opts;
+      try { const snap = await ref.get(); if (snap && snap.version != null) opts = { if_version: snap.version }; } catch (_) {}
+      await ref.update({ command: cmd, updated: cmd.at }, opts);
+      ok = true;
+    } catch (e) {
+      if (e && e.code === "invalid_argument") readOnly = true;
+      msg = "Could not send: " + (e && e.message ? e.message : "unknown error") + ". Tell the Architect in the terminal.";
+    }
+    if (!ok) {
+      optimisticCmd.delete(s.id); cmdOpen.set(s.id, st); render();
+      const m = $("err-cmd-" + s.id); if (m) m.textContent = msg;
+    }
+    return ok;
+  }
+  /* END sessionCmd */
+
+  /* ---------- sessions ---------- */
+  function renderSession(s) {
+    const state = txt(s.state);
+    const sc = stateClass(state);
+    const d = el("details", "item sess " + sc);
+    d.dataset.name = s.name;
+    d.dataset.id = s.id;
+    d.dataset.pid = s.id;
+    refRows.set(s.id, d);
+    bindOpen(d, "sess:" + s.id, false);
+    const sum = el("summary");
+    sum.appendChild(idTitle(s.id, s.name, "title name", true));
+
+    const roll = sessionRollup(s, sessionTasks(s), stepMap);
+    if (roll.summary) { const ss = el("span", "sess-sum", roll.summary); ss.title = roll.summary; sum.appendChild(ss); }
+    const cf = ctxFill(s);
+    if (cf) { d.classList.add("has-ctx"); if (cf.hot) d.classList.add("ctx-hot"); d.style.setProperty("--ctx", cf.pct + "%"); const b = pbar(cf.pct); b.setAttribute("aria-label", "context use " + cf.pct + "%"); b.title = "context use " + cf.label; sum.appendChild(b); }
+    if (roll.pct != null) { const w = el("span", "chip work", "tasks " + roll.pct + "%"); w.title = "Task progress, not context use"; sum.appendChild(w); }
+    const use = usageOf(s.usage);
+    const cx = ctxOf(s);
+    if (cx) { const c = el("span", "tok ctx", "ctx " + ctxText(cx)); c.title = "Context window use" + (cx.at ? ", measured " + hm(cx.at) : ""); sum.appendChild(c); }
+    if (use) {
+      const at = agentsText(use);
+      if (at) { const c = el("span", "chip agents", at); c.title = "Subagents: active / parked"; sum.appendChild(c); }
+      const t24 = num(use.out_tokens_24h);
+      if (t24 != null) { const c = el("span", "tok", tok(t24)); c.title = tok(t24) + " output tokens in the last 24 h"; sum.appendChild(c); }
+    }
+    if (commandSent(s)) sum.appendChild(el("span", "chip cmd-chip", cmdChipText(s.command)));
+    if (s.goal) { const gc = rich("span", "chip goal-chip", txt(s.goal)); gc.title = "Current goal: " + txt(s.goal); sum.appendChild(gc); }
+    sum.appendChild(el("span", "state st-" + sc, stateLabel(state)));
+    d.appendChild(sum);
+
+    const det = s.details && typeof s.details === "object" && !Array.isArray(s.details) ? s.details : {};
+    const pick = (k) => (det[k] != null && det[k] !== "" ? det[k] : s[k]);
+    const body = el("div", "body");
+    if (s.status) body.appendChild(rich("p", "line", txt(s.status)));
+    const kv = el("dl", "kv");
+    addKV(kv, "Goal", txt(s.goal));
+    addKV(kv, "Project", txt(s.project));
+    addKV(kv, "Current", txt(pick("current")));
+    addKV(kv, "Next", txt(pick("next")));
+    addKV(kv, "Waiting on", txt(pick("waiting_on")));
+    const prs = pick("prs");
+    if (Array.isArray(prs) && prs.length) {
+      const dd = addKV(kv, "Pull requests", " ", "list");
+      dd.replaceChildren();
+      prs.forEach((p) => {
+        if (!p || typeof p !== "object") return;
+        const label = (p.n != null && p.n !== "" ? "#" + txt(p.n) : "PR") + (p.state ? " " + txt(p.state) : "");
+        const url = txt(p.url);
+        if (/^https:\/\/github\.com\/[^\s]+$/.test(url)) {
+          const a = el("a", "chip", label); a.href = url; a.target = "_blank"; a.rel = "noopener";
+          dd.appendChild(a);
+        } else dd.appendChild(el("span", "chip", label));
+      });
+    }
+    const ctx = pick("ctx_k");
+    if (cx) {
+      const hot = (cx.pct != null && cx.pct >= 50) || (cx.tokens != null && cx.tokens >= 250000);
+      const span = el("span", hot ? "warn-text" : null, ctxText(cx) + (cx.tokens != null && cx.pct != null ? " (tokens / % of window)" : "") + (cx.at ? " · measured " + hm(cx.at) : ""));
+      addKV(kv, "Context", span);
+    } else if (ctx != null && ctx !== "") {
+      const n = Number(ctx);
+      if (isFinite(n)) {
+        const span = el("span", n >= 250 ? "warn-text" : null, n + "k tokens" + (n >= 250 ? " (at or past the refresh bar)" : ""));
+        addKV(kv, "Context", span);
+      } else addKV(kv, "Context", txt(ctx));
+    }
+    if (use) {
+      const parts = [];
+      const at = agentsText(use); if (at) parts.push("agents " + at);
+      const t1 = num(use.out_tokens_1h), t24 = num(use.out_tokens_24h), u24 = num(use.units_24h);
+      if (t1 != null) parts.push(tok(t1) + " out 1h");
+      if (t24 != null) parts.push(tok(t24) + " out 24h");
+      if (u24 != null) parts.push(tok(u24) + " units 24h");
+      if (use.measured_at) parts.push("measured " + hm(use.measured_at));
+      addKV(kv, "Usage", parts.join(" · "));
+    }
+    addKV(kv, "Last relay", txt(pick("last_relay")));
+    addKV(kv, "Notes", txt(pick("notes")));
+    addKV(kv, "Updated", utc(s.updated));
+    if (kv.childNodes.length) body.appendChild(kv);
+    else if (!s.status) body.appendChild(el("p", "line", "No details recorded yet."));
+    sessionCommandControl(body, s, goalsOf("directed").concat(goalsOf("standing")));
+    d.appendChild(body);
+    return d;
+  }
+
+  /* BEGIN ownerState */
+  /* Needs-owner is the only waiting-on signal. It is on only while an open item that names the session has blocks_session true; a stored waiting-owner with no such item shows idle. */
+  function ownerState(stored, isBlocked) {
+    if (stored === "waiting-owner") return isBlocked ? stored : "idle";
+    if (isBlocked && stored !== "blocked" && stored !== "parked" && stored !== "exited") return "waiting-owner";
+    return stored;
+  }
+  function blockedSessions(list) {
+    return new Set(list.filter((i) => i.status === "open" && i.blocks_session === true && i.session).map((i) => String(i.session)));
+  }
+  /* END ownerState */
+  function renderSessions() {
+    sessionRows.clear();
+    /* Only an open item with blocks_session true makes a session wait on the owner; other open items never change a session's state. */
+    const openFor = blockedSessions(items);
+    const list = sessions.map((s) => {
+      const name = txt(s.name) || s.id;
+      return Object.assign({}, s, { name: name, state: ownerState(txt(s.state), openFor.has(name)) });
+    });
+    list.sort((a, b) => {
+      const oa = Number(a.order), ob = Number(b.order);
+      const fa = isFinite(oa) && a.order !== "" && a.order != null, fb = isFinite(ob) && b.order !== "" && b.order != null;
+      if (fa && fb && oa !== ob) return oa - ob;
+      if (fa !== fb) return fa ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    const buckets = new Map(GROUPS.map((g) => [g, []]));
+    list.forEach((s) => buckets.get(groupOf(txt(s.state))).push(s));
+    const sumParts = [];
+    GROUPS.forEach((g) => {
+      const arr = buckets.get(g);
+      g.el.hidden = !arr.length;
+      g.h.textContent = g.label();
+      g.n.textContent = String(arr.length);
+      g.list.replaceChildren();
+      arr.forEach((s) => {
+        const row = renderSession(s);
+        sessionRows.set(s.name, row);
+        if (s.id !== s.name) sessionRows.set(s.id, row);
+        g.list.appendChild(row);
+      });
+      if (arr.length) sumParts.push(g.label() + " " + arr.length);
+    });
+    $("sessions-empty").hidden = list.length > 0;
+    $("sessions-empty").textContent = "No sessions recorded yet. The Architect writes one row per managed session on its next pass.";
+    $("n-sessions").textContent = String(list.length);
+    const fu = usageOf(meta && meta.fleet_usage);
+    const fleetParts = [];
+    if (fu) {
+      const a = num(fu.agents_active), p = num(fu.agents_parked), t = num(fu.out_tokens_24h);
+      if (a != null || p != null) fleetParts.push("Agents " + (a || 0) + " active · " + (p || 0) + " parked");
+      if (t != null) fleetParts.push(tok(t) + " out tokens 24h");
+    }
+    const ss = $("sessions-sum");
+    ss.textContent = !list.length ? "No sessions recorded yet." : fleetParts.length ? fleetParts.join(" · ") : sumParts.join(" · ");
+    ss.title = ss.textContent;
+  }
+
+  function jumpToSession(name) {
+    const row = sessionRows.get(name);
+    if (row) revealRow(row);
+  }
+
+  /* ---------- header ---------- */
+  function renderHeader() {
+    const f = $("fleet"); f.replaceChildren();
+    const bits = [];
+    if (offlineMsg) bits.push(el("span", null, offlineMsg));
+    if (meta && meta.updated) { const s = el("span"); s.append("Updated "); s.appendChild(el("b", null, utc(meta.updated))); bits.push(s); }
+    if (meta && meta.fleet_line) bits.push(rich("span", null, txt(meta.fleet_line)));
+    if (readOnly) bits.push(el("span", "err", "Read-only view"));
+    if (!bits.length) bits.push(el("span", null, "Waiting for the Architect's first update."));
+    bits.forEach((b, i) => { if (i) f.appendChild(el("span", "sep", "·")); f.appendChild(b); });
+  }
+
+  /* ---------- settings pane: user state (the owner 2026-10-09) ---------- */
+  /* BEGIN userState */
+  const USER_STATES = [["active", "Active", "on computer"], ["remote", "Remote", "on device"], ["away", "Away", "not engaged"], ["sleeping", "Sleeping", "sleeping or not available"]];
+  function userStateOf(s) { const v = s && typeof s === "object" ? s.user_state : null; return USER_STATES.some((x) => x[0] === v) ? v : "active"; }   /* unset: active */
+  function userStatePayload(state, by, nowIso) { return { user_state: state, user_state_at: nowIso, user_state_by: by }; }
+  /* END userState */
+  function paintSettings() {
+    const st = optimisticState || userStateOf(settings);
+    const lab = USER_STATES.find((x) => x[0] === st);
+    const chip = $("user-state-chip");
+    chip.textContent = lab[1]; chip.className = "chip state-chip st-" + st; chip.title = "User state: " + lab[1] + " (" + lab[2] + ")";
+    document.querySelectorAll('input[name="user-state"]').forEach((r) => { r.checked = r.value === st; r.disabled = readOnly; });
+  }
+  async function chooseUserState(state) {
+    const err = $("user-state-err"); err.textContent = "";
+    if (!db || readOnly) { err.textContent = "Read-only view: the state cannot be saved."; paintSettings(); return; }
+    const payload = userStatePayload(state, userName() || ownerName(), new Date().toISOString());
+    const ref = db.doc("meta/settings");
+    optimisticState = state; paintSettings();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const snap = await ref.get();
+        const exists = !!(snap && snap.exists);
+        await ref.set(Object.assign({}, exists ? bodyOf(snap) : {}, payload), exists ? (snap.version != null ? { if_version: snap.version } : undefined) : { if_version: 0 });
+        return;
+      } catch (e) {
+        if (attempt === 0 && e && e.status === 409) continue;   /* a racing write: re-read the version and try once more */
+        optimisticState = null; paintSettings();
+        err.textContent = "Could not save the state: " + (e && e.message ? e.message : "unknown error") + ".";
+        return;
+      }
+    }
+  }
+  (function wireSettings() {
+    const dlg = $("settings-pane"), btn = $("settings-btn");
+    if (!dlg || !btn) return;
+    const native = typeof dlg.showModal === "function";
+    const open = () => { if (native) { if (!dlg.open) dlg.showModal(); } else dlg.setAttribute("open", ""); btn.setAttribute("aria-expanded", "true"); };
+    const close = () => { if (native) dlg.close(); else dlg.removeAttribute("open"); btn.setAttribute("aria-expanded", "false"); try { btn.focus({ preventScroll: true }); } catch (_) {} };
+    btn.addEventListener("click", open);
+    $("settings-close").addEventListener("click", close);
+    dlg.addEventListener("click", (ev) => { if (ev.target === dlg) close(); });   /* a click on the backdrop (the dialog itself has no padding) */
+    dlg.addEventListener("close", () => btn.setAttribute("aria-expanded", "false"));   /* Esc closes a modal dialog natively */
+    dlg.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !native) close(); });
+    document.querySelectorAll('input[name="user-state"]').forEach((r) => r.addEventListener("change", () => { if (r.checked) chooseUserState(r.value); }));
+    paintSettings();
+  })();
+
+  /* ---------- reload across an edited index.html: unsent drafts are stashed first and restored after (dashboard-serve.py shim) ---------- */
+  const DRAFT_KEY = "aq-drafts";
+  window.__stashDrafts = function () {
+    try {
+      const d = captureDrafts(Array.from(document.querySelectorAll(".wrap input[id], .wrap textarea[id]")));
+      if (Object.keys(d).length) window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ at: Date.now(), drafts: d }));
+    } catch (_) {}
+  };
+  let stashedDrafts = (function () {
+    try { const v = JSON.parse(window.sessionStorage.getItem(DRAFT_KEY) || "null"); window.sessionStorage.removeItem(DRAFT_KEY); return v && Date.now() - v.at < 120000 ? v.drafts : null; } catch (_) { return null; }
+  })();
+  function restoreStashed() {
+    if (!stashedDrafts) return;
+    restoreDrafts(stashedDrafts, $);
+    Object.keys(stashedDrafts).forEach((id) => { if ($(id)) delete stashedDrafts[id]; });
+    if (!Object.keys(stashedDrafts).length) stashedDrafts = null;
+  }
+
+  /* ---------- render, keeping unsent drafts and focus across live updates ---------- */
+  function render() {
+    if (drag) { renderPending = true; return; }   /* never rebuild the list under a finger */
+    renderPending = false;
+    const drafts = captureDrafts(Array.from(document.querySelectorAll(".wrap input[id], .wrap textarea[id]")));
+    const active = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
+    const caret = active && document.activeElement.selectionStart != null ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+    const sx = window.scrollX, sy = window.scrollY;
+    renderHeader();
+    buildRefs();
+    renderAsks();
+    renderSessions();   /* before goals, so goal rows know which session names have rows */
+    renderAccounts();
+    renderGoals();
+    if (window.scrollX !== sx || window.scrollY !== sy) window.scrollTo(sx, sy);   /* a rebuild never moves the page */
+    if (pendingHash && showRef(pendingHash)) pendingHash = "";
+    applyPulses();
+    restoreDrafts(drafts, $);
+    restoreStashed();
+    if (active) {
+      let a = $(active);
+      /* a goal moved to the top or bottom disables the button just used: keep focus on its other move button */
+      if (a && a.disabled && /^(up|down)-/.test(active)) a = $(active.replace(/^(up|down)-/, (m, d) => (d === "up" ? "down-" : "up-")));
+      if (a && !a.disabled && a !== document.activeElement) try { a.focus({ preventScroll: true }); if (caret && a.id === active && a.setSelectionRange) a.setSelectionRange(caret[0], caret[1]); } catch (_) {}
+    }
+  }
+
+  function offline(msg) {
+    offlineMsg = msg;
+    ["list-q", "list-a", "list-qx", "list-ax", "list-tx", "list-gd", "list-gs"].forEach((id) => $(id).replaceChildren(el("p", "empty", msg)));
+    ["decisions-sum", "asks-sum", "goals-sum", "sessions-sum"].forEach((id) => { $(id).textContent = msg; });
+    $("sessions-empty").textContent = msg; $("sessions-empty").hidden = false;
+    renderHeader();
+  }
+
+  async function start() {
+    if (!window.claude || typeof window.claude.use !== "function") { offline("Open this page on claude.ai to see the live dashboard."); return; }
+    db = await window.claude.use("db");
+    if (!db) { offline("The dashboard store is not available in this view. Sign in to claude.ai to load it."); return; }
+    try {
+      const user = await window.claude.use("user");
+      userCap = user || null;
+      if (user) { const ok = await user.can("data.write"); if (ok === false) readOnly = true; }
+    } catch (_) {}
+    const stopped = (what) => (e) => { offlineMsg = "The " + what + " stopped updating (" + (e && e.code ? e.code : "error") + "). Reload the page."; renderHeader(); };
+    const rows = (snap) => snap.docs.map((d) => Object.assign({}, bodyOf(d), { id: d.id }));
+    db.collection("accounts").onSnapshot((snap) => { accounts = rows(snap); acctBeepCheck(); render(); }, () => {});
+    db.collection("items").onSnapshot((snap) => { items = rows(snap).map((r) => withPark(withFeedback(r, optimisticFeedback), optimisticPark)); gateAttention(items, trackDocs("items", items)); render(); }, stopped("ask list"));
+    db.doc("meta/seen").onSnapshot((snap) => { const b = snap && snap.exists ? bodyOf(snap) : null; seenServer = b && b.map && typeof b.map === "object" ? b.map : {}; seenOpen(); }, () => seenOpen());
+    setTimeout(seenOpen, 4000);   /* a store that never answers must not hold the frame back */
+    db.collection("goals").onSnapshot((snap) => {
+      goals = rows(snap); trackDocs("goals", goals);
+      goals.forEach((g) => { if (optimisticRank.has(g.id) && g.rank === optimisticRank.get(g.id)) optimisticRank.delete(g.id); if (optimisticKind.has(g.id) && g.kind === optimisticKind.get(g.id)) optimisticKind.delete(g.id); });
+      render();
+    }, stopped("goal list"));
+    db.collection("step_progress").onSnapshot((snap) => {
+      progress.clear();
+      const pr = rows(snap); trackDocs("step_progress", pr);
+      pr.forEach((r) => progress.set(r.id, r));
+      optimisticSteps.forEach((o, id) => { const d = progress.get(id); if (d && txt(d.updated) >= o.updated) optimisticSteps.delete(id); });
+      render();
+    }, () => {});
+    db.collection("goal_removals").onSnapshot((snap) => {
+      removals = rows(snap);
+      optimisticRm.forEach((_, gid) => { if (removals.some((r) => txt(r.goal) === gid && r.status === "new")) optimisticRm.delete(gid); });
+      render();
+    }, () => {});
+    db.collection("effort_tunes").onSnapshot((snap) => { tunes = rows(snap); optimisticTune.forEach((gid) => { if (tunePending(tunes, gid)) optimisticTune.delete(gid); }); render(); }, () => {});
+    db.collection("goal_reorders").orderBy("at", "desc").limit(20).onSnapshot((snap) => { reorders = rows(snap); render(); }, () => {});
+    db.collection("sessions").onSnapshot((snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); render(); }, stopped("session list"));
+    db.collection("priorities").onSnapshot((snap) => { priorities = rows(snap); trackDocs("priorities", priorities); render(); }, stopped("priority list"));
+    db.doc("meta/state").onSnapshot((snap) => { meta = snap.exists ? bodyOf(snap) : null; render(); }, () => {});
+    db.doc("meta/settings").onSnapshot((snap) => { settings = snap.exists ? bodyOf(snap) : null; optimisticState = null; paintSettings(); }, () => {});
+  }
+  try { pendingHash = decodeURIComponent(location.hash.slice(1)); } catch (_) {}
+  start();
+})();
+</script>

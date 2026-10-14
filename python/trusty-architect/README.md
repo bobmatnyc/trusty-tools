@@ -14,16 +14,16 @@ when the skill copy shipped in trusty-mpm differs from `skills/`.
 
 | Path | Purpose |
 | --- | --- |
-| `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy. |
-| `skills/tm-fleet-check.md`, `skills/tm-context-refresh.md` | The Architect's operations skills: one supervision pass, and a watched session's context refresh. Architect only: `tm fleet init` writes them into the Architect project's `.claude/skills/`, and no other project receives them. |
-| `templates/` | What `tm fleet init` seeds into the Architect project: `CLAUDE.md` (the fleet specifics), `gitignore` (written as `.gitignore`), and `records/`. |
-| `scripts/fleet-poll.py` | Deterministic fleet poller, no LLM. Classifies each `tm-*` PM pane, reads push-hook events, checks host load, disk, swap and the Architect's own context, appends new alerts to `inbox/alerts.jsonl`, and wakes the Architect's pane with a one-line pointer. `--once`, `--interval N`, `--dry-run`. |
-| `scripts/fleet-classify.py` | The poller's pure half: pane parsing and alert evaluation, with no tmux call or file I/O. `fleet-poll.py` loads it by path, so it ships beside it. |
-| `scripts/input-state.py` | Classifies a pane's input box as `empty`, `suggestion` (Claude Code's dim auto-suggestion) or `typed`. The poller never types over a real draft. |
-| `scripts/self-ctx.py` | Measures the Architect's own context from its newest interactive Claude Code transcript. |
-| `scripts/quiet-sessions.py` | Reads the quiet-session list (idle alerts dropped) and matches throwaway test-fixture session names (`exited` alerts dropped). |
-| `scripts/start-fleet-poll.sh` | Starts the poller in its own tmux session unless it is already running. Arguments pass through. |
-| `tests/` | pytest suite for the scripts above. |
+| `skills/tm-architect-setup.md` | Canonical copy of the bundled setup skill. trusty-mpm ships a byte-identical copy in `content/skills/`. |
+| `skills/tm-*.md`, `skills/architect-*/SKILL.md` | The Architect's skills: the pass (`tm-fleet-check`), the context refresh (`tm-context-refresh`), restarts (`tm-fleet-restart`), and the 16 `architect-*` procedures the operating manual points at. Architect only: tm deploys them into the Architect project's `.claude/skills/` at `tm fleet init` and at every launch; no other project receives them. |
+| `agents/` | The Architect's agents, installed as `.claude/agents/`. |
+| `templates/` | What `tm fleet init` seeds: `CLAUDE.md` (a short pointer), `AGENTS.md` (the instance layer, a marked placeholder), `gitignore` (written as `.gitignore`), the `local/` starting files and the dashboard page. The whole directory is also seeded as `templates/`. |
+| `scripts/` | The poller and its helpers, hooks, installers, the dashboard, `init.sh` (the manual path) and `doctor.sh`. See `scripts/README.md`. `scripts/test_*.py` and `scripts/conftest.py` are tests and do not ship. |
+| `docs/` | The voice guide, the history and the specs, seeded as `docs/`. |
+| `tests/` | pytest suite for the poller scripts. |
+
+The operating manual is not here: it is `content/instructions/architect/architect.md`
+in trusty-tools, and tm composes it into the Architect's instructions.
 
 ## Configuration
 
@@ -35,11 +35,11 @@ account or session name is built in.
 | `ARCHITECT_SESSION` | `tm-architect` | The Architect's tmux session: the only pane the poller sends keys to. |
 | `ARCHITECT_POLL_SESSION` | `<ARCHITECT_SESSION>-poll` | The poller's own tmux session. |
 | `ARCHITECT_INBOX_DIR` | `<this dir>/inbox` | `events.jsonl`, `alerts.jsonl`, `poll-state.json`, `poll.log`. |
-| `ARCHITECT_QUIET_SESSIONS_FILE` | `<this dir>/quiet-sessions.txt` | One session name per line; `#` starts a comment. |
-| `ARCHITECT_PROJECT_DIR` | `~/trusty-mpm-projects/architect` | The Architect's project, used to find its transcripts. |
+| `ARCHITECT_QUIET_SESSIONS_FILE` | `<this dir>/local/quiet-sessions.txt` | One session name per line; `#` starts a comment. |
+| `ARCHITECT_PROJECT_DIR` | `<this dir>` | The Architect's project, used to find its transcripts. |
 | `CLAUDE_CONFIG_DIR` | `~/.trusty-tools/trusty-mpm/claude-config` | The Claude Code config dir trusty-mpm launches under. |
 | `SELF_CTX_DIR` | `<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>` | Transcript directory override. |
-| `SELF_CTX_WINDOW`, `SELF_CTX_THRESHOLD` | `1000000`, `40` | Context window in tokens, and the alert threshold in percent. |
+| `SELF_CTX_WINDOW`, `SELF_CTX_THRESHOLD` | `1000000`, `25` | Context window in tokens, and the alert threshold in percent. |
 | `LOAD_FACTOR` | `1.5` | Load alert when the 5-minute average exceeds this many times the core count. |
 | `TMUX_SOCKET` | tmux's own default | Selects the tmux server. |
 
@@ -54,18 +54,16 @@ selftest, only when this directory or the check changes.
 
 ## Deployment
 
-trusty-mpm ships a byte-identical copy of every file under `scripts/`,
-`skills/` and `templates/`, and the drift check fails when one differs.
-`tm fleet init` writes them into the Architect project: `scripts/`,
-`.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `.gitignore` and `records/`.
-It writes a file only when it is absent and reports an edited one as skipped.
-With a launch it starts the poller through `scripts/start-fleet-poll.sh`, and
-a start that fails fails the command.
-
-## Not here yet
-
-The relay tooling, the question collector, the review, drift-check and
-provision skills, and `fleet-restart` stay in the prototype for now (#8536).
+trusty-mpm ships a byte-identical copy of every file under `agents/`, `docs/`,
+`scripts/`, `skills/` and `templates/` (tests excepted), and the drift check
+fails when one differs or a new file has no copy. `tm fleet init` writes them
+into the Architect project: `scripts/`, `templates/`, `docs/`,
+`.claude/agents/`, `.claude/skills/<name>/SKILL.md`, `CLAUDE.md`, `AGENTS.md`,
+`.gitignore` and the `local/` skeleton. It writes a file only when it is absent
+and reports an edited one as skipped. With a launch it starts the poller through
+`scripts/start-fleet-poll.sh`, and a start that fails fails the command.
+`--guard-lift` sets `TRUSTY_MPM_PM_UNRESTRICTED=1` in `.claude/settings.json`;
+without it the PM guard stays on.
 
 ## Provision by hand
 
@@ -80,8 +78,9 @@ Rules:
 - One Architect per user. Run `tmux has-session -t =tm-architect` first. If it
   succeeds, an Architect exists. Stop.
 - Never add a git remote to the Architect's repo.
-- Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The `supervisor` profile replaces it.
-- Never copy another installation's `CLAUDE.md`, `records/` or `inbox/`. Write
+- Never set `TRUSTY_MPM_PM_UNRESTRICTED` unless the owner asks. It is off by
+  default; `scripts/init.sh --guard-lift` sets it.
+- Never copy another installation's `CLAUDE.md`, `local/` or `inbox/`. Write
   them for this user.
 - Launch the session only when the owner says so.
 
@@ -107,40 +106,45 @@ printf 'profile = "supervisor"\n' > "$dir/.trusty-mpm.toml"
 
 ### 3. Place the files
 
-Copy each file only if the target is absent. Never overwrite an edited one.
+Copy the shipped files only where the target is absent, then let `init.sh`
+create `local/`. Never overwrite an edited file.
 
 ```sh
 src=<src>
-mkdir -p "$dir/scripts" "$dir/records/projects" \
-  "$dir/.claude/skills/tm-fleet-check" "$dir/.claude/skills/tm-context-refresh"
-cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
-cp -n "$src/templates/gitignore"        "$dir/.gitignore"
-cp -n "$src/templates/records/state.md" "$src/templates/records/actions.md" "$dir/records/"
-cp -n "$src"/scripts/*.py "$src"/scripts/*.sh "$dir/scripts/"
-cp -n "$src/skills/tm-fleet-check.md"     "$dir/.claude/skills/tm-fleet-check/SKILL.md"
-cp -n "$src/skills/tm-context-refresh.md" "$dir/.claude/skills/tm-context-refresh/SKILL.md"
-chmod 755 "$dir/scripts/fleet-poll.py" "$dir/scripts/input-state.py" \
-  "$dir/scripts/start-fleet-poll.sh"
+mkdir -p "$dir/.claude/agents" "$dir/.claude/skills"
+cp -Rn "$src/scripts" "$src/templates" "$src/docs" "$dir/"
+cp -n "$src"/agents/*.md "$dir/.claude/agents/"
+for f in "$src"/skills/tm-fleet-check.md "$src"/skills/tm-context-refresh.md "$src"/skills/tm-fleet-restart.md; do
+  n=$(basename "$f" .md); mkdir -p "$dir/.claude/skills/$n"; cp -n "$f" "$dir/.claude/skills/$n/SKILL.md"
+done
+for d in "$src"/skills/architect-*/; do
+  n=$(basename "$d"); mkdir -p "$dir/.claude/skills/$n"; cp -n "$d/SKILL.md" "$dir/.claude/skills/$n/SKILL.md"
+done
+cp -n "$src/templates/CLAUDE.md" "$dir/CLAUDE.md"
+cp -n "$src/templates/AGENTS.md" "$dir/AGENTS.md"
+cp -n "$src/templates/gitignore" "$dir/.gitignore"
+rm -f "$dir"/scripts/test_*.py "$dir/scripts/conftest.py"
+"$dir/scripts/init.sh"
 ```
 
-This is the same set `tm fleet init` writes. The setup skill
+This is the same tree `tm fleet init` writes. The setup skill
 `skills/tm-architect-setup.md` is not copied here. It is a PM skill that tm
 ships to every project.
 
 ### 4. Write the instance layer
 
-Edit `$dir/CLAUDE.md` for this user. Do not copy it from elsewhere.
+Edit `$dir/AGENTS.md` for this user. Do not copy it from elsewhere.
 
 - Replace `<Name>` with the user's name for the relay marker.
-- Fill the watch set: one line per PM session, with its tmux session name,
-  project path and goal.
+- Fill the watch set in `local/state.md`: one line per PM session, with its
+  tmux session name and project.
 - Set the cadence only if the owner wants a value other than the default.
 
-`records/state.md` and `records/actions.md` stay as seeded. The Architect
+`local/state.md` and `local/actions.md` stay as seeded. The Architect
 fills them. Commit the project:
 
 ```sh
-git -C "$dir" add -- CLAUDE.md .gitignore .trusty-mpm.toml records scripts .claude
+git -C "$dir" add -- CLAUDE.md AGENTS.md .gitignore .trusty-mpm.toml local scripts templates docs .claude
 git -C "$dir" commit -m "chore: seed the Architect project"
 ```
 
@@ -182,7 +186,7 @@ From `$dir`:
 tm doctor | grep session_profile    # says a launch here runs the `supervisor` profile
 tm fleet status --dir "$dir"        # only on a tm that has `tm fleet`; reports the pre-launch checks
 python3 scripts/fleet-poll.py --dry-run   # one cycle: classifies panes, writes nothing, sends no keys
-python3 scripts/input-state.py %<pane>    # prints `<pane> <empty|suggestion|typed|no-prompt> | <text>`
+tm architect input-state %<pane>          # prints `<pane> <empty|suggestion|typed|no-prompt> | <text>`
 ```
 
 Pick `%<pane>` from `tmux list-panes -a -F '#{pane_id} #{session_name}'`.
@@ -225,6 +229,6 @@ The script is idempotent. Pass `--interval N` to change the cycle length.
   before that.
 - `tm fleet status --dir "$dir"` exits 0 and prints `complete`.
 - The Architect's first supervision pass appends an entry to
-  `records/actions.md`.
+  `local/actions.md`.
 
 When a step fails, report it to the owner. Do not start a second Architect.

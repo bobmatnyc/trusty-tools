@@ -4,5 +4,6 @@
 # nothing from the rest of the monorepo (scripts/check_architect_subproject.sh
 # at the repo root enforces both).
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# scripts/ holds the framework's own test_*.py beside the code they test.
+testpaths = ["tests", "scripts"]
 addopts = "-p no:cacheprovider"

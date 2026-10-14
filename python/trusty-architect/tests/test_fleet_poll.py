@@ -27,7 +27,7 @@ RULE = "─" * 80
 DIM, RESET = "\x1b[2m", "\x1b[0m"
 
 
-def screen(body, box="", dim=False, agents=(), ctx=30, plan=(30, 40), status=None):
+def screen(body, box="", dim=False, agents=(), ctx=10, plan=(30, 40), status=None):
     """A pane capture: transcript, optional status line, input box, footer."""
     box_line = "❯\xa0" + (f"{DIM}{box}{RESET}" if dim else box)
     footer = [f"  TM 1.7.4 ● | org/proj ⎇ tm-x | @me | Opus 5.5 | ctx {ctx}% | $1.00 | "
@@ -126,11 +126,11 @@ def test_dialog_words_in_transcript_above_the_box_are_not_a_dialog():
 
 
 # --- box detection against a real capture with a labeled top rule -----------
-# tests/fixtures/idle-pane-labeled-rule.txt: the Architect's own idle pane,
+# tests/fixtures/idle-pane-labeled-rule.txt: the supervisor's own idle pane,
 # captured 2026-09-27. Claude Code now draws the box's TOP rule with a short
 # date label ("──…── 9-26/2026 ─"); the old plain-rule-only check made
 # find_box() miss it (has_box=False), so the poller could never wake the
-# Architect even while genuinely idle (poll-state.json: wake_pending=239,
+# supervisor even while genuinely idle (poll-state.json: wake_pending=239,
 # no wake sent since 2026-09-26T19:15Z).
 
 def test_labeled_top_rule_is_still_recognized_as_the_box():
@@ -178,9 +178,10 @@ def test_busy_pane_is_neither_idle_nor_question(agents, status):
     assert info["busy"] and alerts == [] and ps["idle_since"] is None
 
 
-def test_old_waiting_line_above_a_newer_turn_is_not_busy():
+def test_waiting_line_anywhere_in_the_capture_is_busy():
+    # 87ace19: scan the whole capture, so a capture without a bottom rule is not read idle.
     body = ["✻ Waiting for 1 background agent to finish"] + PM_TURN
-    assert not fp.parse_pane(screen(body))["busy"]
+    assert fp.parse_pane(screen(body))["busy"]
 
 
 def test_question_is_last_pm_line_ending_in_question_mark():
@@ -193,12 +194,13 @@ def test_question_is_last_pm_line_ending_in_question_mark():
 
 # --- ctx / plan-limit / error ------------------------------------------------
 
-def test_ctx_47_alerts_and_crossing_50_changes_fingerprint():
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=47))
-    assert kinds(alerts) == ["ctx"] and alerts[0]["fingerprint"] == "45"
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=52))
-    assert alerts[0]["fingerprint"] == "50"
-    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=44))
+def test_ctx_at_warn_alerts_and_crossing_high_changes_fingerprint():
+    # Bars per ruling b7 (2026-10-07): CTX_WARN 22, CTX_HIGH 25.
+    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=fp.CTX_WARN + 1))
+    assert kinds(alerts) == ["ctx"] and alerts[0]["fingerprint"] == str(fp.CTX_WARN)
+    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=fp.CTX_HIGH + 2))
+    assert alerts[0]["fingerprint"] == str(fp.CTX_HIGH)
+    _, alerts, _ = run(screen(PM_TURN, agents=["x"], ctx=fp.CTX_WARN - 1))
     assert alerts == []
 
 
@@ -268,14 +270,14 @@ def test_events_become_alerts_except_idle_prompt(tmp_path, monkeypatch):
             for t, m in (("permission_prompt", "Claude needs your permission to use Bash"),
                          ("idle_prompt", "Claude is waiting for your input"),
                          ("agent_needs_input", "Agent needs input"))]
-    rows.append({"tmux_session": fp.ARCHITECT, "type": "permission_prompt", "message": "x"})
+    rows.append({"tmux_session": fp.SUPERVISOR, "type": "permission_prompt", "message": "x"})
     ev.write_text("".join(json.dumps(r) + "\n" for r in rows))
     got = fp.read_events(st)
     assert kinds(got) == ["agent_needs_input", "permission_prompt"]
     assert fp.read_events(st) == []
 
 
-# --- self_ctx (the Architect's own transcript has no `ctx N%` field) --------
+# --- self_ctx (the supervisor's own transcript has no `ctx N%` field) -------
 
 def _usage_line(usage, msg_type="assistant", entrypoint="cli"):
     return json.dumps({"type": msg_type, "message": {"usage": usage},
@@ -297,7 +299,7 @@ def test_self_ctx_alerts_only_when_over_threshold(tmp_path, monkeypatch):
     alerts = fp.self_ctx_alerts(0.0)
     assert kinds(alerts) == ["self_ctx"]
     assert "self ctx 41%" in alerts[0]["detail"] or "self ctx 40%" in alerts[0]["detail"]
-    assert alerts[0]["session"] == fp.ARCHITECT
+    assert alerts[0]["session"] == fp.SUPERVISOR
 
     # A newer transcript (higher mtime) under the threshold: no alert, and the
     # newer file — not the older over-threshold one — is the one read.
@@ -310,16 +312,16 @@ def test_self_ctx_alerts_only_when_over_threshold(tmp_path, monkeypatch):
 def test_self_ctx_alerts_ignores_a_newer_sdk_cli_transcript(tmp_path, monkeypatch):
     """question-collector.py's `claude -p --agent` runs (entrypoint "sdk-cli")
     write to the same directory every few minutes and can out-mtime the
-    Architect's own session; they must never be the one measured."""
+    supervisor's own session; they must never be the one measured."""
     monkeypatch.setattr(fp, "SELF_CTX_DIR", str(tmp_path))
     monkeypatch.delenv("SELF_CTX_WINDOW", raising=False)
     monkeypatch.delenv("SELF_CTX_THRESHOLD", raising=False)
-    architect = tmp_path / "architect.jsonl"
-    architect.write_text(_usage_line({"input_tokens": 900_000}, entrypoint="cli"))
-    os.utime(architect, (1000, 1000))
+    supervisor = tmp_path / "supervisor.jsonl"
+    supervisor.write_text(_usage_line({"input_tokens": 900_000}, entrypoint="cli"))
+    os.utime(supervisor, (1000, 1000))
     collector = tmp_path / "collector.jsonl"
     collector.write_text(_usage_line({"input_tokens": 1}, entrypoint="sdk-cli"))
-    os.utime(collector, (9000, 9000))  # newer than the Architect's own transcript
+    os.utime(collector, (9000, 9000))  # newer than the supervisor's own transcript
     alerts = fp.self_ctx_alerts(0.0)
     assert kinds(alerts) == ["self_ctx"]  # would be [] if the collector file won
 
@@ -359,7 +361,7 @@ def test_self_ctx_reemit_interval_matches_ctx(tmp_path, monkeypatch):
 
 # --- wake() skip reasons / dispatch_wake pending -----------------------------
 
-SUP_PANE = [{"session": fp.ARCHITECT, "pane": "%1", "cmd": "claude", "active": "11"}]
+SUP_PANE = [{"session": fp.SUPERVISOR, "pane": "%1", "cmd": "claude", "active": "11"}]
 
 
 def test_wake_reports_no_input_box_found_not_a_misleading_box_state(monkeypatch):
@@ -367,7 +369,7 @@ def test_wake_reports_no_input_box_found_not_a_misleading_box_state(monkeypatch)
     it works, even though a stale "❯" line elsewhere still makes
     input_state.classify() guess "empty" — that guess is not the real skip
     reason and must not appear in its place (poll.log, 2026-09-27: 980+196
-    such entries while the Architect was continuously busy)."""
+    such entries while the supervisor was continuously busy)."""
     cap = "❯\n\n  ✻ Doing work… (2m 14s · esc to interrupt)\n"
     monkeypatch.setattr(fp, "capture", lambda pane: cap)
     assert fp.parse_pane(cap)["has_box"] is False  # the actual cause
@@ -383,7 +385,7 @@ def test_wake_reports_input_typed_when_a_real_box_holds_a_draft(monkeypatch):
 
 def _wrapped_box_screen(body, text):
     """A box whose typed `text` is split across two screen rows with no rule
-    between them — the shape a narrow pane (the Architect's own is ~47 cols)
+    between them — the shape a narrow pane (the supervisor's own is ~47 cols)
     produces, and which input_state.classify()'s single-line read never sees
     in full."""
     half = len(text) // 2
@@ -410,7 +412,7 @@ def test_wake_confirms_a_message_that_wraps_across_screen_rows(monkeypatch):
             sent["msg"] = keys[1]
 
     monkeypatch.setattr(fp, "capture", fake_capture)
-    monkeypatch.setattr(fp, "send_to_architect", fake_send)
+    monkeypatch.setattr(fp, "send_to_supervisor", fake_send)
     monkeypatch.setattr(fp.time, "sleep", lambda s: None)
     result = fp.wake(3, SUP_PANE, dry_run=False)
     assert result.startswith("sent to")
@@ -424,7 +426,7 @@ def test_wake_cleans_up_its_own_text_when_confirmation_fails(monkeypatch):
     empty_cap = screen(PM_TURN, box="")
 
     monkeypatch.setattr(fp, "capture", lambda pane: empty_cap)  # box stays empty throughout
-    monkeypatch.setattr(fp, "send_to_architect", lambda pane, *k: keys_sent.append(k))
+    monkeypatch.setattr(fp, "send_to_supervisor", lambda pane, *k: keys_sent.append(k))
     monkeypatch.setattr(fp.time, "sleep", lambda s: None)
     result = fp.wake(2, SUP_PANE, dry_run=False)
     assert result.startswith("failed:") and "cleaned up, box empty" in result
@@ -441,11 +443,11 @@ def test_wake_detects_its_own_stale_pointer_and_does_not_send(monkeypatch):
     is recognized as the poller's own and never treated like a human draft —
     and never deleted here, since deletion belongs only to the just-typed
     cleanup path above."""
-    stale = "[poll 11:15Z] 4 new alerts -> /srv/architect/inbox/alerts.jsonl"
+    stale = "[poll 11:15Z] 4 new alerts -> /srv/x/inbox/alerts.jsonl"
     cap = _wrapped_box_screen(PM_TURN, stale)
     monkeypatch.setattr(fp, "capture", lambda pane: cap)
     keys_sent = []
-    monkeypatch.setattr(fp, "send_to_architect", lambda pane, *k: keys_sent.append(k))
+    monkeypatch.setattr(fp, "send_to_supervisor", lambda pane, *k: keys_sent.append(k))
     assert fp.parse_pane(cap)["box"] == "typed"
     result = fp.wake(1, SUP_PANE, dry_run=False)
     assert result == "skipped: own stale pointer in box"
@@ -465,7 +467,7 @@ def test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once(monkeypatch
     idle cycle (2 more) must wake exactly once, carrying both cycles' total."""
     calls = []
 
-    def fake_wake(n, panes, dry_run):
+    def fake_wake(n, panes, dry_run, logged=None):
         calls.append(n)
         return "skipped: no input box found" if len(calls) == 1 else "sent to %1"
 
@@ -482,7 +484,7 @@ def test_dispatch_wake_carries_pending_across_a_skip_then_wakes_once(monkeypatch
 def test_dispatch_wake_carries_pending_on_a_failed_confirm(monkeypatch):
     calls = []
 
-    def fake_wake(n, panes, dry_run):
+    def fake_wake(n, panes, dry_run, logged=None):
         calls.append(n)
         return "failed: text not confirmed in the input box; Enter not sent"
 
@@ -513,8 +515,15 @@ def _cycle_env(monkeypatch, tmp_path, panes, quiet_lines=""):
     captures = {p["pane"]: cap for p, cap in panes}
     monkeypatch.setattr(fp, "list_panes", lambda: [p for p, _ in panes])
     monkeypatch.setattr(fp, "capture", lambda pid: captures[pid])
-    monkeypatch.setattr(fp, "host_alerts", lambda now: [])
+    monkeypatch.setattr(fp, "host_alerts", lambda now, state=None: [])
     monkeypatch.setattr(fp, "self_ctx_alerts", lambda now, dry_run: [])
+    # The watchdog would relaunch a real tm-supervisor and notify: never in a unit test.
+    monkeypatch.setattr(fp, "watchdog_alerts", lambda state, panes, now, dry_run=False: ([], "architect=ok"))
+    monkeypatch.setattr(fp, "notify_macos", lambda title, message: None)
+    # These read the host's transcripts, accounts and dashboard: never in a unit test.
+    monkeypatch.setattr(fp, "usage_alerts", lambda *a, **k: [])
+    monkeypatch.setattr(fp, "token_alerts", lambda *a, **k: [])
+    monkeypatch.setattr(fp, "run_dashboard_feeder", lambda *a, **k: None)
     events = tmp_path / "events.jsonl"
     events.write_text("")
     monkeypatch.setattr(fp, "EVENTS", str(events))
@@ -571,7 +580,75 @@ def test_exited_suppressed_for_a_vanished_fixture_session_but_not_a_real_one(tmp
     assert _written_kinds(alerts_path, "tm-realproj") == ["exited"]
 
 
-# --- load alert: the 5-min average, not the 1-min spike ---------------------
+# --- ctx from the transcript when the status line has no `ctx N%` ----------
+
+def _compacted(cap):
+    """The status line after an auto-compact: the ctx field is replaced."""
+    return cap.replace("ctx 10% |", "⤵ 969k→77k (92%) |")
+
+
+def _transcript_env(monkeypatch, tmp_path, workdir, tokens):
+    """A transcript folder for `workdir`; tokens=None writes none."""
+    base = tmp_path / "projects"
+    monkeypatch.setattr(fp, "TRANSCRIPT_BASE", str(base))
+    monkeypatch.setattr(fp, "pane_session_id", lambda pane: "s")  # the s.jsonl below
+    fp._transcript_cache.clear()
+    if tokens is not None:
+        d = base / workdir.replace("/", "-").replace(".", "-")
+        d.mkdir(parents=True)
+        (d / "s.jsonl").write_text(_usage_line(
+            {"input_tokens": 10, "cache_read_input_tokens": tokens - 10}))
+
+
+def _ctx_cycle(monkeypatch, tmp_path, cap, path="/w/proj"):
+    pane = {**_pane("tm-proj", "%40"), "path": path}
+    alerts_path = _cycle_env(monkeypatch, tmp_path, [(pane, cap)])
+    fp.cycle({"panes": {"tm-proj|%40": {}}}, dry_run=False, now=0.0)
+    return alerts_path
+
+
+def test_status_line_ctx_wins_over_the_transcript(tmp_path, monkeypatch):
+    _transcript_env(monkeypatch, tmp_path, "/w/proj", 700_000)  # 70%, ignored
+    alerts_path = _ctx_cycle(monkeypatch, tmp_path, screen(PM_TURN, agents=["x"], ctx=10))
+    assert _written_kinds(alerts_path, "tm-proj") == []
+
+
+@pytest.mark.parametrize("replacement", ["⤵ 969k→77k (92%) |", "ctx>200k |"])
+def test_status_line_without_a_plain_ctx_percent_uses_the_transcript(
+        tmp_path, monkeypatch, replacement):
+    # Pane sits in a worktree under /w/proj: the walk-up finds the project's folder.
+    _transcript_env(monkeypatch, tmp_path, "/w/proj", 699_000)
+    cap = screen(PM_TURN, agents=["x"]).replace("ctx 10% |", replacement)
+    assert fp.parse_pane(cap)["ctx"] is None
+    alerts_path = _ctx_cycle(monkeypatch, tmp_path, cap, path="/w/proj/.claude/worktrees/t")
+    with open(alerts_path) as f:
+        rows = [json.loads(l) for l in f]
+    assert [(r["kind"], r["fingerprint"], r["detail"]) for r in rows] == \
+        [("ctx", str(fp.CTX_HIGH), "ctx 69%")]
+
+
+def test_no_transcript_means_no_ctx_alert_and_no_crash(tmp_path, monkeypatch):
+    _transcript_env(monkeypatch, tmp_path, "/w/proj", None)
+    cap = _compacted(screen(PM_TURN, agents=["x"]))
+    assert _written_kinds(_ctx_cycle(monkeypatch, tmp_path, cap), "tm-proj") == []
+    assert fp.transcript_ctx_pct("") is None
+
+
+def test_transcript_ctx_is_cached_until_the_file_changes(tmp_path, monkeypatch):
+    _transcript_env(monkeypatch, tmp_path, "/w/proj", 460_000)
+    reads = []
+    real = fp.self_ctx.tail_last_assistant_usage
+    monkeypatch.setattr(fp.self_ctx, "tail_last_assistant_usage",
+                        lambda path: reads.append(path) or real(path))
+    assert fp.transcript_ctx_pct("/w/proj") == 46
+    assert fp.transcript_ctx_pct("/w/proj") == 46
+    assert len(reads) == 1
+    f = next((tmp_path / "projects").rglob("*.jsonl"))
+    f.write_text(f.read_text() + _usage_line({"input_tokens": 520_000}))
+    assert fp.transcript_ctx_pct("/w/proj") == 52 and len(reads) == 2
+
+
+# --- load alert: the 15-min average, not the 1-min spike --------------------
 
 def _loadavg(monkeypatch, load1, load5, load15, cores=16, factor=None):
     monkeypatch.setattr(fp.os, "getloadavg", lambda: (load1, load5, load15))
@@ -589,17 +666,17 @@ def test_a_brief_1min_spike_with_a_low_5min_average_does_not_alert(monkeypatch):
     assert [a["kind"] for a in fp.host_alerts(0.0) if a["kind"] == "load"] == []
 
 
-def test_a_sustained_5min_average_above_1_5x_cores_alerts(monkeypatch):
-    _loadavg(monkeypatch, 30.0, 25.0, 20.0, cores=16)   # 1.5x16=24; 25.0 > 24
+def test_a_sustained_15min_average_above_1_5x_cores_alerts(monkeypatch):
+    _loadavg(monkeypatch, 30.0, 26.0, 25.0, cores=16)   # 1.5x16=24; 25.0 > 24
     alerts = [a for a in fp.host_alerts(0.0) if a["kind"] == "load"]
     assert len(alerts) == 1
-    assert "30.0/25.0/20.0" in alerts[0]["detail"]        # all three averages shown
+    assert "30.0/26.0/25.0" in alerts[0]["detail"]        # all three averages shown
 
 
 def test_load_factor_is_env_overridable(monkeypatch):
-    _loadavg(monkeypatch, 10.0, 17.0, 5.0, cores=8, factor=2.0)   # 2.0x8=16; 17>16
+    _loadavg(monkeypatch, 10.0, 5.0, 17.0, cores=8, factor=2.0)   # 2.0x8=16; 17>16
     assert len([a for a in fp.host_alerts(0.0) if a["kind"] == "load"]) == 1
-    _loadavg(monkeypatch, 10.0, 17.0, 5.0, cores=8, factor=3.0)   # 3.0x8=24; 17<24
+    _loadavg(monkeypatch, 10.0, 5.0, 17.0, cores=8, factor=3.0)   # 3.0x8=24; 17<24
     assert [a for a in fp.host_alerts(0.0) if a["kind"] == "load"] == []
 
 
@@ -607,7 +684,7 @@ def test_load_reemit_interval_is_unchanged_at_1800s():
     assert fp.REEMIT["load"] == 1800
 
 
-def test_send_refuses_any_pane_outside_the_architect(monkeypatch):
+def test_send_refuses_any_pane_outside_tm_supervisor(monkeypatch):
     calls = []
 
     def fake_tmux(*args):
@@ -616,5 +693,55 @@ def test_send_refuses_any_pane_outside_the_architect(monkeypatch):
 
     monkeypatch.setattr(fp, "tmux", fake_tmux)
     with pytest.raises(fp.TmuxError):
-        fp.send_to_architect("%3", "-l", "hello")
+        fp.send_to_supervisor("%3", "-l", "hello")
     assert not any(c[0] == "send-keys" for c in calls)
+
+
+# --- builder band -------------------------------------------------------------
+
+@pytest.mark.parametrize("load5,free,mem,swap,want", [
+    (0.0, 300, 70, 0, "open"),
+    (17.9, 200, 20, 0, "open"),      # just under the stateless hold line (1.125x16 = 18)
+    (18.0, 300, 70, 0, "hold"),      # load == 1.125x16
+    (0.0, 199, 70, 0, "hold"),       # free < 200
+    (30.0, 300, 70, 0, "hold"),      # load == 1.875x16 is not > stop
+    (30.1, 300, 70, 0, "stop"),
+    (0.0, 99, 70, 0, "stop"),        # free < 100
+    (0.0, 100, 70, 0, "hold"),       # free == 100 is not < stop
+    (0.0, 300, 19, 0, "stop"),       # mem free < 20
+    (0.0, 300, None, 0, "open"),     # mem unavailable: skipped
+    (0.0, 300, 70, 1, "stop"),       # any swap
+])
+def test_builder_band_boundaries(monkeypatch, load5, free, mem, swap, want):
+    for v in ("BAND_STOP_LOAD_FACTOR", "BAND_HOLD_LOAD_FACTOR", "BAND_STOP_FREE_GIB",
+              "BAND_HOLD_FREE_GIB", "BAND_STOP_MEM_FREE_PCT"):
+        monkeypatch.delenv(v, raising=False)
+    assert fp.builder_band(load5, 16, free, mem, swap) == want
+
+
+def test_band_alert_fires_only_on_change_and_first_run():
+    st = {}
+    first = fp.band_alerts(st, 0.0, 1.0, 16, 300, 70, 0)
+    assert [a["kind"] for a in first] == ["band"] and st["band"] == "open"
+    assert fp.band_alerts(st, 1.0, 1.0, 16, 300, 70, 0) == []
+    chg = fp.band_alerts(st, 2.0, 13.2, 16, 180, 70, 0)
+    assert st["band"] == "hold"
+    assert chg[0]["detail"] == ("builder band open -> hold (load15 13.2/16 cores, "
+                                "180 GiB free, mem 70% free, swap 0)")
+
+
+@pytest.mark.parametrize("load5,prev,want", [
+    (15.5, "open", "open"), (18.0, "open", "open"), (20.0, "open", "open"),
+    (20.5, "open", "hold"), (18.0, "hold", "hold"), (16.0, "hold", "hold"),
+    (15.9, "hold", "open"), (15.9, "stop", "open"), (18.0, "stop", "hold"),
+    (30.5, "open", "stop"),
+])
+def test_builder_band_hysteresis(monkeypatch, load5, prev, want):
+    for v in ("BAND_OPEN_LOAD_FACTOR", "BAND_REHOLD_LOAD_FACTOR", "BAND_STOP_LOAD_FACTOR"):
+        monkeypatch.delenv(v, raising=False)
+    assert fp.builder_band(load5, 16, 300, 70, 0, prev=prev) == want
+
+
+def test_builder_band_hysteresis_disk_still_gates_open():
+    assert fp.builder_band(5.0, 16, 150, 70, 0, prev="open") == "hold"
+    assert fp.builder_band(5.0, 16, 150, 70, 0, prev="hold") == "hold"
