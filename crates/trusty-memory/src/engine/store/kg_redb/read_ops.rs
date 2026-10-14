@@ -80,7 +80,7 @@ impl KgStoreRedb {
     /// What: Iterate ACTIVE_SUBJECT_COUNTS (keyed by subject bytes, sorted
     /// alphabetically), collect subjects whose count is > 0, take `limit`.
     /// Test: `list_subjects_returns_distinct_active_subjects`.
-    pub fn list_subjects(&self, limit: usize) -> Result<Vec<String>> {
+    pub(crate) fn list_subjects(&self, limit: usize) -> Result<Vec<String>> {
         let rtx = self.db().begin_read().context("begin list_subjects txn")?;
         let counts = rtx
             .open_table(ACTIVE_SUBJECT_COUNTS)
@@ -110,7 +110,7 @@ impl KgStoreRedb {
     /// What: Iterate ACTIVE_SUBJECT_COUNTS in key order, take rows with
     /// non-zero counts up to `limit`.
     /// Test: `list_subjects_with_counts_returns_grouped_counts`.
-    pub fn list_subjects_with_counts(&self, limit: usize) -> Result<Vec<(String, u64)>> {
+    pub(crate) fn list_subjects_with_counts(&self, limit: usize) -> Result<Vec<(String, u64)>> {
         let rtx = self
             .db()
             .begin_read()
@@ -145,7 +145,7 @@ impl KgStoreRedb {
     /// secondary index on valid_from — acceptable since the active set is
     /// bounded by application sizing.
     /// Test: `list_active_returns_ordered_window`.
-    pub fn list_active(&self, limit: usize, offset: usize) -> Result<Vec<Triple>> {
+    pub(crate) fn list_active(&self, limit: usize, offset: usize) -> Result<Vec<Triple>> {
         let rtx = self.db().begin_read().context("begin list_active txn")?;
         let triples = rtx
             .open_table(TRIPLES)
@@ -214,7 +214,7 @@ impl KgStoreRedb {
     /// - Counts only ACTIVE triples — a superseded or retracted triple is
     ///   excluded even though its history row survives.
     /// - The sum saturates rather than overflowing `u64`.
-    pub fn count_active_triples(&self) -> Result<u64> {
+    pub(crate) fn count_active_triples(&self) -> Result<u64> {
         // #5384: propagate instead of returning 0 — a failed read must not be
         // reportable as an empty graph.
         let rtx = self
@@ -240,7 +240,8 @@ impl KgStoreRedb {
     /// manual checkpoint; the call is kept for API compatibility.
     /// What: Returns immediately.
     /// Test: Implicit via `checkpoint_is_noop`.
-    pub fn checkpoint(&self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn checkpoint(&self) -> Result<()> {
         // redb manages its commit log internally — nothing to do.
         Ok(())
     }
@@ -253,7 +254,7 @@ impl KgStoreRedb {
     /// skipped-row count. Callers that only want the rows (e.g. `kg_rebuild`,
     /// `backfill_report`) keep a bare `Vec<Drawer>` return.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`.
-    pub fn load_drawers(&self) -> Result<Vec<Drawer>> {
+    pub(crate) fn load_drawers(&self) -> Result<Vec<Drawer>> {
         Ok(self.load_drawers_with_skipped()?.0)
     }
 
@@ -272,7 +273,7 @@ impl KgStoreRedb {
     /// Test: `drawer_load_degraded_true_on_corrupt_table_false_when_empty`
     /// (whole-table Err) and `drawer_load_degraded_true_on_partial_row_corruption`
     /// (per-row skip), both in `retrieval::tests`.
-    pub fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
+    pub(crate) fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
         let rtx = self.db().begin_read().context("begin load_drawers txn")?;
         let drawers = rtx.open_table(DRAWERS).context("open drawers table")?;
         let mut out = Vec::new();
@@ -322,7 +323,7 @@ impl KgStoreRedb {
     /// Test: `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`,
     /// `a_fact_key_index_naming_no_row_still_admits_the_newcomer`,
     /// `an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_second_claimant`.
-    pub fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
+    pub(crate) fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
         let rtx = self.db().begin_read().context("begin load_drawer txn")?;
         let drawers = rtx
             .open_table(DRAWERS)
@@ -380,7 +381,7 @@ impl KgStoreRedb {
     /// `load_drawers` skips undecodable rows instead of failing the whole read.
     /// Test: `fact_key_index_tracks_upsert_and_delete`,
     /// `fact_key_index_follows_the_slot_on_reassignment`.
-    pub fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
+    pub(crate) fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
         let rtx = self
             .db()
             .begin_read()
@@ -420,7 +421,7 @@ impl KgStoreRedb {
     /// that is not a drawer reference is skipped; an undecodable row is an
     /// error.
     /// Test: `superseded_by_many_maps_only_active_drawer_edges`.
-    pub fn superseded_by_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, Uuid>> {
+    pub(crate) fn superseded_by_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, Uuid>> {
         self.first_active_object_many(ids, SUPERSEDED_BY, |id, object| {
             object
                 .strip_prefix("drawer:")
@@ -436,7 +437,7 @@ impl KgStoreRedb {
     /// What: the first active `(drawer:{id}, verify_with)` row's object, keyed
     /// by drawer id. An id with no active row is absent from the map.
     /// Test: `a_refused_slot_stores_no_verify_command`, `slot_retirement_closes_the_retirees_verify_command`.
-    pub fn verify_with_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
+    pub(crate) fn verify_with_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, String>> {
         self.first_active_object_many(ids, VERIFY_WITH, |_, object| Some(object.to_string()))
     }
 
@@ -496,7 +497,8 @@ impl KgStoreRedb {
     /// What: Scan the TRIPLES table end-to-end, returning both active rows and
     /// `hist:` rows decoded as `Triple` (so `valid_to.is_some()` for history).
     /// Test: `assert_supersedes_prior` checks history is preserved.
-    pub fn dump_all_triples(&self) -> Result<Vec<Triple>> {
+    #[cfg(test)]
+    pub(crate) fn dump_all_triples(&self) -> Result<Vec<Triple>> {
         let rtx = self
             .db()
             .begin_read()

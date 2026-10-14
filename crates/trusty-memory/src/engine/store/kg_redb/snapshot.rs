@@ -42,25 +42,26 @@ mod dest;
 mod io_util;
 #[path = "snapshot_restore.rs"]
 mod restore;
-pub use dest::check_backup_name;
+pub(crate) use dest::check_backup_name;
 use dest::{manual_backup_root, prepare_dest};
 use io_util::{
     StagingDir, copy_verified, hash_file, io_err, redb_err, sibling, sync_file, write_verified,
 };
-pub use restore::restore_palace_snapshot;
+#[cfg(any(test, feature = "server"))]
+pub(crate) use restore::restore_palace_snapshot;
 
 /// Version of the snapshot layout and manifest this build writes and reads.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub(crate) const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 /// Value of [`SnapshotManifest::kind`].
-pub const SNAPSHOT_KIND: &str = "palace-snapshot";
+pub(crate) const SNAPSHOT_KIND: &str = "palace-snapshot";
 /// The manifest file; its presence marks a snapshot complete.
-pub const SNAPSHOT_MANIFEST: &str = "manifest.json";
+pub(crate) const SNAPSHOT_MANIFEST: &str = "manifest.json";
 /// The KG database inside a palace and inside a snapshot.
-pub const KG_FILE: &str = "kg.redb";
+pub(crate) const KG_FILE: &str = "kg.redb";
 /// The chat-session database inside a palace and inside a snapshot.
-pub const CHAT_FILE: &str = "chat_sessions.redb";
+pub(crate) const CHAT_FILE: &str = "chat_sessions.redb";
 /// This palace's lines of the shared `drawer_counts.jsonl` (#9283).
-pub const DRAWER_COUNTS_FILE: &str = "drawer_counts.jsonl";
+pub(crate) const DRAWER_COUNTS_FILE: &str = "drawer_counts.jsonl";
 /// Small metadata files copied whole.
 const PLAIN_FILES: [&str; 2] = ["palace.json", "identity.txt"];
 /// Append-only journals, in read order. The live file is read BEFORE the
@@ -149,13 +150,13 @@ type Result<T> = std::result::Result<T, SnapshotError>;
 
 /// One file in a snapshot, as recorded in [`SNAPSHOT_MANIFEST`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SnapshotFile {
+pub(crate) struct SnapshotFile {
     /// File name inside the snapshot directory.
-    pub name: String,
+    pub(crate) name: String,
     /// Byte length.
-    pub len: u64,
+    pub(crate) len: u64,
     /// Lower-case hex SHA-256.
-    pub sha256: String,
+    pub(crate) sha256: String,
 }
 
 /// The contents of [`SNAPSHOT_MANIFEST`].
@@ -169,37 +170,37 @@ pub struct SnapshotFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotManifest {
     /// [`SNAPSHOT_FORMAT_VERSION`] of the writer.
-    pub format_version: u32,
+    pub(crate) format_version: u32,
     /// Always [`SNAPSHOT_KIND`].
-    pub kind: String,
+    pub(crate) kind: String,
     /// Palace id.
-    pub palace: String,
+    pub(crate) palace: String,
     /// When the redb read transactions were opened.
-    pub taken_at: DateTime<Utc>,
+    pub(crate) taken_at: DateTime<Utc>,
     /// trusty-memory version that wrote the snapshot (trusty-common's before
     /// #9271 moved the engine).
-    pub writer_version: String,
+    pub(crate) writer_version: String,
     /// `kg_schema.palace_format` of the copy; `None` for a fresh KG.
-    pub palace_format: Option<u32>,
+    pub(crate) palace_format: Option<u32>,
     /// Row count per `kg.redb` table, as copied.
-    pub kg_tables: BTreeMap<String, u64>,
+    pub(crate) kg_tables: BTreeMap<String, u64>,
     /// Row count per `chat_sessions.redb` table; empty when the palace has none.
-    pub chat_tables: BTreeMap<String, u64>,
+    pub(crate) chat_tables: BTreeMap<String, u64>,
     /// Rows in `drawers`.
-    pub drawer_count: u64,
+    pub(crate) drawer_count: u64,
     /// Rows in `rooms`.
-    pub room_count: u64,
+    pub(crate) room_count: u64,
     /// Every file in the snapshot except the manifest.
-    pub files: Vec<SnapshotFile>,
+    pub(crate) files: Vec<SnapshotFile>,
 }
 
 /// A completed snapshot: its directory and its manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PalaceSnapshot {
     /// The snapshot directory.
-    pub dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// What [`SNAPSHOT_MANIFEST`] in `dir` records.
-    pub manifest: SnapshotManifest,
+    pub(crate) manifest: SnapshotManifest,
 }
 
 /// Named points a test can fail a snapshot or restore at.
