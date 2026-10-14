@@ -120,7 +120,7 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
             return DoctorCheck::new(
                 NAME,
                 CheckStatus::Unknown,
-                format!("cannot read the channel answer delivery trace: {e}"),
+                format!("cannot read the channel answer delivery trace or question log: {e}"),
             );
         }
     };
@@ -145,7 +145,9 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
                 channels_taint::REAPPLY_FAILURES_FILE
             ));
         }
-        parts.push(lines.join("; "));
+        if !lines.is_empty() {
+            parts.push(lines.join("; "));
+        }
         return DoctorCheck::new(NAME, CheckStatus::Fail, parts.join(" "));
     }
     if lines.is_empty() {
