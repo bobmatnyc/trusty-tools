@@ -466,7 +466,14 @@ pub fn sample_cache(
     if same_windows_as_other_account(rows, &account, &got.data) {
         return Ok(None);
     }
-    record_reading(&paths.ledger, &account, "statusline-cache", now, &got.data, rows)
+    record_reading(
+        &paths.ledger,
+        &account,
+        "statusline-cache",
+        now,
+        &got.data,
+        rows,
+    )
 }
 
 /// True when the newest reading of a different account has the same reset

@@ -260,7 +260,10 @@ fn hm(seconds: f64) -> String {
 
 /// `_fmt`: `<iso> / <New York time> NY`, or `-`.
 fn fmt(t: Option<UtcTime>) -> String {
-    t.map_or_else(|| "-".to_owned(), |t| format!("{} / {} NY", t.iso(), t.ny()))
+    t.map_or_else(
+        || "-".to_owned(),
+        |t| format!("{} / {} NY", t.iso(), t.ny()),
+    )
 }
 
 /// Other accounts usable for a cutover (best first) and the skipped ones.
@@ -353,7 +356,9 @@ pub fn runway(rows: &[Reading], now: UtcTime) -> Result<Runway, UsageError> {
     let rate = best.as_ref().map(|b| b.0);
     let first_reset = resets.into_iter().min();
     let runway_h = rate.filter(|r| *r != 0.0).map(|r| left / r);
-    let gap_h = first_reset.as_ref().map(|(t, _)| t.seconds_since(now) / 3600.0);
+    let gap_h = first_reset
+        .as_ref()
+        .map(|(t, _)| t.seconds_since(now) / 3600.0);
     let covers_gap = match (runway_h.filter(|h| *h != 0.0), gap_h) {
         (Some(h), Some(g)) => Some(h >= g),
         _ => None,

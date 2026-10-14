@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 use trusty_architect::classify::{Alert, alert};
 use trusty_architect::poller::steps::notify_macos::{
-    NotifyError, Notifier, Osascript, RecordingNotifier, WATCHDOG_TITLE, applescript,
+    Notifier, NotifyError, Osascript, RecordingNotifier, WATCHDOG_TITLE, applescript,
     notify_watchdog_alerts,
 };
 use trusty_architect::poller::steps::usage::{
@@ -46,7 +46,10 @@ fn ledger_with_alerts(p: &UsagePaths) -> TestResult {
     ];
     let text: String = rows.iter().map(|r| format!("{r}\n")).collect();
     fs::write(&p.ledger, text)?;
-    fs::write(&p.claude_json, json!({"oauthAccount": {"emailAddress": GM}}).to_string())?;
+    fs::write(
+        &p.claude_json,
+        json!({"oauthAccount": {"emailAddress": GM}}).to_string(),
+    )?;
     Ok(())
 }
 
@@ -74,11 +77,21 @@ fn failed_probe_launch_leaves_probe_state_and_keeps_alerts() -> TestResult {
     let kinds: Vec<&str> = alerts.iter().map(|a| a.fingerprint.as_str()).collect();
     assert_eq!(
         kinds,
-        [format!("wk>=80:{GM}:2026-10-09T07:00:00Z"), format!("cutover:{GM}:next@x")]
+        [
+            format!("wk>=80:{GM}:2026-10-09T07:00:00Z"),
+            format!("cutover:{GM}:next@x")
+        ]
     );
-    assert!(log.iter().any(|l| l.starts_with("usage probe ERROR ")), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.starts_with("usage probe ERROR ")),
+        "{log:?}"
+    );
     let usage = state["usage"].as_object().ok_or("usage state")?;
-    assert_eq!(usage.get("last_probe"), None, "a failed launch is not a probe");
+    assert_eq!(
+        usage.get("last_probe"),
+        None,
+        "a failed launch is not a probe"
+    );
     assert_eq!(usage["tries"], json!(0));
 
     // The next cycle tries again, because nothing was recorded as probed.
@@ -215,7 +228,10 @@ fn failed_notifications_are_logged_and_the_rest_still_sent() {
     let log = notify_watchdog_alerts(&failing, &new);
     assert_eq!(failing.sent().len(), 2, "every notification is tried");
     assert_eq!(log.len(), 2, "{log:?}");
-    assert!(log.iter().all(|l| l.starts_with("notify ERROR ")), "{log:?}");
+    assert!(
+        log.iter().all(|l| l.starts_with("notify ERROR ")),
+        "{log:?}"
+    );
 }
 
 /// A hung `osascript` is killed at the timeout, so it cannot stall the poller.
@@ -229,7 +245,11 @@ fn osascript_that_hangs_is_killed_at_the_timeout() -> TestResult {
     let start = Instant::now();
     let got = notifier.notify("Architect watchdog", "x");
     assert!(matches!(got, Err(NotifyError::Timeout(_))), "{got:?}");
-    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
     Ok(())
 }
 
@@ -239,7 +259,11 @@ fn osascript_that_hangs_is_killed_at_the_timeout() -> TestResult {
 fn osascript_failures_are_errors() -> TestResult {
     let dir = tempfile::tempdir()?;
     let failing = Osascript {
-        program: script(dir.path(), "osascript", "echo 'execution error' >&2; exit 1")?,
+        program: script(
+            dir.path(),
+            "osascript",
+            "echo 'execution error' >&2; exit 1",
+        )?,
         ..Osascript::default()
     };
     match failing.notify("t", "m") {
@@ -253,7 +277,10 @@ fn osascript_failures_are_errors() -> TestResult {
         program: dir.path().join("no-osascript"),
         ..Osascript::default()
     };
-    assert!(matches!(missing.notify("t", "m"), Err(NotifyError::Spawn(_))));
+    assert!(matches!(
+        missing.notify("t", "m"),
+        Err(NotifyError::Spawn(_))
+    ));
     Ok(())
 }
 

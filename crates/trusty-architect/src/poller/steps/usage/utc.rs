@@ -244,14 +244,20 @@ mod tests {
     #[test]
     fn utc_times_round_like_cpython() -> R {
         // datetime.fromtimestamp(1791400000.9999996, UTC) rolls to the next second.
-        assert_eq!(UtcTime::from_unix(1_791_400_000.999_999_6)?.iso(), "2026-10-07T19:06:41Z");
+        assert_eq!(
+            UtcTime::from_unix(1_791_400_000.999_999_6)?.iso(),
+            "2026-10-07T19:06:41Z"
+        );
         let t = UtcTime::parse_iso("2026-10-07T16:15:00Z")?;
         // timedelta(hours=73 / (26 / 3.1)) from the masa pair: 2026-10-08T00:57:13.846154.
         let at = t.plus_hours(73.0 / (26.0 / (186.0 / 60.0)))?;
         assert_eq!(at.micros() % US_PER_S, 846_154);
         assert!(t.plus_hours(f64::INFINITY).is_err());
         assert!(t.plus_hours(1e13).is_err(), "past year 9999");
-        assert_eq!(t.seconds_since(UtcTime::parse_iso("2026-10-07T13:09:00Z")?), 11_160.0);
+        assert_eq!(
+            t.seconds_since(UtcTime::parse_iso("2026-10-07T13:09:00Z")?),
+            11_160.0
+        );
         Ok(())
     }
 
@@ -260,7 +266,10 @@ mod tests {
         let base = UtcTime::parse_iso("2026-10-07T16:10:00Z")?;
         assert_eq!(UtcTime::parse_iso("2026-10-07T12:10:00-04:00")?, base);
         assert_eq!(UtcTime::parse_iso("2026-10-07 16:10+00:00")?, base);
-        assert_eq!(UtcTime::parse_iso("2026-10-07T16+00:00")?.iso(), "2026-10-07T16:00:00Z");
+        assert_eq!(
+            UtcTime::parse_iso("2026-10-07T16+00:00")?.iso(),
+            "2026-10-07T16:00:00Z"
+        );
         let frac = UtcTime::parse_iso("2026-10-07T16:10:00.2500009Z")?;
         assert_eq!(frac.micros() - base.micros(), 250_000);
         for bad in [

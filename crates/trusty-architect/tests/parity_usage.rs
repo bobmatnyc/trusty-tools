@@ -76,7 +76,10 @@ fn check_row<T: Serialize, E: std::fmt::Debug>(
     }
     let got = got.map_err(|e| format!("{file} {name}: Rust failed: {e:?}"))?;
     let text = to_python_json(&(name, Ok_ { ok: got }), ensure_ascii)?;
-    assert_eq!(text, line, "{file} {name}: Rust (left) differs from Python (right)");
+    assert_eq!(
+        text, line,
+        "{file} {name}: Rust (left) differs from Python (right)"
+    );
     Ok(())
 }
 
@@ -98,7 +101,11 @@ fn usage_alerts_match_python_goldens() -> TestResult {
         let name = s(&want[0]);
         let case = named(&c, "alerts", name)?;
         let got = case_rows(case).and_then(|rows| {
-            Ok(usage_alerts(&rows, t(s(&case["now"]))?, s(&case["current"]))?)
+            Ok(usage_alerts(
+                &rows,
+                t(s(&case["now"]))?,
+                s(&case["current"]),
+            )?)
         });
         check_row("usage_alerts.jsonl", &line, &want, name, got, false)?;
     }
@@ -133,7 +140,11 @@ fn plan_row(p: &Plan) -> PlanRow {
     PlanRow {
         need: p.need,
         switch_at: p.switch_at.map(UtcTime::iso),
-        triggers: p.triggers.iter().map(|(at, x)| (at.iso(), x.clone())).collect(),
+        triggers: p
+            .triggers
+            .iter()
+            .map(|(at, x)| (at.iso(), x.clone()))
+            .collect(),
         next: p.next.as_ref().map(|(a, _)| a.clone()),
         alternatives: p.alternatives.iter().map(|(a, _)| a.clone()).collect(),
         skipped: p.skipped.clone(),
@@ -207,7 +218,10 @@ fn usage_rows_match_python_goldens() -> TestResult {
         } else {
             assert!(alerts.is_empty(), "{name}: a failed step yields no alert");
             assert_eq!(log.len(), 1, "{name}: {log:?}");
-            assert!(log[0].starts_with("usage sampler ERROR "), "{name}: {log:?}");
+            assert!(
+                log[0].starts_with("usage sampler ERROR "),
+                "{name}: {log:?}"
+            );
             assert!(s(&python_log[0]).starts_with("usage sampler ERROR "));
         }
     }
@@ -285,11 +299,16 @@ fn project_matches_python_goldens() -> TestResult {
         } else {
             Window::Week
         };
-        let got = rows_from_values(arr(&case[1])).map_err(Into::into).and_then(
-            |rows| -> TestResult<Option<ProjectRow>> {
-                Ok(project_row(project(&rows, s(&case[2]), t(s(&case[3]))?, window)?))
-            },
-        );
+        let got = rows_from_values(arr(&case[1]))
+            .map_err(Into::into)
+            .and_then(|rows| -> TestResult<Option<ProjectRow>> {
+                Ok(project_row(project(
+                    &rows,
+                    s(&case[2]),
+                    t(s(&case[3]))?,
+                    window,
+                )?))
+            });
         check_row("project.jsonl", &line, &want, name, got, true)?;
     }
     Ok(())
@@ -325,9 +344,8 @@ fn read_cache_matches_python_goldens() -> TestResult {
             fs::write(&path, text)?;
             set_mtime(&path, now_ts - case["age"].as_f64().ok_or("age")?)?;
         }
-        let got = read_cache(now, &path, 1800.0).map(|r| {
-            r.map(|r| (r.account, r.mtime.timestamp(), r.data))
-        });
+        let got = read_cache(now, &path, 1800.0)
+            .map(|r| r.map(|r| (r.account, r.mtime.timestamp(), r.data)));
         check_row("cache.jsonl", &line, &want, name, got, false)?;
     }
     Ok(())
@@ -434,7 +452,10 @@ fn every_divergence_from_the_prototype_is_named() -> TestResult {
         ("usage_alerts:current_5h_reading_over_3h_old", empty_run),
         ("usage_alerts:inferred_windows", empty_run),
         ("project:newest_older_than_span", empty_run),
-        ("poll_step:probe_launch_fails", "failed_launch_is_not_a_probe"),
+        (
+            "poll_step:probe_launch_fails",
+            "failed_launch_is_not_a_probe",
+        ),
         ("notify_macos:spawn_fails", "notify_failure_is_logged"),
         ("notify_macos:timeout", "notify_failure_is_logged"),
         ("notify_macos:nonzero_exit", "notify_failure_is_logged"),

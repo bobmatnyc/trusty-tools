@@ -23,8 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use super::band::BandConfig;
-use super::steps::usage::UsagePaths;
 use super::pyfmt::{py_float, py_int};
+use super::steps::usage::UsagePaths;
 use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
 use crate::self_ctx::{default_dir, projects_dir};
@@ -129,7 +129,10 @@ impl Config {
         let claude_dir = path("CLAUDE_CONFIG_DIR", config.clone());
         let usage = UsagePaths {
             ledger: path("USAGE_LEDGER", root.join("local/usage/ledger.jsonl")),
-            cache: path("USAGE_STATUSLINE_CACHE", inbox.join("statusline-usage.json")),
+            cache: path(
+                "USAGE_STATUSLINE_CACHE",
+                inbox.join("statusline-usage.json"),
+            ),
             claude_json: path("USAGE_CLAUDE_JSON", claude_dir.join(".claude.json")),
             probe_script: root.join("scripts/usage-probe.sh"),
             probe_log: inbox.join("usage-probe.log"),

@@ -20,7 +20,10 @@ const GM: &str = "a2@example.com";
 fn usage_files(env: &Env) -> TestResult {
     let usage = &env.config.usage;
     fs::create_dir_all(usage.claude_json.parent().ok_or("claude.json dir")?)?;
-    fs::write(&usage.claude_json, json!({"oauthAccount": {"emailAddress": GM}}).to_string())?;
+    fs::write(
+        &usage.claude_json,
+        json!({"oauthAccount": {"emailAddress": GM}}).to_string(),
+    )?;
     fs::create_dir_all(usage.ledger.parent().ok_or("ledger dir")?)?;
     let rows = [
         json!({"ts": "2026-10-07T14:30:00Z", "account": GM, "pct5h": 1, "reset5h": "2026-10-07T20:50:00Z",
@@ -30,12 +33,17 @@ fn usage_files(env: &Env) -> TestResult {
         json!({"ts": "2026-10-07T16:18:00Z", "account": "next@x", "pct5h": 0, "reset5h": null,
                "pctwk": 50, "resetwk": "2026-10-12T11:00:00Z", "source": "manual"}),
     ];
-    fs::write(&usage.ledger, rows.iter().map(|r| format!("{r}\n")).collect::<String>())?;
+    fs::write(
+        &usage.ledger,
+        rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )?;
     Ok(())
 }
 
 fn clock() -> TestResult<FakeClock> {
-    Ok(FakeClock::new(UtcTime::parse_iso("2026-10-07T16:20:00Z")?.timestamp()))
+    Ok(FakeClock::new(
+        UtcTime::parse_iso("2026-10-07T16:20:00Z")?.timestamp(),
+    ))
 }
 
 /// The defaults the cycle reads: `<root>/local/usage/ledger.jsonl`,
@@ -64,8 +72,14 @@ fn usage_paths_default_like_the_prototype() -> TestResult {
         set.config.usage.claude_json,
         std::path::Path::new("/cfg/.claude.json")
     );
-    let file = Env::new(&[("USAGE_CLAUDE_JSON", "/a.json"), ("CLAUDE_CONFIG_DIR", "/cfg")])?;
-    assert_eq!(file.config.usage.claude_json, std::path::Path::new("/a.json"));
+    let file = Env::new(&[
+        ("USAGE_CLAUDE_JSON", "/a.json"),
+        ("CLAUDE_CONFIG_DIR", "/cfg"),
+    ])?;
+    assert_eq!(
+        file.config.usage.claude_json,
+        std::path::Path::new("/a.json")
+    );
     Ok(())
 }
 
@@ -88,10 +102,20 @@ fn usage_alerts_reach_alerts_jsonl_and_the_probe_runs_once() -> TestResult {
         .collect();
     assert_eq!(
         usage,
-        [format!("wk>=80:{GM}:2026-10-09T07:00:00Z"), format!("cutover:{GM}:next@x")]
+        [
+            format!("wk>=80:{GM}:2026-10-09T07:00:00Z"),
+            format!("cutover:{GM}:next@x")
+        ]
     );
-    assert!(env.keys()?.iter().any(|k| k.contains("\"usage\"")), "{:?}", env.keys()?);
-    assert_eq!(env.probe.launched(), [["tm-a", "%2", GM].map(str::to_owned)]);
+    assert!(
+        env.keys()?.iter().any(|k| k.contains("\"usage\"")),
+        "{:?}",
+        env.keys()?
+    );
+    assert_eq!(
+        env.probe.launched(),
+        [["tm-a", "%2", GM].map(str::to_owned)]
+    );
     let (state, err) = load_state(&env.state_path());
     assert!(err.is_none(), "{err:?}");
     assert_eq!(state.other["usage"]["tries"], json!(1));
@@ -122,13 +146,20 @@ fn a_failing_usage_probe_never_stops_the_cycle() -> TestResult {
     };
     let (mut session, _) = PollSession::load(&env.config, false, clock.now_unix());
     let summary = runner.run_once(&mut session)?;
-    assert!(summary.new.iter().any(|a| a.kind == "usage"), "{:?}", summary.new);
+    assert!(
+        summary.new.iter().any(|a| a.kind == "usage"),
+        "{:?}",
+        summary.new
+    );
     assert!(env.log().contains("usage probe ERROR "), "{}", env.log());
     assert_eq!(probe.launched().len(), 1);
     let (state, err) = load_state(&env.state_path());
     assert!(err.is_none(), "{err:?}");
     assert_eq!(state.other["usage"].get("last_probe"), None);
     assert_eq!(state.other["usage"]["tries"], json!(0));
-    assert!(notifier.sent().is_empty(), "no architect_* alert, no notification");
+    assert!(
+        notifier.sent().is_empty(),
+        "no architect_* alert, no notification"
+    );
     Ok(())
 }

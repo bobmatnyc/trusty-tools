@@ -188,8 +188,14 @@ pub fn collect<T: Tmux + ?Sized>(
     candidates.extend(fleet_plan_alerts(&infos, now));
     // #9801: a usage failure is a log line, never a stopped cycle.
     let usage = &s.config.usage;
-    let (found, lines) =
-        usage_step(usage, s.usage_probe, &mut state.other, now, &idle_panes, s.dry_run);
+    let (found, lines) = usage_step(
+        usage,
+        s.usage_probe,
+        &mut state.other,
+        now,
+        &idle_panes,
+        s.dry_run,
+    );
     candidates.extend(found);
     log.extend(lines);
     let failed = |e, log| Stopped::Failed(e, log);
