@@ -178,10 +178,21 @@ impl GitOut {
 /// catch-up on a `/dev/tty` prompt nobody can answer.
 /// Test: exercised by every test in `session_refs_tests.rs`.
 fn git(repo: &Path, args: &[&str]) -> Result<GitOut> {
+    git_with_env(repo, args, &[])
+}
+
+/// [`git`] with `env` set on the child (#9160): the caller's credential pin.
+///
+/// What: `env` is applied AFTER the prompt pins and is never echoed — the
+/// error text is the argv and git's stderr only, so a token in `env` cannot
+/// reach it.
+/// Test: `fetch_applies_the_supplied_git_env`.
+fn git_with_env(repo: &Path, args: &[&str], env: &[(String, String)]) -> Result<GitOut> {
     let out = crate::git::command_in(repo)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .output()
         .with_context(|| format!("could not run `git {}`", args.join(" ")))?;
     Ok(GitOut {
@@ -193,7 +204,17 @@ fn git(repo: &Path, args: &[&str]) -> Result<GitOut> {
 
 /// Run `git -C <repo> <args>` and fail with git's own stderr on a non-zero exit.
 fn git_ok(repo: &Path, args: &[&str], step: &str) -> Result<GitOut> {
-    let out = git(repo, args)?;
+    git_ok_with_env(repo, args, step, &[])
+}
+
+/// [`git_ok`] with `env` set on the child (#9160).
+fn git_ok_with_env(
+    repo: &Path,
+    args: &[&str],
+    step: &str,
+    env: &[(String, String)],
+) -> Result<GitOut> {
+    let out = git_with_env(repo, args, env)?;
     if !out.success {
         bail!("{step}: `git {}` failed: {}", args.join(" "), out.stderr);
     }
@@ -405,11 +426,31 @@ fn is_own_snapshot_path(rel: &str, session_id: &str) -> bool {
 /// `a_tree_carrying_extra_blobs_writes_only_the_named_snapshot`,
 /// `a_forged_session_id_trailer_loses_to_the_ref_key`.
 pub fn hydrate_session_cache(repo: &Path, target: &SessionRefTarget) -> Result<HydrationOutcome> {
+    hydrate_session_cache_with_env(repo, target, &[])
+}
+
+/// [`hydrate_session_cache`] with `env` set on its one network call, the fetch.
+///
+/// Why (#9160): the fetch ran with the daemon's ambient git credential, so a
+/// project pinned to a non-active gh account read "Repository not found". The
+/// caller resolves the pinned identity; this crate only applies it.
+/// What: identical to [`hydrate_session_cache`], except `env` (e.g. `GH_TOKEN`
+/// plus a `GIT_CONFIG_*` credential-helper pin) is set on the `git fetch`
+/// child. Every other step is local and gets no env. `env` is never logged
+/// and never appears in an error.
+/// Test: `fetch_applies_the_supplied_git_env`.
+pub fn hydrate_session_cache_with_env(
+    repo: &Path,
+    target: &SessionRefTarget,
+    env: &[(String, String)],
+) -> Result<HydrationOutcome> {
     ensure_fetch_refspec(repo)?;
-    git_ok(
+    // #9160: the fetch is the only remote step, so it alone carries `env`.
+    git_ok_with_env(
         repo,
         &["fetch", "origin", SESSION_REF_FETCH_REFSPEC],
         "fetch",
+        env,
     )?;
 
     let want = target.ref_name();

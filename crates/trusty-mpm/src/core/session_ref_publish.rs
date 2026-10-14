@@ -103,11 +103,12 @@ pub enum RefPublishError {
 /// Why: the pause writer already knows all four values; re-deriving any of them
 /// here would be a second answer to a settled question.
 /// What: the checkout, the session id the snapshot was filed under, the
-/// snapshot's absolute path, and the pause timestamp (which also becomes the
+/// snapshot's absolute path, the pause timestamp (which also becomes the
 /// commit's author/committer date, so the chain is ordered by pause time rather
-/// than by push time).
-/// Test: every test in `session_ref_publish_tests.rs`.
-#[derive(Debug, Clone)]
+/// than by push time), and the env the network calls run under.
+/// Test: every test in `session_ref_publish_tests.rs`; `Debug` redacts `git_env`
+/// tokens (`session_ref_identity_errors_never_carry_a_token`).
+#[derive(Clone)]
 pub struct SessionRefRequest<'a> {
     /// The project checkout the pause happened in.
     pub repo: &'a Path,
@@ -117,6 +118,25 @@ pub struct SessionRefRequest<'a> {
     pub snapshot_path: &'a Path,
     /// The pause timestamp.
     pub timestamp: DateTime<Utc>,
+    /// #9160: env for the three network calls (ls-remote, fetch, push) — the
+    /// project's pinned gh identity, or empty for the ambient credential.
+    pub git_env: &'a [(String, String)],
+}
+
+// #9160: `git_env` holds a real token for a pinned request, so `Debug` redacts it.
+impl std::fmt::Debug for SessionRefRequest<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRefRequest")
+            .field("repo", &self.repo)
+            .field("session_id", &self.session_id)
+            .field("snapshot_path", &self.snapshot_path)
+            .field("timestamp", &self.timestamp)
+            .field(
+                "git_env",
+                &crate::core::gh_identity::RedactedVars(self.git_env),
+            )
+            .finish()
+    }
 }
 
 /// One appended session-ref commit.
@@ -363,14 +383,20 @@ fn failure_text(out: &std::process::Output) -> String {
 /// the lease meaningful — a local ref left ahead by a previously failed push
 /// would otherwise lease against itself forever.
 /// What: `git ls-remote origin <ref>`; an empty answer means the ref does not
-/// exist yet and the next commit starts an orphan chain.
-/// Test: `a_first_pause_creates_an_orphan_commit_and_leaves_main_alone`.
-pub fn remote_tip(repo: &Path, ref_name: &str) -> Result<Option<String>, RefPublishError> {
+/// exist yet and the next commit starts an orphan chain. #9160: `env` is the
+/// caller's credential pin.
+/// Test: `a_first_pause_creates_an_orphan_commit_and_leaves_main_alone`,
+/// `publish_ls_remote_fetch_and_push_apply_the_pinned_env`.
+pub fn remote_tip(
+    repo: &Path,
+    ref_name: &str,
+    env: &[(String, String)],
+) -> Result<Option<String>, RefPublishError> {
     let out = git(
         repo,
         &["ls-remote", "origin", ref_name],
         None,
-        &[],
+        &borrowed(env),
         "ls-remote",
     )?;
     Ok(out
@@ -390,13 +416,15 @@ pub fn remote_tip(repo: &Path, ref_name: &str) -> Result<Option<String>, RefPubl
 /// `expected_tip` of `None` renders the empty expectation, which git reads as
 /// "this ref must not exist" — verified against real git, not assumed. A
 /// rejection is [`RefPublishError::StaleLease`]; the caller never retries with
-/// `--force`.
+/// `--force`. #9160: `env` is the caller's credential pin.
 /// Test: `a_stale_lease_is_rejected_and_never_forced`,
-/// `a_first_pause_creates_an_orphan_commit_and_leaves_main_alone`.
+/// `a_first_pause_creates_an_orphan_commit_and_leaves_main_alone`,
+/// `publish_ls_remote_fetch_and_push_apply_the_pinned_env`.
 pub fn push_session_ref(
     repo: &Path,
     ref_name: &str,
     expected_tip: Option<&str>,
+    env: &[(String, String)],
 ) -> Result<(), RefPublishError> {
     let lease = format!(
         "--force-with-lease={ref_name}:{}",
@@ -407,7 +435,7 @@ pub fn push_session_ref(
         repo,
         &["push", &lease, "origin", &refspec],
         None,
-        &[],
+        &borrowed(env),
         "push",
     ) {
         Ok(_) => Ok(()),
@@ -420,6 +448,11 @@ pub fn push_session_ref(
         }),
         Err(e) => Err(e),
     }
+}
+
+/// `env` in the borrowed-key shape [`git`] takes (#9160).
+fn borrowed(env: &[(String, String)]) -> Vec<(&str, String)> {
+    env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect()
 }
 
 /// Whether git's push stderr describes a lost lease rather than a transport error.
@@ -506,12 +539,21 @@ pub fn publish_session_ref_as(
         tracing::warn!(repo = %req.repo.display(), "could not register the session fetch refspec: {e}");
     }
 
-    let parent = remote_tip(req.repo, &ref_name)?;
+    // #9160: the three network calls run under the caller's credential pin;
+    // every local plumbing step below gets no env.
+    let parent = remote_tip(req.repo, &ref_name, req.git_env)?;
     if parent.is_some() {
         // Force-fetch the tip into the local ref so `commit-tree -p` can reach
         // it AND so a local ref left ahead by an earlier failed push is reset.
         let refspec = format!("+{ref_name}:{ref_name}");
-        git(req.repo, &["fetch", "origin", &refspec], None, &[], "fetch")?;
+        let env = borrowed(req.git_env);
+        git(
+            req.repo,
+            &["fetch", "origin", &refspec],
+            None,
+            &env,
+            "fetch",
+        )?;
     }
 
     let blob = git(
@@ -571,7 +613,7 @@ pub fn publish_session_ref_as(
         &[],
         "update-ref",
     )?;
-    push_session_ref(req.repo, &ref_name, parent.as_deref())?;
+    push_session_ref(req.repo, &ref_name, parent.as_deref(), req.git_env)?;
 
     Ok(SessionRefOutcome {
         ref_name,
