@@ -260,6 +260,34 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool, runtime_live: bool) -> R
     }
 }
 
+/// The daemon's refusal sentence when `action` would resume a protected row.
+///
+/// Why: #9000 — attaching to a live Architect row is allowed, but a resume
+/// (`Restart`, or `ReconcileThenRestart` with its `/runtime-stop` leg) is
+/// refused by the daemon (#8942). The picker and `resume_session` share this
+/// one rule so neither sends a request the daemon refuses.
+/// What: `Some(refusal)` when `session` is an Architect row
+/// ([`is_architect_row`]) and `action` reaches the daemon; `None` otherwise,
+/// so `Attach` and `Terminal` pass through unchanged.
+/// Test: `resume_plan_that_reaches_the_daemon_is_refused_on_an_architect_row`.
+pub(crate) fn architect_resume_refusal(
+    session: &trusty_mpm::client::ManagedSessionSummary,
+    action: &ResumeAction,
+) -> Option<String> {
+    use crate::commands::session_tui::state::is_architect_row;
+    let reaches_daemon = matches!(
+        action,
+        ResumeAction::Restart | ResumeAction::ReconcileThenRestart
+    );
+    (reaches_daemon && is_architect_row(session)).then(|| {
+        trusty_mpm::session_manager::architect::refusal(
+            &session.name,
+            session.kind.unwrap_or_default(),
+            trusty_mpm::session_manager::architect::ProtectedVerb::Resume,
+        )
+    })
+}
+
 /// Parse a session-scoped `tmux list-panes -F` listing into the
 /// [`trusty_mpm::daemon::orphan_gc::PaneInfo`] rows the daemon's liveness
 /// predicates consume (#3873).
@@ -576,6 +604,11 @@ pub(crate) async fn resume_session(
     // anyway (the panes are gone with the session).
     let runtime_live = !tmux_live || session_runtime_live(&session.name);
     let action = plan_resume(persisted_state, tmux_live, runtime_live);
+    // #9000: attach stays open on an Architect row; a resume is refused here
+    // with the daemon's sentence, before any request or pane kill.
+    if let Some(text) = architect_resume_refusal(session, &action) {
+        anyhow::bail!(text);
+    }
 
     // Terminal-state refusal (code-critic CRITICAL): a decommissioned/deleted
     // tombstone must never be attached to or restarted — doing either would

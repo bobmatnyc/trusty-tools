@@ -7,6 +7,7 @@
 use trusty_mpm::client::ManagedSessionSummary;
 use trusty_mpm::session_manager::SessionKind;
 
+use super::super::super::guided_resume::{ResumeAction, architect_resume_refusal};
 use super::super::state::{Action, Input, Mode, Severity, TuiState};
 use super::{draw, session};
 
@@ -57,6 +58,24 @@ fn state_enter_on_a_live_architect_row_attaches() {
         );
         assert!(state.message().is_none(), "{kind:?}");
     }
+}
+
+// #9000: `resume_session` re-checks with real liveness: a live row whose
+// runtime is gone plans a reconcile-restart, which the daemon refuses.
+#[test]
+fn resume_plan_that_reaches_the_daemon_is_refused_on_an_architect_row() {
+    let (sessions, _) = fleet_with(SessionKind::Architect, "active");
+    let row = &sessions[0];
+    for action in [ResumeAction::Restart, ResumeAction::ReconcileThenRestart] {
+        let text = architect_resume_refusal(row, &action).expect("a refusal");
+        assert!(text.contains("tm does not resume it"), "{text}");
+    }
+    assert_eq!(architect_resume_refusal(row, &ResumeAction::Attach), None);
+    let (ordinary, _) = fleet_with(SessionKind::Ordinary, "active");
+    assert_eq!(
+        architect_resume_refusal(&ordinary[0], &ResumeAction::Restart),
+        None
+    );
 }
 
 #[test]

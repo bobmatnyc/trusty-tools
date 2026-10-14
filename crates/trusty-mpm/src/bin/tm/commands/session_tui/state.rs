@@ -24,6 +24,9 @@ use trusty_mpm::session_manager::ManagedSessionState;
 use trusty_mpm::session_manager::architect::{ProtectedVerb, refusal, refuses_verbs};
 use trusty_mpm::session_manager::rename::validate_session_name;
 
+use super::super::guided_resume::{
+    architect_resume_refusal, plan_resume, resume_classification_state,
+};
 use super::super::picker_delete::{confirm_is_force, confirm_is_yes, delete_route_flags};
 use super::new_session::{NewSessionFlow, NewSessionRequest, Step};
 
@@ -388,8 +391,9 @@ impl TuiState {
             Input::Char('R') => Action::Refresh,
             Input::Enter => match sessions.get(self.selected) {
                 None => Action::Ignore,
-                // #9000: the daemon refuses a resume of the Architect's rows.
-                Some(s) if is_architect_row(s) => self.refuse(s, ProtectedVerb::Resume),
+                // #9000: attach to a live Architect row still works; a resume
+                // of one is refused here, as the daemon would.
+                Some(s) if architect_enter_refused(s) => self.refuse(s, ProtectedVerb::Resume),
                 Some(_) => Action::Open(self.selected),
             },
             Input::Char('d') => self.begin_delete(sessions),
@@ -612,7 +616,7 @@ impl TuiState {
 /// persisted state. No `kind` (a pre-#8942 daemon) is an ordinary row. A
 /// state token this build cannot parse is not proven terminal, so the row
 /// stays protected, the way an unknown kind does.
-/// Test: `state_enter_on_an_architect_row_sends_no_resume`,
+/// Test: `state_enter_on_a_stopped_architect_row_sends_no_resume`,
 /// `state_ordinary_and_terminal_architect_rows_keep_their_verbs`.
 pub(crate) fn is_architect_row(session: &ManagedSessionSummary) -> bool {
     let Some(kind) = session.kind else {
@@ -623,6 +627,21 @@ pub(crate) fn is_architect_row(session: &ManagedSessionSummary) -> bool {
         Some(state) => refuses_verbs(kind, &state),
         None => kind.is_protected(),
     }
+}
+
+/// Would Enter on this row resume an Architect record, which the daemon refuses?
+///
+/// Why: #9000 — Enter on a live Architect row attaches (no daemon call) and
+/// must keep working; only a resume is a dead end.
+/// What: [`architect_resume_refusal`] over [`plan_resume`] with a live tmux
+/// and runtime, the same inputs for a stopped or errored row as the resume
+/// path. A live row is `Attach` here; `resume_session` re-checks it against
+/// real tmux liveness (a dead runtime plans a reconcile-restart there).
+/// Test: `state_enter_on_a_live_architect_row_attaches`,
+/// `state_enter_on_a_stopped_architect_row_sends_no_resume`.
+pub(crate) fn architect_enter_refused(session: &ManagedSessionSummary) -> bool {
+    let action = plan_resume(resume_classification_state(session), true, true);
+    architect_resume_refusal(session, &action).is_some()
 }
 
 /// Is this row the managed session the current terminal is attached to?

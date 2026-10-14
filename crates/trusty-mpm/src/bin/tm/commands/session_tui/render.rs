@@ -31,9 +31,13 @@ use super::state::{Mode, Severity, TuiState};
 const FOOTER: &str =
     "↑↓ move · Enter open · n new · r rename · d delete · R refresh · ? keys · q quit";
 
-/// #9000: the legend on an Architect row, without the verbs the daemon refuses.
-const FOOTER_ARCHITECT: &str =
-    "Architect row: no open/delete · ↑↓ move · n new · r rename · R refresh · q quit";
+/// #9000: the legend on an Architect row whose Enter attaches (live session).
+const FOOTER_ARCHITECT_LIVE: &str =
+    "Architect: Enter attach · ↑↓ · n new · r rename · R refresh · ? keys · q quit";
+
+/// #9000: the legend on an Architect row Enter would resume (stopped/errored).
+const FOOTER_ARCHITECT_STOPPED: &str =
+    "Architect: no resume/delete · ↑↓ · n new · r rename · R refresh · ? keys · q quit";
 
 /// Draw one frame of the session TUI.
 ///
@@ -75,11 +79,16 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
     );
     render_table(frame, body, sessions, state);
     frame.render_widget(Paragraph::new(status_text), status);
-    // #9000: an Architect row offers no open (resume) and no delete.
-    let architect = sessions
-        .get(state.selected())
-        .is_some_and(super::state::is_architect_row);
-    let legend = if architect { FOOTER_ARCHITECT } else { FOOTER };
+    // #9000: an Architect row offers no delete; Enter attaches when live and
+    // is not offered when it would be a resume.
+    let selected = sessions.get(state.selected());
+    let architect = selected.is_some_and(super::state::is_architect_row);
+    let enter_refused = selected.is_some_and(super::state::architect_enter_refused);
+    let legend = match (architect, enter_refused) {
+        (false, _) => FOOTER,
+        (true, false) => FOOTER_ARCHITECT_LIVE,
+        (true, true) => FOOTER_ARCHITECT_STOPPED,
+    };
     frame.render_widget(
         Paragraph::new(legend).style(Style::default().fg(Color::DarkGray)),
         footer,
@@ -87,7 +96,7 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
 
     match state.mode() {
         Mode::Browse => {}
-        Mode::Help => overlay(frame, area, "keys", help_body(architect)),
+        Mode::Help => overlay(frame, area, "keys", help_body(architect, enter_refused)),
         Mode::Confirm {
             index,
             force,
@@ -421,24 +430,28 @@ fn new_session_hint(flow: &super::new_session::NewSessionFlow) -> String {
 }
 
 /// The `?` key reference; `architect` (#9000) swaps the Enter and `d` lines
-/// for one saying why an Architect row offers neither.
-fn help_body(architect: bool) -> Vec<Line<'static>> {
+/// for what an Architect row offers: attach when live (`enter_refused` false),
+/// nothing for Enter when it would be a resume, and no delete.
+fn help_body(architect: bool, enter_refused: bool) -> Vec<Line<'static>> {
     let mut lines = vec![
         "↑ / k, ↓ / j   move the selection",
         "g / G          first / last row",
         "PgUp / PgDn    move ten rows",
-        match architect {
-            true => "Enter, d       not offered on an Architect row: the daemon refuses",
-            false => "Enter          open (resume + attach) the selected session",
+        match (architect, enter_refused) {
+            (false, _) => "Enter          open (resume + attach) the selected session",
+            (true, false) => "Enter          attach to the running Architect session",
+            (true, true) => "Enter          not offered on an Architect row: the daemon refuses",
         },
         "n              new session — pick a project, or type a path, a clone",
         "               URL, owner/repo, or domain/owner/repo",
         "Ctrl-N         in that project list: name the new session first",
         "r              rename it",
     ];
-    if !architect {
-        lines.push("d              delete it, with a confirm step");
-    }
+    lines.push(if architect {
+        "d              not offered on an Architect row: the daemon refuses"
+    } else {
+        "d              delete it, with a confirm step"
+    });
     lines.extend([
         "R              refresh the list from the daemon",
         "q / Esc        quit",
