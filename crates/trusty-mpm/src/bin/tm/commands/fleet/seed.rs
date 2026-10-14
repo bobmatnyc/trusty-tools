@@ -48,6 +48,7 @@ pub(crate) struct Seeded {
     pub(crate) executable: bool,
 }
 
+#[cfg(test)]
 impl Seeded {
     /// The shipped bytes as text; every seeded file is UTF-8.
     pub(crate) fn text(&self) -> &str {

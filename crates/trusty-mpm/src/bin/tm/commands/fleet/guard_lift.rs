@@ -30,6 +30,7 @@ pub(crate) enum Request {
     /// Neither flag: ask on a terminal, else leave the guard as it is.
     Ask,
     /// Neither flag and never ask (the unit tests).
+    #[cfg(test)]
     Unset,
 }
 
