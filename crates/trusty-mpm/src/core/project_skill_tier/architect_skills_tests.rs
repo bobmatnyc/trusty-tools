@@ -14,10 +14,25 @@ use tempfile::tempdir;
 
 /// A shipped table of one skill with `contents`.
 fn one(contents: &'static str) -> [ArchitectSkill; 1] {
+    one_with_history(contents, &[])
+}
+
+/// [`one`] with the sha256 of earlier shipped versions.
+fn one_with_history(
+    contents: &'static str,
+    previous: &'static [&'static str],
+) -> [ArchitectSkill; 1] {
     [ArchitectSkill {
         stem: "tm-probe",
         contents,
+        previous,
     }]
+}
+
+/// A one-entry history holding the sha256 of `old_body`.
+fn history_of(old_body: &str) -> &'static [&'static str] {
+    let hash: &'static str = Box::leak(sha256_hex(old_body.as_bytes()).into_boxed_str());
+    Box::leak(vec![hash].into_boxed_slice())
 }
 
 /// Pin `path`'s mtime to a fixed past instant and return it.
@@ -179,6 +194,183 @@ fn health_names_each_skill_that_is_not_current() {
     deploy_architect_skills(project.path());
     let (ok, detail) = health(project.path());
     assert!(ok, "{detail}");
+}
+
+/// Seed `body` as the probe skill's live copy.
+fn seed_probe(dir: &Path, body: &str) -> PathBuf {
+    let path = skill_path(dir, "tm-probe");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn a_prior_shipped_seed_with_no_record_is_refreshed_and_recorded() {
+    // #9540: a `tm fleet init` seed of an older shipped version has no record,
+    // but it is a tm deploy nobody edited.
+    let dir = tempdir().unwrap();
+    let history = history_of("v0\n");
+    let path = seed_probe(dir.path(), "v0\n");
+
+    let report = deploy_skills_into(dir.path(), &one_with_history("v2\n", history));
+
+    assert_eq!(report.written, vec!["tm-probe"], "{report:?}");
+    assert!(report.kept_custom.is_empty(), "{:?}", report.kept_custom);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2\n");
+    let again = deploy_skills_into(dir.path(), &one_with_history("v2\n", history));
+    assert_eq!(
+        again,
+        DeployReport::default(),
+        "the refresh was not recorded"
+    );
+}
+
+#[test]
+fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
+    let dir = tempdir().unwrap();
+    let history = history_of("v0\n");
+    let path = seed_probe(dir.path(), "v0\nplus a project line\n");
+
+    let report = deploy_skills_into(dir.path(), &one_with_history("v2\n", history));
+
+    assert_eq!(report.kept_custom, vec!["tm-probe"]);
+    assert!(report.written.is_empty(), "{:?}", report.written);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "v0\nplus a project line\n"
+    );
+}
+
+#[test]
+fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
+    // Drift guard: editing an asset without moving its old hash into
+    // `previous` would make a `tm fleet init` seed of the old text look custom.
+    const PINNED: [(&str, &str); 2] = [
+        (
+            "tm-fleet-check",
+            "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
+        ),
+        (
+            "tm-context-refresh",
+            "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
+        ),
+    ];
+    assert_eq!(PINNED.len(), SKILLS.len());
+    for (skill, (stem, pinned)) in SKILLS.iter().zip(PINNED) {
+        assert_eq!(skill.stem, stem);
+        assert_eq!(
+            sha256_hex(skill.contents.as_bytes()),
+            pinned,
+            "{stem} changed: add the OLD hash (the PINNED value) to its `previous` \
+             list, then update PINNED"
+        );
+        assert!(!skill.previous.is_empty(), "{stem} has no shipped history");
+        assert!(
+            !skill.previous.contains(&pinned),
+            "{stem}: the current hash is listed as previous"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_record_keeps_a_differing_copy_and_names_the_record() {
+    let dir = tempdir().unwrap();
+    let path = seed_probe(dir.path(), "project edit\n");
+    std::fs::write(dir.path().join(RECORD_FILE), "{ not json").unwrap();
+
+    let report = deploy_skills_into(dir.path(), &one("v2\n"));
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "project edit\n");
+    assert_eq!(report.kept_custom, vec!["tm-probe"]);
+    assert!(report.written.is_empty(), "{:?}", report.written);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("malformed") && e.contains(RECORD_FILE)),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn the_skills_row_names_a_malformed_record() {
+    let project = tempdir().unwrap();
+    deploy_architect_skills(project.path());
+    std::fs::write(project_tier(project.path()).join(RECORD_FILE), "{ not json").unwrap();
+
+    let (ok, detail) = health(project.path());
+
+    assert!(!ok, "{detail}");
+    assert!(
+        detail.contains("malformed") && detail.contains(RECORD_FILE),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_record_write_failure_is_an_error_and_the_row_does_not_say_current() {
+    // A directory where the record file goes: the write cannot succeed.
+    let project = tempdir().unwrap();
+    std::fs::create_dir_all(project_tier(project.path()).join(RECORD_FILE)).unwrap();
+
+    let report = deploy_architect_skills(project.path());
+
+    assert!(
+        report.errors.iter().any(|e| e.contains(RECORD_FILE)),
+        "{:?}",
+        report.errors
+    );
+    let (ok, detail) = health(project.path());
+    assert!(!ok, "an unrecorded deploy read as current: {detail}");
+    assert!(detail.contains(RECORD_FILE), "{detail}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tier_resolving_onto_a_reserved_dir_is_refused() {
+    use crate::core::paths::FrameworkPaths;
+
+    let home = tempdir().unwrap();
+    let root = home.path().join(".trusty-mpm");
+    let fw = FrameworkPaths::from_root(&root);
+    for reserved in [fw.claude_skills_dir(), fw.skill_deploy_dir()] {
+        let project = tempdir().unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&reserved).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            format!(
+                "[supervisor]\nprojects = [{:?}]\n",
+                project.path().display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".trusty-mpm.toml"),
+            "profile = \"supervisor\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&reserved, project_tier(project.path())).unwrap();
+
+        let report = deploy_for_launch(&root, project.path()).expect("an Architect launch");
+
+        assert!(report.written.is_empty(), "{:?}", report.written);
+        assert!(
+            !report.errors.is_empty(),
+            "no error line for {}",
+            reserved.display()
+        );
+        for skill in SKILLS {
+            let landed = skill_path(&reserved, skill.stem);
+            assert!(
+                !landed.exists(),
+                "wrote onto the reserved tier: {}",
+                landed.display()
+            );
+        }
+    }
 }
 
 #[test]
