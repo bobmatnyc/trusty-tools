@@ -221,12 +221,15 @@ async fn link_claude_session(
 /// What: `Ok` when no record matched. Otherwise, for each cwd-matched
 /// non-terminal record (`Stopped` included, critic HIGH 1),
 /// [`channels_taint::reapply`] under `home`; an unknown home, an unreadable
-/// mark or a failed write is an `Err` naming the record.
+/// mark or a failed write is an `Err` naming the record. #9877: `reapply`
+/// first records the id in the record's seen list, marked or not, so a later
+/// delivery to a record still pinned to an old id taints this one too.
 /// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`,
 /// `session_start_for_untainted_managed_session_writes_nothing`,
 /// `reapply_failure_fails_session_start_hook_and_egress_denies`,
 /// `session_start_in_stopped_tainted_session_reapplies`,
-/// `reapply_with_an_unknown_home_fails`.
+/// `reapply_with_an_unknown_home_fails`,
+/// `lost_session_end_new_id_is_tainted_before_the_send`.
 fn reapply_channel_taint(
     home: Option<&std::path::Path>,
     matched: &[&crate::session_manager::SessionRecord],

@@ -1,0 +1,3 @@
+Fixed
+- A channel answer can no longer reach a session whose Claude id was never tainted after a lost or late `SessionEnd`. Every `SessionStart` now records the new Claude id in `managed/<id>.seen` in the channel taint directory before it checks the session's taint mark, and the deliverer taints every recorded id after it writes the mark, so one of the two always taints the new id. A `SessionStart` whose id cannot be recorded fails, and a delivery whose recorded ids cannot be read or tainted is refused. Retiring a session's taint removes its list (#9877, #8433).
+- The `channel_taint` row of `tm doctor` now fails when the D09 re-apply failures record exists but cannot be read or is not UTF-8, instead of counting no failures and reporting `Ok` (#9877).

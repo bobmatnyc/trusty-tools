@@ -8,7 +8,8 @@
 //! hidden; once the question resolved, a lost answer is final (#8433 Q4).
 //! What: [`deliver`] runs over a [`DeliverEnv`] in a fixed order: the asker's
 //! record ([`check_asker`]: the live Architect, a plain Claude session id, an
-//! absolute workspace), the taint (Claude id file, then managed marker), a
+//! absolute workspace), the taint (Claude id file, managed marker, then each
+//! id in the session's seen list, #9877), a
 //! `pending` line, a re-read of the Claude id ([`confirm_asker`], #9873 fix
 //! round), the send of one [`frame_answer`] line, then the settle line.
 //! Every failure writes a `failed` line and returns [`Delivery::Failed`].
