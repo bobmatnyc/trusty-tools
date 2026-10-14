@@ -84,6 +84,18 @@ fn stub_daemon_socket(dir: &Path, binding: Option<serde_json::Value>) -> PathBuf
 /// beside the shared one. A stale socket file already there is replaced, as
 /// the real daemon's singleton bind replaces one.
 fn stub_daemon_at(socket: &Path, binding: Option<serde_json::Value>) {
+    // #8203: a stub stands in for a daemon of THIS build unless a case says
+    // otherwise.
+    stub_daemon_with_build(socket, binding, Some(trusty_code::build_info::GIT_HASH));
+}
+
+/// [`stub_daemon_at`] publishing `build` as its `health.build` — `None` for a
+/// daemon that predates #8164 and reports none (#8203).
+fn stub_daemon_with_build(
+    socket: &Path,
+    binding: Option<serde_json::Value>,
+    build: Option<&'static str>,
+) {
     let dir = socket.parent().expect("a socket path has a parent");
     // `connect_hardened` refuses a socket whose containing directory is wider
     // than `0700`, and `tempfile` creates one at the process umask.
@@ -109,7 +121,11 @@ fn stub_daemon_at(socket: &Path, binding: Option<serde_json::Value>) {
                     Ok(request) => request,
                     Err(_) => return,
                 };
-                let mut result = serde_json::json!({"server": "tcode", "status": "ok"});
+                let mut result =
+                    serde_json::json!({"server": "tcode", "status": "ok", "pid": 4242});
+                if let Some(build) = build {
+                    result["build"] = serde_json::json!(build);
+                }
                 if let Some(binding) = binding {
                     result["binding"] = binding;
                 }
@@ -402,6 +418,53 @@ async fn attaches_to_a_projectless_daemon_when_projectless() {
         .expect("a projectless TUI must attach to a projectless daemon");
     assert_eq!(resolved, socket);
     assert!(!marker.exists(), "must not have spawned anything");
+}
+
+/// #8203: a live daemon from a DIFFERENT build — or one that reports no
+/// build at all — is refused with both builds and the restart command, never
+/// attached to.
+///
+/// Why: a daemon keeps running the code it started with. After a reinstall,
+/// `tcode tui` attached to the old daemon and reproduced a fixed defect for
+/// six hours with nothing on screen naming the mismatch.
+/// What: a stub on the shared socket serving the same project, publishing a
+/// foreign build and then no build; each call must fail, the error must name
+/// both builds, the daemon's pid and the restart steps, and nothing may be
+/// spawned. FAILS at c69c8e01be: the call attaches.
+/// Test: this test.
+#[tokio::test]
+async fn refuses_a_daemon_from_a_different_build() {
+    let _lock = ENV_LOCK.lock().await;
+    let _env = EnvGuard::isolated();
+    let project = tempfile::tempdir().expect("project");
+    let canonical = project.path().canonicalize().expect("canonicalize");
+
+    for (build, label) in [
+        (Some("0123abc-stale"), "0123abc-stale"),
+        (None, "<unreported>"),
+    ] {
+        let sock_dir = tempfile::tempdir().expect("socket dir");
+        let socket = sock_dir.path().join("tcode.sock");
+        stub_daemon_with_build(&socket, Some(binding_json(Some(&canonical))), build);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("spawned");
+        let stub = marker_stub(dir.path(), &marker);
+
+        let err = ensure_daemon_with(Some(&canonical), &stub, &socket)
+            .await
+            .expect_err("a daemon from another build must be refused")
+            .to_string();
+        for needle in [
+            label,
+            trusty_code::build_info::GIT_HASH,
+            "4242",
+            "tcode tui",
+        ] {
+            assert!(err.contains(needle), "refusal must name {needle:?}: {err}");
+        }
+        assert!(!marker.exists(), "a refusal must not spawn anything");
+    }
 }
 
 /// This project's own socket beside the shared `socket` (#4600).
