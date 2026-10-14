@@ -307,6 +307,9 @@ pub fn ensure_project_skill_tier_for_version(
     })
 }
 
+// #9540: the Architect-only skills share this tier; see the module.
+pub mod architect_skills;
+
 #[cfg(test)]
 #[path = "project_skill_tier_tests.rs"]
 mod tests;
