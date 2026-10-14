@@ -20,8 +20,13 @@
 //! Test: `state_*` in `super::tests`.
 
 use trusty_mpm::client::ManagedSessionSummary;
+use trusty_mpm::session_manager::ManagedSessionState;
+use trusty_mpm::session_manager::architect::{ProtectedVerb, refusal, refuses_verbs};
 use trusty_mpm::session_manager::rename::validate_session_name;
 
+use super::super::guided_resume::{
+    architect_resume_refusal, plan_resume, resume_classification_state,
+};
 use super::super::picker_delete::{confirm_is_force, confirm_is_yes, delete_route_flags};
 use super::new_session::{NewSessionFlow, NewSessionRequest, Step};
 
@@ -384,9 +389,12 @@ impl TuiState {
             Input::PageUp => self.move_to(self.selected.saturating_sub(PAGE), sessions),
             Input::PageDown => self.move_to((self.selected + PAGE).min(last), sessions),
             Input::Char('R') => Action::Refresh,
-            Input::Enter => match sessions.is_empty() {
-                true => Action::Ignore,
-                false => Action::Open(self.selected),
+            Input::Enter => match sessions.get(self.selected) {
+                None => Action::Ignore,
+                // #9000: attach to a live Architect row still works; a resume
+                // of one is refused here, as the daemon would.
+                Some(s) if architect_enter_refused(s) => self.refuse(s, ProtectedVerb::Resume),
+                Some(_) => Action::Open(self.selected),
             },
             Input::Char('d') => self.begin_delete(sessions),
             Input::Char('r') => self.begin_rename(sessions),
@@ -418,8 +426,9 @@ impl TuiState {
     /// same pair the numbered fallback picker computes, so a running session
     /// demands the word `force` and an errored session takes the stop-first leg
     /// (#7224) in either surface. One `y` covers both legs; the overlay says so
-    /// before it is typed.
+    /// before it is typed. An [`is_architect_row`] row is refused (#9000).
     /// Test: `state_delete_refuses_the_attached_self_session`,
+    /// `state_delete_on_an_architect_row_opens_no_confirm`,
     /// `state_delete_on_a_running_row_requires_the_force_word`,
     /// `state_delete_on_an_errored_row_asks_to_stop_and_delete`.
     fn begin_delete(&mut self, sessions: &[ManagedSessionSummary]) -> Action {
@@ -441,6 +450,10 @@ impl TuiState {
             );
             return Action::Redraw;
         }
+        // #9000: the daemon refuses a delete (and its stop leg) on these rows.
+        if is_architect_row(session) {
+            return self.refuse(session, ProtectedVerb::Delete);
+        }
         let (force, stop_first) = delete_route_flags(&session.state);
         self.mode = Mode::Confirm {
             index: self.selected,
@@ -449,6 +462,13 @@ impl TuiState {
             typed: String::new(),
         };
         self.message = None;
+        Action::Redraw
+    }
+
+    /// Refuse `verb` on an Architect row with the daemon's own sentence (#9000).
+    fn refuse(&mut self, session: &ManagedSessionSummary, verb: ProtectedVerb) -> Action {
+        let kind = session.kind.unwrap_or_default();
+        self.set_message(refusal(&session.name, kind, verb), Severity::Error);
         Action::Redraw
     }
 
@@ -586,6 +606,42 @@ impl TuiState {
             _ => Action::Ignore,
         }
     }
+}
+
+/// Is this a row the daemon refuses stop, resume and delete on (#9000)?
+///
+/// Why: a key or a hint that offers a verb the daemon refuses (#8942) is a
+/// dead end, so the TUI hides those verbs on the Architect's rows.
+/// What: the daemon's own [`refuses_verbs`] over the row's `kind` and its
+/// persisted state. No `kind` (a pre-#8942 daemon) is an ordinary row. A
+/// state token this build cannot parse is not proven terminal, so the row
+/// stays protected, the way an unknown kind does.
+/// Test: `state_enter_on_a_stopped_architect_row_sends_no_resume`,
+/// `state_ordinary_and_terminal_architect_rows_keep_their_verbs`.
+pub(crate) fn is_architect_row(session: &ManagedSessionSummary) -> bool {
+    let Some(kind) = session.kind else {
+        return false;
+    };
+    let wire = session.persisted_state.as_deref().unwrap_or(&session.state);
+    match ManagedSessionState::from_wire(wire) {
+        Some(state) => refuses_verbs(kind, &state),
+        None => kind.is_protected(),
+    }
+}
+
+/// Would Enter on this row resume an Architect record, which the daemon refuses?
+///
+/// Why: #9000 — Enter on a live Architect row attaches (no daemon call) and
+/// must keep working; only a resume is a dead end.
+/// What: [`architect_resume_refusal`] over [`plan_resume`] with a live tmux
+/// and runtime, the same inputs for a stopped or errored row as the resume
+/// path. A live row is `Attach` here; `resume_session` re-checks it against
+/// real tmux liveness (a dead runtime plans a reconcile-restart there).
+/// Test: `state_enter_on_a_live_architect_row_attaches`,
+/// `state_enter_on_a_stopped_architect_row_sends_no_resume`.
+pub(crate) fn architect_enter_refused(session: &ManagedSessionSummary) -> bool {
+    let action = plan_resume(resume_classification_state(session), true, true);
+    architect_resume_refusal(session, &action).is_some()
 }
 
 /// Is this row the managed session the current terminal is attached to?

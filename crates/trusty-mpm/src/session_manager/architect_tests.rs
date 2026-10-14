@@ -290,3 +290,23 @@ fn the_architect_id_is_stable_across_the_rename() {
     assert_eq!(id("-poll"), "f75797ca-cc1e-5fdf-a528-5e24a3c627b5");
     assert_eq!(id("-collector"), "46358247-da91-5895-a720-10b693332f6e");
 }
+
+/// #9000: the rule the daemon and the session picker share.
+#[test]
+fn only_a_live_protected_record_refuses_the_verbs() {
+    use super::refuses_verbs;
+    use ManagedSessionState::*;
+    for state in [Provisioning, Active, Stopped, Errored] {
+        assert!(!refuses_verbs(SessionKind::Ordinary, &state), "{state:?}");
+        for kind in [
+            SessionKind::Architect,
+            SessionKind::ArchitectAux,
+            SessionKind::Unknown,
+        ] {
+            assert!(refuses_verbs(kind, &state), "{kind:?} {state:?}");
+        }
+    }
+    for state in [Decommissioned, Deleted] {
+        assert!(!refuses_verbs(SessionKind::Architect, &state), "{state:?}");
+    }
+}

@@ -31,6 +31,14 @@ use super::state::{Mode, Severity, TuiState};
 const FOOTER: &str =
     "↑↓ move · Enter open · n new · r rename · d delete · R refresh · ? keys · q quit";
 
+/// #9000: the legend on an Architect row whose Enter attaches (live session).
+const FOOTER_ARCHITECT_LIVE: &str =
+    "Architect: Enter attach · ↑↓ · n new · r rename · R refresh · ? keys · q quit";
+
+/// #9000: the legend on an Architect row Enter would resume (stopped/errored).
+const FOOTER_ARCHITECT_STOPPED: &str =
+    "Architect: no resume/delete · ↑↓ · n new · r rename · R refresh · ? keys · q quit";
+
 /// Draw one frame of the session TUI.
 ///
 /// Why: one entry point so the modal overlay can never be drawn without the
@@ -40,8 +48,10 @@ const FOOTER: &str =
 /// table for the columns that fit, records the scroll offset it used back into
 /// `state` (so the next frame holds still), then overlays a modal for any mode
 /// other than [`Mode::Browse`]. Takes `&mut TuiState` only for that scroll
-/// write-back; nothing else about the state changes here.
+/// write-back; nothing else about the state changes here. On an Architect row
+/// the footer and help drop open and delete (#9000).
 /// Test: `render_at_eighty_by_twentyfour_drops_the_widest_columns`,
+/// `render_footer_on_an_architect_row_says_what_enter_does`,
 /// `render_at_two_hundred_by_fifty_shows_every_column`,
 /// `render_tiny_terminal_does_not_panic`, `render_*_overlay_*`.
 pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], state: &mut TuiState) {
@@ -69,14 +79,24 @@ pub(crate) fn render(frame: &mut Frame, sessions: &[ManagedSessionSummary], stat
     );
     render_table(frame, body, sessions, state);
     frame.render_widget(Paragraph::new(status_text), status);
+    // #9000: an Architect row offers no delete; Enter attaches when live and
+    // is not offered when it would be a resume.
+    let selected = sessions.get(state.selected());
+    let architect = selected.is_some_and(super::state::is_architect_row);
+    let enter_refused = selected.is_some_and(super::state::architect_enter_refused);
+    let legend = match (architect, enter_refused) {
+        (false, _) => FOOTER,
+        (true, false) => FOOTER_ARCHITECT_LIVE,
+        (true, true) => FOOTER_ARCHITECT_STOPPED,
+    };
     frame.render_widget(
-        Paragraph::new(FOOTER).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(legend).style(Style::default().fg(Color::DarkGray)),
         footer,
     );
 
     match state.mode() {
         Mode::Browse => {}
-        Mode::Help => overlay(frame, area, "keys", help_body()),
+        Mode::Help => overlay(frame, area, "keys", help_body(architect, enter_refused)),
         Mode::Confirm {
             index,
             force,
@@ -409,24 +429,34 @@ fn new_session_hint(flow: &super::new_session::NewSessionFlow) -> String {
     parts.join("  ·  ")
 }
 
-/// The `?` key reference.
-fn help_body() -> Vec<Line<'static>> {
-    [
+/// The `?` key reference; `architect` (#9000) swaps the Enter and `d` lines
+/// for what an Architect row offers: attach when live (`enter_refused` false),
+/// nothing for Enter when it would be a resume, and no delete.
+fn help_body(architect: bool, enter_refused: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
         "↑ / k, ↓ / j   move the selection",
         "g / G          first / last row",
         "PgUp / PgDn    move ten rows",
-        "Enter          open (resume + attach) the selected session",
+        match (architect, enter_refused) {
+            (false, _) => "Enter          open (resume + attach) the selected session",
+            (true, false) => "Enter          attach to the running Architect session",
+            (true, true) => "Enter          not offered on an Architect row: the daemon refuses",
+        },
         "n              new session — pick a project, or type a path, a clone",
         "               URL, owner/repo, or domain/owner/repo",
         "Ctrl-N         in that project list: name the new session first",
         "r              rename it",
-        "d              delete it, with a confirm step",
+    ];
+    lines.push(if architect {
+        "d              not offered on an Architect row: the daemon refuses"
+    } else {
+        "d              delete it, with a confirm step"
+    });
+    lines.extend([
         "R              refresh the list from the daemon",
         "q / Esc        quit",
         "",
         "Any key closes this help.",
-    ]
-    .into_iter()
-    .map(|l| Line::from(l.to_string()))
-    .collect()
+    ]);
+    lines.into_iter().map(Line::from).collect()
 }

@@ -2886,3 +2886,7 @@ async fn new_session_name_reaches_the_daemon_post() {
         .expect("perform must POST the create request");
     assert_eq!(body["name_hint"], "auth-refactor", "{body}");
 }
+
+// #9000: no resume, stop or delete on an Architect row.
+#[path = "architect_row_tests.rs"]
+mod architect_row;

@@ -1,0 +1,2 @@
+Fixed
+- The `tm ls` session TUI no longer offers resume or delete on the Architect's rows and its helpers' rows. `d` on such a row, and Enter when it would resume a stopped or errored one, send no request and show the daemon's own refusal. Enter on a live Architect row still attaches. The footer and the `?` help say what Enter does on an Architect row and keep the `? keys` hint. Ordinary rows, and an Architect record already decommissioned or deleted, keep every verb (#9000).
