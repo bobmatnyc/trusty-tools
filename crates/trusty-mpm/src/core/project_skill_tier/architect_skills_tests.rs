@@ -64,7 +64,8 @@ fn an_absent_skill_is_written_byte_equal() {
             path.display()
         );
     }
-    assert_eq!(report.written, vec!["tm-fleet-check", "tm-context-refresh"]);
+    let stems: Vec<&str> = SKILLS.iter().map(|s| s.stem).collect();
+    assert_eq!(report.written, stems);
     assert!(report.errors.is_empty(), "{:?}", report.errors);
 }
 
@@ -178,7 +179,8 @@ fn a_blocked_skill_dir_is_an_error_line() {
         "{:?}",
         report.errors
     );
-    assert_eq!(report.written, vec!["tm-context-refresh"]);
+    let rest: Vec<&str> = SKILLS.iter().skip(1).map(|s| s.stem).collect();
+    assert_eq!(report.written, rest);
     let (ok, detail) = health(project.path());
     assert!(!ok, "a failed deploy reported healthy: {detail}");
     assert!(detail.contains("tm-fleet-check: unreadable"), "{detail}");

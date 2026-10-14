@@ -112,10 +112,17 @@ pub const SKILL_FLOOR_EXACT: &[&str] = &[
 
 /// Whether `name` is a floor skill; case-insensitive, as [`is_tool_floor`].
 ///
-/// Test: `the_skill_floor_holds_the_prefix_and_the_exact_names`.
+/// #8436 PR C: the Architect's shipped skills (`architect_skills::SKILLS`)
+/// are floored too; its operating manual loads each one by name.
+/// Test: `the_skill_floor_holds_the_prefix_and_the_exact_names`,
+/// `skill_floor_covers_every_skill_the_prompts_load`.
 pub fn is_skill_floor(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(SKILL_FLOOR_PREFIX) || SKILL_FLOOR_EXACT.contains(&lower.as_str())
+    lower.starts_with(SKILL_FLOOR_PREFIX)
+        || SKILL_FLOOR_EXACT.contains(&lower.as_str())
+        || crate::core::project_skill_tier::architect_skills::SKILLS
+            .iter()
+            .any(|skill| skill.stem == lower)
 }
 
 #[cfg(test)]

@@ -91,8 +91,9 @@ impl FleetEnv {
     }
 
     /// The fake `claude`'s argv, one entry per Architect launch (a `--model`
-    /// line; tm's `claude --version` probes are skipped), waiting up to 10 s
-    /// for launch `n` (1-based) to appear.
+    /// line; tm's `claude --version` probes and the poller's one-shot `-p`
+    /// Haiku triage calls, #8436 PR C, are skipped), waiting up to 10 s for
+    /// launch `n` (1-based) to appear.
     fn launches(&self, n: usize) -> Vec<Vec<String>> {
         let log = self.bin.path().join(ARGV_LOG);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -102,6 +103,7 @@ impl FleetEnv {
                 .lines()
                 .map(|line| line.split_whitespace().map(str::to_owned).collect())
                 .filter(|argv: &Vec<String>| argv.iter().any(|a| a == "--model"))
+                .filter(|argv: &Vec<String>| argv.first().is_none_or(|a| a != "-p"))
                 .collect();
             if lines.len() >= n || std::time::Instant::now() >= deadline {
                 return lines;

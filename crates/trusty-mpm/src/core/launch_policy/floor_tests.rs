@@ -77,7 +77,13 @@ fn skills_the_prompts_load() -> BTreeSet<String> {
     }
     let seeds = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/skills");
     for path in md_files(&seeds) {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        // #8436 PR C: an `architect-*` skill ships as `<stem>/SKILL.md`.
+        let stem = if path.file_name().is_some_and(|n| n == "SKILL.md") {
+            path.parent().and_then(|p| p.file_name())
+        } else {
+            path.file_stem()
+        };
+        if let Some(stem) = stem.and_then(|s| s.to_str()) {
             names.insert(stem.to_string());
         }
     }
