@@ -110,13 +110,13 @@ fn carry_usage(session: &mut PollSession, next: &PollState) {
             .and_then(|u| u.get("last_probe"))
             .cloned()
     };
-    if probe(next) != probe(&session.state) {
-        if let Some(usage) = next.other.get("usage") {
-            session
-                .state
-                .other
-                .insert("usage".to_owned(), usage.clone());
-        }
+    if probe(next) != probe(&session.state)
+        && let Some(usage) = next.other.get("usage")
+    {
+        session
+            .state
+            .other
+            .insert("usage".to_owned(), usage.clone());
     }
 }
 
