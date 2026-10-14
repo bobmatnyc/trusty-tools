@@ -128,6 +128,9 @@ pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target}
 mod floor_d4;
 mod floor_d4_rules;
 mod force_push;
+// #8436 PR C: no hook-guarded session lifts the Architect guard at init.
+mod guard_lift_init;
+pub(crate) use guard_lift_init::{GUARD_LIFT_INIT_RULE, evaluate_guard_lift_init};
 
 pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;

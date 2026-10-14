@@ -65,6 +65,16 @@ pub fn settings_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".claude").join("settings.json")
 }
 
+/// `<project_dir>/.claude/settings.local.json`.
+pub fn local_settings_path(project_dir: &Path) -> PathBuf {
+    project_dir.join(".claude").join("settings.local.json")
+}
+
+/// The settings files (by file name) in which the key is `"1"`. Red stub.
+pub fn lifted_in(_project_dir: &Path) -> Vec<&'static str> {
+    Vec::new()
+}
+
 /// The guard-lift state of `project_dir`; writes nothing.
 ///
 /// Test: `the_state_reader_covers_every_shape`.

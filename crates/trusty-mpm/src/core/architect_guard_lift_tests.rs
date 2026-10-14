@@ -125,3 +125,57 @@ fn a_symlinked_settings_file_or_claude_dir_is_refused() {
     assert!(set(dir.path()).is_err());
     assert!(std::fs::read_dir(&real).unwrap().next().is_none());
 }
+
+/// Plant `body` as `dir`'s `.claude/settings.local.json`.
+fn plant_local(dir: &Path, body: &str) {
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    std::fs::write(local_settings_path(dir), body).unwrap();
+}
+
+const LIFTED: &str = "{\"env\": {\"TRUSTY_MPM_PM_UNRESTRICTED\": \"1\"}}";
+
+/// #8436 PR C (M3): Claude Code merges `settings.local.json` over
+/// `settings.json`, so a lift in either file is a lift, and the state names it.
+#[test]
+fn a_lift_in_either_settings_file_is_a_lift() {
+    let dir = tempdir().unwrap();
+    plant(dir.path(), "{}");
+    plant_local(dir.path(), LIFTED);
+    assert_eq!(read_state(dir.path()), LiftState::Lifted);
+    assert_eq!(lifted_in(dir.path()), vec!["settings.local.json"]);
+
+    plant(dir.path(), LIFTED);
+    assert_eq!(read_state(dir.path()), LiftState::Lifted);
+    assert_eq!(
+        lifted_in(dir.path()),
+        vec!["settings.json", "settings.local.json"]
+    );
+
+    plant_local(dir.path(), "{}");
+    assert_eq!(lifted_in(dir.path()), vec!["settings.json"]);
+}
+
+/// #8436 PR C (M3), Fail-Open Check: a local file that cannot be read never
+/// reads as off; a known lift still reads as lifted.
+#[test]
+fn an_unreadable_local_file_is_unknown_never_off() {
+    for body in ["{ not json", "[1]", "{\"env\": 3}"] {
+        let dir = tempdir().unwrap();
+        plant(dir.path(), "{}");
+        plant_local(dir.path(), body);
+        assert!(
+            matches!(read_state(dir.path()), LiftState::Unknown(_)),
+            "{body:?}"
+        );
+        assert!(lifted_in(dir.path()).is_empty(), "{body:?}");
+        plant(dir.path(), LIFTED);
+        assert_eq!(read_state(dir.path()), LiftState::Lifted, "{body:?}");
+    }
+    let dir = tempdir().unwrap();
+    plant(dir.path(), "{}");
+    plant_local(
+        dir.path(),
+        "{\"env\": {\"TRUSTY_MPM_PM_UNRESTRICTED\": \"yes\"}}",
+    );
+    assert!(matches!(read_state(dir.path()), LiftState::Other(_)));
+}
