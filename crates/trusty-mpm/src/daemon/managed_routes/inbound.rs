@@ -77,14 +77,44 @@ pub async fn inbound_op(state: &Arc<DaemonState>, ev: InboundEvent) -> InboundRe
     run_inbound(Arc::new(inbound), &deliverer, ev).await
 }
 
-/// RED STUB (#9873 S6): never decides; the next commit replaces it.
+/// Decide `ev` over `inbound` on the blocking pool, then deliver a resolved
+/// answer over `env`.
+///
+/// Why: the decision blocks (table fsync, audit, tmux pane proof); the
+/// delivery awaits the session manager. Only a `Resolved` verdict, which
+/// only the CAS winner holds, reaches `deliver`, so a question is delivered
+/// at most once.
+/// What: a decision task that does not finish (a panic after `resolve`
+/// included) is [`InboundReply::Aborted`], logged at ERROR; the question may
+/// be resolved with no delivery record, which `tm doctor` reports (Q4a).
+/// Test: `concurrent_inbound_answers_deliver_once`,
+/// `aborted_task_after_resolve_is_reported_not_ok`.
 pub(crate) async fn run_inbound(
     inbound: Arc<dyn InboundEnv + Send + Sync>,
     env: &impl DeliverEnv,
     ev: InboundEvent,
 ) -> InboundReply {
-    let _ = (inbound, env, ev, decide, Verdict::Dropped, Delivery::Delivered);
-    InboundReply::Aborted("stub".into())
+    let verdict = match tokio::task::spawn_blocking(move || decide(&*inbound, &ev)).await {
+        Ok(verdict) => verdict,
+        Err(e) => {
+            // #9873 (F16): never reported ok; the doctor row decides.
+            tracing::error!(error = %e, "inbound answer: the decision task did not finish");
+            return InboundReply::Aborted(e.to_string());
+        }
+    };
+    let resolved = match verdict {
+        Verdict::Dropped(dropped) => return InboundReply::Dropped(dropped),
+        Verdict::Resolved(resolved) => resolved,
+    };
+    let question_id = resolved.question().id;
+    match deliver(env, &resolved).await {
+        Delivery::Delivered => InboundReply::Delivered { question_id },
+        Delivery::Failed { code, sent } => InboundReply::DeliveryFailed {
+            question_id,
+            code,
+            sent,
+        },
+    }
 }
 
 /// The HTTP status and JSON body for `outcome` (#9873 Q6, AC3).
