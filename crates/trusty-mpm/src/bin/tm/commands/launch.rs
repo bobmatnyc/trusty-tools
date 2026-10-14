@@ -1094,6 +1094,25 @@ mod tests {
         ));
     }
 
+    /// A session running in the managed checkout itself — where a launch
+    /// without `--worktree` places it since #5274 — is that project's running
+    /// session, so a second `tm launch --detach` reports it (#8406).
+    #[test]
+    fn session_in_the_managed_checkout_itself_matches_its_project() {
+        let project_dir = "/home/bob/trusty-mpm-projects/owner/repo";
+        for session_wd in [project_dir, "/home/bob/trusty-mpm-projects/owner/repo/"] {
+            assert!(
+                session_matches_workdir(session_wd, "/other/live/dir", Some(project_dir)),
+                "{session_wd}"
+            );
+        }
+        assert!(!session_matches_workdir(
+            "/home/bob/trusty-mpm-projects/owner/repo-extra",
+            "/other/live/dir",
+            Some(project_dir)
+        ));
+    }
+
     /// Trailing-slash normalization: a session workdir with a trailing slash must
     /// still match (regression guard for `normalize_workdir`).
     ///
