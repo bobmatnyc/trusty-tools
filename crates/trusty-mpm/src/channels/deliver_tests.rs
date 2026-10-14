@@ -216,6 +216,8 @@ async fn taint_written_before_delivery() {
             "asker",
             "taint",
             "record:Pending",
+            // #9873 fix round: the Claude id is re-read after the marker.
+            "asker",
             "send",
             "record:Delivered"
         ]

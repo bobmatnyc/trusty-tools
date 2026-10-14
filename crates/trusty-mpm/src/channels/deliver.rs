@@ -9,7 +9,8 @@
 //! What: [`deliver`] runs over a [`DeliverEnv`] in a fixed order: the asker's
 //! record ([`check_asker`]: the live Architect, a plain Claude session id, an
 //! absolute workspace), the taint (Claude id file, then managed marker), a
-//! `pending` line, the send of one [`frame_answer`] line, then the settle line.
+//! `pending` line, a re-read of the Claude id ([`confirm_asker`], #9873 fix
+//! round), the send of one [`frame_answer`] line, then the settle line.
 //! Every failure writes a `failed` line and returns [`Delivery::Failed`].
 //! Test: `deliver_tests.rs`.
 
@@ -158,8 +159,11 @@ pub trait DeliverEnv: Sync {
 /// sends nothing; after it the taint stays. Each failure is logged at ERROR
 /// and settled with a `failed` line; a settle that cannot be written leaves
 /// the `pending` line for `tm doctor`, and a failed `delivered` settle is
-/// `delivery_unconfirmed`, never `Delivered`.
+/// `delivery_unconfirmed`, never `Delivered`. An id [`confirm_asker`] cannot
+/// pin is `asker_changed`, so no send reaches an id with no taint file.
 /// Test: `taint_written_before_delivery`, `taint_write_failure_refuses_delivery`,
+/// `asker_new_claude_id_at_send_is_tainted_before_delivery`,
+/// `asker_claude_id_that_keeps_changing_refuses_delivery`,
 /// `taint_marker_write_failure_refuses_delivery`,
 /// `missing_claude_session_id_refuses_delivery`,
 /// `relative_or_missing_workspace_refuses_delivery`,
@@ -206,6 +210,11 @@ pub async fn deliver(env: &impl DeliverEnv, resolved: &Resolved) -> Delivery {
         resolved.answerer(),
         resolved.text(),
     );
+    // #9873 fix round: a `/clear` before the marker existed gave the pane an
+    // id `reapply` never saw; send only to an id read after it, tainted.
+    if let Err(why) = confirm_asker(env, asker, claude, &mark).await {
+        return step.refuse("asker_changed", &why).await;
+    }
     // #9873 (F12, Q4): one send; a failure is final, never retried.
     if let Err(why) = env.send(asker, &line).await {
         return step.refuse("send_failed", &why).await;
@@ -218,6 +227,47 @@ pub async fn deliver(env: &impl DeliverEnv, resolved: &Resolved) -> Delivery {
             sent: true,
         }
     }
+}
+
+/// Pin the asker's Claude id now that its managed marker exists.
+///
+/// Why: #9873 fix round (HIGH): `deliver` read the id before the marker
+/// existed. A `/clear` in that window starts id Y, whose SessionStart
+/// `reapply` finds no marker and writes nothing, and the egress guard reads
+/// only `<Y>.json`; the answer would reach an untainted Y.
+/// What: re-reads the id after the taint. Equal to `tainted`: `Ok`. A new id
+/// is tainted and read once more, which must match it. A read that fails, a
+/// view [`check_asker`] refuses, a taint that fails, or a third id is an
+/// `Err`. An id that starts after this read finds the marker, so `reapply`
+/// taints it.
+/// Test: `asker_new_claude_id_at_send_is_tainted_before_delivery`,
+/// `asker_claude_id_that_keeps_changing_refuses_delivery`.
+async fn confirm_asker(
+    env: &impl DeliverEnv,
+    asker: &str,
+    tainted: &str,
+    mark: &TaintMark,
+) -> Result<(), String> {
+    let first = reread_claude_id(env, asker).await?;
+    if first == tainted {
+        return Ok(());
+    }
+    env.taint(asker, &first, mark).await?;
+    let second = reread_claude_id(env, asker).await?;
+    if second == first {
+        return Ok(());
+    }
+    Err(format!(
+        "the asker's Claude id changed twice during delivery ({tainted}, {first}, {second})"
+    ))
+}
+
+/// The asker's current Claude id, under the same rules as the first read.
+async fn reread_claude_id(env: &impl DeliverEnv, asker: &str) -> Result<String, String> {
+    let view = env.asker(asker).await?;
+    check_asker(&view)
+        .map(|(claude, _)| claude.to_owned())
+        .map_err(str::to_owned)
 }
 
 /// One delivery's trace writer.
