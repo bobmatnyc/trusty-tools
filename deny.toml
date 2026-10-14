@@ -216,7 +216,10 @@ unsound = "none"
 # Only the h2 0.3.27 half remains. The 0.4 line now resolves to the patched
 # 0.4.16. 0.3.27 is on a line the advisory never patched. It enters through
 # hf-hub 0.3.2 -> reqwest 0.11.27 -> hyper 0.14.32, so no `cargo update` clears
-# it.
+# it. That path is reachable only through non-default features. cargo-deny's
+# default-feature graph does not see it and prints `advisory-not-detected` for
+# this row (a warning). cargo-audit scans the whole Cargo.lock and still needs
+# the matching ignore in `.cargo/audit.toml`.
 #
 # Owner ruling Dd5 (2026-10-14, #6067): upgrade where a patched version
 # exists, otherwise renew the exception for 30 days. The way to delete this row
