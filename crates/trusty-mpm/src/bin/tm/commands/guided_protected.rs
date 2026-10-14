@@ -71,6 +71,7 @@ pub(crate) async fn launch_protected_workspace(
         super::managed_workspace::LaunchDir::CallerResolved,
         home,
         false, // #8878: twin mode is armed only by `tm launch --twin`.
+        super::launch_handoff::Handoff::Attach, // #8406: only `--detach` detaches.
     )
     .await
 }

@@ -597,6 +597,7 @@ async fn main() -> anyhow::Result<()> {
             style,
             worktree,
             twin,
+            detach,
             // `--dir` (or the process cwd) is the operator's, not a resolved
             // placement: ADR-0037's rule applies here and only here (#5836).
         }) => {
@@ -617,11 +618,13 @@ async fn main() -> anyhow::Result<()> {
                 LaunchDir::OperatorCwd,
                 home.as_deref(),
                 twin, // #8878: only an operator's `tm launch --twin` arms.
+                commands::launch_handoff::Handoff::from_detach(detach), // #8406
             )
             .await
         }
         Some(Command::Connect { dir }) => {
-            connect(&client, &url, dir, dirs::home_dir().as_deref()).await
+            let attach = commands::launch_handoff::Handoff::Attach; // #8406
+            connect(&client, &url, dir, dirs::home_dir().as_deref(), attach).await
         }
         Some(Command::Attach {
             target,
