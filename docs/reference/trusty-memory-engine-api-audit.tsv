@@ -1,4 +1,39 @@
 path	kind	disposition	consumer_or_reason	batch
+trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::BackfillReport::observed	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::BackfillReport::skipped	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::BackfillReport::unresolved	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession::created_at	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession::history	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession::id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession::title	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSession::updated_at	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta::created_at	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta::id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta::message_count	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta::title	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionMeta::updated_at	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore	struct	KEEP	engine::PalaceHandle::snapshot signature; the listing names the ChatSessionStore methods under this path	A3b
+trusty_memory::engine::store::ChatSessionStore::append_message	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::append_messages	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::create_session	method	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::ChatSessionStore::delete_session	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::get_chat_asset	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::get_session	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::list_sessions	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::open	method	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::ChatSessionStore::put_chat_asset	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ChatSessionStore::upsert_session	method	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::DeadlinedWrite	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::EmbedFailure	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::EmbedFailure::attempts	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::EmbedFailure::drawer_id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::EmbedFailure::failed_at	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::EmbedFailure::reason	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::INCOMPATIBLE_SUFFIX	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::KnowledgeGraph	struct	KEEP	engine signatures (PalaceHandle::kg, community::find_communities, store::rooms); tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::adjacency_desynced	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	tests/kg_graph_tests.rs	A3a
@@ -43,6 +78,359 @@ trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	tests/bm
 trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	tests/memory_palace.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::upsert_drawers_atomic	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::verify_with_many	method	NARROW	no consumer outside the library	A3a
+trusty_memory::engine::store::L1Cache	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Io	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Io::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Io::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Json	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Json::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Json::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::L1CacheError::Time	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::LabelSource	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::LabelSource::Builtin	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::LabelSource::FoldInversion	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::LabelSource::KgDictionary	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::LabelSource::Unresolved	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::OpenIntent	enum	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/kg_triple_key_migration_tests.rs	A3b
+trusty_memory::engine::store::OpenIntent::Observer	variant	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/kg_triple_key_migration_tests.rs	A3b
+trusty_memory::engine::store::OpenIntent::ReadOnlyClient	variant	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/kg_triple_key_migration_tests.rs	A3b
+trusty_memory::engine::store::OpenIntent::Writer	variant	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/kg_triple_key_migration_tests.rs	A3b
+trusty_memory::engine::store::OpenMode	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::OpenMode::ReadWrite	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::OpenMode::Recreated	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::OpenMode::Snapshot	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStore	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::PalaceStoreError	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupFailed	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupFailed::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupFailed::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupVerifyMismatch	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupVerifyMismatch::actual	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupVerifyMismatch::expected	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::BackupVerifyMismatch::file	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerMismatch	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerMismatch::marker	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerMismatch::mirror	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerMismatch::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerUnreadable	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerUnreadable::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerUnreadable::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMarkerUnreadable::reason	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMigrationFailed	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMigrationFailed::from	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMigrationFailed::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMigrationFailed::reason	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatMigrationFailed::to	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatNeedsMigration	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatNeedsMigration::found	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatNeedsMigration::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatNeedsMigration::supported	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooNew	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooNew::found	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooNew::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooNew::supported	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooOld	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooOld::found	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooOld::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::FormatTooOld::supported	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::InsufficientSpace	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::InsufficientSpace::available	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::InsufficientSpace::needed	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::InsufficientSpace::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Io	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Io::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Io::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Json	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Json::path	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::Json::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PalaceStoreError::NotFound	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::PayloadRow	struct	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadRow::id	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadRow::payload	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadRow::segment	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadRow::uuid	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore	struct	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::delete	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::exists	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::get	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::list_segment	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::load_all	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::lookup_id_for_uuid	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::open	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::try_for_each_row	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStore::upsert	method	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError	enum	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Commit	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Commit::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Commit::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Database	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Database::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Database::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Io	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Io::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Io::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Json	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Json::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Postcard	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Postcard::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Storage	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Storage::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Storage::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Table	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Table::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Table::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Transaction	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Transaction::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::PayloadStoreError::Transaction::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::ReadOnlyRedb	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ReadOnlyRedb::Live	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ReadOnlyRedb::Snapshot	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ReadOnlyRedb::Snapshot::_guard	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ReadOnlyRedb::Snapshot::db	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Insert	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Insert::room	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Insert::source	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Registered	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Registered::label	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanAction::Registered::resolved	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanEntry	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanEntry::action	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanEntry::drawer_count	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomPlanEntry::room_id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::created_at_ms	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::description	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::label	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::merged_from	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::resolved	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::room_type	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomRecord::wing_id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::created_at_ms	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::description	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::label	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::resolved	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::room_type	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::RoomSummary::wing_id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::Triple	struct	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::confidence	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::object	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::predicate	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::provenance	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::subject	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::valid_from	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::valid_to	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::VectorHit	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::VectorHit::drawer_id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::VectorHit::score	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::VectorStore	trait	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::remove	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::search	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::upsert	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::WingRecord	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingRecord::created_at_ms	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingRecord::description	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingRecord::label	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary	struct	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::created_at_ms	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::description	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::id	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::is_default	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::label	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WingSummary::room_count	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError	enum	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded	variant	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded::budget	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded::held	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded::palace	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded::stage	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::WriteTxnError::DeadlineExceeded::store	field	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::backfill_rooms	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::backfill_rooms_fail_open	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::backup_incompatible_file	reexport	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions	mod	KEEP	trusty-agents src/chat_attachments.rs (chat_sessions::ChatMessage)	A3b
+trusty_memory::engine::store::chat_sessions::ChatImageAsset	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatImageAsset::data_base64	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatImageAsset::mime_type	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatImageAsset::name	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatImageAsset::session_id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage	struct	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::attachments	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::content	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::role	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession::created_at	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession::history	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession::id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession::title	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSession::updated_at	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta::created_at	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta::id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta::message_count	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta::title	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionMeta::updated_at	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStore	struct	KEEP	engine::PalaceHandle::snapshot signature; tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError	enum	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Commit	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Commit::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Commit::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::CorruptHistory	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::CorruptHistory::id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::CorruptHistory::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Database	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Database::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Database::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Io	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Io::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Io::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Json	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Json::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Postcard	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Postcard::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Storage	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Storage::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Storage::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Table	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Table::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Table::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Timestamp	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Timestamp::field	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Timestamp::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Transaction	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Transaction::path	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::chat_sessions::ChatSessionStoreError::Transaction::source	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open	mod	KEEP	path of OpenIntent	A3b
+trusty_memory::engine::store::concurrent_open::OpenIntent	enum	KEEP	engine::PalaceHandle::open_with_intent and PalaceRegistry::open_with_intent signatures; trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A3b
+trusty_memory::engine::store::concurrent_open::OpenIntent::Observer	variant	KEEP	engine::PalaceHandle::open_with_intent and PalaceRegistry::open_with_intent signatures; trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A3b
+trusty_memory::engine::store::concurrent_open::OpenIntent::ReadOnlyClient	variant	KEEP	engine::PalaceHandle::open_with_intent and PalaceRegistry::open_with_intent signatures; trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A3b
+trusty_memory::engine::store::concurrent_open::OpenIntent::Writer	variant	KEEP	engine::PalaceHandle::open_with_intent and PalaceRegistry::open_with_intent signatures; trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode	enum	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode::ReadWrite	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode::Recreated	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode::Snapshot	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode::is_read_only	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::OpenMode::was_recreated	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb	enum	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::Live	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::Snapshot	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::Snapshot::_guard	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::Snapshot::db	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::begin_read	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::is_snapshot	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::ReadOnlyRedb::open	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::SnapshotGuard	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::SnapshotGuard::drop	trait_method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::SnapshotGuard::noop	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::concurrent_open::try_open_or_snapshot	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::create_room	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger	mod	KEEP	path of EmbedFailure	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure	struct	KEEP	engine::retrieval::EmbedHealth::recorded_failures signature (A4)	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure::attempts	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure::drawer_id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure::failed_at	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::EmbedFailure::reason	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::clear	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::load	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::embed_ledger::record	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::ensure_default_wing	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::ensure_default_wing_fail_open	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup	mod	KEEP	tests/kg_triple_key_migration_tests.rs (format_backup::backup_root)	A3b
+trusty_memory::engine::store::format_backup::BACKUP_KEEP	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::BackupManifest	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::BackupManifest::files	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::BackupManifest::from	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::BackupManifest::palace	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::BackupManifest::to	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::MANIFEST	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::ManifestEntry	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::ManifestEntry::len	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::ManifestEntry::name	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::ManifestEntry::sha256	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::backup_data_root	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::format_backup::backup_root	fn	KEEP	tests/kg_triple_key_migration_tests.rs	A3b
+trusty_memory::engine::store::format_backup::ensure_format_backup	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::format_backup::verify_backup	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store	mod	KEEP	path of HnswStore, HnswStoreError, HnswOp and op_budget	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit::aliased	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit::aliased_key_count	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit::distinct_vector_ids	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit::is_clean	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::AliasAudit::key_rows	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswOp	struct	KEEP	engine::registry::PalaceRegistry::oldest_hnsw_op signature (A4)	A3b
+trusty_memory::engine::store::hnsw_store::HnswOp::kind	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswOp::since	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswOpKind	enum	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswOpKind::Search	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswOpKind::Upsert	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore	struct	KEEP	tests/chunked_embed_9275.rs, tests/hnsw_abandoned_health_9487.rs via UsearchStore::hnsw_for_test (embedder-test-support)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::all_keys	method	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::audit_aliases	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::compact_orphans	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::delete	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::delete_group	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::is_empty	method	NARROW	removed: no caller anywhere	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::is_read_only	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::len	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::oldest_op	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::op_breaker	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::open	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::open_with_mode	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::replace_group	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::run_bounded	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::search	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::unalias	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::upsert	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::with_palace	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError	enum	KEEP	named by hnsw_store::Result	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount::got	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount::max	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch::expected	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch::got	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::DrawerKey	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed::last_candidate	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed::probes	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::InvalidUuid	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::OpBudget	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::Postcard	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::ReadOnly	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::Redb	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::RedbCommit	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::RedbStorage	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::RedbTable	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::RedbTransaction	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::StdoutGuard	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::WriteDeadline	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::from	trait_method	KEEP	From impls of HnswStoreError	A3b
+trusty_memory::engine::store::hnsw_store::Result	type	KEEP	return type of HnswStore::all_keys	A3b
+trusty_memory::engine::store::hnsw_store::op_budget	mod	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OP_BUDGET_ENV	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OP_BUDGET_TXN_DEADLINES	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker	struct	KEEP	return type of UsearchStore::op_breaker	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::abandoned_ops	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::budget	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::is_tripped	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::spawned_ops	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError	enum	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded	variant	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::budget	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::op	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::palace	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged	variant	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged::palace	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::abandoned_ops_in_flight	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::default_op_budget	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::op_budget_error	fn	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::op_budget_for_txn_deadline	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::incompatible_backup_path	reexport	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::is_incompatible_format	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::kg	mod	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync	enum	KEEP	error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424)	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
@@ -462,3 +850,278 @@ trusty_memory::engine::store::kg_writer::KgWriter::spawn	method	NARROW	no consum
 trusty_memory::engine::store::kg_writer::KgWriter::store	method	NARROW	no consumer outside the library; module pub(crate)	A3a
 trusty_memory::engine::store::kg_writer::KgWriter::upsert_drawer	method	NARROW	no consumer outside the library; module pub(crate)	A3a
 trusty_memory::engine::store::kg_writer::KgWriter::upsert_drawer_sync	method	NARROW	no consumer outside the library; module pub(crate)	A3a
+trusty_memory::engine::store::l1_cache	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1Cache	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1Cache::is_stale	method	NARROW	no consumer outside the library; module pub(crate); unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::l1_cache::L1Cache::load_l1_cache	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1Cache::save_l1_cache	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError	enum	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Io	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Io::path	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Io::source	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Json	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Json::path	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Json::source	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1CacheError::Time	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::l1_cache::L1_SNAPSHOT_CAP	const	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::list_room_summaries	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::list_wings	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::open_or_recreate	reexport	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format	mod	KEEP	trusty-mpm src/core/sm/memory_tests.rs, src/daemon/manager/memory_tests.rs	A3b
+trusty_memory::engine::store::palace_format::KG_SCHEMA_PALACE_FORMAT	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::MIGRATION_RECORD	const	KEEP	trusty-mpm src/core/sm/memory_tests.rs, src/daemon/manager/memory_tests.rs	A3b
+trusty_memory::engine::store::palace_format::PALACE_FORMAT_SUPPORTED	const	KEEP	trusty-mpm src/core/sm/memory_tests.rs, src/daemon/manager/memory_tests.rs	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus	enum	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus::Current	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus::NeedsMigration	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus::NeedsMigration::found	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus::NeedsMigration::interrupted	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::PalaceFormatStatus::Unverified	variant	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::is_format_refusal	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_format::palace_format_status	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store	mod	KEEP	path of PalaceStore and PalaceStoreError	A3b
+trusty_memory::engine::store::palace_store::PalaceStore	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::list_palaces	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::load_identity	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::load_palace	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::metadata_present	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::save_identity	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store::PalaceStore::save_palace	method	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError	enum	KEEP	error type of PalaceStore::metadata_present and save_palace	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::actual	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::expected	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::file	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::marker	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::mirror	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::reason	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::from	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::reason	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::to	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::available	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::needed	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Io	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Io::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Io::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Json	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Json::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Json::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::NotFound	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::is_format_refusal	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::variant_name	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::payload_store	mod	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadRow	struct	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadRow::id	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadRow::payload	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadRow::segment	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadRow::uuid	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStore	struct	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError	enum	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Commit	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Commit::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Commit::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Database	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Database::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Database::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Io	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Io::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Io::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Json	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Json::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Postcard	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Postcard::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Storage	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Storage::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Storage::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Table	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Table::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Table::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Transaction	variant	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Transaction::path	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::payload_store::PayloadStoreError::Transaction::source	field	KEEP	ruling needed: no caller in or outside the library (its own unit tests only); built for the retired trusty-agents TrustyBackedMemoryStore sidecar; narrowing leaves it dead, so delete or keep is a design call	A3b
+trusty_memory::engine::store::plan_rooms	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::redb_open	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::redb_open::INCOMPATIBLE_SUFFIX	reexport	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::redb_open::backup_incompatible_file	reexport	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::redb_open::incompatible_backup_path	reexport	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::redb_open::is_incompatible_format	reexport	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::redb_open::open_or_recreate	reexport	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::rename_room	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::rename_wing	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::resolve_or_create_room	fn	NARROW	removed: no caller anywhere	A3b
+trusty_memory::engine::store::resolve_or_create_wing	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::resolve_room_filter_id	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::resolve_room_selector	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::resolve_wing_selector	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::room_backfill	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::BackfillReport	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::BackfillReport::inserted	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::BackfillReport::observed	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::BackfillReport::skipped	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::BackfillReport::unresolved	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource	enum	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource::Builtin	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource::FoldInversion	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource::KgDictionary	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource::Unresolved	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::LabelSource::is_resolved	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::backfill_rooms	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_backfill::backfill_rooms_fail_open	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction	enum	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Insert	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Insert::room	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Insert::source	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Registered	variant	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Registered::label	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanAction::Registered::resolved	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry::action	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry::drawer_count	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry::label	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry::room_id	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::RoomPlanEntry::would_insert	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::room_plan::plan_rooms	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::rooms	mod	KEEP	tests/palace_backup_9282.rs (rooms::resolve_or_create_room_sync)	A3b
+trusty_memory::engine::store::rooms::ROOM_SCHEMA_VERSION	const	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord	struct	KEEP	kg_redb::KgStoreRedb::list_rooms return type (A3a KEEP)	A3b
+trusty_memory::engine::store::rooms::RoomRecord::created_at_ms	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::description	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::label	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::merged_from	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::new	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::resolved	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::room_type	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::summarize	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomRecord::wing_id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSchemaMarker	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSchemaMarker::schema_version	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::created_at_ms	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::description	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::label	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::resolved	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::room_type	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::RoomSummary::wing_id	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::create_room	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::list_room_summaries	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::rename_room	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::resolve_or_create_room	fn	NARROW	removed: no caller anywhere	A3b
+trusty_memory::engine::store::rooms::resolve_or_create_room_in_wing	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::resolve_or_create_room_in_wing_sync	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::resolve_or_create_room_sync	fn	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::rooms::resolve_room_filter_id	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms::resolve_room_selector	fn	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::rooms_in_wing	fn	NARROW	re-export; no consumer outside the library	A3b
+trusty_memory::engine::store::vector	mod	KEEP	tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::vector::AliasScan	struct	KEEP	engine::retrieval::AliasAudit::from_scan signature (A4)	A3b
+trusty_memory::engine::store::vector::AliasScan::aliased_drawer_ids	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::AliasScan::distinct_vector_ids	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::AliasScan::key_rows	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::AliasScan::unnameable_keys	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::ChunkShape	struct	KEEP	return type of UsearchStore::chunk_shapes	A3b
+trusty_memory::engine::store::vector::ChunkShape::is_complete	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::ChunkShape::max_index	field	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::ChunkShape::rows	field	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::CompactionResult	struct	KEEP	engine::PalaceHandle::compact_vector_orphans signature (A4)	A3b
+trusty_memory::engine::store::vector::CompactionResult::index_size_after	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::CompactionResult::index_size_before	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::CompactionResult::orphans_removed	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::CompactionResult::total_checked	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UnaliasOutcome	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UnaliasOutcome::freed	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UnaliasOutcome::unparsed_keys	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore	struct	KEEP	engine::PalaceHandle::new and vector_store signatures; tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::alias_audit	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::all_ids	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::chunk_shapes	method	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::compact_orphans	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::dim	method	KEEP	tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::index_size	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::is_read_only	method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::new	method	KEEP	tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::new_with_intent	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::oldest_hnsw_op	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
+trusty_memory::engine::store::vector::UsearchStore::op_breaker	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::path	method	NARROW	removed: no caller anywhere	A3b
+trusty_memory::engine::store::vector::UsearchStore::remove	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::reset	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::search	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::try_index_size	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::unalias	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::UsearchStore::upsert	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::upsert_chunks	method	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::VectorHit	struct	KEEP	return type of VectorStore::search	A3b
+trusty_memory::engine::store::vector::VectorHit::drawer_id	field	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::VectorHit::score	field	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::vector::VectorStore	trait	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::remove	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::search	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::upsert	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::wings	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WING_SCHEMA_VERSION	const	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord::created_at_ms	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord::description	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord::label	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord::new	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingRecord::summarize	method	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSchemaMarker	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSchemaMarker::schema_version	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::created_at_ms	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::description	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::id	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::is_default	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::label	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::WingSummary::room_count	field	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::ensure_default_wing	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::ensure_default_wing_fail_open	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::list_wings	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::normalize_wing_label	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::rename_wing	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::rename_wing_sync	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::resolve_or_create_wing	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::resolve_or_create_wing_sync	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::resolve_wing_selector	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::wings::rooms_in_wing	fn	NARROW	no consumer outside the library; module pub(crate)	A3b
+trusty_memory::engine::store::write_deadline	mod	KEEP	path of WriteTxnError	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite	struct	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite::Target	type	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite::begin	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite::check	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite::check_before_commit	method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::DeadlinedWrite::deref	trait_method	NARROW	no consumer outside the library	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError	enum	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded	variant	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::budget	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::held	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::palace	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::stage	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::store	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::palace_label	fn	NARROW	no consumer outside the library	A3b

@@ -52,13 +52,78 @@
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
-# See #9278: one line per audited prefix. A3a = store knowledge-graph modules.
+# See #9278: one line per audited prefix. A3a = store knowledge-graph modules;
+# A3b = every other `engine::store` module and store-root re-export.
 SCOPE_PREFIXES='
 trusty_memory::engine::store::kg
 trusty_memory::engine::store::kg_redb
 trusty_memory::engine::store::kg_store
 trusty_memory::engine::store::kg_writer
 trusty_memory::engine::store::KnowledgeGraph
+trusty_memory::engine::store::BackfillReport
+trusty_memory::engine::store::ChatSession
+trusty_memory::engine::store::ChatSessionMeta
+trusty_memory::engine::store::ChatSessionStore
+trusty_memory::engine::store::DeadlinedWrite
+trusty_memory::engine::store::EmbedFailure
+trusty_memory::engine::store::INCOMPATIBLE_SUFFIX
+trusty_memory::engine::store::L1Cache
+trusty_memory::engine::store::L1CacheError
+trusty_memory::engine::store::LabelSource
+trusty_memory::engine::store::OpenIntent
+trusty_memory::engine::store::OpenMode
+trusty_memory::engine::store::PalaceStore
+trusty_memory::engine::store::PalaceStoreError
+trusty_memory::engine::store::PayloadRow
+trusty_memory::engine::store::PayloadStore
+trusty_memory::engine::store::PayloadStoreError
+trusty_memory::engine::store::ReadOnlyRedb
+trusty_memory::engine::store::RoomPlanAction
+trusty_memory::engine::store::RoomPlanEntry
+trusty_memory::engine::store::RoomRecord
+trusty_memory::engine::store::RoomSummary
+trusty_memory::engine::store::Triple
+trusty_memory::engine::store::VectorHit
+trusty_memory::engine::store::VectorStore
+trusty_memory::engine::store::WingRecord
+trusty_memory::engine::store::WingSummary
+trusty_memory::engine::store::WriteTxnError
+trusty_memory::engine::store::backfill_rooms
+trusty_memory::engine::store::backfill_rooms_fail_open
+trusty_memory::engine::store::backup_incompatible_file
+trusty_memory::engine::store::chat_sessions
+trusty_memory::engine::store::concurrent_open
+trusty_memory::engine::store::create_room
+trusty_memory::engine::store::embed_ledger
+trusty_memory::engine::store::ensure_default_wing
+trusty_memory::engine::store::ensure_default_wing_fail_open
+trusty_memory::engine::store::format_backup
+trusty_memory::engine::store::hnsw_store
+trusty_memory::engine::store::incompatible_backup_path
+trusty_memory::engine::store::is_incompatible_format
+trusty_memory::engine::store::l1_cache
+trusty_memory::engine::store::list_room_summaries
+trusty_memory::engine::store::list_wings
+trusty_memory::engine::store::open_or_recreate
+trusty_memory::engine::store::palace_format
+trusty_memory::engine::store::palace_store
+trusty_memory::engine::store::payload_store
+trusty_memory::engine::store::plan_rooms
+trusty_memory::engine::store::redb_open
+trusty_memory::engine::store::rename_room
+trusty_memory::engine::store::rename_wing
+trusty_memory::engine::store::resolve_or_create_room
+trusty_memory::engine::store::resolve_or_create_wing
+trusty_memory::engine::store::resolve_room_filter_id
+trusty_memory::engine::store::resolve_room_selector
+trusty_memory::engine::store::resolve_wing_selector
+trusty_memory::engine::store::room_backfill
+trusty_memory::engine::store::room_plan
+trusty_memory::engine::store::rooms
+trusty_memory::engine::store::rooms_in_wing
+trusty_memory::engine::store::vector
+trusty_memory::engine::store::wings
+trusty_memory::engine::store::write_deadline
 '
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
