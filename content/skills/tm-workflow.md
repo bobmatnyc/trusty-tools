@@ -1006,6 +1006,11 @@ marker, `<!-- TRUSTY-MPM: <TOKEN> START v=1 -->` … `<!-- TRUSTY-MPM: <TOKEN> E
 (`core/claude_md_sections.rs::HOST_FILES`). This replaces exactly the matching
 section, nothing else.
 
+**Profile exception, #8436:** the "`CLAUDE.md` is the only non-dynamic
+instruction source" rule is scoped by profile. A PM reads `CLAUDE.md` alone; an
+Architect (the `supervisor` profile) also reads the owner's `AGENTS.md`, which tm
+composes between `architect.md` and the Architect core.
+
 The five legacy per-file overrides
 (`.trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,
 PM_INSTRUCTIONS_DEPLOYED}.md`) are RETIRED (#4286) and never read. Never create

@@ -246,14 +246,82 @@ fn other_bytes_with_no_record_stay_custom_even_with_a_history() {
 fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     // Drift guard: editing an asset without moving its old hash into
     // `previous` would make a `tm fleet init` seed of the old text look custom.
-    const PINNED: [(&str, &str); 2] = [
+    const PINNED: [(&str, &str); 19] = [
         (
             "tm-fleet-check",
-            "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
+            "7d20aa084e7c408e3ab6a3a8abb12985fe15f3925daf8924e6b14c0c89837fa1",
         ),
         (
             "tm-context-refresh",
-            "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
+            "ced719f7a8cd6e0bad2ad10fffc83f9f70d19527cb2c9856ec867cca9db5f3e7",
+        ),
+        (
+            "tm-fleet-restart",
+            "0d66c4271364ec0be3e3e1e1a0d6b21b757955af02836a21d17c13711a64c617",
+        ),
+        (
+            "architect-completion-standard",
+            "d03e6f7aafe76da05047f971e2f17d897584382cb1d11f148d65bdef9a7c4ff4",
+        ),
+        (
+            "architect-dashboard",
+            "f8a9ac7a01e3adc6c46461e848ad6ebc26500c97c638d432d563ede31f8f1177",
+        ),
+        (
+            "architect-drift-check",
+            "2a597ae15fbc161923275b1d9946be87cfb014ff514fa27bf6e5c8950e8f2b81",
+        ),
+        (
+            "architect-github",
+            "ee361a3fa399cfbe0baee56f55b8c34d42bbd4dbf0832fa3b521cb5ed0b7fbf0",
+        ),
+        (
+            "architect-host-admin",
+            "b7eb2a7023bda9efb9e672d38e0e072b31594522befc1f3af12f663bb260e711",
+        ),
+        (
+            "architect-improvements",
+            "c904e9db8d224b52b8f0991d143896856617e3fe02e081c64a55e119c3d7d971",
+        ),
+        (
+            "architect-macos",
+            "6f43f4b59f8428570e163ff46f03ed01791738dbd5f036ae3dcf5bf69e3852ed",
+        ),
+        (
+            "architect-operating-rules",
+            "07089cdbd3021b6ee8e9a91d28b3134efe522c70be690376f7791e0f1d26fce0",
+        ),
+        (
+            "architect-owner-model",
+            "b11afa1f8725f4ecee324ea91e4c5b2b7f35206f8f0031ac9a32df0b508f6716",
+        ),
+        (
+            "architect-project-provision",
+            "205254f02f5839c7404958ddae2623bef3175c6b027c3ca839ac6709205a7990",
+        ),
+        (
+            "architect-review",
+            "a999073644424e0ab04427d8d6376972a035b05a005995e85e017573f556526f",
+        ),
+        (
+            "architect-search-memory",
+            "70ce3e2383a4097db95d44ab745790903e4657b8259ee7fd4e2839195653d389",
+        ),
+        (
+            "architect-strategy",
+            "37737c0c2e7769d59fc777633607ff0858158228a2409f9a8029673e4839d9ea",
+        ),
+        (
+            "architect-tmux-ops",
+            "b537c39c613d54c240eb3b2effeccfb2ceb8dd9db3424faeff7856b4abce1e29",
+        ),
+        (
+            "architect-token-optimizer",
+            "78d9a6a5b3314eb5fea176f718ce06c410ef214136f913422772e5657dc99132",
+        ),
+        (
+            "architect-workflow",
+            "da20dc44480a1fd5d99797e089144980a472beb60fc4275d6daa106dc1399038",
         ),
     ];
     assert_eq!(PINNED.len(), SKILLS.len());
@@ -265,7 +333,12 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
             "{stem} changed: add the OLD hash (the PINNED value) to its `previous` \
              list, then update PINNED"
         );
-        assert!(!skill.previous.is_empty(), "{stem} has no shipped history");
+        // #8436 PR C: a skill first shipped in PR C has no history yet.
+        let first_shipped = ["tm-fleet-check", "tm-context-refresh"];
+        assert!(
+            !first_shipped.contains(&stem) || !skill.previous.is_empty(),
+            "{stem} has no shipped history"
+        );
         assert!(
             !skill.previous.contains(&pinned),
             "{stem}: the current hash is listed as previous"

@@ -20,9 +20,12 @@
 #                       (/Users/, /home/, or Claude Code's -Users- slug form)
 #                       or a <projects>/<owner>/supervisor checkout path
 #     SECRET            a sub-project file carries a GitHub or API token shape
-#     DRIFT             a shipped copy is missing or differs from its source
+#     DRIFT             a shipped copy differs from its source, or the
+#                       content/ copy of the setup skill is missing
+#     UNSHIPPED         a source file under a mirrored directory has no
+#                       shipped copy (the derived pair rule, #8436 PR C)
 #     UNPAIRED          a file under crates/trusty-mpm/src/assets/architect/
-#                       is no pair's shipped copy, so no source guards it
+#                       has no source, so nothing guards it
 #     EMPTY             the sub-project holds no files (a vacuous pass)
 #   Runtime state (inbox/, __pycache__/, .pytest_cache/) is not scanned.
 #
@@ -54,23 +57,39 @@ done
 SUB_REL="python/trusty-architect"
 SUB="$ROOT/$SUB_REL"
 
-# Shipped copies: "<path under the sub-project>|<path under the repo root>",
-# one per line. P4 added what `tm fleet init` writes into the Architect.
-PAIRS="
-skills/tm-architect-setup.md|content/skills/tm-architect-setup.md
-skills/tm-fleet-check.md|crates/trusty-mpm/src/assets/architect/skills/tm-fleet-check.md
-skills/tm-context-refresh.md|crates/trusty-mpm/src/assets/architect/skills/tm-context-refresh.md
-scripts/fleet-poll.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-poll.py
-scripts/fleet-classify.py|crates/trusty-mpm/src/assets/architect/scripts/fleet-classify.py
-scripts/input-state.py|crates/trusty-mpm/src/assets/architect/scripts/input-state.py
-scripts/quiet-sessions.py|crates/trusty-mpm/src/assets/architect/scripts/quiet-sessions.py
-scripts/self-ctx.py|crates/trusty-mpm/src/assets/architect/scripts/self-ctx.py
-scripts/start-fleet-poll.sh|crates/trusty-mpm/src/assets/architect/scripts/start-fleet-poll.sh
-templates/CLAUDE.md|crates/trusty-mpm/src/assets/architect/templates/CLAUDE.md
-templates/gitignore|crates/trusty-mpm/src/assets/architect/templates/gitignore
-templates/records/state.md|crates/trusty-mpm/src/assets/architect/templates/records/state.md
-templates/records/actions.md|crates/trusty-mpm/src/assets/architect/templates/records/actions.md
+# Shipped copies, derived (#8436 PR C): every file under a MIRRORED directory
+# of the sub-project has a byte-equal copy at the same path under ASSET_REL,
+# except the EXCEPTIONS below. "<path under the sub-project>|<path under the
+# repo root>", one per line.
+ASSET_REL="crates/trusty-mpm/src/assets/architect"
+MIRRORED="agents docs scripts skills templates"
+# Not shipped: the tests beside the scripts, and the setup skill, which ships
+# to content/skills/ instead (SPECIAL_PAIRS).
+is_exception() { # $1 = path under the sub-project
+  case "$1" in
+    scripts/test_*.py | scripts/conftest.py | */.DS_Store | *.pyc) return 0 ;;
+    skills/tm-architect-setup.md) return 0 ;;
+  esac
+  return 1
+}
+SPECIAL_PAIRS="skills/tm-architect-setup.md|content/skills/tm-architect-setup.md"
+NL="
 "
+derived=""
+for d in $MIRRORED; do
+  [ -d "$SUB/$d" ] || continue
+  found="$(find "$SUB/$d" -type f ! -path '*/__pycache__/*' ! -path '*/.pytest_cache/*' \
+    | LC_ALL=C sort)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$SUB"/}"
+    is_exception "$rel" && continue
+    derived="$derived$rel|$ASSET_REL/$rel$NL"
+  done <<EOF
+$found
+EOF
+done
+PAIRS="$SPECIAL_PAIRS$NL$derived"
 if [ "$LIST_PAIRS" -eq 1 ]; then
   for pair in $PAIRS; do echo "$pair"; done
   exit 0
@@ -87,10 +106,13 @@ if [ ! -d "$SUB" ]; then
   exit 1
 fi
 
-scan() { # $1 = class, $2 = extended regex; reports each matching line
+scan() { # $1 = class, $2 = extended regex, $3 = optional regex of lines to ignore
   local hits
   hits="$(grep -rInE --exclude-dir=inbox --exclude-dir=__pycache__ \
     --exclude-dir=.pytest_cache -e "$2" "$SUB" 2>/dev/null || true)"
+  if [ -n "${3:-}" ] && [ -n "$hits" ]; then
+    hits="$(printf '%s\n' "$hits" | grep -vE "$3" || true)"
+  fi
   [ -n "$hits" ] || return 0
   while IFS= read -r line; do
     report "$1" "${line#"$ROOT"/}"
@@ -120,7 +142,8 @@ if [ -f "$ROOT/Cargo.toml" ] &&
 fi
 
 scan MAIN_TREE_IMPORT '^[[:space:]]*(from|import)[[:space:]]+trusty_'
-scan MAIN_TREE_IMPORT '(^|[^A-Za-z0-9_.-])crates/'
+# #8436 PR C: a crates.io API URL is not a main-tree path.
+scan MAIN_TREE_IMPORT '(^|[^A-Za-z0-9_.-])crates/' 'crates\.io/api/'
 scan MAIN_TREE_IMPORT '\.\./\.\.'
 scan OPERATOR_PATH '/Users/|/home/|-Users-'
 scan OPERATOR_PATH 'trusty-mpm-projects/[^/[:space:]]+/supervisor'
@@ -131,17 +154,16 @@ for pair in $PAIRS; do
   dst="$ROOT/${pair#*|}"
   if [ ! -f "$src" ]; then
     report DRIFT "source missing: $SUB_REL/${pair%%|*}"
-  elif [ ! -f "$dst" ]; then
+  elif [ ! -f "$dst" ] && [ "$pair" = "$SPECIAL_PAIRS" ]; then
     report DRIFT "shipped copy missing: ${pair#*|}"
+  elif [ ! -f "$dst" ]; then
+    report UNSHIPPED "$SUB_REL/${pair%%|*} has no shipped copy at ${pair#*|}; copy it, or list it in is_exception"
   elif ! cmp -s "$src" "$dst"; then
     report DRIFT "${pair#*|} differs from $SUB_REL/${pair%%|*}"
   fi
 done
 
 # #8436 P4 fix: a new asset file with no pair would ship unguarded.
-ASSET_REL="crates/trusty-mpm/src/assets/architect"
-NL="
-"
 if [ -d "$ROOT/$ASSET_REL" ]; then
   shipped="$(find "$ROOT/$ASSET_REL" -type f ! -name .DS_Store \
     ! -path '*/__pycache__/*' | LC_ALL=C sort)"
@@ -150,7 +172,7 @@ if [ -d "$ROOT/$ASSET_REL" ]; then
     rel="${f#"$ROOT"/}"
     case "$PAIRS" in
       *"|$rel$NL"*) ;;
-      *) report UNPAIRED "$rel is shipped, but no pair names it; add it to PAIRS" ;;
+      *) report UNPAIRED "$rel is shipped, but has no source under $SUB_REL" ;;
     esac
   done <<EOF
 $shipped

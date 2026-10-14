@@ -44,6 +44,7 @@ pub const FLEET_CHECK: ArchitectSkill = ArchitectSkill {
         "3de7f63492d03ef3d7b0ca613c04ef977b82f4349e9e3d379240c323f6b91db6",
         "dc87f24d8905d63671ecb1deed6a832dcbbde8469161b6873b7d982d7352cdae",
         "a485db4f6b3fc33fba3a880a0f56b903da5433ae78474c341b96e8002f0c8726",
+        "58a841696ac206c4bb456de7be55ac3eb1f1ff0caa6ae21d366526b22bb72a8a",
     ],
 };
 
@@ -54,11 +55,56 @@ pub const CONTEXT_REFRESH: ArchitectSkill = ArchitectSkill {
     previous: &[
         "e44d87a0715798a89ee20ab450ac4ff2b320d274c3ba3569c6894ec0277d883c",
         "922ed43c92abc1288a1053b1180e9cc6e0b1a1b259b5d51a163d6a94b7663e8f",
+        "2267c3436de2a177509f99a9445496e0243f0a3a55e32cd51d5264608175bf7f",
     ],
 };
 
-/// Every skill the Architect receives. #9132 moves the bytes to `content/`.
-pub const SKILLS: &[ArchitectSkill] = &[FLEET_CHECK, CONTEXT_REFRESH];
+/// `tm-fleet-restart`: relaunch, resume and restart (#8436 PR C, Q2).
+pub const FLEET_RESTART: ArchitectSkill = ArchitectSkill {
+    stem: "tm-fleet-restart",
+    contents: include_str!("../../assets/architect/skills/tm-fleet-restart.md"),
+    previous: &[],
+};
+
+/// One `architect-*` skill, shipped as `skills/<stem>/SKILL.md` (#8436 PR C, Q1).
+macro_rules! framework_skill {
+    ($stem:literal) => {
+        ArchitectSkill {
+            stem: $stem,
+            contents: include_str!(concat!(
+                "../../assets/architect/skills/",
+                $stem,
+                "/SKILL.md"
+            )),
+            previous: &[],
+        }
+    };
+}
+
+/// Every skill the Architect receives: each one `architect.md` points at
+/// (`every_architect_md_skill_pointer_names_a_deployed_skill`). #9132 moves
+/// the bytes to `content/`.
+pub const SKILLS: &[ArchitectSkill] = &[
+    FLEET_CHECK,
+    CONTEXT_REFRESH,
+    FLEET_RESTART,
+    framework_skill!("architect-completion-standard"),
+    framework_skill!("architect-dashboard"),
+    framework_skill!("architect-drift-check"),
+    framework_skill!("architect-github"),
+    framework_skill!("architect-host-admin"),
+    framework_skill!("architect-improvements"),
+    framework_skill!("architect-macos"),
+    framework_skill!("architect-operating-rules"),
+    framework_skill!("architect-owner-model"),
+    framework_skill!("architect-project-provision"),
+    framework_skill!("architect-review"),
+    framework_skill!("architect-search-memory"),
+    framework_skill!("architect-strategy"),
+    framework_skill!("architect-tmux-ops"),
+    framework_skill!("architect-token-optimizer"),
+    framework_skill!("architect-workflow"),
+];
 
 /// The deploy record, beside the skills in the project tier.
 ///

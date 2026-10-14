@@ -19,7 +19,8 @@ pub(crate) enum FleetAction {
     /// `~/.trusty-mpm/config.toml` (also when a PM runs this), and starts the
     /// session detached as tmux session `tm-architect` (or `--session`) on
     /// the `opus` alias. Writes no twin grant. A second run changes nothing
-    /// and says so. Refuses when another Architect is already set up.
+    /// and says so. Refuses when another Architect is already set up. The
+    /// PM-guard lift is the owner's choice and off by default (#8436).
     Init {
         /// Project directory (default: the Architect recorded in `[supervisor]
         /// projects`, else `~/trusty-mpm-projects/architect`).
@@ -33,6 +34,15 @@ pub(crate) enum FleetAction {
         /// `[supervisor] session` so later runs and `status` use it (#8878).
         #[arg(long)]
         session: Option<String>,
+        /// Lift the PM guard for the Architect: set
+        /// `TRUSTY_MPM_PM_UNRESTRICTED=1` in its `.claude/settings.json`,
+        /// keeping every other key. Without either flag a terminal run asks
+        /// `[y/N]` and any other run leaves the guard as it is.
+        #[arg(long, conflicts_with = "no_guard_lift")]
+        guard_lift: bool,
+        /// Remove the guard lift if it is set; the PM guard stays on.
+        #[arg(long)]
+        no_guard_lift: bool,
     },
     /// Report whether the Architect is set up and running (read-only).
     ///

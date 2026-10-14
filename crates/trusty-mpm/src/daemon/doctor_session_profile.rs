@@ -13,15 +13,19 @@
 //! legacy sections, and the content origin), the `AGENTS.md` state, and
 //! `Warn`s on a refused or unapplied `AGENTS.md`, a core rule the content
 //! lacks, a `CLAUDE.md` that `@`-imports what tm composes, or leftover PM
-//! marker blocks. Read-only; never fetches content.
+//! marker blocks. Read-only; never fetches content. #8436 PR C: it also
+//! names the PM-guard lift ([`lift_line`]) in the same row, so the doctor
+//! count and its generated reference do not change.
 //! Test: `a_project_only_architect_switch_warns`,
 //! `an_allow_listed_architect_is_ok`, `both_architect_tables_warn`,
 //! `an_architect_row_names_its_instructions_and_agents_md`,
 //! `an_architect_claude_md_with_a_double_load_or_markers_warns`,
-//! `a_legacy_content_source_is_named_and_agents_md_warns`.
+//! `a_legacy_content_source_is_named_and_agents_md_warns`,
+//! `doctor_session_profile_reports_the_lift_state`.
 
 use std::path::Path;
 
+use crate::core::architect_guard_lift::{self, LiftState};
 use crate::core::architect_prompt::{self, AgentsMd};
 use crate::core::config::MpmConfig;
 use crate::core::content_source::{Fetch, FrameworkContent, resolve_for_in};
@@ -64,9 +68,11 @@ fn check_session_profile_with(
 ) -> DoctorCheck {
     let config = MpmConfig::load(&home.join(".trusty-mpm"));
     let (mut status, mut message) = profile_verdict(project_dir, &config);
+    let architect =
+        project_dir.is_some_and(|p| session_profile::resolve(p, &config).is_architect());
     if let Some(project) = project_dir
         && status == CheckStatus::Ok
-        && session_profile::resolve(project, &config).is_architect()
+        && architect
     {
         let (warn, lines) = architect_report(project, load(project));
         if warn {
@@ -76,6 +82,12 @@ fn check_session_profile_with(
             .chain(lines)
             .collect::<Vec<_>>()
             .join("; ");
+    }
+    if let Some((warn, line)) = project_dir.and_then(|p| lift_line(p, architect)) {
+        if warn {
+            status = CheckStatus::Warn;
+        }
+        message = format!("{message}; {line}");
     }
     // #9755 (Q7): the legacy table is ignored once `[architect]` exists.
     if config.has_both_architect_tables() {
@@ -192,6 +204,37 @@ fn architect_report(
         ));
     }
     (warn, lines)
+}
+
+/// The guard-lift part of the row: `(warn, line)`, `None` when there is
+/// nothing to say (#8436 PR C, plan §4).
+///
+/// Why: the lift is the owner's choice; an unreadable file must never read as
+/// a pass, and a lift on a project that is not the Architect opens the whole
+/// PM guard.
+/// What: for an Architect, one line always (`off`, `lifted (owner choice at
+/// init)`, another value, or `lift state unknown` with a warning). For any
+/// other project, a line and a warning only when the key is `"1"`.
+/// Test: `doctor_session_profile_reports_the_lift_state`.
+fn lift_line(project: &Path, architect: bool) -> Option<(bool, String)> {
+    let state = architect_guard_lift::read_state(project);
+    match (architect, &state) {
+        (true, LiftState::Lifted) => Some((
+            false,
+            "guard lift: lifted (owner choice at init)".to_owned(),
+        )),
+        (true, LiftState::Unknown(_)) => Some((true, format!("guard lift: {}", state.describe()))),
+        (true, _) => Some((false, format!("guard lift: {}", state.describe()))),
+        (false, LiftState::Lifted) => Some((
+            true,
+            format!(
+                "guard lift: {} is \"1\" but this project does not run the Architect profile, so \
+                 the whole PM guard is open — remove it from .claude/settings.json",
+                architect_guard_lift::LIFT_KEY
+            ),
+        )),
+        (false, _) => None,
+    }
 }
 
 /// The `@` imports in `claude_md` of a file tm composes for the Architect.

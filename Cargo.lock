@@ -11615,6 +11615,7 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest 0.12.28",
+ "rust-embed",
  "semver",
  "serde",
  "serde_json",
