@@ -40,9 +40,8 @@
 //! above and the bypass/fallback single-op path stay identical.
 
 use crate::engine::palace::Drawer;
-use crate::engine::store::kg::Triple;
+use crate::engine::store::kg::{KgError, Triple};
 use crate::engine::store::kg_redb::{BatchOpResult, BatchWriteOp, KgStoreRedb};
-use crate::engine::store::write_deadline::WriteTxnError;
 use anyhow::{Context, Result, anyhow};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -266,9 +265,12 @@ impl KgWriter {
             Err(_send_err) => {
                 // Actor not running (bypass mode or shutdown) — direct call.
                 let store = self.store.clone();
-                tokio::task::spawn_blocking(move || store.assert(&triple))
-                    .await
-                    .context("kg writer fallback spawn_blocking join")?
+                // #9278: the store returns `KgError`; the writer stays anyhow.
+                tokio::task::spawn_blocking(move || {
+                    store.assert(&triple).map_err(anyhow::Error::from)
+                })
+                .await
+                .context("kg writer fallback spawn_blocking join")?
             }
         }
     }
@@ -334,9 +336,12 @@ impl KgWriter {
                 .context("kg writer reply channel dropped before commit")?,
             Err(_) => {
                 let store = self.store.clone();
-                tokio::task::spawn_blocking(move || store.upsert_drawer(&drawer))
-                    .await
-                    .context("kg writer fallback spawn_blocking join")?
+                // #9278: the store returns `KgError`; the writer stays anyhow.
+                tokio::task::spawn_blocking(move || {
+                    store.upsert_drawer(&drawer).map_err(anyhow::Error::from)
+                })
+                .await
+                .context("kg writer fallback spawn_blocking join")?
             }
         }
     }
@@ -380,12 +385,12 @@ impl KgWriter {
     /// Test: Indirect — every synchronous existing test.
     #[cfg(test)]
     pub fn assert_sync(&self, triple: &Triple) -> Result<()> {
-        self.store.assert(triple)
+        Ok(self.store.assert(triple)?) // #9278: `KgError` into anyhow
     }
 
     /// Synchronous drawer upsert; see `assert_sync`.
     pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> Result<()> {
-        self.store.upsert_drawer(drawer)
+        Ok(self.store.upsert_drawer(drawer)?) // #9278: `KgError` into anyhow
     }
 }
 
@@ -471,7 +476,8 @@ async fn commit_and_reply(store: &Arc<KgStoreRedb>, buf: &mut Vec<QueuedOp>) {
     let store_for_blocking = store.clone();
 
     // redb writes are blocking I/O — move them off the async reactor.
-    let result: std::result::Result<Result<Vec<BatchOpResult>>, tokio::task::JoinError> =
+    // #9278: `apply_batch` returns `KgError`.
+    let result: std::result::Result<std::result::Result<Vec<BatchOpResult>, KgError>, _> =
         tokio::task::spawn_blocking(move || store_for_blocking.apply_batch(&ops)).await;
 
     match result {
@@ -504,7 +510,8 @@ async fn commit_and_reply(store: &Arc<KgStoreRedb>, buf: &mut Vec<QueuedOp>) {
             let msg = format!("kg writer batch failed: {e:#}");
             // #8749: keep a deadline abort typed for every caller, so it reads
             // as "rolled back, nothing landed" rather than an opaque string.
-            let deadline = e.downcast_ref::<WriteTxnError>().cloned();
+            // #9278: the typed accessor; `apply_batch` returns `KgError` now.
+            let deadline = e.as_write_deadline().cloned();
             for queued in buf.drain(..) {
                 let err = match &deadline {
                     Some(d) => anyhow::Error::new(d.clone()).context(msg.clone()),

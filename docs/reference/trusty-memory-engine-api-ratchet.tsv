@@ -2,11 +2,11 @@ marker	slice	initial	ceiling
 # #9278 T0: pending-marker counts per slice, read by scripts/check_engine_api_audit.sh.
 # `initial` is the T0 count and never changes. `ceiling` may only fall: each slice PR
 # lowers its own ceilings to the markers left in the audit table (0 when the slice is done).
-anyhow	T1	25	25
+anyhow	T1	25	14
 anyhow	T2	7	7
 anyhow	T3	41	41
 anyhow	T4	12	12
-variant	T1	3	3
+variant	T1	3	0
 variant	T2	16	16
 variant	T3	28	28
 variant	T4	0	0

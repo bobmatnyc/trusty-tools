@@ -27,6 +27,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;
 
 use super::store::KgStoreRedb;
+use crate::engine::store::kg::KgError;
 
 impl KgStoreRedb {
     /// Look up the room id registered under `key`.
@@ -136,7 +137,12 @@ impl KgStoreRedb {
     /// A row that fails to decode is logged and skipped so one bad row cannot
     /// hide the rest.
     /// Test: `room_key_collision_keeps_both_rows`.
-    pub fn list_rooms(&self) -> Result<Vec<(Uuid, RoomRecord)>> {
+    pub fn list_rooms(&self) -> std::result::Result<Vec<(Uuid, RoomRecord)>, KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.list_rooms_inner().map_err(KgError::from_internal)
+    }
+
+    fn list_rooms_inner(&self) -> Result<Vec<(Uuid, RoomRecord)>> {
         let rtx = self.db().begin_read().context("begin list_rooms txn")?;
         let table = rtx.open_table(ROOMS).context("open rooms table")?;
         let mut out = Vec::new();

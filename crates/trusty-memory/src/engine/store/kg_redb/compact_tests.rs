@@ -431,7 +431,10 @@ fn a_backup_is_written_and_only_one_generation_is_kept() {
 fn fail_at(step: CompactStep) -> copy_swap::CompactFaultHook {
     Arc::new(move |s| {
         if s == step {
-            anyhow::bail!("injected failure at {s:?}");
+            // #9278: the hook returns `KgError`.
+            return Err(crate::engine::store::kg::KgError::Other(
+                format!("injected failure at {s:?}").into(),
+            ));
         }
         Ok(())
     })
