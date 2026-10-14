@@ -112,3 +112,24 @@ pub struct Triple {
     /// Free-form provenance string (drawer id, source URL, agent name, ...).
     pub provenance: Option<String>,
 }
+
+impl Triple {
+    /// Why: other crates build a `Triple` without a struct literal (#9278).
+    /// What: valid from now, no `valid_to`, confidence 1.0, no provenance.
+    /// Test: `triple_new_is_a_current_full_confidence_fact_without_provenance`.
+    pub fn new(
+        subject: impl Into<String>,
+        predicate: impl Into<String>,
+        object: impl Into<String>,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            predicate: predicate.into(),
+            object: object.into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        }
+    }
+}
