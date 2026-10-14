@@ -74,6 +74,8 @@ impl AgentsMd {
 /// [`AgentsMd::Absent`]; whitespace only → [`AgentsMd::Empty`]; any other
 /// failure → [`AgentsMd::Refused`] with the reason, never an error.
 /// Test: `an_unusable_agents_md_is_named_in_the_prompt_and_never_applied`,
+/// `a_fifo_agents_md_is_refused_without_blocking_the_launch`,
+/// `a_mode_000_agents_md_is_refused`,
 /// `an_empty_agents_md_adds_no_override_section`.
 pub fn read_agents_md(project_dir: &Path) -> AgentsMd {
     use std::io::Read as _;
