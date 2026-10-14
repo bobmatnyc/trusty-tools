@@ -150,6 +150,8 @@ impl RunReport {
             "task": self.task,
             "diff": self.diff,
             "transcript": self.transcript,
+            // #8155: the daemon path's `--json` carries the same count.
+            "turns": self.transcript.len(),
             "usage": {
                 "prompt_tokens": self.usage.prompt_tokens,
                 "completion_tokens": self.usage.completion_tokens,
@@ -419,6 +421,7 @@ mod tests {
         assert_eq!(parsed["agent"], "pm");
         assert!(parsed["diff"].as_str().unwrap().contains("added: x.py"));
         assert_eq!(parsed["transcript"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["turns"], 2);
         assert_eq!(parsed["usage"]["prompt_tokens"], 100);
         assert_eq!(parsed["cost_usd"], 0.001);
         // The engineer turn must carry its own model slug for #1035 assertions.

@@ -280,7 +280,8 @@ pub trait PermissionEvents: Send + Sync {
 /// run's working root, which
 /// [`subjects_for_in_root`] needs to decide an absolute in-root path against a
 /// relatively-written rule; `None` restricts matching to the spelling the model
-/// wrote.
+/// wrote. #8288: `delegator` names the delegating top-level agent; see
+/// [`DELEGATOR_DENIED_TOOLS`].
 /// Test: `headless_ask_is_denied`, `ask_emits_requested_then_resolved`,
 /// `absolute_in_root_path_meets_a_relative_deny`.
 #[derive(Clone)]
@@ -291,7 +292,24 @@ pub struct PermissionContext {
     pub ask: Option<Arc<SessionPermissions>>,
     pub events: Option<Arc<dyn PermissionEvents>>,
     pub root: Option<PathBuf>,
+    pub delegator: Option<String>,
 }
+
+/// The tools a delegating top-level agent may never call itself (#8288).
+///
+/// Why: owner ruling 2026-09-19 — a delegating PM never writes source; the
+/// coding work goes through a delegated agent. The stock `pm` card grants
+/// these as `ask`, which `--permission-mode allow-asks` or a remembered grant
+/// turns into an allow, and `delegate_to_agent(agent_name: "pm")` ran that same
+/// card as a sub-agent. `bash` is here because it writes a file as easily.
+/// What: denied by [`PermissionGate::resolve`] before any rule, mode or grant
+/// is consulted, for every gate whose agent is the context's `delegator`.
+/// Test: `delegator_write_is_denied_before_any_rule`,
+/// `task::executor::tests::delegating_pm_cannot_write_source_through_itself`.
+pub const DELEGATOR_DENIED_TOOLS: &[&str] = &["write_file", "write_files", "edit", "bash"];
+
+/// The `Outcome::Denied.rule` a [`DELEGATOR_DENIED_TOOLS`] refusal reports.
+pub const DELEGATOR_DENY_RULE: &str = "delegating agent writes no source (#8288)";
 
 impl PermissionContext {
     /// A context that can never prompt — the `tcode run-task` shape.
@@ -304,7 +322,16 @@ impl PermissionContext {
             ask: None,
             events: None,
             root: None,
+            delegator: None,
         }
+    }
+
+    /// Lock `agent` out of [`DELEGATOR_DENIED_TOOLS`] for every gate this
+    /// context mints for it — its own and any self-delegation (#8288).
+    /// Test: `delegator_write_is_denied_before_any_rule`.
+    pub fn with_delegator(mut self, agent: impl Into<String>) -> Self {
+        self.delegator = Some(agent.into());
+        self
     }
 
     /// Attach the run's working root.
@@ -423,6 +450,22 @@ impl PermissionGate {
     /// `allow_for_session_is_remembered_for_a_later_matching_call`,
     /// `remembered_grant_emits_a_resolution_event`.
     pub async fn resolve(&self, tool: &str, args: &Value) -> Outcome {
+        // #8288: first, so no rule, mode, remembered grant or malformed
+        // argument can reach an allow for a delegator's own source write.
+        // Case-insensitive: a card without `name:` is named by the requested
+        // file stem, and a case-insensitive filesystem loads `pm.md` for "PM".
+        if self
+            .ctx
+            .delegator
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case(&self.agent.agent.name))
+            && DELEGATOR_DENIED_TOOLS.contains(&tool)
+        {
+            return Outcome::Denied {
+                rule: DELEGATOR_DENY_RULE.to_string(),
+                source: DenySource::Policy,
+            };
+        }
         // #7948: the run's root makes a relative path rule decide the absolute
         // in-root spelling too.
         let root = self.ctx.root.as_deref();

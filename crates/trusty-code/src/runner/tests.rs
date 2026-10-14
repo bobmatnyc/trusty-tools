@@ -577,6 +577,50 @@ async fn delegate_runs_engineer_loop() {
     );
 }
 
+/// #8288/#8206: a delegator never runs its own card as a sub-agent, however
+/// the name is cased.
+///
+/// Why: a self-delegating PM ran its card under the delegator lock (no write
+/// path, but a `finish_task` gate that expects `bash` the lock denies, so the
+/// run wedged to the turn cap); on a case-insensitive filesystem `PM` loaded
+/// `pm.md` and skipped the lock entirely.
+/// What: a runner whose permission context names the delegator; `run` of the
+/// same card, spelled exactly and in other case, must fail at dispatch with
+/// the specialist guidance, and the LLM must never be called.
+/// FAILS at 97038f5a23: the card runs.
+/// Test: this test.
+#[tokio::test]
+async fn a_delegator_cannot_delegate_to_its_own_card() {
+    let body = "---\nname: rust-engineer\n---\n\nYou are an engineer.\n";
+    let tmp = agents_dir_with(body, "rust-engineer");
+    for delegator in ["rust-engineer", "Rust-Engineer"] {
+        let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("never reached")]));
+        let invoked = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(recording_factory(vec![], invoked));
+        let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+            .with_permissions(
+                crate::permissions::PermissionContext::headless(
+                    crate::permissions::PermissionMode::AllowAsks,
+                )
+                .with_delegator(delegator),
+            );
+        let err = runner
+            .run("rust-engineer", "do something")
+            .await
+            .expect_err("self-delegation must be refused")
+            .to_string();
+        assert!(
+            err.contains("specialist"),
+            "must steer to a specialist: {err}"
+        );
+        assert_eq!(
+            llm.calls(),
+            0,
+            "the refused card must never run ({delegator})"
+        );
+    }
+}
+
 /// The delegated engineer's own `[llm].max_tokens` reaches its `ChatRequest`.
 ///
 /// Why: This is the regression guard for the run_task bug where

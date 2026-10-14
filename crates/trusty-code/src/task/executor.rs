@@ -53,7 +53,8 @@ use crate::provider::{
     resolve_model_with_override,
 };
 use crate::run_task::{
-    RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
+    RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, recording_per_agent,
+    resolve_agent_model_slug,
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::session::{SessionRegistry, SessionStatus, TaskResult, TaskResultStatus};
@@ -384,6 +385,9 @@ async fn run_and_record(
         // #7948: the run's working root, so a relative path rule also decides
         // the absolute in-root spelling `tools::fs::scoped_path` accepts.
         root: Some(work_root.clone()),
+        // #8288: a delegating PM writes no source — not itself, and not by
+        // delegating to its own card. A solo run keeps its tools.
+        delegator: (!params.no_delegate).then(|| pm_config.agent.name.clone()),
     };
 
     let project_context = load_project_context(&work_root);
@@ -418,7 +422,7 @@ async fn run_and_record(
     .await;
 
     let engineer_runner = build_engineer_runner(
-        wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
+        Arc::clone(&llm),
         &params,
         &work_root,
         EngineerPromptContext {
@@ -428,7 +432,8 @@ async fn run_and_record(
                 .as_ref()
                 .map(|(_, resolver)| Arc::clone(resolver)),
         },
-        Arc::clone(&transcript),
+        // #8158: each delegation's turns are recorded under its own agent.
+        recording_per_agent(Arc::clone(&transcript), debug_sink.clone()),
         Arc::clone(&sink),
         Arc::clone(&cancel),
         permission_ctx.clone(),
@@ -756,7 +761,7 @@ fn build_engineer_runner(
     params: &TaskRunParams,
     work_root: &Path,
     prompt: EngineerPromptContext,
-    transcript: SharedTranscript,
+    agent_llm: crate::runner::AgentLlmFn,
     sink: Arc<dyn ToolEventSink>,
     cancel: Arc<AtomicBool>,
     permissions: crate::permissions::PermissionContext,
@@ -766,16 +771,13 @@ fn build_engineer_runner(
         skills_catalog,
         skill_resolver,
     } = prompt;
-    let engineer_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
-        llm,
-        ENGINEER_AGENT_NAME,
-        transcript,
-    ));
 
     let factory: Arc<dyn RegistryFactory> =
         Arc::new(project_tool_factory(params, work_root, skill_resolver));
 
-    let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
+    let mut runner = InProcessAgentRunner::new(llm, factory, params.agents_dir.clone())
+        // #8158: label each delegation's turns with the agent that ran them.
+        .with_agent_llm(agent_llm)
         .with_tool_event_sink(sink)
         .with_cancel_flag(cancel)
         .with_mode(params.mode)

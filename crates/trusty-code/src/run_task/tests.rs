@@ -540,6 +540,130 @@ async fn pm_delegates_through_the_tcode_tools_allowlist() {
     );
 }
 
+/// #8158: a delegated turn is recorded under the agent the PM actually
+/// delegated to, not the fixed `python-engineer` label.
+///
+/// Why: the parity lab's Rust runs reported every engineer turn as
+/// `python-engineer` because the engineer's recorder was bound to a constant
+/// at construction, while `delegate_to_agent` dispatched to `rust-engineer`.
+/// What: an agents dir that also carries `rust-engineer.md`; the PM delegates
+/// to it; asserts the transcript (the source of every report role label)
+/// carries a `rust-engineer` turn and no `python-engineer` turn. FAILS at
+/// c69c8e01be: the only non-PM role is `python-engineer`.
+/// Test: this test.
+#[tokio::test]
+async fn delegated_turns_carry_the_delegated_agents_role() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    std::fs::write(
+        agents.path().join("rust-engineer.md"),
+        "---\nname: rust-engineer\nmodel: deepseek/deepseek-chat\n---\n\nYou are a Rust engineer.\n",
+    )
+    .expect("write rust-engineer.md");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let delegate_to_rust = json!({
+        "id": "gen-delegate-rust",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-del-rust",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_to_agent",
+                        "arguments": json!({"agent_name": "rust-engineer", "task": "create lib.rs"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62}
+    });
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_rust,
+        write_file_response("lib.rs", "pub fn f() {}"),
+        stop_response("rust-engineer: done"),
+        stop_response("pm: task complete"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm).await;
+
+    let roles: Vec<&str> = report.transcript.iter().map(|t| t.role.as_str()).collect();
+    assert!(
+        roles.contains(&"rust-engineer"),
+        "the delegated turns must carry the delegated agent's name; roles: {roles:?}"
+    );
+    assert!(
+        !roles.contains(&"python-engineer"),
+        "no turn ran as python-engineer, so none may be labelled so; roles: {roles:?}"
+    );
+}
+
+/// #8288: the legacy path's delegating PM writes no source through its own
+/// card either — the sibling of
+/// `task::executor::tests::delegating_pm_cannot_write_source_through_itself`.
+///
+/// What: a disk `pm.md` granting `write_file` as `ask`, `AllowAsks`, the PM
+/// delegating to `pm`; asserts the delegation is refused at dispatch (no
+/// sub-agent turns) and that no write landed. FAILS at 97038f5a23: the
+/// sub-agent runs.
+/// Test: this test.
+#[tokio::test]
+async fn delegating_pm_cannot_write_source_through_itself() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    std::fs::write(
+        agents.path().join("pm.md"),
+        "---\nname: pm\nmodel: openai/gpt-4o-mini\ntcode_tools: [read_file, write_file, finish_task]\npermissions:\n  write_file: ask\n---\n\nYou are the PM.\n",
+    )
+    .expect("write pm.md");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let delegate_to_self = json!({
+        "id": "gen-delegate-self",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-del-self",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_to_agent",
+                        "arguments": json!({"agent_name": "pm", "task": "create self.py"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 12, "total_tokens": 62}
+    });
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_self,
+        write_file_response("self.py", "print('pm')"),
+        stop_response("pm sub-agent: done"),
+        stop_response("pm: task complete"),
+    ]));
+    let p = RunTaskParams {
+        permission_mode: crate::permissions::PermissionMode::AllowAsks,
+        ..params(&agents, &project, None)
+    };
+
+    let report = execute_run_task(p, llm).await;
+
+    // Delegate, a refused-then-denied write, stop: three PM turns and no
+    // sub-agent turns (a dispatched self-delegation adds a fourth).
+    assert_eq!(
+        report.transcript.len(),
+        3,
+        "the self-delegation must be refused, not run: {:?}",
+        report.transcript
+    );
+    assert!(
+        !project.path().join("self.py").exists(),
+        "a delegating PM must not write source by delegating to its own card"
+    );
+}
+
 /// The PM's configured `[llm].max_tokens` reaches its `ChatRequest` via
 /// `execute_run_task` — the exact entry point of the run_task max-tokens bug.
 ///

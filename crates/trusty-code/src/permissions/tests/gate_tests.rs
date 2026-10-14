@@ -322,6 +322,7 @@ fn ctx_with_events(
         ask: Some(broker.session(session)),
         events: Some(Arc::clone(&events) as Arc<dyn PermissionEvents>),
         root: None,
+        delegator: None,
     };
     (ctx, events)
 }
@@ -332,6 +333,70 @@ fn gate(ctx: &PermissionContext, agent: AgentConfig) -> PermissionGate {
 
 fn ask_bash() -> AgentConfig {
     agent_with_permissions("permissions:\n  bash: ask\n")
+}
+
+/// #8288 FAIL-OPEN CHECK: a delegator's own write is denied before every
+/// widening path — an explicit `allow` rule, `allow-asks` mode, and arguments
+/// that do not even parse — while another agent on the same context, and the
+/// delegator's own reads, keep their normal decision.
+/// Test: this test.
+#[tokio::test]
+async fn delegator_write_is_denied_before_any_rule() {
+    let ctx = PermissionContext::headless(PermissionMode::AllowAsks).with_delegator("t");
+    let delegator =
+        agent_with_permissions("permissions:\n  write_file: allow\n  edit: ask\n  bash: ask\n");
+    let denied = Outcome::Denied {
+        rule: crate::permissions::gate::DELEGATOR_DENY_RULE.to_string(),
+        source: DenySource::Policy,
+    };
+    for (tool, args) in [
+        ("write_file", json!({"path": "src/lib.rs", "content": "x"})),
+        ("write_file", json!("not an object")),
+        ("write_files", json!(null)),
+        ("edit", json!({"path": "src/lib.rs"})),
+        ("bash", json!({"command": "echo x > src/lib.rs"})),
+    ] {
+        let outcome = gate(&ctx, delegator.clone()).resolve(tool, &args).await;
+        assert_eq!(outcome, denied, "{tool}({args}) must be denied");
+    }
+    assert_eq!(
+        gate(&ctx, delegator.clone())
+            .resolve("read_file", &json!({"path": "src/lib.rs"}))
+            .await,
+        Outcome::Allow,
+        "the lock covers writes only"
+    );
+
+    let mut other = delegator;
+    other.agent.name = "engineer".into();
+    assert_eq!(
+        gate(&ctx, other)
+            .resolve("write_file", &json!({"path": "src/lib.rs", "content": "x"}))
+            .await,
+        Outcome::Allow,
+        "a delegated engineer keeps its own write decision"
+    );
+}
+
+/// #8288: the delegator lock ignores case. A disk card with no `name:` takes
+/// its name from the requested file stem, so on a case-insensitive filesystem
+/// `delegate_to_agent("PM")` loads `pm.md` named "PM".
+/// FAILS at 97038f5a23: the exact comparison misses and the `ask` is allowed.
+/// Test: this test.
+#[tokio::test]
+async fn delegator_lock_ignores_case() {
+    let ctx = PermissionContext::headless(PermissionMode::AllowAsks).with_delegator("pm");
+    let mut card = agent_with_permissions("permissions:\n  write_file: ask\n");
+    card.agent.name = "PM".into();
+    assert_eq!(
+        gate(&ctx, card)
+            .resolve("write_file", &json!({"path": "src/lib.rs", "content": "x"}))
+            .await,
+        Outcome::Denied {
+            rule: crate::permissions::gate::DELEGATOR_DENY_RULE.to_string(),
+            source: DenySource::Policy,
+        }
+    );
 }
 
 /// A gate for an agent with no map allows everything.
@@ -460,6 +525,7 @@ async fn an_ask_on_an_unwatched_session_is_headless_while_a_sibling_is_watched()
         ask: Some(broker.session(session_id)),
         events: Some(Arc::clone(&registry) as Arc<dyn PermissionEvents>),
         root: None,
+        delegator: None,
     };
     let agent = Arc::new(ask_bash());
 

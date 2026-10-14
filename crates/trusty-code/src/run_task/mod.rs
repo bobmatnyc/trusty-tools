@@ -47,7 +47,7 @@ use crate::tools::{
     ToolRegistry, TrustySearchTool, UseSkillTool, WriteFileTool, WriteFilesTool,
 };
 
-pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
+pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord, recording_per_agent};
 pub use redelegation::{MAX_REDELEGATIONS, RedelegationCapSignal};
 pub use report::{ExitCode, RunReport, aggregate_usage_per_role};
 
@@ -354,19 +354,33 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
     let skills_catalog = daily_driver_skills_catalog(&params.project);
 
     // Build the engineer runner, scoped to the project working dir, sharing the
-    // transcript (engineer turns are tagged "python-engineer"). The full
+    // transcript (each delegation is tagged with its own agent, #8158). The full
     // `(catalog, resolver)` pair is threaded through (rather than just the
     // catalog string) so `ProjectToolFactory` can register `use_skill` against
     // the SAME resolver instance the catalog was rendered from (experimental,
     // refs #2892).
+    // #7948: headless — no broker, so an `ask` resolves at once per
+    // `params.permission_mode`; the project root lets a relative path rule
+    // decide the absolute in-root spelling. #8288: a delegating PM writes no
+    // source, itself or through its own card. One context gates the PM and
+    // every delegation.
+    let mut permission_ctx =
+        crate::permissions::PermissionContext::headless(params.permission_mode)
+            .with_root(params.project.clone());
+    if !params.no_delegate {
+        permission_ctx = permission_ctx.with_delegator(pm_config.agent.name.clone());
+    }
+
     let engineer_runner = build_engineer_runner(
-        wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
+        Arc::clone(&llm),
         &params,
         project_context.clone(),
         skills_catalog.clone(),
-        Arc::clone(&transcript),
+        // #8158: each delegation's turns are recorded under its own agent.
+        recording_per_agent(Arc::clone(&transcript), debug_sink.clone()),
         deadline_secs,
         redelegation_signal.clone(),
+        permission_ctx.clone(),
     );
 
     // The PM's tool registry: the delegate tool (the PM orchestrates; the
@@ -504,9 +518,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
         // run's working root, so a relative path rule also decides the absolute
         // in-root spelling of the same file.
         .with_permission_gate(Arc::new(
-            crate::permissions::PermissionContext::headless(params.permission_mode)
-                .with_root(params.project.clone())
-                .gate_for(Arc::new(pm_config.clone()), "pm"),
+            permission_ctx.gate_for(Arc::new(pm_config.clone()), "pm"),
         ))
         // #2279: the PM never calls `bash` itself (its registry above is
         // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
@@ -569,7 +581,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
 /// rejected here because the cap in fix #1 is a cleaner, purpose-built ceiling
 /// than a bigger, still-somewhat-arbitrary PM turn budget would be).
 /// What: Returns an `Arc<dyn AgentRunner>` the `DelegateToAgentTool` dispatches
-/// to. The engineer's own LLM turns are recorded under the "python-engineer" role.
+/// to. Each delegation's LLM turns are recorded under that agent's own name (#8158).
 /// `redelegation_signal` is shared with `assemble_report` via the caller.
 /// `skills_catalog` (#2924) is the same rendered `(catalog, resolver)` pair the
 /// PM's own prompt/registry are built from, threaded through so the delegated
@@ -583,24 +595,25 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn InferenceAdapt
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `run_task::tests::use_skill_on_legacy_path_reaches_pm_and_transcript`,
 /// `run_task::tests::use_skill_on_legacy_path_reaches_engineer_and_transcript`.
+// #8288: the permission context is the eighth argument because the PM's own
+// gate shares it; bundling it with the prompt or lifecycle values would group
+// unrelated concerns only to satisfy the arity lint.
+#[allow(clippy::too_many_arguments)]
 fn build_engineer_runner(
     llm: Arc<dyn InferenceAdapter>,
     params: &RunTaskParams,
     project_context: Option<String>,
     skills_catalog: Option<(String, Arc<dyn SkillResolver>)>,
-    transcript: SharedTranscript,
+    agent_llm: crate::runner::AgentLlmFn,
     deadline_secs: u64,
     redelegation_signal: RedelegationCapSignal,
+    permissions: crate::permissions::PermissionContext,
 ) -> Arc<dyn AgentRunner> {
-    let engineer_llm: Arc<dyn InferenceAdapter> = Arc::new(RecordingLlmClient::new(
-        llm,
-        ENGINEER_AGENT_NAME,
-        transcript,
-    ));
-
     let factory: Arc<dyn RegistryFactory> = Arc::new(project_tool_factory(params, &skills_catalog));
 
-    let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
+    let mut runner = InProcessAgentRunner::new(llm, factory, params.agents_dir.clone())
+        // #8158: label each delegation's turns with the agent that ran them.
+        .with_agent_llm(agent_llm)
         .with_timeout_secs(deadline_secs)
         // #8206: the project the engineer's tools are scoped to, so its own
         // verify-before-finish gate probes the right directory.
@@ -609,13 +622,8 @@ fn build_engineer_runner(
         // always resolves as `HarnessMode::DailyDriver` (see
         // `daily_driver_skills_catalog`'s docs).
         .with_mode(HarnessMode::DailyDriver)
-        // #7948: headless — no broker, so a delegated agent's `ask` resolves
-        // at once per `params.permission_mode`. The root is the project the
-        // engineer's tools are scoped to, matching its gate's path rules.
-        .with_permissions(
-            crate::permissions::PermissionContext::headless(params.permission_mode)
-                .with_root(params.project.clone()),
-        );
+        // #7948/#8288: the run's one headless context, built by the caller.
+        .with_permissions(permissions);
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }
