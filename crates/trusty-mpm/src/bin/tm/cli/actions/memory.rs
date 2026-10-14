@@ -230,9 +230,9 @@ pub(crate) enum MemoryAction {
 
     /// Migrate Claude Code's own auto-memory store into the project's palace.
     ///
-    /// trusty-memory is the memory; Claude Code's auto memory is the fallback
-    /// for when it is down (owner ruling 2026-09-12). This command is what makes
-    /// emptying that fallback safe: it reads every fact file under
+    /// trusty-memory is the memory; Claude Code's auto memory is off for every
+    /// tm session (owner ruling 2026-10-14, #8436). This command is what makes
+    /// emptying the old store safe: it reads every fact file under
     /// `<claude-config>/projects/<slug>/memory/`, stores it as a drawer tagged
     /// `migrated-from-auto-memory` plus `name:<name>` and `type:<type>`, moves
     /// the file into `memory.archived-<YYYYMMDD>/`, and only then empties

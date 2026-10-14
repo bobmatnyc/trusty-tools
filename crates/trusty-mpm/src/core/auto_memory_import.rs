@@ -1,7 +1,8 @@
 //! Migrate Claude Code's auto-memory store into the project's palace (#7685).
 //!
-//! Why: the owner ruling of 2026-09-12 makes trusty-memory the memory and Claude
-//! Code's auto memory a fallback. Turning auto memory off is only half of that —
+//! Why: trusty-memory is the memory and Claude Code's auto memory is off for
+//! every tm session (#8436, owner ruling 2026-10-14). Turning auto memory off is
+//! only half of that —
 //! the facts it already captured live in
 //! `<claude_config_dir>/projects/<slug>/memory/`, and a project whose
 //! `MEMORY.md` is merely zeroed has LOST them. This module is the other half:

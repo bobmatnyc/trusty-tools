@@ -165,7 +165,7 @@ impl Fixture {
     }
 
     fn adapter(&self, tmux: &Arc<Recorder>) -> ClaudeCodeAdapter {
-        ClaudeCodeAdapter::new(tmux.clone(), Some(true), &self.home.join(".trusty-mpm"))
+        ClaudeCodeAdapter::new(tmux.clone(), &self.home.join(".trusty-mpm"))
     }
 
     /// Make the project an Architect (#8453): it asks for the supervisor

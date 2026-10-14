@@ -1037,6 +1037,15 @@ fn inplace_exec_command_scrubs_api_key_and_sets_auth_env() {
         ),
         "#2246: the resolved oauth token must be injected: {envs:?}"
     );
+    // #8436: auto memory is off for every session; this path bypasses
+    // `managed_env_set`, so an operator `autoMemoryEnabled: true` would win.
+    assert!(
+        envs.contains(&(
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY".to_owned(),
+            Some("1".to_owned())
+        )),
+        "#8436: the relaunch must disable auto memory: {envs:?}"
+    );
 }
 
 #[test]

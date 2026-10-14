@@ -185,16 +185,13 @@ pub(crate) async fn launch_and_wait(
     // rooted at `project_dir` and `ClaudeCodeAdapter::spawn` always appends
     // `--setting-sources project,local` (`runtime/claude_code.rs`), so a
     // `$HOME/.claude` deploy would never be read by the session it prepares.
-    // #7685: keep the trusty-memory reachability preparation resolved, so the
-    // adapter at (3) reuses it instead of probing a second time.
-    let memory_reachable = match prepare_isolated_session(project_dir, None) {
+    match prepare_isolated_session(project_dir, None) {
         Ok(report) => {
             info!(
                 agents = report.deploy.deployed.len(),
                 project = %project_dir.display(),
                 "meta run: prepared session (agents/skills/CLAUDE.md/MCP deployed)"
             );
-            Some(report.memory_reachable)
         }
         // #4752: a compiled-prompt write failure refuses the launch; every
         // other prep failure stays non-fatal (#2149).
@@ -204,9 +201,8 @@ pub(crate) async fn launch_and_wait(
                 project = %project_dir.display(),
                 "meta run: session preparation failed (continuing): {e}"
             );
-            None
         }
-    };
+    }
 
     // (2) Create the tmux host rooted at the local project dir. Passing
     // `cwd = Some(project_dir)` and NO workspace/repo means the manager creates
@@ -240,16 +236,10 @@ pub(crate) async fn launch_and_wait(
     // injection (which needs the registry) is out of scope here, matching
     // the existing scope boundary around the bare-`tm` in-place relaunch
     // path (`build_inplace_resume_command`).
-    // #7685: `None` only when preparation failed before resolving one.
     // #8233: `framework_root` arrives from the command entry point, which plays
     // `DaemonState`'s role on this daemon-free path. Resolving a layout here
     // instead is the #4203 defect.
-    let adapter = build_adapter(
-        RuntimeKind::ClaudeCode,
-        mgr.tmux_driver(),
-        memory_reachable,
-        framework_root,
-    );
+    let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver(), framework_root);
     adapter
         .spawn(
             &record.tmux_name,
@@ -381,43 +371,6 @@ mod tests {
     fn launch_outcome_status_tokens() {
         assert_eq!(LaunchOutcome::Exited.status(), "exited");
         assert_eq!(LaunchOutcome::TimedOut.status(), "timed-out");
-    }
-
-    /// `tm meta run` hands the adapter the reachability preparation resolved
-    /// (#7685).
-    ///
-    /// Why: this path spawns a real `claude` in tmux, so its end-to-end test is
-    /// `#[ignore]`d and cannot count probes. Discarding the prepared value and
-    /// passing `None` made the adapter probe trusty-memory a second time.
-    /// What: reads this file's production half and asserts the prepared value is
-    /// bound and appears in `build_adapter`'s argument list, with no `None` left
-    /// in its place. The argument list is read as a whole so a later argument or
-    /// a rustfmt rewrap cannot fail the guard for a reason it does not name.
-    /// Test: itself.
-    #[test]
-    fn meta_run_hands_the_adapter_the_prepared_reachability() {
-        const SRC: &str = include_str!("launch.rs");
-        let production = SRC.split("#[cfg(test)]").next().unwrap_or(SRC);
-        assert!(
-            production.contains("Some(report.memory_reachable)"),
-            "the prepared reachability must be kept"
-        );
-        // #8233 gave `build_adapter` a fourth argument and rustfmt wrapped the
-        // call across lines, so read its ARGUMENT LIST rather than pinning one
-        // line's exact spelling — which is what broke this guard.
-        let args = production
-            .split_once("build_adapter(")
-            .and_then(|(_, rest)| rest.split_once(");"))
-            .map(|(args, _)| args)
-            .expect("the production half must call build_adapter");
-        assert!(
-            args.contains("memory_reachable"),
-            "build_adapter must receive the prepared reachability, got: {args}"
-        );
-        assert!(
-            !args.contains("None"),
-            "a `None` here makes the adapter probe trusty-memory again, got: {args}"
-        );
     }
 
     #[test]

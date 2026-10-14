@@ -75,10 +75,11 @@ pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
 ///   * #8066 `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`, unconditional: Claude Code
 ///     2.1.260 gates `TodoWrite` and the `TaskCreate` family to a fixed model
 ///     list, so a managed session on any other model has no progress tracking.
-///   * #7685 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, only when `memory_reachable`:
-///     auto memory is the FALLBACK, so with trusty-memory down a session that
-///     also lost auto memory would have no memory at all (owner ruling
-///     2026-09-12).
+///   * #8436 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, unconditional: auto memory is
+///     off for every session, trusty-memory down included (Bob Db0 Q5a,
+///     2026-10-14, retiring the #7685 fallback). Claude Code documents the
+///     variable at <https://code.claude.com/docs/en/memory#enable-or-disable-auto-memory>;
+///     it also overrides a subagent's own `memory:` frontmatter.
 ///   * DOC-34 / #2246 `CLAUDE_CONFIG_DIR`: points the session at the tm-owned
 ///     config home, which relocates the `user` settings tier the bundled agent
 ///     roster lives in (#4451/#4455) and keys its auth away from `~/.claude`.
@@ -102,8 +103,7 @@ pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
 /// default and is added by [`ManagedLaunch::base`].
 /// What: `(name, value)` pairs, in the order above.
 /// Test: `env_set_enables_todo_tools_unconditionally`,
-/// `env_set_disables_auto_memory_when_trusty_memory_answers`,
-/// `env_set_keeps_auto_memory_when_trusty_memory_is_unreachable`,
+/// `env_set_disables_auto_memory_unconditionally`,
 /// `env_set_relocates_the_config_dir`, `env_set_carries_a_non_empty_mcp_env`,
 /// `env_set_carries_the_oauth_token_when_available`,
 /// `env_set_omits_the_oauth_token_when_absent`,
@@ -112,13 +112,13 @@ pub(super) fn managed_env_set(
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
     mcp_env: &[(String, String)],
-    memory_reachable: bool,
     gh_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let mut set: Vec<(String, String)> = vec![("CLAUDE_CODE_ENABLE_TODO_TOOLS".into(), "1".into())];
-    if memory_reachable {
-        set.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
-    }
+    let mut set: Vec<(String, String)> = vec![
+        ("CLAUDE_CODE_ENABLE_TODO_TOOLS".into(), "1".into()),
+        // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14)
+        ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()),
+    ];
     if let Some(dir) = config_dir {
         set.push(("CLAUDE_CONFIG_DIR".into(), dir.display().to_string()));
     }
@@ -158,8 +158,6 @@ pub(super) struct ManagedLaunch<'a> {
     pub mcp_config: Option<&'a Path>,
     /// #8988: the owner settings file this launch provisioned, carried the same way.
     pub settings: Option<&'a Path>,
-    /// #7685: whether trusty-memory answered at launch.
-    pub memory_reachable: bool,
     /// #8405: config `tmux.alternate_screen`, read by the caller at launch.
     pub alternate_screen: bool,
     /// #8453: the profile this launch's prompt was composed for — the stamp.
@@ -181,13 +179,8 @@ impl ManagedLaunch<'_> {
     /// `every_launch_path_carries_the_configured_fullscreen_renderer`,
     /// `every_launch_path_carries_the_classic_renderer_when_alternate_screen_is_off`.
     fn base(&self) -> LaunchSpec {
-        let mut env_set = managed_env_set(
-            self.config_dir,
-            self.oauth_token,
-            self.mcp_env,
-            self.memory_reachable,
-            self.gh_env,
-        );
+        let mut env_set =
+            managed_env_set(self.config_dir, self.oauth_token, self.mcp_env, self.gh_env);
         // #8405: an explicit assignment, so the tmux server's inherited value
         // cannot decide the renderer the config asked for.
         env_set.extend(crate::core::alt_screen::configured_env(

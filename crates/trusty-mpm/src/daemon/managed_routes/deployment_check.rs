@@ -24,25 +24,20 @@ use crate::session_manager::ManagedSessionId;
 
 /// What a launch already resolved about the host, for the deployment repair.
 ///
-/// Why (#7763, #8545): the repair re-runs session preparation, which probes
-/// trusty-memory and writes the user-tier statusLine and trust seed under a
-/// home. An isolated test daemon pins its own home; production passes
-/// `DaemonState::user_home`.
-/// What: `memory_reachable` (`None` probes) and `home` (`None` skips the
-/// user-global writes).
+/// Why (#8545): the repair re-runs session preparation, which writes the
+/// user-tier statusLine and trust seed under a home. An isolated test daemon
+/// pins its own home; production passes `DaemonState::user_home`. #8436: it no
+/// longer carries a trusty-memory verdict — no launch asks for one.
+/// What: `home` (`None` skips the user-global writes).
 #[derive(Default)]
 pub(super) struct RepairHost {
-    pub(super) memory_reachable: Option<bool>,
     pub(super) home: Option<std::path::PathBuf>,
 }
 
 impl RepairHost {
-    /// A host with trusty-memory's verdict and the user home.
-    pub(super) fn new(memory_reachable: Option<bool>, home: Option<std::path::PathBuf>) -> Self {
-        Self {
-            memory_reachable,
-            home,
-        }
+    /// A host with the user home.
+    pub(super) fn new(home: Option<std::path::PathBuf>) -> Self {
+        Self { home }
     }
 }
 
@@ -83,11 +78,6 @@ impl RepairHost {
 /// `Ok(())` when the workspace is (or becomes) complete; `Err(detail)` naming
 /// every residual gap otherwise.
 ///
-/// #7763: `memory_reachable` is whatever this launch's own `prepare_session*`
-/// already resolved. The repair step re-runs that preparation, so passing the
-/// resolved verdict is what keeps a slow or wedged trusty-memory from costing
-/// the launch a second `PROBE_TIMEOUT`. `None` is correct for a caller that
-/// never prepared (the resume path) and simply restores the probe.
 /// Test: `ensure_deployment_complete_noops_for_unknown_workspace`,
 /// `ensure_deployment_complete_ok_when_already_complete`,
 /// `ensure_deployment_complete_does_not_abort_when_no_carrier_reachable`
@@ -105,12 +95,10 @@ pub(super) fn ensure_deployment_complete(
     if workspace == std::path::Path::new("/unknown") || !workspace.is_dir() {
         return Ok(());
     }
-    // #7763: reuse the launch's own reachability verdict rather than re-probing.
     let outcome = crate::core::deploy_validate::validate_and_repair_under(
         fw,
         workspace,
         repo_url,
-        host.memory_reachable,
         host.home.as_deref(),
     );
     // Warn-only carrier-reachability self-check (issue #2231) — see its own

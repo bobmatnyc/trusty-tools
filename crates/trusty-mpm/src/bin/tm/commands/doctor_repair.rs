@@ -253,15 +253,12 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
                 mode,
             ),
         );
-        // #7685: write `autoMemoryEnabled` into the project tier, in the
-        // direction reachability dictates — `false` when trusty-memory is the
-        // memory, `true` to restore the fallback when it is not answering.
-        // Additive: one boolean key, every other key preserved, through the same
-        // merge the launch path uses.
+        // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) —
+        // write `autoMemoryEnabled: false` into the project tier whatever
+        // trusty-memory's state. Additive: one boolean key, every other key
+        // preserved, through the same merge the launch path uses.
         steps.extend(trusty_mpm::daemon::doctor_auto_memory::repair_auto_memory(
-            project,
-            mode,
-            trusty_mpm::core::memory_reachable::probe_memory_reachable_blocking(),
+            project, mode,
         ));
         // #9664: park what `search_project_duplicate_index` flags, through the
         // daemon's `search.project.park`; never this project's own index.

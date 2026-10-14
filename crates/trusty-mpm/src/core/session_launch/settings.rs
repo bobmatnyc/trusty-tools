@@ -278,41 +278,28 @@ pub(crate) fn merge_settings_key(
     merge_settings(project_dir, |settings| settings[key] = value)
 }
 
-/// Write `autoMemoryEnabled` into the project's `.claude/settings.json` (#7685).
+/// Write `autoMemoryEnabled: false` into the project's `.claude/settings.json`.
 ///
-/// Why: the owner directive — `trusty-memory` is the memory, and Claude Code's
-/// own auto memory is a FALLBACK that stays on only while trusty-memory is
-/// unavailable (ruling 2026-09-12). This is the project-tier half; the
-/// managed-spawn half is the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` assignment in
-/// [`crate::runtime::claude_code::env_bin_prefix`]. Both, for the reason
+/// Why: `trusty-memory` is the memory, and Claude Code's own auto memory
+/// (`MEMORY.md`) is off for every tm session with no fallback (#8436, Bob Db0
+/// Q5a 2026-10-14, which retired the 2026-09-12 #7685 fallback). This is the
+/// project-tier half; the managed-spawn half is the
+/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` assignment in
+/// [`crate::runtime::managed_launch`]. Both, for the reason
 /// [`write_output_style`]'s `attribution` seed gives: the env var reaches only
 /// the `claude` child tm spawns, whereas a bare `claude` launched in this
 /// project reads the project tier regardless.
-///
-/// The write is TWO-WAY, and that is the whole contract: the key is ALWAYS
-/// written, in the direction reachability dictates. "Leave it alone" was the
-/// first shape of this function and it could never recover — a project whose key
-/// a healthy-trusty-memory launch set `false` kept that `false` forever once
-/// trusty-memory went down, leaving the session with neither memory. `true` is
-/// therefore written explicitly, through this same helper, so the fallback comes
-/// back on by itself.
-/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `enabled`.
-/// [`super::prepare_session_inner`] derives `enabled` as `!memory_reachable`.
+/// What: [`merge_settings_key`] with [`AUTO_MEMORY_KEY`] and `false`, every
+/// other key preserved. Unconditional: an existing `true` (the retired fallback
+/// wrote one whenever trusty-memory was down) is overwritten.
 /// Test: `write_auto_memory_off_disables_auto_memory`,
 /// `write_auto_memory_off_preserves_existing_keys`,
 /// `write_auto_memory_off_overrides_an_enabled_value`,
-/// `write_auto_memory_on_reverts_a_prior_disable`,
-/// `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`.
-pub(super) fn write_auto_memory_enabled(
-    project_dir: &Path,
-    enabled: bool,
-) -> Result<(), PrepError> {
-    merge_settings_key(
-        project_dir,
-        AUTO_MEMORY_KEY,
-        serde_json::Value::Bool(enabled),
-    )
+/// `prepare_session_disables_auto_memory`,
+/// `prepare_session_keeps_auto_memory_off_when_trusty_memory_is_down`.
+pub(super) fn write_auto_memory_off(project_dir: &Path) -> Result<(), PrepError> {
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14)
+    merge_settings_key(project_dir, AUTO_MEMORY_KEY, serde_json::Value::Bool(false))
 }
 
 /// Merge trusty-mpm output-style and spinner-tip settings into the project's

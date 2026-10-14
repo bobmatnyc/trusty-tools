@@ -240,8 +240,8 @@ pub mod memory_import;
 // #7685: `tm memory import-auto-memory` — the migration that makes zeroing
 // Claude Code's `MEMORY.md` safe.
 pub mod auto_memory_import;
-// #7685: auto memory is a FALLBACK — every write site that turns it off asks
-// this module whether trusty-memory is available first.
+// #7685: whether trusty-memory answers — read by `tm doctor`'s `auto_memory`
+// row only; #8436 retired the launch-time fallback that also consulted it.
 pub mod memory_reachable;
 // #8352: `tm memory recall|remember|note` — palace access over the daemon
 // socket, so a dead MCP connection does not cut the session off from memory.

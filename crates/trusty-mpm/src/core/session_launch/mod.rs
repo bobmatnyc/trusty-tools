@@ -24,8 +24,7 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_isolated_session_under, prepare_session,
-    prepare_session_for_managed, prepare_session_for_repair, prepare_session_for_repair_under,
-    prepare_session_with_home, prepare_session_with_memory_reachable,
+    prepare_session_for_managed, prepare_session_for_repair_under, prepare_session_with_home,
     prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
     prepare_session_with_style, prepare_session_with_style_and_native,
 };
@@ -168,7 +167,7 @@ use settings::{
     deploy_output_style,
     preseed_workspace_trust_home,
     remove_global_trusty_memory_hooks,
-    write_auto_memory_enabled,
+    write_auto_memory_off,
     write_output_style,
     // #9018: the launch builds its additions with every toggle resolved — the
     // #7688 capture and `[pm_guard] enabled` included — and hands them to the
@@ -378,17 +377,6 @@ pub struct PrepReport {
     /// Test: `prepare_session_reports_a_quarantined_agent_as_a_launch_notice`,
     /// `prepare_session_on_a_clean_project_reports_no_asset_notice`.
     pub asset_notices: Vec<String>,
-    /// Whether trusty-memory answered this launch's reachability probe (#7685).
-    ///
-    /// Why: the runtime adapter needs the same answer to decide
-    /// `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, and it runs after preparation in the
-    /// same request. Returning the resolved value is what lets it reuse this
-    /// one rather than paying a second `PROBE_TIMEOUT` against a daemon that is
-    /// already known to be hung.
-    /// What: the value this preparation wrote `autoMemoryEnabled` against —
-    /// `true` means auto memory was turned off, `false` means it was restored.
-    /// Test: `prepare_session_reports_the_resolved_reachability`.
-    pub memory_reachable: bool,
     /// The session profile this preparation resolved and wrote for (#8453).
     pub profile: crate::core::session_profile::SessionProfile,
 }
@@ -571,33 +559,27 @@ impl PrepError {
 /// the process itself.
 ///
 /// Why: every field is something production reads from the environment and
-/// tests must pin — `home` since #5544, `hook_exe` since #7244,
-/// `memory_reachable` since #7685. Grouping them keeps
+/// tests must pin — `home` since #5544, `hook_exe` since #7244. Grouping them keeps
 /// [`prepare_session_inner`]'s arity where clippy wants it and puts the
 /// injections side by side, so the next one has an obvious home.
 /// What: `home` is the USER-GLOBAL home (not derivable from `FrameworkPaths` —
 /// the managed constructors relocate every `.claude/` path on it onto the
 /// workspace); `hook_exe` is the stable binary the project-tier hooks writer
-/// should bake, `None` meaning "resolve the running one"; `memory_reachable`
-/// pins whether trusty-memory answered, `None` meaning "probe the host";
-/// `palace_registry` (#8311) is the trusty-memory registry the palace alias is
+/// should bake, `None` meaning "resolve the running one"; `palace_registry` (#8311) is the trusty-memory registry the palace alias is
 /// written to, `None` meaning "the one the trusty-memory daemon reads".
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
-/// `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`,
 /// `session_prep_writes_the_palace_alias_under_the_named_registry`, plus
 /// every `prepare_session_*` test.
 #[derive(Clone, Copy, Default)]
 pub(super) struct HostInputs<'a> {
     pub(super) home: Option<&'a Path>,
     pub(super) hook_exe: Option<&'a Path>,
-    pub(super) memory_reachable: Option<bool>,
     pub(super) palace_registry: Option<&'a Path>,
 }
 
 impl<'a> HostInputs<'a> {
-    /// The production shape: a real home, the running binary for hooks, a
-    /// live reachability probe, and the daemon's own palace registry.
+    /// The production shape: a real home, the running binary for hooks, and
+    /// the daemon's own palace registry.
     pub(super) fn with_home(home: Option<&'a Path>) -> Self {
         Self {
             home,
@@ -623,11 +605,6 @@ pub(super) fn prepare_session_inner(
     // shares ONE nested walk, while a daemon-hosted launch still re-detects a
     // tree that changed since the last one.
     crate::core::manifest::invalidate_stack_detection(project_dir);
-    // #7685: resolved ONCE per launch, here, and returned on the `PrepReport` so
-    // the runtime adapter reuses this answer instead of dialling the daemon a
-    // second time.
-    let memory_reachable =
-        crate::core::memory_reachable::resolve_memory_reachable(host.memory_reachable);
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
     // `config.toml` a second time mid-function (the old `MpmConfig::load` just
@@ -974,20 +951,12 @@ pub(super) fn prepare_session_inner(
         ),
     }
 
-    // #7685: Claude Code auto-memory (`MEMORY.md`) is a FALLBACK — trusty-memory
-    // is the memory, and auto memory stays on only when trusty-memory is not
-    // available (owner ruling 2026-09-12). The write is TWO-WAY: `true` is
-    // written as deliberately as `false`, because only an explicit `true` can
-    // revert a `false` an earlier healthy-trusty-memory launch left behind.
-    // Non-fatal for the same reason the write above is: a failure costs the
-    // project the setting, not its session.
-    if let Err(err) = write_auto_memory_enabled(project_dir, !memory_reachable) {
-        tracing::warn!("failed to write Claude Code `{AUTO_MEMORY_KEY}`: {err}");
-    } else if !memory_reachable {
-        tracing::info!(
-            "trusty-memory is not reachable — wrote `{AUTO_MEMORY_KEY}: true` to restore \
-             Claude Code auto-memory as this project's fallback (#7685)"
-        );
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14) —
+    // whatever trusty-memory's state, so no launch probes it. Non-fatal for the
+    // same reason the write above is: a failure costs the project the setting,
+    // not its session; `tm doctor`'s `auto_memory` row reports it.
+    if let Err(err) = write_auto_memory_off(project_dir) {
+        tracing::warn!("failed to write Claude Code `{AUTO_MEMORY_KEY}: false`: {err}");
     }
 
     // #7422: write the project-tier `enabledPlugins` allowlist beside the output
@@ -1276,7 +1245,6 @@ pub(super) fn prepare_session_inner(
         catchup_context,
         roster_errors,
         asset_notices,
-        memory_reachable,
         profile,
     })
 }

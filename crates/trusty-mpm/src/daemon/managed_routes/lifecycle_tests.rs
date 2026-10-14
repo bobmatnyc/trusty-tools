@@ -1003,33 +1003,27 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
     );
 }
 
-/// `tm connect`'s launch-on-main spawn hands the adapter the prepared reachability (#7685).
+/// `tm connect`'s launch-on-main spawn writes auto memory off with trusty-memory
+/// down (#8436).
 ///
-/// Why: preparation resolves reachability, and the runtime adapter used to be
-/// built with `None`, so it dialled the probe again — a second `PROBE_TIMEOUT`
-/// against a daemon already known to be hung, on every launch.
-/// What: drives the real `spawn_managed_on_main` and counts the adapter spawns
-/// on this thread that had no resolved value and so probed again (the spawn runs
-/// synchronously on a current-thread runtime). The count is observable when the
-/// adapter reaches its reachability read (a `claude` binary is resolvable); the
-/// source assertion covers hosts where the adapter stops earlier. Preparation's
-/// own probe is not the adapter's and is not counted; since #7763 the
-/// deployment auto-repair's re-preparation makes no probe of its own either.
+/// Why: auto memory is off for every session (Bob Db0 Q5a, 2026-10-14). The
+/// retired #7685 fallback turned it back on whenever trusty-memory did not
+/// answer; this drives the daemon's real launch route through that failure
+/// branch.
+/// What: points trusty-memory's socket at a path nothing listens on, drives the
+/// real `spawn_managed_on_main` (preparation, deployment gate and its repair),
+/// and reads the project-tier `autoMemoryEnabled` the launch left in the
+/// checkout.
 /// Test: itself.
 #[tokio::test]
 #[serial_test::serial]
-async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
-    const SRC: &str = include_str!("launch_on_main.rs");
-    assert!(
-        // #8233: the call is now multi-line and also carries the framework root,
-        // so the pin names the two arguments rather than the whole call text.
-        SRC.contains("memory_reachable,\n        state.framework_root(),"),
-        "launch-on-main must hand the adapter the reachability preparation \
-         resolved, and the daemon's own framework root"
-    );
-
+async fn spawn_managed_on_main_writes_auto_memory_off_with_trusty_memory_down() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
     let _home = set_home(tmp_home.path());
+    let _memory = crate::secret_source::test_env::EnvVarGuard::set(
+        trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV,
+        tmp_home.path().join("no-trusty-memory.sock"),
+    );
     let data_root = tempfile::TempDir::new().expect("tmp data root");
     let state = std::sync::Arc::new(
         crate::daemon::state::DaemonState::with_root_isolated_managed(
@@ -1062,7 +1056,6 @@ async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
         worktree: false,
     };
 
-    crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD.with(|n| n.set(0));
     spawn_managed_on_main(
         &state,
         &ManagedSessionId::new(),
@@ -1074,49 +1067,15 @@ async fn spawn_managed_on_main_hands_the_adapter_the_prepared_reachability() {
     .await
     .expect("spawn_managed_on_main must succeed against a real git repo");
 
+    let settings = local_path.join(".claude").join("settings.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).expect("settings written"))
+            .expect("settings parse");
+    // #8436: auto-memory off for every session (Bob Db0 Q5a, 2026-10-14).
     assert_eq!(
-        crate::core::memory_reachable::ADAPTER_REPROBES_ON_THIS_THREAD.with(std::cell::Cell::get),
-        0,
-        "the adapter must reuse the reachability preparation resolved, not probe again"
-    );
-}
-
-/// Both launch gates hand their repair the reachability already resolved (#7763).
-///
-/// Why: `ensure_deployment_complete`'s repair re-runs the whole preparation
-/// pipeline, so a call site passing `None` put a second `PROBE_TIMEOUT` on every
-/// launch against a slow trusty-memory. That cost is invisible in the session
-/// that results — nothing downstream records which probe answered — so the
-/// threading is pinned where it is decided, at the call site.
-/// What: reads the two spawn call sites and asserts each forwards its own
-/// resolved value, whitespace-normalized so `cargo fmt` cannot break the match.
-/// The resume path prepares nothing and keeps `None`, which is why only the two
-/// spawn sites are asserted here.
-/// Test: itself.
-#[test]
-fn both_launch_gates_reuse_the_resolved_reachability() {
-    /// Collapse every run of whitespace to one space, so a rewrap cannot fail this.
-    fn flat(src: &str) -> String {
-        src.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    let on_main = flat(include_str!("launch_on_main.rs"));
-    assert!(
-        on_main.contains(
-            "ensure_deployment_complete( &fw, local_path, record.repo_url.as_deref(), \
-             session_id, RepairHost::new(memory_reachable, state.user_home()), )"
-        ),
-        "launch-on-main must hand the gate the reachability preparation resolved"
-    );
-
-    let inproject = flat(include_str!("lifecycle.rs"));
-    assert!(
-        inproject.contains(
-            "let host = RepairHost::new(reachable, state.user_home()); \
-             let url = record.repo_url.as_deref(); if let Err(reason) = \
-             ensure_deployment_complete(&fw, &worktree, url, session_id, host)"
-        ),
-        "the in-project spawn must hand the gate the reachability preparation resolved"
+        value["autoMemoryEnabled"],
+        serde_json::json!(false),
+        "the launch must turn auto memory off with trusty-memory down: {value}"
     );
 }
 

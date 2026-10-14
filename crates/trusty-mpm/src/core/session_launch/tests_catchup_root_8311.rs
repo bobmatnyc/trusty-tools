@@ -45,11 +45,12 @@ fn session_prep_writes_the_catchup_watermark_under_the_framework_root() {
         std::fs::write(fw.root.join("config.toml"), CATCHUP_OFFLINE).unwrap();
 
         let named_home = inject_home.then(|| home.path());
-        crate::core::session_launch::prepare_session_with_memory_reachable(
+        crate::core::session_launch::prepare_session_with_home(
             &fw,
             project.path(),
-            named_home,
+            None,
             false,
+            named_home,
         )
         .expect("prep succeeds");
 
@@ -113,7 +114,6 @@ fn session_prep_writes_the_palace_alias_under_the_named_registry() {
         None,
         HostInputs {
             home: Some(home.path()),
-            memory_reachable: Some(false),
             palace_registry: Some(named.path()),
             ..HostInputs::default()
         },

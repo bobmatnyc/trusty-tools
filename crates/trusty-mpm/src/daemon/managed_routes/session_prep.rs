@@ -37,10 +37,6 @@ use crate::session_manager::ManagedSessionId;
 /// the clone provisioner's non-fatal handling of the identical
 /// call, so a prep failure never blocks the session from spawning.
 ///
-/// #7685: returns the trusty-memory reachability this preparation resolved, so
-/// the caller can hand it to `build_adapter` instead of making the runtime
-/// adapter pay a second probe against a daemon already known to be hung. `None`
-/// means preparation never got far enough to resolve one.
 /// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule.
 pub(super) fn prepare_inproject_session(
@@ -48,8 +44,7 @@ pub(super) fn prepare_inproject_session(
     session_id: &ManagedSessionId,
     worktree: &std::path::Path,
     repo_url: Option<&str>,
-) -> Result<Option<bool>, String> {
-    let mut memory_reachable = None;
+) -> Result<(), String> {
     match crate::core::session_launch::prepare_session_for_managed(
         fw,
         worktree,
@@ -57,7 +52,6 @@ pub(super) fn prepare_inproject_session(
         &session_id.to_string(),
     ) {
         Ok(report) => {
-            memory_reachable = Some(report.memory_reachable);
             info!(
                 id = %session_id,
                 deployed = report.deploy.deployed.len(),
@@ -99,7 +93,7 @@ pub(super) fn prepare_inproject_session(
             );
         }
     }
-    Ok(memory_reachable)
+    Ok(())
 }
 
 /// Refresh the project's compiled PM prompt on the RESUME path.

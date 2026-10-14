@@ -574,48 +574,21 @@ pub fn validate_and_repair(
     validate_and_repair_with_exe(fw, workspace, repo_url, None)
 }
 
-/// [`validate_and_repair`] reusing a reachability the caller already resolved.
-///
-/// Why (#7763): the daemon's spawn gate calls this immediately after
-/// `prepare_session*` probed trusty-memory, and the repair step re-runs that
-/// same preparation. With nothing threaded, a launch against a slow or wedged
-/// daemon paid [`PROBE_TIMEOUT`](crate::core::memory_reachable::PROBE_TIMEOUT)
-/// twice — once in preparation, once in the repair.
-/// What: [`validate_and_repair`] with `memory_reachable` handed to
-/// [`crate::core::session_launch::prepare_session_for_repair`]. `None` keeps the
-/// live probe, which is what the resume path — which never prepared — passes.
-/// Test: `repair_reuses_the_reachability_the_launch_resolved`.
-pub fn validate_and_repair_reusing_memory(
-    fw: &FrameworkPaths,
-    workspace: &Path,
-    repo_url: Option<&str>,
-    memory_reachable: Option<bool>,
-) -> RepairOutcome {
-    repair_with(
-        fw,
-        workspace,
-        repo_url,
-        None,
-        memory_reachable,
-        dirs::home_dir().as_deref(),
-    )
-}
-
-/// [`validate_and_repair_reusing_memory`] with the user home named (#8545).
+/// [`validate_and_repair`] with the user home named (#8545).
 ///
 /// Why: the repair's session preparation writes the user-tier statusLine and
 /// trust seed under a home; a daemon pinned to a test home must not reach `$HOME`.
 /// What: the same repair, with `home` handed to
 /// [`crate::core::session_launch::prepare_session_for_repair_under`].
-/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`.
+/// Test: `the_claim_is_still_held_when_the_route_types_into_the_pane`,
+/// `repair_writes_auto_memory_off`.
 pub fn validate_and_repair_under(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
-    memory_reachable: Option<bool>,
     home: Option<&Path>,
 ) -> RepairOutcome {
-    repair_with(fw, workspace, repo_url, None, memory_reachable, home)
+    repair_with(fw, workspace, repo_url, None, home)
 }
 
 /// [`validate_and_repair`] with the hook binary pinned by the caller.
@@ -625,7 +598,7 @@ pub fn validate_and_repair_under(
 /// no installed `tm`, so `HooksMissing` stayed a gap and the repair could never
 /// report complete. Pinning the path keeps the assertion about the pipeline.
 /// What: [`repair_with`], forwarding `hook_exe` to
-/// [`crate::core::session_launch::prepare_session_for_repair`].
+/// [`crate::core::session_launch::prepare_session_for_repair_under`].
 /// Test: `repair_closes_gaps_on_incomplete_workspace`.
 pub fn validate_and_repair_with_exe(
     fw: &FrameworkPaths,
@@ -633,36 +606,32 @@ pub fn validate_and_repair_with_exe(
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
 ) -> RepairOutcome {
-    // #7763: `None` is "probe the host" — the reachability-reusing entry point
-    // above is the one that threads a resolved value.
     repair_with(
         fw,
         workspace,
         repo_url,
         hook_exe,
-        None,
         dirs::home_dir().as_deref(),
     )
 }
 
-/// The shared body of the three `validate_and_repair*` entry points.
+/// The shared body of the `validate_and_repair*` entry points.
 ///
-/// Why (#7763): the hook binary and the trusty-memory verdict are both host
-/// inputs a caller may pin, and each public wrapper pins a different subset. One
-/// body keeps them from drifting — a repair that skipped the re-probe on one
-/// entry point and not another would be invisible until a slow daemon exposed it.
+/// Why (#7763): the hook binary and the user home are host inputs a caller may
+/// pin, and each public wrapper pins a different subset. One body keeps them
+/// from drifting.
 /// What: validate; return early when complete; resync in place for a
 /// hook-group-only gap; otherwise re-run the preparation pipeline through
-/// [`crate::core::session_launch::prepare_session_for_repair`] and re-validate.
+/// [`crate::core::session_launch::prepare_session_for_repair_under`] and
+/// re-validate.
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
-/// `repair_reuses_the_reachability_the_launch_resolved`,
+/// `repair_writes_auto_memory_off`,
 /// `repair_is_not_reported_when_the_pipeline_fails_fatally`.
 fn repair_with(
     fw: &FrameworkPaths,
     workspace: &Path,
     repo_url: Option<&str>,
     hook_exe: Option<&Path>,
-    memory_reachable: Option<bool>,
     home: Option<&Path>,
 ) -> RepairOutcome {
     let before = validate_workspace_with_exe(fw, hook_exe);
@@ -697,15 +666,8 @@ fn repair_with(
         };
     }
 
-    // #7763: the launch already asked whether trusty-memory answered; reuse that
-    // verdict instead of paying a second `PROBE_TIMEOUT` here.
     let repair_error = match crate::core::session_launch::prepare_session_for_repair_under(
-        fw,
-        workspace,
-        repo_url,
-        hook_exe,
-        memory_reachable,
-        home,
+        fw, workspace, repo_url, hook_exe, home,
     ) {
         Ok(report) if !report.roster_errors.is_empty() => Some(report.roster_errors.join("; ")),
         Ok(_) => None,

@@ -56,15 +56,8 @@ fn launch(home: &Path, project: &Path) -> serde_json::Value {
     let _home = EnvVarGuard::set("HOME", home);
     let mut fw = crate::core::paths::FrameworkPaths::under(home);
     fw.trusty_mpm_root = None;
-    prepare_session_for_repair_under(
-        &fw,
-        project,
-        None,
-        Some(Path::new(TEST_EXE)),
-        Some(false),
-        Some(home),
-    )
-    .expect("the launch prepares");
+    prepare_session_for_repair_under(&fw, project, None, Some(Path::new(TEST_EXE)), Some(home))
+        .expect("the launch prepares");
     read_settings(project)
 }
 

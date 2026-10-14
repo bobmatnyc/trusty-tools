@@ -169,9 +169,7 @@ pub(super) async fn spawn_managed_on_main(
     // brief, which is how this path has always delivered it.
     // #8934: a local-only repository has no GitHub URL to synthesise.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
-    // #7685: keep the reachability preparation resolved; the adapter reuses it.
-    let memory_reachable =
-        prepare_inproject_session(&fw, session_id, local_path, source.repo_url.as_deref())?;
+    prepare_inproject_session(&fw, session_id, local_path, source.repo_url.as_deref())?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr
@@ -217,14 +215,12 @@ pub(super) async fn spawn_managed_on_main(
         warn!(id = %session_id, "spawn_managed (launch-on-main): set_workspace failed: {e}");
     }
 
-    // #7763: hand the gate the reachability preparation resolved, so its repair
-    // step does not pay a second `PROBE_TIMEOUT` against the same daemon.
     if let Err(reason) = ensure_deployment_complete(
         &fw,
         local_path,
         record.repo_url.as_deref(),
         session_id,
-        RepairHost::new(memory_reachable, state.user_home()),
+        RepairHost::new(state.user_home()),
     ) {
         warn!(
             id = %session_id,
@@ -244,14 +240,8 @@ pub(super) async fn spawn_managed_on_main(
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
-    // #7685: hand the adapter what preparation resolved, so it does not re-probe.
     // #8233: the daemon's own framework root, never the process home.
-    let adapter = crate::runtime::build_adapter(
-        record.runtime,
-        tmux_arc,
-        memory_reachable,
-        state.framework_root(),
-    );
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc, state.framework_root());
     let gh_env = resolve_gh_env(state, local_path).await;
     if let Err(e) = adapter.spawn(
         &record.tmux_name,
