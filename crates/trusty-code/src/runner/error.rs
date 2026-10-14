@@ -46,6 +46,16 @@ pub enum RunnerError {
         source: anyhow::Error,
     },
 
+    /// The requested agent is the delegating top-level agent itself (#8288, #8206).
+    #[error(
+        "agent '{name}' is the delegating agent itself and cannot run its own card as a \
+         sub-agent. Delegate to a specialist agent instead (for example an engineer)."
+    )]
+    SelfDelegation {
+        /// The requested agent slug.
+        name: String,
+    },
+
     /// The multi-turn agent loop returned an error (turn cap, timeout, LLM, …).
     #[error("agent '{name}' loop failed: {source}")]
     Loop {

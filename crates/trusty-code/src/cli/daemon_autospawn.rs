@@ -204,32 +204,53 @@ async fn ensure_daemon_with(
 /// defect for six hours with nothing naming the mismatch. The refusal does not
 /// stop the daemon itself: other clients may be attached to it, and the TUI
 /// never ends a daemon's live work (module docs).
-/// What: `Ok` only when `health.build` equals [`trusty_code::build_info::GIT_HASH`].
-/// A different build, no `build` field (a daemon older than #8164) or a failed
-/// `health` call is an error naming both builds, the daemon's pid and the
-/// restart steps.
-/// Test: `daemon_autospawn_tests::refuses_a_daemon_from_a_different_build`.
+/// What: `Ok` only when `health.build` equals [`trusty_code::build_info::GIT_HASH`] AND
+/// `health.version` equals [`trusty_code::VERSION`] (an "unknown" build, from a
+/// checkout without git, matches any other).
+/// A different build or version, no `build` field (a daemon older than #8164) is an
+/// error naming both builds, the daemon's pid and the restart steps; a failed
+/// `health` call is a separate error saying the build could not be confirmed.
+/// Test: `daemon_autospawn_tests::refuses_a_daemon_from_a_different_build`,
+/// `daemon_autospawn_tests::refuses_a_different_version_when_the_builds_match`,
+/// `daemon_autospawn_tests::a_failed_health_call_is_not_reported_as_an_unreported_build`.
 async fn check_build(socket: &Path) -> Result<()> {
-    let health = UdsRpcClient::new(socket)
+    let health = match UdsRpcClient::new(socket)
         .call("health", serde_json::json!({}))
         .await
-        .ok();
+    {
+        Ok(health) => health,
+        // Its own message: a failed call says nothing about the daemon's build.
+        Err(e) => {
+            return Err(anyhow!(
+                "the tcode daemon on {socket} is serving but its `health` call failed, so \
+                 this tcode could not confirm it is the same build: {e}. `tcode tui` will \
+                 not attach to it. Stop that daemon, then run \
+                 `tcode tui` again to start a daemon from this build.",
+                socket = socket.display(),
+            ));
+        }
+    };
     let client = trusty_code::build_info::GIT_HASH;
-    let daemon = health.as_ref().and_then(|h| h["build"].as_str());
-    if daemon == Some(client) {
+    let daemon = health["build"].as_str();
+    let daemon_version = health["version"].as_str();
+    // `build.rs` reports "unknown" without git, so equal builds prove nothing
+    // unless the versions agree too.
+    if daemon == Some(client) && daemon_version == Some(trusty_code::VERSION) {
         return Ok(());
     }
-    let pid = health
-        .as_ref()
-        .and_then(|h| h["pid"].as_u64())
+    let pid = health["pid"]
+        .as_u64()
         .map_or_else(|| "<pid>".to_string(), |p| p.to_string());
     Err(anyhow!(
-        "the tcode daemon on {socket} (pid {pid}) runs build {daemon}, but this tcode is \
-         build {client}. A daemon keeps running the code it started with, so `tcode tui` \
-         will not attach to it. Restart it: `kill {pid}` (it finishes in-flight work, then \
-         exits), then run `tcode tui` again to start a daemon from this build.",
+        "the tcode daemon on {socket} (pid {pid}) runs build {daemon} (version \
+         {daemon_version}), but this tcode is build {client} (version {version}). A daemon \
+         keeps running the code it started with, so `tcode tui` will not attach to it. \
+         Restart it: `kill {pid}` (it finishes in-flight work, then exits), then run \
+         `tcode tui` again to start a daemon from this build.",
         socket = socket.display(),
         daemon = daemon.unwrap_or("<unreported>"),
+        daemon_version = daemon_version.unwrap_or("<unreported>"),
+        version = trusty_code::VERSION,
     ))
 }
 

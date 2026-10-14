@@ -1,2 +1,2 @@
 Fixed
-- `tcode tui` refuses to attach to a daemon whose build differs from its own, or that reports no build, with a message naming both builds, the daemon's pid and the restart steps. The daemon's `tcode serve: starting` log entry now carries a `build` field (#8203).
+- `tcode tui` refuses to attach to a daemon whose build or version differs from its own, or that reports no build, with a message naming both builds, the daemon's pid and the restart steps. Two builds that both report `unknown` (a checkout without git) are told apart by version. A daemon whose `health` call fails gets its own message. The daemon's `tcode serve: starting` log entry now carries a `build` field (#8203).

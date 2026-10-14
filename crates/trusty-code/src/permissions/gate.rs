@@ -452,7 +452,13 @@ impl PermissionGate {
     pub async fn resolve(&self, tool: &str, args: &Value) -> Outcome {
         // #8288: first, so no rule, mode, remembered grant or malformed
         // argument can reach an allow for a delegator's own source write.
-        if self.ctx.delegator.as_deref() == Some(self.agent.agent.name.as_str())
+        // Case-insensitive: a card without `name:` is named by the requested
+        // file stem, and a case-insensitive filesystem loads `pm.md` for "PM".
+        if self
+            .ctx
+            .delegator
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case(&self.agent.agent.name))
             && DELEGATOR_DENIED_TOOLS.contains(&tool)
         {
             return Outcome::Denied {

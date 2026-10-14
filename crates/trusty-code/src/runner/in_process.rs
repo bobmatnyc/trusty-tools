@@ -403,7 +403,7 @@ impl InProcessAgentRunner {
     /// `AgentLoop` — attaching (#2279) `verify_gate::default_finish_gate` so a
     /// premature `finish_task` gets a recoverable retry rather than
     /// terminating the loop — and maps any loop error to `RunnerError::Loop`.
-    /// Test: `runner::tests::*`.
+    /// Test: `runner::tests::*`, `runner::tests::a_delegator_cannot_delegate_to_its_own_card`.
     async fn run_pipeline(
         &self,
         agent_name: &str,
@@ -411,6 +411,23 @@ impl InProcessAgentRunner {
         ctx: &RunContext,
     ) -> Result<AgentOutput, RunnerError> {
         let agent = self.load_agent(agent_name)?;
+
+        // #8288/#8206: a delegator never runs its own card as a sub-agent. The
+        // gate lock would leave it no `bash` while `finish_task` still expects
+        // one (a wedge to the turn cap). Names compare without regard to case
+        // (a case-insensitive filesystem loads `pm.md` for "PM"), on both the
+        // requested slug and the card's own name.
+        if let Some(delegator) = self
+            .permissions
+            .as_ref()
+            .and_then(|p| p.delegator.as_deref())
+            && (delegator.eq_ignore_ascii_case(agent_name)
+                || delegator.eq_ignore_ascii_case(&agent.agent.name))
+        {
+            return Err(RunnerError::SelfDelegation {
+                name: agent_name.to_string(),
+            });
+        }
 
         // Build the agent's full tool set, then gate it by `tools.allowed`.
         // #8031: via the shared helper `--no-delegate` also calls, so a
