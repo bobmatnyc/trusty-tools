@@ -82,8 +82,17 @@
 #        slice's PR; a slice may fall in steps (T1a, T1b);
 #     every `variant-pending` row of one enum (keyed by the enum name, so a
 #        re-export path counts) carries one tag.
+#     R6 with --base-audit: every valid pending marker of the head table
+#        exists in the base audit table for the same path, marker kind and
+#        T<n>. Markers may disappear; they may not appear, move to another
+#        path or be retagged. R1-R4 compare counts only, so a retag or a swap
+#        that leaves the counts alone passes them. Prints
+#        `RATCHET audit <path>: <marker>-pending T<n> is not in the base audit table`.
 #   A missing ratchet file, a bad header, a malformed, duplicate or missing
-#   row fails closed (exit 2), for the --base-ratchet file too.
+#   row fails closed (exit 2), for the --base-ratchet file too. So does a
+#   missing, unreadable, empty, headerless or row-less --base-audit file, and
+#   an empty-string path to --base-ratchet or --base-audit (an unset variable
+#   must not switch R3 or R6 off).
 #
 #   --final (the 1.0 end state, run by the T4 gate): every valid pending
 #   marker of either kind prints `PENDING <path>: <marker>-pending T<n>` (exit 1).
@@ -113,7 +122,7 @@
 # Usage:
 #   bash scripts/check_engine_api_audit.sh --api-file <listing>
 #   bash scripts/check_engine_api_audit.sh            # runs cargo public-api
-#   bash scripts/check_engine_api_audit.sh --base-ratchet <file> [--final]
+#   bash scripts/check_engine_api_audit.sh [--base-ratchet <file>] [--base-audit <file>] [--final]
 #   bash scripts/check_engine_api_audit.sh --help
 #   Make the listing with:
 #     cargo +nightly public-api -p trusty-memory --no-default-features \
@@ -121,8 +130,10 @@
 #   Slice gate (T1-T3; T4 adds --final), <base> = the PR's base branch:
 #     git show origin/<base>:docs/reference/trusty-memory-engine-api-ratchet.tsv \
 #       > "$S/base-ratchet.tsv"
+#     git show origin/<base>:docs/reference/trusty-memory-engine-api-audit.tsv \
+#       > "$S/base-audit.tsv"
 #     bash scripts/check_engine_api_audit.sh --api-file <listing> \
-#       --base-ratchet "$S/base-ratchet.tsv"
+#       --base-ratchet "$S/base-ratchet.tsv" --base-audit "$S/base-audit.tsv"
 #
 # Env (fixtures only):
 #   ENGINE_API_AUDIT_TSV   the audit table (default docs/reference/...tsv)
@@ -130,7 +141,7 @@
 #
 # Exit: 0 when the listing matches the table; 1 on any EXTRA, UNAUDITED,
 #   MISSING, UNMARKED, ANYHOW, RATCHET or PENDING line; 2 on a usage, tool,
-#   table, ratchet or listing error.
+#   table, ratchet, base file or listing error.
 #
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path (in an engine module,
@@ -158,6 +169,7 @@ AUDIT="${ENGINE_API_AUDIT_TSV:-$REPO_ROOT/docs/reference/trusty-memory-engine-ap
 RATCHET="${ENGINE_API_RATCHET_TSV:-$REPO_ROOT/docs/reference/trusty-memory-engine-api-ratchet.tsv}"
 API_FILE=''
 BASE_RATCHET=''
+BASE_AUDIT=''
 FINAL=0
 
 while [ $# -gt 0 ]; do
@@ -172,8 +184,14 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --base-ratchet)
-      [ $# -ge 2 ] || { echo "check_engine_api_audit: --base-ratchet needs a path" >&2; exit 2; }
+      # An empty path (an unset variable) must not switch R3 off.
+      [ $# -ge 2 ] && [ -n "$2" ] || { echo "check_engine_api_audit: --base-ratchet needs a path" >&2; exit 2; }
       BASE_RATCHET="$2"
+      shift 2
+      ;;
+    --base-audit)
+      [ $# -ge 2 ] && [ -n "$2" ] || { echo "check_engine_api_audit: --base-audit needs a path" >&2; exit 2; }
+      BASE_AUDIT="$2"
       shift 2
       ;;
     --final)
@@ -296,6 +314,28 @@ ratchet_read() {
 ratchet_read "$RATCHET" "$WORK/ratchet"
 : > "$WORK/base-ratchet"
 [ -z "$BASE_RATCHET" ] || ratchet_read "$BASE_RATCHET" "$WORK/base-ratchet"
+
+# T0 R6: the base branch's audit table, reduced to its pending markers
+# (`marker slice path`); fails closed (exit 2) like the base ratchet file.
+: > "$WORK/base-markers"
+if [ -n "$BASE_AUDIT" ]; then
+  [ -f "$BASE_AUDIT" ] && [ -r "$BASE_AUDIT" ] || { echo "check_engine_api_audit: no base audit table at $BASE_AUDIT" >&2; exit 2; }
+  BAHEAD=''
+  IFS= read -r BAHEAD < "$BASE_AUDIT" || true
+  if [ "$BAHEAD" != "$WANT_HEADER" ]; then
+    echo "check_engine_api_audit: bad base audit header at line 1 in $BASE_AUDIT (want path, kind, disposition, consumer_or_reason, batch, tab-separated)" >&2
+    exit 2
+  fi
+  if ! awk -F '\t' '
+    NR == 1 || $0 == "" || $0 ~ /^#/ { next }
+    { rows++ }
+    $4 ~ /^anyhow-pending T[1-4]: +[^ ]/ { print "anyhow\t" substr($4, 16, 2) "\t" $1 }
+    $4 ~ /^variant-pending T[1-4]: +[^ ]/ { print "variant\t" substr($4, 17, 2) "\t" $1 }
+    END { if (rows == 0) exit 1 }' "$BASE_AUDIT" > "$WORK/base-markers"; then
+    echo "check_engine_api_audit: no data row in the base audit table $BASE_AUDIT" >&2
+    exit 2
+  fi
+fi
 
 if [ -z "$API_FILE" ]; then
   API_FILE="$WORK/api.txt"
@@ -460,10 +500,13 @@ awk -F '\t' '$2 == "A" { print "anyhow\t" $3 "\t" $1 } $2 == "P" { print "varian
   "$WORK/exempt" | LC_ALL=C sort -t "$(printf '\t')" -k3,3 > "$WORK/markers"
 
 # Ratchet R1-R4 and the per-enum tag (header). Lines go to $WORK/ratchet.out.
-awk -F '\t' -v rf="$WORK/ratchet" -v bf="$WORK/base-ratchet" -v base="${BASE_RATCHET:+1}" '
+awk -F '\t' -v rf="$WORK/ratchet" -v bf="$WORK/base-ratchet" -v base="${BASE_RATCHET:+1}" \
+  -v af="$WORK/base-markers" -v basea="${BASE_AUDIT:+1}" '
   FILENAME == rf { init[$1, $2] = $3; ceil[$1, $2] = $4; next }
   FILENAME == bf { binit[$1, $2] = $3; bceil[$1, $2] = $4; next }
+  FILENAME == af { bm[$1, $2, $3] = 1; next }
   { cnt[$1, $2]++ }
+  basea && !(($1, $2, $3) in bm) { printf "audit %s: %s-pending %s is not in the base audit table\n", $3, $1, $2 }
   $1 == "variant" {
     e = $3; sub(/::[A-Za-z_][A-Za-z0-9_]*$/, "", e); sub(/.*::/, "", e)
     if (!(e in ntag)) { ntag[e] = 0; order[++ne] = e }
@@ -491,7 +534,7 @@ awk -F '\t' -v rf="$WORK/ratchet" -v bf="$WORK/base-ratchet" -v base="${BASE_RAT
       for (j = 1; j <= 4; j++) if ((e, "T" j) in at) line = line (line == "" ? "" : ", ") "T" j " at " at[e, "T" j]
       printf "enum %s: mixed tags %s\n", e, line
     }
-  }' "$WORK/ratchet" "$WORK/base-ratchet" "$WORK/markers" > "$WORK/ratchet.out"
+  }' "$WORK/ratchet" "$WORK/base-ratchet" "$WORK/base-markers" "$WORK/markers" > "$WORK/ratchet.out"
 PATH_FAILS="$FAILS"
 report RATCHET "$WORK/ratchet.out"
 RATCHET_FAILS=$((FAILS - PATH_FAILS))

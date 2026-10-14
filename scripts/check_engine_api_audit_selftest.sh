@@ -58,8 +58,12 @@
 #   later slice with progress while an earlier one is open, and one enum with
 #   two tags fail (exit 1); equal counts, a lower ceiling than base, an
 #   earlier slice at zero and one tag on two paths pass. A missing, misheaded,
-#   non-integer, duplicate-row or short ratchet file, a missing base file and
-#   a bare --base-ratchet fail closed (exit 2). --final fails on any marker of
+#   non-integer, duplicate-row or short ratchet file, a missing base file, a
+#   bare --base-ratchet and an empty-string path fail closed (exit 2).
+#   --base-audit (cases 142 on): a marker retagged or added against the base
+#   audit table fails (exit 1), a pure removal with lowered ceilings passes; a
+#   missing, empty, headerless or row-less base file, a bare flag and an
+#   empty-string path fail closed (exit 2). --final fails on any marker of
 #   either kind and passes a table with none.
 #
 # Usage: bash scripts/check_engine_api_audit_selftest.sh
