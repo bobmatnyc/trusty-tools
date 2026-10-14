@@ -87,7 +87,10 @@ fn an_architect_launch_gets_the_architect_prompt_style_and_model() {
     );
     assert_eq!(settings["model"], ARCHITECT_MODEL);
     assert!(
-        stash.contains(&crate::core::session_profile::architect_prompt(rc())),
+        stash.contains(&crate::core::architect_prompt::architect_prompt_for(
+            rc(),
+            tmp.path()
+        )),
         "{stash}"
     );
     assert!(!stash.contains("STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY"));

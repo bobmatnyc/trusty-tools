@@ -133,20 +133,18 @@ pub const ARCHITECT_SECTIONS: [(&str, &str); 8] = [
     ("prose-style", "architect/prose-style.md"),
 ];
 
-/// The composed supervisor instructions.
+/// The composed Architect instructions with no owner `AGENTS.md`.
 ///
-/// Why: the text a supervisor session receives in place of the PM prompt.
-/// What: each [`ARCHITECT_SECTIONS`] body, read from `content`, folded on its
-/// own (authoring comments removed, as the PM composer does), trimmed, and
-/// joined with a blank line. Pure and deterministic for one content source.
+/// Why: the text an Architect session receives in place of the PM prompt
+/// when its project has no `AGENTS.md`.
+/// What: #8436 — `architect.md` then the Architect core, or the eight legacy
+/// [`ARCHITECT_SECTIONS`] for a content source without `architect.md`; see
+/// [`crate::core::architect_prompt::compose`]. Pure and deterministic for one
+/// content source.
 /// Test: `golden_architect_prompt`, `the_architect_prompt_is_never_empty`.
 pub fn architect_prompt(content: &crate::core::framework_content::FrameworkContent) -> String {
-    ARCHITECT_SECTIONS
-        .iter()
-        .map(|(_, path)| crate::core::instruction_fold::fold_block(content.required(path).trim()))
-        .filter(|body| !body.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    use crate::core::architect_prompt::{AgentsMd, compose};
+    compose(content, &AgentsMd::Absent)
 }
 
 /// The profile a parsed project config asks for.

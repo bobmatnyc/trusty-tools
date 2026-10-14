@@ -2,8 +2,9 @@
 //! then the Architect core, in that order (owner rulings Q1a, Q2a, Q3a).
 
 use super::*;
-use crate::core::content_source::test_support::{rc, repo_content};
+use crate::core::content_source::test_support::rc;
 use crate::core::framework_content::FrameworkContent;
+use crate::core::framework_content::tests::legacy_content;
 use crate::core::instruction_fold::fold_block;
 use crate::core::instruction_overrides::{
     PromptSource, resolve_pm_prompt_with_roster, resolve_pm_prompt_with_roster_for,
@@ -38,19 +39,6 @@ fn architect_dir(agents_md: Option<&[u8]>) -> TempDir {
 /// The Architect prompt for `dir` from `content`.
 fn compose_in(content: &FrameworkContent, dir: &Path) -> (String, PromptSource) {
     resolve_pm_prompt_with_roster_for(content, dir, SessionProfile::Architect, || None)
-}
-
-/// A content source carrying only the legacy supervisor sections: every
-/// required instruction from the repository, and no `architect/architect.md`.
-fn legacy_content() -> FrameworkContent {
-    let dir = TempDir::new().expect("tempdir");
-    let package = repo_content()
-        .required("pm-instruction-package.json")
-        .to_string();
-    crate::core::framework_content::tests::fake_checkout_with_package(dir.path(), &package);
-    let resolved =
-        trusty_agents_common::agent_content::checkout_content(dir.path()).expect("a fake checkout");
-    FrameworkContent::load(&resolved).expect("a legacy-only source still loads")
 }
 
 /// Asserts the prompt opens with `architect.md` and closes with the core.

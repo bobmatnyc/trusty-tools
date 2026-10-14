@@ -260,6 +260,19 @@ pub(crate) fn fake_checkout_with_package(root: &Path, package: &str) {
     fake_checkout(root, &refs);
 }
 
+/// #8436: a content source carrying only the legacy supervisor sections —
+/// every required instruction from the repository and no
+/// `architect/architect.md` — as a release older than PR B ships it.
+pub(crate) fn legacy_content() -> FrameworkContent {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let package = repo_content()
+        .required("pm-instruction-package.json")
+        .to_string();
+    fake_checkout_with_package(dir.path(), &package);
+    FrameworkContent::load(&checkout_content(dir.path()).expect("checkout"))
+        .expect("a legacy-only source still loads")
+}
+
 /// #9012: a PM package this binary cannot parse refuses the load, naming the
 /// file, the defect and the remedy — never a prompt missing its rules.
 #[test]
