@@ -1,2 +1,2 @@
-Changed
+Breaking
 - The issue state model is now refused at load when one state label carries `label_config.status_prefix` and another does not (for example `status:in-progress` mapped to the label `in-progress` beside `status:coded`). The error names the state, the label and the prefix to add. This is intended: a repo whose `issue-state.yaml` mixes the two fails every `tm issue` verb, transitions included, until the label is renamed (#9580).
