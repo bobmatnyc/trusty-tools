@@ -97,11 +97,13 @@ trusty-mpm	lib	core::output_style_deployer::tests	reads the checkout's content: 
 trusty-mpm	lib	core::pm_prompt_golden_tests	reads test_support::rc — the committed PM prompt goldens (#9012)
 trusty-mpm	lib	core::pm_prompt_golden_tests::golden_bundled_fallback_prompt	reads compose_bundled_fallback_with_overrides
 trusty-mpm	lib	core::pm_prompt_golden_tests::the_memory_section_claims_no_per_prompt_context_hook	reads compose_bundled_fallback_with_overrides
+trusty-mpm	lib	core::project_skill_tier::architect_skills::tests	reads the embedded Architect skills (#9540)
 trusty-mpm	lib	core::prompt_self_improvement::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::reinstall::tests	reads seeded (test_support::repo_roster) (#9011)
 trusty-mpm	lib	core::savings_instructions::tests	reads test_support::rc — section byte figures (#9012)
 trusty-mpm	lib	core::savings_sidecar::sweep_tests	reads test_support::rc — the compiled-prompt floor (#9012)
 trusty-mpm	lib	core::scaffold_gitignore::tests::a_project_style_stays_trackable_and_generated_styles_are_ignored	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
+trusty-mpm	lib	core::session_launch::skills::architect_9540_tests	reads the embedded Architect skills (#9540)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_for_applies_project_override	reads test_support::rc (#9012)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_for_no_override_matches_bundled_sections	reads test_support::rc (#9012)
 trusty-mpm	lib	core::session_launch::tests::build_system_prompt_includes_trusty_block	reads test_support::rc (#9012)

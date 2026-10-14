@@ -9,8 +9,11 @@
 //! session is `--session`, else the recorded name, else `tm-architect`.
 //! [`this_session_check`] adds whether the calling session is bound as the
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
+//! [`skills_check`] adds whether the Architect's shipped skills are current
+//! in its project tier (#9540); like `binding` it is never part of `complete`.
 //! Test: `status_reports_incomplete_setup`,
 //! `fleet_status_names_why_this_session_is_not_bound`,
+//! `the_skills_row_names_a_missing_or_custom_skill`,
 //! `status_binding_needs_the_record_and_the_same_session`, `tests/tm_fleet.rs`.
 
 use std::path::{Path, PathBuf};
@@ -19,6 +22,7 @@ use serde::Serialize;
 use trusty_mpm::core::architect_session::check_session_binding;
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
+use trusty_mpm::core::project_skill_tier::architect_skills;
 use trusty_mpm::core::session_profile::{self, ARCHITECT_WRITTEN_PROFILE_ID};
 use trusty_mpm::core::twin_arming;
 
@@ -53,6 +57,9 @@ pub(crate) struct StatusReport {
     /// Whether the session's `claude` is the Architect tm launched, under
     /// this session name (#8878 R1); informational, never part of `complete`.
     pub(crate) binding: Check,
+    /// Whether the Architect's shipped skills are current in its project
+    /// tier (#9540); informational, never part of `complete`.
+    pub(crate) skills: Check,
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
@@ -66,6 +73,12 @@ impl StatusReport {
             let mark = if c.ok { "ok     " } else { "MISSING" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
         }
+        // #9540: a skipped or failed skill deploy is not ok.
+        let mark = if self.skills.ok { "ok     " } else { "WARN   " };
+        out.push_str(&format!(
+            "  {mark}  {:<12} {}\n",
+            self.skills.name, self.skills.detail
+        ));
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
@@ -117,6 +130,7 @@ pub(crate) fn status(
     let complete = checks.iter().all(|c| c.ok);
     StatusReport {
         binding: binding_check(&dir, home, probe, &names),
+        skills: skills_check(&dir),
         session: names
             .as_ref()
             .map(|n| n.architect().to_owned())
@@ -228,6 +242,22 @@ pub(crate) fn this_session_env() -> HookEnv {
     HookEnv {
         claude: ClaudeLookup::new(|| twin_arming::nearest_claude_for_status(std::process::id())),
         ..HookEnv::ambient()
+    }
+}
+
+/// Are the Architect's shipped skills current in `dir`'s project tier?
+///
+/// Why: #9540 — the launch deploy is fail-open and keeps a project-custom
+/// copy, so a failed or skipped deploy must show here.
+/// What: [`architect_skills::health`]; it names each skill that is missing,
+/// stale, project-custom or unreadable. Read-only.
+/// Test: `the_skills_row_names_a_missing_or_custom_skill`.
+pub(crate) fn skills_check(dir: &Path) -> Check {
+    let (ok, detail) = architect_skills::health(dir);
+    Check {
+        name: "skills",
+        ok,
+        detail,
     }
 }
 
