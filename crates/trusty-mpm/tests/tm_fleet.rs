@@ -926,3 +926,192 @@ fn fleet_init_refuses_the_home_directory_before_writing() {
     );
     assert!(!home.join(".trusty-mpm.toml").exists(), "{}", text(&out));
 }
+
+// --- #8436 PR C: the guard lift at init (Dca A, default off; plan §4) ---
+
+/// The guard-lift key `pm_guard` reads.
+const LIFT_KEY: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
+
+impl FleetEnv {
+    /// `tm fleet init --no-launch --dir <arch> <extra>`.
+    fn init_no_launch(&self, extra: &[&str]) -> Output {
+        let dir = self.dir();
+        let mut args = vec!["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)];
+        args.extend_from_slice(extra);
+        self.tm(&args)
+    }
+
+    /// The Architect's `.claude/settings.json`.
+    fn settings_path(&self) -> PathBuf {
+        self.dir().join(".claude/settings.json")
+    }
+
+    /// Plant `body` as the Architect's `.claude/settings.json`.
+    fn plant_settings(&self, body: &str) {
+        let path = self.settings_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The settings file, parsed.
+    fn settings(&self) -> serde_json::Value {
+        let raw = std::fs::read_to_string(self.settings_path()).expect("settings.json");
+        serde_json::from_str(&raw).expect("settings.json parses")
+    }
+}
+
+/// Plan §4: no flag and no TTY (`Command::output` gives the child no stdin) is
+/// No; nothing is written and the step says so.
+#[test]
+fn init_without_a_guard_lift_choice_writes_no_env_key() {
+    let env = FleetEnv::new();
+    let out = env.init_no_launch(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("guard lift: off (no choice given)"),
+        "{}",
+        text(&out)
+    );
+    let raw = std::fs::read_to_string(env.settings_path()).unwrap_or_default();
+    assert!(!raw.contains(LIFT_KEY), "{raw}");
+}
+
+/// Plan §4: an existing settings file with no flag and no TTY stays byte-identical.
+#[test]
+fn a_non_tty_run_without_a_flag_is_no() {
+    let env = FleetEnv::new();
+    let body = "{\"model\": \"opus\"}\n";
+    env.plant_settings(body);
+    let out = env.init_no_launch(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("guard lift: off (no choice given)"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(std::fs::read_to_string(env.settings_path()).unwrap(), body);
+}
+
+/// Plan §4: `--guard-lift` merges the key, keeps every other key, leaves no
+/// temp file, is Unchanged on a second run, and status reports it.
+#[test]
+fn init_with_guard_lift_sets_the_key_and_keeps_other_keys() {
+    let env = FleetEnv::new();
+    env.plant_settings("{\"model\": \"opus\", \"env\": {\"FOO\": \"bar\"}}\n");
+    let out = env.init_no_launch(&["--guard-lift"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let settings = env.settings();
+    assert_eq!(settings["env"][LIFT_KEY], "1", "{settings}");
+    assert_eq!(settings["env"]["FOO"], "bar", "{settings}");
+    assert_eq!(settings["model"], "opus", "{settings}");
+    let leftovers: Vec<_> = std::fs::read_dir(env.dir().join(".claude"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    let again = env.init_no_launch(&["--guard-lift"]);
+    assert!(again.status.success(), "{}", text(&again));
+    let stdout = String::from_utf8_lossy(&again.stdout);
+    assert!(
+        stdout.contains("unchanged  guard lift: lifted"),
+        "{}",
+        text(&again)
+    );
+
+    let status = env.tm(&["fleet", "status", "--json", "--dir", dir_arg(&env.dir())]);
+    let report = json(&status);
+    let detail = report["guard_lift"]["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("lifted"), "{}", text(&status));
+}
+
+/// Plan §4: both flags are a clap conflict — exit 2, nothing written.
+#[test]
+fn both_guard_lift_flags_conflict_before_any_write() {
+    let env = FleetEnv::new();
+    let out = env.init_no_launch(&["--guard-lift", "--no-guard-lift"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(!env.dir().exists(), "{}", text(&out));
+}
+
+/// Plan §4: a file tm cannot parse, a non-object `env`, and a symlinked
+/// settings file each fail the lift step (exit 1, named), leave the file as it
+/// was, and do not undo the seeding.
+#[test]
+fn an_unusable_settings_file_fails_the_lift_and_is_left_untouched() {
+    for (case, body) in [
+        ("malformed", "{ not json"),
+        ("top-level array", "[1, 2]"),
+        ("env not an object", "{\"env\": \"x\"}"),
+    ] {
+        let env = FleetEnv::new();
+        env.plant_settings(body);
+        let out = env.init_no_launch(&["--guard-lift"]);
+        assert_eq!(out.status.code(), Some(1), "{case}: {}", text(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("FAILED     guard lift"),
+            "{case}: {}",
+            text(&out)
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.settings_path()).unwrap(),
+            body,
+            "{case}"
+        );
+        assert!(
+            env.dir().join("AGENTS.md").is_file(),
+            "{case}: seeding undone"
+        );
+    }
+
+    let env = FleetEnv::new();
+    let elsewhere = env.home.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, "{}").unwrap();
+    std::fs::create_dir_all(env.dir().join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, env.settings_path()).unwrap();
+    let out = env.init_no_launch(&["--guard-lift"]);
+    assert_eq!(out.status.code(), Some(1), "symlink: {}", text(&out));
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "{}");
+}
+
+/// Plan §4: without a flag an existing lift is reported and kept; a key with
+/// another value is named as off; `--guard-lift` replaces it (old value
+/// named); `--no-guard-lift` removes only that key.
+#[test]
+fn an_existing_lift_is_kept_without_a_flag_and_removed_only_on_request() {
+    let env = FleetEnv::new();
+    env.plant_settings(&format!(
+        "{{\"env\": {{\"{LIFT_KEY}\": \"1\", \"FOO\": \"x\"}}}}"
+    ));
+    let out = env.init_no_launch(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("guard lift: lifted (existing"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(env.settings()["env"][LIFT_KEY], "1");
+
+    let out = env.init_no_launch(&["--no-guard-lift"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let settings = env.settings();
+    assert!(settings["env"].get(LIFT_KEY).is_none(), "{settings}");
+    assert_eq!(settings["env"]["FOO"], "x", "{settings}");
+
+    env.plant_settings(&format!("{{\"env\": {{\"{LIFT_KEY}\": \"yes\"}}}}"));
+    let out = env.init_no_launch(&[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("treated as off by the guard"),
+        "{}",
+        text(&out)
+    );
+    let out = env.init_no_launch(&["--guard-lift"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("was \"yes\""),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(env.settings()["env"][LIFT_KEY], "1");
+}
