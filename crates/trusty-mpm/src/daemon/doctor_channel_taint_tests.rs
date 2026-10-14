@@ -228,6 +228,14 @@ fn resolved_question_without_a_delivery_line_is_a_doctor_fail() {
         "{}",
         row.message
     );
+    // #9873 live check: no empty taint-file clause trails the message.
+    assert!(!row.message.ends_with(' '), "{:?}", row.message);
+    // An unreadable question log names it, and grades `Unknown`.
+    drop(table);
+    std::fs::write(questions_path(home.path()), "{\"truncated\n\n").expect("corrupt");
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(row.message.contains("question log"), "{}", row.message);
 }
 
 /// 🔴 #8433 (r-078): a taint dir or a managed dir that cannot be listed
