@@ -606,6 +606,15 @@ pub struct SessionRecord {
     /// next upsert, so never run one against a post-#8942 store.
     #[serde(default)]
     pub kind: SessionKind,
+
+    // #8393: the classifier's blocked-prompt observation, its own block.
+    /// The free-text prompt the idle classifier saw this `Active` session
+    /// blocked on (#8393). Observation only: unlike `pending_decision` it is
+    /// no gate, and only the metrics read it.
+    ///
+    /// `#[serde(default)]` loads an older record as `None`; skipped when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_prompt: Option<super::blocked_prompt::BlockedPrompt>,
 }
 
 impl SessionRecord {

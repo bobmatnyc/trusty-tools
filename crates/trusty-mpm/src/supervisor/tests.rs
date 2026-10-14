@@ -241,6 +241,7 @@ async fn seed_sessions(
             proposed_default: None,
             pending_decision_id: None,
             last_answer: None,
+            blocked_prompt: None,
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
@@ -469,6 +470,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         proposed_default: None,
         pending_decision_id: None,
         last_answer: None,
+        blocked_prompt: None,
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,
@@ -844,9 +846,9 @@ fn classify_cfg() -> SupervisorConfig {
 }
 
 /// #8393: a confident `blocked_on_permission` verdict on a pane no regex
-/// matches lands in the record's `pending_decision`, so `FleetMetrics` (and
+/// matches lands in the record's `blocked_prompt`, so `FleetMetrics` (and
 /// with it `supervisor-metrics.json` / `supervisor_status`) surfaces it. A
-/// second sweep over the same blocked pane keeps the same decision id.
+/// second sweep over the same blocked pane leaves the record as it was.
 #[tokio::test]
 async fn a_blocked_verdict_raises_a_pending_decision() {
     let dir = TempDir::new().unwrap();
@@ -858,11 +860,9 @@ async fn a_blocked_verdict_raises_a_pending_decision() {
     let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
     assert_eq!(report.classified, 1);
     let after = mgr.get(&ids[0]).await.expect("record");
-    assert_eq!(after.pending_decision.as_deref(), Some(BLOCKED_QUESTION));
-    assert!(
-        after.pending_decision_id.is_some(),
-        "a raised decision is answerable"
-    );
+    let prompt = after.blocked_prompt.clone().expect("a raised prompt");
+    assert_eq!(prompt.question, BLOCKED_QUESTION);
+    assert_eq!(after.pending_decision, None);
     assert_eq!(after.state, ManagedSessionState::Active);
     let m = FleetMetrics::from_records(&mgr.list().await);
     assert_eq!(m.pending_decisions.len(), 1, "{:?}", m.pending_decisions);
@@ -871,13 +871,14 @@ async fn a_blocked_verdict_raises_a_pending_decision() {
     run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
     let again = mgr.get(&ids[0]).await.expect("record");
     assert_eq!(
-        again.pending_decision_id, after.pending_decision_id,
-        "a repeat verdict must not re-mint the decision"
+        again.blocked_prompt,
+        Some(prompt),
+        "a repeat verdict must not re-stamp the prompt"
     );
 }
 
 /// #8393: a `blocked_on_permission` verdict below the confidence floor, and
-/// a verdict of any other state, leave `pending_decision` unset.
+/// a verdict of any other state, leave `blocked_prompt` unset.
 #[tokio::test]
 async fn a_low_confidence_or_unblocked_verdict_raises_nothing() {
     for (state, confidence) in [
@@ -894,7 +895,7 @@ async fn a_low_confidence_or_unblocked_verdict_raises_nothing() {
         let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
         assert_eq!(report.classified, 1, "{state:?} at {confidence}");
         let after = mgr.get(&ids[0]).await.expect("record");
-        assert_eq!(after.pending_decision, None, "{state:?} at {confidence}");
+        assert_eq!(after.blocked_prompt, None, "{state:?} at {confidence}");
     }
 }
 
@@ -919,15 +920,13 @@ async fn a_failed_decision_write_is_not_counted_and_is_retried() {
         "a verdict whose decision never persisted must not count as handled"
     );
     let failed = mgr.get(&ids[0]).await.expect("record");
-    assert_eq!(
-        failed.pending_decision, None,
-        "an unpersisted decision stuck"
-    );
+    assert_eq!(failed.blocked_prompt, None, "an unpersisted prompt stuck");
 
     let report = run_tick(&mgr, &classify_cfg(), Some(&monitor)).await;
     assert_eq!(report.classified, 1);
     let retried = mgr.get(&ids[0]).await.expect("record");
-    assert_eq!(retried.pending_decision.as_deref(), Some(BLOCKED_QUESTION));
+    let prompt = retried.blocked_prompt.expect("the retry persisted it");
+    assert_eq!(prompt.question, BLOCKED_QUESTION);
 }
 
 /// #8393 round 2: the classifier's verdict must not wedge the session. It is
@@ -955,6 +954,10 @@ async fn a_raised_blocked_verdict_does_not_wedge_stop_and_resume() {
     assert!(refused.is_err(), "no decision to answer: {refused:?}");
 
     mgr.stop(&ids[0]).await.expect("a blocked session stops");
+    assert!(
+        surfaced_questions(&mgr).await.is_empty(),
+        "a stopped session surfaces no prompt"
+    );
     let resumed = mgr.resume(&ids[0]).await.expect("and resumes");
     assert_eq!(resumed.state, ManagedSessionState::Active);
 }

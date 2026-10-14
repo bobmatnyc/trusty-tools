@@ -9,6 +9,7 @@
 //! tested in `manager::tests`.
 
 pub mod adopt;
+pub mod blocked_prompt; // #8393
 // #8433 P0: a managed session's end retires its channel taint.
 mod channel_taint;
 pub mod create;
@@ -294,6 +295,9 @@ mod reload_error_tests;
 pub(crate) mod decision_tests;
 
 #[cfg(test)]
+mod blocked_prompt_tests;
+
+#[cfg(test)]
 mod decision_straddle_tests;
 
 #[cfg(test)]
@@ -333,6 +337,7 @@ pub use architect_floor::{ArchitectFloor, KillVerdict, SidecarRole};
 pub use architect_register::{
     ArchitectRegistration, BindingVerifier, RegisterError, RegisteredSession, RegistrationReport,
 };
+pub use blocked_prompt::BlockedPrompt;
 pub use decision::{AnswerClaim, AnswerOutcome, Claim, DecisionAnswer, DecisionId};
 pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};

@@ -108,7 +108,8 @@ impl FleetMetrics {
     /// store on every sweep and on every `/metrics` request; this pure function
     /// keeps that derivation in one tested place, independent of I/O.
     /// What: tallies records by [`ManagedSessionState`], collects every record
-    /// carrying a `pending_decision` into a [`PendingDecision`], and tracks the
+    /// carrying a `pending_decision` into a [`PendingDecision`] (else an `Active`
+    /// record's classifier `blocked_prompt`, #8393), and tracks the
     /// maximum `last_activity_at`. Leaves `run_stats` at its default — the caller
     /// overlays the supervisor's live counters.
     /// Test: `metrics_counts_by_state`, `metrics_surfaces_pending_decisions`,
@@ -137,14 +138,21 @@ impl FleetMetrics {
             // before the decommission-path fix landed still carry the stale
             // field. Surfacing a dead entry here trains operators to ignore
             // the one queue whose entire purpose is to stop and wait.
-            if !r.state.is_terminal()
-                && let Some(ref question) = r.pending_decision
-            {
+            // #8393: a front-gate decision wins; else the classifier's blocked
+            // prompt, surfaced only while the session is `Active`.
+            let surfaced = match (&r.pending_decision, &r.blocked_prompt) {
+                (Some(q), _) if !r.state.is_terminal() => Some((q, r.proposed_default.clone())),
+                (None, Some(p)) if r.state == ManagedSessionState::Active => {
+                    Some((&p.question, None))
+                }
+                _ => None,
+            };
+            if let Some((question, proposed_default)) = surfaced {
                 m.pending_decisions.push(PendingDecision {
                     session_id: r.id.to_string(),
                     tmux_name: r.tmux_name.clone(),
                     question: question.clone(),
-                    proposed_default: r.proposed_default.clone(),
+                    proposed_default,
                 });
             }
             if let Some(ts) = r.last_activity_at {
