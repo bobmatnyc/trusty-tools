@@ -167,22 +167,22 @@ trusty_memory::engine::Wing::id	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::name	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Wing::palace_id	field	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::analytics	mod	KEEP	path of RecallLog	A5
-trusty_memory::engine::analytics::RecallEvent	struct	KEEP	RecallLog::record signature (a deletion candidate)	A5
+trusty_memory::engine::analytics::RecallEvent	struct	KEEP	public type; no public signature names it since RecallLog::record went test-only in #9278 T3d (a narrowing candidate)	A5
 trusty_memory::engine::analytics::RecallEvent::drawer_id	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::layer	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::occurred_at	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::palace_id	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::query_hash	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::score	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::analytics::RecallLog	struct	KEEP	owner of the deletion-candidate RecallLog methods	A5
-trusty_memory::engine::analytics::RecallLog::hit_count	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
-trusty_memory::engine::analytics::RecallLog::miss_rate	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
-trusty_memory::engine::analytics::RecallLog::missed_queries	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog	struct	KEEP	public type; its methods are crate-private since #9278 T3d (a narrowing candidate)	A5
+trusty_memory::engine::analytics::RecallLog::hit_count	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::analytics::RecallLog::miss_rate	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::analytics::RecallLog::missed_queries	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::analytics::RecallLog::open	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallLog::open_shared	method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::analytics::RecallLog::record	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::record	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::analytics::RecallLog::record_batch	method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::analytics::RecallLog::top_drawers	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::top_drawers	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::analytics::fnv1a_hash	fn	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::normalize_query	fn	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::query_hash	fn	NARROW	no consumer outside the library	A5
@@ -414,36 +414,36 @@ trusty_memory::engine::filter::is_git_sha_like	fn	NARROW	no consumer outside the
 trusty_memory::engine::filter::mask_content	fn	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::non_alphabetic_ratio	fn	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::find_communities	fn	KEEP	re-export of community::find_communities (KEEP)	A5
-trusty_memory::engine::git	mod	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities::co_authors	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities::file_paths	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities::issue_refs	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities::room_types	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::CommitEntities::symbols	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::ConventionalCommit	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::ConventionalCommit::breaking	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::ConventionalCommit::commit_type	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::ConventionalCommit::description	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::ConventionalCommit::scope	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitExtractor	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitExtractor::extract	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitExtractor::new	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::author	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::author_email	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::committed_at	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::conventional	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::entities	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::importance	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::narrative	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::sha	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitFact::to_drawer	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::build_narrative	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::classify_file_path	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::extract_entities	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::parse_conventional_commit	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::score_importance	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git	mod	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities	struct	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities::co_authors	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities::file_paths	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities::issue_refs	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities::room_types	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::CommitEntities::symbols	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::ConventionalCommit	struct	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::ConventionalCommit::breaking	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::ConventionalCommit::commit_type	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::ConventionalCommit::description	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::ConventionalCommit::scope	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitExtractor	struct	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitExtractor::extract	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitExtractor::new	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact	struct	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::author	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::author_email	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::committed_at	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::conventional	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::entities	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::importance	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::narrative	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::sha	field	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::GitFact::to_drawer	method	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::build_narrative	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::classify_file_path	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::extract_entities	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::parse_conventional_commit	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
+trusty_memory::engine::git::score_importance	fn	NARROW	unit tests only, #[cfg(test)]: narrowed, not deleted (owner ruling 17:21Z, #9278 T3d)	T3d
 trusty_memory::engine::import_palace_jsonl	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_jsonl (KEEP)	A5
 trusty_memory::engine::import_palace_records	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_records (KEEP)	A5
 trusty_memory::engine::inference_available	fn	KEEP	re-export of semantic_consolidation::inference_available (KEEP)	A5
