@@ -72,6 +72,7 @@ pub(crate) enum AliasAudit {
     },
 }
 
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl AliasAudit {
     /// Turn a scan result into an outcome — the ONLY way this type is built
     /// from a fallible read.
@@ -123,7 +124,6 @@ impl AliasAudit {
 
     /// Keys in a collision group that name no drawer, or `None` when the audit
     /// did not run. Non-empty means [`Self::aliased_drawer_ids`] is short.
-    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn unnameable_keys(&self) -> Option<&[String]> {
         match self {
             Self::Measured {
@@ -144,7 +144,6 @@ impl AliasAudit {
     /// What: `Some(ids)` only when the audit ran. `Some(&[])` means "looked,
     /// found nothing" — the only state a zero legitimately describes.
     /// Test: `alias_audit_failure_is_never_reported_as_clean`.
-    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn aliased_drawer_ids(&self) -> Option<&[Uuid]> {
         match self {
             Self::Measured {
@@ -155,7 +154,6 @@ impl AliasAudit {
     }
 
     /// `(key_rows, distinct_vector_ids)`, or `None` when the audit did not run.
-    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn counts(&self) -> Option<(usize, usize)> {
         match self {
             Self::Measured {
@@ -381,9 +379,9 @@ pub(crate) enum AliasRepairOutcome {
     Unavailable { reason: String },
 }
 
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 impl AliasRepairOutcome {
     /// One word for a wire payload or a log line.
-    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Clean => "clean",
@@ -398,7 +396,6 @@ impl AliasRepairOutcome {
     ///
     /// `Planned` is false: a dry run repaired nothing. `Partial` and
     /// `Unavailable` are false by construction — that is the whole point.
-    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn is_success(&self) -> bool {
         matches!(self, Self::Clean | Self::Repaired)
     }
