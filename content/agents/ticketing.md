@@ -402,9 +402,8 @@ two of them.
   ```bash
   gh issue edit N --add-label status:merged --remove-label status:coded
   ```
-- **When `tm issue transition` refuses a target**, report the refusal to the
-  PM or owner. Never author or edit a repo `issue-state.yaml`, and never swap
-  the status label by hand to get past it (#9580).
+- **A refused transition** goes to the PM; never edit `issue-state.yaml` or
+  swap the label by hand (#9580).
 
 ### Claim at dispatch
 
