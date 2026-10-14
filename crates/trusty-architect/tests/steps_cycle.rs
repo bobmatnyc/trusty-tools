@@ -163,3 +163,28 @@ fn a_failing_usage_probe_never_stops_the_cycle() -> TestResult {
     );
     Ok(())
 }
+
+/// #9801: a cycle that fails after the probe started (here, the alerts append)
+/// still records the probe, so the next cycles do not launch it again. Red
+/// against a runner that drops the copied state on a failed cycle: it
+/// launches on every one of them and bypasses the three-try cap.
+#[test]
+fn a_probe_started_in_a_failed_cycle_is_not_launched_again() -> TestResult {
+    let env = Env::new(&[])?;
+    usage_files(&env)?;
+    let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(10));
+    let clock = clock()?;
+    let runner = env.runner(&tmux, &clock, &QuietHost);
+    let (mut session, _) = PollSession::load(&env.config, false, clock.now_unix());
+    fs::create_dir(env.config.alerts())?; // appending to a directory fails
+    for _ in 0..2 {
+        assert!(runner.run_once(&mut session).is_err());
+        clock.sleep(std::time::Duration::from_secs(60));
+    }
+    assert_eq!(env.probe.launched().len(), 1, "{:?}", env.probe.launched());
+    assert_eq!(session.state.other["usage"]["tries"], json!(1));
+    fs::remove_dir(env.config.alerts())?;
+    runner.run_once(&mut session)?;
+    assert_eq!(env.probe.launched().len(), 1);
+    Ok(())
+}

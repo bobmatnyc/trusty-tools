@@ -32,6 +32,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 
@@ -51,6 +52,8 @@ use crate::input::InputState;
 
 /// The `/usage` fallback probe runs at most once per this many seconds.
 pub const PROBE_EVERY: f64 = 60.0 * 60.0;
+/// A probe still running after this long is killed.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(120);
 /// Probe tries after an account change before falling back to hourly.
 const PENDING_TRIES: f64 = 3.0;
 
@@ -87,6 +90,7 @@ pub trait ProbeLauncher {
 pub struct ScriptProbe {
     script: PathBuf,
     log: PathBuf,
+    deadline: Duration,
 }
 
 impl ScriptProbe {
@@ -95,7 +99,15 @@ impl ScriptProbe {
         Self {
             script: paths.probe_script.clone(),
             log: paths.probe_log.clone(),
+            deadline: PROBE_DEADLINE,
         }
+    }
+
+    /// The same launcher with another deadline.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 }
 

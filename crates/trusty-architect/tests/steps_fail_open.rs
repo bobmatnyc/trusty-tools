@@ -307,3 +307,44 @@ fn osascript_receives_dash_e_and_the_script() -> TestResult {
     );
     Ok(())
 }
+
+/// True while `pid` still names a process (a zombie counts).
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// #9801: the reaper waited on the child with no deadline, so a probe that
+/// hangs held its thread and its process for good. Past the deadline the
+/// probe is killed with its whole process group and reaped.
+#[test]
+fn a_probe_past_its_deadline_is_killed_with_its_group_and_reaped() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mut p = paths(dir.path());
+    let pids = dir.path().join("pids");
+    p.probe_script = script(
+        dir.path(),
+        "usage-probe.sh",
+        &format!("sleep 30 &\necho \"$$ $!\" > '{}'\nwait", pids.display()),
+    )?;
+    let probe = ScriptProbe::new(&p).with_deadline(Duration::from_millis(300));
+    probe.launch("tm-x", "%1", GM)?;
+    let line = wait_for_line(&pids);
+    let both: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(both.len(), 2, "{line:?}");
+    let start = Instant::now();
+    while both.iter().any(|pid| alive(pid)) && start.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let gone = both.iter().all(|pid| !alive(pid));
+    // Best-effort cleanup when the assertion below is about to fail.
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", both[0])])
+        .stderr(std::process::Stdio::null())
+        .status();
+    assert!(gone, "the probe and its child outlived the deadline: {line:?}");
+    Ok(())
+}

@@ -13,7 +13,7 @@ use trusty_architect::classify::{DETAIL_MAX, alert};
 use trusty_architect::poller::steps::usage::{
     Pct, ProbeLauncher, Reading, RecordingProbe, UsagePaths, UtcTime, Window, append_ledger,
     burn_rate, effective, plan, poll_step, project, rows_from_values, runway, sample_cache,
-    usage_alerts, usage_step,
+    UsageError, usage_alerts, usage_step,
 };
 use trusty_architect::{Clock, SystemClock};
 
@@ -473,4 +473,17 @@ fn test_poll_step_probes_hourly_not_more() -> TestResult {
     }
     assert_eq!(probe.launched().len(), 2); // at t=0 and t>=3600
     Ok(())
+}
+
+/// #9801: `from_unix` multiplied the seconds by 1e6 unchecked, which panics in
+/// a debug build for a time above about 9.2e12 s. Every such time is outside
+/// years 1-9999, so it is `OutOfRange`.
+#[test]
+fn from_unix_beyond_the_i64_microsecond_range_is_out_of_range_not_a_panic() {
+    for t in [1e13, -1e13, 9.3e12, -9.3e12, 5e14, 1e15, f64::MAX] {
+        assert!(
+            matches!(UtcTime::from_unix(t), Err(UsageError::OutOfRange)),
+            "{t}"
+        );
+    }
 }
