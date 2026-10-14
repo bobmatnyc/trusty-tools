@@ -219,12 +219,12 @@ pub(crate) enum FilterReject {
 #[derive(Debug, Clone)]
 pub struct FilterConfig {
     /// Minimum meaningful tokens required for `memory_remember`.
-    pub(crate) min_tokens: u8,
+    pub min_tokens: u8,
     /// String form of each reject regex (compiled lazily).
-    pub(crate) reject_patterns: Vec<String>,
+    pub reject_patterns: Vec<String>,
     /// Maximum allowed ratio of non-alphabetic chars before treating the
     /// content as raw code/JSON. Range `[0.0, 1.0]`. Default `0.80`.
-    pub(crate) max_non_alpha_ratio: f32,
+    pub max_non_alpha_ratio: f32,
 }
 
 impl Default for FilterConfig {

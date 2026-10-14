@@ -32,20 +32,20 @@ pub struct SemanticConsolidationConfig {
     /// Whether the phase runs at all. Defaults to `false` — a config key must
     /// turn it on explicitly, and it still needs a resolvable provider (see
     /// [`resolve_consolidation_provider`]).
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Model id used for consolidation prompts. An `ollama/` or `local/`
     /// prefix — and only that prefix — selects a local model server; anything
     /// else routes to OpenRouter and needs an API key.
-    pub(crate) model: String,
+    pub model: String,
     /// Cosine-similarity threshold above which two drawers are considered
     /// candidates for LLM-based consolidation (distinct from the NLP dedup
     /// threshold; lower here to catch near-synonyms the embedding model can
     /// see but the strict dedup pass ignores).
     pub similarity_threshold: f32,
     /// Maximum drawers in a single LLM prompt batch (keeps prompts short).
-    pub(crate) max_batch_size: usize,
+    pub max_batch_size: usize,
     /// Maximum total LLM calls per dream cycle (cost ceiling).
-    pub(crate) max_calls_per_cycle: usize,
+    pub max_calls_per_cycle: usize,
 }
 
 impl Default for SemanticConsolidationConfig {

@@ -141,10 +141,10 @@ trusty_memory::engine::RoomType::Testing	variant	NARROW	removed: one path per ty
 trusty_memory::engine::SHARE_FORMAT_VERSION	const	KEEP	re-export of share::SHARE_FORMAT_VERSION (KEEP)	A5
 trusty_memory::engine::SemanticConsolidationConfig	struct	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig (KEEP)	A5
 trusty_memory::engine::SemanticConsolidationConfig::default	trait_method	KEEP	member of SemanticConsolidationConfig (re-export of semantic_consolidation::SemanticConsolidationConfig, KEEP)	A5
-trusty_memory::engine::SemanticConsolidationConfig::enabled	field	NARROW	re-export; no consumer outside the library	A5
-trusty_memory::engine::SemanticConsolidationConfig::max_batch_size	field	NARROW	re-export; no consumer outside the library	A5
-trusty_memory::engine::SemanticConsolidationConfig::max_calls_per_cycle	field	NARROW	re-export; no consumer outside the library	A5
-trusty_memory::engine::SemanticConsolidationConfig::model	field	NARROW	re-export; no consumer outside the library	A5
+trusty_memory::engine::SemanticConsolidationConfig::enabled	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::max_batch_size	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::max_calls_per_cycle	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::SemanticConsolidationConfig::model	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig field: DreamConfig::semantic tuning (Q4, Architect 06:11Z: DreamConfig tuning)	A5
 trusty_memory::engine::SemanticConsolidationConfig::similarity_threshold	field	KEEP	re-export of semantic_consolidation::SemanticConsolidationConfig: deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
 trusty_memory::engine::SemanticConsolidator	struct	KEEP	re-export of semantic_consolidation::SemanticConsolidator (KEEP)	A5
 trusty_memory::engine::SemanticConsolidator::config	field	NARROW	re-export; no consumer outside the library	A5
@@ -289,10 +289,10 @@ trusty_memory::engine::dream::FadingMemory::drawer_id	field	NARROW	no consumer o
 trusty_memory::engine::dream::FadingMemory::effective_importance	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::FadingParams	struct	KEEP	DreamConfig::fading field type (Q4)	A5
 trusty_memory::engine::dream::FadingParams::default	trait_method	KEEP	member of FadingParams (Default impl)	A5
-trusty_memory::engine::dream::FadingParams::resurface_boost_epsilon	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::dream::FadingParams::resurface_min_base	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::dream::FadingParams::resurface_threshold	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::dream::FadingParams::resurface_top_n	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::dream::FadingParams::resurface_boost_epsilon	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_min_base	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_threshold	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::dream::FadingParams::resurface_top_n	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
 trusty_memory::engine::dream::KgCompactReport	struct	KEEP	owner of KgCompactReport::rows_copied, a deletion candidate	A5
 trusty_memory::engine::dream::KgCompactReport::backup	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::KgCompactReport::bytes_after	field	NARROW	no consumer outside the library	A5
@@ -353,9 +353,9 @@ trusty_memory::engine::filter::DEFAULT_MIN_TOKENS	const	NARROW	no consumer outsi
 trusty_memory::engine::filter::FilterConfig	struct	KEEP	engine::retrieval::RememberOptions::filter field type (A4 KEEP)	A5
 trusty_memory::engine::filter::FilterConfig::apply	method	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterConfig::default	trait_method	KEEP	member of FilterConfig (Default impl)	A5
-trusty_memory::engine::filter::FilterConfig::max_non_alpha_ratio	field	NARROW	no consumer outside the library (Q6)	A5
-trusty_memory::engine::filter::FilterConfig::min_tokens	field	NARROW	no consumer outside the library (Q6)	A5
-trusty_memory::engine::filter::FilterConfig::reject_patterns	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterConfig::max_non_alpha_ratio	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::filter::FilterConfig::min_tokens	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::filter::FilterConfig::reject_patterns	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
 trusty_memory::engine::filter::FilterReject	enum	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::NoisePattern	variant	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::NoisePattern::pattern	field	NARROW	no consumer outside the library (Q6)	A5
@@ -1027,10 +1027,10 @@ trusty_memory::engine::semantic_consolidation::MockInference::fixture_actions	fi
 trusty_memory::engine::semantic_consolidation::OllamaInference	struct	NARROW	no consumer outside the library	A5
 trusty_memory::engine::semantic_consolidation::OpenRouterInference	struct	NARROW	no consumer outside the library	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig	struct	KEEP	DreamConfig::semantic field type (Q4)	A5
-trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::enabled	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_batch_size	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_calls_per_cycle	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::model	field	NARROW	no consumer outside the library	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::enabled	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_batch_size	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::max_calls_per_cycle	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
+trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::model	field	KEEP	DreamConfig tuning field (Q4, Architect 06:11Z: DreamConfig tuning)	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidationConfig::similarity_threshold	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): never read outside tests	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidator	struct	KEEP	Dreamer::with_consolidator signature (a deletion candidate)	A5
 trusty_memory::engine::semantic_consolidation::SemanticConsolidator::config	field	NARROW	no consumer outside the library	A5

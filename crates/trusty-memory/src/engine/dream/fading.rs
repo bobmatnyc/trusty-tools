@@ -46,17 +46,17 @@ const PREVIEW_MAX_CHARS: usize = 120;
 pub struct FadingParams {
     /// Only memories whose *base* importance is at least this are candidates.
     /// Default: 0.7 (we only care about resurfacing originally high-value ones).
-    pub(crate) resurface_min_base: f32,
+    pub resurface_min_base: f32,
     /// A candidate is fading when its *effective* importance has fallen below
     /// this. Default: 0.3.
-    pub(crate) resurface_threshold: f32,
+    pub resurface_threshold: f32,
     /// Accumulated access boost below which a drawer is treated as "not accessed
     /// recently". Access recency is not tracked as an independently-decaying
     /// signal, so we approximate it via the accumulated boost: a value below
     /// this epsilon means essentially no recall reinforcement. Default: 0.01.
-    pub(crate) resurface_boost_epsilon: f32,
+    pub resurface_boost_epsilon: f32,
     /// Cap on the number of ranked entries returned. Default: 10.
-    pub(crate) resurface_top_n: usize,
+    pub resurface_top_n: usize,
 }
 
 impl Default for FadingParams {
