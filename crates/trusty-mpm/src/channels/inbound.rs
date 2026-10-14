@@ -210,32 +210,111 @@ pub enum Verdict {
 
 /// Judge, bind and resolve `ev`.
 ///
-/// RED STUB (#9873 S2): binds and resolves with no check at all; the next
-/// commit replaces it.
+/// Why: see the module doc; the order is the contract.
+/// What: each step that refuses returns [`Verdict::Dropped`] with its code,
+/// after one audit line (a rate-window drop writes one per window). Only
+/// `resolve` returning `Resolved` yields [`Verdict::Resolved`].
+/// Test: `unknown_sender_changes_no_state_and_is_logged`,
+/// `matched_route_without_open_question_never_starts_a_prompt`,
+/// `second_answer_gets_already_answered`,
+/// `non_owner_dm_never_resolves_a_decision`,
+/// `answer_from_another_thread_never_resolves`,
+/// `reply_with_no_matching_thread_never_binds_to_the_latest_question`,
+/// `inbound_with_stale_snapshot_drops`, `inbound_drops_when_table_cannot_open`,
+/// `inbound_drops_on_a_poisoned_table`, `resolve_poisoned_delivers_nothing`,
+/// `inbound_drop_stands_when_audit_write_fails`,
+/// `over_long_answer_drops_without_resolving`,
+/// `failed_preflight_leaves_the_question_open_and_answerable`,
+/// `per_binding_rate_limit_drops_101st`, `poisoned_rate_limiter_drops`.
 pub fn decide(env: &dyn InboundEnv, ev: &InboundEvent) -> Verdict {
-    let stub = || {
-        Verdict::Dropped(Dropped {
-            code: "stub",
+    let drop_with = |code: &'static str, first: Option<Answer>, rate_limited: bool| {
+        // #9873 (F14): an audit error is logged; the drop stands either way.
+        if let Err(why) = env.audit(ev, code, rate_limited) {
+            tracing::error!(%why, code, "inbound drop: audit line not written");
+        }
+        Verdict::Dropped(Dropped { code, first })
+    };
+    let refuse = |code| drop_with(code, None, false);
+    let limited = |take: RateTake| match take {
+        RateTake::Admit => None,
+        RateTake::Limited { audit: true } => Some(drop_with("rate_limited", None, true)),
+        // #9873: later drops in the window write no line (#8454 Q2).
+        RateTake::Limited { audit: false } => Some(Verdict::Dropped(Dropped {
+            code: "rate_limited",
             first: None,
-        })
+        })),
+        RateTake::Poisoned => Some(refuse("rate_limiter_poisoned")),
     };
-    let Ok(table) = env.table() else {
-        return stub();
+    // #9873 (F1, F2): the sender alone, so an unknown sender reads no table.
+    match env.check_inbound(ev.channel, &ev.sender, &[], &[]) {
+        Err(Refusal::Policy(DropReason::NoBinding)) => {}
+        Err(Refusal::Policy(DropReason::UnknownSender)) => {
+            return limited(env.take_rate(RateBucket::UnknownSender))
+                .unwrap_or_else(|| refuse("unknown_sender"));
+        }
+        Err(Refusal::Policy(reason)) => return refuse(reason.as_str()),
+        Err(Refusal::Snapshot(deny)) => return refuse(snapshot_code(deny)),
+        // An empty binding never answers; fail closed if it ever does.
+        Ok(_) => return refuse("no_binding"),
+    }
+    // #9873 (F3): no table, no answer; nothing falls back.
+    let table = match env.table() {
+        Ok(table) if table.is_poisoned() => return refuse("table_poisoned"),
+        Ok(table) => table,
+        Err(why) => {
+            tracing::error!(%why, "inbound answer: question table unavailable");
+            return refuse("table_unavailable");
+        }
     };
+    // #9873 (Q2, F4): the thread binds; never the latest question, never text.
     let Some(id) = table.find_by_conversation(&ev.conversation) else {
-        return stub();
+        return refuse("no_open_question");
     };
+    let states: Vec<QuestionState> = table.state(id).into_iter().collect();
+    let route = match env.check_inbound(ev.channel, &ev.sender, &[id], &states) {
+        Ok((route, bound)) if bound == id => route,
+        Ok(_) => return refuse("ambiguous_binding"),
+        Err(Refusal::Policy(DropReason::AlreadyResolved)) => {
+            return drop_with("already_resolved", table.answer(id), false);
+        }
+        Err(Refusal::Policy(reason)) => return refuse(reason.as_str()),
+        Err(Refusal::Snapshot(deny)) => return refuse(snapshot_code(deny)),
+    };
+    // #9873 Q7: the route's window, taken once the policy says "answer".
+    if let Some(verdict) = limited(env.take_rate(RateBucket::Route(&route))) {
+        return verdict;
+    }
+    // #9873 (F17, Q10): too long drops whole, before `resolve`.
+    if ev.text.len() > MAX_ANSWER_BYTES {
+        return refuse("answer_too_long");
+    }
+    if ev.text.trim().is_empty() {
+        return refuse("answer_empty");
+    }
     let Some(question) = table.get(id) else {
-        return stub();
+        return refuse("unknown_question");
     };
-    let answerer = question.ask.recipient.clone();
+    let answerer = route.recipient().to_owned();
+    // A pre-filter only: `resolve` checks both again inside its lock.
+    if question.ask.recipient != answerer || question.ask.conversation != ev.conversation {
+        return refuse("not_recipient");
+    }
+    // #9873 Q4: a foreseeable delivery failure leaves the question open.
+    if let Err(why) = env.preflight(&question) {
+        tracing::warn!(%why, question = id, "inbound answer: asker cannot take it now");
+        return refuse("asker_unavailable");
+    }
     match table.resolve(id, &answerer, &ev.conversation, &ev.text) {
         ResolveOutcome::Resolved => Verdict::Resolved(Resolved {
             question,
             answerer,
             text: ev.text.clone(),
         }),
-        _ => stub(),
+        ResolveOutcome::AlreadyResolved { first } => drop_with("already_resolved", Some(first), false),
+        ResolveOutcome::NotRecipient => refuse("not_recipient"),
+        ResolveOutcome::Unknown => refuse("unknown_question"),
+        // #9873 (F5): durability unknown; the reopen's replay decides.
+        ResolveOutcome::Poisoned => refuse("table_poisoned"),
     }
 }
 
@@ -302,10 +381,40 @@ impl InboundLimiter {
         }
     }
 
-    /// RED STUB (#9873 S2): admits everything; the next commit replaces it.
-    pub fn take(&self, _bucket: RateBucket<'_>) -> RateTake {
-        let _ = (&self.inner, BucketDecision::Admit);
-        RateTake::Admit
+    /// Spend one admit from `bucket`'s window.
+    ///
+    /// What: `Admit`, or `Limited` with `audit` true for the bucket's first
+    /// limited drop in a window of the bucket's own length; a poisoned lock
+    /// is `Poisoned`. A backwards clock reading counts as inside the window.
+    /// Test: `per_binding_rate_limit_drops_101st`, `poisoned_rate_limiter_drops`.
+    pub fn take(&self, bucket: RateBucket<'_>) -> RateTake {
+        let Ok(mut state) = self.inner.lock() else {
+            return RateTake::Poisoned;
+        };
+        let (decision, key, window) = match bucket {
+            RateBucket::Route(route) => (
+                state.limiter.take_route(route),
+                format!("{}:{}", route.channel().as_str(), route.name()),
+                route.rate_limit().window(),
+            ),
+            RateBucket::UnknownSender => (
+                state.limiter.take_unknown_sender(),
+                "unknown_sender".to_owned(),
+                RateLimit::DEFAULT.window(),
+            ),
+        };
+        if decision == BucketDecision::Admit {
+            return RateTake::Admit;
+        }
+        let now = state.limiter.clock().now();
+        let audited = state
+            .audited
+            .get(&key)
+            .is_some_and(|at| now.saturating_sub(*at) < window);
+        if !audited {
+            state.audited.insert(key, now);
+        }
+        RateTake::Limited { audit: !audited }
     }
 }
 
