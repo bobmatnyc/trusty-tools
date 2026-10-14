@@ -128,16 +128,14 @@ pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target}
 mod floor_d4;
 mod floor_d4_rules;
 mod force_push;
-// #8436 PR C: no hook-guarded session lifts the Architect guard at init.
-mod guard_lift_init;
-pub(crate) use guard_lift_init::{GUARD_LIFT_INIT_RULE, evaluate_guard_lift_init};
 
 pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
 pub(crate) use destructive_delete::{
     DeleteTarget, evaluate_destructive_delete_command, lone_inert_heredoc,
 };
-pub(crate) use floor_d4::evaluate_d4_floor;
+// #8436 PR C: the guard-lift-at-init floor is declared in `floor_d4` (this file is at its cap).
+pub(crate) use floor_d4::{GUARD_LIFT_INIT_RULE, evaluate_d4_floor, evaluate_guard_lift_init};
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
 pub(crate) use linked_worktree_head_move::{

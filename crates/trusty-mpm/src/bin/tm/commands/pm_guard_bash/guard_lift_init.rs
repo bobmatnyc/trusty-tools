@@ -18,7 +18,7 @@
 //! Test: `guard_lift_init_tests.rs`, `pm_guard_floor_tests.rs`
 //! (`a_guard_lift_at_init_is_denied_to_every_hook_guarded_session`).
 
-use super::floor_d4::segments;
+use super::segments;
 
 /// The rule name recorded with a guard-lift-at-init deny.
 pub(crate) const GUARD_LIFT_INIT_RULE: &str = "guard-lift-init";
