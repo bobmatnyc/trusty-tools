@@ -23,7 +23,18 @@
 //! wiped [#8445](https://github.com/bobmatnyc/trusty-tools/issues/8445) when
 //! the hand-run procedure accepted an empty `awk` result as a body.
 //!
+//! # Concurrent writers (#9578)
+//!
+//! The body read, the child reads and the write are separate `gh` calls, and
+//! GitHub offers no conditional issue update. So the sync re-reads the body
+//! just before writing and, when it moved, starts the round again from fresh
+//! reads; after [`SYNC_ATTEMPTS`] moved rounds it refuses and writes nothing.
+//! An edit made outside the markers during the read-render window therefore
+//! survives. The window left is the one between that re-read and the write.
+//!
 //! Test: `sync_replaces_the_whole_block_and_discards_a_hand_edited_row`,
+//! `sync_keeps_a_tracker_edit_made_between_its_read_and_its_write`,
+//! `sync_refuses_and_writes_nothing_when_the_tracker_keeps_changing`,
 //! `sync_leaves_every_byte_outside_the_markers_identical`,
 //! `sync_refuses_a_body_with_no_markers_and_writes_nothing`,
 //! `sync_refuses_a_body_with_two_start_markers_and_writes_nothing`,
@@ -55,7 +66,8 @@ pub(crate) struct SyncReport {
 /// should contain.
 /// What: reads the body and the children, renders the table (its State cell
 /// resolves each child's labels through `model`'s states, #8448/#8696),
-/// replaces the marker region, and writes the result only when it differs.
+/// replaces the marker region, and writes the result only when it differs
+/// and the body has not moved since it was read (#9578, see the module doc).
 /// Every refusal is propagated with the tracker named, and no write happens
 /// on any of them.
 /// Test: see the module doc.
@@ -64,27 +76,43 @@ pub(crate) fn sync<B: EpicBackend>(
     tracker: u64,
     model: &StateModel,
 ) -> anyhow::Result<SyncReport> {
-    let body = backend.body(tracker)?;
-    let children = backend.children(tracker)?;
-    let rows = children
-        .iter()
-        .filter(|c| render::phase_number_of(&c.title).is_some())
-        .count();
-    // #8696: the whole model, not its prefix — see `render::state_cell`.
-    let table = render::phases_table(&children, model);
-    let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
-        .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
-    if next == body {
+    // #9578: each attempt re-reads the body just before writing; a body that
+    // moved since the attempt's first read is re-rendered from fresh reads
+    // instead of overwritten with the stale copy.
+    for _ in 0..SYNC_ATTEMPTS {
+        let body = backend.body(tracker)?;
+        let children = backend.children(tracker)?;
+        let rows = children
+            .iter()
+            .filter(|c| render::phase_number_of(&c.title).is_some())
+            .count();
+        // #8696: the whole model, not its prefix — see `render::state_cell`.
+        let table = render::phases_table(&children, model);
+        let next = render::replace_block(&body, PHASES_START, PHASES_END, &table)
+            .map_err(|e| anyhow::anyhow!("#{tracker}: {e}"))?;
+        let unchanged = next == body;
+        if !unchanged {
+            if backend.body(tracker)? != body {
+                continue;
+            }
+            backend.set_body(tracker, &next)?;
+        }
         return Ok(SyncReport {
             tracker,
             rows,
-            unchanged: true,
+            unchanged,
         });
     }
-    backend.set_body(tracker, &next)?;
-    Ok(SyncReport {
-        tracker,
-        rows,
-        unchanged: false,
-    })
+    anyhow::bail!(
+        "#{tracker}: the tracker body changed while its phases block was being regenerated, \
+         {SYNC_ATTEMPTS} times in a row — nothing was written, so no edit was overwritten. \
+         Re-run `tm issue epic sync {tracker}` once the other writer is done"
+    )
 }
+
+/// How many read-render-recheck rounds [`sync`] makes before refusing (#9578).
+///
+/// Why: a concurrent writer (an operator, or a sibling phase's own sync)
+/// usually finishes within one round; a body still moving after three is a
+/// writer the sync should not race, so it refuses instead of writing.
+const SYNC_ATTEMPTS: usize = 3;
