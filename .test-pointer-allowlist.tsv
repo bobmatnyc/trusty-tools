@@ -866,7 +866,6 @@ crates/trusty-code/src/agent_loop/mod.rs	config_max_tokens_reaches_chat_request
 crates/trusty-code/src/intent/mod.rs	submit_task
 crates/trusty-code/src/perf/mod.rs	update_skill_usage
 crates/trusty-common/src/bin/candle_metal_bench.rs	print_summary
-crates/trusty-common/src/embedder_client/supervisor.rs	locate_embedderd_binary_prefers_sibling
 crates/trusty-common/src/embedder_client/uds.rs	uds_bit_identical
 crates/trusty-common/src/log_drain/single_source.rs	toml_round_trips_every_field
 crates/trusty-common/src/log_drain/single_source.rs	yaml_round_trips_every_field

@@ -486,3 +486,37 @@ async fn search_health_reports_a_failing_embedder_as_unhealthy() {
     );
     assert_eq!(report["healthy"], Value::Bool(false));
 }
+
+/// #9828: the report carries the sidecar footprint and the recycle counters.
+///
+/// Why: `/health` already reported `embedderd_rss_mb`, but `search_health`
+/// dropped it, so the agent-facing probe could not see a sidecar growing to
+/// 68 GB, nor whether the supervisor had recycled it.
+/// What: one daemon whose body carries both fields (forwarded verbatim) and one
+/// whose body omits `embedderd_rss_mb`, as `/health` does when no sidecar runs
+/// (reported as `null`, not dropped).
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_reports_sidecar_footprint_and_recycle_counters() {
+    let recycle = json!({ "recycles_total": 2, "last_trigger": "max_age" });
+    let mut body = healthy_body(1, 10);
+    body["embedderd_rss_mb"] = json!(812);
+    body["embedder_recycle"] = recycle.clone();
+    let daemon = spawn_health_daemon((200, body), (200, json!({ "chunk_count": 10 }))).await;
+    let report = super::health::report_health(&daemon.server(), None).await;
+    assert_eq!(report["daemon"]["embedderd_rss_mb"], json!(812), "{report}");
+    assert_eq!(report["daemon"]["embedder_recycle"], recycle, "{report}");
+
+    let daemon = spawn_health_daemon(
+        (200, healthy_body(1, 10)),
+        (200, json!({ "chunk_count": 10 })),
+    )
+    .await;
+    let report = super::health::report_health(&daemon.server(), None).await;
+    let daemon_obj = report["daemon"].as_object().expect("daemon object");
+    assert_eq!(
+        daemon_obj.get("embedderd_rss_mb"),
+        Some(&Value::Null),
+        "no sidecar must read as null, not as an absent key: {report}"
+    );
+}

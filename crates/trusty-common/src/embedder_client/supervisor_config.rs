@@ -76,6 +76,10 @@ pub struct SupervisorConfig {
     ///
     /// Env: `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` (default 300 = 5 minutes).
     pub wedge_reset_secs: u64,
+
+    /// Graceful-recycle thresholds (#9828): footprint ceiling, max age, max
+    /// embed calls. See [`super::RecycleConfig`] for each knob's env var.
+    pub recycle: super::RecycleConfig,
 }
 
 impl Default for SupervisorConfig {
@@ -86,6 +90,7 @@ impl Default for SupervisorConfig {
             startup_timeout_secs: 5,
             sidecar_batch_size: None,
             wedge_reset_secs: 300,
+            recycle: super::RecycleConfig::default(),
         }
     }
 }
@@ -97,8 +102,9 @@ impl SupervisorConfig {
     /// without recompiling.
     /// What: reads `TRUSTY_EMBEDDERD_MAX_RESTARTS`,
     /// `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS`,
-    /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`, and
-    /// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` from the process environment.
+    /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`,
+    /// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS`, and the `TRUSTY_EMBEDDERD_RECYCLE_*`
+    /// knobs (#9828) from the process environment.
     /// `sidecar_batch_size` defaults to `None`; callers set it via the struct.
     /// Test: `from_env_uses_defaults_when_no_vars_set` (no env vars set → defaults).
     pub fn from_env() -> Self {
@@ -115,6 +121,7 @@ impl SupervisorConfig {
             ),
             sidecar_batch_size: None,
             wedge_reset_secs: parse_env("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", def.wedge_reset_secs),
+            recycle: super::RecycleConfig::from_env(),
         }
     }
 }
@@ -218,7 +225,7 @@ pub fn sidecar_batch_size(
     raw.max(1)
 }
 
-fn parse_env<T: std::str::FromStr + Copy>(name: &str, default: T) -> T {
+pub(super) fn parse_env<T: std::str::FromStr + Copy>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())

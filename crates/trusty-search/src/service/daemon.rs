@@ -714,6 +714,8 @@ pub async fn run_daemon(
     // on an operator action, so a paused index would otherwise hold a background
     // task — and the flush behind it — open for a resume that is never coming.
     drain_paused_embedders(&flush_state);
+    // #9828: the pid forwarder no longer stops at a 0 pid; end it here.
+    flush_state.stop_embedderd_pid_forwarder().await;
     let joined = match rpc_joined {
         Some(joined) => joined,
         None => rpc_task.await,

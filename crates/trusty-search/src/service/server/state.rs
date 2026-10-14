@@ -330,10 +330,11 @@ pub struct SearchAppState {
     /// operators the full memory picture. `0` means the sidecar is not running
     /// (in-process / HTTP remote / UDS mode, or sidecar has exited).
     ///
-    /// What: an `Arc<AtomicU32>` set by `install_embedderd_pid_slot()` after the
-    /// sidecar spawns. The `EmbedderSupervisor` loop owns the same Arc and
-    /// updates it automatically on crash-restart (new PID) and exit (0).
-    /// Initialised to 0 so reads before the sidecar spawns return `None` from
+    /// What: an `Arc<AtomicU32>` the forwarder `install_embedderd_pid_slot()`
+    /// starts keeps equal to the supervisor's slot: a lazy first spawn, a
+    /// recycle and a respawn publish the new pid; a restart gap or an idle
+    /// shutdown publishes 0 and forwarding continues (#9828). Initialised to
+    /// 0 so reads before the sidecar spawns return `None` from
     /// `current_embedderd_pid()`.
     ///
     /// Test: `health_includes_embedderd_rss_field` in `server.rs#tests` verifies
@@ -343,15 +344,13 @@ pub struct SearchAppState {
     ///
     /// Why: `install_embedderd_pid_slot` spawns a background task that copies
     /// the sidecar PID from the supervisor's Arc to the AppState's slot every
-    /// 500 ms. Without tracking this handle, each sidecar restart (idle-shutdown
-    /// cycle) accumulates one leaked task because the previous slot's value
-    /// never resets to 0. The fix: store the last `AbortHandle` here so
-    /// `install_embedderd_pid_slot` can abort the old task before spawning a new
-    /// one, bounding the number of live forwarder tasks to exactly one.
+    /// 500 ms. The last `AbortHandle` lives here so a re-install aborts the old
+    /// task (#829) and `stop_embedderd_pid_forwarder` ends it at shutdown
+    /// (#9828), bounding the live forwarder tasks to at most one.
     /// What: `Arc<tokio::sync::Mutex<Option<AbortHandle>>>` so multiple clones of
     /// `SearchAppState` (e.g. the flush clone in `run_daemon`) share the handle.
     /// `None` until the first `install_embedderd_pid_slot` call.
-    /// Test: `pid_slot_forwarder_does_not_leak_tasks` in `tests_state.rs`.
+    /// Test: `pid_slot_forwarder_does_not_leak_tasks`, `pid_forwarder_stops_on_shutdown`.
     pub embedderd_pid_forwarder_handle: Arc<tokio::sync::Mutex<Option<tokio::task::AbortHandle>>>,
     /// In-process graceful-shutdown trigger (issue #829 — ungraceful admin_stop).
     ///

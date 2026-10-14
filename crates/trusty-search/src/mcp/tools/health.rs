@@ -99,6 +99,8 @@ const DAEMON_IDENTITY_FIELDS: &[&str] = &[
     "total_chunks",
     "uptime_secs",
     "embedder",
+    // #9828: embed-sidecar recycle counters and last trigger.
+    "embedder_recycle",
 ];
 
 /// Answer the `search_health` tool call.
@@ -407,6 +409,13 @@ fn daemon_identity(socket: &str, health: &Value) -> Value {
             out.insert((*key).to_string(), v.clone());
         }
     }
+    // #9828: the sidecar footprint, `null` when no sidecar runs (`/health`
+    // omits the key then), so a reader sees the field either way.
+    let rss = health
+        .get("embedderd_rss_mb")
+        .cloned()
+        .unwrap_or(Value::Null);
+    out.insert("embedderd_rss_mb".into(), rss);
     Value::Object(out)
 }
 

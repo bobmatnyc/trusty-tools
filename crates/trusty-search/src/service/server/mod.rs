@@ -194,6 +194,9 @@ mod tests_4250;
 mod tests_4289;
 #[cfg(test)]
 mod tests_829;
+// #9828: the pid forwarder follows a lazy spawn, a recycle and a 0 gap.
+#[cfg(test)]
+mod tests_9828_pid_forwarder;
 #[cfg(test)]
 mod tests_chunks;
 #[cfg(test)]
