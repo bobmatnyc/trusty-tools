@@ -5,9 +5,11 @@
 //! argument), so a managed session name read "not found" or hit the wrong
 //! route. These tests pin the managed-first resolution, the explicit refusal
 //! for verbs a managed session has no route for, and that a managed-list
-//! failure never reads as "not found" (a fail-open check).
+//! failure never reads as "not found" (a fail-open check). The `info_*_9862`
+//! tests pin `info`'s one resolution over both session lists (#9862).
 //! What: each test serves a stub daemon that answers canned responses and
-//! records every request it receives, then drives the `session` dispatcher.
+//! records every request it receives, then drives the `session` dispatcher
+//! (or `info` directly, to read the returned JSON).
 //! Test: this file IS the test module for `session::target`.
 
 use std::future::IntoFuture as _;
@@ -406,4 +408,104 @@ async fn pause_unknown_target_still_reads_not_found_9834() {
     .await;
     let err = error_of(&daemon, pause("tm-nobody")).await;
     assert!(err.contains("session 'tm-nobody' not found"), "{err}");
+}
+
+/// Resolve `target` through `info`, failing the test on an error.
+async fn info_ok(daemon: &trusty_mpm::client::DaemonClient, target: &str) -> serde_json::Value {
+    match super::info(daemon, target).await {
+        Ok(v) => v,
+        Err(e) => panic!("info '{target}' must resolve, got: {e:#}"),
+    }
+}
+
+/// Resolve `target` through `info` and return its error text.
+async fn info_err(daemon: &trusty_mpm::client::DaemonClient, target: &str) -> String {
+    match super::info(daemon, target).await {
+        Ok(v) => panic!("expected an error for '{target}', got {v}"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+/// #9862: a unique managed name prefix resolves. Red on main: "not found".
+#[tokio::test]
+async fn info_resolves_unique_managed_prefix_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED]))).await;
+    let found = info_ok(&daemon, "tm-alpha").await;
+    assert_eq!(found["id"], NAMED.0, "{found}");
+}
+
+/// #9862: a unique project tmux-name prefix resolves. Red on main: "not found".
+#[tokio::test]
+async fn info_resolves_unique_project_prefix_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED]))).await;
+    let found = info_ok(&daemon, "tm-proj").await;
+    assert_eq!(found["id"], PROJECT.0, "{found}");
+    assert_eq!(found["tmux_name"], PROJECT.1, "{found}");
+}
+
+/// #9862: a prefix matching one project and one managed session is refused
+/// and names both. Red on main: "not found".
+#[tokio::test]
+async fn info_ambiguous_prefix_names_candidates_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED]))).await;
+    let err = info_err(&daemon, "tm-").await;
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains(PROJECT.1) && err.contains(NAMED.1), "{err}");
+}
+
+/// #9862: a managed-list 500 is that failure, never "not found", when the
+/// project list is healthy and the target is not a project session.
+#[tokio::test]
+async fn info_managed_list_error_never_reads_as_not_found_9862() {
+    let (daemon, _hits) = client_for(healthy(list_error())).await;
+    assert_list_error(&info_err(&daemon, "tm-x").await, "tm-x");
+}
+
+/// #9862: a managed-list 404 (a daemon with no managed route) is an error
+/// saying the daemon is older than the CLI. Red on main: "not found".
+#[tokio::test]
+async fn info_managed_list_404_says_daemon_is_older_9862() {
+    let (daemon, _hits) = client_for(healthy(no_route())).await;
+    let err = info_err(&daemon, "tm-x").await;
+    assert_list_error(&err, "tm-x");
+    assert!(err.contains("older than this CLI"), "{err}");
+}
+
+/// #9862: an exact project session id resolves. Red on main: the id match
+/// read `id.0`, which a bare-string UUID never has.
+#[tokio::test]
+async fn info_resolves_project_session_by_id_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED]))).await;
+    let found = info_ok(&daemon, PROJECT.0).await;
+    assert_eq!(found["tmux_name"], PROJECT.1, "{found}");
+}
+
+/// #9862 guard: an exact managed name and id return the full raw row.
+#[tokio::test]
+async fn info_exact_managed_name_and_id_return_raw_row_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED, SIBLING]))).await;
+    let row = serde_json::json!({ "id": NAMED.0, "name": NAMED.1, "state": "active" });
+    assert_eq!(info_ok(&daemon, NAMED.1).await, row);
+    assert_eq!(info_ok(&daemon, NAMED.0).await, row);
+}
+
+/// #9862 guard: an unknown target on healthy lists reads "not found".
+#[tokio::test]
+async fn info_unknown_target_reads_not_found_9862() {
+    let (daemon, _hits) = client_for(healthy(managed_list(&[NAMED]))).await;
+    let err = info_err(&daemon, "tm-nobody").await;
+    assert!(err.contains("session 'tm-nobody' not found"), "{err}");
+}
+
+/// #9862 guard: a project-list failure is still an error, never "not found".
+#[tokio::test]
+async fn info_project_list_error_is_an_error_9862() {
+    let (daemon, _hits) = client_for(Stub {
+        project_list: list_error(),
+        ..healthy(managed_list(&[NAMED]))
+    })
+    .await;
+    let err = info_err(&daemon, "tm-alpha-01").await;
+    assert!(err.contains("500"), "{err}");
+    assert!(!err.contains("not found"), "{err}");
 }

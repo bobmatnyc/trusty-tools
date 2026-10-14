@@ -23,7 +23,7 @@ pub(crate) mod catchup;
 pub(crate) mod instructions;
 mod output;
 mod start;
-// #9834: managed-session resolution for pause/events/run/activity.
+// #9834/#9862: session target resolution for pause/events/run/activity/info.
 mod target;
 
 use instructions::{compose_session_instructions, print_excluded_scope};
@@ -45,7 +45,8 @@ use crate::types::{EventRow, SessionRow};
 /// #1916 rationale); `Stop` and `Resume` are managed-aware (#1218) — they
 /// route to the managed runtime-stop/resume endpoints when the id/name
 /// resolves to a managed session, falling back to the project-session path
-/// otherwise; `Info` resolves a session by id or friendly name; `List` and
+/// otherwise; `Info` resolves an id, name or unique prefix over both stores
+/// via [`target::info`] (#9862); `List` and
 /// `Clean` scope to the project directory. `Pause`/`Events`/`Run` refuse a
 /// managed target and `Activity` resolves one, via [`target`] (#9834).
 /// Test: `cli_parses_session_start`, `cli_parses_session_stop`,
@@ -144,42 +145,9 @@ pub(crate) async fn session(
             println!("reaped {removed} dead session(s)");
         }
         SessionAction::Info { id_or_name } => {
-            #[derive(Deserialize)]
-            struct Body {
-                sessions: Vec<serde_json::Value>,
-            }
-            let body: Body = daemon
-                .get("/sessions")
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let found = body.sessions.iter().find(|s| {
-                let id_match = s
-                    .get("id")
-                    .and_then(|v| v.get("0"))
-                    .and_then(|v| v.as_str())
-                    == Some(id_or_name.as_str());
-                let name_match =
-                    s.get("tmux_name").and_then(|v| v.as_str()) == Some(id_or_name.as_str());
-                id_match || name_match
-            });
-            match found {
-                Some(s) => println!("{}", serde_json::to_string_pretty(s)?),
-                None => {
-                    // Fall back: the id/name may belong to a MANAGED session
-                    // (SM sessions live in the managed store, not the project-session
-                    // store). Fetch the managed list and search there too before
-                    // giving up. This fixes the gap where `tm session info <uuid>`
-                    // printed "not found" for sessions visible in `tm session ls`.
-                    let managed = info_from_managed_store(daemon, &id_or_name).await;
-                    match managed {
-                        Some(val) => println!("{}", serde_json::to_string_pretty(&val)?),
-                        None => anyhow::bail!("session '{id_or_name}' not found"),
-                    }
-                }
-            }
+            // #9862: one resolution over the project and managed lists.
+            let found = target::info(daemon, &id_or_name).await?;
+            println!("{}", serde_json::to_string_pretty(&found)?);
         }
         SessionAction::Instructions { dir } => {
             // Pure local computation — no daemon round-trip needed.
@@ -635,56 +603,6 @@ fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
 /// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit via path variant).
 pub(crate) fn derive_source_id_from_cwd() -> Option<String> {
     derive_source_id_from_path(&std::env::current_dir().ok()?)
-}
-
-/// Return true when `session` matches `id_or_name` by id or tmux name.
-///
-/// Why: extracted from `info_from_managed_store` so the match predicate is
-/// unit-testable without requiring an HTTP call.
-/// What: compares `session["id"]` and `session["name"]` against `id_or_name`;
-/// returns true on either match.
-/// Test: `info_managed_fallback_matches_by_id_and_name`.
-fn matches_session(session: &serde_json::Value, id_or_name: &str) -> bool {
-    let id_match = session.get("id").and_then(|v| v.as_str()) == Some(id_or_name);
-    let name_match = session.get("name").and_then(|v| v.as_str()) == Some(id_or_name);
-    id_match || name_match
-}
-
-/// Fetch the managed session list and find a session matching `id_or_name`.
-///
-/// Why: `tm session info` queries the project-session store first; managed
-/// sessions live in a separate store and return 404 there. This fallback
-/// prevents the confusing "not found" message for sessions that ARE visible in
-/// `tm session ls`. Non-404 HTTP errors are logged as warnings so daemon 5xx
-/// responses are not silently swallowed as "not found".
-/// What: GETs `/api/v1/sessions/managed`, searches by id-exact then name-exact
-/// via `matches_session`, returns the first match as a `serde_json::Value`.
-/// Returns `None` when the daemon is unreachable, returns a non-success status,
-/// or no session matches.
-/// Test: `info_managed_fallback_matches_by_id_and_name` (unit on match predicate);
-/// HTTP path covered by the integration test.
-async fn info_from_managed_store(
-    daemon: &trusty_mpm::client::DaemonClient,
-    id_or_name: &str,
-) -> Option<serde_json::Value> {
-    let resp = daemon.get("/api/v1/sessions/managed").send().await.ok()?;
-    let status = resp.status();
-    if !status.is_success() {
-        if status != reqwest::StatusCode::NOT_FOUND {
-            tracing::warn!(
-                "managed store lookup failed with HTTP {status} — \
-                 'session not found' may mask a daemon error"
-            );
-        }
-        return None;
-    }
-    let raw = resp.text().await.ok()?;
-    let resp: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let sessions = resp.get("sessions")?.as_array()?;
-    sessions
-        .iter()
-        .find(|s| matches_session(s, id_or_name))
-        .cloned()
 }
 
 // Unit tests live in session_tests.rs (test-file budget: 1500 SLOC).
