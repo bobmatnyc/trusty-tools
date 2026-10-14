@@ -222,11 +222,8 @@ pub(crate) async fn prepare(
             Attachment::Table { name,source_format,sheets } => Attachment::Table { name:name.clone(),source_format:source_format.clone(),sheets:sheets.clone() },
         });
     }
-    let current = ChatMessage {
-        role: "user".into(),
-        content: input.into(),
-        attachments: stored,
-    };
+    // #9278: built by constructor; a later #[non_exhaustive] forbids the literal.
+    let current = ChatMessage::new("user", input).with_attachments(stored);
     let result = rpc(&socket,"chat_session_add_turn",json!({"palace":policy.namespace,"session_id":session,"role":"user","content":input,"attachments":current.attachments})).await?;
     anyhow::ensure!(
         result["attachments_version"] == 1,
@@ -567,17 +564,14 @@ mod tests {
             assert_eq!(params["arguments"]["session_id"],"persona-own");
             Box::pin(async move { Ok(json!({"content":[{"type":"text","text":json!({"mime_type":"image/png","data_base64":PNG}).to_string()}]})) })
         }).await;
-        let message = ChatMessage {
-            role: "user".into(),
-            content: "Describe again".into(),
-            attachments: vec![Attachment::Image {
+        let message =
+            ChatMessage::new("user", "Describe again").with_attachments(vec![Attachment::Image {
                 name: "fixture.png".into(),
                 mime_type: "image/png".into(),
                 image: ImageRef {
                     asset_id: uuid::Uuid::new_v4().to_string(),
                 },
-            }],
-        };
+            }]);
         let mut total = 0;
         let hydrated = hydrate(daemon.socket(), "own", "persona-own", &message, &mut total)
             .await
