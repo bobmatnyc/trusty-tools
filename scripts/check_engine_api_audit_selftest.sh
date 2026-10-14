@@ -8,7 +8,8 @@
 # What: each case writes a small `cargo public-api` listing and audit table to
 #   a temp dir and runs the gate with `--api-file` and ENGINE_API_AUDIT_TSV.
 #   Failing cases: a NARROW row still listed, a HIDE row still listed, a listed
-#   path with no row (including one under an engine-root re-export stem), a
+#   path with no row (including one under an engine-root re-export stem, or a
+#   method on a generic type), a
 #   KEEP row that is not listed. Passing cases: a matching
 #   listing whose lines carry an attribute prefix, a generic fn, a field, a
 #   variant and an impl header; an out-of-scope path and a path that only
@@ -127,6 +128,14 @@ run_case engine-root-unaudited 1 'UNAUDITED trusty_memory::engine::PalaceHandle:
 cp "$TMP/base.api" "$TMP/engine-root-stem.api"
 echo 'pub struct trusty_memory::engine::PalaceHandleExt' >> "$TMP/engine-root-stem.api"
 run_case engine-root-shared-stem 0 '6 audited path(s) match' "$TMP/engine-root-stem.api"
+
+# A method on a generic in-scope type is a path of its own: `X<T>::m` must not
+# collapse into the type's row (#9278), nested and lifetime groups included.
+cp "$TMP/base.api" "$TMP/generic.api"
+echo "pub fn $K::Store<T>::generic_new(&self) -> u8" >> "$TMP/generic.api"
+echo "pub fn $K::Store<'a, Vec<T>>::lifetimed(&self) -> u8" >> "$TMP/generic.api"
+run_case generic-type-unaudited 1 "UNAUDITED $K::Store::generic_new" "$TMP/generic.api"
+run_case generic-type-nested-unaudited 1 "UNAUDITED $K::Store::lifetimed" "$TMP/generic.api"
 
 : > "$TMP/empty.api"
 run_case empty-listing 2 'empty listing' "$TMP/empty.api"

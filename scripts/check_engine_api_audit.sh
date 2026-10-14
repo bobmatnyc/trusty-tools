@@ -138,7 +138,8 @@ in_scope() {
 }
 
 # Item path of each listing line: drop leading attributes, skip impl headers,
-# strip the keyword, then cut at the first `(`, `<`, `: `, ` ` or `{`.
+# strip the keyword, then drop generic groups (`<...>`, nested and lifetimes), then cut at the
+# first `(`, `{`, `: ` or ` `.
 awk '{
   s = $0
   while (s ~ /^#\[[^]]*\] /) sub(/^#\[[^]]*\] /, "", s)
@@ -146,7 +147,10 @@ awk '{
   sub(/^pub /, "", s)
   sub(/^((unsafe|async|const|extern "[^"]*") )*fn /, "", s)
   sub(/^(struct|enum|union|trait|unsafe trait|type|mod|const|static|use|macro) /, "", s)
-  sub(/[(<{].*/, "", s); sub(/: .*/, "", s); sub(/ .*/, "", s); sub(/:$/, "", s)
+  # #9278: strip generic groups (nested too) before the cut, so `X<T>::m` is
+  # `X::m`, not a collapse into the row of the type itself.
+  while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
+  sub(/[({].*/, "", s); sub(/: .*/, "", s); sub(/ .*/, "", s); sub(/:$/, "", s)
   if (s ~ /^trusty_memory(::|$)/) print s
 }' "$API_FILE" | in_scope | LC_ALL=C sort -u > "$WORK/listed"
 

@@ -244,6 +244,7 @@ trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::reason	field
 trusty_memory::engine::registry::PalaceRenameError::is_conflict	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::registry::RenameOptions	struct	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::RenameOptions::busy_wait	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::registry::RenameOptions::default	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::RenameOptions::legacy_probe	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::RenameOptions::replace_empty	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::RenameOutcome	struct	NARROW	no consumer outside the library	A4
@@ -351,6 +352,7 @@ trusty_memory::engine::retrieval::EmbedHealth::vector_count	field	NARROW	no cons
 trusty_memory::engine::retrieval::FACT_KEY_MAX_LEN	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::FloorOutcome	struct	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::FloorOutcome::kept	field	NARROW	no consumer outside the library	A4
+trusty_memory::engine::retrieval::FloorOutcome::silenced	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::FloorOutcome::withheld	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::ForgetOutcome	enum	KEEP	PalaceHandle::forget return type	A4
 trusty_memory::engine::retrieval::ForgetOutcome::Deleted	variant	KEEP	member of ForgetOutcome	A4
