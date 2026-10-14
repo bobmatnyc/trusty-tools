@@ -681,6 +681,113 @@ fn create_managed_session_confirms_server_before_applying_options() {
     );
 }
 
+// ── #9461: a fresh server keeps the options only if a session holds it ──
+
+/// A fake `tmux` that models the server lifetime the #9461 log shows.
+///
+/// Why: tmux's `exit-empty` default stops a server the moment its last client
+/// leaves while it holds no session. `start-server` therefore starts a server
+/// that is gone before the next invocation, and a following `set-option -g`
+/// answers "no server running". A fake that always exits 0 cannot see that.
+/// What: one invocation may carry several commands split by a `;` argument, as
+/// real tmux does. A server exists while `<dir>/sessions` exists, or for one
+/// invocation that carries `new-session` or `start-server`. With no server, the
+/// invocation fails "no server running". `set-option` appends `name=value` to
+/// `<dir>/options`; `show-options` reads it back (tmux defaults otherwise);
+/// `new-session` creates `<dir>/sessions` and records the history-limit the
+/// pane was born with in `<dir>/pane-history`. When the invocation ends with no
+/// session, the options are dropped, as the server that held them exits.
+/// `extra_case` is spliced into the per-command `case` so a test can make one
+/// command fail; a failure skips the rest of the invocation, as tmux skips the
+/// rest of a command list after an error. Every command name is appended to
+/// `<dir>/calls`.
+fn server_model_tmux(dir: &std::path::Path, name: &str, extra_case: &str) -> String {
+    let d = dir.display();
+    let script = format!(
+        r#"#!/bin/sh
+D='{d}'
+starts=0
+for a in "$@"; do
+  case "$a" in new-session|start-server) starts=1 ;; esac
+done
+if [ ! -f "$D/sessions" ] && [ "$starts" -eq 0 ]; then
+  echo "no server running on $D/default" >&2
+  exit 1
+fi
+status=0
+while [ "$#" -gt 0 ]; do
+  cmd=$1; shift
+  prev=""; last=""; all=""
+  while [ "$#" -gt 0 ] && [ "$1" != ";" ]; do
+    prev=$last; last=$1; all="$all $1"; shift
+  done
+  [ "$#" -gt 0 ] && shift
+  echo "$cmd" >> "$D/calls"
+  case "$cmd" in
+{extra_case}    set-option) echo "$prev=$last" >> "$D/options" ;;
+    show-options)
+      v=$(grep "^$last=" "$D/options" 2>/dev/null | tail -n 1 | cut -d= -f2)
+      if [ -z "$v" ]; then
+        case "$last" in history-limit) v=2000 ;; alternate-screen) v=on ;; *) v=off ;; esac
+      fi
+      echo "$v" ;;
+    new-session)
+      h=$(grep '^history-limit=' "$D/options" 2>/dev/null | tail -n 1 | cut -d= -f2)
+      echo "${{h:-2000}}" > "$D/pane-history"
+      touch "$D/sessions" ;;
+  esac
+  [ "$status" -eq 0 ] || break
+done
+[ -f "$D/sessions" ] || rm -f "$D/options"
+exit "$status"
+"#
+    );
+    write_fake_tmux(dir, name, &script)
+}
+
+/// The tm-specified options #9461's doctor row compares against.
+fn spec_9461() -> crate::core::trusty_tools_config::ResolvedTmuxOptions {
+    crate::core::trusty_tools_config::ResolvedTmuxOptions {
+        history_limit: 10_000,
+        mouse: true,
+        alternate_screen: false,
+    }
+}
+
+/// Why (#9461): on a fresh server `start-server` exits before the separate
+/// `set-option -g` calls run, so all three attempts failed "no server running",
+/// the pane was born at the factory 2000 lines, and mouse stayed off.
+/// What: drives the real create path against [`server_model_tmux`] with no
+/// server up, then asserts the pane carries the configured history-limit, the
+/// options are still on the server afterwards (what the doctor row reads), and
+/// the outcome reports them verified.
+/// Test: this test.
+#[serial_test::serial]
+#[test]
+fn a_fresh_server_gets_the_options_before_the_first_pane() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = server_model_tmux(dir.path(), "fake-tmux-9461-fresh", "");
+
+    let outcome =
+        create_managed_session_with_options(Some(&bin), "tm-9461-fresh", None, spec_9461())
+            .expect("the fake tmux spawns");
+
+    assert!(outcome.output.status.success(), "{outcome:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("pane-history"))
+            .unwrap()
+            .trim(),
+        "10000",
+        "the first pane on a fresh server must be born with the configured history-limit"
+    );
+    assert_eq!(probe_history_limit(&bin), Ok(10_000));
+    assert_eq!(probe_alternate_screen(&bin), Ok(false));
+    assert!(
+        outcome.options_verified,
+        "options that landed on the fresh server must report verified"
+    );
+}
+
 // ── #3386 review: apply-and-verify retries the WHOLE cycle ──────────
 
 #[serial_test::serial]
