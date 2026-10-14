@@ -1,0 +1,2 @@
+Fixed
+- The supervisor now records a confident `blocked_on_permission` verdict from the idle classifier as the session's pending decision, so a free-text prompt such as "which option?" shows up in `supervisor-metrics.json` and `supervisor_status`. Before, only `[Y/n]` and `(yes/no)` prompts matched by the regex parser were surfaced. A session that already holds a decision keeps it and its id; answering the decision clears it as before. A failed write is logged and retried on the next sweep (Refs #8393).
