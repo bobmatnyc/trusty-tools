@@ -20,7 +20,8 @@
 #   (plain, re-exported, field line first, a tuple field first or later,
 #   generic, another attribute only); an exemption reason without the
 #   `exhaustive: ` prefix; a struct-like variant without `#[non_exhaustive]`
-#   (plain, re-exported, field line first, another attribute only).
+#   (plain, re-exported, field line first, another attribute only, the second
+#   path of a variant whose first path carries a pending marker).
 #   Passing cases: a matching listing whose lines carry an attribute prefix, a
 #   generic fn, a field, a variant and an impl header; the generic shapes
 #   against a matching table; a fn-pointer generic method with its row; marked
@@ -28,14 +29,17 @@
 #   generic, either attribute order); opaque, unit and private-tuple structs;
 #   a marked struct-like variant whose field is not a struct field; a struct
 #   name that prefixes another; `exhaustive:` exemptions with a reason; tuple
-#   and unit variants.
+#   and unit variants; an unmarked struct-like variant whose row carries a
+#   `variant-pending T<n>: ` marker.
 #   Errors (exit 2, naming the line or path): a missing, empty, crate-less or
 #   unparsable listing (a generic group the strip cannot read, or an
 #   attribute glued to `pub`, included); a stale exemption (on a marked
 #   struct, an opaque struct, an unlisted path) or a misplaced one (a non-struct
 #   kind, a NARROW row); an exemption with an empty, blank or bare reason, on
-#   an unmarked or a marked struct; a
-#   missing or header-only table; a header line that is deleted, misspelled,
+#   an unmarked or a marked struct; a `variant-pending` marker that is stale
+#   (a marked variant, an unlisted path, a tuple variant), misplaced (a
+#   non-variant kind, a NARROW row) or malformed (no tag, a tag outside
+#   T1-T4, no reason); a missing or header-only table; a header line that is deleted, misspelled,
 #   six columns wide or CRLF-terminated; a malformed row (an
 #   unknown or mixed-case disposition, a space-separated row, a 4-field row,
 #   an empty field, an unknown kind, a path outside the crate or carrying
@@ -357,6 +361,53 @@ struct_case v-tuple-unit "enum=$K::Ev variant=$K::Ev::Pair variant=$K::Ev::Done"
 run_case tuple-and-unit-variants-pass 0 '10 audited path(s) match' "$TMP/v-tuple-unit.api"
 struct_case v-other-attr "$EV" "#[non_exhaustive] pub enum $K::Ev" "#[doc(alias = \"m\")] pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
 run_case struct-variant-other-attribute-unmarked 1 "UNMARKED $K::Ev::Moved" "$TMP/v-other-attr.api"
+
+# #9278 A2c ruling: an unmarked struct-like variant may carry a pending marker
+# on its variant KEEP row, `variant-pending T<n>: <reason>` with n in 1-4: the
+# slice that marks it. The marker is the only disposition. A stale (variant
+# marked, unlisted, or not struct-like), misplaced or malformed marker fails
+# closed (exit 2). Each case is base.api plus the lines; base.tsv plus <rows>
+# (KEEP, as struct_case) plus one marker row.
+# pending_case <name> <rows> <marker-path> <kind> <disp> <reason> <line...>
+pending_case() {
+  local name="$1" rows="$2" mp="$3" kind="$4" disp="$5" reason="$6"
+  shift 6
+  struct_case "$name" "$rows" "$@"
+  printf '%s\t%s\t%s\t%s\tA2c\n' "$mp" "$kind" "$disp" "$reason" >> "$TMP/case.tsv"
+}
+MV="$K::Ev::Moved"
+EVF="enum=$K::Ev field=$MV::from"
+EVL_U="#[non_exhaustive] pub enum $K::Ev"
+pending_case p-ok "$EVF" "$MV" variant KEEP 'variant-pending T3: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8"
+run_case variant-pending-marker-passes 0 '10 audited path(s) match' "$TMP/p-ok.api"
+pending_case p-marked "$EVF" "$MV" variant KEEP 'variant-pending T3: member of Ev' \
+  "$EVL_U" "#[non_exhaustive] pub $MV" "pub $MV::from: u8"
+run_case variant-pending-on-marked-variant 2 "stale pending $MV: the variant is #[non_exhaustive]" "$TMP/p-marked.api"
+pending_case p-no-tier "$EVF" "$MV" variant KEEP 'variant-pending: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8"
+run_case variant-pending-without-tier 2 "stale pending $MV: variant-pending needs a T1-T4 tag and a reason" "$TMP/p-no-tier.api"
+pending_case p-bad-tier "$EVF" "$MV" variant KEEP 'variant-pending T5: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8"
+run_case variant-pending-tier-out-of-range 2 "stale pending $MV: variant-pending needs a T1-T4 tag and a reason" "$TMP/p-bad-tier.api"
+pending_case p-no-reason "$EVF" "$MV" variant KEEP 'variant-pending T2: ' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8"
+run_case variant-pending-empty-reason 2 "stale pending $MV: variant-pending needs a T1-T4 tag and a reason" "$TMP/p-no-reason.api"
+pending_case p-unlisted '' "$K::Ev::Gone" variant KEEP 'variant-pending T1: gone'
+run_case variant-pending-on-unlisted-path 2 "stale pending $K::Ev::Gone: not a listed variant" "$TMP/p-unlisted.api"
+pending_case p-tuple "enum=$K::Ev" "$K::Ev::Pair" variant KEEP 'variant-pending T1: member of Ev' \
+  "$EVL_U" "pub $K::Ev::Pair(u8)"
+run_case variant-pending-on-tuple-variant 2 "stale pending $K::Ev::Pair: the variant has no field line" "$TMP/p-tuple.api"
+pending_case p-kind "field=$X::n" "$X" struct KEEP 'variant-pending T1: not a variant' \
+  "pub struct $X" "pub $X::n: u8"
+run_case variant-pending-on-non-variant-kind 2 "stale pending $X: variant-pending is only for a variant KEEP row (struct KEEP)" "$TMP/p-kind.api"
+pending_case p-narrow '' "$K::Ev::Old" variant NARROW 'variant-pending T1: narrowed'
+run_case variant-pending-on-narrow-row 2 "stale pending $K::Ev::Old: variant-pending is only for a variant KEEP row (variant NARROW)" "$TMP/p-narrow.api"
+pending_case p-reexport "$EVF enum=trusty_memory::engine::Ev variant=trusty_memory::engine::Ev::Moved field=trusty_memory::engine::Ev::Moved::from" \
+  "$MV" variant KEEP 'variant-pending T3: member of Ev' \
+  "$EVL_U" "pub $MV" "pub $MV::from: u8" \
+  '#[non_exhaustive] pub enum trusty_memory::engine::Ev' 'pub trusty_memory::engine::Ev::Moved' 'pub trusty_memory::engine::Ev::Moved::from: u8'
+run_case variant-pending-one-path-of-two 1 "UNMARKED trusty_memory::engine::Ev::Moved${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/p-reexport.api"
 
 # #9278 A1 LOW gaps, for enums and structs: an attribute glued to `pub`
 # fails closed, and `#[non_exhaustive]` counts in either attribute order.
