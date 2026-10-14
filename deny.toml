@@ -212,14 +212,19 @@ unsound = "none"
 
 # TIME-BOXED EXCEPTION — one advisory, one review date, enforced by a human.
 #
-# RUSTSEC-2026-0258 was published 2026-08-17 and turned this check red on every
-# run since. h2 enters the graph twice and only one entry has a fix: 0.4.14 can
-# take the patched 0.4.16, but 0.3.27 is on a line the advisory never patched,
-# so no `cargo update` clears both. Clearing them needs a hyper 0.14 -> 1.x move
-# somewhere in the transitive graph, which is dependency work, not release work.
+# RUSTSEC-2026-0258 (h2 unbounded empty DATA frames, published 2026-08-17).
+# Only the h2 0.3.27 half remains. The 0.4 line now resolves to the patched
+# 0.4.16. 0.3.27 is on a line the advisory never patched. It enters through
+# hf-hub 0.3.2 -> reqwest 0.11.27 -> hyper 0.14.32, so no `cargo update` clears
+# it. That path is reachable only through non-default features. cargo-deny's
+# default-feature graph does not see it and prints `advisory-not-detected` for
+# this row (a warning). cargo-audit scans the whole Cargo.lock and still needs
+# the matching ignore in `.cargo/audit.toml`.
 #
-# Owner ruling 2026-08-19: "this is an expedited release. We will handle
-# dependabot in a subsequent release."
+# Owner ruling Dd5 (2026-10-14, #6067): upgrade where a patched version
+# exists, otherwise renew the exception for 30 days. The way to delete this row
+# is the hf-hub 0.3 -> 0.5 bump, which drops reqwest 0.11 and hyper 0.14 from
+# the graph. That bump is follow-up work on #6067.
 #
 # CARGO-DENY CANNOT EXPIRE THIS ROW ITSELF. An `ignore` entry accepts `id` and
 # `reason` and nothing else — cargo-deny 0.20.2 rejects `expires` outright with
@@ -229,7 +234,7 @@ unsound = "none"
 # same id is ignored in `.cargo/audit.toml` for cargo-audit; remove both in one
 # change.
 ignore = [
-  { id = "RUSTSEC-2026-0258", reason = "REVIEW BY 2026-09-18. h2 unbounded empty DATA frames (low severity). Deferred past the 2026-08-19 expedited release by owner ruling; h2 0.3.27 has no patched version, so the real fix is a hyper 1.x migration. Nothing expires this row automatically — delete it when the upgrade lands or record a fresh decision." },
+  { id = "RUSTSEC-2026-0258", reason = "REVIEW BY 2026-11-13. h2 unbounded empty DATA frames (low severity). Only h2 0.3.27 remains (0.4 line is on the patched 0.4.16); 0.3.27 has no patched version. Renewed 30 days by owner ruling Dd5 (2026-10-14, #6067). Remove with the hf-hub 0.5 bump. Nothing expires this row automatically — delete it when that lands or record a fresh decision." },
 ]
 
 # ---------------------------------------------------------------------------

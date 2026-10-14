@@ -6,20 +6,16 @@
 # place to turn the gate down. Every entry names one advisory id, and the comment
 # above it says who deferred it, when, and what clears it.
 #
-# NO EXPIRY FIELD EXISTS HERE. cargo-audit's ignore list is a bare array of ids
-# with no expiry support, unlike cargo-deny's `{ id, expires, reason }` form. The
-# EXPIRY FOR THIS DEFERRAL IS RECORDED IN `deny.toml` (`[advisories].ignore`,
-# `expires = "2026-09-18"`), and cargo-deny fails the build once that date
-# passes. Both tools read the same RustSec database and both legs must be green,
-# so the cargo-deny expiry is what re-opens this file's entry too — remove the id
-# here in the same change that removes it there.
+# NO EXPIRY FIELD EXISTS HERE, AND NONE IN `deny.toml` EITHER. cargo-audit's
+# ignore list is a bare array of ids. cargo-deny's ignore entry accepts only
+# `id` and `reason` (it rejects `expires`). The review date for this deferral
+# lives in the `reason` string of the matching `deny.toml` `[advisories].ignore`
+# entry — "REVIEW BY 2026-11-13" — and nothing enforces it automatically; a
+# human acts on it. Remove the id here in the same change that removes it there.
 
 [advisories]
 # RUSTSEC-2026-0258 — h2 unbounded empty DATA frames, published 2026-08-17, low
-# severity. h2 appears twice in the graph: 0.4.14 (patched in 0.4.16) and 0.3.27
-# (a line the advisory never patched), so no `cargo update` clears both — the
-# real fix is a hyper 0.14 -> 1.x move in the transitive graph.
-#
-# Owner ruling 2026-08-19: "this is an expedited release. We will handle
-# dependabot in a subsequent release."
+# severity. Only h2 0.3.27 remains affected (the 0.4 line is on the patched
+# 0.4.16); 0.3.27 has no patched version. Renewed to 2026-11-13 by owner ruling
+# Dd5 (2026-10-14, #6067); the hf-hub 0.5 bump removes it.
 ignore = ["RUSTSEC-2026-0258"]
