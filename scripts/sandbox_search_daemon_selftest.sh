@@ -45,6 +45,9 @@
 #                 file ("cannot tell") and leaves that file alone (#9214)
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
 #                 directory refuses
+#     embedder-knobs the embedder names (#9828) reach the stub with the
+#                 caller's value; a credential-shaped name under their
+#                 prefixes, a near-miss prefix and an exported empty value do not
 #
 # Usage: ./scripts/sandbox_search_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -503,6 +506,58 @@ elif [ "$S19" -eq 1 ] && printf '%s' "$OUT19" | grep -qF "cannot tell whether $S
   pass no-python3
 else
   fail no-python3 "exit $S19, socket kept: $([ -S "$SOCK19" ] && echo yes || echo no): $OUT19"
+fi
+
+# 15. embedder-knobs (#9828): TRUSTY_EMBEDDER, TRUSTY_DEVICE, TRUSTY_UV_BIN and
+# every TRUSTY_EMBEDDERD_PY_* / TRUSTY_EMBEDDERD_RECYCLE_* name reach the
+# daemon with the caller's value. A credential-shaped name under those
+# prefixes, a near-miss prefix, and an exported empty value do not.
+STUBV="$TMP_ROOT/stub-ts-env"
+cat > "$STUBV" <<'STUB_EOF'
+#!/bin/sh
+env | sort > "$HOME/stub-env"
+STUB_EOF
+chmod +x "$STUBV"
+EMBED_SET="TRUSTY_EMBEDDER=python TRUSTY_DEVICE=mps TRUSTY_UV_BIN=/opt/fake/uv
+TRUSTY_EMBEDDERD_PY_BIN=/opt/fake/trusty-embedderd-py TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0
+TRUSTY_EMBEDDERD_RECYCLE_FOOTPRINT_MB=1500 TRUSTY_EMBEDDERD_RECYCLE_MAX_AGE_SECS=3600
+TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS=5000 TRUSTY_EMBEDDERD_RECYCLE_CHECK_SECS=30
+TRUSTY_EMBEDDERD_RECYCLE_DRAIN_SECS=10"
+DIR20="$TMP_ROOT/case20"
+DIR21="$TMP_ROOT/case21"
+mkdir -p "$DIR20" "$DIR21"
+set +e
+# shellcheck disable=SC2086  # EMBED_SET is NAME=value words, split on purpose
+OUT20="$(env -i PATH="$PATH" GITHUB_TOKEN="$FAKE_TOKEN" OPENROUTER_API_KEY="$FAKE_KEY" \
+  TRUSTY_EMBEDDERD_PY_FAKE_TOKEN="$FAKE_TOKEN" TRUSTY_EMBEDDERD_RECYCLE_API_KEY="$FAKE_KEY" \
+  TRUSTY_EMBEDDERX=1 $EMBED_SET bash "$LAUNCHER" --bin "$STUBV" --dir "$DIR20" 2>&1)"
+S20=$?
+OUT21="$(env -i PATH="$PATH" TRUSTY_EMBEDDER= TRUSTY_DEVICE= TRUSTY_UV_BIN= \
+  TRUSTY_EMBEDDERD_PY_BIN= TRUSTY_EMBEDDERD_RECYCLE_MAX_CALLS= \
+  bash "$LAUNCHER" --bin "$STUBV" --dir "$DIR21" 2>&1)"
+S21=$?
+set -e
+MISSING20=""
+for word in $EMBED_SET; do
+  grep -qxF -- "$word" "$DIR20/home/stub-env" 2>/dev/null || MISSING20="$MISSING20 $word"
+done
+if [ "$S20" -ne 0 ] || [ ! -f "$DIR20/home/stub-env" ]; then
+  fail embedder-knobs "exit $S20 or the stub never ran: $OUT20"
+elif [ -n "$MISSING20" ]; then
+  fail embedder-knobs "the daemon did not receive:$MISSING20"
+elif leaks "$OUT20" || leaks "$(cat "$DIR20/home/stub-env")"; then
+  fail embedder-knobs "a fake secret value reached the daemon or the output"
+elif grep -qE '^(TRUSTY_EMBEDDERD_PY_FAKE_TOKEN|TRUSTY_EMBEDDERD_RECYCLE_API_KEY|TRUSTY_EMBEDDERX)=' "$DIR20/home/stub-env"; then
+  fail embedder-knobs "a credential-shaped or near-miss name reached the daemon"
+else
+  pass embedder-knobs
+fi
+if [ "$S21" -ne 0 ] || [ ! -f "$DIR21/home/stub-env" ]; then
+  fail embedder-knobs-empty "exit $S21 or the stub never ran: $OUT21"
+elif grep -qE '^TRUSTY_(EMBEDDER|DEVICE|UV_BIN|EMBEDDERD_PY_BIN|EMBEDDERD_RECYCLE_MAX_CALLS)=' "$DIR21/home/stub-env"; then
+  fail embedder-knobs-empty "an exported empty value reached the daemon: $(grep '^TRUSTY_' "$DIR21/home/stub-env" | tr '\n' ' ')"
+else
+  pass embedder-knobs-empty
 fi
 
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"
