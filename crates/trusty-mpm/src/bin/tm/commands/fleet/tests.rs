@@ -1062,3 +1062,37 @@ fn a_resume_fails_only_on_a_proven_absent_claude() {
         assert_eq!(slept.contains(&RESUME_SETTLE), settled, "{name}: {slept:?}");
     }
 }
+
+/// #9540: the `skills` row is not ok when a shipped skill is missing or kept
+/// as project-custom, names that skill, and never moves `complete`.
+#[test]
+fn the_skills_row_names_a_missing_or_custom_skill() {
+    let fx = Fixture::new();
+    let fresh = fx.status();
+    assert!(!fresh.skills.ok, "{}", fresh.render());
+    assert!(
+        fresh.skills.detail.contains("tm-fleet-check: missing"),
+        "{}",
+        fresh.render()
+    );
+
+    fx.init().unwrap();
+    assert!(fx.status().skills.ok, "{}", fx.status().render());
+
+    let edited = fx.dir().join(".claude/skills/tm-fleet-check/SKILL.md");
+    std::fs::write(&edited, "THE ARCHITECT'S OWN EDIT\n").unwrap();
+    let report = fx.status();
+    assert!(!report.skills.ok, "{}", report.render());
+    assert!(
+        report
+            .render()
+            .contains("WARN     skills       tm-fleet-check: project-custom"),
+        "{}",
+        report.render()
+    );
+    assert!(
+        !report.skills.detail.contains("tm-context-refresh"),
+        "{}",
+        report.render()
+    );
+}

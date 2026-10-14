@@ -254,3 +254,7 @@ pub(super) fn deploy_session_skills(
 #[cfg(test)]
 #[path = "skills_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "skills_architect_9540_tests.rs"]
+mod architect_9540_tests;

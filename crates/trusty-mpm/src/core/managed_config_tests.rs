@@ -924,3 +924,47 @@ fn ensure_managed_config_dir_heals_a_bare_repo_palace_alias() {
          resolves to the claude-mpm-era store instead of failing with missing metadata"
     );
 }
+
+/// #9540: resume and in-place relaunch reach this choke point, so a deleted
+/// Architect skill must come back here, into the project tier only.
+/// Test: itself.
+#[test]
+fn ensure_managed_config_dir_restores_a_deleted_architect_skill() {
+    use crate::core::project_skill_tier::architect_skills;
+
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+    let workspace = project_dir(tmp.path());
+    std::fs::write(
+        workspace.join(".trusty-mpm.toml"),
+        "profile = \"supervisor\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fw.root.join("config.toml"),
+        format!(
+            "[supervisor]\nprojects = [{:?}]\n",
+            workspace.display().to_string()
+        ),
+    )
+    .unwrap();
+    let tier = architect_skills::project_tier(&workspace);
+    let copy = architect_skills::skill_path(&tier, architect_skills::FLEET_CHECK.stem);
+    // The copy is absent, as after a deletion.
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&copy).unwrap_or_default(),
+        architect_skills::FLEET_CHECK.contents,
+        "a resume must restore the Architect's deleted skill"
+    );
+    for skill in architect_skills::SKILLS {
+        let managed = architect_skills::skill_path(&config_dir.join("skills"), skill.stem);
+        assert!(
+            !managed.exists(),
+            "{} reached the managed tier",
+            managed.display()
+        );
+    }
+}
