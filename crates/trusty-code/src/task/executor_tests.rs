@@ -1815,6 +1815,51 @@ async fn todo_write_is_registered_and_reaches_the_roster() {
     assert_eq!(row.todos[1].status, crate::events::TodoStatus::InProgress);
 }
 
+/// #8158: the daemon path records a delegated turn under the agent the PM
+/// actually delegated to.
+///
+/// Why: `build_engineer_runner` bound the engineer's recorder to the fixed
+/// `ENGINEER_AGENT_NAME`, so `session.get_transcript` — and every report built
+/// from it — labelled each delegated turn `python-engineer`.
+/// What: the PM delegates to the fixture `engineer`; asserts the stored
+/// transcript carries an `engineer` turn and no `python-engineer` turn.
+/// FAILS at c69c8e01be.
+/// Test: this test.
+#[tokio::test]
+async fn delegated_turns_carry_the_delegated_agents_role() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = engineer_agents_dir("read_file, write_file, finish_task");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm: Arc<dyn InferenceAdapter> = Arc::new(ScriptedLlm::from_json(&[
+        delegate_to_response("engineer", "create role.py"),
+        write_file_tool_call_response("call_1", "role.py", "print('role')"),
+        stop_response("engineer: done"),
+        stop_response("pm: task complete"),
+    ]));
+    spawn_task_run(
+        Arc::clone(&registry),
+        llm,
+        params(&agents, &project, &session.id),
+    )
+    .expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let transcript = registry
+        .get_transcript(&session.id)
+        .expect("transcript must exist");
+    let roles: Vec<&str> = transcript.turns.iter().map(|t| t.role.as_str()).collect();
+    assert!(
+        roles.contains(&"engineer"),
+        "the delegated turns must carry the delegated agent's name; roles: {roles:?}"
+    );
+    assert!(
+        !roles.contains(&"python-engineer"),
+        "no turn ran as python-engineer, so none may be labelled so; roles: {roles:?}"
+    );
+}
+
 // ── #8288: a delegating PM writes no source itself ──────────────────────────
 
 /// A `delegate_to_agent` call naming `agent` (#8288).
