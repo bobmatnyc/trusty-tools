@@ -54,7 +54,7 @@ fn mtime(path: &Path) -> SystemTime {
 #[test]
 fn an_absent_skill_is_written_byte_equal() {
     let project = tempdir().unwrap();
-    let report = deploy_architect_skills(project.path());
+    let report = deploy_architect_skills(project.path(), &[]);
     for skill in SKILLS {
         let path = skill_path(&project_tier(project.path()), skill.stem);
         assert_eq!(
@@ -73,7 +73,7 @@ fn an_edited_copy_is_kept_and_reported() {
     use tracing_subscriber::layer::SubscriberExt;
 
     let project = tempdir().unwrap();
-    deploy_architect_skills(project.path());
+    deploy_architect_skills(project.path(), &[]);
     let path = skill_path(&project_tier(project.path()), FLEET_CHECK.stem);
     std::fs::write(&path, "PROJECT EDIT\n").unwrap();
 
@@ -82,8 +82,9 @@ fn an_edited_copy_is_kept_and_reported() {
     let subscriber = tracing_subscriber::registry().with(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
-    let report =
-        tracing::subscriber::with_default(subscriber, || deploy_architect_skills(project.path()));
+    let report = tracing::subscriber::with_default(subscriber, || {
+        deploy_architect_skills(project.path(), &[])
+    });
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "PROJECT EDIT\n");
     assert_eq!(report.kept_custom, vec!["tm-fleet-check"]);
@@ -148,13 +149,13 @@ fn a_byte_equal_seed_is_adopted_then_refreshed() {
 fn a_second_run_writes_nothing() {
     let project = tempdir().unwrap();
     let tier = project_tier(project.path());
-    let first = deploy_architect_skills(project.path());
+    let first = deploy_architect_skills(project.path(), &[]);
     assert_eq!(first.written.len(), SKILLS.len());
     let mut files: Vec<PathBuf> = SKILLS.iter().map(|s| skill_path(&tier, s.stem)).collect();
     files.push(tier.join(RECORD_FILE));
     let pinned: Vec<SystemTime> = files.iter().map(|f| age(f)).collect();
 
-    let second = deploy_architect_skills(project.path());
+    let second = deploy_architect_skills(project.path(), &[]);
 
     assert_eq!(second, DeployReport::default());
     let after: Vec<SystemTime> = files.iter().map(|f| mtime(f)).collect();
@@ -169,7 +170,7 @@ fn a_blocked_skill_dir_is_an_error_line() {
     std::fs::create_dir_all(&tier).unwrap();
     std::fs::write(tier.join(FLEET_CHECK.stem), "not a dir").unwrap();
 
-    let report = deploy_architect_skills(project.path());
+    let report = deploy_architect_skills(project.path(), &[]);
 
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
@@ -191,7 +192,7 @@ fn health_names_each_skill_that_is_not_current() {
     assert!(detail.contains("tm-fleet-check: missing"), "{detail}");
     assert!(detail.contains("tm-context-refresh: missing"), "{detail}");
 
-    deploy_architect_skills(project.path());
+    deploy_architect_skills(project.path(), &[]);
     let (ok, detail) = health(project.path());
     assert!(ok, "{detail}");
 }
@@ -296,7 +297,7 @@ fn a_malformed_record_keeps_a_differing_copy_and_names_the_record() {
 #[test]
 fn the_skills_row_names_a_malformed_record() {
     let project = tempdir().unwrap();
-    deploy_architect_skills(project.path());
+    deploy_architect_skills(project.path(), &[]);
     std::fs::write(project_tier(project.path()).join(RECORD_FILE), "{ not json").unwrap();
 
     let (ok, detail) = health(project.path());
@@ -314,7 +315,7 @@ fn a_record_write_failure_is_an_error_and_the_row_does_not_say_current() {
     let project = tempdir().unwrap();
     std::fs::create_dir_all(project_tier(project.path()).join(RECORD_FILE)).unwrap();
 
-    let report = deploy_architect_skills(project.path());
+    let report = deploy_architect_skills(project.path(), &[]);
 
     assert!(
         report.errors.iter().any(|e| e.contains(RECORD_FILE)),
@@ -371,6 +372,26 @@ fn a_tier_resolving_onto_a_reserved_dir_is_refused() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_skills_row_names_a_refused_reserved_tier() {
+    let project = tempdir().unwrap();
+    let reserved = tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+    std::os::unix::fs::symlink(reserved.path(), project_tier(project.path())).unwrap();
+
+    let (ok, detail) = health_with(project.path(), &[reserved.path().to_path_buf()]);
+    assert!(!ok, "{detail}");
+    assert!(detail.contains("deploy refused"), "{detail}");
+    let report = deploy_architect_skills(project.path(), &[reserved.path().to_path_buf()]);
+    assert!(report.written.is_empty(), "{:?}", report.written);
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert!(
+        std::fs::read_dir(reserved.path()).unwrap().next().is_none(),
+        "the reserved dir was written"
+    );
 }
 
 #[test]
