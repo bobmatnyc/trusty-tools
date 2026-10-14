@@ -174,9 +174,11 @@ mod tests {
             "error must mention lock timeout: {msg}"
         );
         // #8749: a waiter that gives up gets a typed timeout naming the palace.
+        // #9278 T3c-1: it stays in `EngineError::Other`, found through `internal()`.
         assert!(
             matches!(
-                err.downcast_ref::<crate::engine::timeouts::WriteTimeout>(),
+                err.internal()
+                    .and_then(|e| e.downcast_ref::<crate::engine::timeouts::WriteTimeout>()),
                 Some(crate::engine::timeouts::WriteTimeout::LockWait { palace, .. })
                     if palace == "lock-timeout"
             ),
