@@ -28,16 +28,28 @@
 #                  line under its path, or a `pub ` tuple field in any
 #                  position) whose prefix lacks it, unless exempt (A2b); or a
 #                  listed struct-like enum variant (a variant line with a
-#                  field line under its path) whose prefix lacks it (A2c).
+#                  field line under its path) whose prefix lacks it, unless
+#                  its row carries a pending marker (A2c).
 #   Each failure prints one line naming the path. The struct and variant
-#   joins run after the whole listing, so line order does not matter. Known gap: a unit
-#   struct and an opaque struct print alike (`pub struct X`) and both pass.
+#   joins run after the whole listing, so line order does not matter. Known
+#   gap: a unit struct and an opaque struct print alike (`pub struct X`) and
+#   both pass.
 #
 #   Struct exemption: a `struct` KEEP row whose reason cell starts
 #   `exhaustive: ` and says why (PalaceId). It fails closed (exit 2,
 #   `stale exemption <path>: <why>`) on any other kind or disposition, on a
 #   path that is not a listed struct, on a struct already marked, on a
 #   struct with no public field, and on an empty or blank reason (A2c).
+
+#   Variant pending marker (A2c ruling): a `variant` KEEP row whose reason
+#   cell starts `variant-pending T<n>: <reason>`, n in 1-4, names the slice
+#   that will mark that unmarked struct-like variant. It is the only
+#   disposition for one (no allow-list, no scoped rule). Each slice removes
+#   its markers as it marks the variants, so T4 ends at zero. It fails closed
+#   (exit 2, `stale pending <path>: <why>`) on any other kind or disposition,
+#   on a path that is not a listed variant, on a variant already marked, on a
+#   variant with no field line, and on a missing or out-of-range tag or an
+#   empty reason.
 #
 #   One path may carry two rows only when they differ in `kind` and agree on
 #   public versus absent (a field and a method sharing a name print the same
@@ -57,7 +69,8 @@
 #       `pub` line the parser cannot cut to a `trusty_memory` path, such as a
 #       generic group it cannot strip or an attribute glued to `pub` (the
 #       message names the line);
-#     - a stale or misplaced `exhaustive:` exemption (above).
+#     - a stale or misplaced `exhaustive:` exemption, or a stale, misplaced
+#       or malformed `variant-pending` marker (above).
 #
 # Usage:
 #   bash scripts/check_engine_api_audit.sh --api-file <listing>
@@ -80,6 +93,7 @@
 #   DEPRECATE row, an enum, a struct with a public field (any tuple field
 #   too) or a struct-like variant without `#[non_exhaustive]`, the
 #   `exhaustive:` exemption and its stale, misplaced and reason-less forms,
+#   the `variant-pending` marker and its stale, misplaced and malformed forms,
 #   attribute order and glued attributes, a field
 #   and method sharing a path, the bad-header, malformed-row, duplicate-row and
 #   conflicting-row errors, and the missing, empty, crate-less and unparsable
@@ -135,7 +149,9 @@ trap 'rm -rf "$WORK"' EXIT
 # must be plain segments, since every listed path is compared with every row.
 # #9278 A2b: every `exhaustive:` reason goes to $WORK/exempt in table order,
 # flagged E (a struct KEEP exemption) or M (misplaced); the listing awk joins.
-# A2c: a struct KEEP row with no reason after the prefix is flagged R.
+# A2c: a struct KEEP row with no reason after the prefix is flagged R. Every
+# `variant-pending` marker goes there too, flagged P (valid), PM (misplaced)
+# or PR (no T1-T4 tag or no reason).
 : > "$WORK/exempt"
 if ! awk -F '\t' -v exemptf="$WORK/exempt" '
   NR == 1 || $0 == "" || $0 ~ /^#/ { next }
@@ -162,6 +178,11 @@ if ! awk -F '\t' -v exemptf="$WORK/exempt" '
       if ($2 != "struct" || $3 != "KEEP") print $1 "\tM\t" $2 " " $3 > exemptf
       else if ($4 ~ /^exhaustive: +[^ ]/) print $1 "\tE\t" > exemptf
       else print $1 "\tR\t" > exemptf
+    }
+    if ($4 ~ /^variant-pending/) {
+      if ($2 != "variant" || $3 != "KEEP") print $1 "\tPM\t" $2 " " $3 > exemptf
+      else if ($4 ~ /^variant-pending T[1-4]: +[^ ]/) print $1 "\tP\t" > exemptf
+      else print $1 "\tPR\t" > exemptf
     } }
   END {
     if (rows == 0) { printf "check_engine_api_audit: no data row in %s\n", FILENAME > "/dev/stderr"; bad = 1 }
@@ -214,7 +235,10 @@ BEGIN {
   sub(/^((unsafe|async|const|extern "[^"]*") )*fn /, "", s)
   sub(/^(struct|enum|union|trait|unsafe trait|type|mod|const|static|use|macro) /, "", s)
   # A2b: a line with no keyword is a field or a variant; a field prints `: `.
-  is_field = (s == kw && s ~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*: /)
+  # A2c: a line with no keyword that is not a field is a variant (unit, tuple
+  # or struct-like); read before the cut below changes s.
+  nokw = (s == kw)
+  is_field = (nokw && s ~ /^trusty_memory(::[A-Za-z_][A-Za-z0-9_]*)*: /)
   # #9278: strip generic groups (nested too) before the cut, so `X<T>::m` is
   # `X::m`, not a collapse into the row of the type itself. A1: hide `->`
   # first, or `<fn() -> u8>` ends the group at its `>`.
@@ -231,7 +255,7 @@ BEGIN {
   print s
   if (is_enum && !marked) print s > unmarked
   if (is_struct) { structs[s] = 1; if (marked) ne[s] = 1; if (tuple_pub) haspub[s] = 1 }
-  if (s == kw && !is_field) { variants[s] = 1; if (marked) vne[s] = 1 }
+  if (nokw && !is_field) { variants[s] = 1; if (marked) vne[s] = 1 }
   # The parent of a field is its path minus the last segment, matched exactly: a
   # struct-variant field has the variant as parent, never a struct. A2c: that
   # makes the variant struct-like.
@@ -244,6 +268,17 @@ function bad_line() {
 END {
   for (i = 1; i <= n; i++) {
     p = ex_path[i]
+    if (ex_flag[i] ~ /^P/) {
+      if (ex_flag[i] == "PM") why = "variant-pending is only for a variant KEEP row (" ex_note[i] ")"
+      else if (ex_flag[i] == "PR") why = "variant-pending needs a T1-T4 tag and a reason"
+      else if (!(p in variants)) why = "not a listed variant"
+      else if (p in vne) why = "the variant is #[non_exhaustive]"
+      else if (!(p in haspub)) why = "the variant has no field line"
+      else { pending[p] = 1; continue }
+      printf "check_engine_api_audit: stale pending %s: %s\n", p, why > "/dev/stderr"
+      bad = 1
+      continue
+    }
     if (ex_flag[i] == "M") why = "exhaustive: is only for a struct KEEP row (" ex_note[i] ")"
     else if (!(p in structs)) why = "not a listed struct"
     else if (p in ne) why = "the struct is #[non_exhaustive]"
@@ -254,7 +289,7 @@ END {
     bad = 1
   }
   for (p in structs) if ((p in haspub) && !(p in ne) && !(p in exempt)) print p > unmarked
-  for (p in variants) if ((p in haspub) && !(p in vne)) print p > unmarked
+  for (p in variants) if ((p in haspub) && !(p in vne) && !(p in pending)) print p > unmarked
   exit bad
 }' "$API_FILE" > "$WORK/paths"; then
   exit 2
