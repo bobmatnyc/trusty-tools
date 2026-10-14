@@ -42,6 +42,7 @@ impl KgStoreRedb {
     /// error, so a corrupt index degrades to "unregistered" instead of making
     /// the palace unusable — the same posture `lookup_room_id` takes.
     /// Test: `wing_create_is_idempotent`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn lookup_wing_id(&self, key: &str) -> Result<Option<Uuid>> {
         let rtx = self.db().begin_read().context("begin lookup_wing_id txn")?;
         let table = rtx.open_table(WING_KEYS).context("open wing_keys table")?;
@@ -133,6 +134,7 @@ impl KgStoreRedb {
     /// A row that fails to decode is logged and skipped so one bad row cannot
     /// hide the rest.
     /// Test: `wing_list_reports_seeded_and_created_wings`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn list_wings(&self) -> Result<Vec<(Uuid, WingRecord)>> {
         let rtx = self.db().begin_read().context("begin list_wings txn")?;
         let table = rtx.open_table(WINGS).context("open wings table")?;
@@ -177,6 +179,7 @@ impl KgStoreRedb {
     /// Test: `wing_rename_changes_no_room_or_drawer_rows`,
     /// `wing_rename_retires_the_old_label`,
     /// `wing_rename_applies_every_effect_together`.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn rename_wing_in_place(
         &self,
         id: Uuid,

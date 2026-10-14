@@ -24,10 +24,10 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Complete backups kept per palace (ADR-0067 D7).
-pub const BACKUP_KEEP: usize = 2;
+pub(crate) const BACKUP_KEEP: usize = 2;
 
 /// The file whose presence marks a backup complete.
-pub const MANIFEST: &str = "MANIFEST";
+pub(crate) const MANIFEST: &str = "MANIFEST";
 
 /// Suffix of a backup directory still being written.
 const TMP_SUFFIX: &str = ".tmp";
@@ -50,26 +50,26 @@ type Result<T> = std::result::Result<T, PalaceStoreError>;
 
 /// One backed-up file, as recorded in [`MANIFEST`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestEntry {
+pub(crate) struct ManifestEntry {
     /// File name inside the palace directory.
-    pub name: String,
+    pub(crate) name: String,
     /// Byte length.
-    pub len: u64,
+    pub(crate) len: u64,
     /// Lower-case hex SHA-256 of the bytes.
-    pub sha256: String,
+    pub(crate) sha256: String,
 }
 
 /// The contents of [`MANIFEST`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackupManifest {
+pub(crate) struct BackupManifest {
     /// Palace id the backup belongs to.
-    pub palace: String,
+    pub(crate) palace: String,
     /// Format the palace was at.
-    pub from: u32,
+    pub(crate) from: u32,
     /// Format the migration was moving it to.
-    pub to: u32,
+    pub(crate) to: u32,
     /// Every file copied, in [`PRIMARY_FILES`] order.
-    pub files: Vec<ManifestEntry>,
+    pub(crate) files: Vec<ManifestEntry>,
 }
 
 /// Fault and environment seams; production uses [`Seams::default`].
@@ -109,7 +109,7 @@ pub fn backup_root(data_root: &Path, palace_id: &str) -> PathBuf {
 /// otherwise the hidden `<palace root>/.trusty-memory`. [`backup_root`] then
 /// appends `backups/format-migration/<palace>`.
 /// Test: `backups_land_beside_the_palaces_directory`.
-pub fn backup_data_root(palace_dir: &Path) -> PathBuf {
+pub(crate) fn backup_data_root(palace_dir: &Path) -> PathBuf {
     let palaces = palace_dir.parent().unwrap_or(palace_dir);
     match (palaces.file_name(), palaces.parent()) {
         (Some(name), Some(data_root)) if name == "palaces" => data_root.to_path_buf(),
@@ -128,7 +128,8 @@ pub fn backup_data_root(palace_dir: &Path) -> PathBuf {
 /// Test: `a_verified_backup_is_byte_identical_and_reused`,
 /// `incomplete_backup_without_manifest_is_not_trusted`,
 /// `a_backup_of_an_older_source_is_not_reused`.
-pub fn ensure_format_backup(
+#[cfg(test)]
+pub(crate) fn ensure_format_backup(
     data_root: &Path,
     palace_id: &str,
     palace_dir: &Path,
@@ -197,7 +198,7 @@ pub(crate) fn ensure_with(
 ///
 /// Why: a backup is trusted only while it still matches what was verified.
 /// Test: `a_verified_backup_is_byte_identical_and_reused`.
-pub fn verify_backup(dir: &Path) -> Result<BackupManifest> {
+pub(crate) fn verify_backup(dir: &Path) -> Result<BackupManifest> {
     let path = dir.join(MANIFEST);
     let bytes = std::fs::read(&path).map_err(|e| failed(&path, e))?;
     let manifest: BackupManifest =

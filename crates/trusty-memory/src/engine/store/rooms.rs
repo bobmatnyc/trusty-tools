@@ -6,7 +6,7 @@
 //! every writer routes through to turn a `RoomType` into a `room_id`.
 //! What: `RoomRecord` (postcard, trailing-optional evolution following the
 //! `DrawerRecord` precedent), `RoomSummary` for reads, the schema marker, and
-//! `resolve_or_create_room` / `resolve_room_filter_id`.
+//! `resolve_or_create_room_in_wing` / `resolve_room_filter_id`.
 //! Storage note: the tables live in the palace's `kg.db` beside `DRAWERS`, NOT
 //! in a JSON sidecar — the redb open path recreates an unreadable database
 //! empty, and a surviving sidecar would then authoritatively describe rooms
@@ -33,7 +33,7 @@ use uuid::Uuid;
 ///
 /// Bump only when the *meaning* of existing rows changes; adding a trailing
 /// optional field does not qualify (the decode chain handles that).
-pub const ROOM_SCHEMA_VERSION: u32 = 1;
+pub(crate) const ROOM_SCHEMA_VERSION: u32 = 1;
 
 /// On-disk room row.
 ///
@@ -48,22 +48,22 @@ pub const ROOM_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomRecord {
     /// First-seen display spelling, e.g. `"Backend"`, `"decisions"`, `"status"`.
-    pub label: String,
+    pub(crate) label: String,
     /// Canonical kind tag: one of the nine built-in variant names, or
     /// `"Custom"`. The label carries the custom body; this carries the kind.
-    pub room_type: String,
+    pub(crate) room_type: String,
     /// Owning wing. [`DEFAULT_WING_ID`] for every room created before the Wing
     /// entity ships (ADR-0027 D2 / ticket T9).
-    pub wing_id: [u8; 16],
-    pub created_at_ms: i64,
+    pub(crate) wing_id: [u8; 16],
+    pub(crate) created_at_ms: i64,
     /// `false` when the backfill could not recover a label and synthesised
     /// one. Surfaced to callers so a human knows a rename is wanted; never
     /// blocks a read.
-    pub resolved: bool,
-    pub description: Option<String>,
+    pub(crate) resolved: bool,
+    pub(crate) description: Option<String>,
     /// Forward-compatibility slot for room aliasing (ADR-0027 D5). Empty
     /// today. When non-empty, a room filter matches `id` OR any member.
-    pub merged_from: Vec<[u8; 16]>,
+    pub(crate) merged_from: Vec<[u8; 16]>,
 }
 
 /// Schema-version marker stored under the nil-UUID key in `ROOMS`.
@@ -75,20 +75,20 @@ pub struct RoomRecord {
 /// What: a one-field postcard record; readers skip the nil key when listing.
 /// Test: `backfill_stamps_schema_version_and_skips_marker_row`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RoomSchemaMarker {
-    pub schema_version: u32,
+pub(crate) struct RoomSchemaMarker {
+    pub(crate) schema_version: u32,
 }
 
 /// A decoded room row plus its id — the read-side view.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RoomSummary {
-    pub id: Uuid,
-    pub label: String,
-    pub room_type: RoomType,
-    pub wing_id: Uuid,
-    pub created_at_ms: i64,
-    pub resolved: bool,
-    pub description: Option<String>,
+pub(crate) struct RoomSummary {
+    pub(crate) id: Uuid,
+    pub(crate) label: String,
+    pub(crate) room_type: RoomType,
+    pub(crate) wing_id: Uuid,
+    pub(crate) created_at_ms: i64,
+    pub(crate) resolved: bool,
+    pub(crate) description: Option<String>,
 }
 
 impl RoomRecord {
@@ -96,7 +96,7 @@ impl RoomRecord {
     ///
     /// `resolved` is `true` for a room a caller named explicitly and `false`
     /// only for a backfill fallback label.
-    pub fn new(room: &RoomType, created_at_ms: i64, resolved: bool) -> Self {
+    pub(crate) fn new(room: &RoomType, created_at_ms: i64, resolved: bool) -> Self {
         Self {
             label: room_label(room),
             room_type: room_type_tag(room).to_string(),
@@ -109,12 +109,12 @@ impl RoomRecord {
     }
 
     /// Project this row back into the enum callers use.
-    pub fn room_type(&self) -> RoomType {
+    pub(crate) fn room_type(&self) -> RoomType {
         room_type_from_parts(&self.room_type, &self.label)
     }
 
     /// Pair this row with its id for the read surface.
-    pub fn summarize(&self, id: Uuid) -> RoomSummary {
+    pub(crate) fn summarize(&self, id: Uuid) -> RoomSummary {
         RoomSummary {
             id,
             label: self.label.clone(),
@@ -141,7 +141,7 @@ impl RoomRecord {
 /// byte-identical to pre-ADR behaviour.
 /// Test: `filter_id_falls_back_to_legacy_fold`,
 /// `filter_id_prefers_registered_room`.
-pub fn resolve_room_filter_id(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
+pub(crate) fn resolve_room_filter_id(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
     match kg.store().lookup_room_id(&default_wing_key(room)) {
         Ok(Some(id)) => id,
         Ok(None) => room_to_uuid(room),
@@ -152,36 +152,20 @@ pub fn resolve_room_filter_id(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
     }
 }
 
-/// Resolve `room` to a `room_id`, creating its registry row when absent.
+/// Resolve `room` **within `wing_id`**, creating its registry row when absent.
 ///
-/// Why (ADR-0027 D4.2): the write path used to stamp
-/// `room_id = room_to_uuid(&room)` — a lossy hash with structured collisions
-/// and no way to enumerate what it produced. Routing every write through the
-/// table is what makes a room nameable, listable, and renameable.
+/// Why (ADR-0027 D4.2, D2 pattern 3): the write path used to stamp
+/// `room_id = room_to_uuid(&room)` — a lossy hash with no way to enumerate what
+/// it produced; routing every write through the table makes a room nameable,
+/// listable, and renameable. The wing is part of the canonical room key, so
+/// `engineer`/`Planning` and `pm`/`Planning` mint different ids and are
+/// genuinely different rooms — without the `Custom("engineer-planning")` name
+/// mangling that gave the live palace twelve ad-hoc labels. A pre-T9 caller
+/// passes `DEFAULT_WING_ID`.
 /// What: looks the canonical key up; on a hit returns the stored id verbatim
 /// (so a write into a backfilled legacy room lands on exactly the id its
 /// existing drawers carry); on a miss mints a UUIDv5 and inserts the row and
-/// key in one transaction. Runs the redb work on the blocking pool because
-/// callers are async.
-/// Fail-open: any registry error is logged at `warn!` and the legacy fold is
-/// returned, so a room-registry problem can never fail a memory write — and
-/// the resulting drawer stays recoverable by the next backfill (a UUIDv5 would
-/// not be).
-/// Test: `resolve_or_create_is_idempotent`,
-/// `resolve_or_create_reuses_backfilled_legacy_id`.
-pub async fn resolve_or_create_room(kg: &KnowledgeGraph, room: &RoomType) -> Uuid {
-    resolve_or_create_room_in_wing(kg, room, DEFAULT_WING_ID).await
-}
-
-/// Resolve `room` **within `wing_id`**, creating its registry row when absent.
-///
-/// Why (ADR-0027 D2, pattern 3): the wing is part of the canonical room key, so
-/// `engineer`/`Planning` and `pm`/`Planning` mint different ids and are
-/// genuinely different rooms — without the `Custom("engineer-planning")` name
-/// mangling that gave the live palace twelve ad-hoc labels. This is the write
-/// half of the wing axis; [`resolve_or_create_room`] is this function pinned to
-/// the default wing, which is what every pre-T9 caller gets.
-/// What: as [`resolve_or_create_room`], but keyed on `wing_id`.
+/// key in one transaction, on the blocking pool because callers are async.
 ///
 /// Fail-open on the DEFAULT wing only: the legacy fold is a default-wing id by
 /// construction, so falling back to it for a non-default wing would silently
@@ -190,7 +174,7 @@ pub async fn resolve_or_create_room(kg: &KnowledgeGraph, room: &RoomType) -> Uui
 /// even when the registry is unwritable.
 /// Test: `wing_scoped_recall_returns_only_that_wing`,
 /// `unscoped_write_still_lands_in_the_default_wing`.
-pub async fn resolve_or_create_room_in_wing(
+pub(crate) async fn resolve_or_create_room_in_wing(
     kg: &KnowledgeGraph,
     room: &RoomType,
     wing_id: Uuid,
@@ -219,7 +203,7 @@ pub async fn resolve_or_create_room_in_wing(
     }
 }
 
-/// Blocking half of [`resolve_or_create_room`].
+/// Blocking half of [`resolve_or_create_room_in_wing`], pinned to the default wing.
 ///
 /// Why: exposed to the crate so the backfill and synchronous callers (CLI
 /// migrate paths) share one implementation rather than re-deriving the
@@ -239,7 +223,7 @@ pub fn resolve_or_create_room_sync(store: &Arc<KgStoreRedb>, room: &RoomType) ->
 /// `wing_id` instead of the default wing, and the stored row records the same
 /// wing so `rooms_in_wing` can find it.
 /// Test: `wing_scoped_recall_returns_only_that_wing`.
-pub fn resolve_or_create_room_in_wing_sync(
+pub(crate) fn resolve_or_create_room_in_wing_sync(
     store: &Arc<KgStoreRedb>,
     room: &RoomType,
     wing_id: Uuid,
@@ -265,7 +249,7 @@ pub fn resolve_or_create_room_in_wing_sync(
 /// `RoomRecord` decoding details.
 /// What: [`KgStoreRedb::list_rooms`] mapped through [`RoomRecord::summarize`].
 /// Test: `create_room_is_idempotent`, `rename_updates_label_and_key`.
-pub fn list_room_summaries(store: &Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>> {
+pub(crate) fn list_room_summaries(store: &Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>> {
     Ok(store
         .list_rooms()?
         .into_iter()
@@ -286,7 +270,8 @@ pub fn list_room_summaries(store: &Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>>
 /// returned. `created` reflects whether THIS call wrote the row.
 /// Test: `create_room_is_idempotent`,
 /// `create_room_returns_the_winner_under_a_race`.
-pub fn create_room(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn create_room(
     store: &Arc<KgStoreRedb>,
     room: &RoomType,
     description: Option<String>,
@@ -321,7 +306,8 @@ pub fn create_room(
 /// is normalised into a canonical key and looked up in `ROOM_KEYS`. Errors
 /// when neither resolves, so a typo can never silently create a room.
 /// Test: `selector_resolves_by_id_and_by_label`.
-pub fn resolve_room_selector(store: &Arc<KgStoreRedb>, selector: &str) -> Result<Uuid> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn resolve_room_selector(store: &Arc<KgStoreRedb>, selector: &str) -> Result<Uuid> {
     if let Ok(id) = Uuid::parse_str(selector.trim())
         && store.get_room(id)?.is_some()
     {
@@ -346,7 +332,12 @@ pub fn resolve_room_selector(store: &Arc<KgStoreRedb>, selector: &str) -> Result
 /// is already owned by a different room — merging is D5 and is deferred.
 /// Test: `rename_changes_no_drawer_rows`, `rename_updates_label_and_key`,
 /// `rename_rejects_a_key_owned_by_another_room`.
-pub fn rename_room(store: &Arc<KgStoreRedb>, id: Uuid, new_label: &str) -> Result<RoomSummary> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn rename_room(
+    store: &Arc<KgStoreRedb>,
+    id: Uuid,
+    new_label: &str,
+) -> Result<RoomSummary> {
     let label = new_label.trim();
     if label.is_empty() {
         anyhow::bail!("room_rename: new_label must be non-empty");

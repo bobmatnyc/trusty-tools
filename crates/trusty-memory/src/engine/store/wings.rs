@@ -83,6 +83,7 @@ pub struct WingSchemaMarker {
 
 /// A decoded wing row plus its id and room population — the read-side view.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct WingSummary {
     pub id: Uuid,
     pub label: String,
@@ -106,6 +107,7 @@ impl WingRecord {
     }
 
     /// Pair this row with its id and room population for the read surface.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub fn summarize(&self, id: Uuid, room_count: usize) -> WingSummary {
         WingSummary {
             id,
@@ -126,6 +128,7 @@ impl WingRecord {
 /// than a silently-merged scope.
 /// What: trims; errors when the result is empty.
 /// Test: `wing_create_rejects_a_blank_label`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn normalize_wing_label(label: &str) -> Result<String> {
     let trimmed = label.trim();
     if trimmed.is_empty() {
@@ -219,6 +222,7 @@ pub fn ensure_default_wing_fail_open(palace_id: &str, kg: &KnowledgeGraph) {
 /// canonical label. `Ok(None)` means "no such wing" — a caller-facing
 /// condition, not an error.
 /// Test: `wing_selector_accepts_id_or_label`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn resolve_wing_selector(kg: &KnowledgeGraph, selector: &str) -> Result<Option<Uuid>> {
     let store = kg.store();
     if let Ok(id) = Uuid::parse_str(selector.trim())
@@ -239,6 +243,7 @@ pub fn resolve_wing_selector(kg: &KnowledgeGraph, selector: &str) -> Result<Opti
 /// one pass rather than re-scanning per wing.
 /// Test: `wing_list_reports_seeded_and_created_wings`,
 /// `wing_list_counts_rooms_per_wing`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn list_wings(kg: &KnowledgeGraph) -> Result<Vec<WingSummary>> {
     let store = kg.store();
     let rooms = store.list_rooms().context("list rooms for wing counts")?;
@@ -292,6 +297,7 @@ pub fn rooms_in_wing(kg: &KnowledgeGraph, wing_id: Uuid) -> Result<HashSet<Uuid>
 /// a wing create has no such caller — it is an explicit operation whose only
 /// sensible failure mode is telling the caller it failed.
 /// Test: `wing_create_is_idempotent`, `wing_create_returns_the_default_wing`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn resolve_or_create_wing_sync(store: &Arc<KgStoreRedb>, label: &str) -> Result<(Uuid, bool)> {
     let label = normalize_wing_label(label)?;
     let key = canonical_wing_key(&label);
@@ -323,8 +329,9 @@ pub fn resolve_or_create_wing_sync(store: &Arc<KgStoreRedb>, label: &str) -> Res
 /// Async wrapper over [`resolve_or_create_wing_sync`].
 ///
 /// Why: the redb work is blocking and every MCP handler is async, so the write
-/// runs on the blocking pool — the same posture `resolve_or_create_room` takes.
+/// runs on the blocking pool — the same posture `resolve_or_create_room_in_wing` takes.
 /// Test: `wing_create_is_idempotent` covers the sync core.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub async fn resolve_or_create_wing(kg: &KnowledgeGraph, label: &str) -> Result<(Uuid, bool)> {
     let store = kg.store();
     let label = label.to_string();
@@ -350,6 +357,7 @@ pub async fn resolve_or_create_wing(kg: &KnowledgeGraph, label: &str) -> Result<
 /// Test: `wing_rename_changes_no_room_or_drawer_rows`,
 /// `wing_rename_retires_the_old_label`, `wing_rename_rejects_a_taken_label`,
 /// `wing_rename_survives_reseed`, `wing_rename_applies_every_effect_together`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn rename_wing_sync(
     store: &Arc<KgStoreRedb>,
     id: Uuid,
@@ -369,6 +377,7 @@ pub fn rename_wing_sync(
 }
 
 /// Async wrapper over [`rename_wing_sync`].
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub async fn rename_wing(kg: &KnowledgeGraph, id: Uuid, new_label: &str) -> Result<WingSummary> {
     let store = kg.store();
     let new_label = new_label.to_string();
@@ -381,6 +390,7 @@ pub async fn rename_wing(kg: &KnowledgeGraph, id: Uuid, new_label: &str) -> Resu
 ///
 /// Why: `rename_wing_sync` already holds an `Arc<KgStoreRedb>` and has no
 /// `KnowledgeGraph` to hand, so it cannot call [`rooms_in_wing`].
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 fn rooms_in_wing_from(store: &Arc<KgStoreRedb>, wing_id: Uuid) -> Result<usize> {
     Ok(store
         .list_rooms()

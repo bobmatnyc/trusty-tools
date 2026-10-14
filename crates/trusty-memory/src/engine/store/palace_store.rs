@@ -142,7 +142,7 @@ impl PalaceStoreError {
     /// wait can change from a transient failure.
     /// What: `true` for the six `Format*` variants.
     /// Test: `format_errors_are_not_retried`.
-    pub fn is_format_refusal(&self) -> bool {
+    pub(crate) fn is_format_refusal(&self) -> bool {
         matches!(
             self,
             Self::FormatTooNew { .. }
@@ -157,7 +157,8 @@ impl PalaceStoreError {
     /// The variant's name, for callers that report it on the wire (#9274).
     ///
     /// Test: `every_new_error_arm_names_its_variant`.
-    pub fn variant_name(&self) -> &'static str {
+    #[cfg(test)]
+    pub(crate) fn variant_name(&self) -> &'static str {
         match self {
             Self::Io { .. } => "Io",
             Self::Json { .. } => "Json",
@@ -295,7 +296,7 @@ impl PalaceStore {
     /// pins the location rule;
     /// `load_palace_missing_returns_not_found` pins the benign arm and
     /// `load_palace_propagates_an_unstattable_palace_json` the error arm.
-    pub fn load_palace(data_dir: &Path) -> Result<Palace> {
+    pub(crate) fn load_palace(data_dir: &Path) -> Result<Palace> {
         let target = data_dir.join(PALACE_JSON);
         // #5549: `exists()` reported a stat we are denied as "no metadata here".
         let present = target
@@ -358,7 +359,7 @@ impl PalaceStore {
     /// makes that palace permanently invisible with no diagnostic while the
     /// destructive callers quietly pass over it. `bm25_backfill`'s private
     /// enumeration already made the same call for the same reason.
-    pub fn list_palaces(registry_dir: &Path) -> Result<Vec<Palace>> {
+    pub(crate) fn list_palaces(registry_dir: &Path) -> Result<Vec<Palace>> {
         // #5532: `exists()` reports a stat we are denied as "absent", silently
         // turning an unreadable registry into an empty one.
         let present = registry_dir
@@ -442,7 +443,7 @@ impl PalaceStore {
     /// `identity.txt` keeps it human-editable.
     /// What: Atomic write of `text` to `<data_dir>/identity.txt`.
     /// Test: `identity_txt_roundtrip` saves and reloads.
-    pub fn save_identity(_palace_id: &PalaceId, text: &str, data_dir: &Path) -> Result<()> {
+    pub(crate) fn save_identity(_palace_id: &PalaceId, text: &str, data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir).map_err(|e| PalaceStoreError::io(data_dir, e))?;
         let target = data_dir.join(IDENTITY_TXT);
         let tmp = data_dir.join(format!("{IDENTITY_TXT}.tmp"));
@@ -460,7 +461,7 @@ impl PalaceStore {
     /// `Ok(Some(text))` on success.
     /// Test: `identity_txt_roundtrip` covers the present case; missing returns
     /// `None` is exercised by `load_identity_missing_returns_none`.
-    pub fn load_identity(data_dir: &Path) -> Result<Option<String>> {
+    pub(crate) fn load_identity(data_dir: &Path) -> Result<Option<String>> {
         let target = data_dir.join(IDENTITY_TXT);
         // intentional fail-open (ADR-0045 decision 4): `exists()` reads a
         // denied stat as "absent" here as everywhere, and that is the safe

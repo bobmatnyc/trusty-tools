@@ -6,7 +6,7 @@
 //! What: `KnowledgeGraph` impl for `query_active`, `list_subjects`,
 //! `list_subjects_with_counts`, `list_active`, `count_active_triples`,
 //! `node_count`, `edge_count`, `community_count`, `checkpoint`,
-//! `upsert_drawer`, `delete_drawer`, `delete_drawer_sync`, `load_drawer_ids`,
+//! `upsert_drawer`, `delete_drawer`, `load_drawer_ids`,
 //! `load_drawers`, `knowledge_gaps`, `is_read_only`,
 //! `cascade_delete_by_drawer`, `retract_triple`, `assert_sync`,
 //! `upsert_drawer_sync`, `store`, `dump_all_triples`.

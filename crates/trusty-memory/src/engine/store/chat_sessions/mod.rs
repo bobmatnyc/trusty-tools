@@ -23,14 +23,16 @@
 //! was removed in issue #989 (all palaces confirmed migrated).
 
 mod assets;
-pub use assets::ChatImageAsset;
+#[cfg(feature = "server")]
+pub(crate) use assets::ChatImageAsset;
 // #9282: the snapshot copies every chat table by name.
 pub(crate) use assets::ASSETS as CHAT_ASSETS_TABLE;
 mod store;
 mod types;
 
 pub use store::ChatSessionStore;
-pub use types::{ChatMessage, ChatSession, ChatSessionMeta, ChatSessionStoreError};
+// #9278: only ChatMessage has a caller outside the library (trusty-agents).
+pub use types::ChatMessage;
 
 #[cfg(test)]
 mod tests {

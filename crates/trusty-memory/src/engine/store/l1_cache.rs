@@ -11,7 +11,6 @@
 use crate::engine::palace::Drawer;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 use thiserror::Error;
 
 /// Filename for the L1 cache snapshot.
@@ -50,6 +49,8 @@ pub enum L1CacheError {
         #[source]
         source: serde_json::Error,
     },
+    // #9278: only the test-only `L1Cache::is_stale` constructs it.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[error("system time error: {0}")]
     Time(String),
 }
@@ -183,6 +184,7 @@ impl L1Cache {
     /// if the snapshot's age is `<= max_age_secs`.
     /// Test: `l1_cache_stale` writes a snapshot, asserts not stale at 60s and
     /// stale at 0s.
+    #[cfg(test)]
     pub fn is_stale(data_dir: &Path, max_age_secs: u64) -> Result<bool> {
         let target = data_dir.join(L1_CACHE_JSON);
         if !target.exists() {
@@ -192,7 +194,7 @@ impl L1Cache {
         let modified = meta
             .modified()
             .map_err(|e| L1CacheError::io(target.clone(), e))?;
-        let age = SystemTime::now()
+        let age = std::time::SystemTime::now()
             .duration_since(modified)
             .map_err(|e| L1CacheError::Time(e.to_string()))?;
         // Compare in milliseconds so a 0-second tolerance treats any
