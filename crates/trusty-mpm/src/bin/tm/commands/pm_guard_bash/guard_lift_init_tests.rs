@@ -31,6 +31,32 @@ fn a_guard_lift_at_init_is_denied_in_every_spelling() {
     }
 }
 
+/// #8436: quoting or escaping splits the flag in the command text and the
+/// shell rejoins it, so the verdict is taken on the normalised tokens.
+#[test]
+fn a_quote_split_or_escaped_lift_is_denied() {
+    for command in [
+        "tm fleet init --guard\"\"-lift",
+        "tm fleet init --guard-l'i'ft",
+        "tm fleet init \"--guard\"-lift",
+        "tm fleet init --guard\\-lift",
+        "tm fleet init --gu\\ard-lift",
+        "tm fleet init --dir x --guard''-lift=true",
+        "bash -c 'tm fleet init --guard\"\"-lift'",
+        "sh -c \"tm fleet init --guard-l'i'ft\"",
+        "scripts/init.sh --guard\"\"-lift",
+        "ARCHITECT_GUARD_\"\"LIFT=1 scripts/init.sh",
+        "ARCHITECT_GUARD_LIFT=\"\"1 bash scripts/init.sh",
+        "env ARCHITECT_GUARD_L'I'FT=1 bash scripts/init.sh",
+        "tm fleet init --guard\"\"-lift 'unclosed",
+    ] {
+        assert!(
+            evaluate_guard_lift_init(command).is_some(),
+            "expected deny: {command}"
+        );
+    }
+}
+
 #[test]
 fn an_unparseable_command_naming_the_lift_is_denied() {
     assert!(evaluate_guard_lift_init("tm fleet init --guard-lift 'unclosed").is_some());
@@ -49,6 +75,8 @@ fn everything_else_passes() {
         "git commit -m 'docs: tm fleet init --guard-lift is the owner choice'",
         "tm fleet --help",
         "ARCHITECT_GUARD_LIFT=0 scripts/init.sh",
+        "tm fleet init --no-guard\"\"-lift",
+        "git commit -m \"docs: tm fleet init --guard\"\"-lift is the owner choice\"",
     ] {
         assert_eq!(evaluate_guard_lift_init(command), None, "{command}");
     }
