@@ -24,8 +24,7 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
-use crate::engine::share::ShareError;
-use crate::engine::store::kg::KgError;
+use crate::engine::store::kg::internal_of;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
 use std::path::{Path, PathBuf};
@@ -485,21 +484,20 @@ pub(crate) struct IncompatibleFormatRefused {
 ///
 /// Why: the retry loops must not spend their backoff window on a condition that
 /// cannot change (issue #4911).
-/// What: downcasts through any `.context()` layers the caller added, and into
-/// the internal error of a root `KgError`.
+/// What: downcasts through any `.context()` layers the caller added, and
+/// recurses into the internal error any typed wrapper in the chain boxes.
 /// Test: `refusal_is_recognised_through_a_context_layer`,
 /// `knowledge_graph_open_refusals_stay_classified`,
-/// `share_error_keeps_typed_sources_visible_to_the_classifiers`.
+/// `share_error_keeps_typed_sources_visible_to_the_classifiers`,
+/// `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`.
 pub(crate) fn is_incompatible_format_refusal(err: &anyhow::Error) -> bool {
-    // #9278: a typed `KnowledgeGraph::open` boxes the refusal in `KgError::Other`.
-    let boxed = err.downcast_ref::<KgError>().and_then(KgError::internal);
-    // #9278 T3a: `ShareError::Other` boxes any internal error, a `KgError` too.
-    let share = err
-        .downcast_ref::<ShareError>()
-        .and_then(ShareError::internal);
+    // #9278 M1: `KgError`, `HnswStoreError`, `ShareError` and `EngineError`
+    // box the refusal in `Other`.
     err.downcast_ref::<IncompatibleFormatRefused>().is_some()
-        || boxed.is_some_and(|e| e.downcast_ref::<IncompatibleFormatRefused>().is_some())
-        || share.is_some_and(is_incompatible_format_refusal)
+        || err
+            .chain()
+            .filter_map(internal_of)
+            .any(is_incompatible_format_refusal)
 }
 
 /// Open `path` exclusively for a writer, retrying through a brief

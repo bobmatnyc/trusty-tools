@@ -184,6 +184,16 @@ impl HnswStoreError {
             Err(e) => Self::Other(Box::new(Internal(e))),
         }
     }
+
+    /// The internal error `Other` carries, for the crate's open classifiers
+    /// (#9278 T3b-1, M1).
+    /// Test: `a_refusal_boxed_in_any_wrapper_other_is_seen_by_both_classifiers`.
+    pub(crate) fn internal(&self) -> Option<&anyhow::Error> {
+        match self {
+            Self::Other(b) => b.downcast_ref::<Internal>().map(|i| &i.0),
+            _ => None,
+        }
+    }
 }
 
 mod alloc;
