@@ -54,12 +54,12 @@ fn engine_error_from_internal_maps_each_variant_and_keeps_text() {
     assert!(!is_format_refusal(&e) && !is_incompatible_format_refusal(&e));
 }
 
-/// #9278 T3b-1, Q7 not applied: a `PalaceStoreError` under a `.context()` is
-/// `Other` and keeps the prefix; the classifiers still see the refusal.
+/// #9278 T3b-1, Q7 (provisional): a `PalaceStoreError` under a `.context()`
+/// is `Palace` and prints only its own text.
 #[test]
-fn engine_error_of_a_contexted_palace_error_keeps_its_prefix() {
+fn engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix() {
     let e = EngineError::from_internal(anyhow::Error::from(too_new()).context("open KG for p"));
-    assert!(matches!(e, EngineError::Other(_)), "{e:?}");
-    assert_eq!(format!("{e:#}"), format!("open KG for p: {}", too_new()));
+    assert!(matches!(e, EngineError::Palace(_)), "{e:?}");
+    assert_eq!(format!("{e:#}"), too_new().to_string());
     assert!(is_format_refusal(&anyhow::Error::from(e)));
 }

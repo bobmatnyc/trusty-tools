@@ -28,20 +28,13 @@ pub enum EngineError {
 impl EngineError {
     /// Map an internal `anyhow` error to its variant; the first match wins.
     ///
-    /// What: an `EngineError` or a `PalaceStoreError` at the root comes back
-    /// as its variant; the rest is `Other`, which keeps the whole chain's text.
+    /// What: an `EngineError` or a root `PalaceStoreError` (under any
+    /// `.context()`) comes back as its variant, without the context prefix
+    /// (#9278 Q7, provisional); the rest is `Other`, which keeps the whole
+    /// chain's text.
     /// Test: `engine_error_from_internal_maps_each_variant_and_keeps_text`,
-    /// `engine_error_of_a_contexted_palace_error_keeps_its_prefix`.
+    /// `engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix`.
     pub(crate) fn from_internal(e: anyhow::Error) -> Self {
-        // #9278 Q7 (provisional): a typed root under a `.context()` stays in
-        // `Other`, so its prefix is kept.
-        let bare = e
-            .chain()
-            .next()
-            .is_some_and(|c| c.is::<EngineError>() || c.is::<PalaceStoreError>());
-        if !bare {
-            return Self::Other(Box::new(Internal(e)));
-        }
         let e = match e.downcast::<EngineError>() {
             Ok(x) => return x,
             Err(e) => e,
