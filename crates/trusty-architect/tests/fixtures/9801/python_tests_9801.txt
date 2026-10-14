@@ -1,0 +1,27 @@
+# #9801 slice 1: every prototype test this slice ports, by Python name.
+# tests/ported_names.rs fails when one has no Rust test of the same name
+# preceded by a `// Python: <name>` line. Source: the Architect prototype's
+# scripts/test_usage.py at 0d1ef3b (usage.py unchanged since 76a5a12).
+#
+# Not ported, and why:
+# - test_parse_usage_capture_sample, test_parse_usage_capture_model_block_and_garbage,
+#   test_time_only_reset_rolls_to_next_day: parse_usage_capture/parse_reset serve
+#   `usage.py ingest`, which usage-probe.sh runs; the poller never calls them.
+# - test_statusline_tee_caches_and_passes_through: statusline-tee.sh, a shell hook.
+# - test_usage_probe_types_reads_escapes_and_ingests,
+#   test_usage_probe_never_types_over_a_draft_or_a_running_turn: usage-probe.sh,
+#   which the port launches unchanged.
+# - The format_plan assertion inside test_plan_names_best_next_account_and_skips_exhausted_5h:
+#   format_plan is the `usage.py plan` CLI text, not poller output.
+test_projection_math_masa_pair
+test_no_rate_from_one_sample_or_falling_or_gap
+test_reset_passed_counts_as_zero_and_is_flagged_inferred
+test_plan_names_best_next_account_and_skips_exhausted_5h
+test_plan_no_cutover_when_healthy_and_limit_reached_means_now
+test_runway_capacity_hours_and_gap
+test_alerts_week_thresholds_and_5h_exhaustion_name_next_account
+test_alert_detail_fits_poller_cap
+test_sample_cache_records_matching_account_only
+test_cache_rejected_when_windows_equal_previous_accounts
+test_poll_step_probes_on_account_change_and_failure_cannot_break_cycle
+test_poll_step_probes_hourly_not_more

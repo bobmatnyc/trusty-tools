@@ -22,6 +22,8 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use cycle_support::{Env, QuietHost, TestResult};
+use trusty_architect::poller::steps::notify_macos::RecordingNotifier;
+use trusty_architect::poller::steps::usage::RecordingProbe;
 use trusty_architect::poller::{PollSession, PollState, Runner, WakeAll};
 use trusty_architect::{FakeClock, SystemTmux};
 
@@ -100,6 +102,8 @@ fn live_cycle_renames_exactly_and_sends_nothing() -> TestResult {
         probe: &QuietHost,
         triage: &WakeAll,
         config: &env.config,
+        usage_probe: &RecordingProbe::default(),
+        notifier: &RecordingNotifier::default(),
         dry_run: false,
     };
     let mut session = PollSession::new(PollState::default());
