@@ -694,5 +694,40 @@ grep -v 'socket_path' "$TMP/base.api" > "$TMP/final-clean.api"
 grep -v 'socket_path' "$TMP/base.tsv" > "$TMP/case.tsv"
 run_case final-passes-with-no-marker 0 '6 audited path(s) match' "$TMP/final-clean.api" --final
 
+# 142-154: --base-audit compares each head marker with the base branch's audit
+# table (R6). A marker may disappear; it may not appear, move or change tag,
+# whatever the counts and ceilings say. The flags fail closed like --base-ratchet.
+BA="$TMP/base-audit.tsv"
+BAMSG="is not in the base audit table"
+pending_case b-retag '' "$LOAD" method KEEP "$AP2" "$LOADL"
+cp "$TMP/base.tsv" "$BA"
+printf '%s\tmethod\tKEEP\tanyhow-pending T1: tests/a.rs\tA2c\n' "$LOAD" >> "$BA"
+run_case base-audit-retag-fails 1 "RATCHET audit $LOAD: anyhow-pending T2 $BAMSG" "$TMP/b-retag.api" --base-audit "$BA"
+cp "$TMP/case.tsv" "$BA"
+run_case base-audit-same-markers-pass 0 '8 audited path(s) match' "$TMP/b-retag.api" --base-audit "$BA"
+cp "$TMP/base.tsv" "$BA"
+run_case base-audit-new-marker-fails 1 "RATCHET audit $LOAD: anyhow-pending T2 $BAMSG" "$TMP/b-retag.api" --base-audit "$BA"
+# A pure removal: the base marker is gone, both ceilings fall, both flags pass.
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+cp "$TMP/base.tsv" "$BA"
+printf '%s\tmethod\tKEEP\t%s\tA2c\n' "$LOAD" "$AP2" >> "$BA"
+RATCHET_FIXTURE="$TMP/r.tsv"
+ratchet_file "$RATCHET_FIXTURE" 0:0 1:0 0:0 1:1 0:0 0:0 0:0 0:0
+ratchet_file "$TMP/base-r.tsv" 0:0 1:1 0:0 1:1 0:0 0:0 0:0 0:0
+run_case base-audit-pure-removal-passes 0 '7 audited path(s) match' "$TMP/base.api" --base-ratchet "$TMP/base-r.tsv" --base-audit "$BA"
+RATCHET_FIXTURE=''
+rm -f "$TMP/no-base-audit.tsv"
+run_case base-audit-file-missing 2 'no base audit table at' "$TMP/base.api" --base-audit "$TMP/no-base-audit.tsv"
+: > "$TMP/empty-base-audit.tsv"
+run_case base-audit-file-empty 2 'bad base audit header at line 1' "$TMP/base.api" --base-audit "$TMP/empty-base-audit.tsv"
+tail -n +2 "$TMP/base.tsv" > "$TMP/headerless-base-audit.tsv"
+run_case base-audit-file-headerless 2 'bad base audit header at line 1' "$TMP/base.api" --base-audit "$TMP/headerless-base-audit.tsv"
+head -n 1 "$TMP/base.tsv" > "$TMP/headonly-base-audit.tsv"
+run_case base-audit-file-no-rows 2 'no data row in the base audit table' "$TMP/base.api" --base-audit "$TMP/headonly-base-audit.tsv"
+run_case base-audit-without-path 2 '--base-audit needs a path' "$TMP/base.api" --base-audit
+run_case base-audit-empty-path 2 '--base-audit needs a path' "$TMP/base.api" --base-audit ''
+# An unset variable expands to '': it must not switch R3 off.
+run_case base-ratchet-empty-path 2 '--base-ratchet needs a path' "$TMP/base.api" --base-ratchet ''
+
 echo "check_engine_api_audit_selftest: $PASSED passed, $FAILED failed (bash $BASH_VERSION)"
 [ "$FAILED" -eq 0 ]
