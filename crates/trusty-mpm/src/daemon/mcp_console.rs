@@ -80,7 +80,13 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Test: `supervisor_status_reports_fleet_and_auto_resume`.
 async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
     let mgr = state.session_manager().await;
-    let records = mgr.list().await;
+    let mut records = mgr.list().await;
+    // #8394: the statusline's context readings, keyed by Claude session id.
+    crate::supervisor::metrics::attach_context_usage(
+        &mut records,
+        &FrameworkPaths::default().root,
+        Utc::now(),
+    );
     let mut fleet = FleetMetrics::from_records(&records);
     // #6288: `from_records` leaves `run_stats` at its default — those counters
     // live in the separate supervisor process. Merge in what it published.

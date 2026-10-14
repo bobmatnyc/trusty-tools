@@ -14,6 +14,7 @@ use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use trusty_mpm::core::context_usage::{ContextUsage, record_context_usage};
 
 /// Persist this tick's figures under the framework root, logging a failure.
 ///
@@ -42,7 +43,31 @@ pub(crate) fn persist_context_usage_at(
     now: DateTime<Utc>,
     log: &mut dyn Write,
 ) {
-    let _ = (root, raw, now, log);
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    let session_id = payload
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if session_id.is_empty() {
+        return;
+    }
+    let Some(usage) = ContextUsage::from_statusline_json(&payload, now) else {
+        return;
+    };
+    let failure = match root {
+        None => "no framework root resolves".to_string(),
+        Some(root) => match record_context_usage(root, session_id, &usage) {
+            Ok(_) => return,
+            Err(e) => e.to_string(),
+        },
+    };
+    tracing::warn!(session_id, error = %failure, "context usage not recorded");
+    let _ = writeln!(
+        log,
+        "tm statusline: context usage not recorded for session {session_id}: {failure}"
+    );
 }
 
 #[cfg(test)]

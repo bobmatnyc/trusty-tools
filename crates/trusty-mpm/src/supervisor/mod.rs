@@ -330,10 +330,16 @@ impl<C: LlmClassifier + 'static> Supervisor<C> {
     /// Why: the published snapshot must reflect both the authoritative session
     /// store AND what the supervisor itself has done; this composes the two.
     /// What: derives [`FleetMetrics::from_records`] from `mgr.list()` and copies the
-    /// live `run_stats` in.
+    /// live `run_stats` in. #8394: first attaches each record's context reading
+    /// from the usage store under the metrics file's root.
     /// Test: `supervisor_snapshot_reflects_fleet`.
     pub async fn snapshot(&self) -> FleetMetrics {
-        let records = self.mgr.list().await;
+        let mut records = self.mgr.list().await;
+        // #8394: `metrics_path` is `<root>/supervisor-metrics.json`, and the
+        // statusline writes its readings under the same root.
+        if let Some(root) = self.metrics_path.parent() {
+            metrics::attach_context_usage(&mut records, root, chrono::Utc::now());
+        }
         let mut m = FleetMetrics::from_records(&records);
         m.run_stats = self.stats.clone();
         m

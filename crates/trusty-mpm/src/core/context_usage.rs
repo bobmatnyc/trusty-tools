@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::session_record::{
-    KIND_CONTEXT_USAGE, read_session_record, session_record_path_in,
+    KIND_CONTEXT_USAGE, read_session_record, session_record_dir_in, session_record_path_in,
 };
 
 /// Seconds after which a reading is marked [`stale`](ContextUsage::stale).
@@ -159,8 +159,30 @@ impl ContextUsage {
     /// `null_and_absent_figures_stay_none`,
     /// `a_payload_with_neither_object_records_nothing`.
     pub fn from_statusline_json(payload: &Value, now: DateTime<Utc>) -> Option<Self> {
-        let _ = (payload, now);
-        None
+        let window = payload.get("context_window").filter(|v| v.is_object());
+        let limits = payload.get("rate_limits").filter(|v| v.is_object());
+        if window.is_none() && limits.is_none() {
+            return None;
+        }
+        let u64_at = |key: &str| window.and_then(|w| w.get(key)).and_then(Value::as_u64);
+        let plan = limits.and_then(|l| {
+            let five_hour = rate_limit_window(l.get("five_hour"));
+            let seven_day = rate_limit_window(l.get("seven_day"));
+            (five_hour.is_some() || seven_day.is_some()).then_some(PlanUsage {
+                five_hour,
+                seven_day,
+                updated_at: now,
+                stale: false,
+            })
+        });
+        Some(Self {
+            total_input_tokens: u64_at("total_input_tokens"),
+            context_window_size: u64_at("context_window_size"),
+            used_percentage: finite_f64(window.and_then(|w| w.get("used_percentage"))),
+            plan,
+            updated_at: now,
+            stale: false,
+        })
     }
 
     /// Set [`Self::stale`] (and the plan's) from the reading's age at `now`.
@@ -169,7 +191,47 @@ impl ContextUsage {
     /// in the future (clock skew) is not stale.
     /// Test: `an_old_reading_reads_back_stale`.
     pub fn mark_staleness(&mut self, now: DateTime<Utc>) {
-        let _ = now;
+        self.stale = is_stale(self.updated_at, now);
+        if let Some(plan) = self.plan.as_mut() {
+            plan.stale = is_stale(plan.updated_at, now);
+        }
+    }
+}
+
+/// Whether a reading taken at `updated_at` is stale at `now`.
+fn is_stale(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now.signed_duration_since(updated_at).num_seconds() > STALE_AFTER_SECS
+}
+
+/// A number that is present and finite; anything else is absent.
+fn finite_f64(value: Option<&Value>) -> Option<f64> {
+    value.and_then(Value::as_f64).filter(|v| v.is_finite())
+}
+
+/// One `rate_limits` window, or `None` when it carries no figure.
+fn rate_limit_window(value: Option<&Value>) -> Option<RateLimitWindow> {
+    let window = value.filter(|v| v.is_object())?;
+    let used_percentage = finite_f64(window.get("used_percentage"));
+    let resets_at = window.get("resets_at").and_then(parse_resets_at);
+    (used_percentage.is_some() || resets_at.is_some()).then_some(RateLimitWindow {
+        used_percentage,
+        resets_at,
+    })
+}
+
+/// `resets_at` as epoch seconds (integer or float) or an RFC 3339 string.
+fn parse_resets_at(value: &Value) -> Option<DateTime<Utc>> {
+    match value {
+        Value::Number(n) => {
+            let secs = n
+                .as_i64()
+                .or_else(|| n.as_f64().map(|f| f.trunc() as i64))?;
+            DateTime::from_timestamp(secs, 0)
+        }
+        Value::String(s) => DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|t| t.with_timezone(&Utc)),
+        _ => None,
     }
 }
 
@@ -189,9 +251,30 @@ pub fn record_context_usage(
     session_id: &str,
     usage: &ContextUsage,
 ) -> Result<bool, ContextUsageError> {
-    let _ = (root, session_id, usage, session_record_path_in);
-    let _ = std::io::sink().write_all(b"");
-    Ok(false)
+    let Some(path) = session_record_path_in(root, KIND_CONTEXT_USAGE, session_id) else {
+        return Ok(false);
+    };
+    crate::core::home_write_fence::check(&path); // #8545
+    let bytes = serde_json::to_vec(usage)?;
+    let dir = session_record_dir_in(root, KIND_CONTEXT_USAGE);
+    std::fs::create_dir_all(&dir).map_err(|e| io_error("create", &dir, e))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)
+        .map_err(|e| io_error("create temp file in", &dir, e))?;
+    tmp.write_all(&bytes)
+        .map_err(|e| io_error("write temp file in", &dir, e))?;
+    // On failure `PersistError` drops the temp file.
+    tmp.persist(&path)
+        .map_err(|e| io_error("rename into", &path, e.error))?;
+    Ok(true)
+}
+
+/// Build a [`ContextUsageError::Io`].
+fn io_error(action: &'static str, path: &Path, source: std::io::Error) -> ContextUsageError {
+    ContextUsageError::Io {
+        action,
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// Read the latest reading for `session_id`, with its stale mark set at `now`.
@@ -205,8 +288,14 @@ pub fn read_context_usage(
     session_id: &str,
     now: DateTime<Utc>,
 ) -> Option<ContextUsage> {
-    let _ = (root, session_id, now, read_session_record);
-    None
+    let text = read_session_record(root, KIND_CONTEXT_USAGE, session_id)?;
+    let mut usage: ContextUsage = serde_json::from_str(&text)
+        .inspect_err(
+            |e| tracing::debug!(session_id, error = %e, "context usage record does not parse"),
+        )
+        .ok()?;
+    usage.mark_staleness(now);
+    Some(usage)
 }
 
 #[cfg(test)]

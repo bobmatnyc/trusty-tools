@@ -51,7 +51,12 @@ pub struct SessionContextUsage {
 /// record has no Claude session id or no reading exists. Never writes.
 /// Test: `attach_reads_the_reading_keyed_by_claude_session_id`.
 pub fn attach_context_usage(records: &mut [SessionRecord], root: &Path, now: DateTime<Utc>) {
-    let _ = (records, root, now, read_context_usage);
+    for r in records {
+        r.context_usage = r
+            .claude_session_id
+            .as_deref()
+            .and_then(|id| read_context_usage(root, id, now));
+    }
 }
 
 /// A pending decision surfaced (not answered) by the supervisor.
@@ -158,9 +163,11 @@ impl FleetMetrics {
     /// carrying a `pending_decision` into a [`PendingDecision`] (else an `Active`
     /// record's classifier `blocked_prompt`, #8393), and tracks the
     /// maximum `last_activity_at`. Leaves `run_stats` at its default — the caller
-    /// overlays the supervisor's live counters.
+    /// overlays the supervisor's live counters. #8394: copies each non-terminal
+    /// record's attached `context_usage` (see [`attach_context_usage`]) and keeps
+    /// the plan figures with the newest `updated_at` as `plan_usage`.
     /// Test: `metrics_counts_by_state`, `metrics_surfaces_pending_decisions`,
-    /// `metrics_last_activity_is_max`.
+    /// `metrics_last_activity_is_max`, `fleet_metrics_report_each_live_sessions_context`.
     pub fn from_records(records: &[SessionRecord]) -> Self {
         let mut m = FleetMetrics {
             total: records.len() as u64,
@@ -206,6 +213,21 @@ impl FleetMetrics {
                 m.last_activity_at = Some(match m.last_activity_at {
                     Some(cur) if cur >= ts => cur,
                     _ => ts,
+                });
+            }
+            // #8394: a tombstone's figures are not fleet state.
+            if let Some(ctx) = r.context_usage.as_ref().filter(|_| !r.state.is_terminal()) {
+                if let Some(plan) = ctx.plan.as_ref()
+                    && m.plan_usage
+                        .as_ref()
+                        .is_none_or(|cur| plan.updated_at > cur.updated_at)
+                {
+                    m.plan_usage = Some(plan.clone());
+                }
+                m.context_usage.push(SessionContextUsage {
+                    session_id: r.id.to_string(),
+                    tmux_name: r.tmux_name.clone(),
+                    context: ctx.clone(),
                 });
             }
         }
