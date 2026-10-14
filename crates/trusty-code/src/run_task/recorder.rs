@@ -9,7 +9,8 @@
 //! the inner client unchanged — so the real OpenRouter client and the offline
 //! mock both work behind it.
 //! What: `RecordingLlmClient` holds an inner `Arc<dyn InferenceAdapter>`, a role
-//! label (`"pm"` / `"python-engineer"`), and a shared `Arc<Mutex<Vec<TurnRecord>>>`.
+//! label (`"pm"`, or the delegated agent's name — #8158), and a shared
+//! `Arc<Mutex<Vec<TurnRecord>>>`.
 //! Each `chat` call records the resolved model and the resulting assistant text
 //! plus tool-call names, then returns the inner response verbatim.
 //! Test: `run_task::tests` assert the recorded transcript carries both roles, and
@@ -75,6 +76,30 @@ pub struct TurnRecord {
 /// What: A type alias for the shared vector of `TurnRecord`s.
 /// Test: Exercised by every `run_task` end-to-end test.
 pub type SharedTranscript = Arc<Mutex<Vec<TurnRecord>>>;
+
+/// The per-delegation adapter wrap both run-task paths hand their sub-agent
+/// runner (#8158).
+///
+/// Why: a recorder bound once at construction labelled every delegated turn
+/// with one fixed name, whatever agent `delegate_to_agent` actually ran.
+/// What: for each delegation, wraps the shared adapter in the debug capture
+/// (when enabled) and a [`RecordingLlmClient`], both labelled with the
+/// delegated agent's name, appending to `transcript`.
+/// Test: `run_task::tests::delegated_turns_carry_the_delegated_agents_role`,
+/// `task::executor::tests::delegated_turns_carry_the_delegated_agents_role`.
+pub fn recording_per_agent(
+    transcript: SharedTranscript,
+    debug_sink: Option<Arc<crate::llm::DebugCaptureSink>>,
+) -> crate::runner::AgentLlmFn {
+    Arc::new(move |llm, agent| {
+        let captured = crate::llm::wrap_with_debug_capture(llm, agent, debug_sink.as_ref());
+        Arc::new(RecordingLlmClient::new(
+            captured,
+            agent,
+            Arc::clone(&transcript),
+        ))
+    })
+}
 
 /// A transparent `InferenceAdapter` that records each turn into a shared transcript.
 ///
