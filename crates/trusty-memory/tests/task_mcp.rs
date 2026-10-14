@@ -106,6 +106,8 @@ async fn task_add_and_list_via_mcp() {
 /// Asserts the normal drawer is pruned and the Task drawer survives.
 /// Test: this IS the test.
 #[tokio::test]
+// #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
+#[allow(clippy::field_reassign_with_default)]
 async fn task_drawer_survives_dream_cycle() {
     seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
