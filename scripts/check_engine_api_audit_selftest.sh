@@ -8,7 +8,8 @@
 # What: each case writes a small `cargo public-api` listing and audit table to
 #   a temp dir and runs the gate with `--api-file` and ENGINE_API_AUDIT_TSV.
 #   Failing cases: a NARROW row still listed, a HIDE row still listed, a listed
-#   path with no row, a KEEP row that is not listed. Passing cases: a matching
+#   path with no row (including one under an engine-root re-export stem), a
+#   KEEP row that is not listed. Passing cases: a matching
 #   listing whose lines carry an attribute prefix, a generic fn, a field, a
 #   variant and an impl header; an out-of-scope path and a path that only
 #   shares a scope prefix's stem, both with no row. Errors: an empty listing,
@@ -43,7 +44,7 @@ pub struct $K::Store
 pub $K::Store::path: std::path::PathBuf
 impl $K::Store
 pub fn $K::Store::open<P: core::convert::AsRef<std::path::Path>>(P) -> anyhow::Result<Self>
-pub fn trusty_memory::engine::palace::Drawer::new() -> Self
+pub fn trusty_memory::socket_path() -> std::path::PathBuf
 EOF
 
 # The table that matches base.api, plus one NARROW and one HIDE row.
@@ -118,10 +119,19 @@ echo 'pub mod trusty_memory::engine::store::brand_new_mod' >> "$TMP/root.api"
 run_case store-root-unaudited 1 'UNAUDITED trusty_memory::engine::store::NewRootReexport' "$TMP/root.api"
 run_case store-root-new-mod 1 'UNAUDITED trusty_memory::engine::store::brand_new_mod' "$TMP/root.api"
 
+# A4: an engine-root re-export name is a stem too; a name that only shares its
+# start (`PalaceHandleExt`) is not under it.
+cp "$TMP/base.api" "$TMP/engine-root.api"
+echo 'pub fn trusty_memory::engine::PalaceHandle::brand_new(&self)' >> "$TMP/engine-root.api"
+run_case engine-root-unaudited 1 'UNAUDITED trusty_memory::engine::PalaceHandle::brand_new' "$TMP/engine-root.api"
+cp "$TMP/base.api" "$TMP/engine-root-stem.api"
+echo 'pub struct trusty_memory::engine::PalaceHandleExt' >> "$TMP/engine-root-stem.api"
+run_case engine-root-shared-stem 0 '6 audited path(s) match' "$TMP/engine-root-stem.api"
+
 : > "$TMP/empty.api"
 run_case empty-listing 2 'empty listing' "$TMP/empty.api"
 
-echo 'pub fn trusty_memory::engine::palace::Drawer::new() -> Self' > "$TMP/none.api"
+echo 'pub fn trusty_memory::socket_path() -> std::path::PathBuf' > "$TMP/none.api"
 run_case no-scoped-path 2 'no listed path under any scope prefix' "$TMP/none.api"
 
 run_case bad-argument 2 'unknown argument' "$TMP/base.api" --bogus

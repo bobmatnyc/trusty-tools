@@ -43,8 +43,9 @@
 #
 # Test: scripts/check_engine_api_audit_selftest.sh — a matching listing, a
 #   NARROW or HIDE row still listed, an unaudited path, a missing KEEP row, an
-#   out-of-scope path, a prefix that only shares a stem, a DEPRECATE row not
-#   listed, malformed table rows, and the empty-listing and bad-argument errors.
+#   out-of-scope path, a prefix that only shares a stem, an engine-root
+#   re-export stem, a DEPRECATE row not listed, malformed table rows, and the
+#   empty-listing and bad-argument errors.
 #
 # Portability: bash 3.2 (macOS) and bash 5 (Linux CI); awk, sort, comm.
 
@@ -52,12 +53,29 @@
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
-# See #9278: one prefix covers the whole `engine::store` module, so a new
-# submodule or store-root re-export is in scope the moment it appears and fails
-# UNAUDITED until it has a row. `engine::storex` is not under it (the match
-# needs `::` after the prefix).
+# See #9278: one prefix per audited module stem, so a new submodule or
+# re-export is in scope the moment it appears and fails UNAUDITED until it has
+# a row. `engine::storex` is not under `engine::store` (the match needs `::`
+# after the prefix). A4 adds `retrieval`, `registry`, `palace` and
+# `palace_emptiness`, plus the engine-root names `engine/mod.rs` re-exports
+# from them (`engine::PalaceHandle` is where the listing names the
+# PalaceHandle methods); `engine::Room` and `engine::Wing` stay listed so a
+# re-added root re-export of either is audited.
 SCOPE_PREFIXES='
 trusty_memory::engine::store
+trusty_memory::engine::retrieval
+trusty_memory::engine::registry
+trusty_memory::engine::palace
+trusty_memory::engine::palace_emptiness
+trusty_memory::engine::PalaceHandle
+trusty_memory::engine::PalaceRegistry
+trusty_memory::engine::Palace
+trusty_memory::engine::PalaceId
+trusty_memory::engine::Drawer
+trusty_memory::engine::DrawerType
+trusty_memory::engine::RoomType
+trusty_memory::engine::Room
+trusty_memory::engine::Wing
 '
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
