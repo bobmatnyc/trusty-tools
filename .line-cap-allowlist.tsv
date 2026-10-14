@@ -14,4 +14,8 @@
 crates/trusty-mpm/src/daemon/api.rs	1176
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	559
 crates/trusty-search/src/main.rs	570
+python/trusty-architect/scripts/fleet-poll.py	1107
+python/trusty-architect/scripts/token_watch.py	501
+python/trusty-architect/scripts/usage.py	556
+python/trusty-architect/scripts/verify-claim.py	565
 scripts/check_asset_test_filter.py	677

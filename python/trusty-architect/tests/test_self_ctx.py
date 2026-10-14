@@ -44,15 +44,15 @@ def test_newest_transcript_missing_or_empty_dir_returns_none(tmp_path):
 
 
 def test_newest_transcript_skips_a_newer_sdk_cli_file_for_an_older_cli_one(tmp_path):
-    """The question-collector regression (2026-09-27): a `claude -p --agent`
+    """The question-collector.py regression (2026-09-27): a `claude -p --agent`
     run (entrypoint "sdk-cli") lands in the same directory every few minutes
-    and can out-mtime the Architect's own interactive session. Its transcript
+    and can out-mtime the supervisor's own interactive session. Its transcript
     must never be picked over an older, genuinely interactive one."""
     collector = tmp_path / "collector.jsonl"
-    architect = tmp_path / "architect.jsonl"
-    _write(architect, _usage_line({"input_tokens": 999_000}, entrypoint="cli"), 1000)
+    supervisor = tmp_path / "supervisor.jsonl"
+    _write(supervisor, _usage_line({"input_tokens": 999_000}, entrypoint="cli"), 1000)
     _write(collector, _usage_line({"input_tokens": 1}, entrypoint="sdk-cli"), 9000)  # newer
-    assert sc.newest_transcript(str(tmp_path)) == str(architect)
+    assert sc.newest_transcript(str(tmp_path)) == str(supervisor)
     assert sc.self_ctx_tokens(str(tmp_path)) == 999_000
 
 
@@ -141,3 +141,17 @@ def test_self_ctx_tokens_none_when_only_sdk_cli_transcripts_exist(tmp_path):
     f = tmp_path / "collector.jsonl"
     f.write_text(_usage_line({"input_tokens": 999_000}, entrypoint="sdk-cli"))
     assert sc.self_ctx_tokens(str(tmp_path)) is None
+
+
+def test_default_dir_derives_from_repo_root():
+    root = os.path.dirname(SCRIPTS)
+    assert sc.REPO_ROOT == root
+    assert sc.DEFAULT_DIR == sc.transcript_dir_for(root)
+    assert sc.DEFAULT_DIR.startswith(sc.PROJECTS_DIR + "/-")
+    assert "/" not in os.path.basename(sc.DEFAULT_DIR)
+
+
+def test_transcript_dir_replaces_slash_and_dot():
+    assert os.path.basename(sc.transcript_dir_for("/srv/x/p/.claude/wt")) == "-srv-x-p--claude-wt"
+    assert os.path.basename(sc.transcript_dir_for("/path/to/architect")) \
+        == "-path-to-architect"

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""self-ctx.py — measure the Architect's own context from its Claude Code transcript.
+"""self-ctx.py — measure the supervisor's own context from its Claude Code transcript.
 
-Why: the Architect's own tmux pane carries no `ctx N%` status-line field (its
+Why: the supervisor's own tmux pane carries no `ctx N%` status-line field (its
 sessions are skipped from fleet-poll.py's per-pane capture, itself included),
 so the standing self-refresh rule (pause/clear/resume over 40% context) has
 nothing in the pane to read. This module tails the newest INTERACTIVE
 transcript *.jsonl Claude Code writes for this project instead. "Interactive"
 matters: the same directory also fills with short-lived `claude -p --agent`
-transcripts from any `claude -p` helper (the deferred question collector ran
-one every few minutes), and a newest-by-mtime-alone pick can land on one of
-those instead of the Architect's own multi-hour session, under-reporting its
-context and never
+transcripts from scripts/question-collector.py every few minutes, and a
+newest-by-mtime-alone pick can land on one of those instead of the
+supervisor's own multi-hour session, under-reporting its context and never
 alerting (trusty-tools review, 2026-09-27). Claude Code tags every line with
 "entrypoint": "cli" for an interactive session and "sdk-cli" for `claude -p`;
 this module filters on it.
@@ -24,21 +23,18 @@ Returns None when the directory is missing or empty, no candidate is an
 interactive ("cli") transcript, or the chosen one carries no assistant usage
 line — this module never raises for that case; the caller (fleet-poll.py)
 decides what a None means. `default_dir()` resolves the transcript directory
-from CLAUDE_CONFIG_DIR and ARCHITECT_PROJECT_DIR, each with a documented
-default, so no operator path is baked in.
-Test: tests/test_self_ctx.py
+from CLAUDE_CONFIG_DIR and ARCHITECT_PROJECT_DIR; unset, they default to
+trusty-mpm's config dir and this checkout, so no operator path is baked in.
+Test: tests/test_self_ctx.py, tests/test_config.py
 """
 import json
 import os
 import re
 
-# `tm fleet init`'s default Architect project (#8436 ruling Q4).
-DEFAULT_PROJECT_DIR = "~/trusty-mpm-projects/architect"
-# The Claude Code config dir trusty-mpm launches sessions under.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The Claude Code config dir trusty-mpm launches sessions under (#8436).
 DEFAULT_CLAUDE_CONFIG_DIR = "~/.trusty-tools/trusty-mpm/claude-config"
-USAGE_TAIL_START = 65536       # first tail read for usage; grows if not found in it
-ENTRYPOINT_TAIL_START = 4096   # entrypoint is on nearly every line; a small tail suffices
-CANDIDATE_LIMIT = 20           # only this many newest-by-mtime files are considered
+PROJECTS_DIR = os.path.join(os.path.expanduser(DEFAULT_CLAUDE_CONFIG_DIR), "projects")
 
 
 def project_slug(path):
@@ -47,15 +43,26 @@ def project_slug(path):
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def transcript_dir_for(root):
+    """Claude Code names a project's transcript dir after its absolute path with
+    every "/" and "." replaced by "-" (so "/a/.b" becomes "-a--b")."""
+    return os.path.join(PROJECTS_DIR, project_slug(root))
+
+
 def default_dir(environ=None):
-    """<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>, with
-    DEFAULT_CLAUDE_CONFIG_DIR and DEFAULT_PROJECT_DIR standing in for an
-    unset variable. `~` expands; the project path is made absolute first."""
+    """<CLAUDE_CONFIG_DIR>/projects/<slug of ARCHITECT_PROJECT_DIR>; an unset
+    variable falls back to DEFAULT_CLAUDE_CONFIG_DIR and to this checkout
+    (REPO_ROOT). `~` expands; the project path is made absolute first."""
     env = os.environ if environ is None else environ
     config = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or DEFAULT_CLAUDE_CONFIG_DIR)
-    project = os.path.abspath(os.path.expanduser(
-        env.get("ARCHITECT_PROJECT_DIR") or DEFAULT_PROJECT_DIR))
+    project = os.path.abspath(os.path.expanduser(env.get("ARCHITECT_PROJECT_DIR") or REPO_ROOT))
     return os.path.join(config, "projects", project_slug(project))
+
+
+DEFAULT_DIR = transcript_dir_for(REPO_ROOT)
+USAGE_TAIL_START = 65536       # first tail read for usage; grows if not found in it
+ENTRYPOINT_TAIL_START = 4096   # entrypoint is on nearly every line; a small tail suffices
+CANDIDATE_LIMIT = 20           # only this many newest-by-mtime files are considered
 
 
 def _scan_tail(path, want, start):
