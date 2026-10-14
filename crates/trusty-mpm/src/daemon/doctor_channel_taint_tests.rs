@@ -181,6 +181,132 @@ fn doctor_row_is_unknown_when_delivery_log_unreadable() {
     }
 }
 
+/// A live taint dir for `live-1` and the live set.
+fn live_dir() -> (tempfile::TempDir, std::path::PathBuf, HashSet<String>) {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = channels_taint::taint_dir(home.path());
+    taint_managed_session(&dir, "live-1", "a", &mark()).expect("live");
+    (home, dir, ["live-1".to_owned()].into())
+}
+
+/// 🔴 #9873 fix round (a): an unreadable trace or question log adds an
+/// "unreadable" part and never lowers a D09 or delivery `Fail` to `Unknown`.
+#[test]
+fn unreadable_trace_never_hides_a_doctor_fail() {
+    use crate::core::channels_delivery::{DELIVERY_FILE, DeliveryLine, DeliveryState};
+    let (_home, dir, live) = live_dir();
+    std::fs::write(
+        dir.join(channels_taint::REAPPLY_FAILURES_FILE),
+        "{\"session_id\":\"e\"}\n",
+    )
+    .expect("double failure");
+    // A directory where the trace goes: unreadable even as root.
+    std::fs::create_dir_all(dir.join(DELIVERY_FILE)).expect("block the trace");
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    for needle in ["D09", "unreadable"] {
+        assert!(row.message.contains(needle), "{needle}: {}", row.message);
+    }
+    // A delivery `Fail` stands when only the question log is unreadable.
+    let (home, dir, live) = live_dir();
+    trace(
+        &dir,
+        &[
+            DeliveryLine::new(DeliveryState::Pending, "7", "live-1", None),
+            DeliveryLine::new(DeliveryState::Failed, "7", "live-1", Some("send_failed")),
+        ],
+    );
+    std::fs::create_dir_all(dir.with_file_name("questions.jsonl")).expect("block the log");
+    let row = channel_taint_row(&dir, &live);
+    drop(home);
+    if cfg!(feature = "channels") {
+        assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+        for needle in ["Q-7 to asker live-1: delivery failed", "unreadable"] {
+            assert!(row.message.contains(needle), "{needle}: {}", row.message);
+        }
+    }
+}
+
+/// 🔴 #9873 fix round (b): a torn last trace line (ENOSPC, a crash
+/// mid-append) is skipped, and the next record is still read.
+#[test]
+fn torn_last_trace_line_never_swallows_the_next_record() {
+    use crate::core::channels_delivery::{DELIVERY_FILE, DeliveryLine, DeliveryState};
+    use std::io::Write as _;
+    let (_home, dir, live) = live_dir();
+    trace(
+        &dir,
+        &[
+            DeliveryLine::new(DeliveryState::Pending, "6", "live-1", None),
+            DeliveryLine::new(DeliveryState::Delivered, "6", "live-1", None),
+        ],
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(DELIVERY_FILE))
+        .and_then(|mut f| f.write_all(b"{\"v\":1,\"ts\":\"2026"))
+        .expect("torn line");
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Ok, "a torn tail: {}", row.message);
+    trace(
+        &dir,
+        &[DeliveryLine::new(
+            DeliveryState::Failed,
+            "7",
+            "live-1",
+            Some("send_failed"),
+        )],
+    );
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(
+        row.message
+            .contains("Q-7 to asker live-1: delivery failed (send_failed)"),
+        "{}",
+        row.message
+    );
+}
+
+/// 🔴 #9873 fix round (c): a malformed middle trace line is a `Fail` that
+/// names the line, and the lines around it are still read.
+#[test]
+fn malformed_middle_trace_line_is_a_doctor_fail_naming_it() {
+    use crate::core::channels_delivery::{DELIVERY_FILE, DeliveryLine, DeliveryState};
+    use std::io::Write as _;
+    let (_home, dir, live) = live_dir();
+    trace(
+        &dir,
+        &[DeliveryLine::new(
+            DeliveryState::Pending,
+            "6",
+            "live-1",
+            None,
+        )],
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(DELIVERY_FILE))
+        .and_then(|mut f| f.write_all(b"not json\n"))
+        .expect("malformed line");
+    trace(
+        &dir,
+        &[DeliveryLine::new(
+            DeliveryState::Delivered,
+            "6",
+            "live-1",
+            None,
+        )],
+    );
+    let row = channel_taint_row(&dir, &live);
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(
+        row.message.contains("delivery.jsonl line 2: malformed"),
+        "{}",
+        row.message
+    );
+    assert!(!row.message.contains("Q-6"), "Q-6 settled: {}", row.message);
+}
+
 /// 🔴 #9873 (Q4a): a question the table records as resolved with no
 /// delivery line at all (the daemon stopped between `resolve` and the
 /// taint) is a `Fail` naming it and its asker.
