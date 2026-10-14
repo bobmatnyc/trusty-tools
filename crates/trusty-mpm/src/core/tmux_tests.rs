@@ -607,23 +607,16 @@ fn probe_alternate_screen_queries_the_window_scope() {
 #[serial_test::serial]
 #[test]
 fn create_managed_session_confirms_server_before_applying_options() {
-    // #3386 end-to-end (still no live tmux): a fake `tmux` that records
-    // each invocation's tmux sub-command (argv[0]) to a log file, always
-    // succeeds, and echoes back the CONFIGURED history-limit for
-    // `show-options` so the apply-and-verify cycle matches on its first
-    // attempt. This exercises the EXACT choke point the
-    // resume-after-server-death path (`SessionManager::resume` →
-    // `resume_workdir::create_and_verify_pane` → `RealTmuxDriver::
-    // create_session` → `TmuxDriver::create_session`) routes through, so
-    // asserting the recorded order here proves the fix for that path too.
+    // #3386 end-to-end (still no live tmux), revised for #9461: a fake `tmux`
+    // that logs each invocation's whole argv, always succeeds, and echoes back
+    // the CONFIGURED values for `show-options`. The FIRST invocation must carry
+    // every `set-option` before `new-session`, `;`-joined, so the server that
+    // `new-session` starts is the one the options land on. This is the choke
+    // point the resume-after-server-death path routes through.
     //
     // #5040: the options are CONSTRUCTED here and injected, not resolved from
-    // `~/.trusty-mpm/config.toml` on both sides. Reading the host config twice —
-    // once here for the expectation, once inside `create_managed_session` for
-    // the actual — let any concurrently-running test that redirects `$HOME`
-    // answer the two reads from different environments, and this test failed
-    // with no change to a single file it exercises. One value, passed in, cannot
-    // diverge from itself.
+    // `~/.trusty-mpm/config.toml` on both sides, so a concurrently-running test
+    // that redirects `$HOME` cannot answer the two reads differently.
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
     let opts = crate::core::trusty_tools_config::ResolvedTmuxOptions {
@@ -632,7 +625,7 @@ fn create_managed_session_confirms_server_before_applying_options() {
         alternate_screen: false,
     };
     let script = format!(
-        "#!/bin/sh\necho \"$1\" >> '{log}'\ncase \"$1\" in\n{show_options}esac\nexit 0\n",
+        "#!/bin/sh\necho \"$@\" >> '{log}'\ncase \"$1\" in\n{show_options}esac\nexit 0\n",
         log = log.display(),
         show_options = fake_show_options_case(
             &opts.history_limit.to_string(),
@@ -647,37 +640,34 @@ fn create_managed_session_confirms_server_before_applying_options() {
 
     assert!(
         outcome.options_verified,
-        "a fake tmux that echoes back the configured history-limit must verify successfully"
+        "a fake tmux that echoes back the configured values must verify successfully"
     );
-
     let calls = std::fs::read_to_string(&log).unwrap();
-    let lines: Vec<&str> = calls.lines().collect();
-
-    assert_eq!(
-        lines.first(),
-        Some(&"start-server"),
-        "the server must be confirmed up BEFORE any set-option -g (#3386): {lines:?}"
-    );
-    let new_session_pos = lines
+    let first = calls.lines().next().expect("tmux was invoked");
+    let words: Vec<&str> = first.split_whitespace().collect();
+    let new_session = words
         .iter()
-        .position(|l| *l == "new-session")
-        .expect("new-session must still run");
-    let set_option_positions: Vec<usize> = lines
+        .position(|w| *w == "new-session")
+        .unwrap_or_else(|| panic!("the first invocation must create the session: {calls}"));
+    let sets: Vec<usize> = words
         .iter()
         .enumerate()
-        .filter(|(_, l)| **l == "set-option")
+        .filter(|(_, w)| **w == "set-option")
         .map(|(i, _)| i)
         .collect();
-    assert!(
-        !set_option_positions.is_empty(),
-        "the scrollback/mouse options must still be applied: {lines:?}"
+    assert_eq!(
+        sets.len(),
+        3,
+        "all three options, in one invocation: {first}"
     );
     assert!(
-        set_option_positions
-            .iter()
-            .all(|&p| p > 0 && p < new_session_pos),
-        "set-option -g must run strictly AFTER start-server and BEFORE new-session \
-         (#3386 / pre-existing #2398 ordering guarantee): {lines:?}"
+        sets.iter().all(|&p| p < new_session),
+        "every set-option must precede new-session (#2398 ordering): {first}"
+    );
+    assert_eq!(
+        words.iter().filter(|w| **w == ";").count(),
+        3,
+        "the commands must be `;`-separated: {first}"
     );
 }
 
@@ -785,6 +775,62 @@ fn a_fresh_server_gets_the_options_before_the_first_pane() {
     assert!(
         outcome.options_verified,
         "options that landed on the fresh server must report verified"
+    );
+}
+
+/// Why (#9461 fail-open check): a `set-option` tmux rejects ends the command
+/// list, so the chained `new-session` never runs. The pane must still be
+/// created, and the outcome must not claim the options landed before it.
+/// What: the alternate-screen `set-option` fails only in the chained call (a
+/// call that also names `new-session`); the later re-apply succeeds, so only
+/// the "applied before the pane" half can make the outcome unverified.
+/// Test: this test.
+#[serial_test::serial]
+#[test]
+fn a_failed_option_still_creates_the_pane_unverified() {
+    let dir = tempfile::tempdir().unwrap();
+    let reject = "    set-option)\n      if [ \"$starts\" -eq 1 ] && [ \"$prev\" = alternate-screen ]; then\n        echo 'invalid option: alternate-screen' >&2; status=1\n      else\n        echo \"$prev=$last\" >> \"$D/options\"\n      fi ;;\n";
+    let bin = server_model_tmux(dir.path(), "fake-tmux-9461-reject", reject);
+
+    let outcome =
+        create_managed_session_with_options(Some(&bin), "tm-9461-reject", None, spec_9461())
+            .expect("the fake tmux spawns");
+
+    assert!(
+        outcome.output.status.success(),
+        "the pane must still be created: {outcome:?}"
+    );
+    assert!(dir.path().join("sessions").exists());
+    assert!(
+        !outcome.options_verified,
+        "a chain that failed before new-session must never report verified"
+    );
+    // The re-apply after creation still repairs the server globals.
+    assert_eq!(probe_history_limit(&bin), Ok(10_000));
+}
+
+/// Why (#9461): a `new-session` tmux refuses (the #3707 exclusive create on a
+/// taken name) must reach the caller as that refusal, unverified, with no
+/// options probe run against a session that is not this caller's.
+/// Test: this test.
+#[serial_test::serial]
+#[test]
+fn a_refused_new_session_is_returned_unverified() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sessions"), "").unwrap();
+    let refuse = "    new-session) echo 'duplicate session: tm-9461-dup' >&2; status=1 ;;\n";
+    let bin = server_model_tmux(dir.path(), "fake-tmux-9461-dup", refuse);
+
+    let outcome = create_managed_session_exclusive(Some(&bin), "tm-9461-dup", None)
+        .expect("the fake tmux spawns");
+
+    assert!(!outcome.output.status.success());
+    assert!(String::from_utf8_lossy(&outcome.output.stderr).contains("duplicate session"));
+    assert!(!outcome.options_verified);
+    let calls = std::fs::read_to_string(dir.path().join("calls")).unwrap();
+    assert!(
+        !calls.contains("show-options"),
+        "no probe may run after a refused create: {calls}"
     );
 }
 
