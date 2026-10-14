@@ -77,7 +77,7 @@ fn engine_error_from_internal_maps_each_variant_and_keeps_text() {
     assert!(!is_format_refusal(&e) && !is_incompatible_format_refusal(&e));
 }
 
-/// #9278 T3b-1, Q7 (provisional): a `PalaceStoreError` under a `.context()`
+/// #9278 T3b-1, Q7: a `PalaceStoreError` under a `.context()`
 /// is `Palace` and prints only its own text.
 #[test]
 fn engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix() {
@@ -87,7 +87,7 @@ fn engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix() {
     assert!(is_format_refusal(&anyhow::Error::from(e)));
 }
 
-/// #9278 T3c-1, Q7b (provisional): a `KgError`, `HnswStoreError` or
+/// #9278 T3c-1, Q7b: a `KgError`, `HnswStoreError` or
 /// `VerifyNotStored` under a `.context()` is its own variant and prints only
 /// its own text; the classifiers still see a refusal inside.
 #[test]

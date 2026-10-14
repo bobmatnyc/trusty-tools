@@ -44,7 +44,7 @@ impl EngineError {
     ///
     /// What: an `EngineError` or a root `PalaceStoreError` (under any
     /// `.context()`) comes back as its variant, without the context prefix
-    /// (#9278 Q7, provisional); the rest is `Other`, which keeps the whole
+    /// (#9278 Q7); the rest is `Other`, which keeps the whole
     /// chain's text.
     /// Test: `engine_error_from_internal_maps_each_variant_and_keeps_text`,
     /// `engine_error_of_a_contexted_palace_error_is_palace_without_its_prefix`.
@@ -61,8 +61,8 @@ impl EngineError {
     }
 
     /// A root `KgError`, `HnswStoreError` or `VerifyNotStored` (under any
-    /// `.context()`) as its variant, without the context prefix (#9278 Q7b,
-    /// provisional); the rest is `Other`, which keeps the whole chain's text.
+    /// `.context()`) as its variant, without the context prefix (#9278 Q7b);
+    /// the rest is `Other`, which keeps the whole chain's text.
     /// Test: `a_contexted_typed_root_is_its_variant_without_its_prefix`.
     fn from_wrapper(e: anyhow::Error) -> Self {
         let e = match e.downcast::<KgError>() {
