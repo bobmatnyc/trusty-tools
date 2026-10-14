@@ -7,12 +7,16 @@
 //! [`crate::channels::question_table`] — the durable question table (#8433 P2);
 //! [`crate::channels::audit_log`] — the route-change and channel audit (#9832);
 //! [`crate::channels::ask_owner`] — one question DM to a route's owner, posted
-//! by [`crate::channels::slack_bot`] (#9856).
+//! by [`crate::channels::slack_bot`] (#9856); [`crate::channels::inbound`] —
+//! an owner's reply judged, bound and resolved (#9873).
 //! Test: `snapshot_tests.rs`, `bin/tm/commands/egress_guard_policy_tests.rs`,
-//! `question_table_tests.rs`, `audit_log_tests.rs`, `ask_owner_tests.rs`.
+//! `question_table_tests.rs`, `audit_log_tests.rs`, `ask_owner_tests.rs`,
+//! `inbound_tests.rs`.
 
 pub mod ask_owner;
 pub mod audit_log;
+// #9873: the inbound decision (P5).
+pub mod inbound;
 pub mod question_table;
 pub mod readiness;
 pub mod slack_bot;
