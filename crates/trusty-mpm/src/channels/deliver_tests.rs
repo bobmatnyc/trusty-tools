@@ -22,6 +22,9 @@ use crate::session_manager::{ManagedSessionState, SessionKind};
 
 pub(crate) const ASKER: &str = "6f1c1d0e-0000-4000-8000-0000000000a1";
 pub(crate) const CLAUDE: &str = "11111111-2222-4333-8444-555555555555";
+/// The Claude id a `/clear` mid-delivery gives the asker (#9873 fix round).
+const CLAUDE_Y: &str = "22222222-3333-4444-8555-666666666666";
+const CLAUDE_Z: &str = "33333333-4444-4555-8666-777777777777";
 const OWNER: &str = "U0OWNER1";
 
 /// The live Architect's view, in an absolute workspace.
@@ -59,6 +62,12 @@ pub(crate) struct Recorder {
     _tmp: tempfile::TempDir,
     pub(crate) dir: PathBuf,
     pub(crate) view: Result<AskerView, String>,
+    /// #9873 fix round: the views of the second and later reads (the last
+    /// repeats); empty means every read is `view`.
+    pub(crate) later_views: Vec<Result<AskerView, String>>,
+    /// #9873 fix round: a Claude id whose taint write fails.
+    pub(crate) taint_fails_for: Option<String>,
+    reads: Mutex<usize>,
     pub(crate) record_fails: Vec<DeliveryState>,
     /// Also append each line to the real trace in `dir`.
     pub(crate) real_trace: bool,
@@ -68,6 +77,8 @@ pub(crate) struct Recorder {
     pub(crate) lines: Mutex<Vec<DeliveryLine>>,
     /// At each send: whether the Claude id file and the managed marker existed.
     pub(crate) tainted_at_send: Mutex<Vec<(bool, bool)>>,
+    /// At each send: the Claude ids holding a taint file, sorted.
+    pub(crate) ids_at_send: Mutex<Vec<Vec<String>>>,
 }
 
 impl Recorder {
@@ -78,6 +89,9 @@ impl Recorder {
             _tmp: tmp,
             dir,
             view: Ok(live_view()),
+            later_views: Vec::new(),
+            taint_fails_for: None,
+            reads: Mutex::new(0),
             record_fails: Vec::new(),
             real_trace: false,
             send_fails: false,
@@ -85,6 +99,7 @@ impl Recorder {
             sent: Mutex::new(Vec::new()),
             lines: Mutex::new(Vec::new()),
             tainted_at_send: Mutex::new(Vec::new()),
+            ids_at_send: Mutex::new(Vec::new()),
         }
     }
 
@@ -124,7 +139,16 @@ impl DeliverEnv for Recorder {
     async fn asker(&self, managed: &str) -> Result<AskerView, String> {
         assert_eq!(managed, ASKER, "the stored asker is the target");
         self.push("asker");
-        self.view.clone()
+        let read = {
+            let mut reads = self.reads.lock().expect("reads");
+            *reads += 1;
+            *reads
+        };
+        match self.later_views.len() {
+            0 => self.view.clone(),
+            _ if read == 1 => self.view.clone(),
+            n => self.later_views[(read - 2).min(n - 1)].clone(),
+        }
     }
 
     async fn taint(
@@ -134,6 +158,9 @@ impl DeliverEnv for Recorder {
         mark: &TaintMark,
     ) -> Result<(), String> {
         self.push("taint");
+        if self.taint_fails_for.as_deref() == Some(claude_session_id) {
+            return Err("taint directory is read-only".into());
+        }
         channels_taint::taint_managed_session(&self.dir, managed, claude_session_id, mark)
             .map_err(|e| e.to_string())
     }
@@ -161,6 +188,13 @@ impl DeliverEnv for Recorder {
             .lock()
             .expect("tainted")
             .push((self.id_tainted(), marked));
+        let mut ids: Vec<String> = channels_taint::list_taints(&self.dir)
+            .expect("list taints")
+            .iter()
+            .filter_map(|(path, _)| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .collect();
+        ids.sort();
+        self.ids_at_send.lock().expect("ids").push(ids);
         self.sent.lock().expect("sent").push(line.to_owned());
         if self.send_fails {
             return Err("pane %1 is gone".into());
@@ -465,6 +499,66 @@ async fn pending_write_failure_refuses_delivery() {
     let lines = crate::core::channels_delivery::read_deliveries(&rec2.dir).expect("trace");
     let states: Vec<_> = lines.iter().map(|l| l.state).collect();
     assert_eq!(states, [DeliveryState::Pending, DeliveryState::Delivered]);
+}
+
+/// The live Architect's view under Claude id `claude`.
+fn view_as(claude: &str) -> Result<AskerView, String> {
+    Ok(AskerView {
+        claude_session_id: Some(claude.into()),
+        ..live_view()
+    })
+}
+
+/// 🔴 #9873 fix round (HIGH): a `/clear` between the first read of the
+/// asker's Claude id and the managed marker gives the pane a new id Y that
+/// `reapply` never saw; Y must hold a taint file before the send.
+#[tokio::test]
+async fn asker_new_claude_id_at_send_is_tainted_before_delivery() {
+    let mut rec = Recorder::new();
+    rec.later_views = vec![view_as(CLAUDE_Y)];
+    let outcome = deliver(&rec, &resolved("approve")).await;
+    assert_eq!(outcome, Delivery::Delivered);
+    assert_eq!(
+        *rec.ids_at_send.lock().expect("ids"),
+        [vec![CLAUDE.to_owned(), CLAUDE_Y.to_owned()]],
+        "both the first and the new Claude id were tainted before the send"
+    );
+}
+
+/// 🔴 #9873 fix round (HIGH): an id that changes again after the second
+/// taint, a re-read that fails, or a new id that cannot be tainted refuses
+/// the send as `asker_changed`, settled by a `failed` line.
+#[tokio::test]
+async fn asker_claude_id_that_keeps_changing_refuses_delivery() {
+    let mut cases: Vec<(&str, Recorder)> = Vec::new();
+    let mut r = Recorder::new();
+    r.later_views = vec![view_as(CLAUDE_Y), view_as(CLAUDE_Z)];
+    cases.push(("keeps changing", r));
+    let mut r = Recorder::new();
+    r.later_views = vec![Err("record gone".into())];
+    cases.push(("re-read fails", r));
+    let mut r = Recorder::new();
+    r.later_views = vec![view_as(CLAUDE_Y)];
+    r.taint_fails_for = Some(CLAUDE_Y.into());
+    cases.push(("new id taint fails", r));
+    for (case, rec) in &cases {
+        let outcome = deliver(rec, &resolved("approve")).await;
+        assert_eq!(
+            outcome,
+            Delivery::Failed {
+                code: "asker_changed",
+                sent: false
+            },
+            "{case}"
+        );
+        assert!(rec.sent().is_empty(), "{case}: nothing was sent");
+        assert!(rec.id_tainted(), "{case}: the first taint stays");
+        assert_eq!(
+            rec.states().last(),
+            Some(&(DeliveryState::Failed, Some("asker_changed".into()))),
+            "{case}"
+        );
+    }
 }
 
 /// The asker check accepts exactly the live Architect's view.
