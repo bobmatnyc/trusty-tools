@@ -9,11 +9,8 @@
 
 use serde::Deserialize;
 
-use crate::commands::{launch_home::launch_files, project::resolve_dir};
-use crate::formatters::banner::{
-    fallback_session_name, normalize_workdir, print_launch_banner,
-    print_launch_banner_reconnecting, tmux_has_session,
-};
+use crate::commands::{launch_handoff::Handoff, launch_home::launch_files, project::resolve_dir};
+use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
 
 /// RAII guard that kills a tmux session on drop unless explicitly disarmed.
 ///
@@ -105,13 +102,16 @@ impl Drop for LaunchSessionGuard {
 /// [`super::managed_workspace::LaunchDir`]. Two of the three callers here reach
 /// this function with placement already decided, and resolving it again
 /// relocates their session.
+///
+/// #8406: `handoff` decides the end of every path, the reattach included:
+/// [`Handoff::Detach`] prints the session name and pane id and returns.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
 /// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`,
-/// `cli_parses_launch_with_twin`,
+/// `cli_parses_launch_with_twin`, `cli_parses_launch_with_detach`,
 /// `a_twin_worktree_launch_is_refused_before_anything_is_touched`;
 /// `guided_fallback_prepares_the_session_in_the_worktree_not_the_base_clone`
 /// covers the composed fallback path.
-#[allow(clippy::too_many_arguments)] // #8878: `twin` is the eighth.
+#[allow(clippy::too_many_arguments)] // #8878 `twin`, #8406 `handoff`.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
@@ -121,6 +121,7 @@ pub(crate) async fn launch(
     launch_dir: super::managed_workspace::LaunchDir,
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
     twin: bool,
+    handoff: Handoff,
 ) -> anyhow::Result<()> {
     super::launch_twin::preflight(twin, worktree)?; // #8878: before anything is touched.
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
@@ -156,7 +157,7 @@ pub(crate) async fn launch(
         super::origin_plan::OriginPlan::LiveCheckout => {
             super::launch_twin::refuse_live_checkout(twin)?; // #8878
             eprintln!("{}", super::origin_plan::live_checkout_notice(&live_path));
-            return connect(client, url, Some(live_workdir), home).await;
+            return connect(client, url, Some(live_workdir), home, handoff).await; // #8406
         }
         // Any origin remote keeps the pre-#6276 path exactly: parse it as
         // owner/repo, or stop with the hint below.
@@ -191,9 +192,9 @@ pub(crate) async fn launch(
         && !existing.is_empty()
     {
         super::launch_twin::refuse_reattach(twin, &existing)?; // #8878
-        print_launch_banner_reconnecting(&live_workdir, &existing);
-        crate::commands::tmux_attach::tmux_attach(&existing)?;
-        return Ok(());
+        // #8406: a detached launch reports the running session, never attaches.
+        handoff.announce_reconnect(&live_workdir, &existing);
+        return handoff.hand_over(&existing);
     }
 
     // #9091: a broken `[accounts]` table refuses before provisioning.
@@ -266,9 +267,8 @@ pub(crate) async fn launch(
                     );
                 }
                 // #6649: silent on a clean worktree; one line per unclean kind.
-                for notice in &report.asset_notices {
-                    println!("  assets: {notice}");
-                }
+                // #8406: stderr, so `--detach` stdout stays one line.
+                super::launch_notices::emit_asset_notices(&report.asset_notices);
             }
             // #4752: a compiled-prompt write failure is FATAL — refuse the
             // launch rather than start a session whose instructions cannot be
@@ -402,8 +402,8 @@ pub(crate) async fn launch(
 
     // 11. Print the full-screen robot splash then the rich info panel.
     //     Pass the real managed worktree path so the banner shows the session
-    //     directory (not just the base project dir).
-    print_launch_banner(
+    //     directory (not just the base project dir). #8406: not when detached.
+    handoff.announce(
         &live_workdir,
         &tmux_name,
         Some(prompt_path.as_path()),
@@ -478,9 +478,10 @@ pub(crate) async fn launch(
     }
 
     // 14. Attach to the session — blocks until the user detaches or exits claude.
-    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
-    // Attach succeeded: the user detached normally. Disarm the guard so the
-    // session persists and can be resumed with `tmux attach -t <name>`.
+    // #8406: a detached launch prints the session name and pane id instead.
+    handoff.hand_over(&tmux_name)?;
+    // Handed over: disarm the guard so the session persists and can be
+    // resumed with `tmux attach -t <name>`.
     session_guard.disarm();
     Ok(())
 }
@@ -511,13 +512,16 @@ pub(crate) async fn launch(
 /// (`tmux new-session -A`), and — only when the session is freshly created —
 /// starts `claude` from the launch spec [`connect_claude_spec`] builds (`--append-system-prompt-file`
 /// plus the shared `--setting-sources project,local` /
-/// `--dangerously-skip-permissions` isolation flags), then `attach`es to it.
+/// `--dangerously-skip-permissions` isolation flags), then `attach`es to it —
+/// or, under [`Handoff::Detach`] (`tm launch --detach` on a checkout with no
+/// origin, #8406), prints the session name and pane id and returns.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.
 pub(crate) async fn connect(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
     home: Option<&std::path::Path>, // #8545: production passes `dirs::home_dir()`
+    handoff: Handoff,
 ) -> anyhow::Result<()> {
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     let path = resolve_dir(dir)?;
@@ -535,9 +539,8 @@ pub(crate) async fn connect(
         && !existing.is_empty()
     {
         // Full-screen robot splash + rich info panel (reconnect mode).
-        print_launch_banner_reconnecting(&workdir, &existing);
-        crate::commands::tmux_attach::tmux_attach(&existing)?;
-        return Ok(());
+        handoff.announce_reconnect(&workdir, &existing); // #8406
+        return handoff.hand_over(&existing);
     }
 
     // 1c. Deploy the framework directly into the live checkout — agents,
@@ -563,9 +566,8 @@ pub(crate) async fn connect(
                 );
             }
             // #6649: silent on a clean checkout; one line per unclean kind.
-            for notice in &report.asset_notices {
-                println!("  assets: {notice}");
-            }
+            // #8406: stderr, so `--detach` stdout stays one line.
+            super::launch_notices::emit_asset_notices(&report.asset_notices);
         }
         // #4752: fatal — refuse the connect rather than attach to a session
         // whose compiled instructions could not be written.
@@ -630,7 +632,7 @@ pub(crate) async fn connect(
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
-    print_launch_banner(&workdir, &tmux_name, Some(prompt_path.as_path()), None);
+    handoff.announce(&workdir, &tmux_name, Some(prompt_path.as_path()), None); // #8406
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -693,8 +695,9 @@ pub(crate) async fn connect(
     }
 
     // 6. Attach — takes over the current terminal until the user detaches.
-    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
-    // Attach succeeded: disarm the guard so the session persists for re-attachment.
+    // #8406: a detached launch prints the session name and pane id instead.
+    handoff.hand_over(&tmux_name)?;
+    // Handed over: disarm the guard so the session persists for re-attachment.
     if let Some(ref mut g) = session_guard {
         g.disarm();
     }
@@ -875,12 +878,26 @@ pub(crate) fn launch_spec_dir(
 /// [`session_matches_workdir`]. Returns `None` when the daemon is unreachable or no
 /// live matching session exists.
 /// Test: `session_matches_workdir_*` unit tests cover the matching logic;
-/// `normalize_workdir_strips_trailing_slash` covers the normalization invariant.
+/// `normalize_workdir_strips_trailing_slash` covers the normalization invariant;
+/// `first_live_session_reads_the_daemon_sessions_body` covers the body.
 async fn find_existing_session(
     client: &reqwest::Client,
     url: &str,
     workdir: &str,
     project_dir: Option<&str>,
+) -> Option<String> {
+    let resp = client.get(format!("{url}/sessions")).send().await.ok()?;
+    let body = resp.error_for_status().ok()?.bytes().await.ok()?;
+    first_live_session(&body, workdir, project_dir, tmux_has_session)
+}
+
+/// The tmux name of the first session in a `GET /sessions` body that matches
+/// `workdir`/`project_dir` and that `is_live` accepts; `None` on an unreadable body.
+fn first_live_session(
+    body: &[u8],
+    workdir: &str,
+    project_dir: Option<&str>,
+    is_live: impl Fn(&str) -> bool,
 ) -> Option<String> {
     /// One session row including its tmux name, as returned by `GET /sessions`.
     #[derive(Deserialize)]
@@ -890,14 +907,18 @@ async fn find_existing_session(
         #[serde(default)]
         tmux_name: String,
     }
-
-    let resp = client.get(format!("{url}/sessions")).send().await.ok()?;
-    let rows: Vec<Row> = resp.error_for_status().ok()?.json().await.ok()?;
+    // #8406: the daemon answers `{"sessions": [...]}` (`SessionsResponse`); a
+    // bare-array read failed on every body, so no launch ever reconnected.
+    #[derive(Deserialize)]
+    struct Body {
+        sessions: Vec<Row>,
+    }
+    let rows = serde_json::from_slice::<Body>(body).ok()?.sessions;
     rows.into_iter()
         .find(|r| {
             !r.tmux_name.is_empty()
                 && session_matches_workdir(&r.workdir, workdir, project_dir)
-                && tmux_has_session(&r.tmux_name)
+                && is_live(&r.tmux_name)
         })
         .map(|r| r.tmux_name)
 }
@@ -909,9 +930,10 @@ async fn find_existing_session(
 /// and the prefix-match (managed clone, `launch`) branches are exercised this way.
 /// What: normalizes all three paths (trailing-slash strip via `normalize_workdir`), then
 /// checks (a) exact equality or (b) when `project_dir` is `Some`, that the session workdir
-/// starts with `<normalized_project_dir>/` — the trailing slash prevents a false match
-/// where `/owner/repo-extra/<id>` matches `/owner/repo`.
-/// Test: `session_matches_workdir_prefix_and_exact` below.
+/// is that directory or starts with `<normalized_project_dir>/` — the trailing slash
+/// prevents a false match where `/owner/repo-extra/<id>` matches `/owner/repo`.
+/// Test: `session_matches_workdir_prefix_and_exact`,
+/// `session_in_the_managed_checkout_itself_matches_its_project` below.
 fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Option<&str>) -> bool {
     let w = normalize_workdir(session_workdir);
     let t = normalize_workdir(target);
@@ -925,12 +947,48 @@ fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Opt
     if !prefix.ends_with('/') {
         prefix.push('/');
     }
-    w.starts_with(prefix.as_str())
+    // #8406: a session in the managed checkout itself (the #5274 placement)
+    // is the project's session too, not only one in a worktree under it.
+    w.starts_with(prefix.as_str()) || w == prefix.trim_end_matches('/')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tm launch` finds a running session in the body the daemon really sends
+    /// for `GET /sessions` (#8406).
+    ///
+    /// Why: the reconnect read a bare array while the daemon answers
+    /// `{"sessions": [...]}`, so no launch ever found its running session, and
+    /// `tm launch --detach` could not report one.
+    /// What: serializes the daemon's own `SessionsResponse` and reads it back.
+    /// Test: itself.
+    #[test]
+    fn first_live_session_reads_the_daemon_sessions_body() {
+        use trusty_mpm::core::session::{ControlModel, Session, SessionId};
+        let proj = std::path::Path::new("/work/proj");
+        let session = Session::new(
+            SessionId::new(),
+            "/work/proj",
+            ControlModel::Tmux,
+            Some(proj),
+        );
+        let body = serde_json::to_vec(&trusty_mpm::daemon::api::SessionsResponse {
+            sessions: vec![session],
+        })
+        .expect("serialize the daemon body");
+        let live = first_live_session(&body, "/work/proj", None, |_| true);
+        assert_eq!(live.as_deref(), Some("tm-proj"));
+        assert_eq!(
+            first_live_session(&body, "/work/proj", None, |_| false),
+            None
+        );
+        assert_eq!(
+            first_live_session(&body, "/work/other", None, |_| true),
+            None
+        );
+    }
 
     /// #9124: the unparseable-origin refusal reaches the terminal; it never
     /// quotes the origin's token.
@@ -1034,6 +1092,25 @@ mod tests {
             session_wd,
             "/other/live/dir",
             None
+        ));
+    }
+
+    /// A session running in the managed checkout itself — where a launch
+    /// without `--worktree` places it since #5274 — is that project's running
+    /// session, so a second `tm launch --detach` reports it (#8406).
+    #[test]
+    fn session_in_the_managed_checkout_itself_matches_its_project() {
+        let project_dir = "/home/bob/trusty-mpm-projects/owner/repo";
+        for session_wd in [project_dir, "/home/bob/trusty-mpm-projects/owner/repo/"] {
+            assert!(
+                session_matches_workdir(session_wd, "/other/live/dir", Some(project_dir)),
+                "{session_wd}"
+            );
+        }
+        assert!(!session_matches_workdir(
+            "/home/bob/trusty-mpm-projects/owner/repo-extra",
+            "/other/live/dir",
+            Some(project_dir)
         ));
     }
 

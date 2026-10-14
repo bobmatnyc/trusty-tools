@@ -488,6 +488,7 @@ async fn run_managed(
         super::managed_workspace::LaunchDir::CallerResolved,
         dirs::home_dir().as_deref(),
         false, // #8878: twin mode is armed only by `tm launch --twin`.
+        super::launch_handoff::Handoff::Attach, // #8406: only `--detach` detaches.
     )
     .await
 }

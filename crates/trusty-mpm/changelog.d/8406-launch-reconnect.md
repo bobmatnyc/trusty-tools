@@ -1,0 +1,3 @@
+Fixed
+- `tm launch` and `tm connect` find a project's running session again. They read the daemon's `GET /sessions` reply as a bare list, while the daemon sends `{"sessions": [...]}`, so the read failed every time: a second launch for a running project registered another session record and tried to start the session again instead of reattaching. A second `tm launch --detach` now reports the running session (#8406).
+- `tm launch` on a GitHub-backed project also recognizes a session running in the managed checkout itself, where a launch without `--worktree` has placed it since #5274; before, only a session in a worktree under the checkout counted as the project's session (#8406).
