@@ -71,6 +71,7 @@ pub struct Palace {
 
 /// Topical category for a Room. Custom variants allow project-specific topics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum RoomType {
     Frontend,
     Backend,

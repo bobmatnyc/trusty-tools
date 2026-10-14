@@ -57,6 +57,7 @@ pub(crate) const BACKUP_SUFFIX: &str = ".pre-compact.bak";
 /// the compaction at that point.
 /// Test: each variant has a test in `dream::tests` named for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum CompactStep {
     /// After the pre-compaction backup exists and has been size-verified.
     AfterBackup,

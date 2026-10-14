@@ -38,6 +38,7 @@ pub struct RecallResult {
 /// Test: `forget_reports_not_found_for_an_unknown_drawer` and
 /// `forget_reports_deleted_and_the_drawer_stays_gone_after_reopen`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum ForgetOutcome {
     /// A drawer with this id existed and was removed.
     Deleted,

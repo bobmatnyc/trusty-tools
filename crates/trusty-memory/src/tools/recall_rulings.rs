@@ -90,6 +90,7 @@ fn rulings_window(top_k: usize) -> usize {
 /// Test: `an_unreadable_rulings_palace_degrades_and_primary_hits_survive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum DegradedReason {
     /// `absent`: no palace has this id.
     Absent,

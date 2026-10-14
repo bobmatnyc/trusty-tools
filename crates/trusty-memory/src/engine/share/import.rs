@@ -37,6 +37,7 @@ use crate::engine::timeouts;
 /// Test: `import_is_idempotent`, `import_of_a_superset_adds_only_the_new`,
 /// `import_skips_a_bad_line_and_keeps_the_rest`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum ImportOutcome {
     /// The hash was absent locally; a new drawer was written.
     Inserted,
