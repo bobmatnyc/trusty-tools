@@ -29,6 +29,7 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
+use super::error::ShareError;
 use crate::engine::palace::RoomType;
 use crate::engine::retrieval::{PalaceHandle, RememberOptions};
 use crate::engine::store::kg::{KnowledgeGraph, Triple};
@@ -102,9 +103,11 @@ pub struct Supersession {
 /// — then asserts the supersession edge. `linked: false` means the caller must
 /// leave the original entirely alone. This function never evicts, forgets, or
 /// tombstones anything: supersession is an added edge, and demotion is the
-/// caller's decision (ADR-0028 D6, "demoted, never deleted").
+/// caller's decision (ADR-0028 D6, "demoted, never deleted"). A read-only
+/// palace is refused with [`ShareError::ReadOnly`] before anything is written.
 /// Test: `supersede_mints_a_new_hash_and_links_the_original`,
-/// `assert_superseded_by_fails_loud_on_an_unwritable_kg`.
+/// `assert_superseded_by_fails_loud_on_an_unwritable_kg`,
+/// `share_writes_refuse_a_read_only_palace_with_share_error`.
 pub async fn supersede_drawer(
     handle: &PalaceHandle,
     original: Uuid,
@@ -112,7 +115,11 @@ pub async fn supersede_drawer(
     room: RoomType,
     tags: Vec<String>,
     importance: f32,
-) -> Result<Supersession> {
+) -> std::result::Result<Supersession, ShareError> {
+    // #9278 T3a: the read-only refusal is typed, as it is on import.
+    if handle.is_read_only() {
+        return Err(ShareError::ReadOnly);
+    }
     let replacement = handle
         .remember_with_options(
             new_content.into(),
@@ -122,7 +129,8 @@ pub async fn supersede_drawer(
             RememberOptions::forced(),
         )
         .await
-        .context("write the superseding drawer")?;
+        .context("write the superseding drawer")
+        .map_err(ShareError::from_internal)?;
 
     let linked =
         match assert_superseded_by(&handle.kg, original, replacement, "share:supersede").await {

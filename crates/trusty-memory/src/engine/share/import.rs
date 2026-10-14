@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::error::ShareError;
 use super::record::SharedMemoryRecord;
 use crate::engine::content_hash::ContentHash;
 use crate::engine::embed::Embedder;
@@ -95,9 +96,14 @@ impl ImportSummary {
 /// FILE's failures only — an embedder that cannot be resolved aborts the whole
 /// run with `Err` and no summary, per [`import_palace_records`].
 /// Test: `export_then_import_preserves_metadata`, `import_skips_a_bad_line_and_keeps_the_rest`.
-pub async fn import_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<ImportSummary> {
+pub async fn import_palace_jsonl(
+    handle: &PalaceHandle,
+    path: &Path,
+) -> std::result::Result<ImportSummary, ShareError> {
+    // #9278 T3a: typed at the public edge.
     let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read the export at {}", path.display()))?;
+        .with_context(|| format!("read the export at {}", path.display()))
+        .map_err(ShareError::from_internal)?;
 
     let mut records = Vec::new();
     let mut summary = ImportSummary::default();
@@ -166,11 +172,12 @@ pub async fn import_palace_jsonl(handle: &PalaceHandle, path: &Path) -> Result<I
 /// Test: `import_is_idempotent`, `import_of_a_superset_adds_only_the_new`,
 /// `two_machines_converge_on_one_memory`, `merge_keeps_the_earlier_created_at_in_either_order`,
 /// `merge_keeps_the_earlier_created_at_in_either_order`,
-/// `import_preserves_the_record_created_at_on_insert`.
+/// `import_preserves_the_record_created_at_on_insert`,
+/// `share_writes_refuse_a_read_only_palace_with_share_error`.
 pub async fn import_palace_records(
     handle: &PalaceHandle,
     records: &[SharedMemoryRecord],
-) -> Result<ImportSummary> {
+) -> std::result::Result<ImportSummary, ShareError> {
     if records.is_empty() {
         return Ok(ImportSummary::default());
     }
@@ -180,7 +187,8 @@ pub async fn import_palace_records(
     // resolution failure does — see this function's doc.
     let embedder = shared_embedder()
         .await
-        .context("acquire the shared embedder for import")?;
+        .context("acquire the shared embedder for import")
+        .map_err(ShareError::from_internal)?;
     import_palace_records_with_embedder(handle, records, &embedder).await
 }
 
@@ -203,7 +211,7 @@ pub(crate) async fn import_palace_records_with_embedder(
     handle: &PalaceHandle,
     records: &[SharedMemoryRecord],
     embedder: &Arc<dyn Embedder + Send + Sync>,
-) -> Result<ImportSummary> {
+) -> std::result::Result<ImportSummary, ShareError> {
     let mut summary = ImportSummary::default();
     if records.is_empty() {
         return Ok(summary);
@@ -211,11 +219,8 @@ pub(crate) async fn import_palace_records_with_embedder(
 
     handle.touch();
     if handle.is_read_only() {
-        return Err(anyhow::anyhow!(
-            "palace '{}' is read-only: the HTTP daemon holds the write lock, so an \
-             import cannot proceed — route it through the daemon or stop it first",
-            handle.id
-        ));
+        // #9278 T3a: typed; the text is `READ_ONLY_ERROR_MSG`.
+        return Err(ShareError::ReadOnly);
     }
 
     // #154 / #5902: one guard for the whole run. See the doc comment above for
@@ -225,7 +230,8 @@ pub(crate) async fn import_palace_records_with_embedder(
         timeouts::write_lock_timeout(),
         handle.id.as_str(),
     )
-    .await?;
+    .await
+    .map_err(ShareError::from_internal)?;
 
     let mut changed = false;
     for rec in records {
@@ -251,7 +257,8 @@ pub(crate) async fn import_palace_records_with_embedder(
         // #9719: the live L1 follows the import.
         handle
             .save_and_refresh_l1()
-            .context("save the L1 snapshot after import")?;
+            .context("save the L1 snapshot after import")
+            .map_err(ShareError::from_internal)?;
         handle.rebuild_closets();
     }
     Ok(summary)

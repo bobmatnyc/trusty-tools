@@ -71,34 +71,42 @@ const JOURNAL_FILES: [&str; 2] = [MAINTENANCE_LOG_FILENAME, MAINTENANCE_LOG_ROTA
 const TMP_SUFFIX: &str = ".tmp";
 
 /// Every way a snapshot or a restore can fail. None is recoverable in place.
+// #9278 T3a: every struct variant is `non_exhaustive` too.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SnapshotError {
     /// The handle is in-memory; there are no files to copy.
     #[error("palace {palace} has no data directory; an in-memory palace cannot be snapshotted")]
+    #[non_exhaustive]
     NoDataDir { palace: String },
     /// The handle reads a raw-copied redb snapshot, which may itself be torn.
     #[error(
         "palace {palace} is open read-only from a copied file; snapshot it through the daemon that owns it"
     )]
+    #[non_exhaustive]
     ReadOnlyHandle { palace: String },
     /// The snapshot directory already exists.
     #[error("snapshot destination {path} already exists")]
+    #[non_exhaustive]
     DestinationExists { path: PathBuf },
     /// The backup name is not a relative path of plain segments (#9282).
     #[error(
         "backup name {name:?} is refused: {reason}; a backup name is a relative path of plain segments under the palace's backup root. No backup was written"
     )]
+    #[non_exhaustive]
     InvalidBackupName { name: PathBuf, reason: String },
     /// A segment of the backup name below the backup root is a symlink or not
     /// a directory, or a created directory resolved outside the root (#9282).
     #[error("backup destination component {path} is unsafe: {reason}. No backup was written")]
+    #[non_exhaustive]
     UnsafeBackupComponent { path: PathBuf, reason: String },
     /// A fixed segment of the backup root is a symlink or not a directory (#9282).
     #[error("backup root component {path} is unsafe: {reason}. No backup was written")]
+    #[non_exhaustive]
     BackupRootUnsafe { path: PathBuf, reason: String },
     /// A filesystem call failed.
     #[error("{op} {path}: {source}")]
+    #[non_exhaustive]
     Io {
         op: &'static str,
         path: PathBuf,
@@ -106,6 +114,7 @@ pub enum SnapshotError {
     },
     /// A redb open, transaction or copy failed.
     #[error("redb {op} {path}: {reason}")]
+    #[non_exhaustive]
     Redb {
         op: &'static str,
         path: PathBuf,
@@ -113,9 +122,11 @@ pub enum SnapshotError {
     },
     /// The database holds tables this build cannot copy; copying would drop them.
     #[error("{path} carries table(s) this build cannot copy ({tables}); nothing was written")]
+    #[non_exhaustive]
     UnknownTables { path: PathBuf, tables: String },
     /// A table's row count differs between source, copy or manifest.
     #[error("{path}: table {table} has {actual} rows, expected {expected}")]
+    #[non_exhaustive]
     CountMismatch {
         path: PathBuf,
         table: String,
@@ -124,6 +135,7 @@ pub enum SnapshotError {
     },
     /// A file's bytes differ from the hash recorded for it.
     #[error("checksum mismatch on {path}: expected {expected}, found {actual}")]
+    #[non_exhaustive]
     ChecksumMismatch {
         path: PathBuf,
         expected: String,
@@ -131,18 +143,22 @@ pub enum SnapshotError {
     },
     /// The manifest could not be written or parsed.
     #[error("manifest {path}: {source}")]
+    #[non_exhaustive]
     ManifestJson {
         path: PathBuf,
         source: serde_json::Error,
     },
     /// The manifest is well-formed JSON but not something this build restores.
     #[error("manifest {path} is not restorable: {reason}")]
+    #[non_exhaustive]
     InvalidManifest { path: PathBuf, reason: String },
     /// The snapshot's palace format is newer than this build supports.
     #[error("snapshot palace format {found} is newer than this build supports ({supported})")]
+    #[non_exhaustive]
     PalaceFormatTooNew { found: u32, supported: u32 },
     /// Restore refuses any target that already holds an entry.
     #[error("restore target {path} is not empty; restore writes only into an empty palace root")]
+    #[non_exhaustive]
     TargetNotEmpty { path: PathBuf },
 }
 
