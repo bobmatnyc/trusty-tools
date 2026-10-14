@@ -143,6 +143,61 @@ fn run_task_json_mode_prints_only_the_final_session() {
     assert_eq!(parsed["status"], "finished");
 }
 
+/// #8155: the daemon path's `--json` document carries the run's `turns`,
+/// `usage`, `cost_usd` and `transcript`, as the `--legacy-in-process` report
+/// does.
+///
+/// Why: the thin client printed only the `session.status` snapshot, so a
+/// caller had no per-run cost unless it fell back to the legacy path, and the
+/// ephemeral daemon took the run record with it on exit.
+/// What: a `TCODE_MOCK_LLM=echo` run; asserts a non-empty `transcript` whose
+/// length equals `turns`, a `usage` object with non-zero prompt tokens, and a
+/// `cost_usd` key. FAILS at c69c8e01be: none of the four keys is present.
+/// Test: this test.
+#[test]
+fn run_task_json_carries_turns_usage_cost_and_transcript() {
+    let project = project_with_agents();
+    let output = support::tcode_command()
+        .args([
+            "run-task",
+            "pm",
+            "say hi",
+            "--project",
+            &project.path().display().to_string(),
+            "--json",
+        ])
+        .env("TCODE_MOCK_LLM", "echo")
+        .output()
+        .expect("spawn tcode run-task --json");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "tcode run-task --json must exit 0, got {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
+    let transcript = parsed["transcript"]
+        .as_array()
+        .unwrap_or_else(|| panic!("--json must carry a transcript array: {stdout}"));
+    assert!(!transcript.is_empty(), "the run took turns: {stdout}");
+    assert_eq!(
+        parsed["turns"].as_u64(),
+        Some(transcript.len() as u64),
+        "`turns` counts the transcript: {stdout}"
+    );
+    assert!(
+        parsed["usage"]["prompt_tokens"].as_u64().unwrap_or(0) > 0,
+        "--json must carry the run's usage: {stdout}"
+    );
+    assert!(
+        parsed.get("cost_usd").is_some(),
+        "--json must carry a cost_usd key (null only when unpriced): {stdout}"
+    );
+}
+
 /// Run `tcode run-task ... --json`, optionally with `--mode`, a
 /// `.claude/settings.json`, and/or `TRUSTY_CODE_MODE`, returning the
 /// resolved `mode` string from the parsed JSON response.
