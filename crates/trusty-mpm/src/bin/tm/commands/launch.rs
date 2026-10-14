@@ -881,12 +881,26 @@ pub(crate) fn launch_spec_dir(
 /// [`session_matches_workdir`]. Returns `None` when the daemon is unreachable or no
 /// live matching session exists.
 /// Test: `session_matches_workdir_*` unit tests cover the matching logic;
-/// `normalize_workdir_strips_trailing_slash` covers the normalization invariant.
+/// `normalize_workdir_strips_trailing_slash` covers the normalization invariant;
+/// `first_live_session_reads_the_daemon_sessions_body` covers the body.
 async fn find_existing_session(
     client: &reqwest::Client,
     url: &str,
     workdir: &str,
     project_dir: Option<&str>,
+) -> Option<String> {
+    let resp = client.get(format!("{url}/sessions")).send().await.ok()?;
+    let body = resp.error_for_status().ok()?.bytes().await.ok()?;
+    first_live_session(&body, workdir, project_dir, tmux_has_session)
+}
+
+/// The tmux name of the first session in a `GET /sessions` body that matches
+/// `workdir`/`project_dir` and that `is_live` accepts; `None` on an unreadable body.
+fn first_live_session(
+    body: &[u8],
+    workdir: &str,
+    project_dir: Option<&str>,
+    is_live: impl Fn(&str) -> bool,
 ) -> Option<String> {
     /// One session row including its tmux name, as returned by `GET /sessions`.
     #[derive(Deserialize)]
@@ -896,14 +910,12 @@ async fn find_existing_session(
         #[serde(default)]
         tmux_name: String,
     }
-
-    let resp = client.get(format!("{url}/sessions")).send().await.ok()?;
-    let rows: Vec<Row> = resp.error_for_status().ok()?.json().await.ok()?;
+    let rows: Vec<Row> = serde_json::from_slice(body).ok()?;
     rows.into_iter()
         .find(|r| {
             !r.tmux_name.is_empty()
                 && session_matches_workdir(&r.workdir, workdir, project_dir)
-                && tmux_has_session(&r.tmux_name)
+                && is_live(&r.tmux_name)
         })
         .map(|r| r.tmux_name)
 }
@@ -937,6 +949,40 @@ fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tm launch` finds a running session in the body the daemon really sends
+    /// for `GET /sessions` (#8406).
+    ///
+    /// Why: the reconnect read a bare array while the daemon answers
+    /// `{"sessions": [...]}`, so no launch ever found its running session, and
+    /// `tm launch --detach` could not report one.
+    /// What: serializes the daemon's own `SessionsResponse` and reads it back.
+    /// Test: itself.
+    #[test]
+    fn first_live_session_reads_the_daemon_sessions_body() {
+        use trusty_mpm::core::session::{ControlModel, Session, SessionId};
+        let proj = std::path::Path::new("/work/proj");
+        let session = Session::new(
+            SessionId::new(),
+            "/work/proj",
+            ControlModel::Tmux,
+            Some(proj),
+        );
+        let body = serde_json::to_vec(&trusty_mpm::daemon::api::SessionsResponse {
+            sessions: vec![session],
+        })
+        .expect("serialize the daemon body");
+        let live = first_live_session(&body, "/work/proj", None, |_| true);
+        assert_eq!(live.as_deref(), Some("tm-proj"));
+        assert_eq!(
+            first_live_session(&body, "/work/proj", None, |_| false),
+            None
+        );
+        assert_eq!(
+            first_live_session(&body, "/work/other", None, |_| true),
+            None
+        );
+    }
 
     /// #9124: the unparseable-origin refusal reaches the terminal; it never
     /// quotes the origin's token.
