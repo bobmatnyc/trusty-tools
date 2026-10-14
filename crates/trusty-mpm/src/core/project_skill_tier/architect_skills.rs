@@ -153,11 +153,58 @@ pub fn deploy_architect_skills(project_dir: &Path) -> DeployReport {
 /// `an_edited_copy_is_kept_and_reported`,
 /// `an_untouched_copy_is_refreshed_when_the_shipped_bytes_move`,
 /// `a_seeded_copy_with_no_record_and_other_bytes_is_custom`,
+/// `a_byte_equal_seed_is_adopted_then_refreshed`,
 /// `a_second_run_writes_nothing`, `a_blocked_skill_dir_is_an_error_line`.
 pub fn deploy_skills_into(skills_dir: &Path, skills: &[ArchitectSkill]) -> DeployReport {
-    // #9540 red: pre-fix behaviour — nothing deployed, the row reports ok.
-    let _ = (skills_dir, skills, load_record, classify);
-    DeployReport::default()
+    let mut report = DeployReport::default();
+    let mut record = load_record(skills_dir, &mut report.errors);
+    let mut record_changed = false;
+    for skill in skills {
+        let path = skill_path(skills_dir, skill.stem);
+        let shipped = skill.contents.as_bytes();
+        let shipped_hash = sha256_hex(shipped);
+        match classify(&path, shipped, record.deployed.get(skill.stem)) {
+            SkillState::Current => {
+                if record.deployed.get(skill.stem) != Some(&shipped_hash) {
+                    record.deployed.insert(skill.stem.to_owned(), shipped_hash);
+                    record_changed = true;
+                }
+            }
+            SkillState::Missing | SkillState::Stale => {
+                match trusty_common::atomic_file::write_atomic(&path, shipped) {
+                    Ok(()) => {
+                        record.deployed.insert(skill.stem.to_owned(), shipped_hash);
+                        record_changed = true;
+                        report.written.push(skill.stem.to_owned());
+                    }
+                    Err(err) => report
+                        .errors
+                        .push(format!("cannot write {}: {err}", path.display())),
+                }
+            }
+            SkillState::Custom => {
+                // #9540: df-D22 — the project's edit wins; never back up and replace.
+                tracing::warn!(
+                    path = %path.display(),
+                    "architect skill {} differs from the last deployed copy: kept as \
+                     project-custom, not refreshed",
+                    skill.stem
+                );
+                report.kept_custom.push(skill.stem.to_owned());
+            }
+            SkillState::Unreadable(why) => report.errors.push(format!("cannot read {why}")),
+        }
+    }
+    if record_changed {
+        let path = skills_dir.join(RECORD_FILE);
+        let body = serde_json::to_vec_pretty(&record).unwrap_or_default();
+        if let Err(err) = trusty_common::atomic_file::write_atomic(&path, &body) {
+            report
+                .errors
+                .push(format!("cannot write {}: {err}", path.display()));
+        }
+    }
+    report
 }
 
 /// Each of `skills`' state in `skills_dir`, read-only.
@@ -187,11 +234,28 @@ pub fn inspect(skills_dir: &Path, skills: &[ArchitectSkill]) -> Vec<(&'static st
 /// What: `ok` only when every [`SKILLS`] entry is [`SkillState::Current`];
 /// otherwise the detail names each other skill and its state. Writes nothing.
 /// Test: `health_names_each_skill_that_is_not_current`,
-/// `the_skills_row_is_not_ok_after_a_failed_deploy`.
+/// `a_blocked_skill_dir_is_an_error_line`,
+/// `the_skills_row_names_a_missing_or_custom_skill`.
 pub fn health(project_dir: &Path) -> (bool, String) {
-    // #9540 red: pre-fix behaviour — nothing deployed, the row reports ok.
-    let _ = (project_dir, inspect);
-    (true, String::new())
+    let states = inspect(&project_tier(project_dir), SKILLS);
+    let problems: Vec<String> = states
+        .iter()
+        .filter_map(|(stem, state)| {
+            let why = match state {
+                SkillState::Current => return None,
+                SkillState::Missing => "missing".to_owned(),
+                SkillState::Stale => "stale (the next Architect launch refreshes it)".to_owned(),
+                SkillState::Custom => "project-custom copy kept, not refreshed".to_owned(),
+                SkillState::Unreadable(why) => format!("unreadable: {why}"),
+            };
+            Some(format!("{stem}: {why}"))
+        })
+        .collect();
+    if problems.is_empty() {
+        (true, format!("{} Architect skills current", states.len()))
+    } else {
+        (false, problems.join("; "))
+    }
 }
 
 /// Deploy the Architect's skills when `project_dir` launches as the Architect.
@@ -207,11 +271,34 @@ pub fn health(project_dir: &Path) -> (bool, String) {
 /// error, and returns the report. It never fails the caller.
 /// Test: `an_architect_launch_writes_both_skills_byte_equal`,
 /// `a_pm_launch_writes_no_architect_skill_anywhere`,
-/// `a_deleted_copy_returns_on_resume`.
+/// `a_deleted_copy_returns_on_the_next_launch_and_on_sync_assets`,
+/// `ensure_managed_config_dir_restores_a_deleted_architect_skill`,
+/// `a_deploy_error_does_not_fail_the_launch`.
 pub fn deploy_for_launch(fw_root: &Path, project_dir: &Path) -> Option<DeployReport> {
-    // #9540 red: pre-fix behaviour — nothing deployed, the row reports ok.
-    let _ = (fw_root, project_dir);
-    None
+    use crate::core::session_profile;
+    // Cheap pre-check: a PM project never loads the user config here.
+    if !session_profile::requested(project_dir).is_architect() {
+        return None;
+    }
+    let config = crate::core::config::MpmConfig::load(fw_root);
+    if !session_profile::resolve(project_dir, &config).is_architect() {
+        return None;
+    }
+    let report = deploy_architect_skills(project_dir);
+    if !report.written.is_empty() {
+        tracing::info!(
+            project_dir = %project_dir.display(),
+            written = %report.written.join(", "),
+            "architect skills deployed into the project tier"
+        );
+    }
+    for err in &report.errors {
+        tracing::error!(
+            project_dir = %project_dir.display(),
+            "architect skills not deployed: {err}"
+        );
+    }
+    Some(report)
 }
 
 #[cfg(test)]
