@@ -395,4 +395,53 @@ mod tests {
             );
         }
     }
+
+    /// #8436 PR C (plan §4): the row names the guard-lift state. A lift on an
+    /// Architect is the owner's choice; an unreadable file is "unknown", never
+    /// a pass; a lift on a project that is not the Architect opens the whole
+    /// PM guard and warns.
+    #[test]
+    fn doctor_session_profile_reports_the_lift_state() {
+        let plant = |project: &Path, body: &str| {
+            std::fs::create_dir_all(project.join(".claude")).unwrap();
+            std::fs::write(project.join(".claude/settings.json"), body).unwrap();
+        };
+        let lifted = "{\"env\": {\"TRUSTY_MPM_PM_UNRESTRICTED\": \"1\"}}";
+
+        let (project, home) = allow_listed();
+        let check = check_session_profile(Some(project.path()), home.path());
+        assert!(
+            check.message.contains("guard lift: off"),
+            "{}",
+            check.message
+        );
+        plant(project.path(), lifted);
+        let check = check_session_profile(Some(project.path()), home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("guard lift: lifted (owner choice at init)"),
+            "{}",
+            check.message
+        );
+        plant(project.path(), "{ not json");
+        let check = check_session_profile(Some(project.path()), home.path());
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert!(
+            check.message.contains("lift state unknown"),
+            "{}",
+            check.message
+        );
+
+        let pm = tempfile::tempdir().unwrap();
+        plant(pm.path(), lifted);
+        let check = check_session_profile(Some(pm.path()), home.path());
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+        assert!(
+            check.message.contains("the whole PM guard is open"),
+            "{}",
+            check.message
+        );
+    }
 }

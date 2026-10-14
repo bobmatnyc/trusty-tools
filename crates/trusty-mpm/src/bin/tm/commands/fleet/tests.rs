@@ -535,32 +535,57 @@ fn ported_skills() -> Vec<&'static super::seed::Seeded> {
         .collect()
 }
 
+/// #8436 PR C: the seeded tree is the source layout — `AGENTS.md`, the
+/// `local/` records and skeleton, every shipped script with its exec bit —
+/// and no longer `records/`, `local/user.md`, `owner/` or `local/projects/`.
 #[test]
 fn a_first_run_seeds_the_architect_project() {
     use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new();
     let report = fx.init().unwrap();
     let dir = fx.dir();
-    for file in super::seed::FILES {
-        let path = dir.join(file.dest);
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            file.contents.as_bytes(),
-            "{}",
-            file.dest
-        );
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(
-            mode & 0o111 != 0,
-            file.executable,
-            "{}: mode {mode:o}",
-            file.dest
-        );
+    for rel in [
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".gitignore",
+        "local/state.md",
+        "local/goals.md",
+        "local/actions.md",
+        "local/.gitignore",
+        "local/improvements/ledger.jsonl",
+        "local/usage/ledger.jsonl",
+        "scripts/fleet-poll.py",
+        "scripts/fleet-classify.py",
+        "scripts/init.sh",
+        "scripts/doctor.sh",
+        "scripts/README.md",
+        "docs/architect/voice.md",
+        "templates/state.md",
+        ".claude/agents/architect.md",
+    ] {
+        assert!(dir.join(rel).is_file(), "{rel} is not seeded");
     }
-    for rel in super::seed::DIRS {
-        assert!(dir.join(rel).is_dir(), "{rel}");
+    for rel in [
+        "local/briefs",
+        "local/archive",
+        "local/mandates",
+        "local/improvements/runs",
+        "local/usage",
+    ] {
+        assert!(dir.join(rel).is_dir(), "{rel}/ is not seeded");
     }
-    for skill in ["tm-fleet-check", "tm-context-refresh"] {
+    for rel in [
+        "records",
+        "local/user.md",
+        "local/projects",
+        "local/improvements/rules.jsonl",
+        "owner",
+        "ARCHITECT.md",
+        "scripts/install-codex.sh",
+    ] {
+        assert!(!dir.join(rel).exists(), "{rel} is still seeded");
+    }
+    for skill in ["tm-fleet-check", "tm-context-refresh", "tm-fleet-restart"] {
         assert!(
             dir.join(".claude/skills")
                 .join(skill)
@@ -569,14 +594,39 @@ fn a_first_run_seeds_the_architect_project() {
             "{skill}"
         );
     }
+    // Accepted layout (10-09): every `*.sh` and every `scripts/*.py` is executable.
+    for entry in std::fs::read_dir(dir.join("scripts")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if name.ends_with(".sh") || name.ends_with(".py") {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "scripts/{name}: mode {mode:o}");
+        }
+    }
     let claude_md = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
     assert!(
         !claude_md.contains("TRUSTY-MPM:"),
         "an override marker was seeded"
     );
     assert!(!claude_md.contains("TRUSTY_MPM_PM_UNRESTRICTED"));
-    assert!(claude_md.contains("records/"), "{claude_md}");
+    assert!(
+        !claude_md.lines().any(|l| l.trim_start().starts_with('@')),
+        "CLAUDE.md carries an `@` import:\n{claude_md}"
+    );
+    assert!(!claude_md.contains("records/"), "{claude_md}");
+    assert!(claude_md.contains("AGENTS.md"), "{claude_md}");
+    assert!(
+        !dir.join(".claude/settings.json").exists()
+            || !std::fs::read_to_string(dir.join(".claude/settings.json"))
+                .unwrap()
+                .contains("TRUSTY_MPM_PM_UNRESTRICTED"),
+        "a run with no guard-lift choice lifted the guard"
+    );
     let rendered = report.render();
+    assert!(
+        rendered.contains("guard lift: off (no choice given)"),
+        "{rendered}"
+    );
     assert!(
         rendered.contains("poller start (--no-launch)"),
         "{rendered}"
@@ -1094,5 +1144,153 @@ fn the_skills_row_names_a_missing_or_custom_skill() {
         !report.skills.detail.contains("tm-context-refresh"),
         "{}",
         report.render()
+    );
+}
+
+// --- #8436 PR C: AGENTS.md, the `local/` layout and the manual path ---
+
+/// #8436 PR C (Q3): the seeded `AGENTS.md` is a short placeholder. It imports
+/// nothing (tm composes the prompt), repeats no core rule (the core wins and a
+/// copy drifts), and names no file the seed stopped writing.
+#[test]
+fn the_seeded_agents_md_has_no_architect_md_import_and_no_core_duplicate() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let agents = std::fs::read_to_string(fx.dir().join("AGENTS.md")).expect("AGENTS.md seeded");
+    assert!(
+        !agents.lines().any(|l| l.trim_start().starts_with('@')),
+        "{agents}"
+    );
+    for stale in [
+        "ARCHITECT.md",
+        "Hard limits",
+        "local/user.md",
+        "owner/",
+        "trusty-fleet",
+        "trusty-context-refresh",
+        "TRUSTY_MPM_PM_UNRESTRICTED",
+    ] {
+        assert!(
+            !agents.contains(stale),
+            "AGENTS.md names {stale}:\n{agents}"
+        );
+    }
+    assert!(
+        agents.to_lowercase().contains("placeholder"),
+        "AGENTS.md does not say it is a placeholder:\n{agents}"
+    );
+    assert!(agents.len() < 4096, "AGENTS.md is {} bytes", agents.len());
+}
+
+/// #8436 PR C: what `tm fleet init` seeds is what the Architect's prompt
+/// carries — architect.md, then the seeded `AGENTS.md`, then the core.
+#[test]
+fn a_seeded_agents_md_is_composed_into_the_architect_prompt() {
+    use trusty_mpm::core::architect_prompt::{self, ARCHITECT_CORE_MD};
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
+    let source = trusty_agents_common::agent_content::checkout_content(&root).expect("content");
+    let content = trusty_mpm::core::content_source::FrameworkContent::load(&source).unwrap();
+    let agents = std::fs::read_to_string(fx.dir().join("AGENTS.md")).expect("AGENTS.md seeded");
+    let prompt = architect_prompt::architect_prompt_for(&content, &fx.dir());
+    let heading = |text: &str| -> String {
+        text.lines()
+            .find(|l| l.starts_with("# "))
+            .unwrap_or_else(|| panic!("no heading in:\n{text}"))
+            .to_owned()
+    };
+    let at = |needle: &str| {
+        prompt
+            .find(needle)
+            .unwrap_or_else(|| panic!("the prompt lacks {needle:?}"))
+    };
+    let manual = at("# The Architect — operating manual");
+    let owner = at(&heading(&agents));
+    let core = at(&heading(content.instruction(ARCHITECT_CORE_MD).unwrap()));
+    assert!(manual < owner && owner < core, "{manual} {owner} {core}");
+}
+
+/// Every path under `root`, relative, sorted; a directory ends in `/`.
+/// `.git`, `inbox/` (poller runtime), `.trusty-mpm.toml` and
+/// `.claude/settings.json` (tm's own launch config) are left out.
+fn tree(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path.strip_prefix(root).unwrap().display().to_string();
+            let skipped = [".git", "inbox", ".trusty-mpm.toml", ".claude/settings.json"];
+            if skipped.contains(&rel.as_str()) {
+                continue;
+            }
+            if path.is_dir() && !path.is_symlink() {
+                out.push(format!("{rel}/"));
+                walk(root, &path, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// Copy `from` to `to`, keeping modes, minus the top-level names in `skip`.
+fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap();
+        if skip.iter().any(|s| name == *s) {
+            continue;
+        }
+        if path.is_dir() {
+            copy_tree(&path, &to.join(name), &[]);
+        } else {
+            std::fs::copy(&path, to.join(name)).unwrap();
+        }
+    }
+}
+
+/// #8436 PR C, item a: the manual path (`scripts/init.sh` over the shipped
+/// files) and `tm fleet init` leave the same tree, and neither lifts the guard
+/// without being asked.
+#[test]
+fn init_sh_and_tm_fleet_init_produce_the_same_tree() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let seeded = fx.dir();
+    let manual_root = tempfile::tempdir().unwrap();
+    let manual = manual_root.path().join("arch");
+    // `local/` is what init.sh creates; everything else ships as files.
+    copy_tree(&seeded, &manual, &["local", ".git", "inbox"]);
+    let home = tempfile::tempdir().unwrap();
+    let tmux_dir = tempfile::Builder::new()
+        .prefix("tmi")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let out = std::process::Command::new(manual.join("scripts/init.sh"))
+        .current_dir(&manual)
+        .env("HOME", home.path())
+        .env("TMUX_TMPDIR", tmux_dir.path())
+        .env_remove("TMUX")
+        .env_remove("TMUX_SOCKET")
+        .env_remove("ARCHITECT_GUARD_LIFT")
+        .output()
+        .expect("run scripts/init.sh");
+    assert!(
+        out.status.success(),
+        "init.sh failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(tree(&seeded), tree(&manual));
+    let settings =
+        std::fs::read_to_string(manual.join(".claude/settings.json")).unwrap_or_default();
+    assert!(
+        !settings.contains("TRUSTY_MPM_PM_UNRESTRICTED"),
+        "init.sh lifted the guard unasked:\n{settings}"
     );
 }

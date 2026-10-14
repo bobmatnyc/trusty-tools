@@ -409,3 +409,52 @@ fn architect_skills_never_join_the_bundled_pm_roster() {
         );
     }
 }
+
+/// Every skill name `text` points at: the names inside each `(details: …)`
+/// and in each `framework` row of the skill index. `instance-*` skills are
+/// the installation's own and are not shipped.
+fn architect_md_skill_pointers(text: &str) -> std::collections::BTreeSet<String> {
+    let skill_names = |span: &str| -> Vec<String> {
+        span.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|w| {
+                ["architect-", "tm-", "trusty-"]
+                    .iter()
+                    .any(|p| w.starts_with(p))
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for chunk in text.split("(details:").skip(1) {
+        names.extend(skill_names(chunk.split(')').next().unwrap_or_default()));
+    }
+    for row in text.lines().filter(|l| l.contains("| framework |")) {
+        names.extend(skill_names(row.split('|').nth(1).unwrap_or_default()));
+    }
+    names
+}
+
+/// #8436 PR C (Q1, Q2, df-D21): every skill `architect.md` sends the
+/// Architect to is one tm deploys into its project tier, so no pointer
+/// dangles at launch. Negative control: rename a stem in [`SKILLS`].
+#[test]
+fn every_architect_md_skill_pointer_names_a_deployed_skill() {
+    let path = crate::core::content_source::test_support::repo_root()
+        .join("content/instructions/architect/architect.md");
+    let text = std::fs::read_to_string(&path).expect("architect.md");
+    let pointers = architect_md_skill_pointers(&text);
+    assert!(
+        pointers.len() >= 18,
+        "found only {} pointers: {pointers:?}",
+        pointers.len()
+    );
+    let deployed: std::collections::BTreeSet<&str> = SKILLS.iter().map(|s| s.stem).collect();
+    let dangling: Vec<&String> = pointers
+        .iter()
+        .filter(|name| !deployed.contains(name.as_str()))
+        .collect();
+    assert!(
+        dangling.is_empty(),
+        "architect.md points at skills tm never deploys: {dangling:?}"
+    );
+}

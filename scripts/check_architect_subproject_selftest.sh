@@ -75,6 +75,9 @@ plant() { # $1 = case name; mutates $WORK/<case_dir>, a copy of the clean tree
     drift:*) printf 'edited\n' >>"$t/${1#drift:}" ;;
     shipped-missing) rm "$t/$SKILL_DST" ;;
     unpaired) printf 'no source\n' >"$t/crates/trusty-mpm/src/assets/architect/skills/extra.md" ;;
+    # #8436 PR C: a new source file under a shipped directory with no copy.
+    the_derived_pair_rule_fails_on_an_unpaired_file)
+      printf 'print("new")\n' >"$sub/scripts/new-helper.py" ;;
     empty) rm -rf "$sub" && mkdir -p "$sub" ;;
     # #9822: the Rust crate crates/trusty-architect is not the sub-project.
     crate-dependency)
@@ -99,6 +102,7 @@ secret${TAB}SECRET
 drift${TAB}DRIFT
 shipped-missing${TAB}DRIFT
 unpaired${TAB}UNPAIRED
+the_derived_pair_rule_fails_on_an_unpaired_file${TAB}UNSHIPPED
 empty${TAB}EMPTY"
 # One planted drift per shipped copy the gate lists.
 for pair in $PAIRS; do
