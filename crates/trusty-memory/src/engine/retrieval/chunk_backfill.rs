@@ -175,7 +175,7 @@ pub(crate) enum Commit {
 /// A commit that could not complete.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum ChunkCommitError {
+pub(crate) enum ChunkCommitError {
     /// `write_mutex` was not granted in time.
     #[error("palace '{palace}': write lock not granted within {waited:?}")]
     LockWait { palace: String, waited: Duration },

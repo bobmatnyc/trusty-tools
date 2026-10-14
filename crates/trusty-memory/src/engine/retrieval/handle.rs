@@ -110,11 +110,12 @@ pub struct PalaceHandle {
     /// Test: `drawer_load_degraded_true_on_corrupt_table_false_when_empty`
     /// (whole-table) and `drawer_load_degraded_true_on_partial_row_corruption`
     /// (per-row skip).
-    pub drawer_load_degraded: bool,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) drawer_load_degraded: bool,
     /// On-disk data directory for this palace (where palace.json,
     /// identity.txt, l1_cache.json, the usearch index, and the KG redb
     /// store all live). `None` for in-memory tests built via `new`.
-    pub data_dir: Option<std::path::PathBuf>,
+    pub(crate) data_dir: Option<std::path::PathBuf>,
     /// Temporal decay configuration applied during L2/L3 ranking.
     ///
     /// Why: Old drawers should fade unless refreshed by access; baking the
@@ -123,7 +124,7 @@ pub struct PalaceHandle {
     /// What: Defaults to `DecayConfig::default()` (90-day half-life, 0.05 floor).
     /// Test: `decay_applied_in_l2_score` confirms an aged drawer ranks below a
     /// fresh one of identical importance.
-    pub decay_config: DecayConfig,
+    pub(crate) decay_config: DecayConfig,
     /// Optional recall analytics log. When `Some`, each `recall` /
     /// `recall_deep` call fires a fire-and-forget event per result (or a
     /// single miss event when the query returned nothing).
@@ -131,7 +132,7 @@ pub struct PalaceHandle {
     /// Why: Closes the feedback loop without blocking the request path.
     /// What: `None` by default so existing tests don't need a log directory.
     /// Test: `recall_logs_events_when_log_present` exercises the wiring.
-    pub recall_log: Option<Arc<RecallLog>>,
+    pub(crate) recall_log: Option<Arc<RecallLog>>,
     /// Closet pointer index: keyword -> drawer ids. Rebuilt during dream cycles.
     ///
     /// Why: Closets accelerate L2 by mapping topic keywords to candidate drawer
@@ -144,7 +145,7 @@ pub struct PalaceHandle {
     /// What: `Arc<RwLock<HashMap<String, Vec<Uuid>>>>` so reads can run
     /// concurrently with the (rare) dream-time rebuild.
     /// Test: `dream::tests::closet_refresh_builds_index`.
-    pub closets: Arc<RwLock<HashMap<String, Vec<Uuid>>>>,
+    pub(crate) closets: Arc<RwLock<HashMap<String, Vec<Uuid>>>>,
     /// Set to `true` for the duration of an in-flight `Dreamer::dream_cycle`.
     ///
     /// Why: The operator dashboard surfaces a per-palace "compacting / dreaming"
@@ -156,7 +157,7 @@ pub struct PalaceHandle {
     /// `CompactionGuard::new` (defined in `dream.rs`) at the start of every
     /// `dream_cycle` and cleared on drop.
     /// Test: `dream::tests::dream_cycle_toggles_is_compacting`.
-    pub is_compacting: Arc<AtomicBool>,
+    pub(crate) is_compacting: Arc<AtomicBool>,
     /// Serialises mutating ops (`remember_with_options`, `forget`) on this
     /// palace so concurrent writers don't race on the L1 snapshot rename,
     /// the vector store upsert, the KG redb record insert, or the in-memory
@@ -177,7 +178,7 @@ pub struct PalaceHandle {
     /// in parallel. Held across `.await` points, so we use the tokio mutex
     /// rather than `parking_lot::Mutex` (which would deadlock the runtime).
     /// Test: `remember_concurrent_does_not_lose_writes` in this module.
-    pub write_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) write_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Orders the durable-commit tail of one write against the next writer's,
     /// independently of [`Self::write_mutex`] (#6366).
     ///
@@ -202,7 +203,7 @@ pub struct PalaceHandle {
     /// landed in redb and in `drawers` both. Narrower than `write_mutex` by
     /// design: it covers only the commit, never the embed.
     /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`.
-    pub commit_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) commit_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Unix-seconds timestamp of the last genuine user access (recall / remember
     /// / forget). Drives idle-to-disk eviction.
     ///
@@ -226,7 +227,7 @@ pub struct PalaceHandle {
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
     /// `registry_tests::open_does_not_reset_idle_clock`,
     /// `registry_tests::touch_after_open_makes_handle_recent`.
-    pub last_accessed: Arc<AtomicU64>,
+    pub(crate) last_accessed: Arc<AtomicU64>,
     /// #9390 test seam: set by [`Self::fail_next_verify_record_for_test`].
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub(crate) fail_next_verify_record: Arc<AtomicBool>,
@@ -240,7 +241,8 @@ impl PalaceHandle {
     /// a cheap `load(Relaxed)` keeps the path contention-free.
     /// What: Returns the current value of `is_compacting`.
     /// Test: `dream::tests::dream_cycle_toggles_is_compacting`.
-    pub fn is_compacting(&self) -> bool {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn is_compacting(&self) -> bool {
         self.is_compacting.load(Ordering::Relaxed)
     }
 
@@ -356,7 +358,7 @@ impl PalaceHandle {
     /// [`Self::without_idle_touch`], in which case it is a no-op.
     /// Test: `registry_tests::touch_suppressed_during_compaction`,
     /// `registry_tests::touch_suppressed_inside_without_idle_touch`.
-    pub fn touch(&self) {
+    pub(crate) fn touch(&self) {
         // #9299: a recall_all fan-out is not a user access (ADR-0071 D2).
         if self.is_compacting.load(Ordering::Relaxed)
             || IDLE_TOUCH_SUPPRESSED.try_with(|_| ()).is_ok()
@@ -379,7 +381,8 @@ impl PalaceHandle {
     /// `join_all` fan-outs; work moved to another task via `tokio::spawn` is
     /// outside it.
     /// Test: `registry_tests::touch_suppressed_inside_without_idle_touch`.
-    pub async fn without_idle_touch<F: std::future::Future>(fut: F) -> F::Output {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn without_idle_touch<F: std::future::Future>(fut: F) -> F::Output {
         IDLE_TOUCH_SUPPRESSED.scope((), fut).await
     }
 
@@ -389,7 +392,8 @@ impl PalaceHandle {
     /// decide which handles to drop.
     /// What: `now - last_accessed`, saturating at 0 (clock skew safe).
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`.
-    pub fn idle_secs(&self) -> u64 {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn idle_secs(&self) -> u64 {
         now_epoch_secs().saturating_sub(self.last_accessed.load(Ordering::Relaxed))
     }
 
@@ -444,7 +448,7 @@ impl PalaceHandle {
     /// What: with `purge_expired == false` expired drawers are still left out
     /// of the in-memory table, but no row is deleted.
     /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
-    pub fn open_with_intent_purging(
+    pub(crate) fn open_with_intent_purging(
         palace: &Palace,
         intent: OpenIntent,
         purge_expired: bool,
@@ -658,14 +662,9 @@ impl PalaceHandle {
     /// redb file; production palaces wire one in at construction time.
     /// What: Builder-style mutator returning `self`.
     /// Test: `recall_logs_events_when_log_present` uses this to enable logging.
-    pub fn with_recall_log(mut self, log: Arc<RecallLog>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_recall_log(mut self, log: Arc<RecallLog>) -> Self {
         self.recall_log = Some(log);
-        self
-    }
-
-    /// Override the decay configuration for this palace.
-    pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
-        self.decay_config = config;
         self
     }
 
@@ -777,7 +776,7 @@ impl PalaceHandle {
     /// A write cancelled BEFORE the commit leaves at most an orphaned vector,
     /// which `palace_compact` reclaims. Neither case loses data.
     /// Test: `write_pipeline_tests`.
-    pub async fn remember_with_options_within(
+    pub(crate) async fn remember_with_options_within(
         &self,
         content: String,
         room: RoomType,
@@ -819,7 +818,8 @@ impl PalaceHandle {
     /// but holds the guard for its duration, matching the existing write path.
     /// Test: `remember_racing_compact_never_loses_a_vector`,
     /// `compact_vector_orphans_still_reclaims_true_orphans`.
-    pub async fn compact_vector_orphans(&self) -> Result<CompactionResult> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn compact_vector_orphans(&self) -> Result<CompactionResult> {
         // #6208: hold the palace write mutex across BOTH the valid-id snapshot
         // and the reclamation so a mid-flight remember (upsert done, drawer not
         // yet pushed) cannot have its vector reclaimed as a false orphan.
@@ -878,7 +878,7 @@ impl PalaceHandle {
     /// What: Rebuilds keyword -> Vec<drawer_id> map by tokenizing each drawer's
     /// content via `extract_keywords` (whitespace + stop-word filter).
     /// Test: `closet_updated_after_remember`.
-    pub fn rebuild_closets(&self) {
+    pub(crate) fn rebuild_closets(&self) {
         let snapshot: Vec<Drawer> = self.drawers.read().clone();
         let mut new_index: HashMap<String, Vec<Uuid>> = HashMap::new();
         for drawer in snapshot.iter() {
@@ -1090,7 +1090,8 @@ impl PalaceHandle {
     /// record survive its retirement. See `Drawer::is_tier_c`.
     /// Test: `purge_expired_drops_only_past_ttl`,
     /// `purge_expired_leaves_tier_c_drawers_alone`.
-    pub async fn purge_expired(&self) -> Result<usize> {
+    #[cfg(test)]
+    pub(crate) async fn purge_expired(&self) -> Result<usize> {
         if self.is_read_only() {
             return Ok(0);
         }

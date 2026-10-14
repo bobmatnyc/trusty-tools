@@ -48,7 +48,10 @@ pub(super) fn select_l1(drawers: &[Drawer]) -> Vec<Drawer> {
 /// every room. L0 is never scoped.
 /// Test: `a_wing_scoped_recall_drops_another_wings_l1_drawer`; trusty-memory's
 /// `tests/wing_mcp.rs` covers the MCP surface.
-pub fn retrieve_l0_l1_scoped(handle: &PalaceHandle, scope: &RecallScope) -> Vec<RecallResult> {
+pub(crate) fn retrieve_l0_l1_scoped(
+    handle: &PalaceHandle,
+    scope: &RecallScope,
+) -> Vec<RecallResult> {
     let allowed = match scope {
         RecallScope::Wing(_) => scope.allowed_room_ids(&handle.kg),
         RecallScope::All | RecallScope::Room(_) => None,

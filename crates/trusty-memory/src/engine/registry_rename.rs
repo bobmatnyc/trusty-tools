@@ -9,6 +9,9 @@
 //! types. It lives beside `registry.rs` (as a child module) because it must
 //! hold the registry's private per-palace open-locks.
 //! Test: `registry_rename_tests.rs`.
+// #9278: only the server half renames a palace, so the engine-only build
+// (`--no-default-features`) compiles this module with no caller.
+#![cfg_attr(not(feature = "server"), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,7 +31,7 @@ use trusty_common::palace_alias::{
 };
 
 /// Default bound on waiting for an open-lock or for a cached handle to go idle.
-pub const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const DEFAULT_RENAME_BUSY_WAIT: Duration = Duration::from_secs(2);
 
 /// Gap between release attempts while a handle is still referenced.
 const RELEASE_POLL: Duration = Duration::from_millis(20);
@@ -41,13 +44,13 @@ const TRASH_DIR: &str = ".trash";
 /// What: `replace_empty` lets an existing, empty target be moved to the trash;
 /// `legacy_probe` decides whether a target's legacy data makes it non-empty
 /// (default: [`conservative_legacy_probe`]); `busy_wait` bounds every wait.
-pub struct RenameOptions<'a> {
+pub(crate) struct RenameOptions<'a> {
     /// Replace an existing target that is empty (moved to `<root>/.trash/`).
-    pub replace_empty: bool,
+    pub(crate) replace_empty: bool,
     /// Legacy-data check for the target; see [`LegacyProbe`].
-    pub legacy_probe: &'a LegacyProbe,
+    pub(crate) legacy_probe: &'a LegacyProbe,
     /// Bound on each open-lock wait and on the release poll.
-    pub busy_wait: Duration,
+    pub(crate) busy_wait: Duration,
 }
 
 impl Default for RenameOptions<'static> {
@@ -62,19 +65,19 @@ impl Default for RenameOptions<'static> {
 
 /// What a completed [`PalaceRegistry::rename_palace`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenameOutcome {
+pub(crate) struct RenameOutcome {
     /// The id the palace had.
-    pub old: PalaceId,
+    pub(crate) old: PalaceId,
     /// The id the palace has now.
-    pub new: PalaceId,
+    pub(crate) new: PalaceId,
     /// Where an empty target was moved, when `replace_empty` replaced one.
-    pub trashed_target: Option<PathBuf>,
+    pub(crate) trashed_target: Option<PathBuf>,
     /// `true` when this call finished a rename an earlier call left partway.
-    pub resumed: bool,
+    pub(crate) resumed: bool,
     /// The alias keys this call changed (`old -> new` and every retarget).
-    pub alias_changes: Vec<AliasChange>,
+    pub(crate) alias_changes: Vec<AliasChange>,
     /// `true` when `palace.json`'s display name was `old` and became `new`.
-    pub name_rewritten: bool,
+    pub(crate) name_rewritten: bool,
 }
 
 /// Why a [`PalaceRegistry::rename_palace`] did not complete.
@@ -155,7 +158,8 @@ pub enum PalaceRenameError {
 
 impl PalaceRenameError {
     /// Whether this refusal is a conflict with existing state (HTTP 409 class).
-    pub fn is_conflict(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_conflict(&self) -> bool {
         matches!(
             self,
             Self::SourceIsAlias { .. }
@@ -226,7 +230,7 @@ impl PalaceRegistry {
     /// `rename_palace_refuses_a_newer_format_source_and_changes_nothing`,
     /// `rename_palace_allows_the_reverse_rename`,
     /// `rename_palace_refuses_a_target_with_chat_sessions`.
-    pub fn rename_palace(
+    pub(crate) fn rename_palace(
         &self,
         data_root: &Path,
         old: &str,

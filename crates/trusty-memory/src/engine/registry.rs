@@ -33,7 +33,9 @@ use std::time::Duration;
 // #9544: palace rename; a child module so it can hold the private open-locks.
 #[path = "registry_rename.rs"]
 mod rename;
-pub use rename::{DEFAULT_RENAME_BUSY_WAIT, PalaceRenameError, RenameOptions, RenameOutcome};
+pub use rename::PalaceRenameError;
+#[cfg(feature = "server")]
+pub(crate) use rename::{DEFAULT_RENAME_BUSY_WAIT, RenameOptions, RenameOutcome};
 
 /// Environment variable overriding the LRU open-handle cap
 /// (`PalaceRegistry::with_max_open`).
@@ -46,7 +48,8 @@ pub use rename::{DEFAULT_RENAME_BUSY_WAIT, PalaceRenameError, RenameOptions, Ren
 /// What: parsed by [`max_open_palaces_from_env`]; consumed by
 /// [`PalaceRegistry::from_env`].
 /// Test: `registry_tests::from_env_respects_max_open_palaces_env`.
-pub const MAX_OPEN_PALACES_ENV: &str = "TRUSTY_MEMORY_MAX_OPEN_PALACES";
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) const MAX_OPEN_PALACES_ENV: &str = "TRUSTY_MEMORY_MAX_OPEN_PALACES";
 
 /// Resolve the effective open-handle cap from the environment.
 ///
@@ -57,7 +60,8 @@ pub const MAX_OPEN_PALACES_ENV: &str = "TRUSTY_MEMORY_MAX_OPEN_PALACES";
 /// non-numeric, or zero value falls back to the default (a zero cap would be
 /// clamped to 1 anyway and is almost certainly a misconfiguration).
 /// Test: `registry_tests::from_env_respects_max_open_palaces_env`.
-pub fn max_open_palaces_from_env() -> usize {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn max_open_palaces_from_env() -> usize {
     std::env::var(MAX_OPEN_PALACES_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -75,7 +79,7 @@ pub fn max_open_palaces_from_env() -> usize {
 /// via `PalaceRegistry::with_max_open`.
 /// What: A compile-time constant; overridable per-instance.
 /// Test: `lru_evicts_least_recently_used` forces eviction below this limit.
-pub const DEFAULT_MAX_OPEN_PALACES: usize = 64;
+pub(crate) const DEFAULT_MAX_OPEN_PALACES: usize = 64;
 
 /// Concurrent palace registry with LRU-bounded open-handle cache (issue #463).
 ///
@@ -232,7 +236,7 @@ impl PalaceRegistry {
     /// What: Constructs a `LruCache` with capacity `max_open_palaces`; values
     /// below 1 are clamped to 1.
     /// Test: `lru_evicts_least_recently_used` uses capacity 2 to force eviction.
-    pub fn with_max_open(max_open_palaces: usize) -> Self {
+    pub(crate) fn with_max_open(max_open_palaces: usize) -> Self {
         let cap = NonZeroUsize::new(max_open_palaces.max(1)).expect("max(1) is always nonzero");
         Self {
             handles: Arc::new(Mutex::new(LruCache::new(cap))),
@@ -261,7 +265,8 @@ impl PalaceRegistry {
     /// What: Consuming builder that overwrites `open_queue_timeout`.
     /// Test: `registry_tests::writer_open_queue_wait_is_bounded_under_sustained_contention`.
     #[must_use]
-    pub fn with_open_queue_timeout(mut self, timeout: Duration) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_open_queue_timeout(mut self, timeout: Duration) -> Self {
         self.open_queue_timeout = timeout;
         self
     }
@@ -275,7 +280,8 @@ impl PalaceRegistry {
     /// contract chain `.with_writer_intent()` as before.
     /// What: `with_max_open(max_open_palaces_from_env())`.
     /// Test: `registry_tests::from_env_respects_max_open_palaces_env`.
-    pub fn from_env() -> Self {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn from_env() -> Self {
         Self::with_max_open(max_open_palaces_from_env())
     }
 
@@ -339,7 +345,8 @@ impl PalaceRegistry {
     /// [`Self::may_run_maintenance`] consults.
     /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
     #[must_use]
-    pub fn with_maintenance_lease(mut self, lease: Arc<MaintenanceLease>) -> Self {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn with_maintenance_lease(mut self, lease: Arc<MaintenanceLease>) -> Self {
         self.maintenance = Some(lease);
         self
     }
@@ -352,20 +359,22 @@ impl PalaceRegistry {
     /// What: consuming builder storing `data_root`; read by [`Self::data_root`].
     /// Test: `registry_tests::data_root_is_unset_by_default_and_named_by_open_and_the_builder`.
     #[must_use]
-    pub fn with_data_root(mut self, data_root: &Path) -> Self {
+    pub(crate) fn with_data_root(mut self, data_root: &Path) -> Self {
         self.data_root = Some(data_root.to_path_buf());
         self
     }
 
     /// The data root named by [`Self::with_data_root`], if any.
     #[must_use]
-    pub fn data_root(&self) -> Option<&Path> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn data_root(&self) -> Option<&Path> {
         self.data_root.as_deref()
     }
 
     /// The maintenance lease this registry is gated on, if any.
     #[must_use]
-    pub fn maintenance_lease(&self) -> Option<&Arc<MaintenanceLease>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn maintenance_lease(&self) -> Option<&Arc<MaintenanceLease>> {
         self.maintenance.as_ref()
     }
 
@@ -377,7 +386,7 @@ impl PalaceRegistry {
     /// lease, so a non-holder takes over once the holder exits.
     /// Test: `maintenance_election_tests::two_maintainers_on_one_root_run_one_dream_pass`.
     #[must_use]
-    pub fn may_run_maintenance(&self) -> bool {
+    pub(crate) fn may_run_maintenance(&self) -> bool {
         self.maintenance
             .as_ref()
             .is_none_or(|lease| lease.try_hold().is_held())
@@ -390,7 +399,7 @@ impl PalaceRegistry {
     /// What: [`PalaceHandle::open_with_intent_purging`] with the purge gated
     /// on [`Self::may_run_maintenance`].
     /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
-    pub fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
+    pub(crate) fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
         PalaceHandle::open_with_intent_purging(palace, self.open_intent, self.may_run_maintenance())
     }
 
@@ -403,7 +412,8 @@ impl PalaceRegistry {
     /// What: Acquires the handle lock, calls `LruCache::put`, and drops the
     /// evicted entry (if any) outside the lock so Drop doesn't run under it.
     /// Test: `register_and_get_roundtrip` re-fetches by id and compares.
-    pub fn register(&self, handle: PalaceHandle) {
+    #[cfg(test)]
+    pub(crate) fn register(&self, handle: PalaceHandle) {
         let id = handle.id.clone();
         self.watch_hnsw_ops(&handle);
         let arc = Arc::new(handle);
@@ -457,7 +467,8 @@ impl PalaceRegistry {
     /// before any store registry is read, and neither lock is held across
     /// store work, so this cannot block behind a wedged call.
     /// Test: `registry_tests::a_blocked_hnsw_op_stays_reported_on_every_eviction_path`.
-    pub fn oldest_hnsw_op(&self) -> Option<(PalaceId, HnswOp)> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn oldest_hnsw_op(&self) -> Option<(PalaceId, HnswOp)> {
         let watches = {
             let mut watches = self.hnsw_ops.lock();
             watches.retain(|(_, w)| w.strong_count() > 0);
@@ -498,7 +509,8 @@ impl PalaceRegistry {
     /// all persisted palaces use `PalaceRegistry::list_palaces`.
     /// What: Snapshots the LRU key set.
     /// Test: `list_contains_all_registered`.
-    pub fn list(&self) -> Vec<PalaceId> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn list(&self) -> Vec<PalaceId> {
         let cache = self.handles.lock();
         cache.iter().map(|(k, _)| k.clone()).collect()
     }
@@ -531,7 +543,8 @@ impl PalaceRegistry {
     /// `gaps_cache`. Cheap and lock-free at the per-palace granularity thanks
     /// to `DashMap`.
     /// Test: `gaps_cache_round_trip`.
-    pub fn set_gaps(&self, palace_id: PalaceId, gaps: Vec<KnowledgeGap>) {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn set_gaps(&self, palace_id: PalaceId, gaps: Vec<KnowledgeGap>) {
         self.gaps_cache.insert(palace_id, gaps);
     }
 
@@ -544,7 +557,8 @@ impl PalaceRegistry {
     /// What: Clones the cached `Vec<KnowledgeGap>` so callers can serialize
     /// without holding the DashMap entry guard.
     /// Test: `gaps_cache_round_trip`.
-    pub fn get_gaps(&self, palace_id: &PalaceId) -> Option<Vec<KnowledgeGap>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn get_gaps(&self, palace_id: &PalaceId) -> Option<Vec<KnowledgeGap>> {
         self.gaps_cache.get(palace_id).map(|r| r.value().clone())
     }
 
@@ -554,7 +568,8 @@ impl PalaceRegistry {
     /// removed palaces and surface stale community shapes in the dashboard.
     /// What: Removes the entry; no-op when not present.
     /// Test: `gaps_cache_round_trip` covers the inverse (insert then read).
-    pub fn clear_gaps(&self, palace_id: &PalaceId) {
+    #[cfg(test)]
+    pub(crate) fn clear_gaps(&self, palace_id: &PalaceId) {
         self.gaps_cache.remove(palace_id);
     }
 
@@ -618,7 +633,8 @@ impl PalaceRegistry {
     /// non-blocking queue attempt, so an UNCONTENDED open still succeeds.
     /// Test: `open_palace_within_an_exhausted_budget_still_opens_an_uncontended_palace`,
     /// `open_palace_within_does_not_extend_the_configured_queue_bound`.
-    pub fn open_palace_within(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn open_palace_within(
         &self,
         data_root: &Path,
         palace_id: &PalaceId,
@@ -742,8 +758,15 @@ impl PalaceRegistry {
     /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
     /// read and the path-free absence; `open_error_is_not_absent_for_an_unstattable_palace_json`
     /// covers a denied stat, the shape #5574 turned from `NotFound` into `Io`.
-    pub fn open_error_is_absent(err: &anyhow::Error) -> bool {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn open_error_is_absent(err: &anyhow::Error) -> bool {
+        // #9278 rebase ruling: `PalaceNotFound` is the crate-only, path-free
+        // form of `PalaceStoreError::NotFound`; both are one absence.
         err.downcast_ref::<PalaceNotFound>().is_some()
+            || matches!(
+                err.downcast_ref::<PalaceStoreError>(),
+                Some(PalaceStoreError::NotFound(_))
+            )
     }
 
     /// Register a `ROOMS` row for every room the palace's drawers already use.
@@ -996,7 +1019,8 @@ impl PalaceRegistry {
     /// order. Empty when every persisted palace hydrated.
     /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
     #[must_use]
-    pub fn unopenable(&self) -> Vec<(PalaceId, String)> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn unopenable(&self) -> Vec<(PalaceId, String)> {
         self.unopenable
             .iter()
             .map(|e| (e.key().clone(), e.value().clone()))
@@ -1011,7 +1035,8 @@ impl PalaceRegistry {
     /// normally or was never seen by an eager `open`.
     /// Test: `registry_tests::open_keeps_an_unopenable_palace_observable`.
     #[must_use]
-    pub fn unopenable_reason(&self, palace_id: &PalaceId) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn unopenable_reason(&self, palace_id: &PalaceId) -> Option<String> {
         self.unopenable.get(palace_id).map(|r| r.value().clone())
     }
 
@@ -1030,7 +1055,8 @@ impl PalaceRegistry {
     /// Test: `registry_tests::record_unopenable_is_cleared_by_a_later_success`;
     /// the daemon path is covered by
     /// `trusty_memory::lib_tests::load_palaces_from_disk_records_an_unopenable_palace`.
-    pub fn record_unopenable(&self, palace_id: PalaceId, reason: String) {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn record_unopenable(&self, palace_id: PalaceId, reason: String) {
         self.unopenable.insert(palace_id, reason);
     }
 
@@ -1049,7 +1075,7 @@ impl PalaceRegistry {
     /// and RAM free never run under it. Returns whether a handle was released.
     /// The next access transparently reopens from redb, the source of truth.
     /// Test: `registry_tests::release_if_unreferenced_skips_a_referenced_handle`.
-    pub fn release_if_unreferenced(&self, palace_id: &PalaceId) -> bool {
+    pub(crate) fn release_if_unreferenced(&self, palace_id: &PalaceId) -> bool {
         let released = {
             let mut cache = self.handles.lock();
             match cache.peek(palace_id) {
@@ -1083,7 +1109,8 @@ impl PalaceRegistry {
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
     /// `registry_tests::evict_idle_skips_referenced_handle`,
     /// `registry_tests::evict_idle_skips_recently_accessed_handle`.
-    pub fn evict_idle(&self, threshold: Duration) -> usize {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn evict_idle(&self, threshold: Duration) -> usize {
         let threshold_secs = threshold.as_secs();
         if threshold_secs == 0 {
             return 0;

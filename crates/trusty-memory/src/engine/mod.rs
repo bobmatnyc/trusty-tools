@@ -4,11 +4,11 @@
 //! Why: Centralises the Memory Palace data model and storage abstractions
 //! so every binary (CLI, MCP server, embedded library) reuses the same
 //! types. #9271 moved it from trusty-common into trusty-memory, its owner.
-//! What: Re-exports the palace hierarchy (`Palace` -> `Wing` -> `Room` ->
-//! `Drawer`), the registry, and the retrieval handle. "Closet" is not a level
-//! in that hierarchy — it is the keyword -> drawer-ids inverted index on
-//! `PalaceHandle` (ADR-0027 D3). Compiled under every trusty-memory feature
-//! set (ADR-0066 D1.4).
+//! What: Re-exports the palace hierarchy types (`Palace`, `Drawer`; wings and
+//! rooms are palace-store rows), the registry, and the retrieval handle.
+//! "Closet" is not a level in that hierarchy — it is the keyword -> drawer-ids
+//! inverted index on `PalaceHandle` (ADR-0027 D3). Compiled under every
+//! trusty-memory feature set (ADR-0066 D1.4).
 //! Test: Each submodule keeps its existing unit tests; `cargo test -p
 //! trusty-memory` exercises the full surface.
 
@@ -55,8 +55,7 @@ pub use content_hash::{
     CONTENT_HASH_VERSION, ContentHash, memory_content_hash, normalize_for_hash,
 };
 pub use maintenance_lease::{LeaseStatus, MaintenanceLease};
-pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
-pub use palace_not_found::{ExistingPalaces, MAX_LISTED_PALACES, PalaceNotFound};
+pub use palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
 pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
 pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};

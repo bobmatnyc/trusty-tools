@@ -89,7 +89,7 @@ the cross-cutting keyword → drawer-ids inverted index held on `PalaceHandle`
 (ADR-0027 D3).
 
 **Key types/modules.**
-- `engine/palace.rs` — `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, `Drawer`, `DrawerType`.
+- `engine/palace.rs` — `PalaceId`, `Palace`, `RoomType`, `Drawer`, `DrawerType`.
 - `engine/registry.rs` — `PalaceRegistry` (`DashMap<PalaceId, Arc<PalaceHandle>>`).
 - `engine/store/palace_store.rs` — `palace.json` + `identity.txt` atomic persistence.
 - `engine/store/l1_cache.rs` — L1 essential-drawer snapshot.

@@ -47,7 +47,7 @@ use uuid::Uuid;
 /// carries why. [`EmbedHealth::is_healthy`] is false for `Unavailable`.
 /// Test: `alias_audit_failure_is_never_reported_as_clean`.
 #[derive(Debug, Clone)]
-pub enum AliasAudit {
+pub(crate) enum AliasAudit {
     /// The audit ran; these numbers are authoritative.
     Measured {
         /// Rows in the `VECTOR_KEYS` table.
@@ -83,7 +83,7 @@ impl AliasAudit {
     /// What: `Ok` → `Measured`; `Err` → `Unavailable` carrying the rendered
     /// error. Never returns zeros for a failure.
     /// Test: `alias_audit_failure_is_never_reported_as_clean`.
-    pub fn from_scan(scan: anyhow::Result<AliasScan>) -> Self {
+    pub(crate) fn from_scan(scan: anyhow::Result<AliasScan>) -> Self {
         match scan {
             Ok(s) => Self::Measured {
                 key_rows: s.key_rows,
@@ -107,7 +107,7 @@ impl AliasAudit {
     /// if they ever disagree the answer is "not clean", which fails closed.
     /// `Unavailable` is false — an unread palace is not a clean one.
     /// Test: `a_collision_whose_keys_do_not_parse_is_never_clean`.
-    pub fn is_clean(&self) -> bool {
+    pub(crate) fn is_clean(&self) -> bool {
         matches!(
             self,
             Self::Measured {
@@ -123,7 +123,8 @@ impl AliasAudit {
 
     /// Keys in a collision group that name no drawer, or `None` when the audit
     /// did not run. Non-empty means [`Self::aliased_drawer_ids`] is short.
-    pub fn unnameable_keys(&self) -> Option<&[String]> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn unnameable_keys(&self) -> Option<&[String]> {
         match self {
             Self::Measured {
                 unnameable_keys, ..
@@ -143,7 +144,8 @@ impl AliasAudit {
     /// What: `Some(ids)` only when the audit ran. `Some(&[])` means "looked,
     /// found nothing" — the only state a zero legitimately describes.
     /// Test: `alias_audit_failure_is_never_reported_as_clean`.
-    pub fn aliased_drawer_ids(&self) -> Option<&[Uuid]> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn aliased_drawer_ids(&self) -> Option<&[Uuid]> {
         match self {
             Self::Measured {
                 aliased_drawer_ids, ..
@@ -153,7 +155,8 @@ impl AliasAudit {
     }
 
     /// `(key_rows, distinct_vector_ids)`, or `None` when the audit did not run.
-    pub fn counts(&self) -> Option<(usize, usize)> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn counts(&self) -> Option<(usize, usize)> {
         match self {
             Self::Measured {
                 key_rows,
@@ -165,7 +168,7 @@ impl AliasAudit {
     }
 
     /// Why the audit could not run, when it could not.
-    pub fn unavailable_reason(&self) -> Option<&str> {
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
         match self {
             Self::Unavailable { reason } => Some(reason),
             Self::Measured { .. } => None,
@@ -186,21 +189,22 @@ impl AliasAudit {
 /// Test: `health_reports_the_drawer_with_no_vector`.
 #[derive(Debug, Clone)]
 pub struct EmbedHealth {
-    pub palace_id: String,
+    pub(crate) palace_id: String,
     /// Live drawers considered (expired non-Tier-C rows are excluded — they are
     /// reclaimable and never served, so a missing vector for one is not a hole).
-    pub drawer_count: usize,
+    pub(crate) drawer_count: usize,
     /// Entries in the vector index, orphans included.
-    pub vector_count: usize,
+    pub(crate) vector_count: usize,
     /// Drawer ids with no entry in the vector index. This is the authoritative
     /// answer; everything else on this struct is context for it.
     pub missing_vector_ids: Vec<Uuid>,
     /// Rows the deferred lane wrote when it gave up (#4906 ledger).
-    pub recorded_failures: Vec<EmbedFailure>,
+    pub(crate) recorded_failures: Vec<EmbedFailure>,
     /// Whether a shared embedder has initialised in this process.
-    pub embedder_ready: bool,
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) embedder_ready: bool,
     /// Vector-id alias audit (#5005), including whether it ran at all.
-    pub alias_audit: AliasAudit,
+    pub(crate) alias_audit: AliasAudit,
     /// #9275: drawers with a vector whose chunk rows are fewer than (or gapped
     /// against) the chunk count their text needs. Their tail is unfindable.
     pub short_chunk_ids: Vec<Uuid>,
@@ -267,35 +271,36 @@ impl Default for VectorBackfillOptions {
 /// What: what was found, what was attempted, and what is still broken.
 /// Test: `backfill_reembeds_a_marked_drawer`.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct VectorBackfillReport {
-    pub palace_id: String,
-    pub dry_run: bool,
-    pub drawer_count: usize,
-    pub vector_count: usize,
+    pub(crate) palace_id: String,
+    pub(crate) dry_run: bool,
+    pub(crate) drawer_count: usize,
+    pub(crate) vector_count: usize,
     /// Drawers found with no vector before this run.
-    pub missing: usize,
+    pub(crate) missing: usize,
     /// Drawers this run tried to embed (0 for a dry run, `<= limit` otherwise).
     pub attempted: usize,
     /// Drawers that now have a vector because of this run.
     pub repaired: usize,
     /// Drawers this run tried and could not repair.
-    pub still_failing: usize,
+    pub(crate) still_failing: usize,
     /// Ids still without a vector after this run (including any skipped by
     /// `limit`), so a caller can act on the remainder.
-    pub still_missing_ids: Vec<Uuid>,
+    pub(crate) still_missing_ids: Vec<Uuid>,
     /// The alias audit for this palace (#5005). This run never repairs an
     /// aliased drawer — a re-embed alone would not, since it already has a key.
     /// A deletion-bearing workflow must require `alias_audit.is_clean()` as well
     /// as `missing == 0` (#5000 resolution item 3); an `Unavailable` audit
     /// blocks exactly as a non-empty one does.
-    pub alias_audit: AliasAudit,
+    pub(crate) alias_audit: AliasAudit,
     /// #9275: drawers found with fewer chunk rows than their text needs.
     pub short: usize,
     /// #9275: short drawers still not repaired after this run.
     pub still_short_ids: Vec<Uuid>,
     /// #9275: whether the chunk-count comparison ran; `short` means nothing
     /// when it is `Unavailable`.
-    pub chunk_check: ChunkCheck,
+    pub(crate) chunk_check: ChunkCheck,
 }
 
 impl VectorBackfillReport {
@@ -328,8 +333,9 @@ impl VectorBackfillReport {
 /// What: `dry_run` reports the ids it would free and writes nothing.
 /// Test: `repair_aliases_dry_run_names_the_group_and_changes_nothing`.
 #[derive(Debug, Clone, Copy)]
-pub struct AliasRepairOptions {
-    pub dry_run: bool,
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct AliasRepairOptions {
+    pub(crate) dry_run: bool,
 }
 
 impl Default for AliasRepairOptions {
@@ -351,7 +357,8 @@ impl Default for AliasRepairOptions {
 /// Test: `repair_aliases_never_reports_success_over_a_partial_repair`,
 /// `an_unavailable_or_partial_repair_is_never_a_success`.
 #[derive(Debug, Clone)]
-pub enum AliasRepairOutcome {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) enum AliasRepairOutcome {
     /// The audit ran and found no collision. Nothing was written.
     Clean,
     /// Dry run. `freed_ids` is what a real run WOULD free; nothing changed.
@@ -376,7 +383,8 @@ pub enum AliasRepairOutcome {
 
 impl AliasRepairOutcome {
     /// One word for a wire payload or a log line.
-    pub fn as_str(&self) -> &'static str {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Planned => "planned",
@@ -390,7 +398,8 @@ impl AliasRepairOutcome {
     ///
     /// `Planned` is false: a dry run repaired nothing. `Partial` and
     /// `Unavailable` are false by construction — that is the whole point.
-    pub fn is_success(&self) -> bool {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn is_success(&self) -> bool {
         matches!(self, Self::Clean | Self::Repaired)
     }
 }
@@ -405,21 +414,22 @@ impl AliasRepairOutcome {
 /// dry run, which reads nothing twice), and the outcome.
 /// Test: `repair_aliases_frees_the_group_and_verifies_it`.
 #[derive(Debug, Clone)]
-pub struct AliasRepairReport {
-    pub palace_id: String,
-    pub dry_run: bool,
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct AliasRepairReport {
+    pub(crate) palace_id: String,
+    pub(crate) dry_run: bool,
     /// The alias audit taken before anything was written.
-    pub before: AliasAudit,
+    pub(crate) before: AliasAudit,
     /// Exact drawer ids freed — or, on a dry run, that would be freed. These
     /// now have no vector and need a `backfill_missing_vectors` run.
-    pub freed_ids: Vec<Uuid>,
+    pub(crate) freed_ids: Vec<Uuid>,
     /// Keys the pre-repair audit found in a collision group but could not name.
     /// Non-empty means `freed_ids` cannot be the whole story.
-    pub unnameable_keys: Vec<String>,
+    pub(crate) unnameable_keys: Vec<String>,
     /// The verification audit. `None` on a dry run and when nothing was
     /// aliased, because neither wrote anything to verify.
-    pub after: Option<AliasAudit>,
-    pub outcome: AliasRepairOutcome,
+    pub(crate) after: Option<AliasAudit>,
+    pub(crate) outcome: AliasRepairOutcome,
 }
 
 impl AliasRepairReport {
@@ -427,7 +437,8 @@ impl AliasRepairReport {
     ///
     /// Freeing an aliased group turns an invisible drawer into an ordinary
     /// missing one; only the backfill makes it retrievable again.
-    pub fn reembed_required(&self) -> bool {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn reembed_required(&self) -> bool {
         !self.dry_run && !self.freed_ids.is_empty()
     }
 }
@@ -449,6 +460,7 @@ impl AliasRepairReport {
 /// Test: `classify_refuses_to_call_an_unverified_write_repaired`,
 /// `classify_reports_partial_when_the_verification_still_finds_a_collision`,
 /// and end-to-end through `repair_aliases_frees_the_group_and_verifies_it`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn classify_repair(
     after: &AliasAudit,
     freed: &UnaliasOutcome,
@@ -513,7 +525,8 @@ impl PalaceHandle {
     /// `repair_aliases_never_reports_success_over_a_partial_repair`,
     /// `an_unavailable_or_partial_repair_is_never_a_success`,
     /// `repair_aliases_then_reembed_makes_a_lost_drawer_retrievable`.
-    pub fn repair_aliases(&self, opts: AliasRepairOptions) -> Result<AliasRepairReport> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn repair_aliases(&self, opts: AliasRepairOptions) -> Result<AliasRepairReport> {
         let before = AliasAudit::from_scan(self.vector_store.alias_audit());
         let mut report = AliasRepairReport {
             palace_id: self.id.as_str().to_string(),

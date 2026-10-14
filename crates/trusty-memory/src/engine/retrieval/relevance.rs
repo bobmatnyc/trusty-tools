@@ -45,7 +45,8 @@
 /// [`FloorOutcome::withheld`].
 /// Test: `relevance_floor_drops_l1_penalty_noise` pins the 0.15 case;
 /// `relevance_floor_keeps_genuine_hit` pins the 0.56 case.
-pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.35;
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) const DEFAULT_RELEVANCE_FLOOR: f32 = 0.35;
 
 /// What cleared a relevance floor, and how much did not.
 ///
@@ -55,11 +56,12 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.35;
 /// What: `kept` in the input's order; `withheld` is how many were dropped.
 /// Test: `relevance_floor_counts_withheld`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FloorOutcome<T> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) struct FloorOutcome<T> {
     /// Candidates at or above the floor, in input order.
-    pub kept: Vec<T>,
+    pub(crate) kept: Vec<T>,
     /// How many candidates fell below the floor.
-    pub withheld: usize,
+    pub(crate) withheld: usize,
 }
 
 impl<T> FloorOutcome<T> {
@@ -70,7 +72,8 @@ impl<T> FloorOutcome<T> {
     /// What: `kept.is_empty() && withheld > 0`. A run with nothing to judge
     /// (`withheld == 0`) is "nothing existed", not "everything was withheld".
     /// Test: `relevance_floor_counts_withheld`.
-    pub fn silenced(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn silenced(&self) -> bool {
         self.kept.is_empty() && self.withheld > 0
     }
 }
@@ -88,7 +91,8 @@ impl<T> FloorOutcome<T> {
 /// Test: `relevance_floor_drops_l1_penalty_noise`,
 /// `relevance_floor_keeps_genuine_hit`, `relevance_floor_keeps_unscored_items`,
 /// `relevance_floor_counts_withheld`.
-pub fn apply_relevance_floor<T>(
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn apply_relevance_floor<T>(
     items: Vec<T>,
     floor: f32,
     score_of: impl Fn(&T) -> Option<f32>,

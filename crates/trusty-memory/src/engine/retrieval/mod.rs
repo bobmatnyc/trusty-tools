@@ -84,6 +84,9 @@ mod timeout_tests;
 mod write_pipeline_tests;
 
 // ── Public re-exports ────────────────────────────────────────────────────────
+// See #9278 (A4): `pub` only for what a caller outside the library names;
+// everything else is `pub(crate)` and recorded in
+// docs/reference/trusty-memory-engine-api-audit.tsv.
 
 // Shared embedder
 #[cfg(any(test, feature = "embedder-test-support"))]
@@ -93,59 +96,63 @@ pub use embedder::{shared_embedder, shared_embedder_initialized};
 // Core types
 // #9390: a committed slot whose verify command was not stored.
 pub use tier_c_verify::VerifyNotStored;
-pub use types::{
-    CrossPalaceRecall, CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult,
-    RememberOptions, RetrievalLayers,
-};
+#[cfg(feature = "server")]
+pub(crate) use types::{CrossPalaceRecall, CrossPalaceResult};
+pub use types::{ForgetOutcome, RecallResult, RememberOptions};
 
 // Palace handle
 pub use handle::PalaceHandle;
 
 // #4906: vector-coverage health and the repair backfill. `RetryPolicy` is
-// public because a caller choosing to run a longer policy than the write-path
-// default is a legitimate operator decision.
+// public because it is a field of `VectorBackfillOptions`.
 pub use deferred_embed::RetryPolicy;
 // #9275: the chunk-count verdict on `EmbedHealth`, and the chunked embed
 // primitive trusty-memory's kuzu import writes a drawer's vectors with.
-pub use chunk_backfill::{ChunkCommitError, SliceBounds, SliceReport, SliceStop};
+pub use chunk_backfill::{SliceBounds, SliceReport, SliceStop};
 pub use chunk_health::ChunkCheck;
 pub use chunk_progress::{
     CHUNK_MARKER_FILE, ChunkMarker, ChunkProgress, ChunkState, MARKER_RESCAN_AFTER,
 };
-pub use embed_repair::{
-    AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
-    VectorBackfillOptions, VectorBackfillReport,
-};
+#[cfg(feature = "server")]
+pub(crate) use embed_repair::{AliasAudit, AliasRepairOptions, AliasRepairOutcome};
+pub use embed_repair::{EmbedHealth, VectorBackfillOptions, VectorBackfillReport};
 pub use embed_store::embed_chunks;
 // #9275: the dream merge and rebuild share the bounded chunked embed.
 pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_within};
 
 // Recall scoping (ADR-0027 T9)
-pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
-// #9719: L0 + L1 under a recall scope; trusty-memory's warming lane uses it.
-pub use l1::retrieve_l0_l1_scoped;
+#[cfg(feature = "server")]
+pub(crate) use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+// #9719: L0 + L1 under a recall scope; the BM25 warming lane uses it.
+#[cfg(feature = "server")]
+pub(crate) use l1::retrieve_l0_l1_scoped;
 
-// #9390: the expired-slot refill bound. Public because trusty-memory's BM25
-// warming lane applies the same stop rule.
-pub use refill::next_refill_window;
+// #9390: the expired-slot refill bound the BM25 warming lane also applies.
+#[cfg(feature = "server")]
+pub(crate) use refill::next_refill_window;
 
-// #5037: relevance floor. Public because the consumer that must apply it —
-// trusty-memory's prompt-context injection — lives in another crate.
-pub use relevance::{DEFAULT_RELEVANCE_FLOOR, FloorOutcome, apply_relevance_floor};
+// #5037: relevance floor, applied by the prompt-context injection.
+#[cfg(feature = "server")]
+pub(crate) use relevance::{DEFAULT_RELEVANCE_FLOOR, FloorOutcome, apply_relevance_floor};
 
 // ADR-0028 Tier C admission (#4886). The write half (`persist_with_retirement`)
 // stays crate-internal — every writer reaches it through
 // `PalaceHandle::remember_with_options`, which is the single enforcement point.
-pub use tier_c::{
-    FACT_KEY_MAX_LEN, TIER_C_DEFAULT_TTL_HOURS, TierCAdmission, TierCRefusal, admit_tier_c,
-    validate_fact_key,
-};
+#[cfg(test)]
+pub(crate) use tier_c::TIER_C_DEFAULT_TTL_HOURS;
+#[cfg(feature = "server")]
+pub(crate) use tier_c::{TierCAdmission, admit_tier_c};
 
 // Layer functions
-pub use layers::{
-    dedup_extend, expand_query, recall, recall_across_palaces, recall_across_palaces_reporting,
-    recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
-    recall_deep_scoped, recall_deep_with_default_embedder, recall_in_room, recall_scoped,
-    recall_with_default_embedder, rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2,
-    retrieve_l2_scoped, retrieve_l3, retrieve_l3_scoped,
+#[cfg(feature = "server")]
+pub(crate) use layers::{
+    dedup_extend, expand_query, recall_across_palaces_reporting, recall_deep_scoped, recall_scoped,
+    retrieve_l2_scoped,
 };
+#[cfg(test)]
+pub(crate) use layers::{
+    recall, recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
+    recall_in_room, rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2, retrieve_l3,
+    retrieve_l3_scoped,
+};
+pub use layers::{recall_deep_with_default_embedder, recall_with_default_embedder};

@@ -57,8 +57,8 @@ const DEFAULT_EMBED_RETRY_BASE_MS: u64 = 250;
 /// Test: `retry_succeeds_after_transient_failures`.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
-    pub attempts: u32,
-    pub base_delay: Duration,
+    pub(crate) attempts: u32,
+    pub(crate) base_delay: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -78,8 +78,8 @@ impl RetryPolicy {
     }
 
     /// Policy with no sleeping, for tests that only care about attempt counts.
-    #[cfg(any(test, feature = "embedder-test-support"))]
-    pub fn instant(attempts: u32) -> Self {
+    #[cfg(test)]
+    pub(crate) fn instant(attempts: u32) -> Self {
         Self {
             attempts,
             base_delay: Duration::ZERO,

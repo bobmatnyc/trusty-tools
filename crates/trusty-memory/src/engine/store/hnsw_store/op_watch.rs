@@ -123,6 +123,7 @@ impl OpWatch {
     }
 
     /// The longest-running registered op, if any.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(crate) fn oldest(&self) -> Option<HnswOp> {
         self.live.lock().ops.values().next().copied()
     }
