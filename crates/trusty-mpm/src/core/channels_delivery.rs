@@ -11,6 +11,9 @@
 //! Test: `channels_delivery_tests.rs`, `deliver_tests.rs`,
 //! `doctor_channel_taint_tests.rs`.
 
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -68,19 +71,107 @@ impl DeliveryLine {
     }
 }
 
-/// RED STUB (#9873 S5): writes nothing; the next commit replaces it.
-pub fn record_delivery(_dir: &Path, _line: &DeliveryLine) -> Result<(), TaintError> {
-    Ok(())
+/// Append `line` to `dir`'s delivery trace, durably, owner-only.
+///
+/// Why: #9873 Q5: the `pending` line must be on disk before the send, so a
+/// crash mid-send leaves an unsettled line the doctor reports.
+/// What: the #8545 home-write fence, the directory created 0700, then the
+/// file opened for append (created 0600; no symlink followed, no wait on a
+/// FIFO), the whole line in one write, then `sync_data`. Any step's error is
+/// returned.
+/// Test: `delivery_trace_is_0600_and_one_line_per_step`,
+/// `pending_write_failure_refuses_delivery`.
+pub fn record_delivery(dir: &Path, line: &DeliveryLine) -> Result<(), TaintError> {
+    let path = dir.join(DELIVERY_FILE);
+    crate::core::home_write_fence::check(&path);
+    let io = |path: &Path, source| TaintError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| io(dir, e))?;
+    let mut bytes = serde_json::to_vec(line).map_err(|e| TaintError::Malformed {
+        path: path.clone(),
+        reason: e.to_string(),
+    })?;
+    bytes.push(b'\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_data()))
+        .map_err(|e| io(&path, e))
 }
 
-/// RED STUB (#9873 S5): reads nothing; the next commit replaces it.
-pub fn read_deliveries(_dir: &Path) -> Result<Vec<DeliveryLine>, TaintError> {
-    Ok(Vec::new())
+/// Every line of `dir`'s delivery trace; an absent trace has none.
+///
+/// What: a read error other than absence, and any line that does not parse
+/// (a torn final line included), is an `Err`: the doctor then grades
+/// `Unknown`, never `Ok`.
+/// Test: `delivery_trace_is_0600_and_one_line_per_step`,
+/// `malformed_delivery_line_is_an_error`.
+pub fn read_deliveries(dir: &Path) -> Result<Vec<DeliveryLine>, TaintError> {
+    let path = dir.join(DELIVERY_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(TaintError::Io { path, source }),
+    };
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(n, l)| {
+            serde_json::from_str(l).map_err(|e| TaintError::Malformed {
+                path: path.clone(),
+                reason: format!("line {}: {e}", n + 1),
+            })
+        })
+        .collect()
 }
 
-/// RED STUB (#9873 S5): finds nothing; the next commit replaces it.
-pub fn delivery_problems(_lines: &[DeliveryLine], _resolved: &[(String, String)]) -> Vec<String> {
-    Vec::new()
+/// The deliveries an operator must look at, one message each.
+///
+/// Why: #8433 Q4 makes a lost answer final, so it must be visible; Q4a
+/// accepts the crash window between `resolve` and the taint, and this is
+/// where it shows.
+/// What: per question, its last line: `pending` is "delivery unconfirmed",
+/// `failed` is "delivery failed (<reason>)". A `resolved` question (id,
+/// asker) with no line at all is "resolved with no delivery record". Each
+/// message names the question and the asker.
+/// Test: `delivery_problems_name_unsettled_failed_and_unrecorded`.
+pub fn delivery_problems(lines: &[DeliveryLine], resolved: &[(String, String)]) -> Vec<String> {
+    let mut last: BTreeMap<&str, &DeliveryLine> = BTreeMap::new();
+    for line in lines {
+        last.insert(line.question_id.as_str(), line);
+    }
+    let mut problems = Vec::new();
+    for (id, line) in &last {
+        let asker = &line.asker;
+        match line.state {
+            DeliveryState::Delivered => {}
+            DeliveryState::Pending => problems.push(format!(
+                "Q-{id} to asker {asker}: delivery unconfirmed (pending, never settled)"
+            )),
+            DeliveryState::Failed => problems.push(format!(
+                "Q-{id} to asker {asker}: delivery failed ({}); the answer is lost",
+                line.reason.as_deref().unwrap_or("unknown")
+            )),
+        }
+    }
+    for (id, asker) in resolved {
+        if !last.contains_key(id.as_str()) {
+            problems.push(format!(
+                "Q-{id} to asker {asker}: resolved with no delivery record (the daemon stopped \
+                 between resolve and taint)"
+            ));
+        }
+    }
+    problems
 }
 
 #[cfg(test)]

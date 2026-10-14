@@ -610,9 +610,34 @@ impl Drop for Flock {
     }
 }
 
-/// RED STUB (#9873 S5): reports nothing; the next commit replaces it.
-pub fn answered_in_log(_path: &Path) -> Result<Vec<(QuestionId, String)>, QuestionTableError> {
-    Ok(Vec::new())
+/// The answered questions in the log at `path`, with their askers, read
+/// without the table's lock.
+///
+/// Why: #9873 Q4a: `tm doctor` lists a question resolved with no delivery
+/// record while the daemon holds the lock, so it cannot open the table.
+/// What: replays every newline-terminated line under the live rules; an
+/// unterminated final line (an append in flight, or a torn one the next
+/// open judges) is skipped. An absent log has none; a read or replay
+/// error is an `Err`.
+/// Test: `resolved_question_without_a_delivery_line_is_a_doctor_fail`.
+pub fn answered_in_log(path: &Path) -> Result<Vec<(QuestionId, String)>, QuestionTableError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(path)(e)),
+    };
+    let mut book = Book::new();
+    for (n, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if line.ends_with(b"\n") && !line.trim_ascii().is_empty() {
+            replay_line(&mut book, decode(line), path, n + 1)?;
+        }
+    }
+    Ok(book
+        .questions
+        .values()
+        .filter(|e| e.answer.is_some())
+        .map(|e| (e.question.id, e.question.ask.asker_managed_session.clone()))
+        .collect())
 }
 
 /// Write one record line to the table's log and sync it.
