@@ -28,18 +28,23 @@ pub struct ArchitectSkill {
     pub stem: &'static str,
     /// The shipped `SKILL.md` text.
     pub contents: &'static str,
+    /// sha256 hex of every earlier shipped `SKILL.md`: a live copy equal to one
+    /// of these, with no deploy record, is an untouched tm deploy.
+    pub previous: &'static [&'static str],
 }
 
 /// `tm-fleet-check`, the Architect's per-pass fleet check.
 pub const FLEET_CHECK: ArchitectSkill = ArchitectSkill {
     stem: "tm-fleet-check",
     contents: include_str!("../../assets/architect/skills/tm-fleet-check.md"),
+    previous: &[],
 };
 
 /// `tm-context-refresh`, the Architect's context refresh.
 pub const CONTEXT_REFRESH: ArchitectSkill = ArchitectSkill {
     stem: "tm-context-refresh",
     contents: include_str!("../../assets/architect/skills/tm-context-refresh.md"),
+    previous: &[],
 };
 
 /// Every skill the Architect receives. #9132 moves the bytes to `content/`.
