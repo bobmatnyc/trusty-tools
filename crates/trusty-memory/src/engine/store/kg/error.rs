@@ -5,8 +5,8 @@ use crate::engine::store::kg_redb::READ_ONLY_ERROR_MSG;
 use crate::engine::store::palace_store::PalaceStoreError;
 use crate::engine::store::write_deadline::WriteTxnError;
 
-/// The error every public `KgStoreRedb` path, `resolve_or_create_room_sync`
-/// and a `CompactFaultHook` return.
+/// The error every public `KgStoreRedb` and `KnowledgeGraph` path,
+/// `resolve_or_create_room_sync` and a `CompactFaultHook` return.
 ///
 /// Why (#9278, ADR-0066): the frozen engine API must not name `anyhow`, and a
 /// caller must tell a read-only store, a rolled-back deadline write, a desynced
@@ -20,7 +20,7 @@ use crate::engine::store::write_deadline::WriteTxnError;
 /// the text (#9278 Q3). `Other` is message-only and not a stable match target.
 /// Test: `from_internal_maps_each_variant_and_keeps_display`,
 /// `kg_store_open_format_refusal_is_recoverable_as_palace_store`,
-/// `kg_store_redb_paths_return_kg_error`.
+/// `kg_store_redb_paths_return_kg_error`, `knowledge_graph_paths_return_kg_error`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum KgError {
@@ -70,6 +70,24 @@ impl KgError {
             Self::Palace(e) => Some(e),
             _ => None,
         }
+    }
+
+    /// The internal error a boxed variant carries, for the crate's open
+    /// classifiers (#9278 T1b-2).
+    /// Test: `knowledge_graph_open_refusals_stay_classified`.
+    pub(crate) fn internal(&self) -> Option<&anyhow::Error> {
+        match self {
+            Self::Storage(b) | Self::Codec(b) | Self::Other(b) => {
+                b.downcast_ref::<Internal>().map(|i| &i.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// The poisoned-adjacency-lock error of a graph traversal (#9278 Q6).
+    /// Test: `from_internal_maps_each_variant_and_keeps_display`.
+    pub(crate) fn poisoned<T>(_: T) -> Self {
+        Self::Other("kg adjacency lock poisoned".into())
     }
 
     /// Map an internal `anyhow` error to its variant; the first match wins.

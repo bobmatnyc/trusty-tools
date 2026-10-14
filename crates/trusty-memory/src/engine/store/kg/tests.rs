@@ -987,7 +987,7 @@ async fn poisoned_adjacency_error_downcasts_with_the_committed_row_count() {
         .await
         .expect_err("a desynced handle must refuse further mutations");
     assert_eq!(
-        refused.downcast_ref::<AdjacencyDesync>(),
+        refused.as_adjacency_desync(), // #9278: `assert` returns `KgError`
         Some(&AdjacencyDesync::HandleStale {
             operation: "assert",
             earlier_operation: "retract_triple",
@@ -1002,4 +1002,39 @@ async fn poisoned_adjacency_error_downcasts_with_the_committed_row_count() {
             .all(|t| t.object != "drawer:d"),
         "the refused assert must not have reached storage"
     );
+}
+
+/// Why (#9278 N5): a write on a read-only graph is refused with the typed
+/// `KgError::ReadOnly` and the full read-only text, not a shorter literal.
+/// What: holds the KG lock so the open falls back to a snapshot, then checks
+/// the error type of the three public writes and the text of all four.
+/// Test: this test.
+#[tokio::test]
+async fn write_on_read_only_writer_raises_kg_error_read_only() {
+    use crate::engine::store::kg_redb::{KgStoreRedb, READ_ONLY_ERROR_MSG};
+    fn err_of<T, E: std::fmt::Display>(r: Result<T, E>) -> (&'static str, String) {
+        let ty = std::any::type_name::<E>();
+        (ty, r.err().map(|e| e.to_string()).unwrap_or_default())
+    }
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("kg.redb");
+    drop(KgStoreRedb::open(&path).unwrap());
+    let _live = redb::Database::create(&path).expect("hold the write lock");
+    let kg = KnowledgeGraph::open(&path).expect("snapshot open");
+    assert!(kg.is_read_only());
+    let drawer = Drawer::new(Uuid::new_v4(), "read-only");
+    let rows = [
+        (
+            "assert",
+            err_of(kg.assert(Triple::new("a", "b", "c")).await),
+        ),
+        ("retract", err_of(kg.retract("a", "b").await)),
+        ("upsert_drawer", err_of(kg.upsert_drawer(&drawer).await)),
+    ];
+    for (name, (ty, text)) in rows {
+        assert!(ty.ends_with("::KgError"), "{name}: {ty}");
+        assert_eq!(text, READ_ONLY_ERROR_MSG, "{name}");
+    }
+    let (_, text) = err_of(kg.writer.delete_drawer(drawer.id).await);
+    assert_eq!(text, READ_ONLY_ERROR_MSG, "delete_drawer");
 }

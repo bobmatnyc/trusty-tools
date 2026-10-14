@@ -121,7 +121,7 @@ pub(super) async fn record_verify_command(
         confidence: 1.0,
         provenance: Some(VERIFY_PROVENANCE.to_string()),
     };
-    ctx.kg.assert(triple).await.map_err(missed)
+    ctx.kg.assert(triple).await.map_err(|e| missed(e.into())) // #9278: `KgError`
 }
 
 /// Close the `verify_with` command of a drawer its slot just retired (#9390).

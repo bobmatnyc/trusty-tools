@@ -392,7 +392,12 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
 /// one-line wiring of the read into that rule: inducing a real failure needs
 /// `KgStoreRedb::db()`, which trusty-common keeps `pub(super)`.
 pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
-    triple_count_or_zero(&handle.id, handle.kg.count_active_triples())
+    // #9278: the count is typed; the degrade rule reads anyhow.
+    let read = handle
+        .kg
+        .count_active_triples()
+        .map_err(anyhow::Error::from);
+    triple_count_or_zero(&handle.id, read)
 }
 
 /// Apply the degrade rule to an already-performed count read.

@@ -8,6 +8,7 @@
 //! `connected_components`, `astar_path`, `snapshot_undirected`.
 //! Test: See kg/tests.rs for the open/assert/retract/traversal tests.
 
+use super::KgError;
 use super::adjacency::{Adjacency, hydrate_adjacency};
 use super::types::{AdjacencyDesync, KgEdge, Triple, UndirectedSnapshot};
 use crate::engine::store::concurrent_open::OpenIntent;
@@ -126,8 +127,9 @@ impl KnowledgeGraph {
     /// What: Delegates to [`KnowledgeGraph::open_with_intent`] with
     /// [`OpenIntent::ReadOnlyClient`].
     /// Test: `open_creates_schema`.
-    pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_intent(path, OpenIntent::ReadOnlyClient)
+    pub fn open(path: &Path) -> std::result::Result<Self, KgError> {
+        // #9278: typed shell; `open_with_intent` stays anyhow.
+        Self::open_with_intent(path, OpenIntent::ReadOnlyClient).map_err(KgError::from_internal)
     }
 
     /// Open or create the redb-backed KG with the caller's open intent.
@@ -278,7 +280,15 @@ impl KnowledgeGraph {
     /// Test: `assert_then_query_active_returns_fact`,
     /// `second_assert_closes_prior_interval`,
     /// `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
-    pub async fn assert(&self, triple: Triple) -> Result<()> {
+    pub async fn assert(&self, triple: Triple) -> std::result::Result<(), KgError> {
+        // #9278 Q7: typed shell; the adjacency helpers stay anyhow.
+        self.assert_inner(triple)
+            .await
+            .map_err(KgError::from_internal)
+    }
+
+    /// The anyhow body of [`Self::assert`] (#9278 Q7).
+    async fn assert_inner(&self, triple: Triple) -> Result<()> {
         self.ensure_adjacency_live("assert")?;
         // Route through the coalescing writer so concurrent asserts share
         // a single redb commit / fsync. The writer awaits the commit
@@ -311,7 +321,19 @@ impl KnowledgeGraph {
     /// durable, and later mutations refuse instead of answering `Ok(0)`.
     /// Test: `retract_closes_active_interval`,
     /// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`.
-    pub async fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
+    pub async fn retract(
+        &self,
+        subject: &str,
+        predicate: &str,
+    ) -> std::result::Result<usize, KgError> {
+        // #9278 Q7: typed shell; the adjacency helpers stay anyhow.
+        self.retract_inner(subject, predicate)
+            .await
+            .map_err(KgError::from_internal)
+    }
+
+    /// The anyhow body of [`Self::retract`] (#9278 Q7).
+    async fn retract_inner(&self, subject: &str, predicate: &str) -> Result<usize> {
         self.ensure_adjacency_live("retract")?;
         let subject_owned = subject.to_string();
         let predicate_owned = predicate.to_string();
@@ -340,11 +362,8 @@ impl KnowledgeGraph {
     /// returns `(other_entity, edge)` pairs. Returns an empty vec when the
     /// entity is unknown.
     /// Test: `neighbors_returns_connected`.
-    pub fn neighbors(&self, entity: &str) -> Result<Vec<(String, KgEdge)>> {
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+    pub fn neighbors(&self, entity: &str) -> std::result::Result<Vec<(String, KgEdge)>, KgError> {
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let Some(&idx) = adj.node_index.get(entity) else {
             return Ok(Vec::new());
         };
@@ -383,11 +402,12 @@ impl KnowledgeGraph {
     /// exactly one less than the current node. Returns `None` when either
     /// endpoint is unknown or no path exists.
     /// Test: `shortest_path_finds_route`.
-    pub fn shortest_path(&self, from: &str, to: &str) -> Result<Option<Vec<String>>> {
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+    pub fn shortest_path(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> std::result::Result<Option<Vec<String>>, KgError> {
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let Some(&from_idx) = adj.node_index.get(from) else {
             return Ok(None);
         };
@@ -455,14 +475,15 @@ impl KnowledgeGraph {
     /// Returned entities are deduplicated and ordered by discovery (BFS
     /// order). Returns an empty vec when the entity is unknown.
     /// Test: `kg_graph_tests::bfs_reachable_within_hops`.
-    pub fn reachable(&self, entity: &str, max_hops: usize) -> Result<Vec<String>> {
+    pub fn reachable(
+        &self,
+        entity: &str,
+        max_hops: usize,
+    ) -> std::result::Result<Vec<String>, KgError> {
         if max_hops == 0 {
             return Ok(Vec::new());
         }
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let Some(&start) = adj.node_index.get(entity) else {
             return Ok(Vec::new());
         };
@@ -498,11 +519,8 @@ impl KnowledgeGraph {
     /// node, Incoming)`, and returns `(source_entity_name, KgEdge)` pairs.
     /// Returns an empty vec when the entity is unknown.
     /// Test: `kg_graph_tests::reverse_lookup_returns_incoming`.
-    pub fn incoming(&self, entity: &str) -> Result<Vec<(String, KgEdge)>> {
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+    pub fn incoming(&self, entity: &str) -> std::result::Result<Vec<(String, KgEdge)>, KgError> {
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let Some(&idx) = adj.node_index.get(entity) else {
             return Ok(Vec::new());
         };
@@ -532,11 +550,8 @@ impl KnowledgeGraph {
     /// independent traversals — equivalent to weakly-connected components on
     /// the directed graph. Returns 0 for an empty graph.
     /// Test: `kg_graph_tests::connected_components_count`.
-    pub fn connected_components(&self) -> Result<usize> {
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+    pub fn connected_components(&self) -> std::result::Result<usize, KgError> {
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let mut visited: HashSet<NodeIndex<u32>> = HashSet::new();
         let mut count = 0usize;
         for start in adj.graph.node_indices() {
@@ -580,11 +595,12 @@ impl KnowledgeGraph {
     /// to `to` inclusive, or `None` when either endpoint is unknown or no
     /// path exists.
     /// Test: `kg_graph_tests::astar_path_finds_route`.
-    pub fn astar_path(&self, from: &str, to: &str) -> Result<Option<Vec<String>>> {
-        let adj = self
-            .adj
-            .read()
-            .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+    pub fn astar_path(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> std::result::Result<Option<Vec<String>>, KgError> {
+        let adj = self.adj.read().map_err(KgError::poisoned)?; // #9278 Q6
         let Some(&from_idx) = adj.node_index.get(from) else {
             return Ok(None);
         };

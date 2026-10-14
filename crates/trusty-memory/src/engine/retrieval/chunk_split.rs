@@ -235,7 +235,11 @@ impl PalaceHandle {
         let mut shrunk = head.clone();
         shrunk.set_content(parts[0]);
         tag_part(&mut shrunk, id, 1, n);
-        self.kg.upsert_drawer(&shrunk).await.map_err(store)?;
+        // #9278: `upsert_drawer` returns the typed `KgError`.
+        self.kg
+            .upsert_drawer(&shrunk)
+            .await
+            .map_err(|e| store(e.into()))?;
         mirror(&self.drawers, std::slice::from_ref(&shrunk));
         // The old group no longer matches the text; the head re-embeds.
         if let Err(e) = self.vector_store.remove(id).await {
