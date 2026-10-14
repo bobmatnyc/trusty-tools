@@ -11,7 +11,9 @@
 //! bundle (`core::bundle::ALL`): that bundle deploys to every session's user
 //! tier, and these must reach the Architect only. [`deploy`] writes each file
 //! only when it is absent. A file with other bytes is someone's edit and is
-//! reported skipped, never overwritten.
+//! reported skipped, never overwritten. The two skills' bytes come from
+//! `architect_skills::SKILLS`, which every Architect launch also deploys
+//! (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `an_edited_seed_or_script_is_never_overwritten`,
 //! `every_path_a_ported_skill_names_exists_after_init`,
@@ -20,6 +22,7 @@
 use std::path::Path;
 
 use anyhow::{Context, bail};
+use trusty_mpm::core::project_skill_tier::architect_skills;
 
 use super::Step;
 
@@ -69,16 +72,17 @@ pub(crate) const FILES: &[Seeded] = &[
         "scripts/start-fleet-poll.sh",
         true
     ),
-    seeded!(
-        ".claude/skills/tm-fleet-check/SKILL.md",
-        "skills/tm-fleet-check.md",
-        false
-    ),
-    seeded!(
-        ".claude/skills/tm-context-refresh/SKILL.md",
-        "skills/tm-context-refresh.md",
-        false
-    ),
+    // #9540: the skill bytes come from the one table the launch deploys.
+    Seeded {
+        dest: ".claude/skills/tm-fleet-check/SKILL.md",
+        contents: architect_skills::FLEET_CHECK.contents,
+        executable: false,
+    },
+    Seeded {
+        dest: ".claude/skills/tm-context-refresh/SKILL.md",
+        contents: architect_skills::CONTEXT_REFRESH.contents,
+        executable: false,
+    },
 ];
 
 /// Directories `tm fleet init` creates that start with no file in them.

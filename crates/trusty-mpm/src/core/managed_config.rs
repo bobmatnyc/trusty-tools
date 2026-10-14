@@ -342,6 +342,10 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
         }
     }
 
+    // #9540: resume and in-place relaunch restore the Architect's shipped
+    // skills too. Non-fatal; the call logs its own errors.
+    crate::core::project_skill_tier::architect_skills::deploy_for_launch(&fw.root, project_dir);
+
     Ok(())
 }
 
