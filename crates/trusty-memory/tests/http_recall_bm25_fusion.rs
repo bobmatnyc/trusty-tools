@@ -75,13 +75,11 @@ async fn the_service_recall_path_runs_the_lexical_lane() {
         .registry
         .create_palace(
             &state.data_root,
-            Palace {
-                id: PalaceId::new(palace.to_string()),
-                name: palace.to_string(),
-                description: None,
-                created_at: chrono::Utc::now(),
-                data_dir: state.data_root.join(palace),
-            },
+            Palace::new(
+                PalaceId::new(palace.to_string()),
+                palace.to_string(),
+                state.data_root.join(palace),
+            ),
         )
         .expect("create palace");
     let handle = state

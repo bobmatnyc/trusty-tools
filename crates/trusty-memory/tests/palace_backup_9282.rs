@@ -49,13 +49,7 @@ impl Fixture {
             .registry
             .create_palace(
                 root,
-                Palace {
-                    id: PalaceId::new(id),
-                    name: id.to_string(),
-                    description: None,
-                    created_at: chrono::Utc::now(),
-                    data_dir: root.join(id),
-                },
+                Palace::new(PalaceId::new(id), id.to_string(), root.join(id)),
             )
             .expect("create palace")
     }
@@ -553,13 +547,7 @@ fn data_dir(override_dir: &Path) -> PathBuf {
 fn seed_on_disk(override_dir: &Path, id: &str) -> (usize, usize) {
     seed_shared_embedder_with_mock();
     let data_dir = data_dir(override_dir).join("palaces").join(id);
-    let palace = Palace {
-        id: PalaceId::new(id),
-        name: id.into(),
-        description: None,
-        created_at: chrono::Utc::now(),
-        data_dir: data_dir.clone(),
-    };
+    let palace = Palace::new(PalaceId::new(id), id, data_dir.clone());
     PalaceStore::save_palace(&palace).expect("palace.json");
     let handle = PalaceHandle::open(&palace).expect("open palace");
     let store = handle.kg.store();
@@ -744,13 +732,7 @@ fn cli_backup_with_a_failing_daemon_errors_without_falling_back() {
 /// `palaces/` dir, so the data dir is the registry) and close its handle.
 fn seed_flat_on_disk(override_dir: &Path, id: &str) {
     seed_shared_embedder_with_mock();
-    let palace = Palace {
-        id: PalaceId::new(id),
-        name: id.into(),
-        description: None,
-        created_at: chrono::Utc::now(),
-        data_dir: data_dir(override_dir).join(id),
-    };
+    let palace = Palace::new(PalaceId::new(id), id, data_dir(override_dir).join(id));
     PalaceStore::save_palace(&palace).expect("palace.json");
     drop(PalaceHandle::open(&palace).expect("open palace"));
 }

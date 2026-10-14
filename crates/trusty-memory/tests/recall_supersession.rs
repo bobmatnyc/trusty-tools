@@ -406,15 +406,8 @@ async fn recall_supersession_latency_profile() {
     };
     // Three triples per drawer and one drawer in 50 superseded by the next,
     // the shape `kg_supersession_latency_profile` times in trusty-common.
-    let triple = |subject: String, predicate: &str, object: String| Triple {
-        subject,
-        predicate: predicate.to_string(),
-        object,
-        valid_from: chrono::Utc::now(),
-        valid_to: None,
-        confidence: 1.0,
-        provenance: None,
-    };
+    let triple =
+        |subject: String, predicate: &str, object: String| Triple::new(subject, predicate, object);
     let mut rows = Vec::with_capacity(PROFILE_DRAWERS * 4);
     for (n, id) in ids.iter().enumerate() {
         let s = format!("drawer:{id}");

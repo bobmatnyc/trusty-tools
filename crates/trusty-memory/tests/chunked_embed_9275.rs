@@ -9,7 +9,6 @@
 //! model.
 //! Test: this file IS the tests.
 
-use chrono::Utc;
 use std::sync::Arc;
 use tempfile::tempdir;
 use trusty_common::embedder::Embedder;
@@ -36,31 +35,18 @@ fn open_palace(name: &str) -> Arc<PalaceHandle> {
     let dir = tempdir().expect("tempdir");
     let data_dir = dir.path().join(name);
     std::fs::create_dir_all(&data_dir).expect("mkdir");
-    let palace = Palace {
-        id: PalaceId::new(name),
-        name: name.into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir,
-    };
+    let palace = Palace::new(PalaceId::new(name), name, data_dir);
     let handle = PalaceHandle::open(&palace).expect("open palace");
     std::mem::forget(dir);
     handle
 }
 
 async fn remember(handle: &PalaceHandle, text: &str) -> Uuid {
+    let mut opts = RememberOptions::default();
+    opts.force = true;
+    opts.enforce_min_tokens = false;
     handle
-        .remember_with_options(
-            text.to_string(),
-            RoomType::General,
-            vec![],
-            0.5,
-            RememberOptions {
-                force: true,
-                enforce_min_tokens: false,
-                ..RememberOptions::default()
-            },
-        )
+        .remember_with_options(text.to_string(), RoomType::General, vec![], 0.5, opts)
         .await
         .expect("remember")
 }
@@ -216,10 +202,8 @@ async fn legacy_palace_recalls_unchanged_then_reembed_adds_the_tail() {
         "tail not yet embedded"
     );
 
-    let repair = VectorBackfillOptions {
-        dry_run: false,
-        ..VectorBackfillOptions::default()
-    };
+    let mut repair = VectorBackfillOptions::default();
+    repair.dry_run = false;
     let report = handle
         .backfill_missing_vectors(repair)
         .await

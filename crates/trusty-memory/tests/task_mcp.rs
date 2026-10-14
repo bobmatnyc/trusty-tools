@@ -152,13 +152,11 @@ async fn task_drawer_survives_dream_cycle() {
 
     // Open the palace handle from the same data root to manipulate drawer
     // metadata directly (back-date + lower importance so the prune pass fires).
-    let palace_obj = Palace {
-        id: PalaceId::new("dreamtask"),
-        name: "dreamtask".into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir: tmp.path().join("dreamtask"),
-    };
+    let palace_obj = Palace::new(
+        PalaceId::new("dreamtask"),
+        "dreamtask",
+        tmp.path().join("dreamtask"),
+    );
     let handle = PalaceHandle::open(&palace_obj).expect("open palace handle");
 
     // Artificially age the non-Task drawer so it falls past the 30-day prune
@@ -179,11 +177,10 @@ async fn task_drawer_survives_dream_cycle() {
     // Run the dream cycle with no inference backend so it stays deterministic.
     // The prune pass fires because the normal drawer is aged + low-importance;
     // the Task drawer is protected by `is_protected()` and must survive.
-    let dreamer = Dreamer::new(DreamConfig {
-        dedup_threshold: 0.999, // very high threshold to avoid dedup false positives
-        recall_benchmark_enabled: false, // skip benchmark for speed
-        ..DreamConfig::default()
-    });
+    let mut config = DreamConfig::default();
+    config.dedup_threshold = 0.999; // very high threshold to avoid dedup false positives
+    config.recall_benchmark_enabled = false; // skip benchmark for speed
+    let dreamer = Dreamer::new(config);
     let stats = dreamer
         .dream_cycle(&handle)
         .await
