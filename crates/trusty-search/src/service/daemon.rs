@@ -591,7 +591,8 @@ use trusty_common::shutdown_signal;
 /// Test: `run_daemon_serves_only_the_socket`,
 /// `run_daemon_removes_a_stale_http_addr`,
 /// `run_daemon_serves_when_a_stale_http_addr_cannot_be_removed`,
-/// `run_daemon_health_reports_the_transport_it_bound`.
+/// `run_daemon_health_reports_the_transport_it_bound`,
+/// `a_stop_sent_once_the_socket_accepts_is_never_lost`.
 pub async fn run_daemon(
     state: SearchAppState,
     rpc_socket: Option<std::path::PathBuf>,
@@ -602,6 +603,12 @@ pub async fn run_daemon(
     // #8760: `acquire_lock` writes our pid itself and fails closed; a
     // contended lock is `AlreadyRunning` whatever pid the file names.
     let lock_file = acquire_lock(&lock_path)?;
+
+    // Issue #829: subscribe before the state moves into its `Arc`.
+    // #9736: and before the socket binds. A client reads a connectable socket
+    // as a ready daemon; a stop sent before this subscribe finds no receiver,
+    // `watch::Sender::send` drops it, and the daemon serves on forever.
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
 
     // #6285: the socket binds before anything is announced, and a bind
     // failure is fatal. #9214: `start --socket` names the socket; otherwise
@@ -631,8 +638,6 @@ pub async fn run_daemon(
     });
     // Issue #85: clone for the post-shutdown flush.
     let flush_state = state.clone();
-    // Issue #829: subscribe before the state moves into its `Arc`.
-    let mut shutdown_rx = state.shutdown_tx.subscribe();
     // #6285: ONE `Arc<SearchAppState>`, shared by the socket and the tickers.
     let state_arc = std::sync::Arc::new(state);
     let rpc_state = std::sync::Arc::clone(&state_arc);
