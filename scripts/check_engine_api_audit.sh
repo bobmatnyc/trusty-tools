@@ -25,17 +25,19 @@
 #                  `#[non_exhaustive]` (A1 Q1: no enum is exhaustive and
 #                  there is no allow-list; a re-export path counts too);
 #                  or a listed `pub struct` with a public field (a field
-#                  line under its path, or a `(pub ` tuple field) whose
-#                  prefix lacks it, unless exempt (A2b).
-#   Each failure prints one line naming the path. The struct join runs after
-#   the whole listing, so line order does not matter. Known gap: a unit
+#                  line under its path, or a `pub ` tuple field in any
+#                  position) whose prefix lacks it, unless exempt (A2b); or a
+#                  listed struct-like enum variant (a variant line with a
+#                  field line under its path) whose prefix lacks it (A2c).
+#   Each failure prints one line naming the path. The struct and variant
+#   joins run after the whole listing, so line order does not matter. Known gap: a unit
 #   struct and an opaque struct print alike (`pub struct X`) and both pass.
 #
 #   Struct exemption: a `struct` KEEP row whose reason cell starts
 #   `exhaustive: ` and says why (PalaceId). It fails closed (exit 2,
 #   `stale exemption <path>: <why>`) on any other kind or disposition, on a
-#   path that is not a listed struct, on a struct already marked, and on a
-#   struct with no public field.
+#   path that is not a listed struct, on a struct already marked, on a
+#   struct with no public field, and on an empty or blank reason (A2c).
 #
 #   One path may carry two rows only when they differ in `kind` and agree on
 #   public versus absent (a field and a method sharing a name print the same
@@ -75,9 +77,10 @@
 #   NARROW or HIDE row still listed, an unaudited path (in an engine module,
 #   at the crate root, under `transport`, sharing a row's stem, on a generic
 #   type, each generic shape, and generics carrying `->`), a missing KEEP or
-#   DEPRECATE row, an enum or a struct with a public field without
-#   `#[non_exhaustive]`, the `exhaustive:` exemption and its stale and
-#   misplaced forms, attribute order and glued attributes, a field
+#   DEPRECATE row, an enum, a struct with a public field (any tuple field
+#   too) or a struct-like variant without `#[non_exhaustive]`, the
+#   `exhaustive:` exemption and its stale, misplaced and reason-less forms,
+#   attribute order and glued attributes, a field
 #   and method sharing a path, the bad-header, malformed-row, duplicate-row and
 #   conflicting-row errors, and the missing, empty, crate-less and unparsable
 #   listing errors.
@@ -132,6 +135,7 @@ trap 'rm -rf "$WORK"' EXIT
 # must be plain segments, since every listed path is compared with every row.
 # #9278 A2b: every `exhaustive:` reason goes to $WORK/exempt in table order,
 # flagged E (a struct KEEP exemption) or M (misplaced); the listing awk joins.
+# A2c: a struct KEEP row with no reason after the prefix is flagged R.
 : > "$WORK/exempt"
 if ! awk -F '\t' -v exemptf="$WORK/exempt" '
   NR == 1 || $0 == "" || $0 ~ /^#/ { next }
@@ -156,7 +160,8 @@ if ! awk -F '\t' -v exemptf="$WORK/exempt" '
     sides[$1] = side
     if ($4 ~ /^exhaustive:/) {
       if ($2 != "struct" || $3 != "KEEP") print $1 "\tM\t" $2 " " $3 > exemptf
-      else if ($4 ~ /^exhaustive: ./) print $1 "\tE\t" > exemptf
+      else if ($4 ~ /^exhaustive: +[^ ]/) print $1 "\tE\t" > exemptf
+      else print $1 "\tR\t" > exemptf
     } }
   END {
     if (rows == 0) { printf "check_engine_api_audit: no data row in %s\n", FILENAME > "/dev/stderr"; bad = 1 }
@@ -185,7 +190,8 @@ fi
 # line whose prefix lacks `#[non_exhaustive]` writes its path to $WORK/unmarked.
 # #9278 A2b: structs, their marks and their public fields are recorded per
 # path and joined in END, where an unmarked struct with a public field that is
-# not exempt is written to $WORK/unmarked too.
+# not exempt is written to $WORK/unmarked too. A2c: so is an unmarked variant
+# (a keyword-less line that is not a field) with a field line under it.
 : > "$WORK/unmarked"
 if ! awk -v unmarked="$WORK/unmarked" -v exemptf="$WORK/exempt" '
 BEGIN {
@@ -214,7 +220,8 @@ BEGIN {
   # first, or `<fn() -> u8>` ends the group at its `>`.
   gsub(/->/, "\001", s)
   while (s ~ /<[^<>]*>/) gsub(/<[^<>]*>/, "", s)
-  tuple_pub = (is_struct && s ~ /^[^({ ]*\(pub /)
+  # A2c: any tuple field, not only the first (`X(_, pub u8)`).
+  tuple_pub = (is_struct && s ~ /^[^({ ]*\((.*, )?pub /)
   sub(/[({].*/, "", s); sub(/: .*/, "", s)
   # A1: a `<` or `>` left in the path part is a group the strip could not
   # read (e.g. `<{ N > 1 }>`); fail closed rather than cut it at a space.
@@ -224,8 +231,10 @@ BEGIN {
   print s
   if (is_enum && !marked) print s > unmarked
   if (is_struct) { structs[s] = 1; if (marked) ne[s] = 1; if (tuple_pub) haspub[s] = 1 }
+  if (s == kw && !is_field) { variants[s] = 1; if (marked) vne[s] = 1 }
   # The parent of a field is its path minus the last segment, matched exactly: a
-  # struct-variant field has the variant as parent, never a struct.
+  # struct-variant field has the variant as parent, never a struct. A2c: that
+  # makes the variant struct-like.
   if (is_field) { p = s; sub(/::[A-Za-z_][A-Za-z0-9_]*$/, "", p); haspub[p] = 1 }
 }
 function bad_line() {
@@ -239,11 +248,13 @@ END {
     else if (!(p in structs)) why = "not a listed struct"
     else if (p in ne) why = "the struct is #[non_exhaustive]"
     else if (!(p in haspub)) why = "the struct has no public field"
+    else if (ex_flag[i] == "R") why = "exhaustive: needs a reason"
     else continue
     printf "check_engine_api_audit: stale exemption %s: %s\n", p, why > "/dev/stderr"
     bad = 1
   }
   for (p in structs) if ((p in haspub) && !(p in ne) && !(p in exempt)) print p > unmarked
+  for (p in variants) if ((p in haspub) && !(p in vne)) print p > unmarked
   exit bad
 }' "$API_FILE" > "$WORK/paths"; then
   exit 2
