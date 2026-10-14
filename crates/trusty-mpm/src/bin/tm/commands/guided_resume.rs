@@ -267,7 +267,7 @@ pub(crate) fn plan_resume(state: &str, tmux_live: bool, runtime_live: bool) -> R
 /// refused by the daemon (#8942). The picker and `resume_session` share this
 /// one rule so neither sends a request the daemon refuses.
 /// What: `Some(refusal)` when `session` is an Architect row
-/// ([`is_architect_row`]) and `action` reaches the daemon; `None` otherwise,
+/// ([`is_architect_row`](crate::commands::session_tui::state::is_architect_row)) and `action` reaches the daemon; `None` otherwise,
 /// so `Attach` and `Terminal` pass through unchanged.
 /// Test: `resume_plan_that_reaches_the_daemon_is_refused_on_an_architect_row`.
 pub(crate) fn architect_resume_refusal(
