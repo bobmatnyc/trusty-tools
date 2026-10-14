@@ -134,4 +134,57 @@ mod tests {
         let check = check_session_profile(None, home.path());
         assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
     }
+
+    /// An allow-listed Architect project and its scratch home.
+    fn allow_listed() -> (tempfile::TempDir, tempfile::TempDir) {
+        let (project, home) = fixture();
+        let root = home.path().join(".trusty-mpm");
+        std::fs::create_dir_all(&root).unwrap();
+        let listed = format!("{:?}", project.path().display().to_string());
+        std::fs::write(
+            root.join("config.toml"),
+            format!("[supervisor]\nprojects = [{listed}]\n"),
+        )
+        .unwrap();
+        (project, home)
+    }
+
+    /// #8436: the Architect row names its instruction source and `AGENTS.md`.
+    #[test]
+    fn an_architect_row_names_its_instructions_and_agents_md() {
+        let (project, home) = allow_listed();
+        std::fs::write(project.path().join("AGENTS.md"), "hello\n").unwrap();
+        let check = check_session_profile(Some(project.path()), home.path());
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
+        for needle in ["architect.md", "AGENTS.md: 6 bytes"] {
+            assert!(
+                check.message.contains(needle),
+                "{needle}: {}",
+                check.message
+            );
+        }
+    }
+
+    /// #8436: a CLAUDE.md that `@`-imports what tm composes, or that carries
+    /// PM marker blocks the Architect ignores, warns.
+    #[test]
+    fn an_architect_claude_md_with_a_double_load_or_markers_warns() {
+        let block =
+            "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\nx\n<!-- TRUSTY-MPM: WORKFLOW END -->\n";
+        for (claude_md, needle) in [
+            ("# Fleet\n\n@AGENTS.md\n", "@AGENTS.md"),
+            ("See @./ARCHITECT.md for the manual.\n", "@./ARCHITECT.md"),
+            (block, "marker block"),
+        ] {
+            let (project, home) = allow_listed();
+            std::fs::write(project.path().join("CLAUDE.md"), claude_md).unwrap();
+            let check = check_session_profile(Some(project.path()), home.path());
+            assert_eq!(check.status, CheckStatus::Warn, "{}", check.message);
+            assert!(
+                check.message.contains(needle),
+                "{needle}: {}",
+                check.message
+            );
+        }
+    }
 }

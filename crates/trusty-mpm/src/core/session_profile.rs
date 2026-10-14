@@ -327,3 +327,7 @@ pub fn hook_profile(
 #[cfg(test)]
 #[path = "session_profile_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_profile_8436_tests.rs"]
+mod tests_8436;
