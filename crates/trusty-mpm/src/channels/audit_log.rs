@@ -272,6 +272,17 @@ impl ChannelAudit {
         self.write(&record)
     }
 
+    /// RED STUB (#9873 S3): writes the wrong event; the next commit fixes it.
+    pub fn rate_limited(
+        &self,
+        channel: Channel,
+        sender: &str,
+        length: usize,
+        reason: &'static str,
+    ) -> Result<(), StateError> {
+        self.inbound_dropped(channel, sender, length, reason)
+    }
+
     /// A `kind` send to `to` was refused for `reason`.
     pub fn send_refused(
         &self,

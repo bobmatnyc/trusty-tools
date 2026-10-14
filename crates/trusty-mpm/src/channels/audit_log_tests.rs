@@ -101,6 +101,26 @@ fn unknown_sender_logs_only_sender_time_length() {
     assert!(text.contains("\"length\":42"), "{text}");
 }
 
+/// 🔴 #9873 (AC8): a rate-window drop is a `rate_limited` line holding the
+/// sender, the time and the length, never the text or the route.
+#[test]
+fn rate_limited_logs_sender_time_length_only() {
+    let (_tmp, home) = home();
+    let audit = ChannelAudit::for_home(Some(&home));
+    audit
+        .rate_limited(Channel::Slack, "U0ABCDEF2", 17, "rate_limited")
+        .expect("logged");
+    assert_eq!(
+        keys(&home),
+        [set(&[
+            "ts", "event", "reason", "channel", "sender", "length"
+        ])]
+    );
+    let text = std::fs::read_to_string(audit_path(&home)).expect("read");
+    assert!(text.contains("\"rate_limited\",\"reason\""), "{text}");
+    assert!(text.contains("\"length\":17"), "{text}");
+}
+
 #[test]
 fn refused_send_is_logged() {
     let (_tmp, home) = home();
