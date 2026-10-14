@@ -932,9 +932,10 @@ fn first_live_session(
 /// and the prefix-match (managed clone, `launch`) branches are exercised this way.
 /// What: normalizes all three paths (trailing-slash strip via `normalize_workdir`), then
 /// checks (a) exact equality or (b) when `project_dir` is `Some`, that the session workdir
-/// starts with `<normalized_project_dir>/` — the trailing slash prevents a false match
-/// where `/owner/repo-extra/<id>` matches `/owner/repo`.
-/// Test: `session_matches_workdir_prefix_and_exact` below.
+/// is that directory or starts with `<normalized_project_dir>/` — the trailing slash
+/// prevents a false match where `/owner/repo-extra/<id>` matches `/owner/repo`.
+/// Test: `session_matches_workdir_prefix_and_exact`,
+/// `session_in_the_managed_checkout_itself_matches_its_project` below.
 fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Option<&str>) -> bool {
     let w = normalize_workdir(session_workdir);
     let t = normalize_workdir(target);
@@ -948,7 +949,9 @@ fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Opt
     if !prefix.ends_with('/') {
         prefix.push('/');
     }
-    w.starts_with(prefix.as_str())
+    // #8406: a session in the managed checkout itself (the #5274 placement)
+    // is the project's session too, not only one in a worktree under it.
+    w.starts_with(prefix.as_str()) || w == prefix.trim_end_matches('/')
 }
 
 #[cfg(test)]
