@@ -149,8 +149,10 @@ of the issue state model's state whose `label.name` the phase carries, with
 the model's `label_config.status_prefix` (`status:` in trusty-tools)
 stripped (`in-progress`, `coded`, `merged`, `tested`), or `open` when no
 model state's label is on it. The label is matched against the model, never
-by prefix: a state `status:in-progress` whose label is `in-progress` still
+by state name: a state `status:in-progress` whose label is `status:wip` still
 renders `in-progress`, and a `status:*` label no state issues renders `open`.
+Every state label carries the prefix or none does; a model mixing the two
+(`in-progress` beside `status:coded`) is refused at load (#9580).
 
 **Not on PR open, merge, commit or review.** Those are phase-issue events and
 belong on the phase issue or its PR. This governs tracker updates only; the

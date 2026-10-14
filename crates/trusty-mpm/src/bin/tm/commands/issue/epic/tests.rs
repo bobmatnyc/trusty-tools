@@ -58,10 +58,34 @@ assignee_model: { strategy: unchanged, per_state: {} }
     serde_yaml::from_str(yaml).expect("the status model parses")
 }
 
-/// #8696: the model of the reporting repo — `status_prefix` is `status:`, yet
-/// the `status:in-progress` state's label is the repo's pre-existing
-/// `in-progress`, and `status:coded`'s is `status:coded`. Legal: the schema
-/// relates neither field to the prefix.
+/// #8696: a model whose `status:in-progress` state is labelled `status:wip` —
+/// a label name that differs from its state name. Resolution goes through the
+/// model, never by matching the state name. Every label carries the prefix,
+/// as #9580 requires.
+fn relabelled_model() -> StateModel {
+    let yaml = r#"
+version: 1
+label_config: { base: "", approved: "", blast_prefix: "", status_prefix: "status:" }
+states:
+  - { name: open, gh_state: open, order: 0 }
+  - { name: "status:in-progress", label: { name: "status:wip", color: "FBCA04" }, order: 1 }
+  - { name: "status:coded", label: { name: "status:coded", color: "AABBCC" }, order: 2 }
+  - { name: closed, gh_state: closed, order: 3 }
+transitions:
+  - { from: open, to: "status:in-progress", trigger: executor_start }
+  - { from: "status:in-progress", to: "status:coded", trigger: executor_start }
+  - { from: "status:coded", to: closed, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+    let model: StateModel = serde_yaml::from_str(yaml).expect("the relabelled model parses");
+    crate::commands::issue::validate::validate_model(&model)
+        .expect("the relabelled model is valid");
+    model
+}
+
+/// #8696's reporting repo: `status_prefix` is `status:`, yet the
+/// `status:in-progress` state's label is the pre-existing `in-progress`.
+/// #9580 (owner ruling 2026-10-09): a mixed-prefix model is invalid.
 fn prefixless_model() -> StateModel {
     let yaml = r#"
 version: 1
@@ -1789,6 +1813,19 @@ fn create_under_the_embedded_default_renders_a_status_label_9579() {
     assert!(after.contains("| #101 | coded |"), "{after}");
 }
 
+/// #9580 AC4: the #8696 reporting repo's mixed-prefix model, once called
+/// legal, is rejected and the error names the state and the label.
+#[test]
+fn a_mixed_prefix_model_is_rejected_9580() {
+    let message = crate::commands::issue::validate::validate_model(&prefixless_model())
+        .expect_err("mixed prefix")
+        .to_string();
+    assert!(
+        message.contains("`status:in-progress`") && message.contains("`in-progress`"),
+        "{message}"
+    );
+}
+
 // ------------------------------------------------------- the `gh`/`git` layer
 
 /// A scripted [`CommandRunner`] returning queued outputs in order.
@@ -2168,13 +2205,13 @@ fn phases_table_uses_the_configured_status_prefix() {
 /// label; the cell must read the state, not `open`. A renderer matching by
 /// prefix never sees the label at all.
 #[test]
-fn state_cell_resolves_a_label_whose_name_lacks_the_prefix() {
-    let child = labelled_child("OPEN", &["enhancement", "in-progress"]);
+fn state_cell_resolves_a_label_whose_name_differs_from_the_state() {
+    let child = labelled_child("OPEN", &["enhancement", "status:wip"]);
     assert_eq!(
-        render::state_cell(&child, &prefixless_model()),
+        render::state_cell(&child, &relabelled_model()),
         "in-progress"
     );
-    let table = render::phases_table(std::slice::from_ref(&child), &prefixless_model());
+    let table = render::phases_table(std::slice::from_ref(&child), &relabelled_model());
     assert!(table.contains("| #5 | in-progress |"), "{table}");
 }
 
@@ -2182,15 +2219,15 @@ fn state_cell_resolves_a_label_whose_name_lacks_the_prefix() {
 /// all. The cell is the state's `name` minus the prefix, never the label.
 #[test]
 fn state_cell_resolves_a_label_name_unrelated_to_the_state_name() {
-    let mut model = prefixless_model();
+    let mut model = relabelled_model();
     let in_progress = model
         .states
         .iter_mut()
         .find(|s| s.name == "status:in-progress")
         .and_then(|s| s.label.as_mut())
         .expect("the fixture labels status:in-progress");
-    in_progress.name = "wip".to_string();
-    let child = labelled_child("OPEN", &["wip"]);
+    in_progress.name = "status:review".to_string();
+    let child = labelled_child("OPEN", &["status:review"]);
     assert_eq!(render::state_cell(&child, &model), "in-progress");
 }
 
@@ -2214,9 +2251,9 @@ fn state_cell_reads_open_for_a_prefixed_label_the_model_lacks() {
 /// model's labels count; the state name is used as-is.
 #[test]
 fn state_cell_under_an_empty_prefix_reads_only_model_labels() {
-    let mut model = prefixless_model();
+    let mut model = relabelled_model();
     model.label_config.status_prefix = String::new();
-    let child = labelled_child("OPEN", &["bug", "in-progress"]);
+    let child = labelled_child("OPEN", &["bug", "status:wip"]);
     assert_eq!(render::state_cell(&child, &model), "status:in-progress");
     let renamed = model
         .states
@@ -2712,9 +2749,9 @@ fn transition_hook_names_the_tracker_when_the_parent_read_fails() {
 }
 
 /// #8696: the reported state — tracker 100's block already reads `open` for
-/// phase #101, and the live child wears the prefix-less `in-progress` label
-/// [`prefixless_model`] issues for `status:in-progress`.
-fn seed_prefixless_phase(backend: &FakeBackend) -> FakeTickets {
+/// phase #101, and the live child wears the `status:wip` label
+/// [`relabelled_model`] issues for `status:in-progress`.
+fn seed_relabelled_phase(backend: &FakeBackend) -> FakeTickets {
     let title = render::phase_title(100, 1, "phase 1");
     backend.seed_tracker(
         100,
@@ -2731,7 +2768,7 @@ fn seed_prefixless_phase(backend: &FakeBackend) -> FakeTickets {
             body: "## Gate\n\ng\n".to_string(),
             state: "OPEN".to_string(),
             parent: Some(100),
-            labels: vec!["enhancement".to_string(), "in-progress".to_string()],
+            labels: vec!["enhancement".to_string(), "status:wip".to_string()],
             ..FakeIssue::default()
         },
     );
@@ -2739,17 +2776,17 @@ fn seed_prefixless_phase(backend: &FakeBackend) -> FakeTickets {
 }
 
 /// #8696 regression 5: the reported bug end to end. The transition applies
-/// the model's `in-progress` label; the hook must regenerate the row to
+/// the model's `status:wip` label; the hook must regenerate the row to
 /// `in-progress` rather than render `open`, find it equal to the stored
 /// block, and report "already current".
 #[test]
-fn transition_hook_regenerates_a_row_for_a_prefix_less_label() {
+fn transition_hook_regenerates_a_row_for_a_relabelled_state() {
     let backend = FakeBackend::new();
-    let tickets = seed_prefixless_phase(&backend);
+    let tickets = seed_relabelled_phase(&backend);
     let hooked = hook::transition_with_tracker_sync(
         &tickets,
         &backend,
-        &prefixless_model(),
+        &relabelled_model(),
         101,
         "status:in-progress",
         None,
@@ -2887,14 +2924,14 @@ fn audit_rows_fail_a_stale_phases_block_with_the_sync_command() {
 }
 
 /// #8696 regression 6: the audit renders through the same model as `sync`,
-/// so a block reading `open` for a child wearing the prefix-less
-/// `in-progress` label is FAIL as stale — a prefix-matching renderer passed
-/// it.
+/// so a block reading `open` for a child wearing the `status:wip` label of
+/// state `status:in-progress` is FAIL as stale — a renderer matching labels
+/// to state names passed it.
 #[test]
-fn audit_rows_fail_a_stale_block_hidden_behind_a_prefix_less_label() {
+fn audit_rows_fail_a_stale_block_hidden_behind_a_relabelled_state() {
     let backend = FakeBackend::new();
-    let _tickets = seed_prefixless_phase(&backend);
-    let rows = audit_rows::epic_rows(&backend, 100, &prefixless_model()).expect("rows");
+    let _tickets = seed_relabelled_phase(&backend);
+    let rows = audit_rows::epic_rows(&backend, 100, &relabelled_model()).expect("rows");
     let block = row(&rows, REQ_PHASES_BLOCK);
     assert_eq!(block.verdict, Verdict::Fail, "{block:?}");
     assert_eq!(
