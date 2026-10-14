@@ -10,9 +10,12 @@
 //! denies one that names a `fleet … init` or an `init.sh` together with
 //! `--guard-lift` or `--guard-lift=…`, in any order, and any
 //! `ARCHITECT_GUARD_LIFT=<not 0>` assignment, which `init.sh` reads as the
-//! same request. Every caller is bound, the Architect included, under every
-//! bypass. `--no-guard-lift` is a different token and passes.
-//! FAIL-CLOSED: a segment that does not lex but names the lift denies.
+//! same request. The verdict is taken on tokens after the shell's quote and
+//! backslash removal (`--guard""-lift`, `--guard-l'i'ft`, `--guard\-lift` all
+//! read as the flag). Every caller is bound, the Architect included, under
+//! every bypass. `--no-guard-lift` is a different token and passes.
+//! FAIL-CLOSED: a segment that does not lex but could name the lift (quotes and
+//! escapes removed) denies.
 //! Residual: a script file or shell function that hides the flag from the
 //! command text is not seen (the same residual as the D4 floor).
 //! Test: `guard_lift_init_tests.rs`, `pm_guard_floor_tests.rs`
@@ -32,15 +35,15 @@ const ENV: &str = "ARCHITECT_GUARD_LIFT";
 /// The deny for a command that asks to lift the Architect's PM guard, or `None`.
 ///
 /// Test: `a_guard_lift_at_init_is_denied_in_every_spelling`,
-/// `an_unparseable_command_naming_the_lift_is_denied`, `everything_else_passes`.
+/// `a_quote_split_or_escaped_lift_is_denied`, `an_unparseable_command_naming_the_lift_is_denied`, `everything_else_passes`.
 pub(crate) fn evaluate_guard_lift_init(command: &str) -> Option<String> {
-    // Cheap exit: every deny names one of these words.
-    if !command.contains("guard-lift") && !command.contains(ENV) {
+    // Cheap pre-filter, quote-proof: only a verdict taken on tokens may deny.
+    if !could_name_the_lift(command) {
         return None;
     }
     for seg in segments(command) {
         let Some(argv) = shlex::split(seg.text.trim()) else {
-            if seg.text.contains("guard-lift") || seg.text.contains(ENV) {
+            if could_name_the_lift(&seg.text) {
                 return Some(reason());
             }
             continue;
@@ -50,6 +53,21 @@ pub(crate) fn evaluate_guard_lift_init(command: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether `text` could name the lift once the shell removes quotes and escapes.
+///
+/// Why: a raw `contains` is defeated by `--guard""-lift`, which the shell rejoins.
+/// What: drops the characters quote removal and line continuation delete (`"`,
+/// `'`, `\`, newline), then looks for the flag or env name. It only over-matches;
+/// the token-level check in [`asks_for_the_lift`] makes the verdict.
+/// Test: `a_quote_split_or_escaped_lift_is_denied`, `everything_else_passes`.
+fn could_name_the_lift(text: &str) -> bool {
+    let plain: String = text
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '\\' | '\n'))
+        .collect();
+    plain.contains("guard-lift") || plain.contains(ENV)
 }
 
 /// Whether one segment's argv asks for the lift.
