@@ -121,10 +121,10 @@ pub use embed_store::embed_chunks;
 pub(crate) use embed_store::{ChunkPlanner, embed_chunks_within, embed_planned_within};
 
 // Recall scoping (ADR-0027 T9)
-#[cfg(feature = "server")]
+#[cfg(any(test, feature = "server"))]
 pub(crate) use scope::{RecallScope, list_drawers_in_wing, scope_admits};
 // #9719: L0 + L1 under a recall scope; the BM25 warming lane uses it.
-#[cfg(feature = "server")]
+#[cfg(any(test, feature = "server"))]
 pub(crate) use l1::retrieve_l0_l1_scoped;
 
 // #9390: the expired-slot refill bound the BM25 warming lane also applies.
@@ -145,10 +145,9 @@ pub(crate) use tier_c::{TierCAdmission, admit_tier_c};
 
 // Layer functions
 #[cfg(feature = "server")]
-pub(crate) use layers::{
-    dedup_extend, expand_query, recall_across_palaces_reporting, recall_deep_scoped, recall_scoped,
-    retrieve_l2_scoped,
-};
+pub(crate) use layers::{dedup_extend, recall_deep_scoped, recall_scoped};
+#[cfg(any(test, feature = "server"))]
+pub(crate) use layers::{expand_query, recall_across_palaces_reporting, retrieve_l2_scoped};
 #[cfg(test)]
 pub(crate) use layers::{
     recall, recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
