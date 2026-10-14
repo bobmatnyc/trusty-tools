@@ -230,7 +230,7 @@ pub async fn serve_with_shutdown(
     // refusal reads as "tmux not found", which sends an operator hunting for a
     // missing binary instead of showing them the reassigned `$HOME` and the
     // variable that lifts the gate.
-    match crate::core::host_state_gate::host_state_access().skip_reason() {
+    match crate::core::tmux_access::tmux_access().skip_reason() {
         Some(reason) => tracing::warn!(
             "tmux and host-process discovery are DISABLED for this daemon — {reason}"
         ),

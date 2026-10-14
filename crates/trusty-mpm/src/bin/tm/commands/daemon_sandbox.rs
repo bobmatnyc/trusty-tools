@@ -40,6 +40,9 @@ use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
 /// - `RUST_LOG`: the log filter.
 /// - `TRUSTY_SANDBOX`: required to be exactly `1`; tells trusty-common to load
 ///   no `.env.local` (#9178). A flag, not a credential.
+/// - `TMUX_TMPDIR`: the sandbox's own tmux socket directory (#9557). A path,
+///   not a credential; `core::tmux_access` admits tmux only when it lies
+///   inside the data-dir override, so it cannot select the default socket.
 ///
 /// Plus [`CF_TEXT_ENCODING`], which macOS sets inside the process itself.
 const ENV_ALLOWLIST: &[&str] = &[
@@ -57,6 +60,8 @@ const ENV_ALLOWLIST: &[&str] = &[
     // #9178: the `.env.local` opt-out, required by `refusals`. A literal, not
     // `SANDBOX_ENV_VAR`: `scripts/sandbox_daemon_selftest.sh` parses this list.
     "TRUSTY_SANDBOX",
+    // #9557: the sandbox's own tmux socket directory; checked by tmux_access.
+    "TMUX_TMPDIR",
 ];
 
 /// The locale categories allowed by name — the `LC_*` family, closed.
