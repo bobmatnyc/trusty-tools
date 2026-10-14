@@ -76,6 +76,8 @@ pub mod mcp_bugreport;
 pub mod mcp_console;
 // #6927: the Disk dashboard survey backing the `disk_survey` MCP tool.
 pub mod mcp_context;
+// #9160: the session-ref hydrate and publish halves, under the pinned gh identity.
+pub(crate) mod mcp_context_session_refs;
 pub mod mcp_disk;
 // #9390: the `ws:<session>/resume` slot `session_context_pause` writes.
 pub(crate) mod pause_resume_slot;

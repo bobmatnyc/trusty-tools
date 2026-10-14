@@ -93,6 +93,7 @@ impl Fixture {
             session_id,
             snapshot_path: snapshot,
             timestamp: chrono::Utc::now(),
+            git_env: &[],
         }
     }
 
@@ -217,7 +218,7 @@ fn a_stale_lease_is_rejected_and_never_forced() {
     );
     git_ok(&fx.repo, &["update-ref", &landed.ref_name, &racing]);
 
-    let err = push_session_ref(&fx.repo, &landed.ref_name, None).unwrap_err();
+    let err = push_session_ref(&fx.repo, &landed.ref_name, None, &[]).unwrap_err();
     let RefPublishError::StaleLease { ref_name, expected } = &err else {
         panic!("expected a stale lease, got {err:?}");
     };
@@ -452,4 +453,56 @@ fn the_ref_commit_carries_the_attribution_trailers() {
         "{message}"
     );
     assert!(message.contains("Session-Timestamp: "), "{message}");
+}
+
+/// 🔴 #9160: all three network calls — ls-remote, the tip fetch and the push —
+/// run under the request's `git_env`, and nothing else does.
+/// What: origin is an unresolvable https URL that only the env rewrites to the
+/// bare remote. Without the env the publish fails at `ls-remote`; with it a
+/// first pause (ls-remote + push) and a second (ls-remote + fetch + push) land.
+/// Test: itself.
+#[test]
+fn publish_ls_remote_fetch_and_push_apply_the_pinned_env() {
+    const PINNED_ORIGIN: &str = "https://fixture.invalid/o/r.git";
+    let fx = Fixture::new();
+    git_ok(&fx.repo, &["remote", "set-url", "origin", PINNED_ORIGIN]);
+    let env = vec![
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            format!("url.{}.insteadOf", fx.remote.display()),
+        ),
+        ("GIT_CONFIG_VALUE_0".to_string(), PINNED_ORIGIN.to_string()),
+    ];
+
+    let first_snap = fx.snapshot("s-alpha", "20260913-100000", PLAIN);
+    let ambient = publish_session_ref_as(&fx.request("s-alpha", &first_snap), Some(USER));
+    assert!(
+        matches!(
+            ambient,
+            Err(RefPublishError::Git {
+                step: "ls-remote",
+                ..
+            })
+        ),
+        "the https origin must not resolve without the env: {ambient:?}"
+    );
+
+    let pinned = SessionRefRequest {
+        git_env: &env,
+        ..fx.request("s-alpha", &first_snap)
+    };
+    let first = publish_session_ref_as(&pinned, Some(USER)).expect("ls-remote + push");
+
+    let second_snap = fx.snapshot("s-alpha", "20260913-110000", PLAIN);
+    let pinned = SessionRefRequest {
+        git_env: &env,
+        ..fx.request("s-alpha", &second_snap)
+    };
+    let second = publish_session_ref_as(&pinned, Some(USER)).expect("ls-remote + fetch + push");
+    assert_eq!(second.parent.as_deref(), Some(first.commit.as_str()));
+    assert_eq!(
+        git_ok(&fx.remote, &["rev-parse", &second.ref_name]),
+        second.commit
+    );
 }

@@ -793,29 +793,19 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
     let cwd_for_log = cwd.to_path_buf();
     let (pinned_for_task, origin_for_task) = (pinned.clone(), origin.clone());
     let joined = tokio::task::spawn_blocking(move || {
-        use crate::core::gh_session_account::{StoredTokenFirst, session_spawn_env};
+        use crate::core::gh_session_account::session_spawn_env;
         let state_root = crate::core::paths::FrameworkPaths::default().root;
         let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::for_current_user();
         // #8510: an account-only pin gets only a token `GET /user` proves.
         let prove = |login: &str| {
-            use crate::core::gh_account_proof::{AccountProver, CliTokenProbe, HttpUserCheck};
-            let mut sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
-                &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+            prove_pinned_login(
+                &pinned_for_task,
                 &origin_for_task,
-                state_root.clone(),
-                gh_config_dir(),
-            );
-            // #8914 HIGH 3: a registry config-dir pin is its own first candidate.
-            if let Some(dir) = &pinned_for_task.config_dir {
-                sources.static_config_dir = Some(dir.clone());
-            }
-            let prover = AccountProver {
-                sources: &sources,
-                probe: &StoredTokenFirst(&CliTokenProbe),
-                check: &HttpUserCheck,
-                cache: None,
-            };
-            spawn_proof(&prover, login, &origin_for_task, &aliases)
+                &state_root,
+                &aliases,
+                login,
+                None,
+            )
         };
         // #8914: every config-dir pin is proven, never used bare.
         let env = session_spawn_env(
@@ -829,6 +819,42 @@ pub(crate) async fn resolve_gh_account_env_for_registry_with(
     })
     .await;
     joined_spawn_vars(joined, &pinned, &origin, cwd)
+}
+
+/// Prove `login`'s token for `pinned` on `origin` the way a spawn does (#8510).
+///
+/// Why: #9160 — session-ref git calls prove the same pin with the same
+/// candidates; one function keeps the two from drifting.
+/// What: candidates from [`crate::core::gh_account_dir::AccountDirSources`],
+/// a registry config-dir pin first (#8914 HIGH 3), a stored token before `gh`,
+/// `GET /user`, and `cache` (`None` proves every time).
+/// Test: `a_config_dir_spawn_pin_is_proven_not_used_bare`,
+/// `a_proven_identity_is_reused_across_two_resolutions`.
+pub(crate) fn prove_pinned_login(
+    pinned: &PinnedGhIdentity,
+    origin: &str,
+    state_root: &Path,
+    aliases: &crate::session_manager::ssh_host_alias::SshHostAliases,
+    login: &str,
+    cache: Option<&crate::core::gh_account_proof::ProofCache>,
+) -> Result<crate::core::gh_account_proof::ProvenToken, String> {
+    use crate::core::gh_account_proof::{AccountProver, CliTokenProbe, HttpUserCheck};
+    let mut sources = crate::core::gh_account_dir::AccountDirSources::for_origin(
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+        origin,
+        state_root.to_path_buf(),
+        gh_config_dir(),
+    );
+    if let Some(dir) = &pinned.config_dir {
+        sources.static_config_dir = Some(dir.clone());
+    }
+    let prover = AccountProver {
+        sources: &sources,
+        probe: &crate::core::gh_session_account::StoredTokenFirst(&CliTokenProbe),
+        check: &HttpUserCheck,
+        cache,
+    };
+    spawn_proof(&prover, login, origin, aliases)
 }
 
 /// Prove `login`'s token for a spawn whose raw origin is `origin` (#8510 r4).
