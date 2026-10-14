@@ -28,7 +28,9 @@
 #   path; the listing cannot tell them apart).
 #
 #   Fails CLOSED with exit 2, never a pass over nothing:
-#     - the table is missing or has no data row;
+#     - the table is missing, has no data row, or its line 1 is not exactly
+#       the header `path kind disposition consumer_or_reason batch`
+#       (tab-separated, no CR);
 #     - a row lacks exactly 5 non-empty tab-separated fields, names a path
 #       that is not a plain `trusty_memory[::segment]*` path, has a `kind`
 #       outside the known set or a disposition outside
@@ -58,7 +60,7 @@
 #   at the crate root, under `transport`, sharing a row's stem, on a generic
 #   type, each generic shape, and generics carrying `->`), a missing KEEP or
 #   DEPRECATE row, a field
-#   and method sharing a path, the malformed-row, duplicate-row and
+#   and method sharing a path, the bad-header, malformed-row, duplicate-row and
 #   conflicting-row errors, and the missing, empty, crate-less and unparsable
 #   listing errors.
 #
@@ -91,6 +93,17 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$AUDIT" ] || { echo "check_engine_api_audit: no audit table at $AUDIT" >&2; exit 2; }
+
+# #9278 A1: both awks below skip line 1 as the header, so line 1 must BE the
+# header, byte for byte (a trailing CR is rejected too). A deleted header would
+# otherwise drop the first data row from validation and from the sets.
+WANT_HEADER="$(printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch')"
+HEADER=''
+IFS= read -r HEADER < "$AUDIT" || true
+if [ "$HEADER" != "$WANT_HEADER" ]; then
+  echo "check_engine_api_audit: bad header at line 1 in $AUDIT (want path, kind, disposition, consumer_or_reason, batch, tab-separated)" >&2
+  exit 2
+fi
 
 # Fail closed on a malformed table, before any comparison, so a typo
 # (`narrow`, `Keep`, `fucntion`), a space-separated row or a row naming
