@@ -187,6 +187,10 @@ struct FakeBackend {
     /// Issues the title SEARCH does not return yet — GitHub's index lagging a
     /// just-created issue (#8448 HIGH 2). Every direct read still sees them.
     hidden_from_search: RefCell<BTreeSet<u64>>,
+    /// Text another writer appends to an issue's body during a `children`
+    /// call, one entry per call — the edit that lands between `sync`'s body
+    /// read and its write (#9578).
+    concurrent_edits: RefCell<Vec<(u64, String)>>,
 }
 
 impl FakeBackend {
@@ -202,7 +206,16 @@ impl FakeBackend {
             fail: RefCell::new(Vec::new()),
             find_labels: RefCell::new(Vec::new()),
             hidden_from_search: RefCell::new(BTreeSet::new()),
+            concurrent_edits: RefCell::new(Vec::new()),
         }
+    }
+
+    /// #9578: append `text` to `issue`'s body during the next `children`
+    /// call that has no earlier edit queued.
+    fn edit_during_children(&self, issue: u64, text: &str) {
+        self.concurrent_edits
+            .borrow_mut()
+            .push((issue, text.to_string()));
     }
 
     /// Make the search index lag `number`: `phase_titled_issues` omits it while
@@ -382,6 +395,15 @@ impl EpicBackend for FakeBackend {
 
     fn children(&self, tracker: u64) -> anyhow::Result<Vec<ChildIssue>> {
         self.tick("children")?;
+        let edit = {
+            let mut edits = self.concurrent_edits.borrow_mut();
+            (!edits.is_empty()).then(|| edits.remove(0))
+        };
+        if let Some((issue, text)) = edit
+            && let Some(found) = self.issues.borrow_mut().get_mut(&issue)
+        {
+            found.body.push_str(&text);
+        }
         Ok(self
             .issues
             .borrow()
@@ -1633,6 +1655,69 @@ fn sync_propagates_a_failed_child_read() {
         "{err}"
     );
     assert_eq!(backend.calls("set_body"), 0);
+}
+
+/// #9578: a tracker edit that lands between `sync`'s body read and its write
+/// — an operator's prose or a sibling phase's own sync — survives, and the
+/// block is still regenerated: the sync re-reads and retries rather than
+/// writing its stale copy over the edit.
+#[test]
+fn sync_keeps_a_tracker_edit_made_between_its_read_and_its_write() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(
+        100,
+        "[EPIC 100] An outcome",
+        &tracker_fixture(
+            "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
+        ),
+    );
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "phase 1"),
+        "OPEN",
+        "## Gate\n\ngate 1\n",
+    );
+    backend.edit_during_children(100, "\nA concurrent edit outside the markers.\n");
+
+    sync::sync(&backend, 100, &status_model()).expect("syncs after re-reading");
+    let after = backend.issue(100).body;
+    assert!(
+        after.contains("A concurrent edit outside the markers."),
+        "the concurrent edit was overwritten: {after}"
+    );
+    assert!(
+        after.contains("| 1 | phase 1 | #101 | open | gate 1 |"),
+        "{after}"
+    );
+}
+
+/// #9578: a tracker that changes under every attempt is refused, and the sync
+/// writes nothing rather than overwriting the latest edit.
+#[test]
+fn sync_refuses_and_writes_nothing_when_the_tracker_keeps_changing() {
+    let backend = FakeBackend::new();
+    backend.seed_tracker(
+        100,
+        "[EPIC 100] An outcome",
+        &tracker_fixture(
+            "| # | Phase | Issue | State | Gate |\n|---|-------|-------|-------|------|",
+        ),
+    );
+    backend.seed_child(
+        100,
+        101,
+        &render::phase_title(100, 1, "p"),
+        "OPEN",
+        "## Gate\n\ng\n",
+    );
+    for n in 0..10 {
+        backend.edit_during_children(100, &format!("\nedit {n}\n"));
+    }
+
+    let err = sync::sync(&backend, 100, &status_model()).unwrap_err();
+    assert!(err.to_string().contains("changed while"), "{err}");
+    assert_eq!(backend.calls("set_body"), 0, "nothing may be written");
 }
 
 // ------------------------------------------------------- the `gh`/`git` layer
