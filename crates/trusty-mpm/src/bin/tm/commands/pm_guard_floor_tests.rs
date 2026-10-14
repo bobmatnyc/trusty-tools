@@ -346,3 +346,28 @@ fn the_gate_walks_the_process_table_lazily_and_once() {
     assert!(gate.is_architect() && gate.is_architect());
     assert_eq!(walks.load(Ordering::SeqCst), 1, "cached after one walk");
 }
+
+/// #8436 PR C (M1): no hook-guarded session lifts the Architect guard by
+/// command — a PM and the Architect alike, with and without a bypass.
+#[test]
+fn a_guard_lift_at_init_is_denied_to_every_hook_guarded_session() {
+    let fx = fixture();
+    let call = bash(&fx, "tm fleet init --dir /w/architect --guard-lift");
+    for bypassed in [false, true] {
+        for (who, env) in [("a PM", pm_env(&fx)), ("the Architect", architect_env(&fx))] {
+            let gate = ArchitectGate::new(&call, env, || allowlist(&fx));
+            let deny = evaluate_floors(&call, &fx.cwd, &gate, &probes(&NoArchitect), bypassed);
+            assert_eq!(
+                deny.map(|d| d.rule),
+                Some("guard-lift-init"),
+                "{who}, bypassed={bypassed}"
+            );
+        }
+    }
+    let ok = bash(&fx, "tm fleet init --dir /w/architect --no-guard-lift");
+    let gate = ArchitectGate::new(&ok, pm_env(&fx), MpmConfig::default);
+    assert_eq!(
+        evaluate_floors(&ok, &fx.cwd, &gate, &probes(&NoArchitect), false),
+        None
+    );
+}

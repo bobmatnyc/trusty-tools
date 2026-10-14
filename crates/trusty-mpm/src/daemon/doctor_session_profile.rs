@@ -487,4 +487,23 @@ mod tests {
             check.message
         );
     }
+
+    /// M3: a lift in `.claude/settings.local.json` shows in the row, naming the file.
+    #[test]
+    fn doctor_session_profile_reads_the_local_settings_file() {
+        let (project, home) = allow_listed();
+        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+        std::fs::write(
+            project.path().join(".claude/settings.local.json"),
+            "{\"env\": {\"TRUSTY_MPM_PM_UNRESTRICTED\": \"1\"}}",
+        )
+        .unwrap();
+        let check = check_session_profile(Some(project.path()), home.path());
+        assert!(
+            check.message.contains("guard lift: lifted")
+                && check.message.contains("settings.local.json"),
+            "{}",
+            check.message
+        );
+    }
 }

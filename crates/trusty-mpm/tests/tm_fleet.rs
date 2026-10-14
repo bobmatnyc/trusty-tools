@@ -1117,3 +1117,96 @@ fn an_existing_lift_is_kept_without_a_flag_and_removed_only_on_request() {
     );
     assert_eq!(env.settings()["env"][LIFT_KEY], "1");
 }
+
+impl FleetEnv {
+    /// Plant `body` as the Architect's `.claude/settings.local.json`.
+    fn plant_local_settings(&self, body: &str) {
+        let path = self.dir().join(".claude/settings.local.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+}
+
+/// M3: a lift in `settings.local.json` is a lift. Status names the file, and
+/// `--no-guard-lift` (which edits only `settings.json`) never claims the guard
+/// is on while the local file still lifts it.
+#[test]
+fn a_lift_in_settings_local_json_is_reported_and_not_claimed_removed() {
+    let env = FleetEnv::new();
+    let lifted = format!("{{\"env\": {{\"{LIFT_KEY}\": \"1\"}}}}");
+    env.plant_local_settings(&lifted);
+    let out = env.init_no_launch(&[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("lifted (existing"),
+        "{}",
+        text(&out)
+    );
+    let status = env.tm(&["fleet", "status", "--json", "--dir", dir_arg(&env.dir())]);
+    let report = json(&status);
+    let detail = report["guard_lift"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("lifted") && detail.contains("settings.local.json"),
+        "{}",
+        text(&status)
+    );
+
+    let out = env.init_no_launch(&["--no-guard-lift"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("the PM guard is on"), "{}", text(&out));
+    assert!(stdout.contains("settings.local.json"), "{}", text(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        std::fs::read_to_string(env.dir().join(".claude/settings.local.json"))
+            .unwrap()
+            .contains(LIFT_KEY),
+        "tm does not edit the local file"
+    );
+}
+
+/// M5: `tm fleet init` seeds the statusLine `init.sh` seeds, inside the locked
+/// settings edit: absolute path of `scripts/statusline-tee.sh`, idempotent, an
+/// existing different value kept, every other key kept.
+#[test]
+fn init_seeds_the_statusline_tee_and_keeps_an_existing_one() {
+    let env = FleetEnv::new();
+    env.plant_settings("{\"model\": \"opus\"}\n");
+    let out = env.init_no_launch(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let tee = env.dir().join("scripts/statusline-tee.sh");
+    let settings = env.settings();
+    assert_eq!(settings["model"], "opus", "{settings}");
+    assert_eq!(
+        settings["statusLine"],
+        serde_json::json!({"type": "command", "command": tee.display().to_string(), "padding": 0}),
+        "{settings}"
+    );
+    let before = std::fs::read(env.settings_path()).unwrap();
+    let again = env.init_no_launch(&[]);
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("unchanged  statusLine"),
+        "{}",
+        text(&again)
+    );
+    assert_eq!(std::fs::read(env.settings_path()).unwrap(), before);
+
+    // scripts/doctor.sh (the manual path's check) accepts the seeded value.
+    let doctor = Command::new("bash")
+        .arg(env.dir().join("scripts/doctor.sh"))
+        .arg("--no-host")
+        .current_dir(env.dir())
+        .output()
+        .expect("doctor.sh");
+    assert!(
+        String::from_utf8_lossy(&doctor.stdout).contains("OK       settings statusLine"),
+        "{}",
+        text(&doctor)
+    );
+
+    let env = FleetEnv::new();
+    let custom = "{\"statusLine\": {\"type\": \"command\", \"command\": \"mine.sh\"}}\n";
+    env.plant_settings(custom);
+    let out = env.init_no_launch(&[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(env.settings()["statusLine"]["command"], "mine.sh");
+}

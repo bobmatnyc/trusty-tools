@@ -45,15 +45,20 @@ impl Request {
     }
 }
 
+/// The consent question's text: what the lift covers.
+fn prompt_text() -> String {
+    format!(
+        "Lift the PM guard for the Architect ({LIFT_KEY}=1 in .claude/settings.json)? It lets \
+         the Architect act on other sessions' panes directly."
+    )
+}
+
 /// Ask `[y/N]` when stdin and stdout are terminals; anything but y/yes is No.
 fn ask_on_terminal() -> bool {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return false;
     }
-    print!(
-        "Lift the PM guard for the Architect ({LIFT_KEY}=1 in .claude/settings.json)? It lets \
-         the Architect act on other sessions' panes directly. [y/N] "
-    );
+    print!("{} [y/N] ", prompt_text());
     let _ = std::io::stdout().flush();
     answer_is_yes(std::io::stdin().lock())
 }
@@ -118,6 +123,17 @@ fn apply_lift(dir: &Path) -> Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M2: the prompt says what the lift covers (the pm-guard rules the
+    /// Architect profile keeps) and what it leaves (the pane and tmux floors).
+    #[test]
+    fn the_prompt_states_what_the_lift_covers() {
+        let text = prompt_text();
+        for needle in ["destructive", "worktree", "pane", "still"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(!text.contains("panes directly"), "{text}");
+    }
 
     #[test]
     fn the_prompt_lifts_only_on_yes() {
