@@ -107,12 +107,12 @@ fn profile_verdict(project_dir: Option<&Path>, config: &MpmConfig) -> (CheckStat
 ///
 /// Why: plan r2 §4 — the operator sees which instructions an Architect gets
 /// and why an override does not apply, in the row they already read.
-/// What: the instruction source and origin, the core rules the composed
-/// prompt lacks (content and binary out of step), the `AGENTS.md` state, and
+/// What: the instruction source and origin, the core rules `core.md` lacks (content and binary out of step), the `AGENTS.md` state, and
 /// the `CLAUDE.md` double-load imports and marker blocks. A content load
 /// error is itself a warning; the `content` row grades it.
 /// Test: `an_architect_row_names_its_instructions_and_agents_md`,
-/// `a_legacy_content_source_is_named_and_agents_md_warns`.
+/// `a_legacy_content_source_is_named_and_agents_md_warns`,
+/// `an_agents_md_carrying_a_dropped_core_marker_does_not_hide_it`.
 fn architect_report(
     project: &Path,
     content: Result<FrameworkContent, AgentContentError>,
@@ -133,8 +133,14 @@ fn architect_report(
                 "instructions: architect.md + core.md from {}",
                 content.origin()
             ));
-            let prompt = architect_prompt::compose(content, &agents);
-            let missing = crate::core::architect_core::missing_architect_core_members(&prompt);
+            // #8436: core.md alone — an AGENTS.md copy of a dropped rule's
+            // marker must not make the core look complete.
+            let core = content
+                .instruction(architect_prompt::ARCHITECT_CORE_MD)
+                .unwrap_or_default();
+            let missing = crate::core::architect_core::missing_architect_core_members(
+                &crate::core::instruction_fold::fold_block(core),
+            );
             if !missing.is_empty() {
                 warn = true;
                 lines.push(format!(

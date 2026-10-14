@@ -144,6 +144,51 @@ fn an_unusable_agents_md_is_named_in_the_prompt_and_never_applied() {
     }
 }
 
+/// Runs `compose_in` on a worker thread and fails after 10 s, so a launch that
+/// blocks on `AGENTS.md` fails the test instead of hanging CI.
+fn compose_within_10s(dir: &Path) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(compose_in(rc(), &dir).0);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the composer blocked on AGENTS.md")
+}
+
+#[test]
+fn a_fifo_agents_md_is_refused_without_blocking_the_launch() {
+    let tmp = architect_dir(None);
+    let path = std::ffi::CString::new(tmp.path().join("AGENTS.md").to_str().expect("utf-8 path"))
+        .expect("no NUL");
+    // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+    let prompt = compose_within_10s(tmp.path());
+    assert!(!prompt.contains(SENTINEL));
+    assert!(
+        prompt.contains("`AGENTS.md` was not read") && prompt.contains("not a regular file"),
+        "the prompt does not name the FIFO as refused"
+    );
+}
+
+#[test]
+fn a_mode_000_agents_md_is_refused() {
+    // SAFETY: `geteuid` has no preconditions. Root reads a mode-000 file.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = architect_dir(Some(SENTINEL.as_bytes()));
+    let path = tmp.path().join("AGENTS.md");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let prompt = compose_within_10s(tmp.path());
+    assert!(!prompt.contains(SENTINEL));
+    assert!(
+        prompt.contains("`AGENTS.md` was not read") && prompt.contains("could not be opened"),
+        "the prompt does not name the unreadable file as refused"
+    );
+}
+
 #[test]
 fn a_pm_session_never_reads_agents_md() {
     let tmp = TempDir::new().expect("tempdir");
