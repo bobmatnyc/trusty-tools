@@ -69,9 +69,18 @@ fn set_profile(project: &Path, profile: &str) {
 fn an_architect_launch_gets_the_architect_prompt_style_and_model() {
     let tmp = tempdir().unwrap();
     set_profile(tmp.path(), "supervisor");
+    // #8436: the owner's AGENTS.md reaches the stash between architect.md
+    // and the core.
+    std::fs::write(tmp.path().join("AGENTS.md"), "AGENTS-SENTINEL-8453\n").unwrap();
     let home = home_allowing(tmp.path());
     let (profile, settings, stash) = launch_in(tmp.path(), home.path());
     assert_eq!(profile, SessionProfile::Architect);
+    let at = |needle: &str| stash.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    assert!(
+        at("# The Architect — operating manual") < at("AGENTS-SENTINEL-8453")
+            && at("AGENTS-SENTINEL-8453") < at("## Architect Core"),
+        "{stash}"
+    );
     assert_eq!(
         settings["outputStyle"],
         crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID

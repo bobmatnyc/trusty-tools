@@ -157,6 +157,61 @@ fn a_source_missing_a_required_instruction_is_an_error() {
     );
 }
 
+/// #8436 (PR B): `architect.md` and its core load as a pair. A source carrying
+/// one without the other, or an empty one, is refused and names the file —
+/// never an Architect launch without the core.
+#[test]
+fn a_source_with_half_or_an_empty_architect_pair_is_an_error() {
+    let manual = repo_content()
+        .instruction("architect/architect.md")
+        .expect("architect.md")
+        .to_string();
+    let core = repo_content()
+        .instruction("architect/core.md")
+        .expect("core.md")
+        .to_string();
+    let empty = "<!-- an authoring comment only -->\n\n".to_string();
+    let cases = [
+        ("no core", Some(manual.clone()), None, "architect/core.md"),
+        (
+            "no manual",
+            None,
+            Some(core.clone()),
+            "architect/architect.md",
+        ),
+        (
+            "empty core",
+            Some(manual),
+            Some(empty.clone()),
+            "architect/core.md",
+        ),
+        (
+            "empty manual",
+            Some(empty),
+            Some(core),
+            "architect/architect.md",
+        ),
+    ];
+    for (label, manual, core, named) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let package = repo_content()
+            .required("pm-instruction-package.json")
+            .to_string();
+        fake_checkout_with_package(dir.path(), &package);
+        let arch = dir.path().join("content/instructions/architect");
+        std::fs::create_dir_all(&arch).expect("dir");
+        for (file, body) in [("architect.md", manual), ("core.md", core)] {
+            if let Some(body) = body {
+                std::fs::write(arch.join(file), body).expect("write");
+            }
+        }
+        let err = FrameworkContent::load(&checkout_content(dir.path()).expect("checkout"))
+            .expect_err(label);
+        let shown = err.to_string();
+        assert!(shown.contains(named), "{label}: {shown}");
+    }
+}
+
 /// `require_instruction` names an absent optional file.
 #[test]
 fn require_instruction_names_an_absent_file() {
