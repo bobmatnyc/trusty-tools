@@ -60,6 +60,8 @@ pub(crate) struct Recorder {
     pub(crate) dir: PathBuf,
     pub(crate) view: Result<AskerView, String>,
     pub(crate) record_fails: Vec<DeliveryState>,
+    /// Also append each line to the real trace in `dir`.
+    pub(crate) real_trace: bool,
     pub(crate) send_fails: bool,
     pub(crate) events: Mutex<Vec<String>>,
     pub(crate) sent: Mutex<Vec<String>>,
@@ -77,6 +79,7 @@ impl Recorder {
             dir,
             view: Ok(live_view()),
             record_fails: Vec::new(),
+            real_trace: false,
             send_fails: false,
             events: Mutex::new(Vec::new()),
             sent: Mutex::new(Vec::new()),
@@ -139,6 +142,10 @@ impl DeliverEnv for Recorder {
         self.push(&format!("record:{:?}", line.state));
         if self.record_fails.contains(&line.state) {
             return Err("delivery trace is read-only".into());
+        }
+        if self.real_trace {
+            crate::core::channels_delivery::record_delivery(&self.dir, line)
+                .map_err(|e| e.to_string())?;
         }
         self.lines.lock().expect("lines").push(line.clone());
         Ok(())
@@ -420,6 +427,37 @@ async fn resolved_always_ends_tainted_or_recorded() {
         let recorded = !rec.states().is_empty();
         assert!(rec.id_tainted() || recorded, "{point}: neither tainted nor recorded");
     }
+}
+
+/// 🔴 #9873 (F11, Q5): a `pending` line the real trace cannot take refuses
+/// the send; the taint written before it stays.
+#[tokio::test]
+async fn pending_write_failure_refuses_delivery() {
+    let mut rec = Recorder::new();
+    rec.real_trace = true;
+    let trace = rec.dir.join(crate::core::channels_delivery::DELIVERY_FILE);
+    std::fs::create_dir_all(&trace).expect("a directory where the trace goes");
+    let outcome = deliver(&rec, &resolved("approve")).await;
+    assert_eq!(
+        outcome,
+        Delivery::Failed {
+            code: "pending_unrecorded",
+            sent: false
+        }
+    );
+    assert!(rec.sent().is_empty(), "nothing was sent");
+    assert!(rec.id_tainted(), "the taint stays");
+    // The real trace refused the `pending` line; with it unblocked, the
+    // same deliverer writes both lines of a good delivery.
+    std::fs::remove_dir(&trace).expect("unblock");
+    let rec2 = Recorder {
+        real_trace: true,
+        ..Recorder::new()
+    };
+    assert_eq!(deliver(&rec2, &resolved("ok")).await, Delivery::Delivered);
+    let lines = crate::core::channels_delivery::read_deliveries(&rec2.dir).expect("trace");
+    let states: Vec<_> = lines.iter().map(|l| l.state).collect();
+    assert_eq!(states, [DeliveryState::Pending, DeliveryState::Delivered]);
 }
 
 /// The asker check accepts exactly the live Architect's view.

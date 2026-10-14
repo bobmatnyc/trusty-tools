@@ -8,10 +8,15 @@
 //! directory beside [`crate::core::channels_taint::REAPPLY_FAILURES_FILE`],
 //! so no session can edit it, and a retire leaves it alone (it is not a
 //! `*.json` taint).
-//! Test: `deliver_tests.rs`.
+//! Test: `channels_delivery_tests.rs`, `deliver_tests.rs`,
+//! `doctor_channel_taint_tests.rs`.
+
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::core::channels_taint::TaintError;
 
 /// The delivery trace's file name in the taint directory.
 pub const DELIVERY_FILE: &str = "delivery.jsonl";
@@ -62,3 +67,22 @@ impl DeliveryLine {
         }
     }
 }
+
+/// RED STUB (#9873 S5): writes nothing; the next commit replaces it.
+pub fn record_delivery(_dir: &Path, _line: &DeliveryLine) -> Result<(), TaintError> {
+    Ok(())
+}
+
+/// RED STUB (#9873 S5): reads nothing; the next commit replaces it.
+pub fn read_deliveries(_dir: &Path) -> Result<Vec<DeliveryLine>, TaintError> {
+    Ok(Vec::new())
+}
+
+/// RED STUB (#9873 S5): finds nothing; the next commit replaces it.
+pub fn delivery_problems(_lines: &[DeliveryLine], _resolved: &[(String, String)]) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(test)]
+#[path = "channels_delivery_tests.rs"]
+mod tests;

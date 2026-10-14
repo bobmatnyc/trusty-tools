@@ -610,6 +610,11 @@ impl Drop for Flock {
     }
 }
 
+/// RED STUB (#9873 S5): reports nothing; the next commit replaces it.
+pub fn answered_in_log(_path: &Path) -> Result<Vec<(QuestionId, String)>, QuestionTableError> {
+    Ok(Vec::new())
+}
+
 /// Write one record line to the table's log and sync it.
 fn append(state: &mut State, record: &Record) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(&LineOut {
