@@ -534,6 +534,6 @@ fn delivery_record_survives_retire_of_the_session() {
     assert_eq!(retire(&dir, "m-1").expect("retire"), 1);
     assert_eq!(read_state(&dir, "claude-1"), TaintState::Untainted);
     assert!(dir.join(DELIVERY_FILE).exists(), "the trace survives");
-    assert_eq!(read_deliveries(&dir).expect("read"), [failed]);
+    assert_eq!(read_deliveries(&dir).expect("read").lines, [failed]);
     assert_eq!(presence(&dir), Presence::Some);
 }

@@ -77,10 +77,13 @@ impl DeliveryLine {
 /// crash mid-send leaves an unsettled line the doctor reports.
 /// What: the #8545 home-write fence, the directory created 0700, then the
 /// file opened for append (created 0600; no symlink followed, no wait on a
-/// FIFO), the whole line in one write, then `sync_data`. Any step's error is
-/// returned.
+/// FIFO; anything but a regular file refused), the whole line in one write,
+/// then `sync_data`. A non-empty file whose last byte is not a newline (a
+/// torn append) gets a leading newline first, so the torn line cannot
+/// swallow this record. Any step's error is returned.
 /// Test: `delivery_trace_is_0600_and_one_line_per_step`,
-/// `pending_write_failure_refuses_delivery`.
+/// `pending_write_failure_refuses_delivery`,
+/// `torn_last_trace_line_never_swallows_the_next_record`.
 pub fn record_delivery(dir: &Path, line: &DeliveryLine) -> Result<(), TaintError> {
     let path = dir.join(DELIVERY_FILE);
     crate::core::home_write_fence::check(&path);
@@ -99,39 +102,79 @@ pub fn record_delivery(dir: &Path, line: &DeliveryLine) -> Result<(), TaintError
     })?;
     bytes.push(b'\n');
     std::fs::OpenOptions::new()
+        .read(true)
         .create(true)
         .append(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)
-        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_data()))
+        .and_then(|mut file| {
+            // #9873 fix round: a torn last line must not swallow this one.
+            if ends_unterminated(&file)? {
+                bytes.insert(0, b'\n');
+            }
+            file.write_all(&bytes).and_then(|()| file.sync_data())
+        })
         .map_err(|e| io(&path, e))
+}
+
+/// Whether regular file `file` is non-empty and its last byte is not `\n`.
+fn ends_unterminated(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::unix::fs::FileExt as _;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(std::io::Error::other(
+            "the delivery trace is not a regular file",
+        ));
+    }
+    let Some(last) = meta.len().checked_sub(1) else {
+        return Ok(false);
+    };
+    let mut byte = [0u8; 1];
+    file.read_exact_at(&mut byte, last)?;
+    Ok(byte[0] != b'\n')
+}
+
+/// A read of the delivery trace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeliveryTrace {
+    /// The lines that parse, in file order.
+    pub lines: Vec<DeliveryLine>,
+    /// One message per newline-terminated line that does not parse, naming
+    /// its line number.
+    pub malformed: Vec<String>,
 }
 
 /// Every line of `dir`'s delivery trace; an absent trace has none.
 ///
-/// What: a read error other than absence, and any line that does not parse
-/// (a torn final line included), is an `Err`: the doctor then grades
-/// `Unknown`, never `Ok`.
+/// What: a read error other than absence is an `Err`. #9873 fix round: an
+/// unterminated last line is a torn append (ENOSPC, a crash) and is skipped,
+/// as `question_table::answered_in_log` does; a terminated line that does
+/// not parse is named in [`DeliveryTrace::malformed`], and the read goes on.
 /// Test: `delivery_trace_is_0600_and_one_line_per_step`,
-/// `malformed_delivery_line_is_an_error`.
-pub fn read_deliveries(dir: &Path) -> Result<Vec<DeliveryLine>, TaintError> {
+/// `malformed_delivery_line_is_named_and_a_torn_last_line_is_skipped`,
+/// `malformed_middle_trace_line_is_a_doctor_fail_naming_it`.
+pub fn read_deliveries(dir: &Path) -> Result<DeliveryTrace, TaintError> {
     let path = dir.join(DELIVERY_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DeliveryTrace::default()),
         Err(source) => return Err(TaintError::Io { path, source }),
     };
-    text.lines()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .map(|(n, l)| {
-            serde_json::from_str(l).map_err(|e| TaintError::Malformed {
-                path: path.clone(),
-                reason: format!("line {}: {e}", n + 1),
-            })
-        })
-        .collect()
+    let mut trace = DeliveryTrace::default();
+    for (n, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if !line.ends_with(b"\n") || line.trim_ascii().is_empty() {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(parsed) => trace.lines.push(parsed),
+            Err(e) => trace.malformed.push(format!(
+                "{DELIVERY_FILE} line {}: malformed ({e}); a delivery record may be lost",
+                n + 1
+            )),
+        }
+    }
+    Ok(trace)
 }
 
 /// The deliveries an operator must look at, one message each.

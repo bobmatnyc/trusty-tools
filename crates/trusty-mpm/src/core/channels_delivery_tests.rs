@@ -30,21 +30,47 @@ fn delivery_trace_is_0600_and_one_line_per_step() {
     assert_eq!(mode, 0o600);
     let dir_mode = std::fs::metadata(&dir).expect("stat").permissions().mode() & 0o777;
     assert_eq!(dir_mode, 0o700);
-    assert_eq!(read_deliveries(&dir).expect("read"), [pending, failed]);
+    let trace = read_deliveries(&dir).expect("read");
+    assert_eq!(trace.lines, [pending, failed]);
+    assert!(trace.malformed.is_empty());
     let raw = std::fs::read_to_string(&path).expect("raw");
     assert_eq!(raw.lines().count(), 2, "{raw}");
     assert!(!raw.contains("text"), "{raw}");
 }
 
-/// 🔴 #9873 (F18): a line the reader cannot parse is an error, never a
-/// clean trace; an absent trace is empty.
+/// 🔴 #9873 (F18, fix round): a terminated line the reader cannot parse is
+/// named, never a clean trace, and the read goes on; an unterminated last
+/// line is a torn append and is skipped; an absent trace is empty.
 #[test]
-fn malformed_delivery_line_is_an_error() {
+fn malformed_delivery_line_is_named_and_a_torn_last_line_is_skipped() {
     let (_tmp, dir) = dir();
-    assert_eq!(read_deliveries(&dir).expect("absent"), []);
+    assert_eq!(
+        read_deliveries(&dir).expect("absent"),
+        DeliveryTrace::default()
+    );
+    let failed = DeliveryLine::new(DeliveryState::Failed, "7", "m-1", Some("send_failed"));
     std::fs::create_dir_all(&dir).expect("mkdir");
     std::fs::write(dir.join(DELIVERY_FILE), "not json\n").expect("write");
-    assert!(read_deliveries(&dir).is_err());
+    record_delivery(&dir, &failed).expect("after the bad line");
+    let trace = read_deliveries(&dir).expect("read");
+    assert_eq!(trace.lines, [failed.clone()]);
+    assert_eq!(trace.malformed.len(), 1, "{:?}", trace.malformed);
+    assert!(trace.malformed[0].starts_with("delivery.jsonl line 1: malformed"));
+    std::fs::write(dir.join(DELIVERY_FILE), "{\"v\":1,\"ts").expect("torn");
+    assert_eq!(
+        read_deliveries(&dir).expect("torn"),
+        DeliveryTrace::default()
+    );
+    record_delivery(&dir, &failed).expect("after the torn line");
+    let raw = std::fs::read_to_string(dir.join(DELIVERY_FILE)).expect("raw");
+    assert_eq!(
+        raw.lines().count(),
+        2,
+        "a newline ends the torn line: {raw:?}"
+    );
+    let trace = read_deliveries(&dir).expect("read");
+    assert_eq!(trace.lines, [failed]);
+    assert!(trace.malformed[0].starts_with("delivery.jsonl line 1: malformed"));
 }
 
 /// 🔴 #9873 (AC2, Q4a): an unsettled `pending`, a `failed` line, and a

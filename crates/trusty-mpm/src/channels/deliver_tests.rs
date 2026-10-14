@@ -498,8 +498,8 @@ async fn pending_write_failure_refuses_delivery() {
         ..Recorder::new()
     };
     assert_eq!(deliver(&rec2, &resolved("ok")).await, Delivery::Delivered);
-    let lines = crate::core::channels_delivery::read_deliveries(&rec2.dir).expect("trace");
-    let states: Vec<_> = lines.iter().map(|l| l.state).collect();
+    let trace = crate::core::channels_delivery::read_deliveries(&rec2.dir).expect("trace");
+    let states: Vec<_> = trace.lines.iter().map(|l| l.state).collect();
     assert_eq!(states, [DeliveryState::Pending, DeliveryState::Delivered]);
 }
 

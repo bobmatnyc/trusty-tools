@@ -169,9 +169,14 @@ fn doctor_row_is_unknown_when_delivery_log_unreadable() {
     let live: HashSet<String> = ["live-1".to_owned()].into();
     taint_managed_session(&dir, "live-1", "a", &mark()).expect("live");
     let path = dir.join(crate::core::channels_delivery::DELIVERY_FILE);
-    std::fs::write(&path, "{\"truncated\n").expect("torn trace");
+    // #9873 fix round: a malformed line is now a named `Fail`
+    // (`malformed_middle_trace_line_is_a_doctor_fail_naming_it`); a
+    // directory where the trace goes is unreadable, even as root.
+    std::fs::create_dir(&path).expect("a directory where the trace goes");
     let row = channel_taint_row(&dir, &live);
     assert_eq!(row.status, CheckStatus::Unknown, "{}", row.message);
+    assert!(row.message.contains("unreadable"), "{}", row.message);
+    std::fs::remove_dir(&path).expect("unblock");
     std::fs::write(&path, "").expect("empty trace");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let row = channel_taint_row(&dir, &live);
