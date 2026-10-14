@@ -136,16 +136,6 @@ pub(crate) const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wi
 /// Test: `store::wings::tests::wing_create_is_idempotent`.
 pub(crate) const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
 
-/// Payload store (for `trusty-agents`'s `TrustyBackedMemoryStore`).
-///
-/// Why: Payloads are namespaced by segment and addressed by id; share the
-///      same redb env as the KG so payload + KG ops can ride a single
-///      transaction.
-/// What: Key = `[segment_len: u16 BE][segment bytes][id bytes]`.
-///       Value = postcard-encoded payload string.
-/// Test: `round_trip_payload_key`.
-pub(crate) const PAYLOADS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("payloads");
-
 /// Recall analytics event log (hit/miss telemetry).
 ///
 /// Why: Issue #57 — `RecallLog` was the last rusqlite/r2d2 consumer in the
@@ -550,33 +540,6 @@ pub(crate) fn prefix_range_end(prefix: &[u8]) -> Vec<u8> {
     end
 }
 
-/// Why: The PAYLOADS table is keyed by `(segment, id)`; this helper produces
-///      the composite key for both reads and writes.
-/// What: Payload key = `[segment_len: u16 BE][segment bytes][id bytes]`.
-/// Test: `round_trip_payload_key`.
-pub(crate) fn encode_payload_key(segment: &str, id: &[u8]) -> Vec<u8> {
-    let seg = segment.as_bytes();
-    let mut out = Vec::with_capacity(2 + seg.len() + id.len());
-    out.extend_from_slice(&(seg.len() as u16).to_be_bytes());
-    out.extend_from_slice(seg);
-    out.extend_from_slice(id);
-    out
-}
-
-/// Why: Range scans by segment use `range(prefix..end)` where `prefix` is
-///      `[segment_len][segment]`; this helper computes that prefix so callers
-///      can enumerate every payload row in a given segment.
-/// What: Segment prefix = `[segment_len: u16 BE][segment bytes]`.
-/// Test: `payload_keys_group_by_segment` verifies key ordering matches the
-///       prefix derived from this helper.
-pub(crate) fn segment_prefix(segment: &str) -> Vec<u8> {
-    let seg = segment.as_bytes();
-    let mut out = Vec::with_capacity(2 + seg.len());
-    out.extend_from_slice(&(seg.len() as u16).to_be_bytes());
-    out.extend_from_slice(seg);
-    out
-}
-
 // ── Value encode/decode ──────────────────────────────────────────────────
 
 /// Why: All value types share a single postcard codec — central helper keeps
@@ -863,26 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_payload_key() {
-        let id = [0xAB, 0xCD, 0xEF, 0x01];
-        let k = encode_payload_key("session", &id);
-        // Verify segment length prefix.
-        assert_eq!(&k[0..2], &(7u16).to_be_bytes());
-        assert_eq!(&k[2..9], b"session");
-        assert_eq!(&k[9..], &id);
-    }
-
-    #[test]
-    fn payload_keys_group_by_segment() {
-        // Keys with the same segment prefix sort together.
-        let k1 = encode_payload_key("seg_a", &[1, 2, 3]);
-        let k2 = encode_payload_key("seg_a", &[1, 2, 4]);
-        let k3 = encode_payload_key("seg_b", &[0]);
-        assert!(k1 < k2);
-        assert!(k2 < k3);
-    }
-
-    #[test]
     fn table_definitions_have_distinct_names() {
         use redb::TableHandle;
         // Sanity check: no two tables share the same name (would alias in redb).
@@ -896,7 +839,6 @@ mod tests {
             ROOM_KEYS.name(),
             WINGS.name(),
             WING_KEYS.name(),
-            PAYLOADS.name(),
             SESSIONS.name(),
             RECALL_LOG.name(),
             VECTORS.name(),

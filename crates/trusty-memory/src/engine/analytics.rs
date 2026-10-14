@@ -5,7 +5,7 @@
 //! What: redb-backed event log with hit_count, miss_rate, top_drawers queries.
 //! Issue #57 migrates the storage layer from rusqlite + r2d2 to redb so the
 //! analytics sidecar drops the heavy SQLite dependency chain and lines up with
-//! the rest of the Memory Palace (`kg_redb.rs`, payload_store). The public
+//! the rest of the Memory Palace (`kg_redb.rs`). The public
 //! `RecallLog` API is unchanged — callers that previously pointed at
 //! `<data_dir>/recall.db` keep working; the file on disk becomes
 //! `<data_dir>/recall.redb`. The one-shot SQLite → redb migration path was

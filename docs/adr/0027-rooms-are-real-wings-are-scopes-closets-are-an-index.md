@@ -252,7 +252,7 @@ pub const ROOM_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("room_k
 We deliberately reject a `rooms.json` sidecar next to `palace.json`, despite the
 precedent in `store/palace_store.rs` and despite JSON being human-repairable.
 The decisive reason is **corruption recovery**: the redb open path calls
-`open_or_recreate` (`store/payload_store/store.rs:70`, `OpenMode::Recreated` in
+`open_or_recreate` (`trusty_common::redb_open`, `OpenMode::Recreated` in
 `store/kg_redb/store.rs:141`), which on an unreadable database **recreates it
 empty**. A JSON sidecar would survive that event and then confidently describe
 rooms whose drawers no longer exist — an authoritative-looking lie. Rooms and

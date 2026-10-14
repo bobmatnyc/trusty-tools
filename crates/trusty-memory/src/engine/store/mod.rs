@@ -33,8 +33,6 @@ pub(crate) mod l1_cache;
 mod observer_open;
 pub mod palace_format;
 pub mod palace_store;
-// #9278: kept public pending a ruling — no caller in or outside the library.
-pub mod payload_store;
 pub(crate) mod redb_open;
 // ADR-0027 T2: additive, fail-open room backfill run at palace open.
 pub(crate) mod room_backfill;
@@ -59,7 +57,6 @@ pub(crate) use l1_cache::L1Cache;
 pub use palace_store::PalaceStore;
 #[cfg(feature = "server")]
 pub(crate) use palace_store::PalaceStoreError;
-pub use payload_store::{PayloadRow, PayloadStore, PayloadStoreError};
 #[cfg(feature = "server")]
 pub(crate) use redb_open::INCOMPATIBLE_SUFFIX;
 pub(crate) use redb_open::open_or_recreate;

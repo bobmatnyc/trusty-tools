@@ -870,7 +870,6 @@ crates/trusty-common/src/embedder_client/uds.rs	uds_bit_identical
 crates/trusty-common/src/log_drain/single_source.rs	toml_round_trips_every_field
 crates/trusty-common/src/log_drain/single_source.rs	yaml_round_trips_every_field
 crates/trusty-memory/src/engine/retrieval/types.rs	deferred_embed_backfills_vector_once_embedder_ready
-crates/trusty-memory/src/engine/store/payload_store/types.rs	iter_segment
 crates/trusty-common/src/monitor/memory_tui/render.rs	test_render_with_drawer_pane_focus_marker
 crates/trusty-common/src/search_index_tests.rs	never_writes_to_a_daemon_under_test
 crates/trusty-common/src/stdio_mcp_client/mod.rs	plugin_log_path_uses_home
