@@ -6,9 +6,9 @@
 //! login; an inherited `VERCEL_*` variable would choose the token, the team
 //! or the project of a push, so every one is removed from the child's
 //! environment, as are `NODE_*`, `NOW_*`, `npm_config_*`/`NPM_CONFIG_*`, the
-//! proxy variables and `SSL_CERT_FILE`/`SSL_CERT_DIR` (D3, D4). D16 — the CLI is a Node script, so the child's `PATH` is the
-//! pinned program's directory and the system directories, never the
-//! spawner's.
+//! proxy variables and `SSL_CERT_FILE`/`SSL_CERT_DIR` (D3, D4). D16 — the
+//! CLI is a Node script, so the child's `PATH` is the pinned program's
+//! directory and the system directories, never the spawner's.
 //! What: [`VercelSettings::from_machine`] checks `secrets.vercel` and picks
 //! the mapping; [`steering_vars`] lists the inherited names a run removes;
 //! [`path_overlay`] is the child's `PATH`.

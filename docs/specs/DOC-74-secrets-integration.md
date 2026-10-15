@@ -1363,8 +1363,8 @@ reached only through `secrets.copy` with `to_backend` set to
   also loses every inherited `NODE_*`, `NOW_*`, `npm_config_*`,
   `NPM_CONFIG_*`, proxy (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY`, either case), `SSL_CERT_FILE` and `SSL_CERT_DIR` variable,
-  always (D3, D4). It pushes `production` then `preview`; a failing target fails the key. An
-  existing variable is overwritten in place with `--force`, never removed
+  always (D3, D4). It pushes `production` then `preview`; a failing target
+  fails the key. An existing variable is overwritten in place with `--force`, never removed
   and re-added; because a listing is presence only, such a key is reported
   failed until the live check shows how to prove an update (D9).
 - A sync target is never a configured backend, never read back, never swept
