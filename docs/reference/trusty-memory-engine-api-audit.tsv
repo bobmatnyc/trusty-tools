@@ -362,7 +362,8 @@ trusty_memory::engine::filter::FilterReject::NoisePattern::pattern	field	NARROW	
 trusty_memory::engine::filter::FilterReject::NonAlphabetic	variant	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::NonAlphabetic::ratio	field	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::PotentialSecret	variant	NARROW	no consumer outside the library (Q6)	A5
-trusty_memory::engine::filter::FilterReject::PotentialSecret::token	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::PotentialSecret::offset	field	NARROW	no consumer outside the library (Q6)	A5
+trusty_memory::engine::filter::FilterReject::PotentialSecret::rule	field	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::TooShort	variant	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::FilterReject::TooShort::tokens	field	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::GIT_SHA_MAX_LEN	const	NARROW	no consumer outside the library (Q6)	A5

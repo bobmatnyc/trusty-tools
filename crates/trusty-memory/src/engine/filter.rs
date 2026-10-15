@@ -25,12 +25,11 @@ use thiserror::Error;
 mod secret;
 // #9278 (A5): crate-only; `SecretShape` and `find_secret_token` have no caller
 // outside `secret`, so the test glob below is their only re-export.
-pub(crate) use secret::check_secret;
 #[cfg(feature = "server")]
 pub(crate) use secret::{
-    MaskError, SECRET_FILTER_VERSION, SecretRule, SecretSpan, classify_secret, find_secret_spans,
-    mask_content,
+    MaskError, SECRET_FILTER_VERSION, SecretSpan, classify_secret, find_secret_spans, mask_content,
 };
+pub(crate) use secret::{SecretRule, check_secret};
 // The detector's predicate internals are re-exported only for the test suite
 // (`filter_tests.rs`, `use super::*`), which reaches into them directly.
 #[cfg(test)]
