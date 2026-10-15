@@ -284,7 +284,8 @@ impl KnowledgeGraph {
                 .into_iter()
                 .map(BatchWriteOp::UpsertDrawer)
                 .collect();
-            store.apply_batch(&ops).map(|_| ())
+            // #9278: `apply_batch` returns `KgError`; this method stays anyhow (T1b).
+            Ok(store.apply_batch(&ops).map(|_| ())?)
         })
         .await
         .context("upsert_drawers_atomic spawn_blocking join error")?
@@ -337,7 +338,7 @@ impl KnowledgeGraph {
     /// What: Delegates to `KgStoreRedb::load_drawer_ids`.
     /// Test: `load_drawer_ids_matches_load_drawers`.
     pub(crate) fn load_drawer_ids(&self) -> Result<std::collections::HashSet<Uuid>> {
-        self.store.load_drawer_ids()
+        Ok(self.store.load_drawer_ids()?) // #9278: `KgError` into anyhow
     }
 
     /// Load all drawer metadata.

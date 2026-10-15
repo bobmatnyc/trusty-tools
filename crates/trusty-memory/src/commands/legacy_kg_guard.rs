@@ -146,8 +146,13 @@ pub(crate) fn screen_drawers(
 /// returns the first failure; an absent file passes.
 /// Test: `apply_refuses_a_store_the_writer_open_would_rename_aside`.
 pub(crate) fn probe_stores(data_dir: &Path) -> Result<()> {
-    with_store_copy(data_dir, &std::env::temp_dir(), |s| s.load_drawer_ids())
-        .context("kg.redb failed a read-only probe; refusing to open it for writing")?;
+    // #9278: `load_drawer_ids` returns `KgError`; `?` lifts it into anyhow.
+    with_store_copy(
+        data_dir,
+        &std::env::temp_dir(),
+        |s| Ok(s.load_drawer_ids()?),
+    )
+    .context("kg.redb failed a read-only probe; refusing to open it for writing")?;
     let live = data_dir.join(INDEX_FILE);
     if !live
         .try_exists()

@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use super::copy_tables::{CopyCounts, copy_all, known_table_names};
 use super::store::KgStoreRedb;
+use crate::engine::store::kg::KgError;
 
 /// Suffix for the in-progress rewrite. Never renamed FROM the live path, only
 /// TO it, so the live file is untouched until one atomic syscall.
@@ -72,7 +73,8 @@ pub enum CompactStep {
 }
 
 /// A test hook that can fail the compaction at a named step.
-pub type CompactFaultHook = Arc<dyn Fn(CompactStep) -> Result<()> + Send + Sync>;
+pub type CompactFaultHook =
+    Arc<dyn Fn(CompactStep) -> std::result::Result<(), KgError> + Send + Sync>; // #9278
 
 /// What the caller wants pruned during the rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -522,7 +524,7 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
 /// Run the fault hook for `step`, if one is installed.
 fn fire(hook: Option<&CompactFaultHook>, step: CompactStep) -> Result<()> {
     match hook {
-        Some(h) => h(step),
+        Some(h) => Ok(h(step)?),
         None => Ok(()),
     }
 }
