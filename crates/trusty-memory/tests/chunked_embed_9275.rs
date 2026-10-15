@@ -9,7 +9,6 @@
 //! model.
 //! Test: this file IS the tests.
 
-use chrono::Utc;
 use std::sync::Arc;
 use tempfile::tempdir;
 use trusty_common::embedder::Embedder;
@@ -36,31 +35,20 @@ fn open_palace(name: &str) -> Arc<PalaceHandle> {
     let dir = tempdir().expect("tempdir");
     let data_dir = dir.path().join(name);
     std::fs::create_dir_all(&data_dir).expect("mkdir");
-    let palace = Palace {
-        id: PalaceId::new(name),
-        name: name.into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir,
-    };
+    let palace = Palace::new(PalaceId::new(name), name, data_dir);
     let handle = PalaceHandle::open(&palace).expect("open palace");
     std::mem::forget(dir);
     handle
 }
 
+// #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
+#[allow(clippy::field_reassign_with_default)]
 async fn remember(handle: &PalaceHandle, text: &str) -> Uuid {
+    let mut opts = RememberOptions::default();
+    opts.force = true;
+    opts.enforce_min_tokens = false;
     handle
-        .remember_with_options(
-            text.to_string(),
-            RoomType::General,
-            vec![],
-            0.5,
-            RememberOptions {
-                force: true,
-                enforce_min_tokens: false,
-                ..RememberOptions::default()
-            },
-        )
+        .remember_with_options(text.to_string(), RoomType::General, vec![], 0.5, opts)
         .await
         .expect("remember")
 }
@@ -180,6 +168,8 @@ async fn rewriting_a_drawer_shorter_drops_its_stale_chunk_rows() {
 }
 
 #[tokio::test]
+// #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
+#[allow(clippy::field_reassign_with_default)]
 async fn legacy_palace_recalls_unchanged_then_reembed_adds_the_tail() {
     let handle = open_palace("legacy");
     for n in 0..20 {
@@ -216,10 +206,8 @@ async fn legacy_palace_recalls_unchanged_then_reembed_adds_the_tail() {
         "tail not yet embedded"
     );
 
-    let repair = VectorBackfillOptions {
-        dry_run: false,
-        ..VectorBackfillOptions::default()
-    };
+    let mut repair = VectorBackfillOptions::default();
+    repair.dry_run = false;
     let report = handle
         .backfill_missing_vectors(repair)
         .await

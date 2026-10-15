@@ -116,13 +116,11 @@ async fn a_forgotten_drawer_leaves_the_lexical_corpus() {
         .registry
         .create_palace(
             &data_root,
-            Palace {
-                id: PalaceId::new(palace.to_string()),
-                name: palace.to_string(),
-                description: None,
-                created_at: chrono::Utc::now(),
-                data_dir: data_root.join(palace),
-            },
+            Palace::new(
+                PalaceId::new(palace.to_string()),
+                palace.to_string(),
+                data_root.join(palace),
+            ),
         )
         .expect("create palace");
 

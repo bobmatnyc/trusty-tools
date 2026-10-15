@@ -13,7 +13,6 @@
 //! Test: `cargo test -p trusty-memory --test
 //! community_tests`.
 
-use chrono::Utc;
 use std::collections::HashSet;
 use tempfile::tempdir;
 use trusty_memory::engine::community::{find_communities, partition};
@@ -25,15 +24,7 @@ use trusty_memory::engine::store::kg::{KnowledgeGraph, Triple};
 /// no provenance.
 /// Test: Indirect — used by every test in this file.
 fn t(subject: &str, predicate: &str, object: &str) -> Triple {
-    Triple {
-        subject: subject.into(),
-        predicate: predicate.into(),
-        object: object.into(),
-        valid_from: Utc::now(),
-        valid_to: None,
-        confidence: 1.0,
-        provenance: None,
-    }
+    Triple::new(subject, predicate, object)
 }
 
 /// Open a fresh KG in a temp directory and apply the given (s, p, o)

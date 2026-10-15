@@ -69,6 +69,29 @@ pub struct Palace {
     pub data_dir: PathBuf,
 }
 
+impl Palace {
+    /// Why: other crates build a `Palace` without a struct literal (#9278).
+    /// What: sets `id`, `name`, `data_dir`; no description, `created_at` now.
+    /// Test: `palace_new_has_no_description_and_a_current_creation_time`.
+    pub fn new(id: PalaceId, name: impl Into<String>, data_dir: PathBuf) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir,
+        }
+    }
+
+    /// Why: the one optional field a caller sets on a new palace (#9278).
+    /// What: replaces `description` and returns the palace.
+    /// Test: `palace_new_has_no_description_and_a_current_creation_time`.
+    pub fn with_description(mut self, description: Option<String>) -> Self {
+        self.description = description;
+        self
+    }
+}
+
 /// Topical category for a Room. Custom variants allow project-specific topics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[non_exhaustive] // #9278 A1: new variants stay additive for other crates.

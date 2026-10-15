@@ -88,13 +88,11 @@ async fn an_in_place_edit_is_re_indexed_by_the_next_backfill() {
         .registry
         .create_palace(
             &data_root,
-            Palace {
-                id: PalaceId::new(palace.to_string()),
-                name: palace.to_string(),
-                description: None,
-                created_at: chrono::Utc::now(),
-                data_dir: data_root.join(palace),
-            },
+            Palace::new(
+                PalaceId::new(palace.to_string()),
+                palace.to_string(),
+                data_root.join(palace),
+            ),
         )
         .expect("create palace");
 
@@ -221,13 +219,11 @@ async fn a_dream_merge_is_re_indexed_by_the_next_repair_pass() {
         .registry
         .create_palace(
             &data_root,
-            Palace {
-                id: PalaceId::new(palace.to_string()),
-                name: palace.to_string(),
-                description: None,
-                created_at: chrono::Utc::now(),
-                data_dir: data_root.join(palace),
-            },
+            Palace::new(
+                PalaceId::new(palace.to_string()),
+                palace.to_string(),
+                data_root.join(palace),
+            ),
         )
         .expect("create palace");
 

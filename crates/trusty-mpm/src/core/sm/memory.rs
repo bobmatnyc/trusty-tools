@@ -26,7 +26,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
 use trusty_memory::engine::registry::PalaceRegistry;
 use trusty_memory::engine::retrieval::{
@@ -243,17 +242,17 @@ impl SmMemory {
             });
         }
 
-        let palace = Palace {
-            id: self.palace_id.clone(),
-            name: "Session Manager".to_string(),
-            description: Some(
-                "Dedicated Session-Manager memory palace (DOC-14 §8): goals, \
-                 outcomes, and decisions across sessions."
-                    .to_string(),
-            ),
-            created_at: Utc::now(),
-            data_dir: self.data_root.join(self.palace_id.as_str()),
-        };
+        // #9278: built by constructor; a later #[non_exhaustive] forbids the literal.
+        let palace = Palace::new(
+            self.palace_id.clone(),
+            "Session Manager",
+            self.data_root.join(self.palace_id.as_str()),
+        )
+        .with_description(Some(
+            "Dedicated Session-Manager memory palace (DOC-14 §8): goals, \
+             outcomes, and decisions across sessions."
+                .to_string(),
+        ));
         self.registry
             .create_palace(&self.data_root, palace)
             .map_err(|source| SmMemoryError::Palace {

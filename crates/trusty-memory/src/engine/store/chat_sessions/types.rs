@@ -29,6 +29,30 @@ pub struct ChatMessage {
     pub attachments: Vec<trusty_common::chat_attachments::StoredAttachment>,
 }
 
+impl ChatMessage {
+    /// Why: trusty-agents builds a `ChatMessage` without a struct literal (#9278).
+    /// What: sets `role` and `content`; `attachments` is empty.
+    /// Test: `chat_message_new_has_no_attachments_until_with_attachments`.
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Why: a user turn carries attachments `new` leaves empty (#9278).
+    /// What: replaces `attachments` and returns the message.
+    /// Test: `chat_message_new_has_no_attachments_until_with_attachments`.
+    pub fn with_attachments(
+        mut self,
+        attachments: Vec<trusty_common::chat_attachments::StoredAttachment>,
+    ) -> Self {
+        self.attachments = attachments;
+        self
+    }
+}
+
 /// Wire-shape summary used by `list_sessions`.
 ///
 /// Why: The web UI lists sessions without their full history; this struct is

@@ -558,6 +558,8 @@ trusty_memory::engine::palace::Palace::data_dir	field	KEEP	trusty-mpm src/core/s
 trusty_memory::engine::palace::Palace::description	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
 trusty_memory::engine::palace::Palace::id	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
 trusty_memory::engine::palace::Palace::name	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
+trusty_memory::engine::palace::Palace::new	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; trusty-memory tests (constructor)	A2a
+trusty_memory::engine::palace::Palace::with_description	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; trusty-memory tests (constructor)	A2a
 trusty_memory::engine::palace::PalaceId	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::palace::PalaceId::as_str	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::palace::PalaceId::fmt	trait_method	KEEP	member of PalaceId (Display impl)	A4
@@ -942,6 +944,7 @@ trusty_memory::engine::retrieval::VectorBackfillReport::still_short_ids	field	KE
 trusty_memory::engine::retrieval::VectorBackfillReport::vector_count	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::VerifyNotStored	struct	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs (builds the literal)	A4
 trusty_memory::engine::retrieval::VerifyNotStored::drawer	field	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs	A4
+trusty_memory::engine::retrieval::VerifyNotStored::new	method	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs (constructor)	A2a
 trusty_memory::engine::retrieval::VerifyNotStored::reason	field	KEEP	trusty-mpm src/daemon/pause_resume_slot_tests.rs	A4
 trusty_memory::engine::retrieval::admit_tier_c	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::apply_relevance_floor	fn	NARROW	no consumer outside the library	A4
@@ -1314,6 +1317,7 @@ trusty_memory::engine::store::RoomSummary::room_type	field	NARROW	re-export; no 
 trusty_memory::engine::store::RoomSummary::wing_id	field	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::Triple	struct	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
 trusty_memory::engine::store::Triple::confidence	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
+trusty_memory::engine::store::Triple::new	method	KEEP	trusty-memory tests (constructor; also printed under the kg::Triple re-export, one row per path)	A2a
 trusty_memory::engine::store::Triple::object	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
 trusty_memory::engine::store::Triple::predicate	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
 trusty_memory::engine::store::Triple::provenance	field	KEEP	re-export of kg::Triple (A3a KEEP; not reopened)	A3b
@@ -1357,7 +1361,9 @@ trusty_memory::engine::store::chat_sessions::ChatImageAsset::session_id	field	NA
 trusty_memory::engine::store::chat_sessions::ChatMessage	struct	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
 trusty_memory::engine::store::chat_sessions::ChatMessage::attachments	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
 trusty_memory::engine::store::chat_sessions::ChatMessage::content	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::new	method	KEEP	trusty-agents src/chat_attachments.rs (constructor)	A2a
 trusty_memory::engine::store::chat_sessions::ChatMessage::role	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::with_attachments	method	KEEP	trusty-agents src/chat_attachments.rs (constructor)	A2a
 trusty_memory::engine::store::chat_sessions::ChatSession	struct	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatSession::created_at	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatSession::history	field	NARROW	no consumer outside the library	A3b

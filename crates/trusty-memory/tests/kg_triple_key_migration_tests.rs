@@ -82,13 +82,7 @@ async fn a_legacy_key_palace_is_refused_too_old_and_left_unchanged() {
         KnowledgeGraph::open(&dir.join("kg.db")).is_err(),
         "a format-0 KG must be refused, not opened un-migrated"
     );
-    let palace = Palace {
-        id: PalaceId::new("legacy"),
-        name: "legacy".into(),
-        description: None,
-        created_at: chrono::Utc::now(),
-        data_dir: dir.clone(),
-    };
+    let palace = Palace::new(PalaceId::new("legacy"), "legacy", dir.clone());
     let err = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
         .err()
         .expect("a format-0 palace is refused under writer intent");

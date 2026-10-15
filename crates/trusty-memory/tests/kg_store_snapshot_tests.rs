@@ -29,16 +29,7 @@ fn unit_vec(dim: usize, seed: u32) -> Vec<f32> {
 }
 
 fn triple(subject: &str, predicate: &str, object: &str) -> Triple {
-    use chrono::Utc;
-    Triple {
-        subject: subject.into(),
-        predicate: predicate.into(),
-        object: object.into(),
-        valid_from: Utc::now(),
-        valid_to: None,
-        confidence: 1.0,
-        provenance: None,
-    }
+    Triple::new(subject, predicate, object)
 }
 
 /// The canonical sentinel that every write on a read-only store must include.
