@@ -5,7 +5,8 @@
 //! keyed by the checkout's origin remote. D7 — the CLI uses its own stored
 //! login; an inherited `VERCEL_*` variable would choose the token, the team
 //! or the project of a push, so every one is removed from the child's
-//! environment. D16 — the CLI is a Node script, so the child's `PATH` is the
+//! environment, as are `NODE_*`, `NOW_*`, `npm_config_*`/`NPM_CONFIG_*`, the
+//! proxy variables and `SSL_CERT_FILE`/`SSL_CERT_DIR` (D3, D4). D16 — the CLI is a Node script, so the child's `PATH` is the
 //! pinned program's directory and the system directories, never the
 //! spawner's.
 //! What: [`VercelSettings::from_machine`] checks `secrets.vercel` and picks
@@ -35,9 +36,38 @@ pub(super) const PROJECT_ENV: &str = "VERCEL_PROJECT_ID";
 /// What follows the pinned program's directory in the child's `PATH` (D16).
 pub(super) const SYSTEM_PATH: &str = "/usr/bin:/bin";
 
-/// Removed from every run whether inherited or not; the prefix rule in
-/// [`steering_vars`] covers the rest.
-const STEERING: [&str; 4] = [ORG_ENV, PROJECT_ENV, "VERCEL_TOKEN", "VERCEL_SCOPE"];
+/// Removed from every run whether inherited or not; the prefix rules in
+/// [`steering_vars`] cover the rest.
+///
+/// #9069: D3, D4 — the proxy names are exact and listed in both cases, and
+/// `SSL_CERT_*` pick the trust roots; none has a switch to keep it.
+const STEERING: [&str; 14] = [
+    ORG_ENV,
+    PROJECT_ENV,
+    "VERCEL_TOKEN",
+    "VERCEL_SCOPE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// Inherited names starting with one of these are removed. Matched on the
+/// bytes, case-sensitively, so `npm_config_` and `NPM_CONFIG_` are both
+/// listed.
+const STEERING_PREFIXES: [&[u8]; 5] = [
+    b"VERCEL_",
+    b"NODE_",
+    b"NOW_",
+    b"npm_config_",
+    b"NPM_CONFIG_",
+];
 
 /// How the backend invokes the Vercel CLI.
 ///
@@ -194,16 +224,25 @@ pub(super) fn checked(
 ///
 /// Why: D7, V4 — `VERCEL_TOKEN` replaces the stored login, and
 /// `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` and `VERCEL_SCOPE` choose the team
-/// or project a push lands in.
-/// What: [`STEERING`] plus every name in `inherited` that starts with
-/// `VERCEL_`. The two ids return as an overlay only from the mapping.
+/// or project a push lands in. D3, D4 — the CLI is a Node script, so
+/// `NODE_*` (`NODE_OPTIONS` runs code, `NODE_EXTRA_CA_CERTS` adds trust
+/// roots), the legacy `NOW_*`, `npm_config_*`/`NPM_CONFIG_*`, the proxy
+/// variables and `SSL_CERT_FILE`/`SSL_CERT_DIR` could redirect or read the
+/// traffic that carries the value.
+/// What: [`STEERING`] plus every name in `inherited` that starts with a
+/// [`STEERING_PREFIXES`] entry (case-sensitive). The two ids return as an
+/// overlay only from the mapping.
 /// Test: `vercel_child_runs_in_an_empty_dir_with_mapping_ids_and_no_inherited_vercel_env`.
 pub(super) fn steering_vars(inherited: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut names: Vec<OsString> = STEERING.iter().map(OsString::from).collect();
     names.extend(
         inherited
             .into_iter()
-            .filter(|name| name.as_encoded_bytes().starts_with(b"VERCEL_")),
+            // #9069: D3, D4 — always, with no allow-list.
+            .filter(|name| {
+                let bytes = name.as_encoded_bytes();
+                STEERING_PREFIXES.iter().any(|p| bytes.starts_with(p))
+            }),
     );
     names
 }

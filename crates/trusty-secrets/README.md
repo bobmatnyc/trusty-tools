@@ -363,8 +363,11 @@ secrets:
   CLI runs. A tracked project file with a `vercel:` section is refused.
 - Each run uses the CLI's own login, runs in a fresh empty 0700 directory
   passed as `--cwd`, gets `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the
-  mapping, and has every inherited `VERCEL_*` variable removed, so a
-  `.vercel/project.json` or a spawner's variable cannot redirect the push.
+  mapping, and has every inherited `VERCEL_*`, `NODE_*`, `NOW_*`,
+  `npm_config_*`, `NPM_CONFIG_*`, `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/
+  `NO_PROXY` (either case), `SSL_CERT_FILE` and `SSL_CERT_DIR` variable
+  removed, with no switch to keep one, so a `.vercel/project.json` or a
+  spawner's variable cannot redirect the push.
   Its `PATH` is the program's directory plus `/usr/bin:/bin`.
 - Per key: `vercel env ls` on both targets, then `vercel env add KEY
   <target> --sensitive --force` with the value on stdin for `production`,
