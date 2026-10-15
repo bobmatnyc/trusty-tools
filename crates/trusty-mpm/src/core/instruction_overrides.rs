@@ -397,9 +397,11 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// [`resolve_pm_prompt_with_roster`] for an already-resolved profile (#8453).
 ///
 /// Why: see [`resolve_pm_prompt_for`].
-/// What: the supervisor prompt for a supervisor profile; otherwise the PM
-/// composition, unchanged.
-/// Test: `an_architect_project_needs_no_claude_md_override_blocks`.
+/// What: the Architect prompt for an Architect profile — `architect.md`, the
+/// project's `AGENTS.md`, then the core (#8436); otherwise the PM
+/// composition, unchanged. A PM never reads `AGENTS.md`.
+/// Test: `an_architect_project_needs_no_claude_md_override_blocks`,
+/// `a_pm_session_never_reads_agents_md`.
 pub(crate) fn resolve_pm_prompt_with_roster_for(
     content: &FrameworkContent,
     project_dir: &Path,
@@ -418,8 +420,9 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
                  profile ignores them"
             );
         }
+        // #8436: architect.md, the owner's AGENTS.md, then the core last.
         return (
-            crate::core::session_profile::architect_prompt(content),
+            crate::core::architect_prompt::architect_prompt_for(content, project_dir),
             PromptSource::Architect,
         );
     }
