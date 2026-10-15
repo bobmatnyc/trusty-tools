@@ -37,10 +37,72 @@ fn key(name: &str) -> SecretKey {
 
 /// A pipe holding `bytes`, its write end closed; the read end.
 fn pipe_with(bytes: &[u8]) -> OwnedFd {
+    pipe_with_during_write(bytes, || {})
+}
+
+/// [`pipe_with`], running `during` while this process still holds the
+/// write end, where a concurrent test's spawn can fork (#9071).
+fn pipe_with_during_write(bytes: &[u8], during: impl FnOnce()) -> OwnedFd {
     let (reader, mut writer) = io::pipe().unwrap();
     writer.write_all(bytes).unwrap();
+    during();
     drop(writer);
     OwnedFd::from(reader)
+}
+
+/// Fork a child that holds every descriptor of this process for `hold`
+/// before it execs `true`, as a concurrent test's spawn does between its
+/// fork and its exec; returns once the fork happened.
+///
+/// What: the child's pre-exec hook writes one byte to a signal pipe, then
+/// sleeps; the spawn runs on its own thread, since `spawn` returns only
+/// after the exec. The returned thread yields the child to reap.
+fn fork_holding_fds(hold: Duration) -> JoinHandle<std::process::Child> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let (mut forked, signal) = io::pipe().unwrap();
+    let signal_fd = signal.as_raw_fd();
+    let spawner = std::thread::spawn(move || {
+        let mut command = Command::new("true");
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // SAFETY: the hook runs in the forked child before exec and calls
+        // only `write` and `nanosleep`, both async-signal-safe; `signal_fd`
+        // is open in the child, since `signal` lives until `spawn` returns.
+        unsafe {
+            command.pre_exec(move || {
+                libc::write(signal_fd, b"f".as_ptr().cast(), 1);
+                std::thread::sleep(hold);
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        drop(signal);
+        child
+    });
+    let mut byte = [0u8; 1];
+    forked
+        .read_exact(&mut byte)
+        .expect("the child never forked");
+    spawner
+}
+
+/// Two siblings dup `parent`; the first reads the token, the second finds
+/// the pipe drained and fails closed with `InvalidToken`.
+fn assert_sibling_finds_the_pipe_drained(parent: OwnedFd) {
+    // SAFETY: `dup` reads no caller memory; each result is a new fd owned below.
+    let first = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
+    // SAFETY: as above.
+    let second = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
+    assert!(first > 2 && second > 2, "dup failed: {first} {second}");
+    assert_eq!(take_inherited(first).unwrap().expose(), TOKEN);
+    let err = take_inherited(second).unwrap_err();
+    assert!(matches!(err, GrantedError::InvalidToken), "{err:?}");
+    // SAFETY: both fds are this test's own and nothing else owns them.
+    drop(unsafe { OwnedFd::from_raw_fd(first) });
+    drop(unsafe { OwnedFd::from_raw_fd(second) });
 }
 
 fn client_for(socket: &Path) -> GrantedClient {
@@ -602,18 +664,24 @@ fn granted_client_rearms_the_token_for_a_child() {
 /// Test: itself.
 #[test]
 fn granted_client_sibling_finds_the_pipe_drained() {
-    let parent = pipe_with(TOKEN.as_bytes());
-    // SAFETY: `dup` reads no caller memory; each result is a new fd owned below.
-    let first = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
-    // SAFETY: as above.
-    let second = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
-    assert!(first > 2 && second > 2, "dup failed: {first} {second}");
-    assert_eq!(take_inherited(first).unwrap().expose(), TOKEN);
-    let err = take_inherited(second).unwrap_err();
-    assert!(matches!(err, GrantedError::InvalidToken), "{err:?}");
-    // SAFETY: both fds are this test's own and nothing else owns them.
-    drop(unsafe { OwnedFd::from_raw_fd(first) });
-    drop(unsafe { OwnedFd::from_raw_fd(second) });
+    assert_sibling_finds_the_pipe_drained(pipe_with(TOKEN.as_bytes()));
+}
+
+/// Why: #9071 flake — another test's spawn can fork while `pipe_with`
+/// holds the write end, and the child keeps a copy until its exec. The
+/// drained sibling then saw an open writer and no data
+/// (`TokenUnreadable`), not EOF (`InvalidToken`). This forces that fork
+/// and holds it 300 ms; `pipe_with` must still hand back a closed pipe.
+/// Test: itself.
+#[test]
+fn granted_pipe_with_survives_a_concurrent_fork() {
+    let mut spawner = None;
+    let parent = pipe_with_during_write(TOKEN.as_bytes(), || {
+        spawner = Some(fork_holding_fds(Duration::from_millis(300)));
+    });
+    assert_sibling_finds_the_pipe_drained(parent);
+    let mut child = spawner.unwrap().join().unwrap();
+    assert!(child.wait().unwrap().success());
 }
 
 /// Why: Fail-Open Check — when the process-wide client failed to build,
