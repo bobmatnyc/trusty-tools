@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 /// and how long the lock was held, plus the knob that moves the budget.
 /// Test: `a_transaction_past_its_deadline_is_rolled_back_not_committed`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum WriteTxnError {
     /// The transaction was aborted; none of its writes were committed.
     #[error(

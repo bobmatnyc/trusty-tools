@@ -49,6 +49,7 @@ use crate::AppState;
 /// retires one) reaches the caller unchanged.
 /// Test: `kg_write_admission_refusal_leaves_storage_and_cache_untouched`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum KgWriteError {
     /// The Tier S gate refused the write. Nothing was stored.
     #[error(transparent)]

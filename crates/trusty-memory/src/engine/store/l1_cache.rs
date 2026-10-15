@@ -36,6 +36,7 @@ pub const L1_SNAPSHOT_CAP: usize = 15;
 
 /// Errors raised by L1 cache persistence operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum L1CacheError {
     #[error("io error at {path}: {source}")]
     Io {

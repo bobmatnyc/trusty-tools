@@ -43,6 +43,7 @@ const MAX_LOCK_ATTEMPTS: usize = 4;
 /// `Internal` (-32603).
 /// Test: `from_anyhow_maps_palace_rename_errors`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RenameError {
     /// The arguments do not describe a rename; nothing was locked.
     #[error("{0}")]

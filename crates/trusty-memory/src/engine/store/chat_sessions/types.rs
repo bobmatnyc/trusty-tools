@@ -94,6 +94,7 @@ pub(super) struct ChatSessionRecord {
 // `Result<_, ChatSessionStoreError>` size stays small and Clippy's
 // `result_large_err` lint stays happy.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ChatSessionStoreError {
     #[error("chat session store io error at {path}: {source}")]
     Io {

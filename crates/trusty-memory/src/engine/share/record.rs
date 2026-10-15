@@ -92,6 +92,7 @@ pub struct SharedMemoryRecord {
 /// Test: `verify_rejects_a_forged_digest`, `verify_rejects_an_unknown_format_version`,
 /// `import_skips_a_bad_line_and_keeps_the_rest`.
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum RecordError {
     #[error(
         "record declares share format version {found}, but this build understands \

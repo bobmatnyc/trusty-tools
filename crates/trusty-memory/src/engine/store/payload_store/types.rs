@@ -33,6 +33,7 @@ use uuid::Uuid;
 // Test: existing CRUD tests still exercise every variant's construction path
 // without behavioural change.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PayloadStoreError {
     #[error("payload store io error at {path}: {source}")]
     Io {

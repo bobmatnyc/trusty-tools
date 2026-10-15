@@ -363,6 +363,7 @@ pub struct StatusPayload {
 /// non-empty palace without `force`).
 /// Test: indirectly via the HTTP tests for the corresponding endpoints.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServiceError {
     #[error("{0}")]
     BadRequest(String),

@@ -225,6 +225,7 @@ pub fn encode_triple_id(subject: &str, predicate: &str, object: &str) -> Result<
 /// answering it with the same "not found" a garbage id gets would read as
 /// "already deleted" to a caller whose request was never understood.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TripleIdError {
     /// Not base64url, or not a three-field `\0`-separated list.
     Malformed,

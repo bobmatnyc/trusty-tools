@@ -522,6 +522,7 @@ pub async fn lock_with_timeout<'a>(
 /// Test: `write_lock_timeout_returns_error_when_held`,
 /// `a_writer_behind_a_stalled_commit_times_out_with_a_typed_error`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum WriteTimeout {
     /// Waiting for the palace write mutex ran out of time.
     #[error(
