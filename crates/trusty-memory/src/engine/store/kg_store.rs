@@ -441,7 +441,7 @@ pub(crate) fn decode_triple_key(bytes: &[u8]) -> Option<(String, String, String)
 ///       `(subject, predicate)`. Returns `None` on the same malformed-input
 ///       conditions as [`decode_triple_key`].
 /// Test: `decode_legacy_triple_key_round_trips`.
-#[cfg(test)]
+// #9918: the 0 -> 1 chain step reads legacy keys again in production.
 pub(crate) fn decode_legacy_triple_key(bytes: &[u8]) -> Option<(String, String)> {
     if bytes.len() < 2 {
         return None;
