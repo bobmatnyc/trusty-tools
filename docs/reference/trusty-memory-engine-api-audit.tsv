@@ -175,14 +175,14 @@ trusty_memory::engine::analytics::RecallEvent::palace_id	field	NARROW	no consume
 trusty_memory::engine::analytics::RecallEvent::query_hash	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallEvent::score	field	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallLog	struct	KEEP	owner of the deletion-candidate RecallLog methods	A5
-trusty_memory::engine::analytics::RecallLog::hit_count	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
-trusty_memory::engine::analytics::RecallLog::miss_rate	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
-trusty_memory::engine::analytics::RecallLog::missed_queries	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::hit_count	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::miss_rate	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::missed_queries	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
 trusty_memory::engine::analytics::RecallLog::open	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::RecallLog::open_shared	method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::analytics::RecallLog::record	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::record	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
 trusty_memory::engine::analytics::RecallLog::record_batch	method	NARROW	no consumer outside the library	A5
-trusty_memory::engine::analytics::RecallLog::top_drawers	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
+trusty_memory::engine::analytics::RecallLog::top_drawers	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
 trusty_memory::engine::analytics::fnv1a_hash	fn	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::normalize_query	fn	NARROW	no consumer outside the library	A5
 trusty_memory::engine::analytics::query_hash	fn	NARROW	no consumer outside the library	A5
@@ -275,7 +275,7 @@ trusty_memory::engine::dream::DreamStats::semantically_consolidated	field	NARROW
 trusty_memory::engine::dream::DreamStats::update_compression_ratio	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::Dreamer	struct	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
 trusty_memory::engine::dream::Dreamer::config	field	NARROW	no consumer outside the library	A5
-trusty_memory::engine::dream::Dreamer::dream_cycle	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
+trusty_memory::engine::dream::Dreamer::dream_cycle	method	KEEP	anyhow-pending T3: tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
 trusty_memory::engine::dream::Dreamer::is_idle	method	NARROW	no consumer outside the library	A5
 trusty_memory::engine::dream::Dreamer::is_semantic_consolidation_disabled	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): unit tests only	A5
 trusty_memory::engine::dream::Dreamer::new	method	KEEP	tests/memory_palace.rs, tests/task_mcp.rs, tests/bm25_stale_edit_8246.rs	A5
@@ -347,8 +347,8 @@ trusty_memory::engine::embed::EMBED_DIM	reexport	NARROW	re-export of trusty_comm
 trusty_memory::engine::embed::Embedder	reexport	NARROW	re-export of trusty_common::embedder::Embedder; module pub(crate) (Q3)	A5
 trusty_memory::engine::embed::FastEmbedder	reexport	NARROW	re-export of trusty_common::embedder::FastEmbedder; module pub(crate) (Q3)	A5
 trusty_memory::engine::embed::embed_one	reexport	NARROW	re-export of trusty_common::embedder::embed_one removed: no caller; the item stays in trusty-common (Q3)	A5
-trusty_memory::engine::export_palace_jsonl	fn	KEEP	re-export of share::export_palace_jsonl (KEEP)	A5
-trusty_memory::engine::export_palace_records	fn	KEEP	re-export of share::export_palace_records (KEEP)	A5
+trusty_memory::engine::export_palace_jsonl	fn	KEEP	anyhow-pending T3: re-export of share::export_palace_jsonl (KEEP)	A5
+trusty_memory::engine::export_palace_records	fn	KEEP	anyhow-pending T3: re-export of share::export_palace_records (KEEP)	A5
 trusty_memory::engine::filter	mod	KEEP	path of FilterConfig	A5
 trusty_memory::engine::filter::BLOCKLIST_PATTERNS	const	NARROW	no consumer outside the library (Q6)	A5
 trusty_memory::engine::filter::DEFAULT_MIN_TOKENS	const	NARROW	no consumer outside the library (Q6)	A5
@@ -427,8 +427,8 @@ trusty_memory::engine::git::ConventionalCommit::commit_type	field	KEEP	deletion 
 trusty_memory::engine::git::ConventionalCommit::description	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::ConventionalCommit::scope	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::GitExtractor	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitExtractor::extract	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::git::GitExtractor::new	method	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitExtractor::extract	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
+trusty_memory::engine::git::GitExtractor::new	method	KEEP	anyhow-pending T3: deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::GitFact	struct	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::GitFact::author	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::GitFact::author_email	field	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
@@ -444,8 +444,8 @@ trusty_memory::engine::git::classify_file_path	fn	KEEP	deletion candidate, Bob d
 trusty_memory::engine::git::extract_entities	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::parse_conventional_commit	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
 trusty_memory::engine::git::score_importance	fn	KEEP	deletion candidate, Bob decides (Architect 05:16Z): no caller outside git's own unit tests	A5
-trusty_memory::engine::import_palace_jsonl	fn	KEEP	re-export of share::import_palace_jsonl (KEEP)	A5
-trusty_memory::engine::import_palace_records	fn	KEEP	re-export of share::import_palace_records (KEEP)	A5
+trusty_memory::engine::import_palace_jsonl	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_jsonl (KEEP)	A5
+trusty_memory::engine::import_palace_records	fn	KEEP	anyhow-pending T3: re-export of share::import_palace_records (KEEP)	A5
 trusty_memory::engine::inference_available	fn	KEEP	re-export of semantic_consolidation::inference_available (KEEP)	A5
 trusty_memory::engine::maintenance_lease	mod	NARROW	no consumer outside the library; module pub(crate)	A5
 trusty_memory::engine::maintenance_lease::LeaseStatus	enum	NARROW	no consumer outside the library; module pub(crate)	A5
@@ -618,7 +618,7 @@ trusty_memory::engine::registry::DEFAULT_RENAME_BUSY_WAIT	const	NARROW	no consum
 trusty_memory::engine::registry::MAX_OPEN_PALACES_ENV	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::registry::PalaceRegistry::clear_gaps	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
-trusty_memory::engine::registry::PalaceRegistry::create_palace	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/palace_backup_9282.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::create_palace	method	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/palace_backup_9282.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::data_root	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::default	trait_method	KEEP	member of PalaceRegistry (Default impl)	A4
 trusty_memory::engine::registry::PalaceRegistry::evict_idle	method	NARROW	no consumer outside the library	A4
@@ -628,18 +628,18 @@ trusty_memory::engine::registry::PalaceRegistry::get_gaps	method	NARROW	no consu
 trusty_memory::engine::registry::PalaceRegistry::is_empty	method	KEEP	pairs the kept len (clippy::len_without_is_empty)	A4
 trusty_memory::engine::registry::PalaceRegistry::len	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::list	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::registry::PalaceRegistry::list_palaces	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::list_palaces	method	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::maintenance_lease	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::may_run_maintenance	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::new	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::oldest_hnsw_op	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::registry::PalaceRegistry::open	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open	method	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory_tests.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::open_error_is_absent	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::open_handle	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::open_intent	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
-trusty_memory::engine::registry::PalaceRegistry::open_palace	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/recall_support/mod.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open_palace	method	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/recall_support/mod.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::open_palace_within	method	NARROW	no consumer outside the library	A4
-trusty_memory::engine::registry::PalaceRegistry::open_with_intent	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
+trusty_memory::engine::registry::PalaceRegistry::open_with_intent	method	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::peek	method	KEEP	tests/hnsw_abandoned_health_9487.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::registry::PalaceRegistry::record_unopenable	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::PalaceRegistry::register	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
@@ -803,7 +803,7 @@ trusty_memory::engine::retrieval::L1Essential::drawers	field	NARROW	removed: no 
 trusty_memory::engine::retrieval::MARKER_RESCAN_AFTER	const	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::PalaceHandle	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::retrieval::PalaceHandle::add_drawer	method	KEEP	tests/recall_degraded_lane.rs, tests/verify_embedded_warmup_9275.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::backfill_missing_vectors	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::closets	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::commit_mutex	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::compact_vector_orphans	method	NARROW	no consumer outside the library	A4
@@ -812,8 +812,8 @@ trusty_memory::engine::retrieval::PalaceHandle::decay_config	field	NARROW	no con
 trusty_memory::engine::retrieval::PalaceHandle::drawer_load_degraded	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::drawers	field	KEEP	tests/memory_palace.rs, tests/task_mcp.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::embed_health	method	KEEP	tests/chunked_embed_9275.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	tests/memory_palace.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::flush	method	KEEP	anyhow-pending T3: tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::forget	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::forget_for_maintenance	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::id	field	KEEP	tests/alias_lane/mod.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::identity	field	KEEP	tests/bm25_alias_recall.rs	A4
@@ -826,16 +826,16 @@ trusty_memory::engine::retrieval::PalaceHandle::l1_drawers	field	KEEP	tests/bm25
 trusty_memory::engine::retrieval::PalaceHandle::last_accessed	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::list_drawers	method	KEEP	trusty-mpm src/core/sm/memory.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::new	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	tests/kg_triple_key_migration_tests.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open	method	KEEP	anyhow-pending T3: tests/memory_palace.rs, tests/palace_backup_9282.rs, tests/task_mcp.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::open_with_intent	method	KEEP	anyhow-pending T3: tests/kg_triple_key_migration_tests.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::open_with_intent_purging	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::purge_expired	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::PalaceHandle::rebuild_closets	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::recall_log	field	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::reembed_slice	method	NARROW	crate-only by ruling 2026-10-14 (ADR-0066 narrow-first); only unit tests call it until the #9735 PR 2 background re-embed caller lands	A4
 trusty_memory::engine::retrieval::PalaceHandle::refresh_l1	method	KEEP	tests/recall_degraded_lane.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	tests/http_recall_bm25_fusion.rs	A4
-trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember	method	KEEP	anyhow-pending T3: tests/http_recall_bm25_fusion.rs	A4
+trusty_memory::engine::retrieval::PalaceHandle::remember_with_options	method	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs, tests/memory_palace.rs	A4
 trusty_memory::engine::retrieval::PalaceHandle::remember_with_options_within	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::repair_aliases	method	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::PalaceHandle::snapshot	method	KEEP	tests/palace_backup_9282.rs	A4
@@ -949,7 +949,7 @@ trusty_memory::engine::retrieval::VerifyNotStored::reason	field	KEEP	trusty-mpm 
 trusty_memory::engine::retrieval::admit_tier_c	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::apply_relevance_floor	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::dedup_extend	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::embed_chunks	fn	KEEP	tests/chunked_embed_9275.rs	A4
+trusty_memory::engine::retrieval::embed_chunks	fn	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs	A4
 trusty_memory::engine::retrieval::expand_query	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::list_drawers_in_wing	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::next_refill_window	fn	NARROW	no consumer outside the library	A4
@@ -960,10 +960,10 @@ trusty_memory::engine::retrieval::recall_across_palaces_with_default_embedder	fn
 trusty_memory::engine::retrieval::recall_deep	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::recall_deep_in_room	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::recall_deep_scoped	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::recall_deep_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs	A4
+trusty_memory::engine::retrieval::recall_deep_with_default_embedder	fn	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs	A4
 trusty_memory::engine::retrieval::recall_in_room	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::recall_scoped	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::recall_with_default_embedder	fn	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::retrieval::recall_with_default_embedder	fn	KEEP	anyhow-pending T3: trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
 trusty_memory::engine::retrieval::rescore_l1_by_similarity	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::retrieve_l0_l1	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::retrieve_l0_l1_scoped	fn	NARROW	no consumer outside the library	A4
@@ -972,7 +972,7 @@ trusty_memory::engine::retrieval::retrieve_l2_scoped	fn	NARROW	no consumer outsi
 trusty_memory::engine::retrieval::retrieve_l3	fn	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::retrieval::retrieve_l3_scoped	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::retrieval::scope_admits	fn	NARROW	no consumer outside the library	A4
-trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
+trusty_memory::engine::retrieval::shared_embedder	fn	KEEP	anyhow-pending T3: tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs	A4
 trusty_memory::engine::retrieval::shared_embedder_initialized	fn	KEEP	tests/verify_embedded_warmup_9275.rs, tests/recall_degraded_lane.rs	A4
 trusty_memory::engine::retrieval::validate_fact_key	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::room_identity	mod	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
@@ -1081,11 +1081,11 @@ trusty_memory::engine::share::Supersession::linked	field	KEEP	ADR-0067 interchan
 trusty_memory::engine::share::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
 trusty_memory::engine::share::export	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
-trusty_memory::engine::share::export::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::export_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::export_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::export_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export::write_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::export_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::import::ImportOutcome	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportOutcome::Inserted	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
@@ -1098,11 +1098,11 @@ trusty_memory::engine::share::import::ImportSummary::inserted	field	KEEP	ADR-006
 trusty_memory::engine::share::import::ImportSummary::merged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::import::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::import::import_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import::import_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::import::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import_palace_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::import_palace_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
+trusty_memory::engine::share::import_palace_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::import_palace_records	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
 trusty_memory::engine::share::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::record::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
@@ -1133,9 +1133,9 @@ trusty_memory::engine::share::supersede::Supersession	struct	KEEP	ADR-0067 inter
 trusty_memory::engine::share::supersede::Supersession::linked	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::supersede::Supersession::replacement	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::supersede::assert_superseded_by	fn	HIDE	tests/recall_support/mod.rs (#[doc(hidden)], ruling D3)	A5
-trusty_memory::engine::share::supersede::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::supersede_drawer	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::write_jsonl	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede::supersede_drawer	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::supersede_drawer	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::write_jsonl	fn	KEEP	anyhow-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::store	mod	KEEP	path of every kept store item (trusty-agents, tests/)	A3b
 trusty_memory::engine::store::BackfillReport	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::BackfillReport::inserted	field	NARROW	re-export; no consumer outside the library	A3b
@@ -1157,12 +1157,12 @@ trusty_memory::engine::store::ChatSessionMeta::updated_at	field	NARROW	re-export
 trusty_memory::engine::store::ChatSessionStore	struct	KEEP	engine::PalaceHandle::snapshot signature; the listing names the ChatSessionStore methods under this path	A3b
 trusty_memory::engine::store::ChatSessionStore::append_message	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::ChatSessionStore::append_messages	method	NARROW	re-export; no consumer outside the library	A3b
-trusty_memory::engine::store::ChatSessionStore::create_session	method	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::ChatSessionStore::create_session	method	KEEP	anyhow-pending T2: tests/palace_backup_9282.rs	A3b
 trusty_memory::engine::store::ChatSessionStore::delete_session	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::ChatSessionStore::get_chat_asset	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::ChatSessionStore::get_session	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::ChatSessionStore::list_sessions	method	NARROW	re-export; no consumer outside the library	A3b
-trusty_memory::engine::store::ChatSessionStore::open	method	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::ChatSessionStore::open	method	KEEP	anyhow-pending T2: tests/palace_backup_9282.rs	A3b
 trusty_memory::engine::store::ChatSessionStore::put_chat_asset	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::ChatSessionStore::upsert_session	method	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::DeadlinedWrite	struct	NARROW	re-export; no consumer outside the library	A3b
@@ -1174,46 +1174,46 @@ trusty_memory::engine::store::EmbedFailure::reason	field	NARROW	re-export; no co
 trusty_memory::engine::store::INCOMPATIBLE_SUFFIX	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::KnowledgeGraph	struct	KEEP	engine signatures (PalaceHandle::kg, community::find_communities, store::rooms); tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::adjacency_desynced	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::assert_sync	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::KnowledgeGraph::astar_path	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::astar_path	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::cascade_delete_by_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::community_computations	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::community_count	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::connected_components	method	KEEP	tests/kg_graph_tests.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::count_active_triples	method	KEEP	tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::connected_components	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::count_active_triples	method	KEEP	anyhow-pending T1: tests/engine_standalone.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::delete_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::delete_drawer_sync	method	NARROW	removed: no caller anywhere	A3a
 trusty_memory::engine::store::KnowledgeGraph::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::dump_all_triples	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::edge_count	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::expand_neighbors	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::incoming	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::incoming	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::is_read_only	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::knowledge_gaps	method	KEEP	tests/community_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::list_active	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::list_subjects	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::list_subjects	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::list_subjects_with_counts	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawer_ids	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawers	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawers_with_skipped	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::neighbors	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::neighbors	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::node_count	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::open	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::open	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::open_with_intent	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::query_active	method	KEEP	tests/engine_standalone.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::reachable	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::query_active	method	KEEP	anyhow-pending T1: tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::reachable	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::redb_store	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::retract	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::retract	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::retract_triple	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::shortest_path	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::shortest_path	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::store	method	KEEP	tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::superseded_by_many	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::top_degree_subgraph	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	tests/bm25_stale_edit_8246.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	tests/memory_palace.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	anyhow-pending T1: tests/bm25_stale_edit_8246.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	anyhow-pending T1: tests/memory_palace.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::upsert_drawers_atomic	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::verify_with_many	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::L1Cache	struct	NARROW	re-export; no consumer outside the library	A3b
@@ -1328,9 +1328,9 @@ trusty_memory::engine::store::VectorHit	struct	NARROW	re-export; no consumer out
 trusty_memory::engine::store::VectorHit::drawer_id	field	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::VectorHit::score	field	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::VectorStore	trait	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
-trusty_memory::engine::store::VectorStore::remove	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
-trusty_memory::engine::store::VectorStore::search	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
-trusty_memory::engine::store::VectorStore::upsert	trait_method	KEEP	tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::remove	trait_method	KEEP	anyhow-pending T4: tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::search	trait_method	KEEP	anyhow-pending T4: tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
+trusty_memory::engine::store::VectorStore::upsert	trait_method	KEEP	anyhow-pending T4: tests/chunked_embed_9275.rs, tests/recall_short_id_tokens.rs, tests/verify_embedded_warmup_9275.rs	A3b
 trusty_memory::engine::store::WingRecord	struct	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::WingRecord::created_at_ms	field	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::WingRecord::description	field	NARROW	re-export; no consumer outside the library	A3b
@@ -1484,7 +1484,7 @@ trusty_memory::engine::store::hnsw_store::HnswStore::op_breaker	method	NARROW	no
 trusty_memory::engine::store::hnsw_store::HnswStore::open	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::open_with_mode	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::replace_group	method	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::hnsw_store::HnswStore::run_bounded	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::hnsw_store::HnswStore::run_bounded	method	KEEP	anyhow-pending T2: tests/hnsw_abandoned_health_9487.rs	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::search	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::unalias	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::upsert	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
@@ -1530,7 +1530,7 @@ trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged	varia
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged::palace	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::abandoned_ops_in_flight	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::default_op_budget	fn	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::hnsw_store::op_budget::op_budget_error	fn	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::op_budget_error	fn	KEEP	anyhow-pending T2: tests/hnsw_abandoned_health_9487.rs	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::op_budget_for_txn_deadline	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::incompatible_backup_path	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::is_incompatible_format	reexport	NARROW	re-export; no consumer outside the library	A3b
@@ -1627,10 +1627,10 @@ trusty_memory::engine::store::kg_redb::KgRedbStats::triples_history_stale	field	
 trusty_memory::engine::store::kg_redb::KgRedbStats::triples_history_stale_bytes	field	NARROW	duplicate re-export of kg_redb::stats::KgRedbStats::triples_history_stale_bytes	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb	struct	KEEP	engine signatures (store::rooms, store::wings); tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::adopt_snapshot_drawers	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::apply_batch	method	KEEP	tests/palace_backup_9282.rs	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::assert	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::apply_batch	method	KEEP	anyhow-pending T1: tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::assert	method	KEEP	anyhow-pending T1: tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::count_active_triples	method	KEEP	crates/trusty-memory/contracts.json (pre-publish Gate 5 Code Contract)	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::count_active_triples	method	KEEP	anyhow-pending T1: crates/trusty-memory/contracts.json (pre-publish Gate 5 Code Contract)	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_by_subject	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::delete_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a
@@ -1638,25 +1638,25 @@ trusty_memory::engine::store::kg_redb::KgStoreRedb::drawers_authoritative	method
 trusty_memory::engine::store::kg_redb::KgStoreRedb::dump_all_triples	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::get_room	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::get_wing	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::import_all	method	KEEP	tests/recall_supersession.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::import_all	method	KEEP	anyhow-pending T1: tests/recall_supersession.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::insert_room_if_absent	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::insert_wing_if_absent	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::is_read_only	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::list_active	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::list_rooms	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::list_rooms	method	KEEP	anyhow-pending T1: tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::list_subjects	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::list_subjects_with_counts	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::list_wings	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawer	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawer_ids	method	KEEP	tests/palace_backup_9282.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawer_ids	method	KEEP	anyhow-pending T1: tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawers	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::load_drawers_with_skipped	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::lookup_room_id	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::lookup_wing_id	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::open	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::open	method	KEEP	anyhow-pending T1: tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::open_with_intent	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::path	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::query_active	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::query_active	method	KEEP	anyhow-pending T1: tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::rename_room	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::rename_wing_in_place	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::retract	method	NARROW	no consumer outside the library	A3a
@@ -1665,7 +1665,7 @@ trusty_memory::engine::store::kg_redb::KgStoreRedb::room_schema_version	method	N
 trusty_memory::engine::store::kg_redb::KgStoreRedb::set_room_schema_version	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::set_wing_schema_version	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::superseded_by_many	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::KgStoreRedb::upsert_drawer	method	KEEP	tests/kg_store_snapshot_tests.rs	A3a
+trusty_memory::engine::store::kg_redb::KgStoreRedb::upsert_drawer	method	KEEP	anyhow-pending T1: tests/kg_store_snapshot_tests.rs	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::verify_with_many	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::KgStoreRedb::wing_schema_version	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::kg_redb::KgTableStats	struct	NARROW	duplicate re-export of kg_redb::stats::KgTableStats	A3a
@@ -1755,7 +1755,7 @@ trusty_memory::engine::store::kg_redb::check_backup_name	fn	NARROW	duplicate re-
 trusty_memory::engine::store::kg_redb::copy_swap	mod	KEEP	path of CompactFaultHook	A3a
 trusty_memory::engine::store::kg_redb::copy_swap::BACKUP_SUFFIX	const	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::copy_swap::COMPACTING_SUFFIX	const	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::kg_redb::copy_swap::CompactFaultHook	type	KEEP	engine::dream::kg_compact_pass_with_hook signature (A5)	A3a
+trusty_memory::engine::store::kg_redb::copy_swap::CompactFaultHook	type	KEEP	anyhow-pending T1: engine::dream::kg_compact_pass_with_hook signature (A5)	A3a
 trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome	struct	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::backup	field	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::copy_swap::CompactOutcome::bytes_after	field	NARROW	no consumer outside the library	A3a
@@ -2107,7 +2107,7 @@ trusty_memory::engine::store::rooms::rename_room	fn	NARROW	no consumer outside t
 trusty_memory::engine::store::rooms::resolve_or_create_room	fn	NARROW	removed: no caller anywhere	A3b
 trusty_memory::engine::store::rooms::resolve_or_create_room_in_wing	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::rooms::resolve_or_create_room_in_wing_sync	fn	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::rooms::resolve_or_create_room_sync	fn	KEEP	tests/palace_backup_9282.rs	A3b
+trusty_memory::engine::store::rooms::resolve_or_create_room_sync	fn	KEEP	anyhow-pending T1: tests/palace_backup_9282.rs	A3b
 trusty_memory::engine::store::rooms::resolve_room_filter_id	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::rooms::resolve_room_selector	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::rooms_in_wing	fn	NARROW	re-export; no consumer outside the library	A3b
@@ -2132,30 +2132,30 @@ trusty_memory::engine::store::vector::UnaliasOutcome::unparsed_keys	field	NARROW
 trusty_memory::engine::store::vector::UsearchStore	struct	KEEP	engine::PalaceHandle::new and vector_store signatures; tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::alias_audit	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::UsearchStore::all_ids	method	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::vector::UsearchStore::chunk_shapes	method	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::chunk_shapes	method	KEEP	anyhow-pending T2: tests/chunked_embed_9275.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::compact_orphans	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::UsearchStore::dim	method	KEEP	tests/verify_embedded_warmup_9275.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::index_size	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::UsearchStore::is_read_only	method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
-trusty_memory::engine::store::vector::UsearchStore::new	method	KEEP	tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::new	method	KEEP	anyhow-pending T2: tests/kg_store_snapshot_tests.rs, tests/hnsw_abandoned_health_9487.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::new_with_intent	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::UsearchStore::oldest_hnsw_op	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
 trusty_memory::engine::store::vector::UsearchStore::op_breaker	method	KEEP	tests/hnsw_abandoned_health_9487.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::path	method	NARROW	removed: no caller anywhere	A3b
-trusty_memory::engine::store::vector::UsearchStore::remove	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::remove	trait_method	KEEP	anyhow-pending T4: VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::reset	method	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::vector::UsearchStore::search	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::search	trait_method	KEEP	anyhow-pending T4: VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
 trusty_memory::engine::store::vector::UsearchStore::try_index_size	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::UsearchStore::unalias	method	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::store::vector::UsearchStore::upsert	trait_method	KEEP	VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
-trusty_memory::engine::store::vector::UsearchStore::upsert_chunks	method	KEEP	tests/chunked_embed_9275.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::upsert	trait_method	KEEP	anyhow-pending T4: VectorStore impl; tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::UsearchStore::upsert_chunks	method	KEEP	anyhow-pending T2: tests/chunked_embed_9275.rs	A3b
 trusty_memory::engine::store::vector::VectorHit	struct	KEEP	return type of VectorStore::search	A3b
 trusty_memory::engine::store::vector::VectorHit::drawer_id	field	KEEP	tests/chunked_embed_9275.rs	A3b
 trusty_memory::engine::store::vector::VectorHit::score	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::vector::VectorStore	trait	KEEP	tests/kg_store_snapshot_tests.rs	A3b
-trusty_memory::engine::store::vector::VectorStore::remove	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
-trusty_memory::engine::store::vector::VectorStore::search	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
-trusty_memory::engine::store::vector::VectorStore::upsert	trait_method	KEEP	tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::remove	trait_method	KEEP	anyhow-pending T4: tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::search	trait_method	KEEP	anyhow-pending T4: tests/kg_store_snapshot_tests.rs	A3b
+trusty_memory::engine::store::vector::VectorStore::upsert	trait_method	KEEP	anyhow-pending T4: tests/kg_store_snapshot_tests.rs	A3b
 trusty_memory::engine::store::wings	mod	NARROW	no consumer outside the library; module pub(crate)	A3b
 trusty_memory::engine::store::wings::WING_SCHEMA_VERSION	const	NARROW	no consumer outside the library; module pub(crate)	A3b
 trusty_memory::engine::store::wings::WingRecord	struct	NARROW	no consumer outside the library; module pub(crate)	A3b
@@ -2198,7 +2198,7 @@ trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::p
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::stage	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::store	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::palace_label	fn	NARROW	no consumer outside the library	A3b
-trusty_memory::engine::supersede_drawer	fn	KEEP	re-export of share::supersede_drawer (KEEP)	A5
+trusty_memory::engine::supersede_drawer	fn	KEEP	anyhow-pending T3: re-export of share::supersede_drawer (KEEP)	A5
 trusty_memory::engine::timeouts	mod	KEEP	path of OpBudget	A5
 trusty_memory::engine::timeouts::OpBudget	struct	KEEP	owner of OpBudget::start_default, a deletion candidate	A5
 trusty_memory::engine::timeouts::OpBudget::leg	method	NARROW	no consumer outside the library	A5
@@ -2235,15 +2235,15 @@ trusty_memory::engine::wing_identity::WING_NAMESPACE	const	KEEP	ADR-0027 id help
 trusty_memory::engine::wing_identity::canonical_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
 trusty_memory::engine::wing_identity::default_wing_key	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
 trusty_memory::engine::wing_identity::mint_wing_id	fn	KEEP	ADR-0027 id helper: room and wing ids and keys stored in the ADR-0067 primary rooms/wings tables (Q2 KEEP, Architect 05:16Z)	A5
-trusty_memory::socket_path	fn	KEEP	re-export of transport::socket_path: trusty-agents src/memory/trusty_client/tests.rs:76 (default-features off, mcp-schema), src/main.rs:1029	A6
+trusty_memory::socket_path	fn	KEEP	anyhow-pending T4: re-export of transport::socket_path: trusty-agents src/memory/trusty_client/tests.rs:76 (default-features off, mcp-schema), src/main.rs:1029	A6
 trusty_memory::transport	mod	KEEP	path of uds and socket_path (tests/uds_consumer_contract.rs, tests/concurrent_perf.rs)	A6
 trusty_memory::transport::FOLDED_METHODS	const	KEEP	re-export of uds::FOLDED_METHODS; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): no caller names this path	A6
 trusty_memory::transport::METHOD_HEALTH	const	KEEP	re-export of uds::METHOD_HEALTH; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): no caller names this path	A6
 trusty_memory::transport::STREAM_METHODS	const	KEEP	re-export of uds::STREAM_METHODS; deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): callers name uds::STREAM_METHODS	A6
-trusty_memory::transport::socket_path	fn	KEEP	re-export of uds::socket_path; src/lib.rs:230 re-exports it as trusty_memory::socket_path	A6
+trusty_memory::transport::socket_path	fn	KEEP	anyhow-pending T4: re-export of uds::socket_path; src/lib.rs:230 re-exports it as trusty_memory::socket_path	A6
 trusty_memory::transport::uds	mod	KEEP	path of the wire constants and socket_path (tests/uds_consumer_contract.rs, tests/concurrent_perf.rs)	A6
 trusty_memory::transport::uds::FOLDED_METHODS	const	KEEP	deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): build_router (server) and uds_tests only; trusty-mcp src/bin/trusty-mcp.rs:89 names it in a comment	A6
 trusty_memory::transport::uds::MAX_FRAME_BYTES	const	KEEP	wire constant pinned against trusty_common::uds::MAX_FRAME_BYTES: tests/uds_consumer_contract.rs:408, tests/concurrent_perf.rs:344 (A6 Q4)	A6
 trusty_memory::transport::uds::METHOD_HEALTH	const	KEEP	deletion candidate, Bob decides (A6 Q2, Architect 06:31Z): build_router (server) and uds_tests only; trusty-installer src/commands/probe_http.rs:269,282 name it in comments	A6
 trusty_memory::transport::uds::STREAM_METHODS	const	KEEP	wire table pinned against the stdio bridge's list: tests/uds_consumer_contract.rs:427	A6
-trusty_memory::transport::uds::socket_path	fn	KEEP	the daemon socket resolver: tests via trusty_memory::socket_path; trusty-console src/memory_uds/mod.rs:283 names it as the shared resolver	A6
+trusty_memory::transport::uds::socket_path	fn	KEEP	anyhow-pending T4: the daemon socket resolver: tests via trusty_memory::socket_path; trusty-console src/memory_uds/mod.rs:283 names it as the shared resolver	A6
