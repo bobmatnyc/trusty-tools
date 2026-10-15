@@ -31,6 +31,10 @@ mod maintenance_log_tests;
 pub mod palace;
 // #9544: the one statement of "this palace is empty" (rename, delete).
 pub mod palace_emptiness;
+// #9751: the one caller-facing palace-not-found error; it never holds a path.
+pub mod palace_not_found;
+#[cfg(test)]
+pub(crate) mod palace_not_found_tests;
 pub mod registry;
 // ADR-0027 T1: pure room identity (canonical keys, UUIDv5 minting, the legacy
 // fold kept as the migration oracle). No I/O — see `store::rooms` for storage.
@@ -52,6 +56,7 @@ pub use content_hash::{
 };
 pub use maintenance_lease::{LeaseStatus, MaintenanceLease};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
+pub use palace_not_found::{ExistingPalaces, MAX_LISTED_PALACES, PalaceNotFound};
 pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
 pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};

@@ -15,7 +15,7 @@ use std::sync::Arc;
 // #4670: ExpandDirection drives the progressive `kg/graph/neighbors` route.
 use crate::engine::store::kg::{ExpandDirection, Triple};
 use crate::engine::store::palace_format::is_format_refusal;
-use crate::engine::{PalaceHandle, PalaceRegistry};
+use crate::engine::{PalaceHandle, PalaceNotFound, PalaceRegistry};
 
 use super::MemoryService;
 use super::core::KG_GRAPH_MAX_TRIPLES;
@@ -400,7 +400,9 @@ impl MemoryService {
         let canonical = trusty_common::palace_alias::canonical_palace_id(&self.state.data_root, id);
         let data_dir = self.state.data_root.join(canonical);
         if !data_dir.exists() {
-            return Err(ServiceError::not_found(format!("palace not found: {id}")));
+            // #9751: name the palaces that do exist.
+            let absent = PalaceNotFound::listing(id, &self.state.data_root);
+            return Err(ServiceError::not_found(absent.to_string()));
         }
         match PersistedDreamStats::load(&data_dir) {
             Ok(Some(s)) => Ok(s.into()),
@@ -540,14 +542,17 @@ impl MemoryService {
 ///
 /// Why: [`MemoryService::open_handle`]'s mapping, kept apart so a test can
 /// drive it with every error variant, not only the ones a fixture can provoke.
-/// What: `NotFound` for a genuine absence, `Conflict` for a format refusal,
+/// What: `NotFound` for a genuine absence, its message the bare
+/// [`PalaceNotFound`] — no directory walk (#9751) — `Conflict` for a format refusal,
 /// `Internal` otherwise — the table `transport::api_error::open_handle` keeps.
 /// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`.
 pub(super) fn open_failure(id: &str, e: &anyhow::Error) -> ServiceError {
     // #5549: every open failure mapped to 404, so a palace that
     // could not be read was reported as one that is not there.
-    if PalaceRegistry::open_error_is_absent(e) {
-        ServiceError::not_found(format!("palace not found: {id} ({e:#})"))
+    if let Some(absent) = e.downcast_ref::<PalaceNotFound>() {
+        // #9751: the id, never the path, and no palace listing: this serves
+        // `memory.kg_all`, which the prompt hook calls on every prompt.
+        ServiceError::not_found(absent.to_string())
     } else if is_format_refusal(e) {
         // #9665: a format refusal no retry can clear was reported as internal.
         ServiceError::conflict(format!("palace refused: {id} ({e:#})"))

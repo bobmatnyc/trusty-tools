@@ -11,10 +11,10 @@
 //! `web::tests`.
 
 use crate::attribution::CreatorInfo;
-use crate::engine::PalaceRegistry;
 use crate::engine::palace::{Palace, PalaceId, RoomType};
 use crate::engine::retrieval::RememberOptions;
 use crate::engine::store::{PalaceStore, PalaceStoreError};
+use crate::engine::{PalaceNotFound, PalaceRegistry};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -372,14 +372,15 @@ impl MemoryService {
     /// `delete_palace_refuses_while_legacy_kg_holds_unimported_drawers`,
     /// `delete_palace_refuses_when_open_fails_or_load_is_degraded`,
     /// `delete_palace_force_removes_populated_palace`,
-    /// `delete_palace_returns_not_found_for_missing_id` in `web::tests`.
+    /// `delete_palace_returns_not_found_for_missing_id` in `web::tests`,
+    /// `absent_palace_is_named_with_existing_palaces_and_no_path_at_every_service_site`.
     pub async fn delete_palace(&self, palace_id: &str, force: bool) -> ServiceResult<()> {
         let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
             .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
         if !palaces.iter().any(|p| p.id.0 == palace_id) {
-            return Err(ServiceError::not_found(format!(
-                "palace not found: {palace_id}"
-            )));
+            // #9751: name the palaces that do exist.
+            let absent = PalaceNotFound::from_ids(palace_id, palaces.into_iter().map(|p| p.id.0));
+            return Err(ServiceError::not_found(absent.to_string()));
         }
         if !force {
             // Open the palace just long enough to count its drawers; we don't
@@ -563,7 +564,10 @@ impl MemoryService {
         let mut palace =
             PalaceStore::load_palace(&state.data_root.join(&canonical)).map_err(|e| {
                 if matches!(&e, PalaceStoreError::NotFound(_)) {
-                    ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+                    // #9751: `e` names the metadata path; it goes to the log only.
+                    tracing::debug!(palace = %palace_id, "palace_update: {e}");
+                    let absent = PalaceNotFound::listing(palace_id, &state.data_root);
+                    ServiceError::not_found(absent.to_string())
                 } else {
                     ServiceError::internal(format!("cannot load palace {palace_id}: {e}"))
                 }
@@ -579,16 +583,19 @@ impl MemoryService {
     /// Look up a single palace by id and enrich with live handle stats.
     ///
     /// Why: distinct 404 vs. 500 path is needed by both HTTP and chat callers.
-    /// What: returns `NotFound` when the id is unknown, otherwise a fully
-    /// populated `PalaceInfo`.
-    /// Test: indirectly via `health_endpoint_round_trip_with_palace_is_ok`.
+    /// What: returns `NotFound` when the id is unknown, naming the existing
+    /// palace ids (#9751), otherwise a fully populated `PalaceInfo`.
+    /// Test: indirectly via `health_endpoint_round_trip_with_palace_is_ok`;
+    /// `absent_palace_is_named_with_existing_palaces_and_no_path_at_every_service_site`.
     pub async fn get_palace(&self, id: &str) -> ServiceResult<PalaceInfo> {
-        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
+        let mut palaces = PalaceRegistry::list_palaces(&self.state.data_root)
             .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
-        let palace = palaces
-            .into_iter()
-            .find(|p| p.id.0 == id)
-            .ok_or_else(|| ServiceError::not_found(format!("palace not found: {id}")))?;
+        let Some(position) = palaces.iter().position(|p| p.id.0 == id) else {
+            // #9751: name the palaces that do exist.
+            let absent = PalaceNotFound::from_ids(id, palaces.into_iter().map(|p| p.id.0));
+            return Err(ServiceError::not_found(absent.to_string()));
+        };
+        let palace = palaces.swap_remove(position);
         let handle = self
             .state
             .registry

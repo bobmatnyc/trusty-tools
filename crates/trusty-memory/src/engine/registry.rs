@@ -15,6 +15,7 @@
 use crate::engine::community::KnowledgeGap;
 use crate::engine::maintenance_lease::MaintenanceLease;
 use crate::engine::palace::{Palace, PalaceId};
+use crate::engine::palace_not_found::PalaceNotFound;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::hnsw_store::{HnswOp, OpWatch};
@@ -585,7 +586,8 @@ impl PalaceRegistry {
     /// is silently evicted (its fds close); the data is safe on disk.
     /// What: Returns the cached `Arc<PalaceHandle>` if present (promotes to MRU);
     /// otherwise loads metadata via `PalaceStore::load_palace`, calls
-    /// `PalaceHandle::open`, and inserts the handle (may evict LRU). The
+    /// `PalaceHandle::open`, and inserts the handle (may evict LRU). A palace
+    /// with no metadata fails with a path-free [`PalaceNotFound`] (#9751). The
     /// per-palace open-lock acquisition is bounded (issue #3992) — see the
     /// `open_locks` field doc for why an unbounded wait there let sustained
     /// writer contention hang a caller indefinitely even though every
@@ -696,8 +698,18 @@ impl PalaceRegistry {
             return Ok(h);
         }
         let palace_dir = data_root.join(effective_id.as_str());
-        let palace = PalaceStore::load_palace(&palace_dir)
-            .with_context(|| format!("load palace metadata for {palace_id}"))?;
+        let palace = match PalaceStore::load_palace(&palace_dir) {
+            Ok(palace) => palace,
+            // #9751: the absence callers relay names the id, never the path;
+            // the path stays in the server log.
+            Err(PalaceStoreError::NotFound(path)) => {
+                tracing::debug!(palace = %palace_id, path = %path.display(), "palace metadata missing");
+                return Err(PalaceNotFound::new(palace_id.as_str()).into());
+            }
+            Err(other) => {
+                return Err(other).with_context(|| format!("load palace metadata for {palace_id}"));
+            }
+        };
         // Issue #1487: honour the registry's open intent. On the HTTP daemon
         // (`Writer`) a second live instance holding the lock makes this fail
         // loud rather than returning a snapshot-mode (read-only) handle.
@@ -722,18 +734,16 @@ impl PalaceRegistry {
     /// `load_palace` stopped making one layer down. This is the only place that
     /// knows which of `open_palace`'s failure modes is absence, so the answer
     /// lives here instead of being re-derived at each call site.
-    /// What: walks the `anyhow` chain for a [`PalaceStoreError`] and returns
-    /// `true` only for `NotFound`, whose sole production site in this crate is
-    /// `PalaceStore::load_palace`'s absence guard. Every other failure —
-    /// including `Io` and `Json` raised by that same call — returns `false`.
+    /// What: walks the `anyhow` chain for a [`PalaceNotFound`], which
+    /// `open_palace` raises in place of `PalaceStoreError::NotFound` (#9751:
+    /// that variant carries the metadata path, which callers relayed). Every
+    /// other failure — including `Io` and `Json` from `load_palace` — returns
+    /// `false`.
     /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
-    /// read; `open_error_is_not_absent_for_an_unstattable_palace_json` covers a
-    /// denied stat, the shape #5574 turned from `NotFound` into `Io`.
+    /// read and the path-free absence; `open_error_is_not_absent_for_an_unstattable_palace_json`
+    /// covers a denied stat, the shape #5574 turned from `NotFound` into `Io`.
     pub fn open_error_is_absent(err: &anyhow::Error) -> bool {
-        matches!(
-            err.downcast_ref::<PalaceStoreError>(),
-            Some(PalaceStoreError::NotFound(_))
-        )
+        err.downcast_ref::<PalaceNotFound>().is_some()
     }
 
     /// Register a `ROOMS` row for every room the palace's drawers already use.
@@ -813,7 +823,7 @@ impl PalaceRegistry {
     /// What: delegates the whole rule to
     /// [`trusty_common::palace_alias::alias_target_if_absent`] (#5810) and adopts its
     /// answer: the target id when it names a redirect, `palace_id` unchanged
-    /// otherwise, so the caller surfaces the normal "metadata missing" error.
+    /// otherwise, so the caller surfaces the normal [`PalaceNotFound`] error.
     /// That function owns the presence probe, the alias-map read, and the
     /// swallow-on-error contract — read it there rather than restating it here.
     ///

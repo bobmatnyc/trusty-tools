@@ -112,22 +112,8 @@ pub fn recall_entry_json(r: RecallResult) -> Value {
     Value::Object(obj)
 }
 
-/// Reserved-prefix predicate for "system" palaces hidden from user listings.
-///
-/// Why: Issue #185 — the `/health` round-trip writes probe drawers into a
-/// dedicated `__health_probe__` palace. That palace exists on disk but must
-/// never appear in the admin UI, TUI, chat-tool palace roster, or any other
-/// user-facing surface. Centralising the predicate here keeps the convention
-/// (any palace id starting with `__`) in one place so future system palaces
-/// inherit the same hidden-from-users behaviour automatically.
-/// What: Returns `true` iff `id.as_str()` starts with the double-underscore
-/// prefix. Pure function over the id — no I/O, no allocation.
-/// Test: covered indirectly by `health_probe_palace_is_invisible` in
-/// `web::tests` (drives a full `/health` round-trip and asserts the probe
-/// palace does not appear in `MemoryService::list_palaces`).
-pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
-    id.as_str().starts_with("__")
-}
+// #9751: the predicate lives in `engine::palace` (ungated by `server`); re-exported for service callers. See #9827.
+pub(crate) use crate::engine::palace::is_reserved_system_palace;
 
 /// Aggregate counts summed across one or more palaces.
 ///

@@ -576,6 +576,8 @@ mod list_fact_key_tests;
 mod lease_refusal_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.
 mod palace_index_tests;
+// #9751: a write to a missing palace names it and the existing ones, no path.
+mod palace_missing_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.

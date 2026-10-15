@@ -16,7 +16,7 @@
 //! Test: `api_error_kind_maps_to_its_rpc_code`,
 //! `api_error_message_survives_the_conversion`.
 
-use crate::engine::PalaceRegistry;
+use crate::engine::PalaceNotFound;
 use crate::engine::palace::PalaceId;
 use crate::engine::store::palace_format::is_format_refusal;
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -180,13 +180,14 @@ impl From<crate::service::ServiceError> for ApiError {
 /// lookup, and #5549 (ADR-0045) is what makes the distinction load-bearing:
 /// mapping every open failure to "not found" sent an operator looking for a
 /// deleted palace when what they had was a denied read or a jammed redb lock.
-/// What: calls `PalaceRegistry::open_palace`, then asks
-/// `PalaceRegistry::open_error_is_absent` which failure it got —
-/// [`ApiError::not_found`] only for a genuine absence, `Refused` for a
+/// What: calls `PalaceRegistry::open_palace`, then asks which failure it got —
+/// [`ApiError::not_found`] only for a genuine absence, carrying the listed
+/// `PalaceNotFound` message (#9751: no path), `Refused` for a
 /// palace-format refusal (#9274; the message leads with the variant name),
 /// [`ApiError::internal`] otherwise.
 /// Test: `unreadable_palace_is_internal_not_not_found_at_open_handle`,
-/// `format_too_new_maps_to_refused_error_naming_variant`.
+/// `format_too_new_maps_to_refused_error_naming_variant`,
+/// `absent_palace_at_open_handle_names_existing_palaces_and_no_path`.
 pub fn open_handle(
     state: &AppState,
     id: &str,
@@ -195,8 +196,9 @@ pub fn open_handle(
         .registry
         .open_palace(&state.data_root, &PalaceId::new(id))
         .map_err(|e| {
-            if PalaceRegistry::open_error_is_absent(&e) {
-                ApiError::not_found(format!("palace not found: {id} ({e:#})"))
+            if let Some(absent) = PalaceNotFound::listed_absence(&e, &state.data_root) {
+                // #9751: the id and the existing palace ids, never the path.
+                ApiError::not_found(absent.to_string())
             } else if is_format_refusal(&e) {
                 // #9274: a format refusal no retry can clear is not internal.
                 ApiError::conflict(format!("palace refused: {id} ({e:#})"))
@@ -298,6 +300,32 @@ mod tests {
             "a palace that is present but unreadable must not report as absent: {}",
             failure.message
         );
+    }
+
+    /// Why (#9751): `open_handle` answered a missing palace with
+    /// `palace not found: X (… palace metadata missing at <root>/X/palace.json)`.
+    /// The folded chat methods relay that message verbatim, so it must name
+    /// the id and the existing palace ids, and no path; when the ids cannot be
+    /// listed it is still `NotFound`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn absent_palace_at_open_handle_names_existing_palaces_and_no_path() {
+        use crate::engine::palace_not_found_tests as fixture;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(tmp.path().to_path_buf());
+        fixture::seed_listed_palaces(&state.data_root, 3);
+        let listed = open_handle(&state, "ghost-palace")
+            .err()
+            .expect("an absent palace cannot be opened");
+        assert_eq!(listed.kind, ErrorKind::NotFound, "{}", listed.message);
+        fixture::assert_listed_absence(&listed.message, &state.data_root, "ghost-palace", 3);
+
+        fixture::seed_unlistable_palace(&state.data_root);
+        let unlisted = open_handle(&state, "ghost-palace")
+            .err()
+            .expect("an absent palace cannot be opened");
+        assert_eq!(unlisted.kind, ErrorKind::NotFound, "{}", unlisted.message);
+        fixture::assert_unlisted_absence(&unlisted.message, &state.data_root, "ghost-palace");
     }
 
     /// Why (#9274): a palace written by a newer release is refused, and a
