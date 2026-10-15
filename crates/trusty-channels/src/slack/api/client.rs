@@ -40,6 +40,30 @@ const AUTH_ERROR_SLUGS: &[&str] = &[
     "no_permission",
 ];
 
+/// Read methods sent as `GET` with URL-query parameters and no body; every
+/// other method is `POST` + JSON.
+///
+/// Why: Slack ignores JSON-body arguments on read methods, so a POST/JSON
+/// `files.info` fails with `invalid_arguments` and a list call drops its
+/// `limit`/`types`. See #7391 (lists) and #9919 (files.info and other reads).
+/// What: holds every read method this client calls; write methods
+/// (`chat.postMessage`, `canvases.*`, `reactions.add`, …) stay off the list.
+/// Test: `tests/slack_list_http.rs::read_methods_send_params_as_get_query`,
+/// `::files_info_sends_file_as_get_query`, `::write_method_still_posts_json`.
+const GET_METHODS: &[&str] = &[
+    "conversations.list",
+    "users.list",
+    // #9919: Slack ignores JSON args on these reads and answers invalid_arguments.
+    "files.info",
+    "conversations.info",
+    "conversations.history",
+    "conversations.replies",
+    "conversations.members",
+    "users.info",
+    "reactions.get",
+    "emoji.list",
+];
+
 /// Authenticated Slack Web API client (two-token model).
 ///
 /// Why: One handle per process; live request methods send a bearer token on
@@ -155,8 +179,8 @@ impl BaseClient {
     /// Why: the single hardened request primitive every future tool handler
     /// reuses — one place for auth, error classification, and rate-limit
     /// backoff, so no handler re-implements (or forgets) them.
-    /// What: GETs `conversations.list` and `users.list` with query parameters;
-    /// other methods POST JSON. List parameters must serialize as a flat map
+    /// What: GETs the read methods in `GET_METHODS` with query parameters;
+    /// other methods POST JSON. Read parameters must serialize as a flat map
     /// of scalar values. Every request carries a bearer token. Maps HTTP 401 and
     /// auth-class `ok:false` bodies to [`SlackError::Auth`] (never retried as
     /// anonymous); honours `429 Retry-After` with a bounded backoff up to
@@ -165,8 +189,9 @@ impl BaseClient {
     /// `Value` when `ok:true`.
     /// Test: `tests/client_http.rs` (`send_ok`, `auth_401`, `auth_ok_false`,
     /// `rate_limit_retries_then_succeeds`, `rate_limit_exhausted`).
-    /// List transport: `list_channels_sends_limit_and_types_as_get_query`,
-    /// `list_users_sends_limit_as_get_query` in `tests/slack_list_http.rs`.
+    /// Read transport: `list_channels_sends_limit_and_types_as_get_query`,
+    /// `list_users_sends_limit_as_get_query`,
+    /// `read_methods_send_params_as_get_query` in `tests/slack_list_http.rs`.
     pub async fn call_method<B>(&self, method: &str, body: &B) -> Result<Value, SlackError>
     where
         B: Serialize + ?Sized,
@@ -252,8 +277,9 @@ impl BaseClient {
     /// Why: bot-scope and user-scope calls differ only in *which* token they
     /// present; every other concern (auth classification, rate-limit backoff,
     /// envelope decoding) is identical and must not be duplicated.
-    /// What: sends list parameters in the URL query and other parameters as
-    /// POST JSON to `{base_url}/{method}`, with `token` as the bearer credential;
+    /// What: sends [`GET_METHODS`] parameters in the URL query and other
+    /// parameters as POST JSON to `{base_url}/{method}`, with `token` as the
+    /// bearer credential;
     /// maps 401 / auth-class `ok:false` to [`SlackError::Auth`], honours
     /// `429 Retry-After` up to [`MAX_RATE_LIMIT_RETRIES`], and returns the
     /// decoded `Value` on `ok:true`.
@@ -267,10 +293,10 @@ impl BaseClient {
 
         let mut retries: u32 = 0;
         loop {
-            // #7391: Slack's listing endpoints ignore parameters in POST JSON bodies.
-            let request = match method {
-                "conversations.list" | "users.list" => self.http.get(&url).query(body),
-                _ => self.http.post(&url).json(body),
+            let request = if GET_METHODS.contains(&method) {
+                self.http.get(&url).query(body)
+            } else {
+                self.http.post(&url).json(body)
             };
             let response = request.bearer_auth(token).send().await?;
             let status = response.status();

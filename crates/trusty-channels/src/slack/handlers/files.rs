@@ -20,6 +20,7 @@
 use serde_json::{json, Value};
 
 use super::args::require_str;
+use super::canvas::with_endpoint;
 use super::clean::field_str;
 use super::FILES_INFO;
 use crate::slack::api::client::BaseClient;
@@ -43,7 +44,11 @@ use trusty_common::slack_format::mrkdwn_escape;
 pub(super) async fn read_file(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let file_id = require_str(&args, "file")?;
     let body = json!({ "file": file_id.as_str() });
-    let resp = client.call_method(FILES_INFO, &body).await?;
+    // #9919: name the method so a bare `invalid_arguments` is diagnosable.
+    let resp = client
+        .call_method(FILES_INFO, &body)
+        .await
+        .map_err(|e| with_endpoint(FILES_INFO, e))?;
     let file = resp.get("file").cloned().unwrap_or(Value::Null);
 
     let file_summary = json!({

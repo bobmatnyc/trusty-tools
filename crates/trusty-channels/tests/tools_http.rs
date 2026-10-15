@@ -16,8 +16,23 @@ use trusty_channels::slack::api::client::BaseClient;
 use trusty_channels::slack::api::error::SlackError;
 use trusty_channels::slack::handlers::dispatch;
 use trusty_channels::slack::server::ToolCallError;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Slack read methods the client sends as GET + query (#7391, #9919); every
+/// other method is POST + JSON. Mirrors the client's private allowlist.
+const GET_METHODS: &[&str] = &[
+    "conversations.list",
+    "users.list",
+    "files.info",
+    "conversations.info",
+    "conversations.history",
+    "conversations.replies",
+    "conversations.members",
+    "users.info",
+    "reactions.get",
+    "emoji.list",
+];
 
 /// A client wired to the mock server with a fixed bot token (no user token).
 fn client_for(server: &MockServer) -> BaseClient {
@@ -37,9 +52,10 @@ fn client_with_user_for(server: &MockServer) -> BaseClient {
 
 /// Mount the method's route returning a 200 + JSON body.
 async fn mount_ok(server: &MockServer, method_path: &str, body: serde_json::Value) {
-    let verb = match method_path {
-        "conversations.list" | "users.list" => "GET",
-        _ => "POST",
+    let verb = if GET_METHODS.contains(&method_path) {
+        "GET"
+    } else {
+        "POST"
     };
     Mock::given(method(verb))
         .and(path(format!("/{method_path}")))
@@ -111,14 +127,12 @@ async fn read_channel_paginates_with_cursor() {
     // to conversations.history and reads back `next_cursor`/`has_more` to
     // decide whether to fetch another page (issue #2996).
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.history"))
-        .and(body_partial_json(json!({
-            "channel": "C1",
-            "cursor": "dXNlcjpVMDYxTkZUVDI=",
-            "oldest": "1600000000.000000",
-            "latest": "1700000000.000000",
-        })))
+        .and(query_param("channel", "C1"))
+        .and(query_param("cursor", "dXNlcjpVMDYxTkZUVDI="))
+        .and(query_param("oldest", "1600000000.000000"))
+        .and(query_param("latest", "1700000000.000000"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "messages": [ { "user": "U1", "ts": "1650000000.000100", "text": "older" } ],
@@ -214,13 +228,11 @@ async fn read_thread_paginates_with_cursor() {
     // conversations.replies and `next_cursor`/`has_more` come back so the
     // caller knows to fetch another page (issue #2996).
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.replies"))
-        .and(body_partial_json(json!({
-            "channel": "C1",
-            "ts": "1616703000.216300",
-            "cursor": "dGhyZWFkLXBhZ2Uy",
-        })))
+        .and(query_param("channel", "C1"))
+        .and(query_param("ts", "1616703000.216300"))
+        .and(query_param("cursor", "dGhyZWFkLXBhZ2Uy"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "messages": [ { "user": "U3", "ts": "1616703100.000200", "text": "later reply" } ],
@@ -255,7 +267,7 @@ async fn read_thread_rejects_malformed_thread_ts() {
     // InvalidArgs message instead of reaching Slack and coming back with an
     // opaque `invalid_arguments` (issue #2996, item 2b).
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.replies"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -284,7 +296,7 @@ async fn read_thread_rejects_malformed_oldest_or_latest() {
     // review); a malformed value must fail fast pre-network exactly like
     // thread_ts, never reach conversations.replies.
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.replies"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -331,7 +343,7 @@ async fn read_channel_rejects_malformed_oldest_or_latest() {
     // Same pre-network validation applies to slack_read_channel, which shares
     // apply_pagination_args with slack_read_thread.
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.history"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -357,14 +369,12 @@ async fn read_thread_forwards_oldest_and_latest_to_conversations_replies() {
     // The tool schema advertises oldest/latest on read_thread; this pins that
     // the handler actually forwards them (not just accepts and drops them).
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.replies"))
-        .and(body_partial_json(json!({
-            "channel": "C1",
-            "ts": "1616703000.216300",
-            "oldest": "1600000000.000000",
-            "latest": "1700000000.000000",
-        })))
+        .and(query_param("channel", "C1"))
+        .and(query_param("ts", "1616703000.216300"))
+        .and(query_param("oldest", "1600000000.000000"))
+        .and(query_param("latest", "1700000000.000000"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "messages": [ { "user": "U1", "ts": "1650000000.000100", "text": "windowed reply" } ],
@@ -760,7 +770,7 @@ async fn get_reactions_returns_reaction_list() {
 #[tokio::test]
 async fn get_reactions_missing_arg_errors_before_network() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/reactions.get"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -906,11 +916,10 @@ async fn list_channel_members_returns_page_and_cursor() {
 #[tokio::test]
 async fn list_channel_members_paginates_with_cursor() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.members"))
-        .and(body_partial_json(
-            json!({ "channel": "C1", "cursor": "cGFnZTI=" }),
-        ))
+        .and(query_param("channel", "C1"))
+        .and(query_param("cursor", "cGFnZTI="))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "members": ["U4"],
@@ -1298,9 +1307,9 @@ async fn channel_canvas_already_exists_names_the_existing_canvas() {
         json!({ "ok": false, "error": "channel_canvas_already_exists" }),
     )
     .await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/conversations.info"))
-        .and(body_partial_json(json!({ "channel": "C1" })))
+        .and(query_param("channel", "C1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "channel": {
@@ -1597,7 +1606,7 @@ async fn read_file_reports_binary_without_embedding_bytes() {
 #[tokio::test]
 async fn read_file_missing_arg_errors_before_network() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
+    Mock::given(method("GET"))
         .and(path("/files.info"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)

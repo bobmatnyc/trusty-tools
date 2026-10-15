@@ -1,0 +1,2 @@
+Fixed
+- `slack_read_canvas` and `slack_read_file` work again. The Slack client now sends `files.info` and the other read methods it calls (`conversations.info`, `conversations.history`, `conversations.replies`, `conversations.members`, `users.info`, `reactions.get`, `emoji.list`) as a GET with URL-query parameters. Slack ignored the POST JSON arguments on these methods and answered `invalid_arguments`. A `files.info` failure now names the method, e.g. `invalid_arguments (from files.info)` (Refs #9919).
