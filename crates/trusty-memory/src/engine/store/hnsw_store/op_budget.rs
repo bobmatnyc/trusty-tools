@@ -57,6 +57,7 @@ pub const OP_BUDGET_TXN_DEADLINES: u32 = 2;
 /// Test: `an_upsert_behind_a_parked_graph_lock_exceeds_its_budget`,
 /// `a_tripped_store_refuses_the_next_call_without_spawning`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum OpBudgetError {
     /// The operation did not finish inside its budget; the breaker is now tripped.
     #[error(

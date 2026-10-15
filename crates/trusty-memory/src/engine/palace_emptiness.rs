@@ -41,6 +41,7 @@ pub type LegacyProbe = dyn Fn(&Path, &HashSet<Uuid>) -> Option<String> + Send + 
 /// Test: `chat_sessions_make_a_palace_non_empty`,
 /// `rename_palace_refuses_a_nonempty_target`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PalaceNotEmpty {
     /// Something that would decide emptiness could not be read.
     #[error("the palace could not be confirmed empty: {0}")]

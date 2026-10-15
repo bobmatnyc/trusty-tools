@@ -159,6 +159,7 @@ pub fn blocklist_match(content: &str) -> Option<&'static str> {
 /// metrics while still bubbling through `anyhow`.
 /// Test: `reject_messages_are_actionable`.
 #[derive(Debug, Error, PartialEq)]
+#[non_exhaustive]
 pub enum FilterReject {
     /// Content has fewer meaningful tokens than the configured minimum.
     #[error(
