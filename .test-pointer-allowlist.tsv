@@ -242,7 +242,6 @@ crates/trusty-memory/src/engine/store/kg_redb/store.rs	write_on_snapshot_returns
 crates/trusty-memory/src/engine/store/kg_redb/types.rs	drawer_record_legacy_decode_without_new_fields
 crates/trusty-memory/src/engine/store/kg_redb/types.rs	write_on_snapshot_returns_read_only_error
 crates/trusty-memory/src/engine/store/kg_redb/write_ops.rs	cascade_delete_removes_triples_for_subject
-crates/trusty-memory/src/engine/store/kg_writer.rs	writer_reports_error_per_op
 crates/trusty-common/src/rpc/client.rs	parse_args
 crates/trusty-common/src/rpc/transport/http.rs	http_transport_roundtrip
 crates/trusty-common/src/rpc/transport/stdio.rs	stdio_transport_echo

@@ -673,4 +673,59 @@ mod tests {
         let active = store.query_active("frank").unwrap();
         assert_eq!(active.len(), 1);
     }
+
+    /// Why (#9278 F2): a non-deadline batch failure must reach every queued
+    /// caller as an `Err`; a dropped or `Ok` reply reports a write that never
+    /// landed.
+    /// What: drives `commit_and_reply` with three ops on a read-only snapshot,
+    /// whose `apply_batch` refuses with `KgError::ReadOnly`.
+    /// Test ID: writer_reports_error_per_op.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_reports_error_per_op() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        drop(KgStoreRedb::open(&path).unwrap());
+        let _live = redb::Database::create(&path).expect("hold the write lock");
+        let ro = Arc::new(KgStoreRedb::open(&path).expect("snapshot open"));
+        assert!(ro.is_read_only());
+        let (u1, r1) = oneshot::channel();
+        let (c2, r2) = oneshot::channel();
+        let (u3, r3) = oneshot::channel();
+        let retract = BatchWriteOp::Retract {
+            subject: "gina".into(),
+            predicate: "has".into(),
+        };
+        let drawer = Drawer::new(Uuid::new_v4(), "d");
+        let mut buf = vec![
+            QueuedOp {
+                op: BatchWriteOp::Assert(t("gina", "has", "x")),
+                reply: ReplyTo::Unit(u1),
+            },
+            QueuedOp {
+                op: retract,
+                reply: ReplyTo::Count(c2),
+            },
+            QueuedOp {
+                op: BatchWriteOp::UpsertDrawer(drawer),
+                reply: ReplyTo::Unit(u3),
+            },
+        ];
+        commit_and_reply(&ro, &mut buf).await;
+        assert!(buf.is_empty(), "every op was answered");
+        let errs = [
+            r1.await.expect("assert reply sent").expect_err("assert"),
+            r2.await
+                .expect("retract reply sent")
+                .map(|_| ())
+                .expect_err("retract"),
+            r3.await.expect("upsert reply sent").expect_err("upsert"),
+        ];
+        for e in errs {
+            let text = format!("{e:#}");
+            assert!(text.contains("kg writer batch failed"), "{text}");
+            assert!(text.contains("read-only"), "{text}");
+        }
+        assert!(ro.query_active("gina").unwrap().is_empty());
+        assert!(ro.load_drawer_ids().unwrap().is_empty());
+    }
 }

@@ -1372,6 +1372,23 @@ fn open_error_is_absent_only_for_a_genuine_absence() {
     crate::engine::palace_not_found_tests::assert_no_path(&text, data_root);
 }
 
+/// #9278: absence behind a `KgError::Palace` is still absence, and an `Io`
+/// behind one is still not (#5549).
+#[test]
+fn open_error_is_absent_sees_a_kg_error_palace() {
+    use crate::engine::store::kg::KgError;
+    let absent = KgError::Palace(PalaceStoreError::NotFound("p".into()));
+    let absent = anyhow::Error::from(absent).context("open palace");
+    assert!(PalaceRegistry::open_error_is_absent(&absent), "{absent:#}");
+    let io = KgError::Palace(PalaceStoreError::Io {
+        path: "p".into(),
+        source: std::io::Error::other("EIO"),
+    });
+    assert!(!PalaceRegistry::open_error_is_absent(&anyhow::Error::from(
+        io
+    )));
+}
+
 /// Why (#5549, #5574): the sibling test above locks the FILE, so the stat
 /// probe succeeds and the read under it fails. This one locks the DIRECTORY, so
 /// the probe itself fails — the shape #5574 changed from `NotFound` to `Io` at

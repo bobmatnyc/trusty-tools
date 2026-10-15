@@ -470,6 +470,28 @@ fn rename_format_too_new_source_maps_to_refused() {
     );
 }
 
+/// #9278: `count_refusal` reads a format refusal behind a `KgError::Palace`,
+/// and still calls any other palace fault behind one an internal error.
+#[test]
+fn count_refusal_sees_a_kg_error_palace() {
+    use crate::engine::store::kg::KgError;
+    let too_new = PalaceStoreError::FormatTooNew {
+        palace: "p".into(),
+        found: 99,
+        supported: 1,
+    };
+    let e = anyhow::Error::from(KgError::Palace(too_new)).context("open palace p");
+    let counted = count_refusal("p", e);
+    assert_eq!(counted.rpc_code(), error_codes::REFUSED, "{counted}");
+    assert!(
+        counted.to_string().contains("newer on-disk format"),
+        "{counted}"
+    );
+    let absent = KgError::Palace(PalaceStoreError::NotFound("p".into()));
+    let other = count_refusal("p", anyhow::Error::from(absent));
+    assert!(matches!(other, RenameError::Internal(_)), "{other}");
+}
+
 /// Why (#9544, ruling QB): `old` is joined onto the data root, so a path-shaped
 /// id must be refused before any lock or palace check.
 /// What: each shape is -32602 and no write mutex was created.
