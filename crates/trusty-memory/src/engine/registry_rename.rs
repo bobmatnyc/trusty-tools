@@ -86,7 +86,7 @@ pub(crate) struct RenameOutcome {
 /// later, server fault — so each class is its own variant.
 /// What: `NotFound`; the conflict class (`SourceIsAlias`, `InvalidTarget`,
 /// `TargetIsAlias`, `TargetExists`, `TargetNotEmpty`); `Busy`; `Io`. See
-/// [`Self::is_conflict`].
+/// `Self::is_conflict` (test-only, so no doc link).
 /// Test: `rename_palace_refuses_a_missing_source`,
 /// `rename_palace_refuses_an_alias_source`,
 /// `rename_palace_refuses_a_nonempty_target`,
