@@ -18,8 +18,8 @@ use std::ops::BitOr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::KeychainBackend;
 use super::config::MachineSecretsConfig;
+use super::{KeychainBackend, RemoteIdentity};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// What a backend can do.
@@ -226,6 +226,110 @@ pub fn cli_backends() -> Vec<BackendId> {
     } else {
         Vec::new()
     }
+}
+
+/// Every write-only sync target this build links, in a fixed order (#9069).
+///
+/// Why: D12 — a sync target is never swept by `delete` and never a store,
+/// so it stays out of [`cli_backends`], which drives the delete sweep.
+/// What: `github-actions` on a build that links the CLI backends; empty
+/// otherwise.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+pub fn sync_targets() -> Vec<BackendId> {
+    if CLI_BACKENDS_COMPILED {
+        vec![BackendId::github_actions()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Open the sync target `id` to push into the repository `identity`
+/// (#9069).
+///
+/// Why: D6 and ruling 74 — only the account's own machine config enables a
+/// push, and the destination is the checkout's origin remote, never a vault
+/// name or a config file's choice.
+/// What: `github-actions` reads `machine_config` and opens only when its
+/// `secrets.github_actions:` section is present, else
+/// [`SecretsError::BackendNotEnabled`]; `gh` comes from the section's
+/// `program` pin or the first of the fixed system directories that holds
+/// one, never a `PATH`, else [`SecretsError::CliNotInstalled`]. Any other
+/// id, and every id on a build without `cli-backends`, is
+/// [`SecretsError::UnknownBackend`]. Opening spawns nothing.
+/// Test: `github_open_requires_the_machine_section`.
+pub fn open_sync_target_at(
+    id: &BackendId,
+    machine_config: &Path,
+    identity: &RemoteIdentity,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    open_sync_target_at_in(id, machine_config, identity, &onepassword_dirs())
+}
+
+/// [`open_sync_target_at`], searching `dirs` for the CLI.
+///
+/// What: the production `dirs` are the fixed system directories the
+/// 1Password backend searches; a test names its own.
+pub(crate) fn open_sync_target_at_in(
+    id: &BackendId,
+    machine_config: &Path,
+    identity: &RemoteIdentity,
+    dirs: &[PathBuf],
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    match id.as_str() {
+        BackendId::GITHUB_ACTIONS => open_github_actions(machine_config, identity, dirs),
+        _ => Err(SecretsError::UnknownBackend {
+            backend: id.to_string(),
+        }),
+    }
+}
+
+/// Whether sync target `id` would open from `machine_config`, for any
+/// repository (#9069).
+///
+/// Why: doctor reports a sync target with or without a project, so it
+/// cannot name a destination, and it never spawns a CLI.
+/// What: [`open_sync_target_at`]'s checks without the destination; `Ok`
+/// carries the capabilities a push opens with.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+#[cfg(feature = "server")]
+pub(crate) fn sync_target_ready(
+    id: &BackendId,
+    machine_config: &Path,
+) -> Result<Capabilities, SecretsError> {
+    match id.as_str() {
+        #[cfg(all(unix, feature = "cli-backends"))]
+        BackendId::GITHUB_ACTIONS => {
+            super::github_actions::ready(machine_config, &onepassword_dirs())
+        }
+        _ => {
+            let _ = machine_config;
+            Err(SecretsError::UnknownBackend {
+                backend: id.to_string(),
+            })
+        }
+    }
+}
+
+/// The GitHub Actions sync target, when this machine enables it.
+#[cfg(all(unix, feature = "cli-backends"))]
+fn open_github_actions(
+    machine_config: &Path,
+    identity: &RemoteIdentity,
+    dirs: &[PathBuf],
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    super::github_actions::open_in(machine_config, identity, dirs)
+}
+
+/// No GitHub Actions sync target without `cli-backends`.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn open_github_actions(
+    _machine_config: &Path,
+    _identity: &RemoteIdentity,
+    _dirs: &[PathBuf],
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    Err(SecretsError::UnknownBackend {
+        backend: BackendId::GITHUB_ACTIONS.to_string(),
+    })
 }
 
 /// Every backend a `delete` must clear on this machine (#7519).

@@ -546,3 +546,35 @@ fn runner_kills_the_cli_group_when_the_server_cancels() {
         );
     }
 }
+
+/// Why: #9069 D7 — an inherited variable the backend removes never reaches
+/// the child, and an overlay of the same name still does. `cargo test` sets
+/// `CARGO_MANIFEST_DIR` in every test process, so the removal has something
+/// to remove without this test changing the process environment.
+/// Test: itself.
+#[test]
+fn runner_env_remove_drops_an_inherited_variable() {
+    let inherited = "CARGO_MANIFEST_DIR";
+    assert!(
+        std::env::var_os(inherited).is_some(),
+        "cargo sets {inherited}"
+    );
+    let shim = Shim::new(RECORDER);
+    shim.command()
+        .env_remove(inherited)
+        .env_remove("TESTCLI_HOME")
+        .env("TESTCLI_HOME", "/overlay-9069")
+        .run()
+        .unwrap();
+    let env = shim.log("env.log");
+    assert!(
+        env.lines().any(|l| l.starts_with("PATH=")),
+        "control: {env}"
+    );
+    let leaked = |l: &str| l.starts_with("CARGO_MANIFEST_DIR=");
+    assert!(!env.lines().any(leaked), "{env}");
+    assert!(
+        env.lines().any(|l| l == "TESTCLI_HOME=/overlay-9069"),
+        "{env}"
+    );
+}

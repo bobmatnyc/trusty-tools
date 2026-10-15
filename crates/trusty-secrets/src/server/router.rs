@@ -272,6 +272,8 @@ pub struct State {
     // with the flag but no override (Q3) the real Keychain is in play, so a
     // refused backend fails the delete closed.
     pub(crate) sandbox_override: bool,
+    /// Replaces the account-config sync-target opener; tests only (#9069).
+    pub(crate) sync_targets: Option<super::sync_target::SyncTargetFactory>,
 }
 
 impl State {
@@ -346,6 +348,7 @@ impl State {
             cache,
             sandboxed: sandbox.flag_set(),
             sandbox_override: sandbox::sandbox_consent_config(sandbox, account_home).is_some(),
+            sync_targets: None,
         }
     }
 

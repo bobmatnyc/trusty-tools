@@ -62,6 +62,11 @@ pub struct MachineSecretsConfig {
     /// section also pins `program` and `config_path`.
     #[serde(default)]
     pub keeper: Option<CliSettings>,
+    /// The GitHub Actions sync target's section. Present, even as `{}`, it
+    /// enables pushes to `github-actions` on this machine (#9069); only
+    /// `program` and `config_path` are read.
+    #[serde(default)]
+    pub github_actions: Option<CliSettings>,
 }
 
 impl MachineSecretsConfig {
@@ -72,13 +77,18 @@ impl MachineSecretsConfig {
     /// ever written where the sweep cannot reach it. Only this untracked
     /// file may enable one.
     /// What: `default_backend` names `id`, or `id`'s own section is present.
-    /// A built-in backend (`keychain`, `file`) is never "enabled" here.
+    /// A built-in backend (`keychain`, `file`) is never "enabled" here. A
+    /// sync target is enabled by its section only, since it is never a
+    /// `default_backend` ([`check_sync_target_backend`], #9069).
     /// Test: `onepassword_open_requires_machine_enablement`,
-    /// `keeper_open_requires_machine_enablement`.
+    /// `keeper_open_requires_machine_enablement`,
+    /// `github_open_requires_the_machine_section`.
     pub fn enables(&self, id: &BackendId) -> bool {
         let section = match id.as_str() {
             BackendId::ONEPASSWORD => self.onepassword.is_some(),
             BackendId::KEEPER => self.keeper.is_some(),
+            // #9069: C6 — a sync target is never the default backend.
+            BackendId::GITHUB_ACTIONS => return self.github_actions.is_some(),
             _ => return false,
         };
         section || self.default_backend.as_ref() == Some(id)
@@ -128,6 +138,12 @@ pub struct ProjectSecretsConfig {
     /// DOC-74 §6.2's Keeper section; read only to refuse it (#7519).
     #[serde(default)]
     pub keeper: Option<CliSettings>,
+    /// A push destination section; read only to refuse it (#9069 D6).
+    #[serde(default)]
+    pub github_actions: Option<CliSettings>,
+    /// A push destination section; read only to refuse it (#9069 D6).
+    #[serde(default)]
+    pub vercel: Option<CliSettings>,
 }
 
 /// The CLI settings DOC-74 §6.2 nests under a backend's own key.
@@ -288,6 +304,44 @@ pub(crate) fn check_value_write_for(
     }
 }
 
+/// Refuse a sync target named as the backend values are stored in (#9069).
+///
+/// Why: C6, DOC-74 §15.4 — a sync target is write-only. As a backend, `set`
+/// would leave a value only on the remote while the names-only index claims
+/// a value no local store holds.
+/// What: a project `secrets.backend` naming a sync target is
+/// [`SecretsError::Config`] naming `project_path`; a machine
+/// `secrets.default_backend` naming one is the same error naming
+/// `machine_path`. Neither echoes file content.
+/// Test: `config_sync_target_as_backend_is_refused`.
+pub fn check_sync_target_backend(
+    project: Option<&ProjectSecretsConfig>,
+    project_path: &Path,
+    machine: Option<&MachineSecretsConfig>,
+    machine_path: &Path,
+) -> Result<(), SecretsError> {
+    let refuse = |path: &Path, key: &str| SecretsError::Config {
+        path: path.to_path_buf(),
+        reason: format!(
+            "`{key}` names a write-only sync target; push to it with `copy` and \
+             store values in a local backend"
+        ),
+    };
+    if project
+        .and_then(|p| p.backend.as_ref())
+        .is_some_and(BackendId::is_sync_target)
+    {
+        return Err(refuse(project_path, "secrets.backend"));
+    }
+    if machine
+        .and_then(|m| m.default_backend.as_ref())
+        .is_some_and(BackendId::is_sync_target)
+    {
+        return Err(refuse(machine_path, "secrets.default_backend"));
+    }
+    Ok(())
+}
+
 /// The first CLI setting `project` sets, as the key the refusal names.
 fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
     // #7519: `program` too — a tracked pin would choose what runs as the CLI.
@@ -320,9 +374,15 @@ fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
             ["keeper.account", "keeper.config_path", "keeper.program"],
         ),
     ];
+    // #9069: D6 — a push destination section is refused whatever it holds.
+    let destinations = [
+        (project.github_actions.is_some(), "github_actions"),
+        (project.vercel.is_some(), "vercel"),
+    ];
     sections
         .into_iter()
         .flat_map(|(set, keys)| set.into_iter().zip(keys))
+        .chain(destinations)
         .find_map(|(set, key)| set.then_some(key))
 }
 

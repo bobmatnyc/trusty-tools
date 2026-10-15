@@ -36,7 +36,7 @@ use super::errors::ErrorKind;
 use super::router::State;
 use crate::api::{BackendId, SecretsError, VaultName};
 use crate::store::config::{self, MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig};
-use crate::store::{ScopeSet, SecretBackend, platform};
+use crate::store::{RemoteIdentity, ScopeSet, SecretBackend, platform};
 
 /// The project's `secrets:` config file, relative to the checkout root.
 pub const PROJECT_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-secrets.yaml";
@@ -53,6 +53,7 @@ pub struct ProjectContext {
     config: Option<ProjectSecretsConfig>,
     machine: Option<MachineSecretsConfig>,
     scopes: ScopeSet,
+    identity: RemoteIdentity,
     keychain_compiled: bool,
 }
 
@@ -87,15 +88,23 @@ impl ProjectContext {
         // #4567: likewise only the machine config may turn the audit off.
         super::gate::check_tracked_audit(config.as_ref())?;
         let machine = selecting_machine(state)?;
+        // #9069: C6 — a sync target is never the backend values live in.
+        config::check_sync_target_backend(
+            config.as_ref(),
+            &config_path,
+            machine.as_ref(),
+            &state.settings.machine_config,
+        )?;
         // #9328: the tracked `vault` is checked against the remote's owner;
         // only the machine config may pick a vault outside it.
         let tracked = config.as_ref().and_then(|c| c.vault.clone());
-        let scopes = ScopeSet::derive(&root, tracked, machine.as_ref())?;
+        let (scopes, identity) = ScopeSet::derive_with_identity(&root, tracked, machine.as_ref())?;
         Ok(Self {
             root,
             config,
             machine,
             scopes,
+            identity,
             keychain_compiled: state.keychain_compiled,
         })
     }
@@ -113,6 +122,11 @@ impl ProjectContext {
     /// The project's scopes.
     pub fn scopes(&self) -> &ScopeSet {
         &self.scopes
+    }
+
+    /// The checkout's origin repository, which a push targets (#9069 D6).
+    pub fn identity(&self) -> &RemoteIdentity {
+        &self.identity
     }
 
     /// Refuse a vault that is neither this project's vault nor its owner's.

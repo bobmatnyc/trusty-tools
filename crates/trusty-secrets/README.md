@@ -92,7 +92,7 @@ digit or `_`.
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`, and on Unix the tier-3 client `granted`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
-| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`) and the Keeper backend (`store::keeper`). Unix only. Implies `store`. |
+| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`), the Keeper backend (`store::keeper`) and the GitHub Actions sync target (`store::github_actions`). Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
 A caller that only names keys can depend on `api` alone:
@@ -176,7 +176,7 @@ unlock the Keychain and retry.
 machine config the selected backend comes from, the account's own machine
 config (the one file that can enable 1Password or Keeper), the selected
 backend and its posture, and one row per backend: `keychain`, `file`,
-`onepassword` and `keeper`, on every build. A row the server cannot open says
+`onepassword`, `keeper` and `github-actions`, on every build. A row the server cannot open says
 why, as `reason` plus a `detail` with the fix:
 
 | `reason` | Meaning |
@@ -301,6 +301,39 @@ fixed location (see above), sets `secrets.default_backend: file`. Any process
 running as the same user can call the socket, and can start a server with
 its own `--machine-config` or `$HOME`, so without that rule it could move
 Keychain values into plaintext files.
+
+## GitHub Actions push
+
+Shims only, provisional: no test has run against a real repository, so the
+`gh` output shapes and messages below are not yet confirmed
+([#9069](https://github.com/bobmatnyc/trusty-tools/issues/9069)).
+
+With the `cli-backends` feature (Unix), `copy --to github-actions` pushes
+named keys into the Actions secrets of the checkout's `origin` repository
+through the GitHub CLI, `gh`. It is a write-only sync target: never read
+back, never swept by `delete`, and never a configured backend. Only the
+account's own machine config can enable it:
+
+```yaml
+secrets:
+  github_actions:
+    program: /opt/homebrew/bin/gh          # optional; else the fixed system directories
+    config_path: /Users/me/.config/gh      # optional; becomes GH_CONFIG_DIR
+```
+
+- The repository is the `origin` remote's `github.com/<owner>/<repo>`. A
+  `project_vaults` override changes the vault keys are read from, never the
+  repository. A tracked project file with a `github_actions:` or `vercel:`
+  section is refused.
+- `gh` uses its own stored login. Every inherited `GH_*`, `GITHUB_TOKEN` and
+  `GITHUB_ENTERPRISE_TOKEN` variable is removed from its environment.
+- The key list is required. A caller with a Claude Code ancestor is refused
+  (`agent_use_refused`), whatever the key's "agents may use" flag says.
+- The value reaches `gh secret set` only on stdin. A key counts as copied
+  only when the secret's `updated_at` advanced after the push; a signed-out
+  `gh` is `backend_locked` and nothing is pushed.
+- Key names must be GitHub secret names: `[A-Za-z0-9_]`, not starting with a
+  digit or `GITHUB_`; `gh` stores them uppercased.
 
 ## Audit trail
 

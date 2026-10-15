@@ -39,7 +39,7 @@ use super::router::State;
 use super::tools::{self, DetectedTool};
 use crate::api::{BackendChoice, BackendId, BackendsResponse, SecretsError};
 use crate::store::config::{self, MachineSecretsConfig};
-use crate::store::{Capabilities, cli_backends};
+use crate::store::{Capabilities, cli_backends, sync_target_ready, sync_targets};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -320,7 +320,8 @@ enum Account {
     /// The file is unreadable or does not parse; the error's text.
     Invalid(String),
     /// The file, and its section when present.
-    Loaded(PathBuf, Option<MachineSecretsConfig>),
+    // #9069: boxed; the section outgrew clippy's variant-size bound.
+    Loaded(PathBuf, Option<Box<MachineSecretsConfig>>),
 }
 
 impl Account {
@@ -328,7 +329,7 @@ impl Account {
         match path {
             None => Self::Unknown,
             Some(path) => match config::load_machine_at(path) {
-                Ok(machine) => Self::Loaded(path.to_path_buf(), machine),
+                Ok(machine) => Self::Loaded(path.to_path_buf(), machine.map(Box::new)),
                 Err(e) => Self::Invalid(e.to_string()),
             },
         }
@@ -379,13 +380,50 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
     }
 }
 
+/// Judge sync target `id` without a destination and without spawning.
+///
+/// What: a target this build does not link is [`Unavailable::NotCompiled`];
+/// under the sandbox flag, or with no account machine config, it is
+/// [`Unavailable::NotEnabled`]; otherwise the account file's section and the
+/// program are checked as a push would open them, and a refusal is folded
+/// to its [`Unavailable`] kind with a fixed detail or the error's text.
+/// Test: `server_doctor_lists_sync_targets_without_spawning`.
+fn judge_sync_target(state: &State, id: BackendId) -> BackendStatus {
+    if !sync_targets().contains(&id) {
+        return BackendStatus::unavailable(id, Unavailable::NotCompiled, NO_CLI_BACKENDS.into());
+    }
+    let section = id.as_str().replace('-', "_");
+    let config = match state.file_consent_config.as_deref() {
+        Some(config) if !state.sandboxed => config,
+        _ => {
+            let detail = format!(
+                "no account machine config can enable it here (sandboxed, or the account's \
+                 home is unknown); add a `secrets.{section}:` section to the account's own file"
+            );
+            return BackendStatus::unavailable(id, Unavailable::NotEnabled, detail);
+        }
+    };
+    match sync_target_ready(&id, config) {
+        Ok(caps) => BackendStatus::available(id, caps),
+        Err(SecretsError::BackendNotEnabled { .. }) => {
+            let detail = format!(
+                "the account machine config {} has no `secrets.{section}:` section",
+                config.display()
+            );
+            BackendStatus::unavailable(id, Unavailable::NotEnabled, detail)
+        }
+        Err(e) => BackendStatus::unavailable(id, Unavailable::of(&e), e.to_string()),
+    }
+}
+
 /// `secrets.doctor`: which backends this server opens, why the others do
 /// not, and where it looks.
 ///
 /// Why: see the module docs.
 /// What: rows for `keychain`, `file`, `onepassword` and `keeper`, in that
-/// order, then the selected backend when it is none of them. Nothing here
-/// reads a secret, spawns a CLI, or writes an audit record.
+/// order, then the selected backend when it is none of them, then each sync
+/// target (#9069). Nothing here reads a secret, spawns a CLI, or writes an
+/// audit record.
 /// Test: `server_doctor_reports_backends_and_paths_only`,
 /// `server_doctor_reports_the_file_posture`,
 /// `server_doctor_lists_onepassword_without_spawning`,
@@ -399,7 +437,9 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
     };
     let target = Target::of(state, &request)?;
-    let backends = rows(state, &target.selected, target.refused);
+    let mut backends = rows(state, &target.selected, target.refused);
+    // #9069: D15 — doctor lists sync targets; the console's copy dialog does not.
+    backends.push(judge_sync_target(state, BackendId::github_actions()));
     to_json(&DoctorResponse {
         socket: state.settings.socket.clone(),
         index_root: state.settings.index_root.clone(),

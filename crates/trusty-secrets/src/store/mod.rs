@@ -26,6 +26,9 @@ pub(crate) mod deadline;
 pub mod cli;
 pub mod config;
 mod dotenv;
+// #9069: the GitHub Actions sync target; spawns `gh` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod github_actions;
 // #9326: the 0600 value-file backend needs Unix modes and owners. #4567: the
 // audit sink reuses its mode, owner and symlink checks, so it is crate-visible.
 #[cfg(unix)]
@@ -57,9 +60,12 @@ pub(crate) use backend::KEYCHAIN_COMPILED;
 // #7524 P2-M2: the server's factory names the 1Password directories itself.
 #[cfg(feature = "server")]
 pub(crate) use backend::open_backend_at_in;
+// #9069: doctor's sync-target rows, judged without a destination or a spawn.
+#[cfg(feature = "server")]
+pub(crate) use backend::sync_target_ready;
 pub use backend::{
     Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
-    open_backend_at, swept_backends,
+    open_backend_at, open_sync_target_at, swept_backends, sync_targets,
 };
 pub(crate) use cache::{OpenedUnder, SecretCache};
 pub use dotenv::parse_dotenv;
@@ -74,7 +80,8 @@ pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};
 pub use resolve::{EnvEntry, ResolvedVar, VarSource, resolve_env, resolve_reference};
 pub use scope::{
-    RemoteRefusal, SUPPORTED_REMOTE_HOST, ScopeSet, VaultOverride, parse_remote_identity,
+    RemoteIdentity, RemoteRefusal, SUPPORTED_REMOTE_HOST, ScopeSet, VaultOverride,
+    parse_remote_identity,
 };
 pub use secret_store::SecretStore;
 

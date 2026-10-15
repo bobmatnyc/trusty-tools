@@ -292,6 +292,27 @@ impl BackendId {
         Self(Self::KEEPER.to_string())
     }
 
+    /// The GitHub Actions sync target (#9069), compiled under `cli-backends`.
+    pub const GITHUB_ACTIONS: &'static str = "github-actions";
+
+    /// The `github-actions` backend id.
+    pub fn github_actions() -> Self {
+        Self(Self::GITHUB_ACTIONS.to_string())
+    }
+
+    /// The Vercel sync target (#9069); its backend ships in a later PR.
+    pub const VERCEL: &'static str = "vercel";
+
+    /// Whether this id names a write-only sync target (#9069).
+    ///
+    /// Why: DOC-74 §15.4 — a sync target is never a store. Config refuses
+    /// it as a backend, and `copy` routes a push to it through its own path,
+    /// whether or not this build links one.
+    /// Test: `config_sync_target_as_backend_is_refused`.
+    pub fn is_sync_target(&self) -> bool {
+        matches!(self.as_str(), Self::GITHUB_ACTIONS | Self::VERCEL)
+    }
+
     /// The `keychain` backend id.
     pub fn keychain() -> Self {
         Self(Self::KEYCHAIN.to_string())
