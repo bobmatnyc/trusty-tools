@@ -37,10 +37,66 @@ fn key(name: &str) -> SecretKey {
 
 /// A pipe holding `bytes`, its write end closed; the read end.
 fn pipe_with(bytes: &[u8]) -> OwnedFd {
+    pipe_with_during_write(bytes, |_| {})
+}
+
+/// [`pipe_with`], running `during` while this process still holds the
+/// write end, where a concurrent test's spawn can fork (#9071). `during`
+/// gets the writer, so a test can model another holder of the write end.
+///
+/// What: returns only once no process holds a write end (the read end
+/// reports `POLLHUP`), within 5 s. Once this process drops its copy, no
+/// new one can appear, so the pipe stays closed.
+fn pipe_with_during_write(bytes: &[u8], during: impl FnOnce(&io::PipeWriter)) -> OwnedFd {
     let (reader, mut writer) = io::pipe().unwrap();
     writer.write_all(bytes).unwrap();
+    during(&writer);
     drop(writer);
+    // #9071: a forked child keeps a write-end copy until its exec, so the
+    // pipe reads as open, not closed; wait for it as for the listener in
+    // `granted_client_never_spawns_a_server`.
+    let started = Instant::now();
+    while !writers_closed(&reader) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a writer held on"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     OwnedFd::from(reader)
+}
+
+/// Whether every write end of the pipe `reader` reads from is closed.
+fn writers_closed(reader: &io::PipeReader) -> bool {
+    let mut poll = libc::pollfd {
+        fd: std::os::fd::AsRawFd::as_raw_fd(reader),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid `pollfd`, count 1, timeout 0; `poll` writes only
+    // its `revents`.
+    if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        assert_eq!(error.kind(), ErrorKind::Interrupted, "poll: {error}");
+        return false;
+    }
+    poll.revents & libc::POLLHUP != 0
+}
+
+/// Two siblings dup `parent`; the first reads the token, the second finds
+/// the pipe drained and fails closed with `InvalidToken`.
+fn assert_sibling_finds_the_pipe_drained(parent: OwnedFd) {
+    // SAFETY: `dup` reads no caller memory; each result is a new fd owned below.
+    let first = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
+    // SAFETY: as above.
+    let second = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
+    assert!(first > 2 && second > 2, "dup failed: {first} {second}");
+    assert_eq!(take_inherited(first).unwrap().expose(), TOKEN);
+    let err = take_inherited(second).unwrap_err();
+    assert!(matches!(err, GrantedError::InvalidToken), "{err:?}");
+    // SAFETY: both fds are this test's own and nothing else owns them.
+    drop(unsafe { OwnedFd::from_raw_fd(first) });
+    drop(unsafe { OwnedFd::from_raw_fd(second) });
 }
 
 fn client_for(socket: &Path) -> GrantedClient {
@@ -602,18 +658,28 @@ fn granted_client_rearms_the_token_for_a_child() {
 /// Test: itself.
 #[test]
 fn granted_client_sibling_finds_the_pipe_drained() {
-    let parent = pipe_with(TOKEN.as_bytes());
-    // SAFETY: `dup` reads no caller memory; each result is a new fd owned below.
-    let first = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
-    // SAFETY: as above.
-    let second = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&parent)) };
-    assert!(first > 2 && second > 2, "dup failed: {first} {second}");
-    assert_eq!(take_inherited(first).unwrap().expose(), TOKEN);
-    let err = take_inherited(second).unwrap_err();
-    assert!(matches!(err, GrantedError::InvalidToken), "{err:?}");
-    // SAFETY: both fds are this test's own and nothing else owns them.
-    drop(unsafe { OwnedFd::from_raw_fd(first) });
-    drop(unsafe { OwnedFd::from_raw_fd(second) });
+    assert_sibling_finds_the_pipe_drained(pipe_with(TOKEN.as_bytes()));
+}
+
+/// Why: #9071 flake — another test's spawn can fork while `pipe_with`
+/// holds the write end, and the child keeps a copy until its exec. The
+/// drained sibling then saw an open writer and no data
+/// (`TokenUnreadable`), not EOF (`InvalidToken`). A cloned writer dropped
+/// 300 ms late models that holder; `pipe_with` must still hand back a
+/// closed pipe.
+/// Test: itself.
+#[test]
+fn granted_pipe_with_waits_for_a_late_writer_drop() {
+    let mut late = None;
+    let parent = pipe_with_during_write(TOKEN.as_bytes(), |writer| {
+        let clone = writer.try_clone().unwrap();
+        late = Some(std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(clone);
+        }));
+    });
+    assert_sibling_finds_the_pipe_drained(parent);
+    late.unwrap().join().unwrap();
 }
 
 /// Why: Fail-Open Check — when the process-wide client failed to build,
