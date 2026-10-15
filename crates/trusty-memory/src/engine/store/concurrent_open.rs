@@ -59,6 +59,7 @@ use trusty_common::redb_cache::create_palace_db;
 /// `snapshot_fallback_when_locked` (ReadOnlyClient path),
 /// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum OpenIntent {
     /// The caller needs read-write access. When the file is already locked
     /// by another process, return `Err` rather than opening a snapshot. When

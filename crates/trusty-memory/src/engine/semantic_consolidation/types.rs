@@ -75,6 +75,7 @@ impl Default for SemanticConsolidationConfig {
 /// Test: `consolidation_action_deserializes` round-trips each variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum ConsolidationAction {
     /// Two strings that refer to the same concept (e.g. `"ts"` → `"trusty-search"`).
     Alias { from: String, to: String },

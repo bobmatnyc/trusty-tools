@@ -466,6 +466,7 @@ impl std::fmt::Debug for KgTestHooks {
 /// Test: `apply_batch_groups_asserts_into_single_commit` exercises the
 /// `Assert` variant; the writer tests cover the others.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum BatchWriteOp {
     /// Assert a triple; closes any prior active interval.
     Assert(Triple),
@@ -488,6 +489,7 @@ pub enum BatchWriteOp {
 /// unit).
 /// Test: Indirect via `apply_batch_*` tests and the writer tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A1: new variants stay additive for other crates.
 pub enum BatchOpResult {
     Asserted,
     Retracted(usize),

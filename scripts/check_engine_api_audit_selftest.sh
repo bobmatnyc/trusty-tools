@@ -13,12 +13,18 @@
 #   with no row in an engine module, at the crate root (`trusty_memory`
 #   itself and a root fn), under `transport::uds`, next to a row that only
 #   shares its stem, on a generic type, and in each generic shape (engine and
-#   crate root); a KEEP or DEPRECATE row not listed.
+#   crate root); a method on a type whose generics carry `->` (fn pointer,
+#   `Fn` bound); a KEEP or DEPRECATE row not listed; a public enum without
+#   `#[non_exhaustive]` (plain, re-exported, generic, or with another
+#   attribute only).
 #   Passing cases: a matching listing whose lines carry an attribute prefix, a
 #   generic fn, a field, a variant and an impl header; the generic shapes
-#   against a matching table; a field and a method sharing one path.
+#   against a matching table; a fn-pointer generic method with its row; marked
+#   enums; a field and a method sharing one path.
 #   Errors (exit 2, naming the line or path): a missing, empty, crate-less or
-#   unparsable listing; a missing or header-only table; a malformed row (an
+#   unparsable listing (a generic group the strip cannot read included); a
+#   missing or header-only table; a header line that is deleted, misspelled,
+#   six columns wide or CRLF-terminated; a malformed row (an
 #   unknown or mixed-case disposition, a space-separated row, a 4-field row,
 #   an empty field, an unknown kind, a path outside the crate or carrying
 #   generics); a duplicate path-and-kind row; a path with a public and an
@@ -189,6 +195,38 @@ run_case root-generic-fn-unaudited 1 "UNAUDITED $R::lock_root" "$TMP/generic-sha
 run_case root-type-alias-unaudited 1 "UNAUDITED $R::RootHook" "$TMP/generic-shapes.api"
 run_case root-generic-type-unaudited 1 "UNAUDITED $R::Frame::len" "$TMP/generic-shapes.api"
 
+# #9278 A1: a `->` inside generic arguments (a fn-pointer type or an `Fn`
+# bound) must not end the generic group early and collapse the method onto
+# its type's row; a generic group the strip cannot read fails closed.
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+with_line fn-pointer "pub fn $K::Store<fn() -> u8>::hooked(&self)"
+run_case fn-pointer-generic-unaudited 1 "UNAUDITED $K::Store::hooked" "$TMP/fn-pointer.api"
+with_line fn-bound "pub fn $K::Store<F: Fn(u8) -> u8>::run(&self)"
+run_case fn-bound-generic-unaudited 1 "UNAUDITED $K::Store::run" "$TMP/fn-bound.api"
+with_line const-expr "pub fn $K::Store<{ N > 1 }>::m()"
+run_case unreadable-generic-fails-closed 2 'unparsable listing line 9' "$TMP/const-expr.api"
+printf '%s::Store::hooked\tmethod\tKEEP\ttests/a.rs\tA1\n' "$K" >> "$TMP/case.tsv"
+run_case fn-pointer-generic-matches 0 '8 audited path(s) match' "$TMP/fn-pointer.api"
+
+# #9278 A1 Q1: every public enum in the listing carries `#[non_exhaustive]`,
+# read from the attribute prefix the listing prints. An unmarked enum fails at
+# every path it is listed under (a re-export prints the enum again), and an
+# attribute other than `#[non_exhaustive]` does not count.
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+printf '%s::Mode\tenum\tKEEP\ttests/a.rs\tA1\n' "$K" >> "$TMP/case.tsv"
+printf 'trusty_memory::engine::Mode\tenum\tKEEP\ttests/a.rs\tA1\n' >> "$TMP/case.tsv"
+with_line unmarked "pub enum $K::Mode" 'pub enum trusty_memory::engine::Mode'
+run_case unmarked-enum 1 "UNMARKED $K::Mode" "$TMP/unmarked.api"
+run_case unmarked-reexported-enum 1 'UNMARKED trusty_memory::engine::Mode' "$TMP/unmarked.api"
+with_line other-attr "#[repr(u8)] pub enum $K::Mode" '#[non_exhaustive] pub enum trusty_memory::engine::Mode'
+run_case unmarked-enum-other-attribute 1 "UNMARKED $K::Mode${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/other-attr.api"
+with_line marked "#[repr(u8)] #[non_exhaustive] pub enum $K::Mode" '#[non_exhaustive] pub enum trusty_memory::engine::Mode'
+run_case marked-enums-match 0 '9 audited path(s) match' "$TMP/marked.api"
+grep -v '::Mode' "$TMP/base.tsv" > "$TMP/case.tsv"
+printf '%s::Mode\tenum\tKEEP\ttests/a.rs\tA1\n' "$K" >> "$TMP/case.tsv"
+with_line generic-enum "pub enum $K::Mode<T>"
+run_case unmarked-generic-enum 1 "UNMARKED $K::Mode" "$TMP/generic-enum.api"
+
 # A field and a method sharing a name print one path; two rows that differ in
 # kind and agree on public versus absent are one audited path.
 cp "$TMP/base.tsv" "$TMP/case.tsv"
@@ -217,6 +255,31 @@ rm -f "$TMP/case.tsv"
 run_case missing-table 2 'no audit table at' "$TMP/base.api"
 head -n 1 "$TMP/base.tsv" > "$TMP/case.tsv"
 run_case header-only-table 2 'no data row' "$TMP/base.api"
+
+# #9278 A1: line 1 must be the exact header. Without the check a deleted
+# header silently drops the first data row from validation and from the sets.
+tail -n +2 "$TMP/base.tsv" > "$TMP/case.tsv"
+run_case header-deleted-keep-first 2 'bad header at line 1' "$TMP/base.api"
+{
+  grep '::Store::compact' "$TMP/base.tsv"
+  tail -n +2 "$TMP/base.tsv" | grep -v '::Store::compact'
+} > "$TMP/case.tsv"
+run_case header-deleted-narrow-first 2 'bad header at line 1' "$TMP/base.api"
+{
+  printf 'path\tkind\tdisposition\treason\tbatch\n'
+  tail -n +2 "$TMP/base.tsv"
+} > "$TMP/case.tsv"
+run_case header-misspelled 2 'bad header at line 1' "$TMP/base.api"
+{
+  printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch\tnote\n'
+  tail -n +2 "$TMP/base.tsv"
+} > "$TMP/case.tsv"
+run_case header-extra-column 2 'bad header at line 1' "$TMP/base.api"
+{
+  printf 'path\tkind\tdisposition\tconsumer_or_reason\tbatch\r\n'
+  tail -n +2 "$TMP/base.tsv"
+} > "$TMP/case.tsv"
+run_case header-crlf 2 'bad header at line 1' "$TMP/base.api"
 
 # Malformed rows fail closed (exit 2, naming the line). Each case drops the
 # Store::open row from the base table and appends one bad row as line 10.
