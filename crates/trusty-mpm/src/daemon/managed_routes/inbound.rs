@@ -327,3 +327,8 @@ impl DeliverEnv for DaemonDeliverEnv {
 #[cfg(test)]
 #[path = "inbound_tests.rs"]
 mod tests;
+
+// #9877: a lost SessionEnd never lets an answer reach an untainted id.
+#[cfg(test)]
+#[path = "inbound_seen_tests.rs"]
+mod seen_tests;

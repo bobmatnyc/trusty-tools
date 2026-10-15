@@ -7,7 +7,8 @@
 //! What: [`check_channel_taint`] reads the taint directory under the home and
 //! the manager's records, and [`channel_taint_row`] grades them: `Unknown`
 //! when the directory cannot be listed; `Fail` when the hook recorded a
-//! double failure, or (#9873) an inbound answer was resolved but its delivery
+//! double failure or (#9877) its record exists but cannot be read, or
+//! (#9873) an inbound answer was resolved but its delivery
 //! failed, never settled, or left no line, or a trace line is malformed;
 //! `Unknown` when the delivery trace or the question log cannot be read and
 //! nothing grades `Fail` (the unreadable part is named either way, #9873 fix
@@ -110,17 +111,17 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
         ));
     }
     // #8433 fix round: the record sits in the anchored taint dir.
-    let failures = std::fs::read_to_string(dir.join(channels_taint::REAPPLY_FAILURES_FILE))
-        .ok()
-        .map_or(0, |text| {
-            text.lines().filter(|l| !l.trim().is_empty()).count()
-        });
+    let (failures, d09_unreadable) = reapply_failures_in(dir);
     // #9873 (Q5, F18): an unreadable delivery trace or log is never `Ok`;
     // #9873 fix round: it adds a part and never lowers a `Fail`.
-    let (undelivered, unreadable) = delivery_problems_in(dir);
+    let (undelivered, mut unreadable) = delivery_problems_in(dir);
     let held = files.len();
     let tail = format!("Nothing was deleted; see {}.", dir.display());
-    if failures > 0 || !undelivered.is_empty() {
+    // #9877: a D09 record that exists but cannot be read may hold failures,
+    // so it grades `Fail` like one that names them.
+    let d09_fail = d09_unreadable.is_some();
+    unreadable.extend(d09_unreadable);
+    if failures > 0 || d09_fail || !undelivered.is_empty() {
         let mut parts = Vec::new();
         if !undelivered.is_empty() {
             // #9873 (AC2, Q4): a resolved answer is final; name each loss.
@@ -161,6 +162,30 @@ pub(crate) fn channel_taint_row(dir: &Path, live: &HashSet<String>) -> DoctorChe
         CheckStatus::Warn,
         format!("{} {tail}", lines.join("; ")),
     )
+}
+
+/// The D09 double failures recorded in taint directory `dir`, and the reason
+/// the record cannot be read, if it cannot.
+///
+/// Why (#9877): the hook writes the record only on a double failure, so one
+/// that exists but cannot be read or decoded must never count as none.
+/// What: an absent record is `(0, None)`; otherwise the non-blank lines.
+/// Any other read error, a non-UTF-8 record included, is `(0, Some(why))`.
+/// Test: `unreadable_reapply_failures_record_is_never_ok`.
+fn reapply_failures_in(dir: &Path) -> (usize, Option<String>) {
+    let path = dir.join(channels_taint::REAPPLY_FAILURES_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => (text.lines().filter(|l| !l.trim().is_empty()).count(), None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (0, None),
+        Err(e) => (
+            0,
+            Some(format!(
+                "The D09 re-apply failures record {} is unreadable ({e}); a SessionStart may \
+                 have left a session reading untainted.",
+                channels_taint::REAPPLY_FAILURES_FILE
+            )),
+        ),
+    }
 }
 
 /// The delivery problems in taint directory `dir` (#9873 Q5, Q4a).
