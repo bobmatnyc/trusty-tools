@@ -24,6 +24,7 @@
 //! by holding the first handle while opening the second — the second open
 //! falls back to a snapshot and read transactions still succeed.
 
+use crate::engine::store::kg::KgError;
 use anyhow::{Context, Result};
 use redb::{Database, DatabaseError};
 use std::path::{Path, PathBuf};
@@ -483,10 +484,15 @@ pub(crate) struct IncompatibleFormatRefused {
 ///
 /// Why: the retry loops must not spend their backoff window on a condition that
 /// cannot change (issue #4911).
-/// What: downcasts through any `.context()` layers the caller added.
-/// Test: `refusal_is_recognised_through_a_context_layer`.
+/// What: downcasts through any `.context()` layers the caller added, and into
+/// the internal error of a root `KgError`.
+/// Test: `refusal_is_recognised_through_a_context_layer`,
+/// `knowledge_graph_open_refusals_stay_classified`.
 pub(crate) fn is_incompatible_format_refusal(err: &anyhow::Error) -> bool {
+    // #9278: a typed `KnowledgeGraph::open` boxes the refusal in `KgError::Other`.
+    let boxed = err.downcast_ref::<KgError>().and_then(KgError::internal);
     err.downcast_ref::<IncompatibleFormatRefused>().is_some()
+        || boxed.is_some_and(|e| e.downcast_ref::<IncompatibleFormatRefused>().is_some())
 }
 
 /// Open `path` exclusively for a writer, retrying through a brief

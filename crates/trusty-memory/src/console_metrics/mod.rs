@@ -291,7 +291,10 @@ fn cached_counts(
     let kg_triples = match cached_field(
         &info.id,
         "kg_triple count",
-        handle.kg.count_active_triples(),
+        handle
+            .kg
+            .count_active_triples()
+            .map_err(anyhow::Error::from), // #9278
     ) {
         Ok(n) => n,
         Err(reason) => return PalaceCounts::Unavailable(reason),

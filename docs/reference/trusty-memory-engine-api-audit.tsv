@@ -1174,46 +1174,46 @@ trusty_memory::engine::store::EmbedFailure::reason	field	NARROW	re-export; no co
 trusty_memory::engine::store::INCOMPATIBLE_SUFFIX	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::KnowledgeGraph	struct	KEEP	engine signatures (PalaceHandle::kg, community::find_communities, store::rooms); tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::adjacency_desynced	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::assert	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::assert_sync	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
-trusty_memory::engine::store::KnowledgeGraph::astar_path	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::astar_path	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::cascade_delete_by_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::checkpoint	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::community_computations	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::community_count	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::connected_components	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::count_active_triples	method	KEEP	anyhow-pending T1: tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::connected_components	method	KEEP	tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::count_active_triples	method	KEEP	tests/engine_standalone.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::delete_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::delete_drawer_sync	method	NARROW	removed: no caller anywhere	A3a
 trusty_memory::engine::store::KnowledgeGraph::drawer_id_for_fact_key	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::dump_all_triples	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3a
 trusty_memory::engine::store::KnowledgeGraph::edge_count	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::expand_neighbors	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::incoming	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::incoming	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::is_read_only	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::knowledge_gaps	method	KEEP	tests/community_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::list_active	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::list_subjects	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::list_subjects	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::list_subjects_with_counts	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawer	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawer_ids	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawers	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::load_drawers_with_skipped	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::neighbors	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::neighbors	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::node_count	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::open	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::open	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::open_with_intent	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::query_active	method	KEEP	anyhow-pending T1: tests/engine_standalone.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::reachable	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::query_active	method	KEEP	tests/engine_standalone.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::reachable	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::redb_store	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::retract	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::retract	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::retract_triple	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::shortest_path	method	KEEP	anyhow-pending T1: tests/kg_graph_tests.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::shortest_path	method	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::store	method	KEEP	tests/palace_backup_9282.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::superseded_by_many	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::top_degree_subgraph	method	NARROW	no consumer outside the library	A3a
-trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	anyhow-pending T1: tests/bm25_stale_edit_8246.rs	A3a
-trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	anyhow-pending T1: tests/memory_palace.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer	method	KEEP	tests/bm25_stale_edit_8246.rs	A3a
+trusty_memory::engine::store::KnowledgeGraph::upsert_drawer_sync	method	KEEP	tests/memory_palace.rs	A3a
 trusty_memory::engine::store::KnowledgeGraph::upsert_drawers_atomic	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::KnowledgeGraph::verify_with_many	method	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::L1Cache	struct	NARROW	re-export; no consumer outside the library	A3b
@@ -1535,7 +1535,7 @@ trusty_memory::engine::store::hnsw_store::op_budget::op_budget_for_txn_deadline	
 trusty_memory::engine::store::incompatible_backup_path	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::is_incompatible_format	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::kg	mod	KEEP	tests/kg_graph_tests.rs	A3a
-trusty_memory::engine::store::kg::AdjacencyDesync	enum	KEEP	error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424)	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync	enum	KEEP	error KnowledgeGraph::assert/retract return as KgError::AdjacencyDesync (#9278 T1b-2); typed accessor contract (#5424)	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::cause	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::committed	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a

@@ -12,6 +12,7 @@
 //! `upsert_drawer_sync`, `store`, `dump_all_triples`.
 //! Test: See kg/tests.rs for comprehensive storage round-trip tests.
 
+use super::KgError;
 use super::graph::KnowledgeGraph;
 use super::types::Triple;
 use crate::engine::palace::Drawer;
@@ -26,13 +27,14 @@ impl KnowledgeGraph {
     /// Why: Most queries want "what is true *now*".
     /// What: Delegates to `KgStoreRedb::query_active` on the blocking pool.
     /// Test: `assert_then_query_active_returns_fact`.
-    pub async fn query_active(&self, subject: &str) -> Result<Vec<Triple>> {
+    pub async fn query_active(&self, subject: &str) -> std::result::Result<Vec<Triple>, KgError> {
         let store = self.store.clone();
         let subject = subject.to_string();
-        let triples = tokio::task::spawn_blocking(move || store.query_active(&subject))
+        // #9278: the store is typed; only the join error needs mapping.
+        tokio::task::spawn_blocking(move || store.query_active(&subject))
             .await
-            .context("query_active spawn_blocking join error")??;
-        Ok(triples)
+            .context("query_active spawn_blocking join error")
+            .map_err(KgError::from_internal)?
     }
 
     /// The active `superseded_by` replacement of each drawer in `ids` (#9421).
@@ -77,8 +79,10 @@ impl KnowledgeGraph {
     /// Why: KG Explorer UI browses subjects without knowing one upfront.
     /// What: Delegates to `KgStoreRedb::list_subjects` synchronously.
     /// Test: `list_subjects_returns_distinct_active_subjects`.
-    pub fn list_subjects(&self, limit: usize) -> Result<Vec<String>> {
-        self.store.list_subjects(limit)
+    pub fn list_subjects(&self, limit: usize) -> std::result::Result<Vec<String>, KgError> {
+        self.store
+            .list_subjects(limit)
+            .map_err(KgError::from_internal) // #9278
     }
 
     /// List up to `limit` `(subject, active_count)` rows.
@@ -114,7 +118,7 @@ impl KnowledgeGraph {
     /// u64 to `usize`, which is what the existing callers consume.
     /// Test: `count_active_triples_returns_live_only`,
     /// `count_active_triples_surfaces_read_failure`.
-    pub fn count_active_triples(&self) -> Result<usize> {
+    pub fn count_active_triples(&self) -> std::result::Result<usize, KgError> {
         let n = self.store.count_active_triples()?;
         Ok(usize::try_from(n).unwrap_or(usize::MAX))
     }
@@ -254,8 +258,12 @@ impl KnowledgeGraph {
     /// What: Forwards to `KgWriter::upsert_drawer`, which queues the op,
     /// awaits the batched commit, and reports errors.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`.
-    pub async fn upsert_drawer(&self, drawer: &Drawer) -> Result<()> {
-        self.writer.upsert_drawer(drawer.clone()).await
+    pub async fn upsert_drawer(&self, drawer: &Drawer) -> std::result::Result<(), KgError> {
+        // #9278: the writer stays anyhow (N3); `from_internal` unwraps its `KgError`.
+        self.writer
+            .upsert_drawer(drawer.clone())
+            .await
+            .map_err(KgError::from_internal)
     }
 
     /// Persist several drawers inside ONE redb write transaction (#4886).
@@ -505,8 +513,10 @@ impl KnowledgeGraph {
     /// What: Delegates to `KgWriter::upsert_drawer_sync`.
     /// Test: `backfill_changes_no_drawer_rows`,
     /// `expired_tier_c_drawer_survives_the_open_time_sweep`.
-    pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> Result<()> {
-        self.writer.upsert_drawer_sync(drawer)
+    pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> std::result::Result<(), KgError> {
+        self.writer
+            .upsert_drawer_sync(drawer)
+            .map_err(KgError::from_internal) // #9278
     }
 
     /// Expose the underlying store for inspection (e.g. the room backfill

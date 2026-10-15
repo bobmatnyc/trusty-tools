@@ -249,9 +249,7 @@ impl KgWriter {
     /// Test: `writer_serialises_concurrent_asserts`.
     pub async fn assert(&self, triple: Triple) -> Result<()> {
         if self.store.is_read_only() {
-            return Err(anyhow!(
-                "palace is read-only: HTTP daemon holds the write lock"
-            ));
+            return Err(anyhow::Error::new(KgError::ReadOnly)); // #9278 N5
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         let queued = QueuedOp {
@@ -285,9 +283,7 @@ impl KgWriter {
     /// the bypass path.
     pub async fn retract(&self, subject: String, predicate: String) -> Result<usize> {
         if self.store.is_read_only() {
-            return Err(anyhow!(
-                "palace is read-only: HTTP daemon holds the write lock"
-            ));
+            return Err(anyhow::Error::new(KgError::ReadOnly)); // #9278 N5
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         let queued = QueuedOp {
@@ -321,9 +317,7 @@ impl KgWriter {
     /// drawer op in the burst.
     pub async fn upsert_drawer(&self, drawer: Drawer) -> Result<()> {
         if self.store.is_read_only() {
-            return Err(anyhow!(
-                "palace is read-only: HTTP daemon holds the write lock"
-            ));
+            return Err(anyhow::Error::new(KgError::ReadOnly)); // #9278 N5
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         let queued = QueuedOp {
@@ -353,9 +347,7 @@ impl KgWriter {
     /// Test: Covered by the bypass fallback in existing forget tests.
     pub async fn delete_drawer(&self, id: Uuid) -> Result<()> {
         if self.store.is_read_only() {
-            return Err(anyhow!(
-                "palace is read-only: HTTP daemon holds the write lock"
-            ));
+            return Err(anyhow::Error::new(KgError::ReadOnly)); // #9278 N5
         }
         let (reply_tx, reply_rx) = oneshot::channel();
         let queued = QueuedOp {

@@ -134,7 +134,7 @@ pub async fn assert_triple(
         .kg
         .assert(triple)
         .await
-        .map_err(KgWriteError::Assert)?;
+        .map_err(|e| KgWriteError::Assert(e.into()))?; // #9278: `KgError`
 
     if hot && policy == CachePolicy::Inline {
         refresh(state).await?;

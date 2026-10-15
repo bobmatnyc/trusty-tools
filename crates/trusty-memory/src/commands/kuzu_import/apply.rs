@@ -446,8 +446,9 @@ pub struct HandleSink {
     pub handle: Arc<PalaceHandle>,
 }
 
-fn sink_err(e: anyhow::Error) -> KuzuImportError {
-    KuzuImportError::Palace(format!("{e:#}"))
+// #9278: takes the KG's typed `KgError` as well as anyhow.
+fn sink_err(e: impl Into<anyhow::Error>) -> KuzuImportError {
+    KuzuImportError::Palace(format!("{:#}", e.into()))
 }
 
 #[async_trait]
