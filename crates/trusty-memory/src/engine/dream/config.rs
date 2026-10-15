@@ -37,6 +37,7 @@ pub(crate) const COMPACT_MIN_RECLAIM_PERCENT: u64 = 10;
 /// inference-backed phase config.
 /// Test: `dream_config_defaults`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: build with `Default`, then assign.
 pub struct DreamConfig {
     /// Seconds of inactivity before a dream cycle is allowed to run.
     pub idle_secs: u64,
@@ -180,6 +181,7 @@ impl Default for DreamConfig {
 /// Test: `dream_stats_serde_roundtrip_new_fields`, `dream_stats_backward_compat`,
 /// `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct DreamStats {
     pub merged: usize,
     pub pruned: usize,

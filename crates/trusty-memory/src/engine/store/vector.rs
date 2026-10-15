@@ -180,6 +180,7 @@ fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDb
 /// What: Plain data — drawer id + cosine similarity score.
 /// Test: See `upsert_then_search_returns_same_vector_at_rank_0`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct VectorHit {
     pub drawer_id: Uuid,
     pub(crate) score: f32,
@@ -261,6 +262,7 @@ pub(crate) struct CompactionResult {
 /// (0 for a bare key only).
 /// Test: `chunk_shapes_counts_rows_and_the_highest_index`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct ChunkShape {
     pub rows: usize,
     pub max_index: u32,

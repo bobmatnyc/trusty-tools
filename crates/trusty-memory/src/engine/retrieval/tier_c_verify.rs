@@ -39,6 +39,7 @@ const VERIFY_PROVENANCE: &str = "tier_c:verify-on-write";
 /// Test: `crates/trusty-memory/src/tools/tests/verify_with_tests.rs` (failed-record case).
 #[derive(Debug, thiserror::Error)]
 #[error("drawer {drawer} is stored, but its verify command was not: {reason}")]
+#[non_exhaustive] // #9278 A2b: build with `VerifyNotStored::new`.
 pub struct VerifyNotStored {
     /// The committed drawer that holds the slot without a command.
     pub drawer: Uuid,

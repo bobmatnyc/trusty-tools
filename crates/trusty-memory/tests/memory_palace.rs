@@ -49,7 +49,6 @@ fn open_palace(name: &str) -> (Arc<PalaceHandle>, std::path::PathBuf) {
 /// `classify_as`.
 /// Test: used by both tests below.
 // #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
-#[allow(clippy::field_reassign_with_default)]
 async fn remember_typed(
     handle: &Arc<PalaceHandle>,
     content: &str,

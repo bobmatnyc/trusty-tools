@@ -62,6 +62,7 @@ fn symbol_regex() -> &'static Regex {
 /// What: Holds the type, optional scope, breaking flag, and free-form description.
 /// Test: `parse_*` tests below assert each field for representative messages.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct ConventionalCommit {
     /// `"feat"`, `"fix"`, etc. Empty string if the message is not conventional.
     pub commit_type: String,
@@ -77,6 +78,7 @@ pub struct ConventionalCommit {
 /// What: Plain data captured by regex; no inference.
 /// Test: `extract_issue_refs` plus end-to-end test on real repo.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct CommitEntities {
     pub issue_refs: Vec<u64>,
     pub co_authors: Vec<String>,
@@ -94,6 +96,7 @@ pub struct CommitEntities {
 /// What: SHA + author + parsed conventional commit + entities + importance + narrative.
 /// Test: Tested indirectly via `extract_on_real_repo`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct GitFact {
     pub sha: String,
     pub author: String,

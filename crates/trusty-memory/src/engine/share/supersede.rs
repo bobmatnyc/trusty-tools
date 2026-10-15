@@ -77,6 +77,7 @@ pub async fn assert_superseded_by(
 ///
 /// Test: `supersede_mints_a_new_hash_and_links_the_original`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct Supersession {
     /// The id of the newly written replacement drawer.
     pub replacement: Uuid,

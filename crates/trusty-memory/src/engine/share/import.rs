@@ -54,6 +54,7 @@ pub enum ImportOutcome {
 ///
 /// Test: `import_is_idempotent`, `import_of_a_superset_adds_only_the_new`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct ImportSummary {
     pub inserted: usize,
     pub merged: usize,

@@ -216,6 +216,7 @@ pub(crate) enum FilterReject {
 /// Test: `filter_config_default_blocks_known_noise`,
 /// `filter_config_force_bypasses_all`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct FilterConfig {
     /// Minimum meaningful tokens required for `memory_remember`.
     pub min_tokens: u8,

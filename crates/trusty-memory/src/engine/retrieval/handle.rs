@@ -82,6 +82,7 @@ fn now_epoch_secs() -> u64 {
 /// drawer table.
 /// Test: See `l0_l1_always_present` (constructor + cache) and
 /// `l2_returns_relevant_drawer` (storage handles wired correctly).
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct PalaceHandle {
     pub id: PalaceId,
     pub identity: String,
