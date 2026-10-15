@@ -9,8 +9,8 @@
 //! no row and no data is new and is stamped at [`PALACE_FORMAT_SUPPORTED`] when
 //! it is created; a KG with data and no row is format 0. [`classify_with`]
 //! turns the two markers, plus the migration-in-progress record, into
-//! "current" or "behind"; the N-1 migration itself (1 → 2, #9275) lives in
-//! `format_migration.rs`.
+//! "current" or "behind"; the migration itself (the 0 → 1 → 2 chain, #9918)
+//! lives in `format_migration.rs`.
 //! Test: palace_format_tests.rs — `n_plus_one_palace_is_refused_and_bytes_unchanged`,
 //! and the other arms listed on each function below.
 
@@ -28,10 +28,13 @@ use std::path::Path;
 /// The palace format this binary reads and writes (ADR-0067 D1).
 ///
 /// #9275: 2 permits `{uuid}#{n}` chunk rows in `index.usearch.redb`
-/// (`vector_key.rs`); no table shape changes. A format-1 palace is migrated
-/// by a writer-intent open; format 0 is refused `FormatTooOld` (ADR-0067 D3
-/// rule 2, N-1 only); a palace stamped 3 or higher is refused.
+/// (`vector_key.rs`); no table shape changes. A palace at format 0 or 1 is
+/// migrated by a writer-intent open, step by step (#9918); a palace stamped 3
+/// or higher is refused.
 pub const PALACE_FORMAT_SUPPORTED: u32 = 2;
+
+/// The oldest format this binary migrates; older is `FormatTooOld` (#9918).
+pub(crate) const OLDEST_MIGRATABLE_FORMAT: u32 = 0;
 
 /// The `kg_schema` key that holds the authoritative palace format.
 pub(crate) const KG_SCHEMA_PALACE_FORMAT: &str = "palace_format";
@@ -100,10 +103,16 @@ pub(crate) enum PalaceFormatStatus {
 /// Compare a palace's format with the one this binary supports.
 ///
 /// Why: one rule set for every open path (ADR-0067 D3 rules 1 and 2).
-/// What: newer → `FormatTooNew`; equal → `Ok`; one behind →
-/// `FormatNeedsMigration`; further behind → `FormatTooOld`.
+/// What: newer → `FormatTooNew`; equal → `Ok`; behind, from
+/// [`OLDEST_MIGRATABLE_FORMAT`] up → `FormatNeedsMigration` (#9918: the chain
+/// migrates it); older → `FormatTooOld`.
 /// Test: `check_format_classifies_every_distance`.
 pub(crate) fn check_format(palace: &str, found: u32, supported: u32) -> Result<()> {
+    check_format_with(palace, found, supported, OLDEST_MIGRATABLE_FORMAT)
+}
+
+/// [`check_format`] with an explicit oldest migratable format, for its test.
+fn check_format_with(palace: &str, found: u32, supported: u32, oldest: u32) -> Result<()> {
     let palace = palace.to_string();
     if found > supported {
         Err(PalaceStoreError::FormatTooNew {
@@ -113,7 +122,7 @@ pub(crate) fn check_format(palace: &str, found: u32, supported: u32) -> Result<(
         })
     } else if found == supported {
         Ok(())
-    } else if found + 1 == supported {
+    } else if found >= oldest {
         Err(PalaceStoreError::FormatNeedsMigration {
             palace,
             found,
@@ -250,11 +259,12 @@ pub(crate) fn read_marker_without_writing(kg_path: &Path) -> Result<KgMarker> {
 /// `Unverified`. Otherwise the
 /// marker wins over a lower mirror (ADR-0067 D1); a mirror above the marker
 /// with no record is `FormatMarkerMismatch` (fail closed); the marker is then
-/// classified by [`check_format`], where one behind is `Behind`.
+/// classified by [`check_format`], where behind is `Behind`; a record's
+/// `Behind` names the format its move started at (#9918).
 /// Test: `n_plus_one_in_palace_json_mirror_is_refused_before_redb_opens`,
 /// `markers_that_disagree_refuse_the_palace`,
 /// `a_lower_mirror_is_repaired_by_a_writer_and_the_marker_wins`,
-/// `a_stale_0_to_1_record_is_refused_as_too_old`.
+/// `a_stale_0_to_1_record_is_resumed_by_the_chain`.
 pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Result<FormatState> {
     let mirror = read_mirror(data_dir)?;
     let m = mirror.unwrap_or(0);
@@ -267,11 +277,8 @@ pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Re
     {
         check_format(palace, v, supported)?;
     }
-    if refuse_foreign_record(data_dir, palace, supported)? {
-        // #9274: an interrupted migration is still the move from N-1.
-        return Ok(FormatState::Behind {
-            found: supported.saturating_sub(1),
-        });
+    if let Some(found) = refuse_foreign_record(data_dir, palace, supported)? {
+        return Ok(FormatState::Behind { found });
     }
     let repair_mirror = mirror != Some(supported);
     let found = match marker {
@@ -296,35 +303,39 @@ pub(crate) fn classify_with(data_dir: &Path, palace: &str, supported: u32) -> Re
     }
 }
 
-/// Whether a migration record is present, refusing one of a move this binary
-/// does not run.
+/// The format a present migration record moves from, refusing one of a move
+/// this binary does not run.
 ///
-/// Why: ADR-0067 D3 rule 2 migrates N-1 only. A record left by an older
-/// release's interrupted move (0 → 1 under a format-2 binary) is not
-/// resumable here; without this it read as `Behind` and failed later as a
-/// generic `FormatMigrationFailed` (#9275, plan Q7).
-/// What: `Ok(false)` with no record. A record whose `to` is above `supported`
-/// → `FormatTooNew`; whose `from` is more than one behind → `FormatTooOld`.
-/// Otherwise `Ok(true)`. A record that does not parse is `Ok(true)`: the
-/// writer's resume reads it again and fails closed on it.
-/// Test: `a_stale_0_to_1_record_is_refused_as_too_old`.
-pub(crate) fn refuse_foreign_record(data_dir: &Path, palace: &str, supported: u32) -> Result<bool> {
+/// Why: without this it read as `Behind` and failed later as a generic
+/// `FormatMigrationFailed` (#9275, plan Q7). #9918: an older release's
+/// interrupted 0 → 1 is resumed by the chain, so it is not foreign.
+/// What: `Ok(None)` with no record. A record whose `to` is above `supported`
+/// → `FormatTooNew`; whose `from` [`check_format`] refuses → that refusal.
+/// Otherwise `Ok(Some(from))`. A record that does not parse is
+/// `Ok(Some(supported - 1))`: the writer's resume fails closed on it.
+/// Test: `a_stale_0_to_1_record_is_resumed_by_the_chain`.
+pub(crate) fn refuse_foreign_record(
+    data_dir: &Path,
+    palace: &str,
+    supported: u32,
+) -> Result<Option<u32>> {
     let record = data_dir.join(MIGRATION_RECORD);
     if !record.try_exists().map_err(|source| PalaceStoreError::Io {
         path: record,
         source,
     })? {
-        return Ok(false);
+        return Ok(None);
     }
     if let Ok(Some(rec)) = super::format_migration::read_record(data_dir) {
         if rec.to > supported {
             check_format(palace, rec.to, supported)?;
         }
-        if rec.from.saturating_add(1) < supported {
-            check_format(palace, rec.from, supported)?;
-        }
+        return match check_format(palace, rec.from, supported) {
+            Ok(()) | Err(PalaceStoreError::FormatNeedsMigration { .. }) => Ok(Some(rec.from)),
+            Err(e) => Err(e),
+        };
     }
-    Ok(true)
+    Ok(Some(supported.saturating_sub(1)))
 }
 
 /// Refuse a palace a read-only caller cannot use: newer, too old, split, or
@@ -389,7 +400,7 @@ pub(crate) fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus
 /// KG directly, without a palace handle, so a direct open must refuse a newer
 /// or an unmigrated file before `Database::create` writes its header.
 /// What: a stamped marker goes through [`check_format`]; a KG with data and no
-/// marker is format 0 and refused; a new or deferred KG passes, and
+/// marker is format 0 and refused as behind; a new or deferred KG passes, and
 /// [`gate_kg_post_open`] reads it after the open.
 /// Test: `a_direct_kg_open_of_an_n_plus_one_file_is_refused`,
 /// `a_direct_kg_open_of_a_format_0_file_is_refused`.
@@ -424,8 +435,8 @@ pub(crate) fn gate_kg_post_open(db: &impl ReadableDatabase, kg_path: &Path) -> R
 
 /// Write the `palace_format` and triple-key markers inside `wtx`.
 ///
-/// Why: both the creation of a new KG and the last step of the 1 → 2
-/// migration commit the format in the same transaction as their KG change
+/// Why: both the creation of a new KG and each migration step (#9918)
+/// commit the format in the same transaction as their KG change
 /// (ADR-0067 D3 rule 4).
 /// What: overwrites both `kg_schema` rows; format 1 implies triple key v1.
 /// Test: `a_new_palace_is_stamped_at_the_supported_format`,

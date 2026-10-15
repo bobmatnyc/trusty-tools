@@ -96,10 +96,11 @@ pub(crate) fn observer_gate(data_dir: &Path, palace: &str) -> Result<()> {
         check_format(palace, found, PALACE_FORMAT_SUPPORTED)?;
     }
     // #9275: a record of a move this binary does not run is refused as such.
-    if refuse_foreign_record(data_dir, palace, PALACE_FORMAT_SUPPORTED)? {
+    // #9918: the record names the format its move started at.
+    if let Some(found) = refuse_foreign_record(data_dir, palace, PALACE_FORMAT_SUPPORTED)? {
         return Err(PalaceStoreError::FormatNeedsMigration {
             palace: palace.to_string(),
-            found: PALACE_FORMAT_SUPPORTED.saturating_sub(1),
+            found,
             supported: PALACE_FORMAT_SUPPORTED,
         }
         .into());
