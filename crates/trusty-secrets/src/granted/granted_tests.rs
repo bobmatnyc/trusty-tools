@@ -42,12 +42,44 @@ fn pipe_with(bytes: &[u8]) -> OwnedFd {
 
 /// [`pipe_with`], running `during` while this process still holds the
 /// write end, where a concurrent test's spawn can fork (#9071).
+///
+/// What: returns only once no process holds a write end (the read end
+/// reports `POLLHUP`), within 5 s. Once this process drops its copy, no
+/// new one can appear, so the pipe stays closed.
 fn pipe_with_during_write(bytes: &[u8], during: impl FnOnce()) -> OwnedFd {
     let (reader, mut writer) = io::pipe().unwrap();
     writer.write_all(bytes).unwrap();
     during();
     drop(writer);
+    // #9071: a forked child keeps a write-end copy until its exec, so the
+    // pipe reads as open, not closed; wait for it as for the listener in
+    // `granted_client_never_spawns_a_server`.
+    let started = Instant::now();
+    while !writers_closed(&reader) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a writer held on"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     OwnedFd::from(reader)
+}
+
+/// Whether every write end of the pipe `reader` reads from is closed.
+fn writers_closed(reader: &io::PipeReader) -> bool {
+    let mut poll = libc::pollfd {
+        fd: std::os::fd::AsRawFd::as_raw_fd(reader),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid `pollfd`, count 1, timeout 0; `poll` writes only
+    // its `revents`.
+    if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+        let error = io::Error::last_os_error();
+        assert_eq!(error.kind(), ErrorKind::Interrupted, "poll: {error}");
+        return false;
+    }
+    poll.revents & libc::POLLHUP != 0
 }
 
 /// Fork a child that holds every descriptor of this process for `hold`
