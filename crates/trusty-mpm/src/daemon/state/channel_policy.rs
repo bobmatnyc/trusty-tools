@@ -4,12 +4,13 @@
 //! snapshot, so its 5 s refresh and 60 s max age apply daemon-wide.
 //! What: [`DaemonState::channel_policy`] builds the snapshot on first use
 //! over `config.yaml` under [`DaemonState::user_home`]. [`ChannelHold`] groups
-//! the daemon's channel state (this snapshot, the #8433 P2 question table)
-//! behind one `DaemonState` field.
+//! the daemon's channel state (this snapshot, the #8433 P2 question table,
+//! the #9873 inbound rate windows) behind one `DaemonState` field.
 //! Test: `daemon_state_holds_snapshot_under_its_user_home`.
 
 use std::sync::OnceLock;
 
+use crate::channels::inbound::InboundLimiter;
 use crate::channels::snapshot::DaemonPolicySnapshot;
 
 use super::DaemonState;
@@ -24,6 +25,8 @@ pub(crate) struct ChannelHold {
     policy: OnceLock<DaemonPolicySnapshot>,
     // #8433 P2: the question table, opened on first use.
     pub(super) questions: super::question_table::QuestionTableHold,
+    // #9873 Q7: the inbound rate windows, process-local.
+    inbound_limiter: InboundLimiter,
 }
 
 impl DaemonState {
@@ -38,5 +41,11 @@ impl DaemonState {
         self.channels
             .policy
             .get_or_init(|| DaemonPolicySnapshot::for_home(self.user_home()))
+    }
+
+    /// The daemon's inbound rate windows (#9873 Q7): one per daemon, reset
+    /// by a restart.
+    pub fn inbound_limiter(&self) -> &InboundLimiter {
+        &self.channels.inbound_limiter
     }
 }

@@ -1367,3 +1367,55 @@ fn seal_reports_an_unreadable_directory_as_io() {
         "an unreadable directory: {checked:?}"
     );
 }
+
+/// 🔴 #9873 (Q2): an answer binds by the conversation its question was
+/// posted in. Another thread or channel binds nothing, a reserved-only id is
+/// never found, and an answered question is still found, so a second answer
+/// reaches `AlreadyResolved` rather than "no question".
+#[test]
+fn conversation_lookup_finds_the_question_posted_there() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let d1t1 = conv("D1", "1700000001.000100");
+    let id = ask(&table, ask_of("bob-dm", BOB, d1t1.clone()));
+    let _reserved = table.reserve().expect("reserve");
+    assert_eq!(table.find_by_conversation(&d1t1), Some(id));
+    assert_eq!(
+        table.find_by_conversation(&conv("D1", "1700000002.000100")),
+        None,
+        "another thread in the same DM"
+    );
+    assert_eq!(
+        table.find_by_conversation(&conv("D2", "1700000001.000100")),
+        None,
+        "the same ts in another DM"
+    );
+    assert_eq!(table.answer(id), None, "unanswered");
+    assert_eq!(
+        table.resolve(id, BOB, &d1t1, "yes"),
+        ResolveOutcome::Resolved
+    );
+    assert_eq!(table.find_by_conversation(&d1t1), Some(id), "answered");
+    let first = table.answer(id).expect("the first answer");
+    assert_eq!(first.answerer, BOB);
+    assert_eq!(first.text_sha256, sha256_hex("yes"));
+}
+
+/// 🔴 #9873: a poisoned table binds nothing and reports no answer, so the
+/// inbound path drops rather than reading a book memory may not match.
+#[test]
+fn conversation_lookup_on_a_poisoned_table_is_none() {
+    let fx = fixture();
+    let table = open_at(&fx.path);
+    let id = ask(&table, bob_ask());
+    assert_eq!(table.find_by_conversation(&bob_conv()), Some(id));
+    assert_eq!(
+        table.resolve(id, BOB, &bob_conv(), "yes"),
+        ResolveOutcome::Resolved
+    );
+    set_fault(&table, Some(Fault::BeforeWrite));
+    assert!(table.reserve().is_err(), "the failed append poisons");
+    set_fault(&table, None);
+    assert_eq!(table.find_by_conversation(&bob_conv()), None);
+    assert_eq!(table.answer(id), None);
+}

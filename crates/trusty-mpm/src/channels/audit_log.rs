@@ -272,6 +272,24 @@ impl ChannelAudit {
         self.write(&record)
     }
 
+    /// An inbound message from `sender`, `length` bytes long, was dropped
+    /// over its rate window (#9873 AC8). The caller writes one per bucket
+    /// per window; `reason` names the window.
+    /// Test: `rate_limited_logs_sender_time_length_only`.
+    pub fn rate_limited(
+        &self,
+        channel: Channel,
+        sender: &str,
+        length: usize,
+        reason: &'static str,
+    ) -> Result<(), StateError> {
+        let mut record = AuditRecord::new(AuditEvent::RateLimited, reason);
+        record.channel = Some(channel.as_str());
+        record.sender = Some(clip(sender));
+        record.length = Some(length);
+        self.write(&record)
+    }
+
     /// A `kind` send to `to` was refused for `reason`.
     pub fn send_refused(
         &self,
