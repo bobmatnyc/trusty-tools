@@ -236,9 +236,9 @@ async fn run_pipeline(
         opts.filter
             .apply(&content, opts.enforce_min_tokens)
             .map_err(|reject| match reject {
-                // Issue #1481: `PotentialSecret` carries the offending token
-                // in its Display impl, so the same `{reject}` bubble names
-                // the trigger for the caller to remediate.
+                // Issue #1481: `PotentialSecret`'s Display names where the
+                // trigger is (#9748: byte offset and rule, never the value),
+                // so the same `{reject}` bubble lets the caller remediate.
                 FilterReject::TooShort { .. }
                 | FilterReject::NoisePattern { .. }
                 | FilterReject::NonAlphabetic { .. }

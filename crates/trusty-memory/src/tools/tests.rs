@@ -1915,8 +1915,9 @@ async fn dispatch_remember_stores_git_sha_prose() {
 /// git-SHA allowlist lands, and the skip/error must name the trigger so the
 /// caller can remediate.
 /// What: `memory_remember` a prose string carrying a high-entropy mixed-case
-/// credential token and assert the call errors with a message that names the
-/// (redacted) secret token. No drawer should land.
+/// credential token and assert the call errors with a message that locates
+/// the token by byte offset and rule, with no part of it (#9748). No drawer
+/// should land.
 /// Test: itself.
 #[tokio::test]
 async fn dispatch_remember_blocks_real_secret() {
@@ -1937,8 +1938,11 @@ async fn dispatch_remember_blocks_real_secret() {
     .expect_err("a real secret must be rejected");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("secret") && msg.contains("AbCd"),
-        "rejection must name the redacted secret token; got: {msg}"
+        msg.contains("secret")
+            && msg.contains("offset 18")
+            && msg.contains("mixed_case_alnum")
+            && !msg.contains("AbCd"),
+        "rejection must locate the token without quoting it; got: {msg}"
     );
 
     let listed = dispatch_tool(&state, "memory_list", json!({"palace": "sec", "limit": 10}))

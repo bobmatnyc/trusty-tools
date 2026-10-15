@@ -19,11 +19,14 @@ pub(crate) use shapes::*;
 // #8589: a bare Google document id, admitted only when the prose names one.
 mod google_bare_id;
 pub(crate) use google_bare_id::*;
+// #9748: GitHub Projects v2 node ids, admitted by exact shape.
+mod github_node_id;
+pub(crate) use github_node_id::*;
 // #8623: span-level detection and the rule set, shared with trusty-memory.
 mod private_key;
 mod spans;
 pub use spans::{SECRET_FILTER_VERSION, SecretRule, SecretSpan, find_secret_spans};
-pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block};
+pub(crate) use spans::{admitted_as_doc_id, candidate_tokens, inside_block, rule_of_flagged};
 // #8624: secret shape and the one marker builder, for the kuzu review export.
 mod mask;
 pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
@@ -80,6 +83,19 @@ pub use mask::{MaskError, SecretShape, classify_secret, mask_content};
 /// `bare_google_doc_ids_named_by_context_after_8589`,
 /// `unterminated_private_key_is_flagged`.
 pub fn find_secret_token(content: &str) -> Option<String> {
+    first_secret_hit(content).map(|(range, _)| redact_token(&content[range]))
+}
+
+/// The earliest secret hit in `content`: its byte range and the rule that
+/// fired. The one verdict path behind [`find_secret_token`] and
+/// [`check_secret`].
+///
+/// What: the earlier of the first PEM block and the first token outside a
+/// block that [`looks_like_secret`] flags and the #8589 doc-id rule does not
+/// admit. A token's rule comes from [`rule_of_flagged`], which is total, so a
+/// hit always carries a rule and is never dropped for want of one.
+/// Test: `potential_secret_error_names_offset_and_rule_only_after_9748`.
+fn first_secret_hit(content: &str) -> Option<(std::ops::Range<usize>, SecretRule)> {
     // #8623: a key block is one hit; it can only add refusals, never remove one.
     let blocks = private_key::private_key_blocks(content);
     // #8589: computed once, and only when a token would otherwise be refused.
@@ -92,14 +108,15 @@ pub fn find_secret_token(content: &str) -> Option<String> {
         .filter(|(range, _)| !inside_block(&blocks, range))
         .find(|(_, tok)| {
             looks_like_secret(tok) && !admitted_as_doc_id(content, tok, &mut names_doc)
-        })
-        .map(|(range, _)| range);
-    let first = match (blocks.first(), token) {
-        (Some(block), Some(tok)) if tok.start < block.start => tok,
-        (Some(block), _) => block.clone(),
-        (None, tok) => tok?,
-    };
-    Some(redact_token(&content[first]))
+        });
+    match (blocks.first(), token) {
+        (Some(block), Some((range, tok))) if range.start < block.start => {
+            Some((range, rule_of_flagged(tok)))
+        }
+        (Some(block), _) => Some((block.clone(), SecretRule::PrivateKeyBlock)),
+        (None, Some((range, tok))) => Some((range, rule_of_flagged(tok))),
+        (None, None) => None,
+    }
 }
 
 /// Standalone secret gate: `Ok(())` when `content` carries no
@@ -115,18 +132,29 @@ pub fn find_secret_token(content: &str) -> Option<String> {
 /// `PalaceHandle::remember_with_options` call it on its own when `force` is
 /// set but the caller has NOT also set the explicit `allow_secret_like`
 /// opt-in.
-/// What: thin wrapper around [`find_secret_token`] that packages a hit into
-/// the same [`FilterReject::PotentialSecret`] variant `apply` returns, so
-/// both call sites produce an identical, actionable error message.
-/// Test: exercised via `FilterConfig::apply`'s existing secret-detection
-/// tests (this function is `apply`'s sole secret-check code path) and
-/// directly by the two-tier `force` tests in
-/// `trusty-common::memory_core::retrieval::handle`.
+/// What: packages the [`first_secret_hit`] into the same
+/// [`FilterReject::PotentialSecret`] variant `apply` returns, so both call
+/// sites produce an identical error. #9748: the error and the one warn line
+/// logged per refusal carry the hit's byte offset and rule label only, never
+/// the value, a preview of it, or its length.
+/// Test: `potential_secret_error_names_offset_and_rule_only_after_9748`,
+/// `secret_refusal_logs_one_warn_with_offset_and_rule_after_9748`, and
+/// `FilterConfig::apply`'s secret-detection tests (this function is `apply`'s
+/// sole secret-check code path).
 pub fn check_secret(content: &str) -> Result<(), FilterReject> {
-    if let Some(token) = find_secret_token(content) {
-        return Err(FilterReject::PotentialSecret { token });
-    }
-    Ok(())
+    let Some((range, rule)) = first_secret_hit(content) else {
+        return Ok(());
+    };
+    // #9748: offset and rule label only; the value and its length stay out.
+    tracing::warn!(
+        offset = range.start,
+        rule = rule.label(),
+        "secret filter refused content"
+    );
+    Err(FilterReject::PotentialSecret {
+        offset: range.start,
+        rule,
+    })
 }
 
 /// Known credential prefixes that should always be treated as secrets.
@@ -1405,7 +1433,8 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
 /// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`,
 /// `structural_tokens_are_not_flagged`,
 /// `vercel_deployment_ids_are_not_flagged`,
-/// `prefixed_provider_keys_are_blocked_after_7549`.
+/// `prefixed_provider_keys_are_blocked_after_7549`,
+/// `github_project_node_ids_are_accepted_after_9748`.
 pub(crate) fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -1435,6 +1464,11 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     // length after `dpl_`, and every SECRET_PREFIXES entry carries a `-` or a
     // second `_`, so no single token can satisfy both predicates.
     if is_public_resource_id(token) {
+        return false;
+    }
+    // #9748: a GitHub Projects v2 node id, by exact length and header; below
+    // the provider-key test for the same reason as the `dpl_` exemption.
+    if is_github_project_node_id(token) {
         return false;
     }
     // Issue #1667: structural tokens (paths, slugs, key=value pairs, and

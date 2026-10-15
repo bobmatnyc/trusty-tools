@@ -161,12 +161,17 @@ fn reject_messages_are_actionable() {
     assert!(noise.to_string().contains("low-signal"));
     let na = FilterReject::NonAlphabetic { ratio: 85.0 };
     assert!(na.to_string().contains("force=true"));
-    // Issue #1481: the secret rejection must name the offending token.
+    // Issue #1481: the secret rejection must say where the token is.
+    // #9748: by byte offset and rule label, never by a preview of the value.
     let secret = FilterReject::PotentialSecret {
-        token: "sk-A…(48 chars)".to_string(),
+        offset: 17,
+        rule: SecretRule::ProviderPrefix,
     };
     let msg = secret.to_string();
-    assert!(msg.contains("sk-A"), "secret reject must name token: {msg}");
+    assert!(
+        msg.contains("offset 17") && msg.contains("provider_prefix"),
+        "secret reject must name offset and rule: {msg}"
+    );
     assert!(
         msg.contains("secret"),
         "secret reject must say 'secret': {msg}"
@@ -226,16 +231,17 @@ fn git_sha_like_is_not_secret() {
 #[test]
 fn secret_token_is_blocked() {
     // A real high-entropy, mixed-case+digit credential token must still
-    // be rejected, and the reject must name the (redacted) trigger.
+    // be rejected, and the reject must locate the trigger (#9748: by offset
+    // and rule, not by a preview).
     let cfg = FilterConfig::default();
     let content = "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the deploy webhook"; // pragma: allowlist secret
-    match cfg.apply(content, true) {
-        Err(FilterReject::PotentialSecret { token }) => {
-            assert!(token.contains("AbCd"), "should name token: {token}");
-            assert!(token.contains("chars"), "should redact tail: {token}");
-        }
-        other => panic!("expected PotentialSecret, got {other:?}"),
-    }
+    assert_eq!(
+        cfg.apply(content, true),
+        Err(FilterReject::PotentialSecret {
+            offset: "Use this token ".len(),
+            rule: SecretRule::MixedCaseAlnum,
+        })
+    );
 }
 
 #[test]
