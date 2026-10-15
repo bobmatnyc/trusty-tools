@@ -11,8 +11,9 @@
 //! (`PalaceRegistry::list_palaces`), reads each drawer table through
 //! [`with_store_copy`] (a private copy of `kg.redb`, never the live file), runs
 //! `check_secret` on each drawer's content in memory, and reports counts only.
-//! The `PotentialSecret { token }` preview is matched away at the call site
-//! and never stored, logged or printed.
+//! The `PotentialSecret` payload is matched away at the call site and never
+//! stored or printed. #9748: it is a byte offset and a rule label, no drawer
+//! text, and `check_secret` logs only those two fields.
 //!
 //! Daemon safety: the live store is only ever `std::fs::copy`-read. No redb
 //! open, lock, WAL or rename touches it, so a running daemon neither blocks the
@@ -176,8 +177,8 @@ pub struct PalaceSecretCounts {
 
 /// Count one refusal against its variant, dropping any payload unread.
 ///
-/// Why: the `PotentialSecret` preview is a partial secret; it must be
-/// discarded where it is produced.
+/// Why: the report is counts only, so a payload is discarded where it is
+/// produced (before #9748 the `PotentialSecret` payload was a partial secret).
 /// What: increments the matching counter. Every arm binds with `{ .. }`.
 /// Test: `counts_refusals_per_palace_and_variant`.
 fn tally_reject(counts: &mut RejectCounts, reject: FilterReject) {

@@ -33,7 +33,8 @@ use super::{
 /// reported or which rule they carry — a prefix, a length, an allowlist, a
 /// branch. The fingerprint test fails until the bump is made.
 /// Test: `secret_filter_version_pins_the_rule_inputs`.
-pub const SECRET_FILTER_VERSION: u32 = 1;
+// #9748: 2 admits GitHub Projects v2 node ids.
+pub const SECRET_FILTER_VERSION: u32 = 2;
 
 /// Which detector rule flagged a span. Only the label is ever reported; the
 /// rule carries no part of the secret.
@@ -165,7 +166,8 @@ fn is_jwt_shaped(tok: &str) -> bool {
 /// therefore a provider key, an AWS id, a base64 blob exactly when it carries
 /// one of those symbols, or else a mixed-case run. A JWT is a mixed-case run
 /// relabelled. Total over flagged tokens: there is no "unknown" rule.
-fn rule_of_flagged(tok: &str) -> SecretRule {
+/// #9748: also names the rule of [`super::check_secret`]'s refusal.
+pub(crate) fn rule_of_flagged(tok: &str) -> SecretRule {
     if carries_secret_prefix(&tok.to_ascii_lowercase()) {
         SecretRule::ProviderPrefix
     } else if is_aws_access_key_id(tok) {

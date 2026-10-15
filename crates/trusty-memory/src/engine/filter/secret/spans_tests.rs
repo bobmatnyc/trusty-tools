@@ -467,6 +467,7 @@ fn rule_inputs_fingerprint() -> u64 {
         format!("{SECRET_PREFIXES:?}"),
         format!("{AWS_KEY_ID_PREFIXES:?}"),
         format!("{PUBLIC_ID_PREFIXES:?} {PUBLIC_ID_TAIL_LEN}"),
+        format!("{GITHUB_PROJECT_NODE_IDS:?}"),
         format!("{SECRET_MIN_LEN} {GIT_SHA_MIN_LEN} {GIT_SHA_MAX_LEN}"),
         format!("{IDENTIFIER_DELIMITERS:?} {MIN_PHRASE_WORD_LEN} {SYMBOL_PATH_SEPARATOR:?}"),
         format!("{SYMBOL_SEGMENT_SHORT_LEN} {SYMBOL_SEGMENT_SHORT_WORD_LEN} {MAX_PATH_WORD_LEN}"),
@@ -483,7 +484,11 @@ fn rule_inputs_fingerprint() -> u64 {
 
 /// `(SECRET_FILTER_VERSION, fingerprint)` per released rule set, oldest first.
 /// Append a row when the version is bumped; never edit an old row.
-const PINNED_FINGERPRINTS: &[(u32, u64)] = &[(1, 0xa59c_686b_f67d_6f1b)];
+const PINNED_FINGERPRINTS: &[(u32, u64)] = &[
+    (1, 0xa59c_686b_f67d_6f1b),
+    // #9748: GitHub Projects v2 node-id shapes.
+    (2, 0x5cef_e4b6_e8ed_c676),
+];
 
 /// Why (#8623): a ledger keyed on `SECRET_FILTER_VERSION` is only as good as
 /// the discipline of bumping it. Any change to a prefix list, a length or a
