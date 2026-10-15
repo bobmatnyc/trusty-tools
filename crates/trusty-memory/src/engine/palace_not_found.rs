@@ -13,9 +13,8 @@
 //! `rpc_missing_palace_is_named_with_existing_palaces_and_no_path`,
 //! `absent_palace_is_named_with_existing_palaces_and_no_path_at_every_service_site`.
 
-use crate::engine::palace::PalaceId;
+use crate::engine::palace::{PalaceId, is_reserved_system_palace};
 use crate::engine::registry::PalaceRegistry;
-use crate::service::helpers::is_reserved_system_palace;
 use std::fmt;
 use std::path::Path;
 
