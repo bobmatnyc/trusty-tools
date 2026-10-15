@@ -203,13 +203,18 @@ bounded by `timeout`, and an unresolvable ref), a bash <4 (`/bin/bash` on
 macOS) compatibility guard, and a short live check of the `trusty-common`
 feature override against this repo's own graph.
 
-## Not wired yet: SemVer surface profiles (#9278)
+## SemVer surface profiles (#9278)
 
-Two scripts added by #9278 that no workflow runs until tm-dogfood wires them
-into `.github/workflows/semver-checks.yml`. Behaviour, table format and the
-pin step: [semver-gate.md, "Surface profiles"](semver-gate.md#surface-profiles-9278).
+Two scripts added by #9278. `.github/workflows/semver-checks.yml` runs both,
+as steps of its `semver-checks` job (`Public API / SemVer`, not a required
+context). Either also runs by hand. Behaviour, table format and the pin step:
+[semver-gate.md, "Surface profiles"](semver-gate.md#surface-profiles-9278).
 
 | Script | Who calls it | What it answers |
 |---|---|---|
-| `lib/semver_profile.sh` | sourced by `check_semver.sh` when `--profile <name>` is given; `bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault` | Compares one declared surface from `scripts/semver-surface-profiles.tsv` — for trusty-memory the `--no-default-features` engine build (ADR-0066). `informational` reports a computed break and exits 0; every fault (missing or unparsable table, missing row, no usable baseline, a tool error) exits 3. |
-| `check_semver_profile_selftest.sh` | `bash scripts/check_semver_profile_selftest.sh [--gate <path>]` | Drives the gate's profile arm with a stub `cargo`, stub `rustc` and stub index, so it runs no cargo. Covers the run results, the unchanged default path, and every fail-closed branch. |
+| `lib/semver_profile.sh` | sourced by `check_semver.sh` when `--profile <name>` is given. The workflow step `SemVer surface profile — trusty-memory engine-nodefault (informational)` runs `bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault` after Enforce, only when trusty-memory is under release | Compares one declared surface from `scripts/semver-surface-profiles.tsv` — for trusty-memory the `--no-default-features` engine build (ADR-0066). `informational` reports a computed break and exits 0; every fault (missing or unparsable table, missing row, no usable baseline, a tool error) exits 3. The step turns `result=break` into a warning annotation and stays green; a nonzero exit or no parsable `result=` fails it. |
+| `check_semver_profile_selftest.sh` | the workflow step `Surface-profile selftest (an informational profile must still fail closed)`, on a release or a change to the gate's machinery; by hand, `bash scripts/check_semver_profile_selftest.sh [--gate <path>]` | Drives the gate's profile arm with a stub `cargo`, stub `rustc` and stub index, so it runs no cargo. Covers the run results, the unchanged default path, and every fail-closed branch. |
+
+`scripts/check-ci-helpers-selftest.sh` pins both steps' placement and
+conditions, and runs the live step's `run:` body against a stub gate to prove
+each arm's exit status.

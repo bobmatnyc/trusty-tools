@@ -26,7 +26,7 @@
 | `scripts/preflight-publish.sh` CHECK 5 | immediately before `cargo publish` | Only on an infrastructure fault (comparison could not run) — never on a computed break (owner ruling 2026-09-26) |
 | `.github/workflows/semver-checks.yml` | on a `<crate>-v<version>` tag push | No — reports |
 | `bash scripts/check_semver.sh --crate <crate>` | on demand, any time | n/a |
-| `bash scripts/check_semver.sh --crate <crate> --profile <name>` | on demand; not wired into CI yet | n/a — see [Surface profiles](#surface-profiles-9278) |
+| `bash scripts/check_semver.sh --crate <crate> --profile <name>` | on demand; in `semver-checks.yml` for trusty-memory `engine-nodefault`, only when trusty-memory is under release | No — informational; see [Surface profiles](#surface-profiles-9278) |
 
 **Internal consistency is the bar — do not deliberate over external SemVer.**
 Keep the workspace self-consistent; what a third-party crates.io consumer
@@ -692,10 +692,36 @@ back to `auto` then.
 
 ### Where it runs
 
-Nothing runs the profile yet. `preflight-publish.sh` CHECK 5 and
-`.github/workflows/semver-checks.yml` call the gate without `--profile`, so
-their behaviour is unchanged. Wiring the profile and its self-test into the
-workflow is tm-dogfood's step (#9278 plan, section 3.2).
+`.github/workflows/semver-checks.yml` runs two profile steps in its
+`semver-checks` job (`Public API / SemVer`, not a required context):
+
+| Step | When | Result |
+|---|---|---|
+| `Surface-profile selftest (an informational profile must still fail closed)` | the selftests' trigger: a release, or a PR that changes the gate's machinery | `bash scripts/check_semver_profile_selftest.sh`; a failure fails the job |
+| `SemVer surface profile — trusty-memory engine-nodefault (informational)` | after Enforce, when trusty-memory is under release: a PR that bumps its version, its tag push, or a dispatch naming it | see below |
+
+The live step runs
+`bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault`
+and reads `result=` from the `semver-gate-profile:` line:
+
+| Gate outcome | Step |
+|---|---|
+| exit 0, `result=clean` | `::notice::`, green |
+| exit 0, `result=break` | `::warning::`, green — informational |
+| exit 1 (a `blocking` row found a break) | `::error::`, red |
+| any other nonzero exit (a fault, `NO VERDICT`) | `::error::`, red |
+| exit 0 with no `clean` or `break` result | `::error::`, exit 3, red |
+
+Every case writes the `semver-gate-profile:` line to the step summary. The
+step carries no `continue-on-error`: a fault is no verdict, not a pass. The
+`verdict` job's check name reports the Enforce run only. Ordinary PRs never run
+the live step, so its first run is the first trusty-memory release PR, unless a
+`workflow_dispatch` names trusty-memory earlier. CI never runs
+`check_semver_types.sh` on a real crate, so the cache ordering above does not
+apply there.
+
+`preflight-publish.sh` CHECK 5 calls the gate without `--profile`; its
+behaviour is unchanged.
 
 ## When it fires
 
@@ -951,7 +977,10 @@ rejected `--profile` as an unknown argument. Mutation runs that turned each
 fault branch into a pass each turned at least one case red; the registry
 re-raise is backed by the `release_type` guard, so only a mutant without both
 exits 0 (the unreachable-index case catches it). `--gate <path>`
-runs it against another copy of the gate.
+runs it against another copy of the gate. `semver-checks.yml` runs it as the
+`Surface-profile selftest` step (Surface profiles, "Where it runs"), and
+`scripts/check-ci-helpers-selftest.sh` pins that step and the live profile
+step's exit status for each result.
 
 The other three predate profiles. `scripts/check_semver_types_selftest.sh` covers the type differ: the
 seven substitutions `cargo-semver-checks` misses are each asserted by name
