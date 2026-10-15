@@ -24,8 +24,10 @@ pub mod format_v1_fixture;
 pub mod hnsw_store;
 pub mod kg;
 pub mod kg_redb;
+// See #9278: storage layout, public only for an integration test.
+#[doc(hidden)]
 pub mod kg_store;
-pub mod kg_writer;
+pub(crate) mod kg_writer;
 pub mod l1_cache;
 // #9659: the observer open — a palace read through a copy, never the live file.
 mod observer_open;

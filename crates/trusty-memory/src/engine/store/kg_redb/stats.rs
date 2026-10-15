@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// it, this module and [`super::copy_swap`] prune on it). A shared constant is
 /// what keeps the prune predicate and the measurement that justifies it from
 /// diverging by one byte.
-pub const HISTORY_KEY_PREFIX: &[u8] = b"hist:";
+pub(crate) const HISTORY_KEY_PREFIX: &[u8] = b"hist:";
 
 /// Predicate whose active object marks a drawer as superseded by a canonical
 /// one (`share::supersede`).
@@ -53,17 +53,17 @@ const MS_PER_DAY: i64 = 86_400_000;
 /// Test: `stats_counts_match_a_hand_built_palace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct KgTableStats {
-    pub name: String,
-    pub rows: u64,
+pub(crate) struct KgTableStats {
+    pub(crate) name: String,
+    pub(crate) rows: u64,
     /// Bytes of keys and values actually stored, excluding index overhead.
-    pub stored_bytes: u64,
+    pub(crate) stored_bytes: u64,
     /// Bytes of b-tree branch keys and other per-table metadata.
-    pub metadata_bytes: u64,
+    pub(crate) metadata_bytes: u64,
     /// Bytes lost to fragmentation inside this table's pages.
-    pub fragmented_bytes: u64,
+    pub(crate) fragmented_bytes: u64,
     /// Leaf + branch pages the table occupies.
-    pub pages: u64,
+    pub(crate) pages: u64,
 }
 
 impl KgTableStats {
@@ -73,7 +73,7 @@ impl KgTableStats {
     /// while the table's rows survive. Excludes fragmentation, which is exactly
     /// what the rewrite removes.
     /// Test: `stats_counts_match_a_hand_built_palace`.
-    pub fn live_bytes(&self) -> u64 {
+    pub(crate) fn live_bytes(&self) -> u64 {
         self.stored_bytes.saturating_add(self.metadata_bytes)
     }
 }
@@ -92,40 +92,40 @@ impl KgTableStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KgRedbStats {
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
     /// `metadata(path).len()` — the number #6652 opened with.
-    pub file_bytes: u64,
+    pub(crate) file_bytes: u64,
     /// `true` when a writer held the live file and the numbers came from a
     /// process-local copy taken at that moment.
-    pub from_snapshot: bool,
+    pub(crate) from_snapshot: bool,
     /// Every table the file actually holds, in `list_tables` order.
-    pub tables: Vec<KgTableStats>,
+    pub(crate) tables: Vec<KgTableStats>,
     /// Rows under a primary `(subject, predicate, object)` key with no
     /// `valid_to` — the triples every live query can see.
-    pub triples_active: u64,
+    pub(crate) triples_active: u64,
     /// Rows under a primary key that already carry a `valid_to`. The import
     /// path can write these; ordinary asserts cannot.
-    pub triples_closed_in_place: u64,
+    pub(crate) triples_closed_in_place: u64,
     /// `hist:`-prefixed rows — one per retraction or functional-predicate
     /// overwrite, ever. Read only by `dump_all_triples` and the export paths
     /// built on it.
-    pub triples_history: u64,
+    pub(crate) triples_history: u64,
     /// History rows closed longer ago than [`Self::history_cutoff_days`].
-    pub triples_history_stale: u64,
+    pub(crate) triples_history_stale: u64,
     /// Stored bytes those stale rows occupy (exact key + value byte sum).
-    pub triples_history_stale_bytes: u64,
+    pub(crate) triples_history_stale_bytes: u64,
     /// The cutoff the two `stale` fields were measured against.
-    pub history_cutoff_days: i64,
+    pub(crate) history_cutoff_days: i64,
     /// Active `superseded_by` triples — drawers a semantic-consolidation run
     /// folded into a canonical drawer.
-    pub superseded_drawers: u64,
+    pub(crate) superseded_drawers: u64,
     /// The `triples_by_predicate` index, when the file still carries it.
     /// `None` on a palace created after #6652, and on one whose compaction has
     /// run — the rewrite reclaims it by not copying it.
-    pub dead_predicate_index: Option<KgTableStats>,
+    pub(crate) dead_predicate_index: Option<KgTableStats>,
     /// Bytes a compaction would reclaim: file slack, plus the dead index, plus
     /// the over-age history rows. An estimate, deliberately conservative.
-    pub reclaimable_bytes: u64,
+    pub(crate) reclaimable_bytes: u64,
 }
 
 impl KgRedbStats {
@@ -144,7 +144,7 @@ impl KgRedbStats {
     /// frees.
     /// Test: `stats_counts_match_a_hand_built_palace`,
     /// `measure_writes_nothing_to_the_live_file`.
-    pub fn measure(path: &Path, history_cutoff_days: i64) -> Result<Self> {
+    pub(crate) fn measure(path: &Path, history_cutoff_days: i64) -> Result<Self> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         Self::measure_at(path, history_cutoff_days, now_ms)
     }
@@ -152,7 +152,7 @@ impl KgRedbStats {
     /// [`Self::measure`] with the clock injected, so age tests are not flaky.
     ///
     /// Test: `stats_history_split_tracks_the_cutoff`.
-    pub fn measure_at(path: &Path, history_cutoff_days: i64, now_ms: i64) -> Result<Self> {
+    pub(crate) fn measure_at(path: &Path, history_cutoff_days: i64, now_ms: i64) -> Result<Self> {
         let file_bytes = std::fs::metadata(path)
             .with_context(|| format!("stat {}", path.display()))?
             .len();
@@ -222,7 +222,8 @@ impl KgRedbStats {
     /// Row count for one table by name, or `0` when the file has no such table.
     ///
     /// Test: `stats_counts_match_a_hand_built_palace`.
-    pub fn rows(&self, table: &str) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn rows(&self, table: &str) -> u64 {
         self.tables
             .iter()
             .find(|t| t.name == table)
@@ -312,7 +313,7 @@ fn scan_triples(rtx: &redb::ReadTransaction, cutoff_ms: i64) -> Result<TripleSca
 /// anything the prune must not touch.
 /// Test: `history_close_ms_requires_both_the_prefix_and_a_valid_to`,
 /// `prune_never_touches_an_active_row_however_old`.
-pub fn history_close_ms(key: &[u8], value: &TripleValue) -> Option<i64> {
+pub(crate) fn history_close_ms(key: &[u8], value: &TripleValue) -> Option<i64> {
     if !key.starts_with(HISTORY_KEY_PREFIX) {
         return None;
     }
@@ -326,6 +327,6 @@ pub fn history_close_ms(key: &[u8], value: &TripleValue) -> Option<i64> {
 /// real run does not free.
 /// What: `now_ms - days * 86_400_000`, saturating.
 /// Test: `stats_history_split_tracks_the_cutoff`.
-pub fn history_cutoff_ms(now_ms: i64, days: i64) -> i64 {
+pub(crate) fn history_cutoff_ms(now_ms: i64, days: i64) -> i64 {
     now_ms.saturating_sub(days.saturating_mul(MS_PER_DAY))
 }

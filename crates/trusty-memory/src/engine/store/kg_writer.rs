@@ -378,6 +378,7 @@ impl KgWriter {
     /// the store keeps that path working.
     /// What: Equivalent to `self.store().assert(&triple)`.
     /// Test: Indirect — every synchronous existing test.
+    #[cfg(test)]
     pub fn assert_sync(&self, triple: &Triple) -> Result<()> {
         self.store.assert(triple)
     }
@@ -385,11 +386,6 @@ impl KgWriter {
     /// Synchronous drawer upsert; see `assert_sync`.
     pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> Result<()> {
         self.store.upsert_drawer(drawer)
-    }
-
-    /// Synchronous drawer delete; see `assert_sync`.
-    pub fn delete_drawer_sync(&self, id: Uuid) -> Result<()> {
-        self.store.delete_drawer(id)
     }
 }
 

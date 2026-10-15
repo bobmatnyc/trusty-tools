@@ -142,7 +142,7 @@ impl KnowledgeGraph {
     /// runtime (read-only / snapshot palaces and sync test contexts get a
     /// `bypass` handle).
     /// Test: `open_creates_schema`.
-    pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
+    pub(crate) fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         let redb_path = redb_path_for(path);
         let store = KgStoreRedb::open_with_intent(&redb_path, intent)
             .with_context(|| format!("open KG redb at {}", redb_path.display()))?;
@@ -192,7 +192,8 @@ impl KnowledgeGraph {
     /// What: reports whether [`Self::adj_desynced`] has been set. Sticky for
     /// the life of the handle and shared by every clone of it.
     /// Test: `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
-    pub fn adjacency_desynced(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn adjacency_desynced(&self) -> bool {
         self.adj_desynced.get().is_some()
     }
 

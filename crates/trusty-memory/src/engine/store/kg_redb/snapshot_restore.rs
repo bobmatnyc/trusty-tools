@@ -38,6 +38,7 @@ use std::path::Path;
 /// `restore_refuses_a_non_empty_target_and_leaves_it_unchanged`,
 /// `restore_with_a_checksum_mismatch_writes_nothing`,
 /// `restore_refuses_a_newer_palace_format`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub fn restore_palace_snapshot(snapshot_dir: &Path, target: &Path) -> Result<SnapshotManifest> {
     restore_with(snapshot_dir, target, no_fault)
 }

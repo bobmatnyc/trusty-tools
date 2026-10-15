@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Test: `expand_neighbors_in_returns_incoming_only`,
 /// `expand_neighbors_out_returns_outgoing_only`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub enum ExpandDirection {
     /// Follow only edges whose object is the current node.
     In,
@@ -96,7 +97,8 @@ impl KnowledgeGraph {
     /// Test: `top_degree_subgraph_ranks_by_degree`,
     /// `top_degree_subgraph_returns_only_induced_edges`,
     /// `top_degree_subgraph_zero_limit_is_empty`.
-    pub fn top_degree_subgraph(&self, limit: usize) -> Result<(Vec<SeedNode>, Vec<Triple>)> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn top_degree_subgraph(&self, limit: usize) -> Result<(Vec<SeedNode>, Vec<Triple>)> {
         if limit == 0 {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -170,7 +172,8 @@ impl KnowledgeGraph {
     /// `expand_neighbors_both_returns_union`,
     /// `expand_neighbors_respects_max_hops`,
     /// `expand_neighbors_unknown_entity_is_empty`.
-    pub fn expand_neighbors(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn expand_neighbors(
         &self,
         entity: &str,
         direction: ExpandDirection,

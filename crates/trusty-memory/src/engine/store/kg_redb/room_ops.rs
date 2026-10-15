@@ -39,7 +39,7 @@ impl KgStoreRedb {
     /// error, so a corrupt index degrades to "unregistered" instead of making
     /// the palace unusable.
     /// Test: `room_key_lookup_returns_registered_id`.
-    pub fn lookup_room_id(&self, key: &str) -> Result<Option<Uuid>> {
+    pub(crate) fn lookup_room_id(&self, key: &str) -> Result<Option<Uuid>> {
         let rtx = self.db().begin_read().context("begin lookup_room_id txn")?;
         let table = rtx.open_table(ROOM_KEYS).context("open room_keys table")?;
         let Some(v) = table.get(key).context("read room_keys row")? else {
@@ -63,7 +63,7 @@ impl KgStoreRedb {
     /// inserts — that check is what preserves a human rename.
     /// What: point read of `ROOMS`, postcard-decoded.
     /// Test: `room_insert_is_insert_only`.
-    pub fn get_room(&self, id: Uuid) -> Result<Option<RoomRecord>> {
+    pub(crate) fn get_room(&self, id: Uuid) -> Result<Option<RoomRecord>> {
         let rtx = self.db().begin_read().context("begin get_room txn")?;
         let table = rtx.open_table(ROOMS).context("open rooms table")?;
         let Some(v) = table
@@ -93,7 +93,12 @@ impl KgStoreRedb {
     /// The backfill visits ids in sorted order so which one that is stays
     /// deterministic.
     /// Test: `room_insert_is_insert_only`, `room_key_collision_keeps_both_rows`.
-    pub fn insert_room_if_absent(&self, id: Uuid, key: &str, record: &RoomRecord) -> Result<bool> {
+    pub(crate) fn insert_room_if_absent(
+        &self,
+        id: Uuid,
+        key: &str,
+        record: &RoomRecord,
+    ) -> Result<bool> {
         self.check_writable()?;
         let value = encode_value(record).context("encode RoomRecord")?;
         // #6652: the swap-exclusion guard must outlive the txn.
@@ -158,7 +163,8 @@ impl KgStoreRedb {
     /// Backfill idempotency does NOT depend on it (see `room_ops` module doc).
     /// What: point read of the nil-uuid `ROOMS` row.
     /// Test: `backfill_stamps_schema_version_and_skips_marker_row`.
-    pub fn room_schema_version(&self) -> Result<Option<u32>> {
+    #[cfg(test)]
+    pub(crate) fn room_schema_version(&self) -> Result<Option<u32>> {
         let rtx = self.db().begin_read().context("begin schema marker txn")?;
         let table = rtx.open_table(ROOMS).context("open rooms table")?;
         let Some(v) = table
@@ -178,7 +184,7 @@ impl KgStoreRedb {
     /// self-describing. Idempotent — writing the same version twice is a
     /// no-op in effect.
     /// Test: `backfill_stamps_schema_version_and_skips_marker_row`.
-    pub fn set_room_schema_version(&self) -> Result<()> {
+    pub(crate) fn set_room_schema_version(&self) -> Result<()> {
         self.check_writable()?;
         let value = encode_value(&RoomSchemaMarker {
             schema_version: ROOM_SCHEMA_VERSION,
@@ -217,7 +223,7 @@ impl KgStoreRedb {
     /// Test: `rename_changes_no_drawer_rows`,
     /// `rename_rejects_a_key_owned_by_another_room`,
     /// `backfill_rename_survives_second_run`.
-    pub fn rename_room(
+    pub(crate) fn rename_room(
         &self,
         id: Uuid,
         old_key: &str,

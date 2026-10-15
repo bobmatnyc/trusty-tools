@@ -38,10 +38,10 @@ pub(crate) type UndirectedSnapshot = (Vec<String>, Vec<(usize, usize)>);
 #[derive(Debug, Clone)]
 pub struct KgEdge {
     pub predicate: String,
-    pub confidence: f32,
-    pub provenance: Option<String>,
-    pub valid_from: DateTime<Utc>,
-    pub valid_to: Option<DateTime<Utc>>,
+    pub(crate) confidence: f32,
+    pub(crate) provenance: Option<String>,
+    pub(crate) valid_from: DateTime<Utc>,
+    pub(crate) valid_to: Option<DateTime<Utc>>,
 }
 
 /// Storage committed a KG write that the in-memory adjacency could not record.

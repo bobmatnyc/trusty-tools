@@ -42,10 +42,10 @@ use super::store::KgStoreRedb;
 
 /// Suffix for the in-progress rewrite. Never renamed FROM the live path, only
 /// TO it, so the live file is untouched until one atomic syscall.
-pub const COMPACTING_SUFFIX: &str = ".compacting";
+pub(crate) const COMPACTING_SUFFIX: &str = ".compacting";
 
 /// Suffix for the pre-compaction backup kept until the next successful run.
-pub const BACKUP_SUFFIX: &str = ".pre-compact.bak";
+pub(crate) const BACKUP_SUFFIX: &str = ".pre-compact.bak";
 
 /// Named points a test can fail the compaction at.
 ///
@@ -76,7 +76,7 @@ pub type CompactFaultHook = Arc<dyn Fn(CompactStep) -> Result<()> + Send + Sync>
 /// What the caller wants pruned during the rewrite.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompactPlan {
+pub(crate) struct CompactPlan {
     /// Drop `hist:` rows closed before this epoch-millisecond instant. `None`
     /// keeps every history row — the rewrite is then pure space reclaim.
     pub history_cutoff_ms: Option<i64>,
@@ -96,19 +96,12 @@ impl Default for CompactPlan {
 /// What one completed compaction did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompactOutcome {
+pub(crate) struct CompactOutcome {
     pub bytes_before: u64,
     pub bytes_after: u64,
     pub rows_copied: u64,
     pub history_rows_pruned: u64,
     pub backup: Option<PathBuf>,
-}
-
-impl CompactOutcome {
-    /// Bytes the rewrite actually returned to the filesystem.
-    pub fn bytes_reclaimed(&self) -> u64 {
-        self.bytes_before.saturating_sub(self.bytes_after)
-    }
 }
 
 /// Per-table `(rows, stored_bytes, metadata_bytes)`, the source fingerprint.
@@ -135,7 +128,7 @@ type Fingerprint = Vec<(String, u64, u64, u64)>;
 /// it.
 /// Test: `a_crash_before_the_rename_leaves_the_original_untouched`.
 #[derive(Debug)]
-pub struct PreparedCompaction {
+pub(crate) struct PreparedCompaction {
     live_path: PathBuf,
     tmp_path: PathBuf,
     /// `None` only after a successful commit has taken the handle.
@@ -173,7 +166,7 @@ impl Drop for PreparedCompaction {
 /// Test: `compaction_shrinks_the_file_and_keeps_live_rows`,
 /// `a_backup_write_failure_aborts_before_the_copy_starts`,
 /// `unknown_table_aborts_the_compaction`.
-pub fn prepare(
+pub(crate) fn prepare(
     store: &KgStoreRedb,
     plan: CompactPlan,
     hook: Option<&CompactFaultHook>,
@@ -340,15 +333,6 @@ impl PreparedCompaction {
             history_rows_pruned: self.counts.history_rows_pruned,
             backup: self.backup.take(),
         })
-    }
-
-    /// Rows the rewrite would keep and history rows it would drop.
-    ///
-    /// Why: a caller that prepared and then decided not to swap (a `--dry-run`
-    /// that still wanted real numbers) needs the counts without the rename.
-    /// Test: `dry_run_prepares_nothing_and_writes_no_bytes`.
-    pub fn counts(&self) -> (u64, u64) {
-        (self.counts.rows_copied, self.counts.history_rows_pruned)
     }
 }
 

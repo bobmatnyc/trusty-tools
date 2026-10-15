@@ -41,22 +41,20 @@ mod types;
 mod wing_ops;
 mod write_ops;
 
-pub use copy_swap::{
-    CompactFaultHook, CompactOutcome, CompactPlan, CompactStep, PreparedCompaction,
+// See #9278: only the items with a consumer outside the library stay public.
+#[cfg(feature = "server")]
+pub(crate) use snapshot::{
+    PalaceSnapshot, SnapshotManifest, check_backup_name, restore_palace_snapshot,
 };
-pub use drawer_authority::KG_SCHEMA_DRAWERS_AUTHORITATIVE;
-pub use snapshot::{
-    PalaceSnapshot, SnapshotError, SnapshotFile, SnapshotManifest, check_backup_name,
-    restore_palace_snapshot,
-};
-pub use stats::{KgRedbStats, KgTableStats};
+#[cfg(feature = "server")]
+pub(crate) use stats::KgRedbStats;
 #[cfg(test)]
 pub(crate) use store::AFTER_PRE_OPEN;
 pub use store::KgStoreRedb;
 pub use types::{BatchOpResult, BatchWriteOp, READ_ONLY_ERROR_MSG};
 
-// Re-export the core domain types so tests (via `use super::*`) and
-// downstream callers can access them without reaching through multiple
-// module paths.
-pub use crate::engine::palace::Drawer;
-pub use crate::engine::store::kg::Triple;
+// The core domain types, for the tests that glob-import this module.
+#[cfg(test)]
+use crate::engine::palace::Drawer;
+#[cfg(test)]
+use crate::engine::store::kg::Triple;

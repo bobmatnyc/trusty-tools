@@ -33,6 +33,8 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod supersession_tests;
 
-pub use explore::{ExpandDirection, SeedNode};
+// See #9278: only the items with a consumer outside the library stay public.
+#[cfg(feature = "server")]
+pub(crate) use explore::{ExpandDirection, SeedNode};
 pub use graph::KnowledgeGraph;
 pub use types::{AdjacencyDesync, KgEdge, Triple};
