@@ -67,8 +67,9 @@ LANE	features	trusty-common/migrations,trusty-common/monitor-tui,trusty-common/p
 LANE	features	trusty-common/sld,trusty-common/stdio-mcp-client,trusty-common/symgraph,trusty-common/symgraph-parser,trusty-common/tickets,trusty-common/uds
 LANE	features	trusty-common/uds-supervisor,trusty-common/update-check,trusty-common/webhook-hmac,trusty-common/webhook-relay
 LANE	features	trusty-common/content-resolver,trusty-common/integrity
-# #9274: gates `memory_core::store::format_v0_fixture` (a cfg site, so not NO-CFG).
-LANE	features	trusty-common/memory-core-test-support
+# #9271: gates `log_buffer::capture_logs`, `atomic_file::test_support` and
+# `credentials::env_guard` (cfg sites, so not NO-CFG).
+LANE	features	trusty-common/test-support
 # #8616: `load-dynamic` joined this row once `ort_probe.rs` (mod-private,
 # `cfg(any(feature = "load-dynamic", feature = "cuda", test))`) gated a cfg
 # site on it, which rotted the prior NO-CFG row. `cargo doc` never runs the
@@ -81,7 +82,10 @@ LANE	features	trusty-common/memory-core-test-support
 LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server
-LANE	features	trusty-mpm/bedrock,trusty-mpm/channels,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
+# #9271: the engine's test seams (`engine::retrieval` mock embedder, the
+# `engine::store` format fixtures), formerly trusty-common's.
+LANE	features	trusty-memory/embedder-test-support,trusty-memory/memory-core-test-support
+LANE	features	trusty-mpm/bedrock,trusty-mpm/channels,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/memory-test-support,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
 LANE	features	trusty-secrets/ancestry,trusty-secrets/api,trusty-secrets/cli-backends,trusty-secrets/server,trusty-secrets/store,trusty-secrets/test-support

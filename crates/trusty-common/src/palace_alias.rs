@@ -15,7 +15,7 @@
 //! cross-process lock through [`crate::json_rmw`] and refuses a corrupt file
 //! (#9544); reads are unlocked and forgiving (a missing/empty/corrupt file is
 //! treated as "no aliases").
-//! Resolution is consulted by [`crate::memory_core::registry::PalaceRegistry`]
+//! Resolution is consulted by `trusty_memory::engine::registry::PalaceRegistry`
 //! ONLY when the requested palace has no metadata on disk, so aliases never
 //! shadow a real palace of the same name. This is DISTINCT from the term/KG
 //! entity aliases exposed by the `add_alias`/`discover_aliases` MCP tools — those
@@ -185,7 +185,7 @@ fn set_alias(
 
 /// Stateless namespace for palace-alias persistence.
 ///
-/// Why: like [`crate::memory_core::store::palace_store::PalaceStore`], alias
+/// Why: like `trusty_memory::engine::store::palace_store::PalaceStore`, alias
 /// persistence has no state of its own — every operation is a pure function over
 /// a registry directory. Grouping under a unit struct gives a stable import path.
 /// What: `load_aliases` / `register_alias` / `resolve_alias`, plus (#9544)
@@ -404,7 +404,7 @@ impl PalaceAliasStore {
 /// while the drawers under it came from `trusty-tools`, and `palace_list` returns
 /// only the latter. A second copy of the rule in trusty-memory would be the drift
 /// this workspace's common-entry-point rule forbids, so the rule lives here and
-/// [`crate::memory_core::registry`] now reads it from the same place.
+/// `trusty_memory::engine::registry` now reads it from the same place.
 /// What: returns `Some(target)` only when `<registry_dir>/<palace_id>/palace.json`
 /// is absent AND an alias maps `palace_id` to a `target` whose own `palace.json`
 /// is present. Returns `None` in every other case — the palace exists, no alias is
@@ -432,11 +432,10 @@ pub fn alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Option<St
 /// What: the same presence rule and redirect as [`alias_target_if_absent`].
 /// A missing alias file is `Ok(None)`, and a corrupt one reads as no aliases,
 /// as at open time. Any other read error on the alias file is returned.
-/// Test: `palace_create_fails_when_the_alias_file_is_unreadable`.
-pub(crate) fn try_alias_target_if_absent(
-    registry_dir: &Path,
-    palace_id: &str,
-) -> Result<Option<String>> {
+/// Test: the engine's create-palace tests, now in trusty-memory (#9271):
+/// `crates/trusty-memory/src/engine/registry_tests.rs`.
+// #9271: pub so the engine, now in trusty-memory, keeps calling it.
+pub fn try_alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Result<Option<String>> {
     let exists = |id: &str| {
         !matches!(
             registry_dir.join(id).join("palace.json").try_exists(),
@@ -472,7 +471,8 @@ pub fn canonical_palace_id(registry_dir: &Path, palace_id: &str) -> String {
 /// `anyhow::Error`, by `PalaceRegistry::create_palace`; callers downcast it to
 /// map the refusal to a conflict. Hand-rolled because `thiserror` is optional
 /// in this crate and this module is always compiled.
-/// Test: `palace_create_refuses_a_live_alias_name`.
+/// Test: the engine's create-palace tests, now in trusty-memory (#9271):
+/// `crates/trusty-memory/src/engine/registry_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveAliasError {
     /// The requested palace id, which is a live alias.

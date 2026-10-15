@@ -38,9 +38,9 @@ trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_on_fr
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_with_palace_is_ok	loads the default ONNX embedder; palace-backed round trip
 trusty-memory	recall_eval_holds_the_recorded_baseline	the real all-MiniLM-L6-v2 model; the #9281 recall release gate, temp palace, no daemon
 trusty-memory	recall_eval_goes_red_with_demotion_or_retirement_off	the real all-MiniLM-L6-v2 model; proves the #9281 gate goes red on a revert, temp palace, no daemon
-trusty-common	memory_core::retrieval::tests::cold_restart_recalls_beyond_l1_snapshot	the real ONNX embedder in its own process (the shared embedder is process-global)
-trusty-common	memory_core::retrieval::tests::recall_ranks_by_similarity_over_importance	the real ONNX embedder in its own process (the shared embedder is process-global)
-trusty-common	memory_core::retrieval::timeout_tests::tests::timeout_fires_on_embedder_init_with_tiny_limit	its own process: sets an env var and fills the process-global embedder cell; no model, no network
+trusty-memory	engine::retrieval::tests::cold_restart_recalls_beyond_l1_snapshot	the real ONNX embedder in its own process (the shared embedder is process-global)
+trusty-memory	engine::retrieval::tests::recall_ranks_by_similarity_over_importance	the real ONNX embedder in its own process (the shared embedder is process-global)
+trusty-memory	engine::retrieval::timeout_tests::tests::timeout_fires_on_embedder_init_with_tiny_limit	its own process: sets an env var and fills the process-global embedder cell; no model, no network
 trusty-console	webhook::tests::from_env_meters_every_targets_inbox	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
 trusty-console	webhook::tests::integration_from_env_delivery_survives_a_console_restart	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
 trusty-console	webhook::tests::integration_from_env_fails_closed_when_the_secret_is_unset	its own process: mutates TRUSTY_DATA_DIR_OVERRIDE / GITHUB_WEBHOOK_SECRET; loopback only
@@ -144,8 +144,8 @@ trusty-search	hnsw_compact_9450::compaction_cost_at_150k_384d_f16	CPU only: buil
 # It stays unselected: a timing probe run by hand with `--nocapture`, not a gate
 # test. 124 -> 125.
 #
-# #9766 added trusty-common
-# `memory_core::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured`
+# #9766 added trusty-common (trusty-memory since #9271)
+# `engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured`
 # (`chunk_backfill_measure_tests.rs`). It stays unselected: it is an ONNX
 # measurement run by hand, not a gate test. 125 -> 126.
 #

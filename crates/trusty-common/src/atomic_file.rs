@@ -55,8 +55,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `write_atomic_leaves_no_temp_file_behind`,
 /// `staging_file_is_owner_only_and_never_truncates`,
 /// `write_atomic_gives_a_new_target_the_default_create_mode`,
-/// `temp_sibling_is_unique_per_call_and_beside_the_target`,
-/// `two_concurrent_dream_stats_writers_never_publish_a_partial_file`.
+/// `temp_sibling_is_unique_per_call_and_beside_the_target`, and the dream-stats
+/// writer race in trusty-memory (#9271),
+/// `crates/trusty-memory/src/engine/dream/persisted_stats_tests.rs`.
 ///
 /// # Errors
 ///
@@ -413,8 +414,9 @@ mod tests {
 }
 
 /// Test-only fixtures shared with callers' error-arm tests.
-#[cfg(all(test, unix))]
-pub(crate) mod test_support {
+// #9271: `test-support` exposes it to the engine's tests in trusty-memory.
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod test_support {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -424,10 +426,11 @@ pub(crate) mod test_support {
     /// temp path no longer forces a failure; a read-only parent does, for any
     /// name. What: `None` (with a skip message) when this process can still
     /// create a file there — root ignores the mode bits.
-    pub(crate) struct ReadOnlyDir(PathBuf);
+    pub struct ReadOnlyDir(PathBuf);
 
     impl ReadOnlyDir {
-        pub(crate) fn new(dir: &Path) -> Option<Self> {
+        /// Sets `dir` to `0555`; `None` when this process can still write there.
+        pub fn new(dir: &Path) -> Option<Self> {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))
                 .expect("chmod 0555");
             let guard = Self(dir.to_path_buf());

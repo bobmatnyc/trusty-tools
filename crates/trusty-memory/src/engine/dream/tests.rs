@@ -1,0 +1,2626 @@
+use super::guard::CompactionGuard;
+use super::helpers::{MERGE_MAX_BYTES, char_safe_prefix, merged_drawer, now_secs};
+use super::*;
+use crate::engine::palace::{Drawer, Palace, PalaceId, RoomType};
+use crate::engine::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
+use crate::engine::store::vector::VectorStore;
+use chrono::{Duration as ChronoDuration, Utc};
+use serial_test::serial;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+use tempfile::tempdir;
+use trusty_common::credentials::env_guard::EnvVarGuard;
+use uuid::Uuid;
+
+/// Why: Lock the default config values so accidental changes are caught.
+#[test]
+fn dream_config_defaults() {
+    let cfg = DreamConfig::default();
+    assert_eq!(cfg.idle_secs, 300);
+    assert!((cfg.dedup_threshold - 0.95).abs() < 1e-6);
+    assert!((cfg.prune_importance - 0.05).abs() < 1e-6);
+    assert_eq!(cfg.max_cycle_ms, 60_000);
+    assert!(
+        cfg.content_prune_enabled,
+        "content-quality pruning is on by default"
+    );
+    assert_eq!(cfg.content_prune_min_words, 4);
+    assert!(
+        cfg.recall_benchmark_enabled,
+        "recall benchmark is enabled by default"
+    );
+    // #5188: both halves of "never reach a model nobody configured".
+    assert!(
+        !cfg.semantic.enabled,
+        "semantic consolidation must default OFF"
+    );
+    assert!(
+        !cfg.local_model_enabled,
+        "a local model server must not be permitted by default"
+    );
+}
+
+/// Why: `touch` must reset the idle clock; with `idle_secs=0` `is_idle`
+/// flips to `true` immediately, and `touch` must NOT make it stay false
+/// for >= idle_secs of zero. We use idle_secs=2 and assert the transition.
+#[test]
+fn dreamer_touch_resets_idle() {
+    let dreamer = Dreamer::new(DreamConfig {
+        idle_secs: 2,
+        ..DreamConfig::default()
+    });
+    // Just-constructed: last_activity = now, so idle_secs has not elapsed.
+    assert!(!dreamer.is_idle(), "fresh dreamer should not be idle yet");
+
+    // Force the idle clock far into the past.
+    dreamer
+        .last_activity
+        .store(now_secs().saturating_sub(10), Ordering::Relaxed);
+    assert!(dreamer.is_idle(), "should be idle after 10s simulated wait");
+
+    // Touch resets it.
+    dreamer.touch();
+    assert!(!dreamer.is_idle(), "touch should reset idle clock");
+}
+
+async fn open_test_handle(name: &str) -> Arc<PalaceHandle> {
+    // Pre-seed the process-wide embedder with MockEmbedder so no HuggingFace
+    // download is attempted. Safe to call multiple times — OnceCell semantics
+    // make subsequent calls a no-op. Issue #850.
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new(name),
+        name: name.into(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: dir.path().join(name),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let handle = PalaceHandle::open(&palace).unwrap();
+    // Keep the tempdir alive by leaking it for the duration of the test —
+    // tests are short and tempdir cleanup at process exit is fine.
+    std::mem::forget(dir);
+    handle
+}
+
+/// A [`DreamConfig`] whose semantic phase is switched off.
+///
+/// Why: `DreamConfig::default()` leaves `semantic.enabled = true` with an empty
+/// `openrouter_api_key`, and `build_consolidator_from_config` resolves that
+/// empty key against the PROCESS environment. On a machine with no
+/// `OPENROUTER_API_KEY` the Ollama branch rejects the default cloud model id,
+/// the phase disables itself, and these tests look deterministic. Let any test
+/// in this binary call `load_env_local_once` first — it folds the developer's
+/// real `.env.local` into the process environment — and the identical config
+/// instead builds an `OpenRouterInference` and issues live, billed LLM calls
+/// whose merge actions add and supersede drawers, changing the very counts
+/// these tests assert on. Every test below that exercises dedup, prune,
+/// compaction, stats or the recall benchmark reads no credential and wants no
+/// network, so it says so rather than inheriting whichever answer the machine
+/// happens to give.
+/// What: `DreamConfig::default()` with `semantic.enabled = false`, which makes
+/// `build_consolidator_from_config` return `Ok(None)` before it reads any
+/// environment variable.
+/// Test: `dedup_only_config_ignores_an_ambient_openrouter_key`.
+fn dedup_only_config() -> DreamConfig {
+    DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    }
+}
+
+/// Why: Two near-identical drawers should collapse to one after a dream
+/// cycle so the L1 cache isn't filled with duplicates.
+/// What: Insert two drawers with the same content (verbatim — embeddings
+/// will land identically), run a dream cycle with default config, and
+/// assert the count drops from 2 to 1.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_merges_duplicates() {
+    let handle = open_test_handle("dream-merge").await;
+    handle
+        .remember(
+            "Rust uses HNSW for vector search".into(),
+            RoomType::Backend,
+            vec!["rust".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+    handle
+        .remember(
+            "Rust uses HNSW for vector search".into(),
+            RoomType::Backend,
+            vec!["rust".into()],
+            0.6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.merged, 1, "expected exactly one merge");
+    assert_eq!(handle.drawers.read().len(), 1, "expected dedup to 1 drawer");
+}
+
+/// Why: Old, low-importance drawers must be pruned so storage doesn't
+/// grow without bound.
+/// What: Insert one drawer with importance=0.01 and back-date its
+/// `created_at` to 60 days ago (older than the 30-day prune floor); run
+/// dream_cycle and assert it's gone.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_prunes_low_importance() {
+    let handle = open_test_handle("dream-prune").await;
+    handle
+        .remember(
+            "very stale fact nobody cares about".into(),
+            RoomType::General,
+            vec![],
+            0.01,
+        )
+        .await
+        .unwrap();
+    // Back-date this drawer to satisfy the >30 days requirement.
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            d.created_at = Utc::now() - ChronoDuration::days(60);
+        }
+    }
+    assert_eq!(handle.drawers.read().len(), 1);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.pruned, 1, "expected exactly one prune");
+    assert!(
+        handle.drawers.read().is_empty(),
+        "low-importance aged drawer should be removed"
+    );
+}
+
+/// Why: Regression for issue #55. With the previous strict `<` condition
+/// and `prune_importance == DecayConfig::floor == 0.05`, a drawer whose
+/// `effective_importance` decayed to the floor was clamped at exactly
+/// `0.05`, making `eff < 0.05` unsatisfiable — nothing was ever pruned.
+/// The `<=` fix means a drawer at the floor (old, unimportant) is now
+/// correctly eligible for pruning.
+/// What: Insert one drawer with `importance == prune_importance == floor`,
+/// age it past 30 days so the decay floor clamps `eff`, run a cycle, and
+/// assert it gets pruned.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_prunes_at_floor_importance() {
+    let handle = open_test_handle("dream-prune-floor").await;
+    // Importance exactly at the prune threshold (and decay floor default).
+    handle
+        .remember(
+            "drawer that decays to the floor".into(),
+            RoomType::General,
+            vec![],
+            0.05,
+        )
+        .await
+        .unwrap();
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            // 60 days ago — well past the 30-day prune-age floor and
+            // enough decay time to push `eff` down to `floor`.
+            d.created_at = Utc::now() - ChronoDuration::days(60);
+        }
+    }
+    assert_eq!(handle.drawers.read().len(), 1);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.pruned, 1,
+        "drawer at floor importance + aged > 30d must be prunable (was unsatisfiable under strict `<`)"
+    );
+    assert!(handle.drawers.read().is_empty());
+}
+
+/// Why: The serve daemon must be able to terminate the dream loop on
+/// SIGTERM/Ctrl-C; verify the watch-channel shutdown path actually causes
+/// the spawned task to exit instead of looping forever.
+/// What: Spawn `start_with_shutdown` with `idle_secs=10` (so it would
+/// otherwise sleep), flip the shutdown flag, and assert the join handle
+/// completes within a short bounded timeout.
+/// Test: This test itself.
+#[tokio::test]
+async fn dreamer_shutdown_terminates_loop() {
+    let handle = open_test_handle("dream-shutdown").await;
+    // The unpinned dream loop resolves the handle from a registry each cycle.
+    let id = handle.id.clone();
+    let registry = crate::engine::PalaceRegistry::new();
+    registry.register_arc(handle);
+    let dreamer = Arc::new(Dreamer::new(DreamConfig {
+        idle_secs: 10,
+        ..dedup_only_config()
+    }));
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let join = dreamer
+        .clone()
+        .start_with_shutdown(registry, id, Duration::ZERO, rx);
+
+    // Yield once so the task is scheduled.
+    tokio::task::yield_now().await;
+    tx.send(true).expect("send shutdown signal");
+
+    // The task should exit promptly — bound the wait to keep the test fast.
+    let outcome = tokio::time::timeout(Duration::from_secs(2), join).await;
+    assert!(
+        outcome.is_ok(),
+        "dream loop did not exit within 2s of shutdown"
+    );
+    outcome.unwrap().expect("join handle clean exit");
+}
+
+/// Part 1 (unpin): a running dream loop must NOT hold an `Arc<PalaceHandle>`
+/// for the process lifetime — otherwise it defeats LRU / idle-to-disk
+/// eviction (the palace can never be freed while its dream loop lives).
+///
+/// Why: the original design captured `Arc<PalaceHandle>` in the spawned task,
+/// so `registry.remove` (or an idle-evict) could not actually drop the
+/// handle's heavy state. The fix resolves the handle from the registry each
+/// cycle instead.
+/// What: registers a handle, keeps a `Weak` to it, spawns the dream loop with
+/// a long idle interval (so it only sleeps — never resolves the handle during
+/// the test), removes the palace from the registry, and asserts the handle is
+/// fully dropped (`Weak::upgrade` is `None`). Under the old pinning bug the
+/// upgrade would still succeed.
+/// Test: this test itself.
+#[tokio::test]
+async fn dream_loop_does_not_pin_palace_handle() {
+    let handle = open_test_handle("dream-unpin").await;
+    let id = handle.id.clone();
+    let weak = Arc::downgrade(&handle);
+    let registry = crate::engine::PalaceRegistry::new();
+    registry.register_arc(handle); // registry now holds the ONLY strong ref
+
+    // Long idle interval: the loop's first action is a `sleep(3600s)`, so it
+    // never peeks the registry during this test and holds no handle Arc.
+    let dreamer = Arc::new(Dreamer::new(DreamConfig {
+        idle_secs: 3600,
+        ..dedup_only_config()
+    }));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let _join = dreamer.start_with_shutdown(registry.clone(), id.clone(), Duration::ZERO, rx);
+    // Let the task reach its sleep.
+    tokio::task::yield_now().await;
+
+    // Drop the registry's strong reference. If the loop had captured an Arc
+    // (the pinning bug), the handle would survive this.
+    registry.remove(&id);
+    tokio::task::yield_now().await;
+    assert!(
+        weak.upgrade().is_none(),
+        "dream loop must not pin the handle: after registry.remove it must be fully dropped"
+    );
+}
+
+/// Why: When drawer rows disappear without their matching vector being
+/// removed (partial write, schema migration, pre-fix bug), the HNSW index
+/// fills with orphans and the cold-start warning fires. The compact pass
+/// must clean these up so `index_vectors == drawer_records` again.
+/// What: Remember three drawers, then directly remove two from the drawer
+/// table (bypassing `forget`, so the vectors stay in the HNSW index),
+/// then run a dream cycle and assert exactly two vectors were compacted.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_compacts_orphaned_vectors() {
+    let handle = open_test_handle("dream-compact").await;
+    let id_keep = handle
+        .remember(
+            "alpha drawer about HNSW".into(),
+            RoomType::Backend,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+    let id_orphan_a = handle
+        .remember(
+            "beta drawer about something else".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let id_orphan_b = handle
+        .remember(
+            "gamma drawer about yet another topic".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(handle.drawers.read().len(), 3);
+    let before_idx = handle.vector_store.index_size();
+    let before_ids = handle.vector_store.all_ids().len();
+    assert_eq!(before_ids, 3, "key_map should track all three upserts");
+
+    // Manually orphan two: drop them from the drawer table (and the SQLite
+    // mirror) but leave their vectors in the HNSW index. This mirrors the
+    // pre-fix bug pattern that produced 720 index vectors against 129
+    // drawer rows.
+    {
+        let mut drawers = handle.drawers.write();
+        drawers.retain(|d| d.id == id_keep);
+    }
+    let _ = handle.kg.delete_drawer(id_orphan_a).await;
+    let _ = handle.kg.delete_drawer(id_orphan_b).await;
+
+    // Dedup threshold high enough that the surviving drawer's L3 hits
+    // don't trigger an accidental merge against the orphan vectors.
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999,
+        ..dedup_only_config()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.compacted, 2,
+        "expected exactly two orphan vectors removed; got stats={stats:?}"
+    );
+    let after_ids = handle.vector_store.all_ids().len();
+    assert_eq!(
+        after_ids, 1,
+        "key_map should only track the surviving drawer (before={before_ids}, before_idx={before_idx})"
+    );
+    // The surviving drawer's id must still be present.
+    assert!(
+        handle.vector_store.all_ids().contains(&id_keep),
+        "compaction must not remove the live drawer's vector"
+    );
+}
+
+/// Why: The admin dashboard reads `dream_stats.json` to surface the last
+/// run's outcome and a "last ran X ago" timestamp; the dream cycle must
+/// snapshot itself to that file after every run so the file is current.
+/// What: Run a dream cycle on a palace, then load the persisted snapshot
+/// from disk and assert the timestamp is recent + stats match.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_stats_persisted_after_cycle() {
+    let handle = open_test_handle("dream-persist").await;
+    // One harmless drawer so the cycle has something to scan.
+    handle
+        .remember(
+            "non-duplicate baseline drawer".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    let data_dir = handle.data_dir.clone().expect("data_dir set");
+    let loaded = PersistedDreamStats::load(&data_dir)
+        .unwrap()
+        .expect("dream_stats.json should exist after a cycle");
+
+    assert_eq!(
+        loaded.stats, stats,
+        "persisted stats must match cycle output"
+    );
+    let age = chrono::Utc::now().signed_duration_since(loaded.last_run_at);
+    assert!(
+        age.num_seconds().abs() < 5,
+        "last_run_at must be within a few seconds of now; got {age}"
+    );
+}
+
+/// Why: After a dream cycle, the closet index should map keywords from
+/// drawer content back to that drawer's id so L2 can use it as a cheap
+/// pre-filter.
+/// What: Insert a drawer with a distinctive keyword, run the cycle, and
+/// assert the closets map contains that keyword pointing to the drawer.
+/// Test: This test itself.
+#[tokio::test]
+async fn closet_refresh_builds_index() {
+    let handle = open_test_handle("dream-closets").await;
+    let id = handle
+        .remember(
+            "Quokkas are the happiest marsupials in Australia".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+    assert!(
+        stats.closets_updated > 0,
+        "closet index should be non-empty"
+    );
+
+    let closets = handle.closets.read();
+    let entry = closets.get("quokkas").expect("expected `quokkas` keyword");
+    assert!(
+        entry.contains(&id),
+        "closet entry must reference the source drawer"
+    );
+}
+
+/// Why: The operator dashboard depends on `is_compacting()` flipping to
+/// `true` while a dream cycle runs and back to `false` once it's done;
+/// otherwise the dreaming spinner would either never appear or never
+/// clear.
+/// What: Confirms the flag starts cleared, then runs a dream cycle and
+/// asserts the flag is cleared again after completion. (Catching the
+/// `true` window requires racy mid-cycle inspection; the drop-guard
+/// semantics are also covered by direct construction below.)
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_toggles_is_compacting() {
+    let handle = open_test_handle("dream-compacting-flag").await;
+    assert!(!handle.is_compacting(), "flag must start cleared");
+
+    // Direct guard exercise — the in-flight `true` window.
+    {
+        let _g = CompactionGuard::try_claim(handle.is_compacting.clone()).expect("free flag");
+        assert!(handle.is_compacting(), "guard must set the flag");
+        // #9172: the claim is exclusive while the first guard lives.
+        assert!(CompactionGuard::try_claim(handle.is_compacting.clone()).is_none());
+    }
+    assert!(!handle.is_compacting(), "guard must clear on drop");
+
+    // Full cycle still clears the flag on exit.
+    let dreamer = Dreamer::new(dedup_only_config());
+    let _stats = dreamer.dream_cycle(&handle).await.unwrap();
+    assert!(
+        !handle.is_compacting(),
+        "flag must be cleared after dream_cycle returns"
+    );
+}
+
+/// Why (#8246): trusty-memory learns that a cycle changed drawer text only
+/// through this hook, so it must fire for every cycle that ran and never for
+/// one that was skipped.
+/// What: a hooked dreamer runs one cycle, then one while the palace's
+/// compaction claim is held elsewhere. The hook saw the first cycle's palace
+/// and stats, and nothing for the skipped one. The failed-cycle case is
+/// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
+/// Test: This test itself.
+#[tokio::test]
+async fn the_after_cycle_hook_sees_every_cycle_that_ran() {
+    let handle = open_test_handle("dream-after-cycle").await;
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let dreamer = Dreamer::new(dedup_only_config()).with_after_cycle(Arc::new(
+        move |id: &PalaceId, stats: Option<&DreamStats>| {
+            sink.lock()
+                .push((id.clone(), stats.map(|s| s.drawers_after)))
+        },
+    ));
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        *seen.lock(),
+        vec![(handle.id.clone(), Some(stats.drawers_after))]
+    );
+
+    let _claim = CompactionGuard::try_claim(handle.is_compacting.clone()).expect("free flag");
+    dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        seen.lock().len(),
+        1,
+        "a skipped cycle does not call the hook"
+    );
+}
+
+/// Why: Drawers captured before the write-path blocklist landed (PR #221)
+/// still pollute existing palaces with `Tool use: Bash`-style noise. The
+/// dream cycle's content-prune pass must drop them retroactively so the
+/// palace self-heals on the next idle window.
+/// What: Insert a drawer whose content matches the blocklist prefix and a
+/// second sentence-length drawer that should survive, run a dream cycle,
+/// and assert only the noise drawer was content-pruned.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_content_prune_drops_blocklist_drawer() {
+    let handle = open_test_handle("dream-content-blocklist").await;
+    // `force=true` bypasses the write-path filter so we can plant a
+    // pre-blocklist-era noise drawer that the dream pass must clean up.
+    handle
+        .remember_with_options(
+            "Tool use: Bash".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+            crate::engine::retrieval::RememberOptions::forced(),
+        )
+        .await
+        .unwrap();
+    let keep_id = handle
+        .remember(
+            "Refactor the dream loop to add a content-quality prune pass.".into(),
+            RoomType::Backend,
+            vec!["dream".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.content_pruned, 1,
+        "expected exactly one blocklist-pruned drawer; got stats={stats:?}"
+    );
+    let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert_eq!(surviving, vec![keep_id], "noise drawer must be gone");
+}
+
+/// Why: Three-word one-liners (and shorter) carry no semantic value but
+/// burn L1 budget and recall slots; the content-prune pass must drop
+/// anything under `content_prune_min_words`.
+/// What: Insert one 2-word drawer and one comfortably long drawer, run
+/// the cycle, and assert only the short one was pruned.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_content_prune_drops_short_drawer() {
+    let handle = open_test_handle("dream-content-short").await;
+    // `force=true` bypasses the write-path token-count gate so we can
+    // plant a too-short drawer for the dream pass to clean up.
+    handle
+        .remember_with_options(
+            "hello world".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+            crate::engine::retrieval::RememberOptions::forced(),
+        )
+        .await
+        .unwrap();
+    let keep_id = handle
+        .remember(
+            "This drawer has more than four words and should survive.".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.content_pruned, 1,
+        "expected exactly one short drawer pruned; got stats={stats:?}"
+    );
+    let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert_eq!(surviving, vec![keep_id], "short drawer must be gone");
+}
+
+/// Why: The prune pass must not be over-eager — normal multi-sentence
+/// drawers should survive untouched even when the cycle runs with default
+/// config. Without this regression test a future tightening of the
+/// blocklist or min-word floor could silently delete useful memories.
+/// What: Insert a single multi-sentence drawer, run the cycle, and assert
+/// `content_pruned == 0` and the drawer is still present.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_content_prune_keeps_good_drawer() {
+    let handle = open_test_handle("dream-content-keep").await;
+    let keep_id = handle
+        .remember(
+            "Dreaming runs a content-quality prune pass before dedup. \
+             It enforces the same rule the write path uses."
+                .into(),
+            RoomType::Backend,
+            vec!["dream".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 1);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.content_pruned, 0,
+        "well-formed drawer must not be content-pruned; got stats={stats:?}"
+    );
+    let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert_eq!(surviving, vec![keep_id], "good drawer must survive");
+}
+
+// ─── Semantic consolidation integration tests ────────────────────────────
+
+/// Why: The dream cycle's semantic phase must add canonical drawers and
+/// preserve the originals when a MockInference returns a Merge action.
+/// What: Injects a MockInference that merges two drawers into one canonical
+/// summary; runs dream_cycle; asserts the canonical drawer is added and the
+/// originals are still present (additive-only).
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_with_mock() {
+    use crate::engine::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("dream-semantic-mock").await;
+
+    // Plant two drawers with distinct content (so NLP dedup doesn't remove one).
+    let id1 = handle
+        .remember(
+            "ts is the search tool used for code navigation".into(),
+            RoomType::Backend,
+            vec!["ts".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+    let id2 = handle
+        .remember(
+            "trusty-search provides hybrid BM25 and vector retrieval".into(),
+            RoomType::Backend,
+            vec!["trusty-search".into()],
+            0.6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // Configure the mock to merge both into one canonical summary.
+    let canonical_text = "trusty-search (alias: ts) provides hybrid BM25 + vector code search";
+    let actions = vec![ConsolidationAction::Merge {
+        canonical_content: canonical_text.to_string(),
+        superseded_ids: vec![id1, id2],
+    }];
+    let mock = std::sync::Arc::new(MockInference::new(actions));
+    let call_count = mock.call_count.clone();
+    let cfg = SemanticConsolidationConfig {
+        enabled: true,
+        max_batch_size: 8,
+        max_calls_per_cycle: 20,
+        ..Default::default()
+    };
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(mock, cfg));
+
+    let dreamer = Dreamer::with_consolidator(
+        DreamConfig {
+            // High dedup threshold so NLP pass doesn't remove the drawers.
+            dedup_threshold: 0.999,
+            semantic: SemanticConsolidationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DreamConfig::default()
+        },
+        consolidator,
+    );
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    // One canonical drawer added.
+    assert_eq!(
+        stats.semantically_consolidated, 1,
+        "expected one canonical drawer; got stats={stats:?}"
+    );
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "expected exactly one LLM call"
+    );
+    assert_eq!(stats.semantic_llm_calls, 1);
+
+    // Original drawers still present (additive-only).
+    let drawer_ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        drawer_ids.contains(&id1),
+        "original drawer 1 must be preserved"
+    );
+    assert!(
+        drawer_ids.contains(&id2),
+        "original drawer 2 must be preserved"
+    );
+
+    // Canonical drawer was added.
+    let has_canonical = handle
+        .drawers
+        .read()
+        .iter()
+        .any(|d| d.content() == canonical_text);
+    assert!(has_canonical, "canonical drawer must be present");
+}
+
+/// Why: spec-001 — `DrawerType::Task` drawers must never be fed to the
+/// semantic consolidator, so they can never be superseded by a canonical
+/// summary. This guards the snapshot filter in `semantic_consolidation_pass`.
+/// What: plants two Task drawers, injects a MockInference that WOULD merge any
+/// drawers it is handed, runs a dream cycle, and asserts the consolidator was
+/// never called (call_count == 0), no canonical drawer was created, and both
+/// Task drawers survive unchanged.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
+    use crate::engine::palace::DrawerType;
+    use crate::engine::retrieval::RememberOptions;
+    use crate::engine::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("dream-semantic-task-skip").await;
+
+    let task_opts = || RememberOptions {
+        force: true,
+        classify_as: Some(DrawerType::Task),
+        ..RememberOptions::default()
+    };
+    let id1 = handle
+        .remember_with_options(
+            "Goal: migrate the chat store to redb".into(),
+            RoomType::Planning,
+            vec![],
+            0.7,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    let id2 = handle
+        .remember_with_options(
+            "Milestone: ship the MCP chat-session tools".into(),
+            RoomType::Planning,
+            vec![],
+            0.6,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // A mock that would merge anything it is handed — it must never be called.
+    let actions = vec![ConsolidationAction::Merge {
+        canonical_content: "tasks should NOT be merged".to_string(),
+        superseded_ids: vec![id1, id2],
+    }];
+    let mock = std::sync::Arc::new(MockInference::new(actions));
+    let call_count = mock.call_count.clone();
+    let cfg = SemanticConsolidationConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(mock, cfg));
+
+    let dreamer = Dreamer::with_consolidator(
+        DreamConfig {
+            dedup_threshold: 0.999,
+            semantic: SemanticConsolidationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DreamConfig::default()
+        },
+        consolidator,
+    );
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.semantically_consolidated, 0,
+        "Task drawers must not be consolidated"
+    );
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "consolidator must never be called when only Task drawers exist"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&id1) && ids.contains(&id2),
+        "both tasks survive"
+    );
+    assert_eq!(handle.drawers.read().len(), 2, "no canonical drawer added");
+}
+
+/// Why: When no inference backend is configured, the semantic phase must
+/// silently skip without error and the dream cycle must complete normally
+/// with the same behavior as pre-#87.
+/// What: Run dream_cycle with default config (no env var, local_model_enabled=false);
+/// assert semantically_consolidated == 0 and the cycle succeeds.
+/// Test: This test itself.
+#[tokio::test]
+// Audit finding (same class as #3607/#3608): `OPENROUTER_API_KEY` is also
+// mutated by `credentials::{resolver,dotenv}::tests` under
+// `#[serial(dotenv_credential_env)]`. The shared `EnvVarGuard` (#3451,
+// `credentials::env_guard`) has no lock of its own, so join that same serial
+// group rather than relying on the (false) assumption that this is the only
+// mutator of the var.
+#[serial(dotenv_credential_env)]
+async fn dream_cycle_semantic_consolidation_no_inference() {
+    // Ensure no env key is set for this test.
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    let handle = open_test_handle("dream-semantic-no-inference").await;
+    handle
+        .remember(
+            "some memory that should not be semantically consolidated".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        local_model_enabled: false,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.semantically_consolidated, 0,
+        "no inference available → semantic phase must be no-op"
+    );
+    assert_eq!(
+        stats.semantic_llm_calls, 0,
+        "no LLM calls when inference unavailable"
+    );
+    // Palace must be intact.
+    assert_eq!(
+        handle.drawers.read().len(),
+        1,
+        "drawer must survive untouched"
+    );
+}
+
+/// Why (issue #2593): a cloud model id pointed at a local model server must
+/// be caught once and disable the phase for this `Dreamer`'s lifetime instead
+/// of being retried every cycle. #5188 changed how that config is spelled —
+/// the local backend is now requested by an `ollama/` prefix rather than
+/// inferred from a missing key — so the id under test is
+/// `ollama/anthropic/claude-haiku-4-5`: an explicit local request naming a
+/// model Ollama cannot serve.
+/// What: Runs `dream_cycle` twice with no injected consolidator.
+/// Asserts both cycles report zero semantic work,
+/// `Dreamer::is_semantic_consolidation_disabled()` is `true` after the first
+/// cycle, and it stays `true` (no reset) after the second — proving the
+/// second cycle short-circuited before rebuilding/retrying the backend.
+/// Test: This test itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    let handle = open_test_handle("dream-semantic-invalid-model").await;
+    handle
+        .remember(
+            "some memory that should not be semantically consolidated".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    // This test is ABOUT the model-validation path, so it must get past the
+    // #5188 gates: the phase enabled, the local backend permitted, and the
+    // model explicitly asking for that backend.
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/anthropic/claude-haiku-4-5".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+    assert!(!dreamer.is_semantic_consolidation_disabled());
+
+    let stats1 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        stats1.semantically_consolidated, 0,
+        "misconfigured model must not produce any consolidation output"
+    );
+    assert_eq!(stats1.semantic_llm_calls, 0);
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "invalid model/provider combination must disable the phase after one cycle"
+    );
+
+    let stats2 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        stats2.semantically_consolidated, 0,
+        "second cycle must remain a no-op (no retry of the known-bad config)"
+    );
+    assert_eq!(stats2.semantic_llm_calls, 0);
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "disabled state must persist across cycles"
+    );
+
+    // Palace must be intact — no partial writes from the doomed build attempt.
+    assert_eq!(
+        handle.drawers.read().len(),
+        1,
+        "drawer must survive untouched"
+    );
+}
+
+/// Why (issue #2593): a correctly-configured local model must pass validation
+/// and NOT trip the disable flag — only the cloud-vendor-prefix mismatch
+/// should. #5188 adds the `ollama/` prefix as the way to request that backend.
+/// What: Sets `semantic.model = "ollama/llama3.1"` with the local backend
+/// permitted, and points `OLLAMA_HOST` at a closed loopback port so the run
+/// gets an immediate connection refusal instead of reaching whatever the
+/// developer has listening on 11434. `SemanticConsolidator` handles the failed
+/// call gracefully; the assertion here is that
+/// `is_semantic_consolidation_disabled()` stays `false`, proving the model
+/// passed validation and the normal build-and-attempt path ran.
+/// Test: This test itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let _host = EnvVarGuard::set(
+        crate::engine::semantic_consolidation::LOCAL_HOST_ENV,
+        &format!("http://127.0.0.1:{}", closed_loopback_port()),
+    );
+
+    let handle = open_test_handle("dream-semantic-valid-local-model").await;
+    handle
+        .remember(
+            "some memory that should not be semantically consolidated".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/llama3.1".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+
+    let _stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert!(
+        !dreamer.is_semantic_consolidation_disabled(),
+        "a valid local model id must pass validation and not disable the phase"
+    );
+}
+
+/// A loopback TCP port with nothing listening on it.
+///
+/// Why (#5188): tests that must NOT reach a live Ollama need an address that
+/// refuses instantly rather than one that hangs until a connect timeout.
+/// Binding then dropping a listener yields a port the OS just confirmed free.
+/// What: `0` asks the OS to choose; the listener is dropped before returning,
+/// so a later connect gets ECONNREFUSED.
+/// Test: used by `dream_cycle_semantic_consolidation_valid_local_model_not_disabled`.
+fn closed_loopback_port() -> u16 {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let port = listener
+        .local_addr()
+        .expect("ephemeral listener has an address")
+        .port();
+    drop(listener);
+    port
+}
+
+/// Why (#5188): the reported repro, asserted at the socket. A daemon with the
+/// semantic phase enabled and NO usable provider must open zero connections to
+/// a local model server, and must park after saying so once — it used to build
+/// an Ollama client against `http://localhost:11434` and drive a 45 GB model
+/// into a crash loop that re-fired every ~2 minutes.
+///
+/// What: binds a listener, points `OLLAMA_HOST` at it, and runs two dream
+/// cycles with `semantic.enabled = true`, no OpenRouter key anywhere, the local
+/// backend permitted, and `model = "llama3.2"` — a bare Ollama tag, which is
+/// what an operator's `[local_model] model` used to become. Asserts the phase
+/// disabled itself after the FIRST cycle — so the single warn is logged once
+/// and the second cycle short-circuits — and that the listener's accept queue
+/// is empty, which is only true if no connection was ever completed.
+///
+/// The bare tag matters: `"anthropic/claude-haiku-4-5"` would be rejected by
+/// `validate_ollama_model` (#2593) before any client was built, so the test
+/// would pass against pre-fix code for the wrong reason. `"llama3.2"` passes
+/// that validator, so only the #5188 change stops it.
+///
+/// Pre-fix this failed on the disable assertion: an unprefixed model with no
+/// key built an `OllamaInference` against the hardcoded `localhost:11434` and
+/// the phase stayed enabled.
+/// Test: This test itself.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn dream_semantic_no_provider_parks_without_local_fallback() {
+    trusty_common::credentials::load_env_local_once();
+    let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    // A real listener, so a fallback would COMPLETE its connect and be counted
+    // rather than failing at the TCP layer and looking like the fix working.
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let addr = listener.local_addr().expect("listener has an address");
+    listener
+        .set_nonblocking(true)
+        .expect("listener can be polled without blocking");
+    let _host = EnvVarGuard::set(
+        crate::engine::semantic_consolidation::LOCAL_HOST_ENV,
+        &format!("http://{addr}"),
+    );
+
+    let handle = open_test_handle("dream-semantic-no-provider").await;
+    handle
+        .remember(
+            "a memory the semantic phase must not send anywhere".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "llama3.2".to_string(),
+            ..Default::default()
+        },
+        // Permitted, but never selected: the model id carries no `ollama/`
+        // prefix, so there is nothing asking for the local backend.
+        local_model_enabled: true,
+        openrouter_api_key: String::new(),
+        ..DreamConfig::default()
+    });
+
+    let stats1 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(stats1.semantic_llm_calls, 0, "no provider, no LLM calls");
+    assert!(
+        dreamer.is_semantic_consolidation_disabled(),
+        "an unusable provider must warn once and park, not retry every cycle"
+    );
+
+    let stats2 = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(stats2.semantic_llm_calls, 0);
+    assert!(dreamer.is_semantic_consolidation_disabled());
+
+    match listener.accept() {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok((_, peer)) => panic!(
+            "semantic consolidation opened a connection to the local model \
+             endpoint from {peer} — the #5188 fallback is back"
+        ),
+        Err(e) => panic!("unexpected accept error: {e}"),
+    }
+
+    assert_eq!(
+        handle.drawers.read().len(),
+        1,
+        "drawer must survive untouched"
+    );
+}
+
+/// Why (#5188): the fresh-daemon case — no config file, so every default
+/// applies. `build_consolidator_from_config` must return `Ok(None)`, which is
+/// the structural guarantee that no inference client of any kind is
+/// constructed and so no endpoint can be contacted.
+/// What: asserts `Ok(None)` for `DreamConfig::default()` with no key in the
+/// environment. Pre-fix this returned `Ok(Some(_))` wrapping an
+/// `OllamaInference`.
+/// Test: This test itself.
+#[test]
+#[serial(dotenv_credential_env)]
+fn dream_cycle_semantic_consolidation_disabled_by_default_builds_nothing() {
+    trusty_common::credentials::load_env_local_once();
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+    assert!(
+        super::semantic::build_consolidator_from_config(&DreamConfig::default())
+            .expect("a disabled semantic phase is not an error")
+            .is_none(),
+        "an unconfigured daemon must build no inference backend at all"
+    );
+}
+
+/// Why: When `semantic.enabled = false`, the phase must be skipped even
+/// if an inference backend is configured, so operators can opt out cheaply.
+/// What: Supply a consolidator but set enabled=false; assert the consolidator's
+/// call_count stays at zero after a dream cycle.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_disabled_by_config() {
+    use crate::engine::semantic_consolidation::{
+        MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("dream-semantic-disabled").await;
+    handle
+        .remember(
+            "this drawer should not be touched by semantic phase".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let mock = std::sync::Arc::new(MockInference::no_op());
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig::default(),
+    ));
+
+    let dreamer = Dreamer::with_consolidator(
+        DreamConfig {
+            semantic: SemanticConsolidationConfig {
+                enabled: false, // ← disabled
+                ..Default::default()
+            },
+            ..DreamConfig::default()
+        },
+        consolidator,
+    );
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.semantically_consolidated, 0);
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "mock must not be called when semantic phase is disabled"
+    );
+}
+
+// ─── Effectiveness metrics tests (issue #1530) ───────────────────────────
+
+/// Why: The compression ratio is the key effectiveness signal; guard its
+/// arithmetic against common edge cases (normal case, zero drawers).
+/// What: Directly constructs `DreamStats` with known field values and
+/// asserts `update_compression_ratio` sets the expected ratio.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_math() {
+    let mut stats = DreamStats {
+        drawers_before: 10,
+        drawers_after: 7,
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    // (10 - 7) / 10 = 0.3
+    let diff = (stats.compression_ratio - 0.3_f64).abs();
+    assert!(
+        diff < 1e-10,
+        "expected 0.3, got {}",
+        stats.compression_ratio
+    );
+}
+
+/// Why: Guard the divide-by-zero path when the palace starts empty.
+/// What: `drawers_before = 0` must yield `compression_ratio = 0.0`.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_zero_drawers() {
+    let mut stats = DreamStats {
+        drawers_before: 0,
+        drawers_after: 0,
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "zero drawers_before must produce 0.0 compression_ratio"
+    );
+}
+
+/// Why: The semantic consolidation phase can add canonical drawers, causing
+/// `drawers_after > drawers_before`. The ratio must be clamped to 0.0 and
+/// must not panic.
+/// What: Directly construct `DreamStats` with `drawers_after > drawers_before`
+/// and assert `compression_ratio == 0.0`.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_net_growth() {
+    let mut stats = DreamStats {
+        drawers_before: 5,
+        drawers_after: 8, // net growth
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "net palace growth (after > before) must clamp compression_ratio to 0.0"
+    );
+}
+/// Why: `DreamStats` adds `f64` fields so the old `Eq` bound is gone;
+/// verify serde round-trips preserve all new fields faithfully.
+/// What: Construct a `DreamStats` with non-default effectiveness fields,
+/// serialize to JSON, deserialize back, and assert equality on each field.
+/// Test: This test itself.
+#[test]
+fn dream_stats_serde_roundtrip_new_fields() {
+    let original = DreamStats {
+        merged: 2,
+        pruned: 1,
+        drawers_before: 8,
+        drawers_after: 5,
+        compression_ratio: 0.375,
+        recall_score_before: Some(0.72),
+        recall_score_after: Some(0.81),
+        duration_ms: 1200,
+        ..DreamStats::default()
+    };
+    let json = serde_json::to_string(&original).expect("serialize");
+    let decoded: DreamStats = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded.drawers_before, 8);
+    assert_eq!(decoded.drawers_after, 5);
+    let cr_diff = (decoded.compression_ratio - 0.375_f64).abs();
+    assert!(cr_diff < 1e-10, "compression_ratio round-trip failed");
+    assert_eq!(decoded.recall_score_before, Some(0.72));
+    assert_eq!(decoded.recall_score_after, Some(0.81));
+    assert_eq!(decoded.merged, 2);
+    assert_eq!(decoded.duration_ms, 1200);
+}
+
+/// Why: Old `dream_stats.json` files written before this PR lack the new
+/// fields. `#[serde(default)]` must allow them to deserialize without error,
+/// defaulting new fields to zero / None.
+/// What: Deserializes a JSON string that only contains the fields present
+/// before issue #1530, then asserts the new fields are at their defaults.
+/// Test: This test itself.
+#[test]
+fn dream_stats_backward_compat() {
+    // A dream_stats.json as written by the pre-#1530 code.
+    let legacy_json = r#"{
+        "merged": 3,
+        "pruned": 1,
+        "closets_updated": 12,
+        "compacted": 0,
+        "content_pruned": 2,
+        "semantically_consolidated": 0,
+        "semantic_llm_calls": 0,
+        "semantic_cache_hits": 0,
+        "duration_ms": 800
+    }"#;
+    let decoded: DreamStats =
+        serde_json::from_str(legacy_json).expect("backward-compat deserialize must succeed");
+    assert_eq!(decoded.merged, 3);
+    assert_eq!(decoded.drawers_before, 0, "missing field must default to 0");
+    assert_eq!(decoded.drawers_after, 0, "missing field must default to 0");
+    assert_eq!(
+        decoded.compression_ratio, 0.0,
+        "missing field must default to 0.0"
+    );
+    assert_eq!(
+        decoded.recall_score_before, None,
+        "missing Option field must default to None"
+    );
+    assert_eq!(
+        decoded.recall_score_after, None,
+        "missing Option field must default to None"
+    );
+}
+
+/// Why: After a dream cycle the stats must include drawer counts that
+/// reflect the actual palace state before and after consolidation passes.
+/// What: Seed one drawer, run a dream cycle with high dedup threshold so
+/// nothing is removed, and assert `drawers_before == drawers_after == 1`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_records_drawer_counts() {
+    let handle = open_test_handle("dream-drawer-counts").await;
+    handle
+        .remember(
+            "drawer count baseline for effectiveness metrics".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999, // nothing deduped
+        ..dedup_only_config()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.drawers_before, 1, "expected 1 drawer before");
+    assert_eq!(
+        stats.drawers_after, 1,
+        "expected 1 drawer after (none removed)"
+    );
+    // Compression ratio: (1 - 1) / 1 = 0.0
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "no drawers removed → ratio 0.0"
+    );
+}
+
+/// Why: When the dedup pass removes a drawer, `drawers_after < drawers_before`
+/// and the compression ratio must be non-zero.
+/// What: Insert two identical drawers, run a cycle, assert `compression_ratio > 0`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_compression_ratio_nonzero_after_dedup() {
+    let handle = open_test_handle("dream-compress-nonzero").await;
+    handle
+        .remember(
+            "duplicate drawer for compression test".into(),
+            RoomType::General,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+    handle
+        .remember(
+            "duplicate drawer for compression test".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    let dreamer = Dreamer::new(dedup_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.drawers_before, 2, "two drawers before cycle");
+    assert_eq!(stats.drawers_after, 1, "one remaining after dedup");
+    // (2 - 1) / 2 = 0.5
+    let diff = (stats.compression_ratio - 0.5_f64).abs();
+    assert!(
+        diff < 1e-10,
+        "expected compression_ratio=0.5, got {}",
+        stats.compression_ratio
+    );
+}
+
+/// Why: An empty palace must not cause the recall benchmark to panic or
+/// return a misleading score. `run_benchmark` must return `None`.
+/// What: Run `run_benchmark` directly on an empty palace and assert `None`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_recall_benchmark_empty_palace_returns_none() {
+    let handle = open_test_handle("dream-bench-empty").await;
+    // Palace is empty — no drawers seeded.
+    let result = super::recall_benchmark::run_benchmark(&handle, None).await;
+    assert_eq!(
+        result, None,
+        "empty palace must yield None from recall benchmark"
+    );
+}
+
+/// Why: With at least one drawer, the recall benchmark must return a score
+/// in the valid [0, 1] range.
+/// What: Seed two drawers, run the benchmark, assert `Some(score)` in range.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_recall_benchmark_returns_score_with_drawers() {
+    let handle = open_test_handle("dream-bench-score").await;
+    handle
+        .remember(
+            "cargo build and test commands for the Rust workspace".into(),
+            RoomType::Backend,
+            vec!["cargo".into()],
+            0.8,
+        )
+        .await
+        .unwrap();
+    handle
+        .remember(
+            "error handling with thiserror for libraries and anyhow for binaries".into(),
+            RoomType::Backend,
+            vec!["errors".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let result = super::recall_benchmark::run_benchmark(&handle, None).await;
+    let score = result.expect("expected Some(score) with seeded drawers");
+    assert!(
+        score.is_finite() && score >= 0.0,
+        "recall benchmark score must be finite and non-negative; got {score}"
+    );
+}
+
+/// Why: The dream cycle must record both pre- and post-cycle recall scores
+/// in the returned stats so they land in dream_stats.json.
+/// What: Seed a drawer, run the cycle, assert both score fields are Some.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_records_recall_scores() {
+    let handle = open_test_handle("dream-recall-scores").await;
+    handle
+        .remember(
+            "HNSW vector search and batch embedding performance patterns".into(),
+            RoomType::Backend,
+            vec!["hnsw".into(), "embedding".into()],
+            0.8,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999, // nothing removed
+        ..dedup_only_config()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert!(
+        stats.recall_score_before.is_some(),
+        "recall_score_before must be Some with a seeded palace"
+    );
+    assert!(
+        stats.recall_score_after.is_some(),
+        "recall_score_after must be Some with a seeded palace"
+    );
+    let before = stats.recall_score_before.unwrap();
+    let after = stats.recall_score_after.unwrap();
+    assert!(
+        before.is_finite() && before >= 0.0,
+        "recall_score_before={before} must be finite and non-negative"
+    );
+    assert!(
+        after.is_finite() && after >= 0.0,
+        "recall_score_after={after} must be finite and non-negative"
+    );
+}
+
+/// Why: Effectiveness fields must survive a round-trip through
+/// `PersistedDreamStats::save` → `PersistedDreamStats::load`.
+/// What: Run a cycle with seeded drawers, write to disk, read back, and
+/// assert all effectiveness fields match.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_stats_effectiveness_fields_persisted() {
+    let handle = open_test_handle("dream-persist-eff").await;
+    handle
+        .remember(
+            "unit test patterns and mock usage in Rust tests".into(),
+            RoomType::General,
+            vec!["testing".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999,
+        ..dedup_only_config()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    let data_dir = handle.data_dir.clone().expect("data_dir set");
+    let loaded = PersistedDreamStats::load(&data_dir)
+        .unwrap()
+        .expect("dream_stats.json must exist after cycle");
+
+    assert_eq!(
+        loaded.stats.drawers_before, stats.drawers_before,
+        "drawers_before must be persisted"
+    );
+    assert_eq!(
+        loaded.stats.drawers_after, stats.drawers_after,
+        "drawers_after must be persisted"
+    );
+    let cr_diff = (loaded.stats.compression_ratio - stats.compression_ratio).abs();
+    assert!(cr_diff < 1e-10, "compression_ratio must be persisted");
+    assert_eq!(
+        loaded.stats.recall_score_before, stats.recall_score_before,
+        "recall_score_before must be persisted"
+    );
+    assert_eq!(
+        loaded.stats.recall_score_after, stats.recall_score_after,
+        "recall_score_after must be persisted"
+    );
+}
+
+/// Why: The recall benchmark adds two full embed+search passes per cycle.
+/// When `recall_benchmark_enabled = false`, both passes must be skipped and
+/// both recall score fields must be `None`, while the cycle itself completes
+/// normally.
+/// What: Run `dream_cycle` with `recall_benchmark_enabled = false` on a
+/// seeded palace and assert both `recall_score_before` and
+/// `recall_score_after` are `None`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_recall_benchmark_disabled() {
+    let handle = open_test_handle("dream-bench-disabled").await;
+    handle
+        .remember(
+            "recall benchmark opt-out test drawer".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        recall_benchmark_enabled: false,
+        dedup_threshold: 0.999, // nothing removed
+        ..dedup_only_config()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.recall_score_before, None,
+        "recall_score_before must be None when benchmark is disabled"
+    );
+    assert_eq!(
+        stats.recall_score_after, None,
+        "recall_score_after must be None when benchmark is disabled"
+    );
+    // Cycle must still complete and report drawer counts.
+    assert_eq!(
+        stats.drawers_before, 1,
+        "drawers_before must still be counted"
+    );
+    assert_eq!(
+        stats.drawers_after, 1,
+        "drawers_after must still be counted"
+    );
+}
+
+// ─── spec-001 Phase 3: on-demand room-scoped consolidation ───────────────────
+
+/// Why: `dream_consolidate_room` must scope to a single room — drawers in other
+/// rooms must not even reach the consolidator.
+/// What: seeds two aged Planning drawers, runs `consolidate_scoped` first for
+/// Backend (no aged drawers there) and asserts the consolidator is never called
+/// and nothing changes, then for Planning and asserts the two originals are
+/// consolidated into one summary and evicted.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_filters_by_room() {
+    use crate::engine::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+    use std::sync::atomic::Ordering;
+
+    let handle = open_test_handle("scoped-room-filter").await;
+    let p1 = handle
+        .remember(
+            "planning note one about the roadmap".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let p2 = handle
+        .remember(
+            "planning note two about the roadmap".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    // Age both past the default 7-day window.
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            d.created_at = Utc::now() - ChronoDuration::days(30);
+        }
+    }
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "roadmap planning summary".to_string(),
+        superseded_ids: vec![p1, p2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let cfg = DreamConfig::default();
+
+    // Backend has no aged drawers => consolidator never runs, nothing changes.
+    let backend = consolidate_scoped(
+        &handle,
+        &cfg,
+        Some(RoomType::Backend),
+        7,
+        Some(consolidator.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend, RoomConsolidationStats::default());
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "wrong room must not consolidate"
+    );
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // Planning has the two aged drawers => one summary created, both evicted.
+    let planning = consolidate_scoped(
+        &handle,
+        &cfg,
+        Some(RoomType::Planning),
+        7,
+        Some(consolidator),
+    )
+    .await
+    .unwrap();
+    assert_eq!(planning.summary_facts_created, 1);
+    assert_eq!(planning.facts_evicted, 2);
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        1,
+        "consolidator ran once for Planning"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        !ids.contains(&p1) && !ids.contains(&p2),
+        "superseded originals evicted"
+    );
+}
+
+/// Why: Task drawers must never be consolidated, even by the on-demand tool.
+/// What: seeds two aged Task drawers, runs `consolidate_scoped` with a mock that
+/// would merge them, and asserts the consolidator is never called and both
+/// tasks survive.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_skips_task_drawers() {
+    use crate::engine::palace::DrawerType;
+    use crate::engine::retrieval::RememberOptions;
+    use crate::engine::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+    use std::sync::atomic::Ordering;
+
+    let handle = open_test_handle("scoped-task-skip").await;
+    let task_opts = || RememberOptions {
+        force: true,
+        classify_as: Some(DrawerType::Task),
+        ..RememberOptions::default()
+    };
+    let t1 = handle
+        .remember_with_options(
+            "Goal: keep this forever".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    let t2 = handle
+        .remember_with_options(
+            "Goal: and this one too".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            d.created_at = Utc::now() - ChronoDuration::days(30);
+        }
+    }
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "tasks must NOT merge".to_string(),
+        superseded_ids: vec![t1, t2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+
+    let stats = consolidate_scoped(
+        &handle,
+        &DreamConfig::default(),
+        None,
+        7,
+        Some(consolidator),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stats,
+        RoomConsolidationStats::default(),
+        "task-only palace yields no work"
+    );
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "consolidator never sees Task drawers"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(ids.contains(&t1) && ids.contains(&t2), "both tasks survive");
+}
+
+/// Why: when no inference backend is configured the tool must no-op cleanly.
+/// What: with the OpenRouter env key removed and no injected consolidator,
+/// `consolidate_scoped` returns zero counts without error. Since #5188 the
+/// silence comes from `semantic.enabled` defaulting to false, so this is now
+/// the fresh-daemon path rather than a special case; `local_model_enabled:
+/// false` is kept explicit to state that the local backend is not permitted
+/// either.
+/// Test: this function.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn consolidate_scoped_no_inference_is_noop() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let handle = open_test_handle("scoped-no-inference").await;
+    handle
+        .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
+        .await
+        .unwrap();
+    let cfg = DreamConfig {
+        local_model_enabled: false,
+        ..DreamConfig::default()
+    };
+    let stats = consolidate_scoped(&handle, &cfg, None, 7, None)
+        .await
+        .unwrap();
+    assert_eq!(stats, RoomConsolidationStats::default());
+}
+
+/// Why (issue #2593): the on-demand `dream_consolidate_room` tool must
+/// surface a misconfigured model/provider combination to the caller as an
+/// error rather than silently no-op'ing (it's a single user-triggered call,
+/// not a recurring background job, so there is nothing to "disable").
+/// What: the phase enabled, the local backend permitted, and
+/// `ollama/anthropic/claude-haiku-4-5` — an explicit local request naming a
+/// model Ollama cannot serve (the #2593 misconfiguration, spelled the #5188
+/// way). Asserts `consolidate_scoped` returns `Err` naming both the model and
+/// Ollama.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn consolidate_scoped_invalid_model_returns_err() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let handle = open_test_handle("scoped-invalid-model").await;
+    handle
+        .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
+        .await
+        .unwrap();
+    let cfg = DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            model: "ollama/anthropic/claude-haiku-4-5".to_string(),
+            ..Default::default()
+        },
+        local_model_enabled: true,
+        ..DreamConfig::default()
+    };
+    let err = consolidate_scoped(&handle, &cfg, None, 7, None)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("anthropic/"),
+        "error should name the model: {msg}"
+    );
+    assert!(
+        msg.contains("Ollama"),
+        "error should name the provider: {msg}"
+    );
+}
+
+/// Why: `max_age_days <= 0` is a guard value meaning "consolidate nothing".
+/// Regression for the off-by-zero bug where a cutoff of `now` made *every*
+/// drawer — including freshly created ones — eligible, evicting the whole room.
+/// What: seeds two recent (NOT aged) drawers plus a mock consolidator that would
+/// merge them, then calls `consolidate_scoped` with `max_age_days = 0` and a
+/// negative value; asserts zero counts, the consolidator never runs, and both
+/// recent drawers survive.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_non_positive_age_is_noop() {
+    use crate::engine::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("scoped-non-positive-age").await;
+    let r1 = handle
+        .remember(
+            "recent planning note one".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let r2 = handle
+        .remember(
+            "recent planning note two".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    // Deliberately leave `created_at` at "now" — these drawers are NOT aged.
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "must NOT merge recent drawers".to_string(),
+        superseded_ids: vec![r1, r2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let cfg = DreamConfig::default();
+
+    for age in [0_i64, -5] {
+        let stats = consolidate_scoped(
+            &handle,
+            &cfg,
+            Some(RoomType::Planning),
+            age,
+            Some(consolidator.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stats,
+            RoomConsolidationStats::default(),
+            "max_age_days={age} must consolidate/evict nothing"
+        );
+    }
+
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "consolidator must never run for a non-positive age window"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&r1) && ids.contains(&r2),
+        "recent drawers must survive a non-positive age window"
+    );
+}
+
+/// Why (issue #1713): consolidation must never evict an original drawer
+/// unless the `superseded_by` KG-triple write actually landed — evicting on
+/// a failed (previously logged-only) write leaves the canonical drawer with
+/// no recorded provenance link back to the original, silently destroying
+/// history with no way to recover it.
+/// What: Opens a `KnowledgeGraph` forced into read-only snapshot mode via
+/// the same lock-contention trick as
+/// `kg_redb::tests::open_on_locked_file_returns_snapshot_handle` (seed the
+/// file, drop the handle so the in-process cache entry expires, hold the
+/// file's exclusive flock via the raw `redb` API, then reopen) so every
+/// `handle.kg.assert` call fails. Calls
+/// `record_provenance_and_collect_superseded` directly — the extracted
+/// per-canonical provenance step of `apply_consolidation_result` — and
+/// asserts the original id is NOT added to the eviction-candidate list.
+/// Test: this function.
+#[tokio::test]
+async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
+    use super::semantic::record_provenance_and_collect_superseded;
+    use crate::engine::store::kg::KnowledgeGraph;
+    use crate::engine::store::kg_redb::KgStoreRedb;
+    use crate::engine::store::vector::UsearchStore;
+
+    let dir = tempdir().unwrap();
+    let kg_path = dir.path().join("kg.redb");
+    // Seed the file via the lower-level `KgStoreRedb` (no `KgWriter` actor
+    // spawned, unlike `KnowledgeGraph::open`), then drop it so the in-process
+    // db cache entry expires synchronously — no async drop race to wait out
+    // — before we grab the raw lock below.
+    drop(KgStoreRedb::open(&kg_path).unwrap());
+    // Hold the file's exclusive flock via the raw redb API so the next
+    // `KnowledgeGraph::open` hits the lock-contention path and falls back to
+    // a read-only snapshot (issue #59 behaviour).
+    let _live = redb::Database::create(&kg_path).unwrap();
+
+    let kg = KnowledgeGraph::open(&kg_path).unwrap();
+    assert!(
+        kg.is_read_only(),
+        "precondition: KG must be a read-only snapshot for this test to be valid"
+    );
+
+    let vs = UsearchStore::new(dir.path().join("idx.usearch"), 384).unwrap();
+    let handle = Arc::new(PalaceHandle::new(
+        PalaceId::new("kg-write-fail"),
+        "test".to_string(),
+        vs,
+        kg,
+    ));
+
+    let canonical_id = Uuid::new_v4();
+    let orig_id = Uuid::new_v4();
+    let mut superseded_ids: Vec<Uuid> = Vec::new();
+    record_provenance_and_collect_superseded(
+        &handle,
+        canonical_id,
+        &[orig_id],
+        &mut superseded_ids,
+    )
+    .await;
+
+    assert!(
+        superseded_ids.is_empty(),
+        "original must NOT be marked evictable when the superseded_by KG write failed"
+    );
+}
+
+/// Why: pins both halves of the reason [`dedup_only_config`] exists.
+/// `DreamConfig::default()` resolves its empty `openrouter_api_key` against the
+/// PROCESS environment, so once anything in this binary calls
+/// `load_env_local_once` — which folds the developer's real `.env.local` into
+/// that environment — every dedup/prune/stats test built on the default config
+/// silently acquired a live OpenRouter backend and issued billed LLM calls
+/// whose merge actions moved the drawer counts those tests assert on. That is
+/// the intermittency behind `dream_cycle_merges_duplicates` and
+/// `dream_cycle_compression_ratio_nonzero_after_dedup`.
+/// What: with a fixture key in the environment, asserts the dedup-only config
+/// builds NO backend while an otherwise-identical config with the semantic
+/// phase switched on builds one. Constructing a backend issues no request, so
+/// this reaches no network and needs no real credential. Since #5188 the
+/// second half must enable the phase explicitly — `DreamConfig::default()` no
+/// longer builds anything, which would have made this assertion vacuous.
+/// Test: itself.
+#[test]
+#[serial(dotenv_credential_env)]
+fn dedup_only_config_ignores_an_ambient_openrouter_key() {
+    let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-or-v1-fixture-not-a-real-key");
+
+    assert!(
+        super::semantic::build_consolidator_from_config(&dedup_only_config())
+            .expect("a disabled semantic phase is not an error")
+            .is_none(),
+        "dedup-only config must build no inference backend, so the ambient \
+         key is never read and no LLM call can be issued"
+    );
+
+    let semantic_on = DreamConfig {
+        semantic: crate::engine::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    };
+    assert!(
+        super::semantic::build_consolidator_from_config(&semantic_on)
+            .expect("a resolvable cloud key passes model validation")
+            .is_some(),
+        "an enabled semantic phase turns an ambient OPENROUTER_API_KEY into a \
+         live backend — the behaviour the dedup tests used to inherit by accident"
+    );
+}
+
+/// Why (#5187, #9172): the merge used to cap the merged drawer at 500 bytes.
+/// A raw `String::truncate` there panicked when the cap fell inside a
+/// multi-byte char (#5187); the char-safe cut that replaced it still dropped
+/// the loser's text (#9172). A merge now keeps both bodies whole.
+/// What: merges a 490-byte survivor with a loser whose first char is a 4-byte
+/// emoji at byte 498 — the input that used to straddle the cap — and asserts
+/// the merged body is both texts, unchanged.
+/// Test: this test.
+#[test]
+fn a_merge_keeps_multibyte_loser_text_whole() {
+    let mut survivor_content =
+        "The Tokyo office rollout review covered staffing and timelines. ".repeat(8);
+    survivor_content.truncate(490);
+    let loser_content = "🎉 The 祝賀会 celebration is on Friday evening in the Tokyo office";
+    let room = Uuid::new_v4();
+    let survivor = Drawer::new(room, survivor_content.clone());
+    let mut loser = Drawer::new(room, loser_content);
+    loser.tags = vec!["祝賀会".into()];
+
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
+
+    assert_eq!(
+        merged.content(),
+        format!("{survivor_content}\n\nAlso: {loser_content}")
+    );
+    assert_eq!(merged.id, survivor.id);
+    assert_eq!(merged.tags, vec!["祝賀会".to_string()]);
+}
+
+/// Why (#9172): a near-duplicate that keeps coming back was appended to the
+/// same survivor on every cycle, so the drawer grew without bound.
+/// What: a merge whose content is exactly [`MERGE_MAX_BYTES`] goes through
+/// whole; one byte more is refused. An exact duplicate of an over-bound drawer
+/// appends nothing and still merges.
+/// Test: this test.
+#[test]
+fn a_merge_is_skipped_past_the_byte_bound() {
+    let room = Uuid::new_v4();
+    let survivor = Drawer::new(room, "s".repeat(1000));
+    let sep = "\n\nAlso: ".len();
+    let at_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep));
+    let merged = merged_drawer(&survivor, &at_bound).expect("a merge at the bound");
+    assert_eq!(merged.content().len(), MERGE_MAX_BYTES);
+    assert!(merged.content().ends_with(at_bound.content()));
+
+    let past_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep + 1));
+    assert!(merged_drawer(&survivor, &past_bound).is_none());
+
+    let big = Drawer::new(room, "b".repeat(MERGE_MAX_BYTES * 2));
+    let same = Drawer::new(room, big.content().to_string());
+    let merged = merged_drawer(&big, &same).expect("an exact duplicate adds no bytes");
+    assert_eq!(merged.content(), big.content());
+}
+
+/// Why (#5187): the semantic pass logs a fixed-width preview of a canonical
+/// drawer's content. Its old `&content[..content.len().min(80)]` clamp is the
+/// same byte-offset slice as the merge cap and panics on the same input, so an
+/// error-path log statement could take the pass down.
+/// What: exercises `char_safe_prefix` with CJK, emoji, and a combining
+/// sequence positioned so the 80-byte cap falls mid-char, and checks the
+/// result is a real prefix, within the cap, and boundary-aligned.
+/// Test: this test.
+#[test]
+fn char_safe_prefix_stops_below_a_multibyte_char() {
+    // "東" is 3 bytes, so the char at 78..81 straddles the 80-byte cap.
+    let cjk = "東".repeat(30);
+    assert!(!cjk.is_char_boundary(80), "cap must fall inside a char");
+    let cut = char_safe_prefix(&cjk, 80);
+    assert_eq!(cut.len(), 78);
+    assert!(cjk.starts_with(cut));
+
+    // One ASCII byte then 4-byte emoji: the cap lands inside the 20th emoji.
+    let emoji = format!("x{}", "🎉".repeat(25));
+    assert!(!emoji.is_char_boundary(80));
+    assert_eq!(char_safe_prefix(&emoji, 80).len(), 77);
+
+    // "é" as e + U+0301 is 3 bytes per unit. The cut is char-aligned but may
+    // land between the base letter and its combining mark — valid UTF-8, and
+    // the deliberate limit of char-level (not grapheme-level) truncation.
+    let combining = "e\u{301}".repeat(30);
+    assert!(!combining.is_char_boundary(80));
+    let cut = char_safe_prefix(&combining, 80);
+    assert_eq!(cut.len(), 79);
+    assert!(combining.is_char_boundary(cut.len()));
+
+    // Already inside the cap: returns everything. Empty input and a zero cap
+    // are both well-defined.
+    assert_eq!(char_safe_prefix("短い", 80), "短い");
+    assert_eq!(char_safe_prefix("", 80), "");
+    assert_eq!(char_safe_prefix("🎉", 0), "");
+}
+
+/// Why (#5902): `merged_drawer` is the ONE production path that rewrites a stored
+/// drawer's content in place. Content-derived identity only holds if the digest
+/// moves with the body — a drawer left carrying its pre-merge hash would export
+/// under an identity no other machine can reproduce, and would collide on import
+/// with the unmerged original. `Drawer::set_content` is what keeps the two in
+/// step; this asserts the merge actually routes through it.
+/// Test: This test.
+#[tokio::test]
+async fn merge_into_keeps_the_content_hash_in_step() {
+    use crate::engine::content_hash::memory_content_hash;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new("merge-hash"),
+        name: "merge-hash".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: dir.path().join("merge-hash"),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let handle = PalaceHandle::open(&palace).unwrap();
+
+    let survivor_id = handle
+        .remember(
+            "the release tags are per-crate".to_string(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let loser_id = handle
+        .remember(
+            "and each crate versions independently".to_string(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let (survivor, loser) = {
+        let drawers = handle.drawers.read();
+        let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned().unwrap();
+        (find(survivor_id), find(loser_id))
+    };
+    let before = survivor.content_hash();
+
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
+    assert_ne!(
+        merged.content(),
+        survivor.content(),
+        "precondition: the merge must actually have rewritten the body"
+    );
+    assert_ne!(
+        merged.content_hash(),
+        before,
+        "a rewritten body must mint a new identity"
+    );
+    assert_eq!(
+        merged.content_hash(),
+        memory_content_hash(merged.content()),
+        "the digest must describe the body the drawer now holds"
+    );
+}
+
+/// Why: #6208 — the dream cycle's `compact_pass` snapshots the drawer-id set
+/// from `handle.drawers` and removes any vector absent from it, WITHOUT the
+/// palace write mutex. `remember` upserts a vector before it registers the
+/// drawer (both inside its own write-mutex section) and does not gate on
+/// `is_compacting`, so the idle dreamer's `compact_pass` running in that window
+/// deleted the freshly-remembered vector as a false orphan. `compact_pass` now
+/// snapshots + removes under the write mutex, so that intermediate state is
+/// unobservable to it.
+/// What: mirrors `remember_racing_compact_never_loses_a_vector` for the dream
+/// path. Holds the write mutex (as `remember` does), upserts drawer B's vector
+/// but leaves B unregistered — the mid-flight window — then runs `compact_pass`
+/// concurrently. With the guard, `compact_pass` blocks until B is registered and
+/// the guard drops, then keeps B; without it, `compact_pass` snapshots (B
+/// absent) and removes B inside the window. Deterministic: the mutex, not the
+/// sleep, orders the two.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remember_racing_dream_compact_pass_never_loses_a_vector() {
+    let handle = open_test_handle("dream-race-compact").await;
+
+    // A committed baseline drawer so the index is non-empty.
+    let anchor_id = handle
+        .remember(
+            "anchor drawer stays put".into(),
+            RoomType::Backend,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    // Racing drawer B: model `remember`'s two write steps by hand under the
+    // real write mutex.
+    let drawer_b = Drawer::new(uuid::Uuid::new_v4(), "racing drawer B must survive");
+    let b_id = drawer_b.id;
+    let mut b_vec = vec![0.0f32; 384];
+    b_vec[7] = 1.0;
+
+    let write_mutex = handle.write_mutex_for_test();
+    let guard = write_mutex.lock().await;
+
+    // Step 1 of remember: vector upserted; step 2 (register) deferred.
+    handle.vector_store.upsert(b_id, b_vec).await.unwrap();
+
+    let compact_handle = handle.clone();
+    let compact = tokio::spawn(async move {
+        super::cycle::compact_pass(&compact_handle, Instant::now(), Duration::from_secs(60)).await
+    });
+
+    // Give a pre-guard (unguarded) compact_pass time to snapshot + remove B.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Complete remember: register B, then release the write mutex.
+    handle.drawers.write().push(drawer_b);
+    drop(guard);
+
+    compact.await.unwrap().unwrap();
+
+    let ids = handle.vector_store.all_ids();
+    assert!(
+        ids.contains(&b_id),
+        "#6208: drawer B's vector was reclaimed by a dream compact_pass racing \
+         its remember (ids={ids:?}, want {b_id})"
+    );
+    assert!(
+        ids.contains(&anchor_id),
+        "the anchor vector must survive too"
+    );
+}
+
+/// Why: #6208 — the dream cycle's fallback `rebuild_index_from_drawers`
+/// snapshots `handle.drawers`, `reset()`s the whole index, then re-upserts only
+/// the snapshotted drawers — WITHOUT the write mutex. A `remember` upserting in
+/// that window has its vector wiped by `reset()` and never re-added, because it
+/// was not in the snapshot. The rebuild now runs snapshot→reset→re-upsert under
+/// the write mutex, so a mid-flight remember cannot be lost.
+/// What: mirrors the compact_pass race for the rebuild path. Holds the write
+/// mutex, upserts B, leaves B unregistered, then runs `rebuild_index_from_drawers`
+/// concurrently. With the guard the rebuild blocks until B is registered, so B is
+/// in the snapshot and is re-embedded; without it the rebuild resets and re-adds
+/// only the anchor, dropping B. Deterministic via the mutex.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remember_racing_dream_rebuild_never_loses_a_vector() {
+    let handle = open_test_handle("dream-race-rebuild").await;
+
+    let anchor_id = handle
+        .remember(
+            "anchor drawer stays put".into(),
+            RoomType::Backend,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let drawer_b = Drawer::new(uuid::Uuid::new_v4(), "racing drawer B must survive");
+    let b_id = drawer_b.id;
+    let mut b_vec = vec![0.0f32; 384];
+    b_vec[9] = 1.0;
+
+    let write_mutex = handle.write_mutex_for_test();
+    let guard = write_mutex.lock().await;
+
+    handle.vector_store.upsert(b_id, b_vec).await.unwrap();
+
+    let rebuild_handle = handle.clone();
+    let rebuild = tokio::spawn(async move {
+        super::helpers::rebuild_index_from_drawers(
+            &rebuild_handle,
+            Instant::now(),
+            Duration::from_secs(60),
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    handle.drawers.write().push(drawer_b);
+    drop(guard);
+
+    rebuild.await.unwrap().unwrap();
+
+    let ids = handle.vector_store.all_ids();
+    assert!(
+        ids.contains(&b_id),
+        "#6208: drawer B's vector was wiped by a dream index rebuild racing its \
+         remember (ids={ids:?}, want {b_id})"
+    );
+    assert!(
+        ids.contains(&anchor_id),
+        "the anchor vector must survive too"
+    );
+}
+
+// ── #6652: the kg.redb prune-and-compact phase ──────────────────────────────
+
+/// Seed `count` closed `hist:` rows aged `age_days` into the palace's KG.
+///
+/// Why: the real `retract` path closes rows at `now`, so history manufactured
+/// through it can never be older than the test. Writing the rows directly is
+/// the only way to place them behind the age gate, and it uses the exact key
+/// shape `close_active_row` writes.
+fn seed_stale_history(handle: &Arc<PalaceHandle>, count: usize, age_days: i64) {
+    use crate::engine::store::kg_store::{TRIPLES, TripleValue, encode_triple_key, encode_value};
+
+    let closed_ms = Utc::now().timestamp_millis() - age_days * 86_400_000;
+    let store = handle.kg.redb_store();
+    let db = store.db_for_test();
+    let wtx = db.begin_write().expect("begin history seed");
+    {
+        let mut t = wtx.open_table(TRIPLES).expect("open triples");
+        for i in 0..count {
+            let core = encode_triple_key("dead", "was", &format!("v{i}"));
+            let mut key = b"hist:".to_vec();
+            key.extend_from_slice(&core);
+            key.extend_from_slice(&(closed_ms - 1000).to_be_bytes());
+            let value = TripleValue {
+                object: format!("v{i}"),
+                valid_from_ms: closed_ms - 1000,
+                valid_to_ms: Some(closed_ms),
+                confidence: 1.0,
+                provenance: None,
+            };
+            let bytes = encode_value(&value).expect("encode");
+            t.insert(key.as_slice(), bytes.as_slice()).expect("insert");
+        }
+    }
+    wtx.commit().expect("commit history seed");
+}
+
+/// A config whose only job is the kg.redb phase.
+fn compact_only_config() -> DreamConfig {
+    DreamConfig {
+        compact: true,
+        prune_history_after_days: 90,
+        // Every gate off: these palaces are tiny by design, and the gates
+        // exist to skip tiny palaces.
+        compact_min_bytes: 0,
+        compact_keep_backup: true,
+        ..dedup_only_config()
+    }
+}
+
+/// Why: the whole point of #6652 — a palace whose file is mostly dead history
+/// must come out smaller, with every live drawer and active triple intact.
+#[tokio::test]
+async fn kg_compaction_shrinks_the_file_in_a_dream_cycle() {
+    let handle = open_test_handle("kg-compact-shrinks").await;
+    for i in 0..12 {
+        handle
+            .remember(
+                format!("a live drawer number {i} with enough words to survive content prune"),
+                RoomType::Planning,
+                vec![],
+                0.9,
+            )
+            .await
+            .expect("remember");
+    }
+    seed_stale_history(&handle, 6_000, 400);
+
+    let path = handle.data_dir.as_ref().expect("data_dir").join("kg.redb");
+    let before = std::fs::metadata(&path).expect("stat").len();
+    let live_ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), false)
+        .await
+        .expect("compact pass");
+
+    assert!(report.ran(), "phase was skipped: {}", report.summary());
+    assert_eq!(report.history_rows_pruned, 6_000);
+    let after = std::fs::metadata(&path).expect("stat").len();
+    assert!(
+        after < before,
+        "file did not shrink: {before} -> {after} ({})",
+        report.summary()
+    );
+
+    // Every live drawer is still readable through the SAME handle the swap
+    // happened under — not a freshly-opened one, which would pass trivially.
+    let survivors = handle.kg.load_drawers().expect("load drawers");
+    for id in &live_ids {
+        assert!(
+            survivors.iter().any(|d| d.id == *id),
+            "drawer {id} vanished in the rewrite"
+        );
+    }
+    assert_eq!(survivors.len(), live_ids.len());
+}
+
+/// Why: a rewrite costs a full read+write pass plus a same-size backup. A small
+/// or already-tight file must not pay it on every idle tick.
+#[tokio::test]
+async fn kg_compaction_is_skipped_below_the_size_gate() {
+    let handle = open_test_handle("kg-compact-gated").await;
+    handle
+        .remember(
+            "one drawer with quite enough words in it".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    let cfg = DreamConfig {
+        compact_min_bytes: 1_000_000_000,
+        ..compact_only_config()
+    };
+    let report = kg_compact_pass(&handle, &cfg, false).await.expect("pass");
+    assert!(!report.ran(), "the size gate did not stop the rewrite");
+    assert!(
+        report
+            .skipped
+            .as_deref()
+            .is_some_and(|r| r.contains("compact_min_bytes")),
+        "unexpected skip reason: {:?}",
+        report.skipped
+    );
+    assert_eq!(report.history_rows_pruned, 0);
+}
+
+/// Why: `--dry-run` is the gate the owner's "measure before deleting" amendment
+/// rests on. It must not write a backup, a temp file, or a byte of the store.
+#[tokio::test]
+async fn dry_run_prepares_nothing_and_writes_no_bytes() {
+    let handle = open_test_handle("kg-compact-dry").await;
+    handle
+        .remember(
+            "a drawer that must still be here afterwards".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    seed_stale_history(&handle, 500, 400);
+
+    let data_dir = handle.data_dir.as_ref().expect("data_dir").clone();
+    let path = data_dir.join("kg.redb");
+    let bytes_before = std::fs::read(&path).expect("read");
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), true)
+        .await
+        .expect("dry run");
+
+    assert!(report.dry_run);
+    assert_eq!(report.history_rows_pruned, 0, "a dry run prunes nothing");
+    assert_eq!(
+        report.stats.triples_history_stale, 500,
+        "but it must still report what a real run would prune"
+    );
+    assert_eq!(
+        bytes_before,
+        std::fs::read(&path).expect("read"),
+        "the dry run changed kg.redb"
+    );
+    assert!(
+        !data_dir.join("kg.redb.pre-compact.bak").exists(),
+        "a dry run must not write a backup"
+    );
+    assert!(
+        !data_dir.join("kg.redb.compacting").exists(),
+        "a dry run must not write a temp file"
+    );
+}
+
+/// Why: the deployment this was written for serves a dozen concurrent readers.
+/// A reader running across the whole rewrite must never see an error, a missing
+/// live row, or a half-copied state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_reader_never_observes_a_torn_state() {
+    let handle = open_test_handle("kg-compact-concurrent").await;
+    for i in 0..10 {
+        handle
+            .remember(
+                format!("concurrent reader fixture drawer number {i} with words"),
+                RoomType::Planning,
+                vec![],
+                0.9,
+            )
+            .await
+            .expect("remember");
+    }
+    seed_stale_history(&handle, 4_000, 400);
+    let expected = handle.drawers.read().len();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_handle = Arc::clone(&handle);
+    let reader_stop = Arc::clone(&stop);
+    let reader = tokio::task::spawn_blocking(move || {
+        let mut polls = 0usize;
+        while !reader_stop.load(Ordering::Relaxed) {
+            let drawers = reader_handle
+                .kg
+                .load_drawers()
+                .expect("a read during the rewrite must never fail");
+            assert_eq!(
+                drawers.len(),
+                expected,
+                "reader saw a torn drawer table mid-rewrite"
+            );
+            polls += 1;
+        }
+        polls
+    });
+
+    let report = kg_compact_pass(&handle, &compact_only_config(), false)
+        .await
+        .expect("compact pass");
+    stop.store(true, Ordering::Relaxed);
+    let polls = reader.await.expect("reader task");
+
+    assert!(report.ran(), "phase skipped: {}", report.summary());
+    assert!(polls > 0, "the reader never ran");
+    assert_eq!(handle.kg.load_drawers().expect("load").len(), expected);
+}
+
+/// Why: the floor exists so a config typo cannot delete last week's audit
+/// trail. It is applied at the read, because nothing validates the field on
+/// the way in from `config.toml`.
+#[test]
+fn history_prune_days_never_goes_below_the_floor() {
+    let cfg = DreamConfig {
+        prune_history_after_days: 1,
+        ..DreamConfig::default()
+    };
+    assert_eq!(cfg.effective_prune_history_days(), MIN_PRUNE_HISTORY_DAYS);
+    let generous = DreamConfig {
+        prune_history_after_days: 365,
+        ..DreamConfig::default()
+    };
+    assert_eq!(generous.effective_prune_history_days(), 365);
+}
+
+/// Why: pin the #6652 defaults the same way `dream_config_defaults` pins the
+/// rest, so a change to any of them is a deliberate edit rather than a drift.
+#[test]
+fn kg_compaction_config_defaults() {
+    let cfg = DreamConfig::default();
+    assert!(cfg.compact, "kg.redb compaction is on by default");
+    assert_eq!(cfg.prune_history_after_days, 90);
+    assert_eq!(cfg.compact_min_bytes, 64 * 1024 * 1024);
+    assert!(cfg.compact_keep_backup);
+    assert_eq!(MIN_PRUNE_HISTORY_DAYS, 7);
+    assert_eq!(COMPACT_MIN_RECLAIM_PERCENT, 10);
+}
+
+/// Why (#6652): the three `DreamStats` compaction fields are the only durable
+/// record that the phase ran — `trusty-memory doctor` reads `kg_bytes_after`
+/// out of `dream_stats.json` to spot growth between cycles. Testing
+/// `kg_compact_pass` alone leaves the wiring from `Dreamer::dream_cycle` into
+/// those fields unproven, which is exactly where a phase gets added and its
+/// telemetry forgotten.
+/// What: runs a full cycle over a palace stuffed with dead history and asserts
+/// all three fields carry the phase's real numbers.
+#[tokio::test]
+async fn dream_cycle_records_kg_compaction_stats() {
+    let handle = open_test_handle("kg-compact-stats").await;
+    handle
+        .remember(
+            "a drawer that survives the cycle with enough words".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.9,
+        )
+        .await
+        .expect("remember");
+    seed_stale_history(&handle, 3_000, 400);
+
+    let dreamer = Dreamer::new(compact_only_config());
+    let stats = dreamer.dream_cycle(&handle).await.expect("dream cycle");
+
+    assert_eq!(
+        stats.kg_history_rows_pruned, 3_000,
+        "the cycle did not record what the phase pruned"
+    );
+    assert!(
+        stats.kg_bytes_reclaimed > 0,
+        "the cycle recorded no reclaimed bytes"
+    );
+    assert!(
+        stats.kg_bytes_after > 0,
+        "kg_bytes_after must carry the post-cycle file size for the doctor check"
+    );
+    assert!(
+        stats.kg_bytes_after < stats.kg_bytes_after + stats.kg_bytes_reclaimed,
+        "reclaimed bytes and the post-cycle size must be consistent"
+    );
+}

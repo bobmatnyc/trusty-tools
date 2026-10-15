@@ -31,7 +31,7 @@
 /// RAII guard over one process-wide environment variable, for tests only.
 ///
 /// Why/What: see the module docs.
-pub(crate) struct EnvVarGuard {
+pub struct EnvVarGuard {
     key: &'static str,
     previous: Option<String>,
 }
@@ -42,7 +42,7 @@ impl EnvVarGuard {
     ///
     /// The caller MUST already hold the `dotenv_credential_env` serial group
     /// — see the module docs — for the whole window the guard is live.
-    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+    pub fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var(key).ok();
         // SAFETY: every caller is `#[serial(dotenv_credential_env)]`, so no
         // other thread reads or writes the environment concurrently.
@@ -58,7 +58,7 @@ impl EnvVarGuard {
     /// controls (#4407) — a test asserting "behavior X holds when this var is
     /// absent" must make it absent itself, not assume the machine happens to
     /// agree.
-    pub(crate) fn remove(key: &'static str) -> Self {
+    pub fn remove(key: &'static str) -> Self {
         let previous = std::env::var(key).ok();
         // SAFETY: see `EnvVarGuard::set`.
         unsafe { std::env::remove_var(key) };

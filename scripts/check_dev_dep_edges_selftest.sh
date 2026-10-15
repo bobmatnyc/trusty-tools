@@ -10,7 +10,7 @@
 #   synthetic `cargo metadata` document, so the suite needs no cargo, no
 #   network and no build.
 #
-# What: eight cases.
+# What: nine cases.
 #   1. a clean workspace passes;
 #   2. a dev edge outside the normal tree fails, naming `consumer -> dep`;
 #   3. the same edge allowlisted passes;
@@ -19,6 +19,7 @@
 #   6. a dev edge the normal tree reaches TRANSITIVELY is not a violation;
 #   7. a build-dependency edge is caught the same way a dev edge is;
 #   8. an empty package set trips the scan floor.
+#   9. a crate dev-depending on itself is not a violation (#9271).
 #   Then the live repository scan must pass.
 #
 # Usage:
@@ -185,6 +186,17 @@ elif ! grep -q "SCAN FLOOR" "${WORK}/out"; then
   cat "${WORK}/out" >&2
 fi
 
+# --- case 9: a self dev-dependency is not a violation (#9271) ---------------
+# trusty-memory dev-depends on itself to turn its own test features on; the
+# gate's `dep_name == name` skip keeps that edge out of the scan.
+fixture "${WORK}/selfdev.json" "app:lib|app," "lib:||"
+pad "${WORK}/selfdev.json" 20
+rc="$(run "${WORK}/selfdev.json" "${WORK}/empty-allowlist.tsv")"
+if [ "${rc}" != "0" ]; then
+  fail "a self dev-dependency must pass, got exit ${rc}:"
+  cat "${WORK}/out" >&2
+fi
+
 # --- the live repository must pass ------------------------------------------
 live_rc=0
 ( cd "${REPO_ROOT}" && bash "${GATE}" ) > "${WORK}/live" 2>&1 || live_rc=$?
@@ -198,4 +210,4 @@ if [ "${failures}" -gt 0 ]; then
   exit 1
 fi
 
-printf 'check_dev_dep_edges.sh self-test: 8 fixture cases + the live scan, all clean.\n'
+printf 'check_dev_dep_edges.sh self-test: 9 fixture cases + the live scan, all clean.\n'

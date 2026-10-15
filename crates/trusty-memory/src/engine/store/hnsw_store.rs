@@ -1,0 +1,985 @@
+//! Pure-Rust HNSW vector store backed by redb (issue #50, Phase 3).
+//!
+//! Why: `UsearchStore` depends on the C++ `usearch` library via FFI, which
+//! pulls a native build-time toolchain into every downstream consumer and
+//! prevents pure-Rust cross-compiles. `hnsw_rs` 0.3 is a pure-Rust HNSW
+//! implementation; pairing it with the existing redb knowledge-graph
+//! database lets us persist raw vectors (postcard-encoded `Vec<f32>`) in a
+//! table and rebuild the in-memory graph on palace open. Doing so also
+//! eliminates the JSON `key_map` sidecar that `UsearchStore` carries: the
+//! UUID → vector_id mapping now lives in a redb table.
+//! What: `HnswStore` owns an `Arc<redb::Database>` plus an
+//! `Hnsw<f32, DistCosine>` rebuilt from the `VECTORS` redb table on `open`.
+//! `upsert` writes both to redb (`VECTORS` + `VECTOR_KEYS`) and inserts into
+//! the in-memory index. `delete` writes a tombstone to `DELETED_VECTORS`
+//! (the in-memory `hnsw_rs` graph does not support removal); searches
+//! filter tombstoned ids. `compact_orphans` scans `VECTORS` for entries
+//! that no longer have a `VECTOR_KEYS` mapping and removes them.
+//! Test: See module-level tests covering upsert+search round-trip,
+//! tombstoned deletes, hydration on reopen, and orphan compaction.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use hnsw_rs::prelude::{DistCosine, Hnsw};
+use parking_lot::RwLock;
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
+use thiserror::Error;
+
+use crate::engine::store::kg_store::{DELETED_VECTORS, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS};
+use crate::engine::store::write_deadline::{DeadlinedWrite, WriteTxnError};
+use crate::engine::timeouts;
+
+mod exhaustive;
+use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
+
+mod graph_arm;
+use graph_arm::graph_nearest;
+
+// #9275: drawer-level replace / delete / search over `{drawer}#n` chunk rows.
+mod groups;
+
+mod key_cache;
+use key_cache::KeyCache;
+
+mod op_watch;
+#[cfg(any(test, feature = "embedder-test-support"))]
+pub use op_watch::OpPark;
+pub(crate) use op_watch::OpWatch;
+pub use op_watch::{HnswOp, HnswOpKind};
+// #9487 AC4: per-operation budget and sticky breaker.
+pub mod op_budget;
+mod quiet_insert;
+mod replay;
+mod row_write;
+mod stranded;
+
+/// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
+///
+/// Why: 16 is the recommended value from the original HNSW paper for
+/// high-dimensional dense embeddings (matches usearch's default too).
+const HNSW_MAX_NB_CONNECTION: usize = 16;
+
+/// Default `ef_construction` for graph build quality.
+///
+/// Why: 200 is the standard "good quality" value from the HNSW paper.
+const HNSW_EF_CONSTRUCTION: usize = 200;
+
+// #9141: the layer count is `replay::HNSW_LAYERS` (1), not 16 — a multi-layer
+// graph drew its hierarchy from an OS-seeded RNG and differed on every open.
+
+/// Initial expected element count hint passed to `Hnsw::new`. Used only to
+/// pre-allocate; the index grows transparently.
+const HNSW_INITIAL_CAPACITY: usize = 1024;
+
+/// How many candidate ids the allocator may probe before it gives up.
+///
+/// Why (#5005): the persisted counter is the mechanism that keeps ids unique;
+/// the occupancy probe in [`allocate_vector_id`] is the backstop for a counter
+/// that is somehow behind the table (a palace written by a pre-#5005 binary
+/// between two opens, a hand-edited file). Each probe jumps past the highest
+/// occupied id, so one iteration resolves any real collision — a budget this
+/// small only runs out if the table is being mutated underneath a write
+/// transaction, which redb does not permit. Bounded so a corrupt file makes
+/// `upsert` fail loudly instead of spinning.
+/// What: 8 attempts, then [`HnswStoreError::IdAllocationFailed`].
+/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`.
+const MAX_ALLOC_PROBES: u8 = 8;
+
+/// Why: A structured error type lets callers distinguish redb failures
+/// from postcard decode failures and from UUID parse failures without
+/// pattern-matching on stringly-typed `anyhow::Error` payloads.
+/// What: `thiserror` enum carrying the underlying source error.
+/// Test: Indirectly via the unit tests below (each variant is reached when
+/// the corresponding subsystem returns an error).
+#[derive(Debug, Error)]
+// #9487: `OpBudget` was a semver break; non_exhaustive keeps the next variant additive.
+#[non_exhaustive]
+pub enum HnswStoreError {
+    /// Boxed so the enum stays small enough that `Result<T, HnswStoreError>`
+    /// doesn't trip clippy's `result_large_err` lint. The redb error types
+    /// each occupy ~160 bytes of stack which would otherwise dominate every
+    /// `Result` returned from this module.
+    #[error("redb error: {0}")]
+    Redb(#[from] Box<redb::Error>),
+    #[error("redb storage error: {0}")]
+    RedbStorage(#[from] Box<redb::StorageError>),
+    #[error("redb transaction error: {0}")]
+    RedbTransaction(#[from] Box<redb::TransactionError>),
+    #[error("redb table error: {0}")]
+    RedbTable(#[from] Box<redb::TableError>),
+    #[error("redb commit error: {0}")]
+    RedbCommit(#[from] Box<redb::CommitError>),
+    #[error("postcard codec error: {0}")]
+    Postcard(#[from] postcard::Error),
+    #[error("invalid uuid in vector_keys table: {0}")]
+    InvalidUuid(#[from] uuid::Error),
+    #[error("vector dimension mismatch: expected {expected}, got {got}")]
+    DimensionMismatch { expected: usize, got: usize },
+    /// The allocator could not find a free `vector_id` within
+    /// [`MAX_ALLOC_PROBES`]. Fails the upsert rather than overwriting a live
+    /// vector (#5005).
+    #[error(
+        "could not allocate a free vector_id after {probes} attempts \
+         (last candidate {last_candidate} is already present in VECTORS); \
+         refusing to overwrite a live vector — the palace index needs a rebuild"
+    )]
+    IdAllocationFailed { probes: u8, last_candidate: u64 },
+    /// #9275: a drawer write named no chunk, or more than the cap allows.
+    #[error("a drawer holds 1..={max} chunk vectors, got {got}")]
+    ChunkCount { got: usize, max: usize },
+    /// #9275: a drawer-level call named a row key (`#`) or an empty key.
+    #[error("drawer key {0:?} is empty or contains '#'")]
+    DrawerKey(String),
+    /// A maintenance write outran its deadline and was rolled back (#8749).
+    #[error(transparent)]
+    WriteDeadline(#[from] WriteTxnError),
+    /// #9187: an insert that `hnsw_rs` prints from could not run with stdout
+    /// silenced, so it did not run.
+    #[error("could not silence stdout around an hnsw_rs insert: {0}")]
+    StdoutGuard(std::io::Error),
+    /// Returned by every write method when the store is in snapshot
+    /// (read-only) mode. Callers should surface this verbatim — the
+    /// message is the canonical guidance for issue #59.
+    #[error(
+        "palace is read-only: HTTP daemon holds the write lock — \
+         route writes through the daemon's HTTP API or stop the daemon \
+         before retrying via stdio"
+    )]
+    ReadOnly,
+    /// #9487: an operation exceeded its budget, or the store is wedged.
+    #[error(transparent)]
+    OpBudget(#[from] op_budget::OpBudgetError),
+}
+
+mod alloc;
+mod open_init;
+mod redb_error_from;
+use alloc::allocate_vector_id;
+
+/// Public result alias to keep call-site signatures concise.
+///
+/// Why: Most call sites only need `Result<T, HnswStoreError>` and
+/// repeating the long error path noise.
+/// What: `type Result<T> = std::result::Result<T, HnswStoreError>`.
+/// Test: Used by every public method below.
+pub type Result<T> = std::result::Result<T, HnswStoreError>;
+
+/// How many drawer keys point at a `vector_id` that another key also points at.
+///
+/// Why (#5005 / #5000): every count-based health signal this palace had could
+/// be zero while four drawers were unretrievable — `drawer_count` matched,
+/// `palace_reembed` reported nothing missing, and recall could still hit
+/// lexically. `key_rows` versus `distinct_vector_ids` is the one comparison
+/// that cannot be fooled by it, because it never leaves `VECTOR_KEYS`.
+/// What: the two counts plus the offending groups, each `(vector_id, uuids)`.
+/// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+#[derive(Debug, Clone, Default)]
+pub struct AliasAudit {
+    /// Rows in `VECTOR_KEYS` — one per drawer that has ever been embedded.
+    pub key_rows: usize,
+    /// Distinct `vector_id`s those rows point at. Equal to `key_rows` iff no
+    /// drawer's vector has been overwritten by another drawer's.
+    pub distinct_vector_ids: usize,
+    /// Every `vector_id` claimed by more than one uuid, with its uuids sorted.
+    pub aliased: Vec<(u64, Vec<String>)>,
+}
+
+impl AliasAudit {
+    /// Drawer keys caught in a collision — the count an operator acts on.
+    ///
+    /// Why: `aliased.len()` counts groups, not drawers, and the number that
+    /// matters is how many drawers are affected. Equals
+    /// `key_rows - distinct_vector_ids` on a consistent audit.
+    /// What: sums the group sizes.
+    /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+    pub fn aliased_key_count(&self) -> usize {
+        self.aliased.iter().map(|(_, uuids)| uuids.len()).sum()
+    }
+
+    /// Whether no drawer's vector is shared with another drawer.
+    pub fn is_clean(&self) -> bool {
+        self.aliased.is_empty()
+    }
+}
+
+/// Pure-Rust HNSW store backed by redb for persistence (issue #50).
+///
+/// Why: We need durable HNSW search without a C++ FFI dependency.
+/// Persisting raw vectors in redb (rather than serializing the HNSW graph
+/// itself) lets us rebuild a fresh in-memory graph on every palace open,
+/// which is both simpler and resilient to `hnsw_rs` schema changes between
+/// minor versions. The cost is a one-time O(N) re-insertion per open;
+/// real-world palaces are bounded to ~10⁵ vectors so this is acceptable.
+/// What: Holds `Arc<Database>` for persistence, the in-memory `Hnsw<f32,
+/// DistCosine>` wrapped in `Arc<RwLock<_>>` for concurrent reads, and the
+/// embedding dimension (for validation). The vector_id counter is NOT held
+/// here — it lives in redb (`VECTOR_ID_SEQ`), because a per-store counter is
+/// exactly the #5005 aliasing bug.
+/// Test: See `tests::upsert_and_search_round_trips` and friends.
+pub struct HnswStore {
+    db: Arc<Database>,
+    index: Arc<RwLock<Hnsw<'static, f32, DistCosine>>>,
+    dim: usize,
+    /// When true, every write method short-circuits with a "read-only"
+    /// error before touching redb.
+    ///
+    /// Why: Issue #59 — a stdio MCP client may open the same palace as the
+    /// HTTP daemon by snapshotting the redb file. Snapshot writes would
+    /// silently diverge from the daemon's live file, so we reject them at
+    /// the store boundary instead.
+    /// What: Set by `HnswStore::open_read_only`; consulted by `upsert`,
+    /// `delete`, and `compact_orphans`.
+    /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
+    read_only: bool,
+    /// `vector_id`s that have more than one point in the in-memory graph.
+    ///
+    /// Why (#5171): `hnsw_rs` cannot remove a point, so re-upserting a mapped
+    /// uuid leaves its previous embedding in the graph under the same id. A
+    /// search that scores the drawer by that stale copy reports content the
+    /// drawer no longer holds. Knowing exactly which ids are ambiguous lets
+    /// `search` re-read only those from `VECTORS` instead of re-reading every
+    /// candidate — the steady state is empty, and this costs nothing there.
+    /// What: written by `upsert` when the uuid already had a mapping. Starts
+    /// empty at every `open`, which is correct: `open` rebuilds the graph with
+    /// one point per live vector. Marked before the shadow point enters the
+    /// graph, so no search can observe the point without the flag.
+    /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
+    /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`.
+    shadowed: RwLock<std::collections::HashSet<u64>>,
+    /// #8749: the palace a deadline abort names; see [`Self::with_palace`].
+    palace: Arc<str>,
+    /// #9187: serialises graph inserts so `quiet_insert` reads an exact count.
+    insert_gate: parking_lot::Mutex<()>,
+    /// #9487: the budget every bounded operation gets, and the sticky breaker.
+    breaker: Arc<op_budget::OpBreaker>,
+    /// #9174: graph points a search for their own vector misses; scanned exactly.
+    stranded: RwLock<Vec<stranded::StrandedGroup>>,
+    /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
+    keys: KeyCache,
+    /// #9487: in-flight `upsert`/`search` calls, readable while one is wedged.
+    ops: Arc<op_watch::OpWatch>,
+    /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
+    ///
+    /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
+    /// window between `compact_orphans`' live-id snapshot and its orphan scan.
+    /// That window is internal, so a deterministic regression test needs a
+    /// control point there rather than a sleep. Gated `#[cfg(test)]`, so the
+    /// field, its writes, and the `wait()` calls vanish from every production
+    /// and consumer build.
+    /// What: when set, `compact_orphans` calls `wait()` on it twice at that
+    /// point — once to release the test to upsert, once to await the commit.
+    /// Test: `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`.
+    #[cfg(test)]
+    compact_race_barrier: RwLock<Option<Arc<std::sync::Barrier>>>,
+    /// #8749 test seam: overrides `timeouts::write_txn_deadline()`.
+    #[cfg(test)]
+    txn_budget: RwLock<Option<std::time::Duration>>,
+}
+
+impl HnswStore {
+    /// Open an HNSW store against an existing redb database.
+    ///
+    /// Why: The palace's KG and vector store share the same redb file so
+    /// drawer/triple writes and vector upserts can be coordinated. Passing
+    /// in `Arc<Database>` (rather than a path) lets the caller own the
+    /// connection cache and reuse the same handle as `KgStoreRedb`.
+    /// What: Touches `VECTORS` / `VECTOR_KEYS` / `DELETED_VECTORS` /
+    /// `VECTOR_ID_SEQ` to create them if missing, then reads every
+    /// `(vector_id, vec)` row from `VECTORS` (skipping tombstoned ids) and
+    /// replays them in parallel into a fresh single-layer
+    /// `Hnsw<f32, DistCosine>` index, so the OS-seeded layer RNG in `hnsw_rs`
+    /// no longer reshapes the graph on every open (#9141).
+    /// Raises the persisted `VECTOR_ID_SEQ` counter to at least
+    /// `max(VECTORS, VECTOR_KEYS) + 1` (#5005).
+    /// Test: `hydration_restores_index`,
+    /// `reopening_a_palace_answers_every_query_identically`.
+    pub fn open(db: Arc<Database>, dim: usize) -> Result<Self> {
+        Self::open_with_mode(db, dim, false)
+    }
+
+    /// Open an HNSW store in either read-write or read-only mode.
+    ///
+    /// Why: Issue #59 — when redb was opened via the snapshot fallback,
+    /// the schema is already initialised in the copy we hold, and any
+    /// writes would only land in the snapshot. Skipping the init write
+    /// transaction in that case preserves the "no writes touch this
+    /// file" invariant, and stamping `read_only = true` makes every
+    /// mutating method return a clear error to the caller.
+    /// What: Identical to `open` except it skips the schema-touch write
+    /// txn when `read_only` is true and sets the `read_only` flag.
+    /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
+    pub fn open_with_mode(db: Arc<Database>, dim: usize, read_only: bool) -> Result<Self> {
+        // Touch the tables in a write txn so a brand-new redb file carries
+        // them. redb only persists a table after it is opened for write at
+        // least once. In read-only mode we skip this — the snapshot copy
+        // we hold was made from a fully-initialised live file, so the
+        // tables already exist.
+        // #8314: write-free once initialised, so a reopen never waits on a
+        // live (possibly stuck) vector write. See `open_init`.
+        if !read_only {
+            open_init::ensure_schema(&db)?;
+        }
+
+        // #9141: single-layer, so hnsw_rs's OS-seeded layer RNG cannot vary it.
+        let index = replay::new_index();
+
+        // Load tombstones first so we never insert a deleted point into the
+        // fresh in-memory graph during hydration.
+        let tombstones: std::collections::HashSet<u64> = {
+            let rtx = db.begin_read()?;
+            let table = rtx.open_table(DELETED_VECTORS)?;
+            let mut set = std::collections::HashSet::new();
+            for entry in table.iter()? {
+                let (k, _) = entry?;
+                set.insert(k.value());
+            }
+            set
+        };
+
+        // Replay every live vector into the in-memory graph and find the
+        // largest vector_id ever assigned so `next_id` resumes correctly.
+        let mut max_seen: u64 = 0;
+        let mut live: Vec<(Vec<f32>, usize)> = Vec::new();
+        {
+            let rtx = db.begin_read()?;
+            let table = rtx.open_table(VECTORS)?;
+            for entry in table.iter()? {
+                let (k, v) = entry?;
+                let id = k.value();
+                if id > max_seen {
+                    max_seen = id;
+                }
+                if tombstones.contains(&id) {
+                    continue;
+                }
+                let vec: Vec<f32> = postcard::from_bytes(v.value())?;
+                if vec.len() != dim {
+                    return Err(HnswStoreError::DimensionMismatch {
+                        expected: dim,
+                        got: vec.len(),
+                    });
+                }
+                live.push((vec, id as usize));
+            }
+        }
+        // #9141: parallel insert into the single-layer graph (owner ruling
+        // 25). See `replay` for what that does and does not guarantee.
+        let started = std::time::Instant::now();
+        replay::replay(&index, &live).map_err(HnswStoreError::StdoutGuard)?;
+        let replayed = started.elapsed();
+        // #9174: found once per open; `upsert` adds the points it strands.
+        let stranded = stranded::stranded_points(&index);
+        // #9141: the per-open cost of the #9174 self-search, for live checks.
+        tracing::debug!(
+            points = live.len(),
+            stranded_groups = stranded.len(),
+            replay_ms = replayed.as_millis() as u64,
+            stranded_ms = (started.elapsed() - replayed).as_millis() as u64,
+            "hnsw open: graph replay and stranded-point scan"
+        );
+
+        // Also consider the highest mapped id from VECTOR_KEYS in case
+        // VECTORS was cleared but the mapping survived (defensive).
+        {
+            let rtx = db.begin_read()?;
+            let table = rtx.open_table(VECTOR_KEYS)?;
+            for entry in table.iter()? {
+                let (_, v) = entry?;
+                let id = v.value();
+                if id > max_seen {
+                    max_seen = id;
+                }
+            }
+        }
+
+        // #5005: raise the persisted allocator to the file's high-water mark.
+        //
+        // This is both the migration for a palace written before `VECTOR_ID_SEQ`
+        // existed (no row → seeded here) and the repair for one that a
+        // pre-#5005 binary wrote to between two opens (row present but stale →
+        // raised here). Written as a max, never a plain set, so it is
+        // idempotent and can only move forward: a rolling upgrade that
+        // interleaves an old binary can leave the counter behind the tables,
+        // and the next open of a fixed binary pulls it back up before any id is
+        // issued. Skipped in read-only/snapshot mode, where every write path
+        // returns `ReadOnly` before it could allocate anything.
+        // #8314: reads first; writes only when the counter is below the floor.
+        if !read_only {
+            open_init::raise_id_floor(&db, max_seen.saturating_add(1))?;
+        }
+
+        Ok(Self {
+            keys: KeyCache::new(&db),
+            db,
+            index: Arc::new(RwLock::new(index)),
+            dim,
+            read_only,
+            shadowed: RwLock::new(std::collections::HashSet::new()),
+            palace: Arc::from("unnamed palace"),
+            insert_gate: parking_lot::Mutex::new(()),
+            breaker: Arc::new(op_budget::OpBreaker::from_env()),
+            stranded: RwLock::new(stranded),
+            ops: Arc::default(),
+            #[cfg(test)]
+            compact_race_barrier: RwLock::new(None),
+            #[cfg(test)]
+            txn_budget: RwLock::new(None),
+        })
+    }
+
+    /// Name the palace this store belongs to, for #8749 deadline diagnostics.
+    ///
+    /// Why: the store opens on a shared `Database` and never sees its path.
+    /// Test: `compact_orphans_past_its_deadline_removes_nothing`.
+    pub fn with_palace(mut self, palace: Arc<str>) -> Self {
+        self.palace = palace;
+        self
+    }
+
+    /// Begin a multi-row maintenance write under the #8749 deadline, so a
+    /// stalled sweep rolls back instead of holding off every `upsert`.
+    fn begin_deadlined_write(&self) -> Result<DeadlinedWrite> {
+        #[cfg(test)]
+        let budget = (*self.txn_budget.read()).unwrap_or_else(timeouts::write_txn_deadline);
+        #[cfg(not(test))]
+        let budget = timeouts::write_txn_deadline();
+        let palace = Arc::clone(&self.palace);
+        Ok(DeadlinedWrite::begin(
+            &self.db,
+            palace,
+            "vector redb",
+            budget,
+        )?)
+    }
+
+    /// Install the test-only `compact_orphans` rendezvous. See
+    /// [`Self::compact_race_barrier`].
+    #[cfg(test)]
+    fn set_compact_race_barrier(&self, barrier: Arc<std::sync::Barrier>) {
+        *self.compact_race_barrier.write() = Some(barrier);
+    }
+
+    /// Whether this store rejects writes (i.e. it was opened against a
+    /// snapshot of a file locked by another process).
+    ///
+    /// Why: Issue #59 — `UsearchStore` and ultimately `PalaceHandle`
+    /// surface this through to the MCP layer so write tools can produce a
+    /// meaningful error instead of a redb traceback.
+    /// What: Returns the value of the `read_only` flag.
+    /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Insert a (uuid, vector) row, returning the assigned vector_id.
+    ///
+    /// Why: Callers reference vectors by drawer UUID; the HNSW graph keys
+    /// them by `usize`. Allocating a monotonic id and persisting both the
+    /// mapping (`VECTOR_KEYS`) and the raw vector (`VECTORS`) inside the
+    /// same write transaction guarantees consistency across crash points.
+    /// If the same UUID already has a vector_id, that id is reused — the
+    /// old vector is overwritten in redb. The new vector is also inserted
+    /// into the in-memory graph (note: `hnsw_rs` does not support point
+    /// updates, so a re-upsert effectively shadows the old graph entry; the
+    /// older copy stays in the graph but is not addressable via the UUID
+    /// mapping, and a full rebuild reclaims it).
+    /// What: Validates `vector.len() == dim`, reads (or allocates) the
+    /// vector_id under one write txn, writes the postcard-encoded vector to
+    /// `VECTORS`, writes the UUID→id mapping to `VECTOR_KEYS`, and removes
+    /// any prior tombstone for this id. Then inserts the vector into the
+    /// in-memory graph, and records it — and any point the insert evicted
+    /// from a neighbour list — for an exact scan if a search for its own
+    /// vector does not reach it (#9174).
+    ///
+    /// #5005: allocation for a NEW uuid reads and bumps the persisted
+    /// `VECTOR_ID_SEQ` counter inside this same write transaction, so two live
+    /// stores over one file serialise against each other instead of each
+    /// handing out ids from a private counter. [`allocate_vector_id`] also
+    /// refuses to return an id that already has a `VECTORS` row, so an upsert
+    /// can never silently overwrite another drawer's vector.
+    /// Test: `upsert_and_search_round_trips`,
+    /// `two_live_stores_over_one_file_never_alias_ids`.
+    pub fn upsert(&self, uuid: &str, vector: &[f32]) -> Result<u64> {
+        if self.read_only {
+            return Err(HnswStoreError::ReadOnly);
+        }
+        if vector.len() != self.dim {
+            return Err(HnswStoreError::DimensionMismatch {
+                expected: self.dim,
+                got: vector.len(),
+            });
+        }
+        // #9487: registered on this blocking thread, so it outlives a dropped future.
+        let _op = self.ops.begin(op_watch::HnswOpKind::Upsert);
+
+        // #9487: the redb half lives in `row_write.rs`.
+        let (vector_id, shadows_previous) = self.commit_vector_row(uuid, vector)?;
+
+        // #9275: the graph half lives in `row_write.rs`, shared with `replace_group`.
+        self.index_point(vector, vector_id, shadows_previous)?;
+        Ok(vector_id)
+    }
+
+    /// Cosine-similarity search returning (uuid, distance) pairs.
+    ///
+    /// Why: Callers identify drawers by UUID, not by HNSW-internal `usize`.
+    /// We resolve the mapping from a cached inversion of `VECTOR_KEYS`,
+    /// re-read only after a write (#9141, see `key_cache`), so the search
+    /// path is a single in-memory graph traversal plus a hash lookup per
+    /// hit. Tombstoned ids are filtered out before the lookup so callers
+    /// never see deleted points.
+    /// What: Ranks candidates — exactly, by scanning every point, when the
+    /// palace holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`] live rows;
+    /// otherwise via `Hnsw::search(query, k, ef_search)`. Re-scores any drawer
+    /// that has a shadow copy in the graph against its `VECTORS` row, filters
+    /// the result against `DELETED_VECTORS`, then maps each surviving
+    /// `vector_id` back to its UUID via the `VECTOR_KEYS` reverse map. Returns
+    /// hits sorted by ascending distance (best first), each UUID at most once.
+    ///
+    /// #9275: the rows of one drawer — `{drawer}` and `{drawer}#n`, grammar in
+    /// `store::vector_key` — fold into one hit under the drawer key, scored by
+    /// its nearest row, and `k` counts drawers; see `groups.rs`.
+    ///
+    /// #5171: below the threshold the graph traversal returns only the points
+    /// reachable from its descent pivot along pruned layer-0 neighbour lists,
+    /// which on real embeddings dropped a true top-5 neighbour on 2–4% of
+    /// queries — and because `hnsw_rs` seeds its level RNG from OS entropy,
+    /// *which* drawer went missing changed on every palace open. See
+    /// [`exhaustive`] for the measurement and the threshold's rationale.
+    /// #9141: the graph is now single-layer, so the layer RNG no longer
+    /// changes which drawers the graph arm misses; see `replay`.
+    ///
+    /// #5179: above the threshold both graph budgets scale with the collection
+    /// rather than sitting at a constant — `ef_search` with the live-drawer
+    /// count, and the candidate pool with what survives the tombstone filter, so
+    /// deleted ids cannot spend the caller's `k` result slots. See
+    /// [`graph_arm`].
+    ///
+    /// #9174: the graph arm also scores every point its search cannot find,
+    /// exactly; see [`stranded`].
+    /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
+    /// `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_is_exact_at_the_exhaustive_threshold`,
+    /// `search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours`,
+    /// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
+    /// `search_finds_drawers_the_graph_cannot_reach`,
+    /// `search_reads_vector_keys_once_until_a_store_write`,
+    /// `top_k_counts_drawers_not_chunks`.
+    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
+        if query.len() != self.dim {
+            return Err(HnswStoreError::DimensionMismatch {
+                expected: self.dim,
+                got: query.len(),
+            });
+        }
+        // #9487: registered on this blocking thread, so it outlives a dropped future.
+        let _op = self.ops.begin(op_watch::HnswOpKind::Search);
+
+        // #9141: the (id → uuid) reverse map and tombstone set, re-read from
+        // redb only when a write has landed since the last search.
+        let keys = self.keys.get(&self.db)?;
+        // #9275: `k` counts drawers, not chunk rows; see `groups.rs`.
+        self.search_grouped(query, k, &keys)
+    }
+
+    /// Candidate `(vector_id, distance)` rows for `query`, best first, with
+    /// shadowed drawers re-scored against `VECTORS` (#5171).
+    ///
+    /// What: the exhaustive arm returns every live row; the graph arm returns
+    /// a pool sized for `k` rows (#5179, #9174). Tombstones and the id → key
+    /// mapping are applied by the caller, `groups::group_rows`.
+    /// Test: `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_widens_until_k_drawers_in_the_graph_arm`.
+    fn ranked(&self, query: &[f32], k: usize, keys: &key_cache::KeyMap) -> Result<Vec<(u64, f32)>> {
+        let (reverse, tombstones) = (&keys.reverse, &keys.tombstones);
+
+        // #5171: `reverse.len()` is the LIVE row count — `get_nb_point()`
+        // also counts tombstones and shadows, so a small palace could churn
+        // past the threshold mid-session and silently revert to the approximate
+        // path. The scan returns every live candidate rather than a
+        // `want`-sized prefix: a shadowed drawer's provisional distance is
+        // `min(stale, current)`, so cutting before `resolve_shadowed` lets a
+        // superseded vector evict a true neighbour. `group_rows` does the
+        // bounding instead, on the corrected ranking.
+        let mut raw: Vec<(u64, f32)> = {
+            let index = self.bounded_graph("search")?; // #9487
+            if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+                exhaustive_nearest(&index, query, tombstones)
+            } else {
+                // #5179: both budgets are functions of the collection, not
+                // constants — a fixed `ef` let recall decay as the palace grew,
+                // and a fixed `2k` candidate count let deleted points spend the
+                // caller's result slots. See [`graph_arm`].
+                let mut hits = graph_nearest(&index, query, tombstones, k, reverse.len());
+                // #9174: the graph search misses stranded points; score them all.
+                stranded::merge_stranded(&mut hits, &self.stranded.read(), query, tombstones);
+                hits
+            }
+        };
+
+        // #5171: a drawer with two embeddings in the graph is scored against
+        // the one `VECTORS` holds, never against the copy it superseded.
+        let shadowed = self.shadowed.read();
+        if !shadowed.is_empty() {
+            let rtx = self.db.begin_read()?;
+            let vectors = rtx.open_table(VECTORS)?;
+            resolve_shadowed(&mut raw, &shadowed, query, &vectors)?;
+        }
+        Ok(raw)
+    }
+
+    /// Mark a UUID's vector as deleted (tombstone).
+    ///
+    /// Why: `hnsw_rs` does not support removing a point from the graph
+    /// after insertion, so a true delete would require rebuilding the
+    /// index. We instead write a tombstone to redb and filter at search
+    /// time. A subsequent `compact_orphans` (or a full rebuild via
+    /// `open`) reclaims the storage and the graph entry.
+    /// What: In a single write txn, removes the `VECTOR_KEYS` row for the
+    /// UUID, inserts the vector_id into `DELETED_VECTORS`. Returns `true`
+    /// if a mapping was found and tombstoned, `false` if the UUID was not
+    /// known. The vector row itself stays in `VECTORS` until compaction.
+    /// Test: `delete_filters_results`.
+    pub fn delete(&self, uuid: &str) -> Result<bool> {
+        if self.read_only {
+            return Err(HnswStoreError::ReadOnly);
+        }
+        let wtx = self.db.begin_write()?;
+        let removed;
+        {
+            let mut keys = wtx.open_table(VECTOR_KEYS)?;
+            let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
+            removed = match keys.remove(uuid)? {
+                Some(g) => {
+                    tombstones.insert(g.value(), [].as_slice())?;
+                    true
+                }
+                None => false,
+            };
+        }
+        wtx.commit()?;
+        self.keys.invalidate(); // #9141
+        Ok(removed)
+    }
+
+    /// Number of live vectors (total rows in `VECTORS` minus tombstones).
+    ///
+    /// Why: Callers (diagnostics, compaction reporting) want the user-
+    /// visible count, not the raw `VECTORS` row count which includes
+    /// tombstoned entries pending compaction.
+    /// What: Reads both `VECTORS` and `DELETED_VECTORS` lengths and returns
+    /// the difference, clamped at zero.
+    /// Test: Indirectly via the unit tests below.
+    pub fn len(&self) -> Result<usize> {
+        let rtx = self.db.begin_read()?;
+        let vectors = rtx.open_table(VECTORS)?;
+        let dead = rtx.open_table(DELETED_VECTORS)?;
+        let total = vectors.len()? as usize;
+        let tombstoned = dead.len()? as usize;
+        Ok(total.saturating_sub(tombstoned))
+    }
+
+    /// True if no live vectors remain.
+    ///
+    /// Why: clippy `len_without_is_empty` requires this alongside `len`,
+    /// and callers benefit from a zero-allocation existence check that
+    /// short-circuits before iterating.
+    /// What: Returns `Ok(true)` when `len()? == 0`.
+    /// Test: Indirectly via the unit tests below.
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
+    }
+
+    /// Snapshot every drawer key currently mapped to a vector.
+    ///
+    /// Why: The dream compaction / orphan-detection pass (issue #51) needs
+    /// to enumerate every drawer UUID known to the index so it can diff
+    /// against the authoritative drawer table and drop the strays. Unlike
+    /// the old usearch-era `key_map`, `VECTOR_KEYS` is persisted, so this
+    /// works after a cold reopen too.
+    /// What: Iterates `VECTOR_KEYS` and collects each key (the string
+    /// UUID) into a `Vec<String>`. Returns an empty vec for a fresh
+    /// store.
+    /// Test: Indirectly via `vector::tests::compact_orphans_removes_only_missing_ids`.
+    pub fn all_keys(&self) -> Result<Vec<String>> {
+        let rtx = self.db.begin_read()?;
+        let keys = rtx.open_table(VECTOR_KEYS)?;
+        let mut out = Vec::new();
+        for entry in keys.iter()? {
+            let (k, _) = entry?;
+            out.push(k.value().to_string());
+        }
+        Ok(out)
+    }
+
+    /// Count how many drawer keys share a `vector_id` with another key.
+    ///
+    /// Why (#5005, and requirement 1 of #5000): key PRESENCE is what
+    /// `palace_reembed` tests, and an aliased drawer has a key — so the palace
+    /// that lost four drawers to id collisions reported zero missing. The
+    /// signal that does catch it is arithmetic on `VECTOR_KEYS` alone: one row
+    /// per drawer, one distinct id per row, so any shortfall between the two is
+    /// exactly the number of drawers whose vector belongs to someone else.
+    /// What: one pass over `VECTOR_KEYS` building id → uuids. Returns the row
+    /// count, the distinct-id count, and every group with more than one uuid.
+    /// Cheap: `VECTOR_KEYS` is one small row per drawer and holds no vectors.
+    /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+    pub fn audit_aliases(&self) -> Result<AliasAudit> {
+        let mut by_id: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut key_rows = 0usize;
+        {
+            let rtx = self.db.begin_read()?;
+            let keys = rtx.open_table(VECTOR_KEYS)?;
+            for entry in keys.iter()? {
+                let (k, v) = entry?;
+                key_rows += 1;
+                by_id
+                    .entry(v.value())
+                    .or_default()
+                    .push(k.value().to_string());
+            }
+        }
+        let distinct_vector_ids = by_id.len();
+        let mut aliased: Vec<(u64, Vec<String>)> = by_id
+            .into_iter()
+            .filter(|(_, uuids)| uuids.len() > 1)
+            .collect();
+        // Deterministic order so callers, logs, and tests all agree.
+        aliased.sort_by_key(|(id, _)| *id);
+        for (_, uuids) in &mut aliased {
+            uuids.sort();
+        }
+        Ok(AliasAudit {
+            key_rows,
+            distinct_vector_ids,
+            aliased,
+        })
+    }
+
+    /// Unmap every drawer caught in an id collision so a re-embed can repair it.
+    ///
+    /// 🔴 Never run against a live palace in the PR that added it (#5005) — the
+    /// coverage below is all synthetic collisions. Reached from the
+    /// `palace_unalias` MCP tool via `PalaceHandle::repair_aliases`, which
+    /// defaults to a dry run.
+    ///
+    /// Why: when N uuids alias onto one `vector_id`, the single surviving
+    /// `VECTORS` row holds whichever vector was written LAST, and search
+    /// resolves that id to whichever uuid `VECTOR_KEYS` yields last (ascending
+    /// by uuid). Those two "last"s are unrelated, so the reachable drawer's
+    /// content is not reliably its own either — every member of the group is
+    /// suspect, not just the unreachable ones. The only sound repair is to drop
+    /// the whole group's mapping and re-embed all of them.
+    /// What: for each aliased group, removes every `VECTOR_KEYS` row in it —
+    /// and, #9275, every other chunk row of each drawer it touches — and
+    /// tombstones the ids, in one write transaction. Returns the freed keys,
+    /// which then read as ordinary "missing" drawers to
+    /// `PalaceHandle::embed_health` and are repaired by the normal backfill.
+    /// Idempotent: a second run finds no groups and frees nothing. #8749: runs
+    /// under the write-transaction deadline, like `compact_orphans`.
+    /// Test: `unalias_frees_every_uuid_in_a_collision_group`,
+    /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`.
+    pub fn unalias(&self) -> Result<Vec<String>> {
+        if self.read_only {
+            return Err(HnswStoreError::ReadOnly);
+        }
+        let audit = self.audit_aliases()?;
+        if audit.aliased.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut freed: Vec<String> = Vec::new();
+        let wtx = self.begin_deadlined_write()?;
+        {
+            let mut keys = wtx.open_table(VECTOR_KEYS)?;
+            let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
+            for (id, uuids) in &audit.aliased {
+                wtx.check("between unalias groups")?; // #8749
+                for uuid in uuids {
+                    // #9275: free the whole drawer, every chunk row of it.
+                    groups::remove_drawer_rows(&mut keys, &mut tombstones, uuid, &mut freed)?;
+                }
+                tombstones.insert(*id, [].as_slice())?;
+            }
+        }
+        wtx.check_before_commit()?.commit()?;
+        self.keys.invalidate(); // #9141
+        tracing::warn!(
+            groups = audit.aliased.len(),
+            freed = freed.len(),
+            "#5005: unmapped every drawer in an aliased vector_id group; they now \
+             read as missing and need a re-embed"
+        );
+        Ok(freed)
+    }
+
+    /// Remove `VECTORS` rows whose `vector_id` no longer has a matching
+    /// `VECTOR_KEYS` entry (i.e. dangling vectors). Also clears tombstoned
+    /// rows from `VECTORS` and `DELETED_VECTORS` in the same pass.
+    ///
+    /// Why: Over a palace's lifetime, the `VECTORS` table accumulates
+    /// rows that were tombstoned via `delete` but never physically
+    /// removed, plus any historical orphans from crashed writes. This
+    /// method reclaims the storage. The in-memory graph still contains
+    /// those points, but they are no longer addressable; a full
+    /// rebuild via `open` reclaims the graph as well.
+    /// What: Scans `VECTOR_KEYS` for the live-id set and `VECTORS` for orphan
+    /// candidates in read transactions (so the O(N) `VECTORS` scan holds no
+    /// write lock), captures each candidate's current uuid, then in the delete
+    /// write transaction re-confirms liveness with a POINT lookup per candidate
+    /// and removes only those still not live, plus any tombstoned rows with no
+    /// mapping. Returns the number of `VECTORS` rows actually removed.
+    ///
+    /// #6195: the earlier three-transaction form deleted every candidate the
+    /// read-txn snapshot found, so an `upsert` committing between the snapshot
+    /// and the delete had its brand-new `VECTORS` row deleted as a false orphan
+    /// while its `VECTOR_KEYS` mapping survived — leaving the drawer out of the
+    /// HNSW graph on the next `open`. Re-confirming liveness inside the delete
+    /// transaction, which redb serialises against every writer, closes that
+    /// window: a row live at the moment of deletion is never deleted. The
+    /// re-check is a per-candidate point lookup, so the write-lock hold stays
+    /// O(candidates), never the O(live-count) full-table scan. #8749: that
+    /// hold is also bounded in time — past the deadline the sweep rolls back
+    /// and returns `WriteDeadline`, and the next cycle retries it.
+    /// Test: `compact_orphans_removes_dangling`,
+    /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`,
+    /// `compact_orphans_past_its_deadline_removes_nothing`.
+    pub fn compact_orphans(&self) -> Result<usize> {
+        if self.read_only {
+            return Err(HnswStoreError::ReadOnly);
+        }
+        // Snapshot live ids and tombstoned ids in a read txn first to
+        // avoid holding the write txn over a large scan.
+        let (live_ids, tombstoned_ids): (std::collections::HashSet<u64>, Vec<u64>) = {
+            let rtx = self.db.begin_read()?;
+            let keys = rtx.open_table(VECTOR_KEYS)?;
+            let mut live = std::collections::HashSet::new();
+            for entry in keys.iter()? {
+                let (_, v) = entry?;
+                live.insert(v.value());
+            }
+            let dead = rtx.open_table(DELETED_VECTORS)?;
+            let mut deads = Vec::new();
+            for entry in dead.iter()? {
+                let (k, _) = entry?;
+                deads.push(k.value());
+            }
+            (live, deads)
+        };
+
+        // #6195 (test seam): a rendezvous fired ONCE, right after the live-id
+        // snapshot and before the orphan scan, so a test can land a real racing
+        // `upsert` in the exact window between the two reads with no timing
+        // dependence. `wait()` twice: first releases the test to upsert, second
+        // waits for that upsert to commit. `None` (production) is a no-op.
+        #[cfg(test)]
+        {
+            let barrier = self.compact_race_barrier.read().clone();
+            if let Some(barrier) = barrier {
+                barrier.wait();
+                barrier.wait();
+            }
+        }
+
+        // Now find vector rows that are NOT in live_ids (i.e. orphans).
+        let orphan_ids: Vec<u64> = {
+            let rtx = self.db.begin_read()?;
+            let vectors = rtx.open_table(VECTORS)?;
+            let mut orphans = Vec::new();
+            for entry in vectors.iter()? {
+                let (k, _) = entry?;
+                let id = k.value();
+                if !live_ids.contains(&id) {
+                    orphans.push(id);
+                }
+            }
+            orphans
+        };
+
+        if orphan_ids.is_empty() && tombstoned_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // #6195: capture the uuid (if any) that currently maps to each delete
+        // candidate, in an UNLOCKED read txn. `VECTOR_KEYS` is keyed by uuid
+        // with no id→uuid index, so one pass is the only way to answer "which
+        // uuid points at this id" — but it holds no write lock, and the map
+        // keeps only candidate ids, so memory stays O(candidates). A candidate
+        // with NO uuid here can never become mapped later: `allocate_vector_id`
+        // refuses any id already present in `VECTORS` (every candidate has a
+        // `VECTORS` row), and `upsert` never remaps an existing uuid to a
+        // different id — so only an id already mapped now can be mapped at
+        // delete time. This capture runs after the orphan scan, so an atomic
+        // `upsert` whose `VECTORS` row the scan saw has its mapping visible
+        // here too.
+        let candidate_uuid: HashMap<u64, String> = {
+            let mut want: std::collections::HashSet<u64> =
+                std::collections::HashSet::with_capacity(orphan_ids.len() + tombstoned_ids.len());
+            want.extend(orphan_ids.iter().copied());
+            want.extend(tombstoned_ids.iter().copied());
+            let rtx = self.db.begin_read()?;
+            let keys = rtx.open_table(VECTOR_KEYS)?;
+            let mut map = HashMap::new();
+            for entry in keys.iter()? {
+                let (k, v) = entry?;
+                let id = v.value();
+                if want.contains(&id) {
+                    map.insert(id, k.value().to_string());
+                }
+            }
+            map
+        };
+
+        let wtx = self.begin_deadlined_write()?;
+        let mut removed = 0usize;
+        {
+            let keys = wtx.open_table(VECTOR_KEYS)?;
+            let mut vectors = wtx.open_table(VECTORS)?;
+            let mut dead = wtx.open_table(DELETED_VECTORS)?;
+
+            // #6195: liveness is a POINT lookup keyed by the candidate's uuid,
+            // so the write-lock hold is O(candidates·log n) — not the O(live)
+            // full `VECTOR_KEYS` scan. redb serialises this txn against every
+            // `upsert`, so the lookup sees every upsert committed before the txn
+            // and blocks any after: a row live at the moment of deletion is
+            // never deleted, and a drawer deleted in the window reads as a true
+            // orphan and is reclaimed. A candidate with no captured uuid cannot
+            // have become mapped since (see the capture note above), so it is a
+            // true orphan.
+            let is_live = |id: u64| -> Result<bool> {
+                match candidate_uuid.get(&id) {
+                    Some(uuid) => Ok(keys.get(uuid.as_str())?.map(|g| g.value()) == Some(id)),
+                    None => Ok(false),
+                }
+            };
+
+            for id in &orphan_ids {
+                wtx.check("between orphan removals")?; // #8749
+                if is_live(*id)? {
+                    continue;
+                }
+                let _ = vectors.remove(id)?;
+                // If this orphan was also tombstoned, clear the tombstone.
+                let _ = dead.remove(id)?;
+                removed += 1;
+            }
+            for id in &tombstoned_ids {
+                wtx.check("between tombstone removals")?; // #8749
+                if is_live(*id)? {
+                    // Tombstoned but still mapped — leave the vector row intact
+                    // (re-upsert flow); only clear the tombstone when it has no
+                    // mapping. Defensive: `delete` also removes the mapping, so
+                    // in the current API a tombstoned id is never remapped.
+                    continue;
+                }
+                let _ = dead.remove(id)?;
+            }
+        }
+        wtx.check_before_commit()?.commit()?;
+        self.keys.invalidate(); // #9141
+        Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests;

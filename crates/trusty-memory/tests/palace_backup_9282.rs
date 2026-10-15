@@ -150,6 +150,28 @@ async fn palace_backup_manifest_counts_equal_the_palace_counts() {
     );
 }
 
+/// Why (#9271): the engine moved into trusty-memory, so the manifest's
+/// `writer_version` is the version of the binary that wrote it, the number
+/// `--version` prints. Before, it was trusty-common's.
+/// What: backs up one palace and compares `writer_version` with this crate's
+/// `CARGO_PKG_VERSION`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn palace_backup_manifest_writer_version_is_the_trusty_memory_version() {
+    let fx = Fixture::new();
+    fx.palace("bk-version");
+    let out = raw(&fx.state, "palace_backup", json!({"palace": "bk-version"}))
+        .await
+        .expect("palace_backup");
+    let dir = PathBuf::from(out["dir"].as_str().expect("dir"));
+    let manifest = read_manifest(&dir);
+    assert_eq!(
+        manifest["writer_version"],
+        env!("CARGO_PKG_VERSION"),
+        "{manifest}"
+    );
+}
+
 /// Seed `n` drawers straight into the KG store, so the copy takes a while.
 fn seed_drawers(handle: &PalaceHandle, n: usize) {
     let store = handle.kg.store();

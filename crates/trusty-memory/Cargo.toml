@@ -67,7 +67,8 @@ name = "trusty-memory"
 # 0.32.0 (Refs #9274): minor — palace format gate; trusty-common floor moves 0.57 -> 0.58; 0.31.1 is live on crates.io.
 # 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
 # 0.35.0 (Refs #9275): minor by owner ruling Dfa — palace format 2; trusty-common floor moves 0.60 -> 0.61; 0.34.0 skipped on purpose and never published (0.33.0 is live on crates.io).
-version = "0.35.1"
+# 0.36.0 (Refs #9271): minor — owns the engine (`trusty_memory::engine` is a module, no longer a re-export of `trusty_common::memory_core`); trusty-common floor moves 0.63 -> 0.64; adds `embedder-test-support` and `memory-core-test-support`; subsumes the unpublished 0.35.1 (0.35.0 is live on crates.io).
+version = "0.36.0"
 edition.workspace = true
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -154,10 +155,26 @@ trusty-mcp = { workspace = true, optional = true }
 # supplies the bind, the peer check, the framing and the accept loop, and
 # `uds::stream_client` the reader `memory.chat` needs. It replaces
 # `axum-server`, which was here for the retired HTTP listener.
-# #9269: only the engine's `memory-core` is unconditional; every feature the
+# #9269: only what the engine needs is unconditional; every feature the
 # serving surface needs is switched on by `server` below (`config-cli` is what
-# pulls in clap). #9544: 0.59.2 is the first release with `PalaceRegistry::rename_palace`.
-trusty-common = { path = "../trusty-common", version = "0.63", default-features = false, features = ["memory-core"] }
+# pulls in clap). #9271: the engine moved here from trusty-common's
+# `memory-core`, so this names the trusty-common features it used to imply.
+trusty-common = { path = "../trusty-common", version = "0.64", default-features = false, features = [
+    "embedder",
+    "embedder-bundled-ort",
+    "credentials",
+    "redb-open",
+    "chat-attachments",
+] }
+# #9271: the engine's own dependencies, moved with it from trusty-common.
+hnsw_rs = { workspace = true }
+git2 = { workspace = true }
+postcard = { workspace = true }
+regex = { workspace = true }
+hex = { workspace = true }
+unicode-normalization = { workspace = true }
+# Same spec as trusty-common's optional copy, so one build serves both.
+petgraph = { version = "0.8", features = ["serde-1"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -236,9 +253,8 @@ tempfile = { workspace = true }
 # REAL terminal on stdin, which needs openpty(3). A pipe proves the silent half
 # of the contract; only a pty proves the human-facing half.
 libc = { workspace = true }
-# #5005: encode a real 384-dim vector when seeding a synthetic id collision
-# into a palace's index redb, so HnswStore's dimension check accepts the file.
-postcard = { workspace = true }
+# #9271: the engine's chat-asset tests encode a PNG.
+image = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
 # #8729: capture the user-forget log line in `service::core_tests`. Already a
@@ -253,7 +269,14 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.63", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+# #9271: `test-support` exposes the trusty-common test helpers the engine's
+# tests share (`capture_logs`, `ReadOnlyDir`, `EnvVarGuard`).
+trusty-common = { path = "../trusty-common", version = "0.64", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
+# #9271: this crate's own test-support features, for `tests/*`. A path-only
+# self dev-dependency: Cargo turns the features on for test builds only, and
+# `cargo publish` strips the entry. `default-features = false` keeps it from
+# re-enabling `server` under `--no-default-features`.
+trusty-memory = { path = ".", default-features = false, features = ["embedder-test-support", "memory-core-test-support"] }
 chrono = { workspace = true }
 # #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
 # the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real
@@ -307,3 +330,10 @@ daemon = ["server"]
 # `MemoryMcpService` descriptor. Its Rust types are out of the 1.x contract;
 # only the feature name is frozen (ADR-0066 D7).
 mcp-schema = ["dep:trusty-mcp"]
+# #9271: test-only seams of the engine, outside the ADR-0066 D1.4 frozen names.
+# `embedder-test-support` exposes `engine::retrieval::seed_shared_embedder_with_mock`
+# and the mock-embedder hooks; `memory-core-test-support` exposes the format-0
+# and format-1 palace fixtures under `engine::store`. Never enable them in a
+# production build; list them in `[dev-dependencies]` or a test-only feature.
+embedder-test-support = ["trusty-common/embedder-test-support"]
+memory-core-test-support = []

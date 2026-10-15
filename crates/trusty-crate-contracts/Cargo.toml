@@ -54,18 +54,17 @@ trusty-installer = { workspace = true }
 # #8341 (C): `tests/memory_uds_consumer.rs` asks tctl's probe about a live
 # trusty-memory daemon. `trusty-installer` above was a trusty-memory
 # dev-dependency for this one test, adding 13 crates to its test build.
-trusty-memory = { path = "../trusty-memory" }
+# #9271: `embedder-test-support` is the engine's mock embedder seam (C); it was
+# a trusty-common feature until the engine moved here.
+trusty-memory = { path = "../trusty-memory", features = ["embedder-test-support"] }
 # The features the moved tests need from the shared crate, named here rather
 # than inherited from whichever neighbour happens to enable them:
 #   `intent-source`  — the real ISR the cross-gate test resolves through (A).
 #   `uds`            — `socket_is_serving` / `daemon_socket_path` (B, C).
-#   `memory-core` + `embedder-test-support` — the mock embedder seam (C).
 #   `memory-rpc`     — the shared memory client (C).
 trusty-common = { workspace = true, features = [
     "intent-source",
     "uds",
-    "memory-core",
-    "embedder-test-support",
     "memory-rpc",
 ] }
 

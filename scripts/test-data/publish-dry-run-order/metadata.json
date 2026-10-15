@@ -20,6 +20,10 @@
     "  demo-private                  publish = false. Must never appear in the",
     "                                order even though it depends on demo-analyze.",
     "  serde                         external. Must never appear in the order.",
+    "  demo-common  -> demo-common   DEV self-edge (#9271): a crate dev-depending on",
+    "                                itself for its own test features. Not a cycle:",
+    "                                cargo publish strips a path-only dev-dependency.",
+    "                                This is trusty-memory -> trusty-memory.",
     "",
     "Only the keys publish-dry-run-order.sh reads are populated faithfully;",
     "`deps` carries dep_kinds so the dev-edge case has real data to assert on.",
@@ -108,9 +112,15 @@
       {
         "id": "path+file:///w/crates/demo-common#demo-common@0.1.0",
         "dependencies": [
+          "path+file:///w/crates/demo-common#demo-common@0.1.0",
           "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"
         ],
         "deps": [
+          {
+            "name": "demo_common",
+            "pkg": "path+file:///w/crates/demo-common#demo-common@0.1.0",
+            "dep_kinds": [{ "kind": "dev", "target": null }]
+          },
           {
             "name": "serde",
             "pkg": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",

@@ -1,0 +1,562 @@
+//! Configuration types, result types, and shared helpers for semantic
+//! consolidation.
+//!
+//! Why: Isolates the data-model layer so `inference.rs` and `consolidator.rs`
+//! can import from here without pulling in unrelated logic.
+//! What: `SemanticConsolidationConfig`, `ConsolidationAction`,
+//! `ConsolidationResult`, `CanonicalDrawer`, `inference_available`,
+//! `parse_consolidation_actions`, `build_consolidation_prompt`,
+//! `batch_cache_key`, `apply_actions_to_result`.
+//! Test: `semantic_config_defaults`, `consolidation_action_deserializes`,
+//! `parse_consolidation_actions_round_trips`, `batch_cache_key_is_deterministic`.
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::engine::palace::Drawer;
+
+// ─── Public config ──────────────────────────────────────────────────────────
+
+/// Configuration for the semantic-consolidation dream phase.
+///
+/// Why: lets operators tune the cost/quality trade-off without recompiling.
+/// The phase is the only part of the dream cycle that spends money and calls
+/// an external model, so it is opt-in: a daemon with no config file runs the
+/// LLM-free phases and nothing else (#5188).
+/// What: holds the enable flag, model id, similarity threshold for clustering,
+/// and per-cycle call budget.
+/// Test: `semantic_config_defaults` asserts the default field values.
+#[derive(Debug, Clone)]
+pub struct SemanticConsolidationConfig {
+    /// Whether the phase runs at all. Defaults to `false` — a config key must
+    /// turn it on explicitly, and it still needs a resolvable provider (see
+    /// [`resolve_consolidation_provider`]).
+    pub enabled: bool,
+    /// Model id used for consolidation prompts. An `ollama/` or `local/`
+    /// prefix — and only that prefix — selects a local model server; anything
+    /// else routes to OpenRouter and needs an API key.
+    pub model: String,
+    /// Cosine-similarity threshold above which two drawers are considered
+    /// candidates for LLM-based consolidation (distinct from the NLP dedup
+    /// threshold; lower here to catch near-synonyms the embedding model can
+    /// see but the strict dedup pass ignores).
+    pub similarity_threshold: f32,
+    /// Maximum drawers in a single LLM prompt batch (keeps prompts short).
+    pub max_batch_size: usize,
+    /// Maximum total LLM calls per dream cycle (cost ceiling).
+    pub max_calls_per_cycle: usize,
+}
+
+impl Default for SemanticConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            // #5188: opt-in. A daemon with no config file must never spend on
+            // an LLM, and must never open a connection to a local model server.
+            enabled: false,
+            model: "anthropic/claude-haiku-4-5".to_string(),
+            similarity_threshold: 0.75,
+            max_batch_size: 8,
+            max_calls_per_cycle: 20,
+        }
+    }
+}
+
+// ─── Consolidation actions (wire + domain) ─────────────────────────────────
+
+/// A single consolidation action emitted by the LLM.
+///
+/// Why: the LLM must return structured JSON so we can parse and apply actions
+/// without further prompting; keeping the enum flat (alias / merge / flag)
+/// covers the three cases from the issue spec.
+/// What: `Alias` links two names for the same concept; `Merge` produces a
+/// canonical drawer from a cluster; `Flag` marks a contradiction for human
+/// review.
+/// Test: `consolidation_action_deserializes` round-trips each variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ConsolidationAction {
+    /// Two strings that refer to the same concept (e.g. `"ts"` → `"trusty-search"`).
+    Alias { from: String, to: String },
+    /// A cluster of drawers that should share one canonical summary.
+    /// `canonical_content` is the LLM's output; `superseded_ids` are the
+    /// drawer UUIDs that were consolidated.
+    Merge {
+        canonical_content: String,
+        superseded_ids: Vec<Uuid>,
+    },
+    /// A drawer that contradicts another; flagged for human review.
+    Flag { drawer_id: Uuid, reason: String },
+}
+
+/// Outcome of one consolidation run: new canonical drawers to add, alias
+/// triples to store, and drawer ids flagged as superseded or contradictory.
+///
+/// Why: keeps the consolidator side-effect-free — callers (dream.rs) apply
+/// the returned actions rather than having the consolidator mutate the palace
+/// directly.
+/// What: additive-only lists; original drawers are preserved, superseded ones
+/// get a `superseded_by` link in the KG.
+/// Test: tested via `SemanticConsolidator` unit tests.
+#[derive(Debug, Default)]
+pub struct ConsolidationResult {
+    /// New canonical drawers to add to the palace.
+    pub canonical_drawers: Vec<CanonicalDrawer>,
+    /// Alias pairs discovered: `(from_term, to_canonical_term)`.
+    pub aliases: Vec<(String, String)>,
+    /// Drawer ids that are now superseded by a canonical drawer.
+    pub superseded_ids: Vec<Uuid>,
+    /// Drawer ids flagged for human review (contradiction / uncertainty).
+    pub flagged_ids: Vec<(Uuid, String)>,
+    /// Number of LLM calls consumed.
+    pub llm_calls: usize,
+    /// Response cache hits (saved LLM calls).
+    pub cache_hits: usize,
+}
+
+/// A new canonical drawer produced by the LLM from a cluster.
+///
+/// Why: we need to store both the canonical text and the list of superseded
+/// drawer ids so dream.rs can write the canonical drawer and set the
+/// `superseded_by` link on the originals.
+/// What: plain struct; `canonical_for` is sorted for deterministic hashing.
+/// Test: checked through `SemanticConsolidator`.
+#[derive(Debug, Clone)]
+pub struct CanonicalDrawer {
+    pub content: String,
+    pub importance: f32,
+    pub tags: Vec<String>,
+    /// Ids of the drawers this canonical entry replaces.
+    pub canonical_for: Vec<Uuid>,
+}
+
+// ─── Effective OpenRouter API key resolution ───────────────────────────────
+
+/// Resolve the effective OpenRouter API key: the explicitly configured value
+/// if non-empty, otherwise the `OPENROUTER_API_KEY` environment variable.
+///
+/// Why: multiple call sites need to agree on whether an OpenRouter key is
+/// configured so they pick the SAME inference backend (Ollama vs OpenRouter)
+/// for the SAME model id — `build_consolidator_from_config` (this crate)
+/// resolves the key with this env-var fallback before branching;
+/// `dream_config_from_user_config` (trusty-memory) picks which model string
+/// to forward based on which backend will resolve. Before this function
+/// existed those two call sites computed "is a key configured" independently
+/// and diverged whenever `OPENROUTER_API_KEY` was set in the daemon's process
+/// environment but absent from `~/.trusty-memory/config.toml`: the helper
+/// picked the local-model id (config.toml has no key), the consolidator built
+/// the OpenRouter backend (the env var supplied one), and every consolidation
+/// call silently failed sending an Ollama-style tag to OpenRouter — a
+/// regression report on the #2593 fix itself.
+/// What: returns `configured` verbatim when non-empty; otherwise reads
+/// `OPENROUTER_API_KEY` from the process environment (empty string when
+/// unset). No trimming — matches the pre-existing resolution semantics of
+/// `build_consolidator_from_config` exactly, so callers stay bit-for-bit
+/// consistent with it.
+/// Test: `resolve_openrouter_api_key_prefers_configured_value`,
+/// `resolve_openrouter_api_key_falls_back_to_env`.
+pub fn resolve_openrouter_api_key(configured: &str) -> String {
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
+}
+
+// ─── Gate: is inference available? ─────────────────────────────────────────
+
+/// Check whether at least one inference backend is configured and potentially
+/// reachable — WITHOUT making a network call.
+///
+/// Why: the dream cycle must not stall on a cold-start or missing config; a
+/// cheap synchronous gate (env var check only) decides whether to attempt the
+/// semantic phase at all.
+/// What: returns `true` if `OPENROUTER_API_KEY` is non-empty in the
+/// environment, or if `openrouter_api_key` is non-empty; `ollama_base_url` is
+/// non-empty when the local model is enabled. Does NOT ping any endpoint.
+///
+/// #5188: this no longer decides which backend the dream cycle builds. It said
+/// "a local model is enabled, so inference is available", which is how an
+/// unconfigured daemon reached `http://localhost:11434`.
+/// [`resolve_consolidation_provider`] is the selector now; this stays a plain
+/// predicate for callers that only want to know whether anything is configured.
+/// Test: `inference_available_false_without_key` (no env var → false) and
+/// `inference_available_true_with_*` (env var set → true).
+pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) -> bool {
+    if !openrouter_api_key.trim().is_empty() {
+        return true;
+    }
+    if local_model_enabled {
+        return true;
+    }
+    // Fall back to env var (daemon callers that didn't thread the config
+    // through to this level yet).
+    let env_key =
+        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
+    !env_key.trim().is_empty()
+}
+
+// ─── Provider resolution (issue #5188) ─────────────────────────────────────
+
+/// Model-id prefixes that explicitly request a local OpenAI-compatible server.
+///
+/// Why (#5188): the prefix is the ONLY thing that selects a local endpoint. An
+/// unprefixed id — including every OpenRouter-style `vendor/model` — routes to
+/// OpenRouter and needs a key, so a daemon that was never told about a local
+/// model never contacts one.
+/// What: matched case-sensitively against the start of `semantic.model`; the
+/// prefix is stripped before the id goes on the wire, so
+/// `"ollama/qwen3:30b"` requests `qwen3:30b`.
+/// Test: `resolve_provider_local_requires_explicit_prefix`.
+pub const LOCAL_MODEL_PREFIXES: &[&str] = &["ollama/", "local/"];
+
+/// Base URL used for a local model server when nothing overrides it.
+pub const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
+
+/// Env var overriding [`DEFAULT_LOCAL_BASE_URL`]. Takes a bare host with no
+/// `/v1` suffix, matching `inference::providers::local::LOCAL_HOST_ENV` and
+/// `trusty-agents`' legacy Ollama adapter so one setting moves every caller.
+pub const LOCAL_HOST_ENV: &str = "OLLAMA_HOST";
+
+/// Which backend the semantic-consolidation phase resolves to.
+///
+/// Why (#5188): backend selection used to be a two-line branch inside
+/// `build_consolidator_from_config`, where "local model enabled" — true by
+/// default — silently won whenever no OpenRouter key was set. Making the
+/// decision a value lets a test assert the choice without a network stack, and
+/// puts the "never fall back to local" rule in one readable place.
+/// What: [`Local`](Self::Local) only when the model id carries a
+/// [`LOCAL_MODEL_PREFIXES`] prefix AND the local backend is enabled;
+/// [`OpenRouter`](Self::OpenRouter) when a key resolves;
+/// [`Unavailable`](Self::Unavailable) otherwise, carrying the provider name and
+/// the reason for the single warn the caller logs.
+/// Test: `resolve_provider_*` in `semantic_consolidation::tests`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsolidationProvider {
+    /// OpenRouter with a resolved, non-empty API key.
+    OpenRouter { api_key: String, model: String },
+    /// A local OpenAI-compatible server, explicitly requested.
+    Local { base_url: String, model: String },
+    /// Nothing usable. `provider` names what the config asked for; `reason`
+    /// says what is missing.
+    Unavailable {
+        provider: &'static str,
+        reason: String,
+    },
+}
+
+/// Strip a [`LOCAL_MODEL_PREFIXES`] prefix, returning the bare model id.
+fn strip_local_prefix(model: &str) -> Option<&str> {
+    LOCAL_MODEL_PREFIXES
+        .iter()
+        .find_map(|p| model.strip_prefix(*p))
+}
+
+/// Resolve the local base URL from [`LOCAL_HOST_ENV`], else the default.
+fn local_base_url() -> String {
+    match std::env::var(LOCAL_HOST_ENV) {
+        Ok(v) if !v.trim().is_empty() => v.trim().trim_end_matches('/').to_string(),
+        _ => DEFAULT_LOCAL_BASE_URL.to_string(),
+    }
+}
+
+/// Decide which backend the semantic-consolidation phase should call.
+///
+/// Why (#5188): with no config file and no API key, the phase used to build an
+/// Ollama client against `http://localhost:11434` and drive a 45 GB model into
+/// a crash loop. A local endpoint is a deliberate choice, never a fallback, so
+/// the caller must name it in `model`.
+/// What: an `ollama/`/`local/` prefix selects [`ConsolidationProvider::Local`]
+/// — but only when `local_model_enabled`, so an operator can veto the local
+/// backend without editing the model id. Any other id resolves the OpenRouter
+/// key via [`resolve_openrouter_api_key`] (configured value, else
+/// `OPENROUTER_API_KEY`) and selects
+/// [`ConsolidationProvider::OpenRouter`] when that key is non-blank. Everything
+/// else is [`ConsolidationProvider::Unavailable`]. Reads the environment but
+/// opens no socket.
+/// Test: `resolve_provider_unprefixed_model_without_key_is_unavailable`,
+/// `resolve_provider_local_requires_explicit_prefix`,
+/// `resolve_provider_local_prefix_vetoed_when_disabled`,
+/// `resolve_provider_openrouter_when_key_present`.
+pub fn resolve_consolidation_provider(
+    model: &str,
+    configured_api_key: &str,
+    local_model_enabled: bool,
+) -> ConsolidationProvider {
+    let model = model.trim();
+    if let Some(bare) = strip_local_prefix(model) {
+        if !local_model_enabled {
+            return ConsolidationProvider::Unavailable {
+                provider: "local",
+                reason: format!(
+                    "semantic consolidation model '{model}' requests a local model server, \
+                     but the local backend is disabled — set `[local_model] enabled = true` \
+                     in ~/.trusty-memory/config.toml to allow it"
+                ),
+            };
+        }
+        if bare.trim().is_empty() {
+            return ConsolidationProvider::Unavailable {
+                provider: "local",
+                reason: format!(
+                    "semantic consolidation model '{model}' names no model after the prefix"
+                ),
+            };
+        }
+        return ConsolidationProvider::Local {
+            base_url: local_base_url(),
+            model: bare.trim().to_string(),
+        };
+    }
+
+    let api_key = resolve_openrouter_api_key(configured_api_key);
+    if !api_key.trim().is_empty() {
+        return ConsolidationProvider::OpenRouter {
+            api_key,
+            model: model.to_string(),
+        };
+    }
+
+    ConsolidationProvider::Unavailable {
+        provider: "openrouter",
+        reason: format!(
+            "semantic consolidation model '{model}' routes to OpenRouter, but no API key is \
+             configured (`[openrouter] api_key` in ~/.trusty-memory/config.toml, or the \
+             OPENROUTER_API_KEY environment variable). Prefix the model with `ollama/` to \
+             use a local model server instead."
+        ),
+    }
+}
+
+// ─── Model / provider compatibility validation (issue #2593) ──────────────
+
+/// Vendor prefixes used by OpenRouter's `vendor/model` naming convention
+/// (e.g. `anthropic/claude-haiku-4-5`, `openai/gpt-4o-mini`).
+///
+/// Why: most of these prefixes are ambiguous on their own — Ollama's own
+/// registry does host several vendor-namespaced pulls (`qwen/…`,
+/// `mistralai/…`, `nvidia/…`, `meta-llama/…`, `deepseek/…`), so a bare prefix
+/// match alone would false-positive on a legitimately-configured local model.
+/// `validate_ollama_model` additionally requires the id to carry no explicit
+/// `:tag` suffix before rejecting it — see that function's doc for the full
+/// rule. This is a curated allowlist of the exact failure mode observed
+/// (issue #2593: the OpenRouter-style default `anthropic/claude-haiku-4-5`
+/// resolved against Ollama), not an exhaustive OpenRouter vendor catalog.
+/// What: consulted only by `validate_ollama_model`.
+/// Test: `validate_ollama_model_rejects_cloud_prefix`.
+const CLOUD_VENDOR_PREFIXES: &[&str] = &[
+    "anthropic/",
+    "openai/",
+    "google/",
+    "x-ai/",
+    "mistralai/",
+    "meta-llama/",
+    "cohere/",
+    "perplexity/",
+    "deepseek/",
+    "qwen/",
+    "nvidia/",
+];
+
+/// Reject a consolidation model id that cannot possibly resolve against a
+/// local Ollama server.
+///
+/// Why (issue #2593): the default `semantic.model` is the OpenRouter-style id
+/// `anthropic/claude-haiku-4-5`. When a deployment enables the local-model
+/// path (`local_model_enabled = true`, no OpenRouter key) without overriding
+/// `semantic.model`, every consolidation call 404s against Ollama and the
+/// dream cycle retried the failure every cycle forever, producing recurring
+/// log noise and redb write-lock churn on the retried batches. Catching the
+/// mismatch once at consolidator-build time lets the caller fail loud and
+/// disable the phase instead of retrying blindly.
+/// What: returns `Err` (an actionable message naming the model, the resolved
+/// provider, and the config knob to fix) only when `model` BOTH starts with a
+/// known OpenRouter/cloud-vendor prefix AND carries no `:tag` suffix. Several
+/// of those prefixes (`qwen/`, `mistralai/`, `nvidia/`, `meta-llama/`,
+/// `deepseek/`) are also real, pullable Ollama namespaces, and a real local
+/// pull is near-always referenced with an explicit tag
+/// (`vendor/model:tag`) — so the presence of a `:tag` suffix is treated as
+/// evidence the operator deliberately configured that vendor-namespaced
+/// model locally, and bypasses the check. `Ok(())` in every other case. Does
+/// NOT verify the model is actually pulled in Ollama (that requires a
+/// network call this function deliberately avoids) — it only catches the
+/// specific, unambiguous "this is not a local-model id" case.
+/// Test: `validate_ollama_model_rejects_cloud_prefix`,
+/// `validate_ollama_model_accepts_local_tag`,
+/// `validate_ollama_model_accepts_tagged_vendor_namespaced_pull`.
+pub fn validate_ollama_model(model: &str) -> Result<()> {
+    let Some(prefix) = CLOUD_VENDOR_PREFIXES
+        .iter()
+        .find(|p| model.starts_with(**p))
+    else {
+        return Ok(());
+    };
+    if model.contains(':') {
+        // Carries an explicit tag (e.g. "qwen/qwen2.5:7b-instruct") — treat
+        // as a deliberately-configured local pull, not a copy-pasted
+        // OpenRouter id.
+        return Ok(());
+    }
+    anyhow::bail!(
+        "semantic consolidation model '{model}' has the OpenRouter/cloud vendor prefix \
+         '{prefix}' but resolves to the local Ollama backend (local_model_enabled=true, no \
+         OpenRouter API key configured) — Ollama cannot serve this model id and every call \
+         would fail. Fix: set `DreamConfig.semantic.model` to a locally-pulled Ollama tag \
+         (e.g. \"llama3.1\"; if you really did pull \"{model}\" locally, add its explicit \
+         `:tag` suffix — e.g. \"{model}:latest\" — to bypass this check), or configure an \
+         OpenRouter API key (`DreamConfig.openrouter_api_key` / OPENROUTER_API_KEY env var) to \
+         route this model through OpenRouter instead. Semantic consolidation is disabled until \
+         the config is fixed."
+    );
+}
+
+// ─── Internal prompt/response helpers ───────────────────────────────────────
+
+/// Internal: build the user-turn content for a consolidation prompt.
+///
+/// Why: shared by both `OpenRouterInference` and `OllamaInference`.
+/// What: formats each drawer as `ID: <id>\nContent: <content>\n---\n`.
+/// Test: exercised indirectly via inference integration tests.
+pub(super) fn build_consolidation_prompt(drawers: &[Drawer]) -> String {
+    let mut lines = Vec::new();
+    for d in drawers {
+        lines.push(format!("ID: {}\nContent: {}\n", d.id, d.content()));
+    }
+    lines.join("---\n")
+}
+
+/// Internal wire types for deserialising OpenAI-compatible chat responses.
+#[derive(Deserialize)]
+pub(super) struct OpenAiChatResponse {
+    pub(super) choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct OpenAiChoice {
+    pub(super) message: OpenAiMessage,
+}
+
+#[derive(Deserialize)]
+pub(super) struct OpenAiMessage {
+    pub(super) content: Option<String>,
+}
+
+// ─── LLM response parsing ────────────────────────────────────────────────────
+
+/// Parse the raw LLM text response into a list of `ConsolidationAction`s.
+///
+/// Why: models don't always return clean JSON (markdown fences, leading prose,
+/// trailing commas). This parser tries to extract the first JSON array from
+/// the response text.
+/// What: strips markdown code fences, finds the first `[…]` substring, and
+/// attempts `serde_json::from_str`. Returns an empty list on any parse error
+/// so the dream cycle degrades gracefully instead of failing.
+/// Test: `parse_consolidation_actions_round_trips`, `parse_handles_markdown_fence`,
+/// `parse_returns_empty_on_garbage`.
+pub fn parse_consolidation_actions(raw: &str) -> Result<Vec<ConsolidationAction>> {
+    // Strip markdown code fences if present.
+    let stripped = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    // Find the first `[` and last `]` to extract the JSON array.
+    let start = stripped.find('[').unwrap_or(0);
+    let end = stripped.rfind(']').map(|i| i + 1).unwrap_or(stripped.len());
+    if start >= end {
+        return Ok(vec![]);
+    }
+    let json_slice = &stripped[start..end];
+
+    match serde_json::from_str::<Vec<ConsolidationAction>>(json_slice) {
+        Ok(actions) => Ok(actions),
+        Err(e) => {
+            tracing::debug!(
+                raw = json_slice,
+                error = %e,
+                "failed to parse consolidation actions; treating as empty"
+            );
+            Ok(vec![])
+        }
+    }
+}
+
+// ─── Cache and action helpers ────────────────────────────────────────────────
+
+/// Compute a cache key for a batch of drawers: SHA-256 over sorted drawer
+/// content strings (first 16 bytes, hex-encoded).
+///
+/// Why: same batch content → same key → one LLM call per unique batch.
+/// What: sorts by drawer id for determinism, SHA-256s the joined content,
+/// returns the first 32 hex chars.
+/// Test: `batch_cache_key_is_deterministic`.
+pub(super) fn batch_cache_key(batch: &[Drawer]) -> String {
+    use sha2::Digest;
+    use std::collections::BTreeMap;
+    let sorted: BTreeMap<Uuid, &str> = batch.iter().map(|d| (d.id, d.content())).collect();
+    let mut hasher = sha2::Sha256::new();
+    for (id, content) in &sorted {
+        hasher.update(id.as_bytes());
+        hasher.update(content.as_bytes());
+    }
+    let hash = hasher.finalize();
+    ::hex::encode(&hash[..16])
+}
+
+/// Apply a list of `ConsolidationAction`s to the accumulator.
+///
+/// Why: separates parsing from state mutation so actions from cache hits and
+/// live calls go through the same path.
+/// What: for `Alias` → push to `result.aliases`; for `Merge` → build a
+/// `CanonicalDrawer` and add superseded ids; for `Flag` → add to flagged_ids.
+/// Test: exercised via `consolidator_merges_cluster`.
+pub(super) fn apply_actions_to_result(
+    actions: Vec<ConsolidationAction>,
+    batch: &[Drawer],
+    result: &mut ConsolidationResult,
+) {
+    for action in actions {
+        match action {
+            ConsolidationAction::Alias { from, to } => {
+                result.aliases.push((from, to));
+            }
+            ConsolidationAction::Merge {
+                canonical_content,
+                superseded_ids,
+            } => {
+                // Compute importance as the max among superseded drawers.
+                let max_importance = batch
+                    .iter()
+                    .filter(|d| superseded_ids.contains(&d.id))
+                    .map(|d| d.importance)
+                    .fold(0.5f32, f32::max);
+
+                // Union tags from superseded drawers.
+                let mut tags: Vec<String> = Vec::new();
+                for d in batch.iter().filter(|d| superseded_ids.contains(&d.id)) {
+                    for t in &d.tags {
+                        if !tags.contains(t) {
+                            tags.push(t.clone());
+                        }
+                    }
+                }
+
+                result.canonical_drawers.push(CanonicalDrawer {
+                    content: canonical_content,
+                    importance: max_importance,
+                    tags,
+                    canonical_for: superseded_ids.clone(),
+                });
+                for id in superseded_ids {
+                    if !result.superseded_ids.contains(&id) {
+                        result.superseded_ids.push(id);
+                    }
+                }
+            }
+            ConsolidationAction::Flag { drawer_id, reason } => {
+                result.flagged_ids.push((drawer_id, reason));
+            }
+        }
+    }
+}

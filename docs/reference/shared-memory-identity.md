@@ -270,7 +270,7 @@ this decision, not a defect in it.
 | Convergent | two machines' overlapping exports produce one memory | `two_machines_converge_on_one_memory` |
 | Monotone in time | a merge keeps the earlier `created_at`, in either order | `merge_keeps_the_earlier_created_at_in_either_order` |
 
-All in `crates/trusty-common/src/memory_core/share/tests.rs`.
+All in `crates/trusty-memory/src/engine/share/tests.rs`.
 
 ## 🔴 Open: the export path can carry secrets
 

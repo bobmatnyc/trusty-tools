@@ -8,8 +8,9 @@
 //! on the helper cannot catch that, because the helper still works; what has to
 //! be pinned is that nothing bypasses it.
 //!
-//! What: scans the memory-core source tree plus the shared `redb_open` recovery
-//! path for a direct redb open outside `#[cfg(test)]` bodies and outside the one
+//! What: scans the shared `redb_open` recovery path and `redb_cache` itself
+//! (#9271: the engine sources moved to trusty-memory, whose own copy scans
+//! them) for a direct redb open outside `#[cfg(test)]` bodies and outside the one
 //! module allowed to call redb directly (`redb_cache`). Any hit is a bypass and
 //! fails the test naming the file and line.
 //!
@@ -33,8 +34,6 @@
 //!
 //! Test: `every_memory_core_redb_open_is_bounded`.
 
-#![cfg(feature = "memory-core")]
-
 use std::path::{Path, PathBuf};
 
 /// Source files allowed to call `redb::Database::{create,open}` directly.
@@ -44,7 +43,7 @@ use std::path::{Path, PathBuf};
 const ALLOWED: &[&str] = &["src/redb_cache.rs"];
 
 /// Trees scanned for bypasses, relative to the crate root.
-const SCANNED: &[&str] = &["src/memory_core", "src/redb_open.rs", "src/redb_cache.rs"];
+const SCANNED: &[&str] = &["src/redb_open.rs", "src/redb_cache.rs"];
 
 fn collect_rs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -75,7 +74,7 @@ fn is_test_file(path: &Path) -> bool {
 
 /// Why (#7106): one unbounded open is enough to bring the 1 GiB ceiling back
 /// for that file, and it would look like every other open in review.
-/// What: walks the memory-core and shared-recovery sources, skips test files
+/// What: walks the shared-recovery sources, skips test files
 /// and `#[cfg(test)]` module bodies, and fails on any remaining direct redb
 /// open — constructor or builder — outside [`ALLOWED`].
 /// Test: this test.

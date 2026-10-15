@@ -64,25 +64,7 @@ pub mod stop;
 pub(crate) mod store_snapshot;
 pub mod upgrade;
 
-/// Process-wide lock for tests that mutate `TRUSTY_DATA_DIR_OVERRIDE` and
-/// related env vars.
-///
-/// Why: Rust's default test runner executes tests in the same process with
-/// thread parallelism, but `std::env::set_var` / `remove_var` mutate
-/// process-wide state. Tests that pin the data dir override to a tempdir
-/// can otherwise observe each other's writes mid-run, with the symptom that
-/// the handler resolves the *real* user data dir and the test asserts the
-/// wrong directory. Acquiring this lock at the top of each env-touching
-/// test forces them to run one-at-a-time without pulling in `serial_test`.
-/// What: a `tokio::sync::Mutex<()>` (chosen over `std::sync::Mutex` so the
-/// guard can be held across `.await` points without tripping clippy's
-/// `await_holding_lock` lint). Tests hold the guard for the duration of
-/// the env-sensitive section.
-/// Test: indirectly via the integration tests in `prompt_context` and
-/// `inbox_check`.
+// #9271: the lock moved out of `server` (`crate::env_test_lock`) so the
+// engine's tests share it; existing callers keep this path.
 #[cfg(test)]
-pub(crate) fn env_test_lock() -> &'static tokio::sync::Mutex<()> {
-    use std::sync::OnceLock;
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
+pub(crate) use crate::env_test_lock::env_test_lock;

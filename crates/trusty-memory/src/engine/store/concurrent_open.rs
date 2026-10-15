@@ -1,0 +1,1110 @@
+//! Multi-process concurrent open support for redb-backed palace storage.
+//!
+//! Why: redb takes an exclusive `flock(LOCK_EX)` on every database file, so
+//! a second process attempting to open the same `kg.redb` or
+//! `index.usearch.redb` while the HTTP daemon owns it fails with
+//! `DatabaseError::DatabaseAlreadyOpen`. Issue #59 demands that the stdio
+//! MCP client and the HTTP daemon coexist: writers must still go through
+//! the daemon, but the stdio client must be able to *read* the same palace
+//! state without the daemon being forced offline.
+//!
+//! Strategy: when an exclusive open fails with `DatabaseAlreadyOpen`, copy
+//! the database file to a process-local snapshot path under the system tmp
+//! directory and open that snapshot as a fresh redb database. The snapshot
+//! is owned exclusively by *this* process so redb's lock check succeeds.
+//! The snapshot represents a point-in-time read of the live database — it
+//! is sufficient to serve `recall`, `kg_query`, and `palace_info` from the
+//! stdio MCP client while the daemon continues to write to the original
+//! file. Writes against a snapshot-mode store return a clear "palace is
+//! read-only" error rather than silently diverging from the daemon's view.
+//!
+//! What: `try_open_or_snapshot` returns `(Arc<Database>, OpenMode)` and
+//! `SnapshotGuard` cleans up the snapshot file on drop.
+//! Test: `snapshot_fallback_when_locked` opens a file twice in one process
+//! by holding the first handle while opening the second — the second open
+//! falls back to a snapshot and read transactions still succeed.
+
+use anyhow::{Context, Result};
+use redb::{Database, DatabaseError};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use trusty_common::redb_cache::create_palace_db;
+
+/// Whether the caller intends to write to the palace redb file.
+///
+/// Why (issue #1152, Tier 3): `try_open_or_snapshot` previously always
+/// fell back to a read-only snapshot when the file was already locked by
+/// another process, regardless of whether the caller was a read-only stdio
+/// client or the HTTP daemon itself (a writer). A daemon that hits
+/// `DatabaseAlreadyOpen` and silently opens a snapshot would service all
+/// its writes against a throw-away copy — a correctness disaster. Passing
+/// `OpenIntent` lets the function fail loud (Err) for writers while
+/// preserving the snapshot fallback for genuine read-only clients.
+/// What: Enum selecting the recovery policy on two conditions —
+/// lock contention and an incompatible on-disk format. `Writer` → error on
+/// contention, destructive rename-aside-and-recreate on an incompatible
+/// format. `ReadOnlyClient` → snapshot fallback on contention, error on an
+/// incompatible format. `Observer` (#9659) → always a snapshot copy.
+///
+/// Scope of the read-only guarantee (issue #4911): `ReadOnlyClient` guarantees
+/// that *this function* never moves, replaces, or truncates the file at
+/// `path`. It does NOT hand back a handle that is incapable of writing — on an
+/// uncontended file `Database::create` returns a normal read-write
+/// [`redb::Database`], and callers such as `KgStoreRedb::open_with_intent`
+/// then run their table-init write transaction against the live file.
+/// redb 4.1's `ReadOnlyDatabase` cannot serve this variant: it is a distinct
+/// type that cannot be opened concurrently with a `Database`, which is exactly
+/// the daemon-holds-the-lock case `ReadOnlyClient` exists to serve.
+/// Test: `writer_intent_fails_on_locked_file`,
+/// `snapshot_fallback_when_locked` (ReadOnlyClient path),
+/// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIntent {
+    /// The caller needs read-write access. When the file is already locked
+    /// by another process, return `Err` rather than opening a snapshot. When
+    /// the file is in an incompatible format, recover it destructively
+    /// (issue #702): rename it aside and create a fresh empty database.
+    Writer,
+    /// The caller only needs to read. When the file is already locked, open
+    /// a process-local snapshot copy (existing behaviour, issue #59). When the
+    /// file is in an incompatible format, return `Err` — never rename the
+    /// caller's store aside (issue #4911).
+    ReadOnlyClient,
+    /// The caller only reads, and must never hold the live file (#9659).
+    ///
+    /// Why: `tm sm serve` opened the daemon's palaces as a `ReadOnlyClient`.
+    /// Uncontended, that takes redb's exclusive lock on the live file for the
+    /// whole process life, so a daemon started second fell back to a snapshot
+    /// (or never migrated a format-0 palace) and every daemon write failed.
+    /// What: always copies the live file to a process-local snapshot and opens
+    /// the copy, read-only, whether or not another process holds it. A missing
+    /// live file is an `Err`: an observer never creates a store, a palace
+    /// directory, or a recall log, and never reads a marker on the live file.
+    /// An incompatible format is refused, as for `ReadOnlyClient`.
+    /// Test: `an_observer_open_never_locks_the_live_file`,
+    /// `an_observer_open_of_a_missing_file_creates_nothing`.
+    Observer,
+}
+
+/// Number of `Database::create` attempts the `Writer` path makes before it
+/// gives up and fails loud on a persistent `DatabaseAlreadyOpen`.
+///
+/// Why (issue #1487): a graceful launchd handoff
+/// (`bootout` old → `bootstrap` new) briefly overlaps two daemons — the old
+/// one may still hold the redb `flock(LOCK_EX)` for a few hundred
+/// milliseconds while the new one starts. A naive fail-loud on the very
+/// first `DatabaseAlreadyOpen` would make the fresh daemon exit non-zero,
+/// triggering launchd's `KeepAlive { SuccessfulExit: false }` respawn — i.e.
+/// restart flapping. Retrying for a short, bounded window absorbs the
+/// handoff without masking a *persistent* conflict (a second live daemon).
+/// What: 5 attempts. Combined with [`WRITER_RETRY_SLEEP_MS`] the total wait
+/// is bounded at ~1.55 s — long enough to outlast a normal flock handoff,
+/// short enough that a genuine conflict still fails loud quickly.
+///
+/// Storage note: the ~1.55 s window is tuned for a local SSD, where a graceful
+/// launchd `bootout` releases the flock in a few hundred milliseconds. On
+/// NFS/SMB/network-mounted palace directories, flock release can be
+/// substantially slower (lease revocation, client-side caching), so a
+/// legitimate handoff may outlast this window and the new daemon could
+/// fail-loud spuriously. Operators running palaces on network storage may need
+/// to raise this (and/or extend [`WRITER_RETRY_SLEEP_MS`]). The defaults are
+/// intentionally conservative for the common local-disk case.
+/// Test: `writer_intent_fails_on_locked_file` (persistent conflict still
+/// errors) and `writer_intent_retries_then_succeeds_when_lock_released`
+/// (transient conflict succeeds within the window).
+pub(crate) const WRITER_RETRY_ATTEMPTS: u8 = 5;
+
+/// Per-attempt backoff (milliseconds) for the `Writer` retry loop.
+///
+/// Why (issue #1487): exponential backoff spreads the 5 attempts across a
+/// ~1.55 s window (0 + 50 + 100 + 400 + 1000) so the common case (handoff
+/// finishes in <500 ms) succeeds on attempt 2 or 3 without waiting the full
+/// budget, while a still-held lock is re-probed a few more times before we
+/// declare a hard conflict. The first attempt has no preceding sleep, so the
+/// uncontended open returns immediately.
+/// What: One sleep value per attempt *after* the first
+/// (`WRITER_RETRY_ATTEMPTS - 1 == 4` entries). The sleep at index `i` is
+/// applied before attempt `i + 1`.
+///
+/// Storage note: these slots assume local-SSD flock semantics (see
+/// [`WRITER_RETRY_ATTEMPTS`]). On NFS/SMB/network-mounted palace dirs a
+/// graceful bootout's flock release can take longer than this table's ~1.55 s
+/// total, so operators on network storage may need larger values here.
+/// Test: `writer_retry_sleep_table_matches_attempt_count` asserts the table
+/// length stays in lock-step with [`WRITER_RETRY_ATTEMPTS`].
+pub(crate) const WRITER_RETRY_SLEEP_MS: [u64; 4] = [50, 100, 400, 1000];
+
+/// Whether a redb file was opened directly (read/write) or via a snapshot
+/// (read-only).
+///
+/// Why: Callers need to know whether subsequent writes are safe. A
+/// snapshot-mode database accepts writes from redb's perspective, but those
+/// writes never reach the original file and would silently diverge from
+/// the daemon's authoritative state — so the store layer must reject them
+/// before they happen.
+/// What: A two-variant enum. `ReadWrite` means we hold the live file lock;
+/// `Snapshot` means we hold a process-local copy.
+/// Test: `snapshot_fallback_when_locked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    /// Holds the exclusive file lock on the original path.
+    ReadWrite,
+    /// Operating against a process-local snapshot copy. Writes must be
+    /// rejected at the store layer.
+    Snapshot,
+    /// The original file was in an incompatible / old redb format (redb 2.x),
+    /// so it was moved aside (`*.v2-incompatible`) and a fresh empty database
+    /// was created in its place (issue #702). Holds the exclusive lock on the
+    /// new file like `ReadWrite`, but signals to the caller that the prior
+    /// contents were lost and the store should be surfaced as
+    /// `degraded`/`rebuilding` rather than `ready`.
+    Recreated,
+}
+
+impl OpenMode {
+    /// Why: Lets callers branch with a method instead of pattern-matching.
+    /// What: Returns `true` when the mode is `Snapshot`.
+    /// Test: trivially covered by the snapshot fallback test.
+    pub fn is_read_only(self) -> bool {
+        matches!(self, OpenMode::Snapshot)
+    }
+
+    /// Why: callers (KG store init, palace status) need to know the store was
+    /// rebuilt empty after an incompatible-format file so they can treat it as
+    /// `degraded`/needs-rebuild rather than `ready` (the #601/#694 false-healthy
+    /// guard) while still materialising tables like a normal read-write open.
+    /// What: Returns `true` only for [`OpenMode::Recreated`].
+    /// Test: `recreates_on_incompatible_format`.
+    #[must_use]
+    pub fn was_recreated(self) -> bool {
+        matches!(self, OpenMode::Recreated)
+    }
+}
+
+/// RAII guard that deletes the snapshot file when dropped.
+///
+/// Why: Snapshot files accumulate fast (one per palace per stdio session)
+/// and would otherwise leak into `$TMPDIR` indefinitely. Tying their
+/// lifetime to the store handle keeps cleanup automatic without requiring
+/// callers to remember a teardown step.
+/// What: Holds the snapshot file path; `Drop` removes it best-effort and
+/// logs a warning on failure.
+/// Test: `snapshot_guard_removes_file_on_drop`.
+#[derive(Debug)]
+pub struct SnapshotGuard {
+    path: Option<PathBuf>,
+}
+
+impl SnapshotGuard {
+    /// Why: Used by `try_open_or_snapshot` to wrap a freshly created
+    /// snapshot path so it gets cleaned up later. A no-op variant is used
+    /// for the read/write path so call sites can store a uniform type.
+    /// What: Constructs a guard owning `path`; on drop the file is removed.
+    /// Test: Indirect via `try_open_or_snapshot`.
+    pub(super) fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Why: The read/write path doesn't create a snapshot, but call sites
+    /// still want a uniform `SnapshotGuard` field so they can avoid
+    /// `Option` plumbing.
+    /// What: Returns a guard with no path; drop is a no-op.
+    /// Test: Indirect via `try_open_or_snapshot`.
+    pub fn noop() -> Self {
+        Self { path: None }
+    }
+}
+
+impl Drop for SnapshotGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take()
+            && let Err(e) = std::fs::remove_file(&path)
+        {
+            // Only warn — the snapshot is in $TMPDIR and the OS will reap
+            // it eventually. We don't want a drop-time error to mask a
+            // more interesting cleanup path elsewhere.
+            tracing::warn!(
+                snapshot = %path.display(),
+                "failed to remove redb snapshot file: {e}"
+            );
+        }
+    }
+}
+
+/// Monotonic counter used to disambiguate snapshot paths created within
+/// the same process. Without it, two threads (or two sequential test
+/// cases) opening the same palace file would compute the same snapshot
+/// filename and the second `Database::create` would fail with "Database
+/// already open. Cannot acquire lock." because the first handle is still
+/// alive in this process.
+static SNAPSHOT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Build a snapshot path for `original` that is unique to this process
+/// AND to this call (so concurrent / sequential opens of the same file
+/// never collide).
+///
+/// Why: Multiple stdio clients (each a separate process) may all snapshot
+/// the same palace file at once; including the pid avoids cross-process
+/// collisions. Within one process, parallel callers (tests, two stdio
+/// sessions sharing the same daemon binary) must also get distinct
+/// snapshot filenames — otherwise the second `Database::create` against
+/// the snapshot trips redb's exclusive lock. A monotonic counter solves
+/// this without requiring callers to thread an id through. Including the
+/// file's stem keeps the snapshot recognisable in `lsof` during
+/// debugging.
+/// What: `<tmpdir>/trusty-memory-snapshot-<pid>-<seq>-<filename>`.
+/// Test: `snapshot_path_is_unique_per_process`,
+/// `snapshot_path_is_unique_per_call`.
+pub(super) fn snapshot_path_for(original: &Path) -> PathBuf {
+    let tmp = std::env::temp_dir();
+    let pid = std::process::id();
+    let seq = SNAPSHOT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let stem = original
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "redb".to_string());
+    tmp.join(format!("trusty-memory-snapshot-{pid}-{seq}-{stem}"))
+}
+
+/// Open `path` as a redb database, falling back to a process-local
+/// snapshot copy when the file is already locked by another process AND
+/// the caller is a read-only client.
+///
+/// Why: The HTTP daemon holds an exclusive flock on every palace's
+/// `kg.redb` and `index.usearch.redb`. Without this helper a second
+/// process (e.g. the stdio MCP server invoked by Claude Code) cannot open
+/// the same palace at all — every recall fails with "open palace …".
+/// With this helper, a read-only client detects lock contention and
+/// transparently switches to a snapshot copy so reads can proceed.
+/// Issue #1152 (Tier 3) / #1487: a daemon/writer that gets
+/// `DatabaseAlreadyOpen` must NOT silently open a snapshot — it would service
+/// all its writes against a throw-away copy while the real daemon continues
+/// writing to the live file. Writer contexts receive a loud `Err` instead,
+/// but only after a short bounded retry window (issue #1487) that absorbs the
+/// brief flock overlap of a graceful launchd handoff without flapping.
+/// What: Attempts `Database::create(path)`. On
+/// `DatabaseError::DatabaseAlreadyOpen` the behaviour depends on `intent`.
+/// ReadOnlyClient: copies `path` to a per-process snapshot and opens that
+/// (existing read-only fallback for issue #59). Writer: retries up to
+/// [`WRITER_RETRY_ATTEMPTS`] times with exponential backoff
+/// ([`WRITER_RETRY_SLEEP_MS`]); if the lock is still held after the window,
+/// returns `Err` with a clear, actionable message and an ERROR log — never a
+/// snapshot. On an incompatible on-disk format `intent` decides again
+/// (issue #4911): Writer runs the #702 rename-aside-and-recreate recovery and
+/// returns [`OpenMode::Recreated`]; ReadOnlyClient returns `Err` with the file
+/// untouched. Returns the open database, a `SnapshotGuard` that removes the
+/// snapshot file when dropped, and the `OpenMode` so the caller can reject
+/// writes when running on a snapshot.
+/// Test: `snapshot_fallback_when_locked` (ReadOnlyClient path),
+/// `writer_intent_fails_on_locked_file` (Writer persistent-conflict path),
+/// `writer_intent_retries_then_succeeds_when_lock_released` (Writer
+/// transient-conflict path, issue #1487), and
+/// `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`
+/// (issue #4911).
+pub fn try_open_or_snapshot(
+    path: &Path,
+    intent: OpenIntent,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    open_with_policy(path, intent, true)
+}
+
+/// [`try_open_or_snapshot`] for a palace primary file (ADR-0067 D5, #9274).
+///
+/// Why: the #702 recovery renames an unreadable file aside and substitutes an
+/// empty database. For `kg.redb`, which holds every drawer, that is apparent
+/// total data loss behind a "degraded" flag, so a primary file is refused
+/// under every intent and its bytes stay where they are.
+/// What: [`try_open_or_snapshot`] with the recreate arm replaced by the typed
+/// refusal, which the open retry loops already stop on.
+/// Test: `a_writer_open_refuses_an_incompatible_kg_with_bytes_unchanged`.
+pub(crate) fn try_open_primary_or_snapshot(
+    path: &Path,
+    intent: OpenIntent,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    open_with_policy(path, intent, false)
+}
+
+/// The body of both opens; `recreate` allows the #702 recovery for a writer.
+fn open_with_policy(
+    path: &Path,
+    intent: OpenIntent,
+    recreate: bool,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    // #9659: an observer never opens the live file, contended or not.
+    if intent == OpenIntent::Observer {
+        return super::observer_open::open_observer_copy(path);
+    }
+    // #7106: every palace-scoped open goes through the bounded page-cache
+    // builder — a bare `Database::create` here takes redb's 1 GiB ceiling.
+    match create_palace_db(path) {
+        Ok(db) => Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::ReadWrite)),
+        // Issue #702: the file is in an incompatible / old redb format (redb
+        // 2.x written by a pre-4.x binary). We hold no lock on it, so it is
+        // safe to move it aside and create a fresh empty database. The caller
+        // receives `OpenMode::Recreated` and must surface degraded status —
+        // never report this store as `ready`.
+        Err(e) if super::redb_open::is_incompatible_format(&e) => match intent {
+            // #9274: never for a primary file (ADR-0067 D5).
+            OpenIntent::Writer if recreate => recreate_incompatible_file(path, &e),
+            OpenIntent::Writer => Err(refuse_incompatible_primary(path, &e)),
+            // #4911: this recovery relocates the caller's store, so it belongs
+            // to the writer that owns the file, not to a read-only client.
+            OpenIntent::ReadOnlyClient | OpenIntent::Observer => {
+                Err(refuse_incompatible_file(path, &e))
+            }
+        },
+        Err(DatabaseError::DatabaseAlreadyOpen) => match intent {
+            // Issue #1152, Tier 3 + #1487: a writer that hits the lock must
+            // fail loud (never a snapshot), but only after a short bounded
+            // retry to absorb a graceful launchd handoff's flock overlap.
+            OpenIntent::Writer => open_writer_with_handoff_retry(path),
+            // Original fallback for read-only clients (issue #59).
+            OpenIntent::ReadOnlyClient | OpenIntent::Observer => open_read_only_snapshot(path),
+        },
+        Err(e) => Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
+    }
+}
+
+/// Move an incompatible-format redb file aside and create a fresh empty one.
+///
+/// Why (issue #702): redb 4.x cannot open a file written by redb 2.x, so a
+/// routine binary upgrade would otherwise crash the daemon on its first warm
+/// boot. The writer that owns the file recovers by renaming the stale bytes to
+/// a `*.v2-incompatible` sibling and starting empty, returning
+/// [`OpenMode::Recreated`] so the store is surfaced as degraded rather than
+/// `ready` (the #601/#694 false-healthy guard).
+/// What: extracted verbatim from the [`try_open_or_snapshot`] match arm when
+/// #4911 restricted it to [`OpenIntent::Writer`]. Backs the file up, creates a
+/// fresh database at the original path, logs an ERROR naming both paths. A
+/// failed backup propagates rather than recreating over un-backed-up bytes.
+/// Test: `recreates_on_incompatible_format`.
+fn recreate_incompatible_file(
+    path: &Path,
+    err: &DatabaseError,
+) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    let backup = super::redb_open::backup_incompatible_file(path).with_context(|| {
+        format!(
+            "back up incompatible-format redb file {} before recreating",
+            path.display()
+        )
+    })?;
+    // #7106: bounded page cache, same as every other palace-scoped open.
+    let db = create_palace_db(path).with_context(|| {
+        format!(
+            "create fresh redb after moving incompatible file aside at {}",
+            path.display()
+        )
+    })?;
+    tracing::error!(
+        path = %path.display(),
+        backup = %backup.display(),
+        error = %err,
+        "redb file is in an incompatible/old format (redb 2.x); moved it aside and \
+         created a fresh empty database — this palace must be rebuilt, not treated as ready"
+    );
+    Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::Recreated))
+}
+
+/// Refuse to open an incompatible-format redb file under read-only intent.
+///
+/// Why (issue #4911): the #702 recovery renames the operator's store aside and
+/// substitutes an empty one. Running it for a caller that declared
+/// [`OpenIntent::ReadOnlyClient`] turns a recoverable format problem into
+/// apparent total data loss, and it fired on the first `Database::create`
+/// error regardless of intent — so a reporting tool that only wanted to read a
+/// palace could relocate it. Returning `Err` leaves the bytes exactly where
+/// they are; a writer-intent open still performs the recovery.
+/// What: logs an ERROR at the point of refusal (so an eager-hydration caller
+/// that downgrades the returned error to a WARN — `PalaceRegistry::open` does
+/// — cannot bury it) and returns an error naming the path, the underlying redb
+/// error, and the writer-intent open that can recover it.
+/// Test: `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`.
+fn refuse_incompatible_file(path: &Path, err: &DatabaseError) -> anyhow::Error {
+    tracing::error!(
+        path = %path.display(),
+        error = %err,
+        "redb file is in an incompatible/old format (redb 2.x) and this open declared \
+         read-only intent; refusing to move it aside and substitute an empty database \
+         (issue #4911) — the file is untouched"
+    );
+    anyhow::Error::new(IncompatibleFormatRefused {
+        message: format!(
+            "palace redb file {} is in an incompatible/old on-disk format ({err}); this open \
+             declared read-only intent, so the file was left exactly as it is rather than being \
+             renamed aside and replaced with an empty database. Re-open with OpenIntent::Writer \
+             (the trusty-memory daemon) to run that recovery, or migrate the file out of band.",
+            path.display()
+        ),
+    })
+}
+
+/// Refuse a primary file in an incompatible format under writer intent (#9274).
+///
+/// Why: ADR-0067 D5 retires the recreate-empty recovery for primary files; the
+/// palace is refused and the error names the file and the cause.
+/// Test: `a_writer_open_refuses_an_incompatible_kg_with_bytes_unchanged`.
+fn refuse_incompatible_primary(path: &Path, err: &DatabaseError) -> anyhow::Error {
+    tracing::error!(path = %path.display(), error = %err,
+        "#9274: palace primary file is in an incompatible on-disk format; refusing the palace \
+         and leaving the file untouched (ADR-0067 D5)");
+    anyhow::Error::new(IncompatibleFormatRefused {
+        message: format!(
+            "palace primary file {} is in an incompatible on-disk format ({err}); the palace is \
+             refused and the file was left exactly as it is (ADR-0067 D5). Restore it from a \
+             backup or open it with the release that wrote it.",
+            path.display()
+        ),
+    })
+}
+
+/// The error [`refuse_incompatible_file`] returns, as a downcastable type.
+///
+/// Why (issue #4911): both store retry loops — `KgStoreRedb::open_with_intent`
+/// and `open_or_get_cached_db` — retry on ANY `Err`, because every failure they
+/// were written for was a transient lock or TOCTOU race that waiting resolves.
+/// A refused incompatible format never resolves by waiting, so an untyped error
+/// would burn all four backoff slots (162 ms) and emit the refusal ERROR five
+/// times for one file. A concrete type lets those loops stop on the first one.
+/// What: carries the fully-composed message so the `Display` a caller sees is
+/// identical to the untyped error it replaces. Crate-private: it exists to be
+/// recognised, not constructed, outside this module.
+/// Test: `read_only_intent_refuses_incompatible_format_and_leaves_store_intact`
+/// asserts the refusal; `refusal_is_recognised_through_a_context_layer` asserts
+/// it survives the `.with_context` wrap `open_or_get_cached_db` applies.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct IncompatibleFormatRefused {
+    message: String,
+}
+
+/// Whether `err` is the read-only refusal of an incompatible on-disk format.
+///
+/// Why: the retry loops must not spend their backoff window on a condition that
+/// cannot change (issue #4911).
+/// What: downcasts through any `.context()` layers the caller added.
+/// Test: `refusal_is_recognised_through_a_context_layer`.
+pub(crate) fn is_incompatible_format_refusal(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<IncompatibleFormatRefused>().is_some()
+}
+
+/// Open `path` exclusively for a writer, retrying through a brief
+/// `DatabaseAlreadyOpen` window before failing loud.
+///
+/// Why (issue #1487): a graceful daemon restart (`launchctl bootout` the old
+/// instance, then `bootstrap` the new one) briefly overlaps two processes;
+/// the old daemon can still hold the redb `flock` for a few hundred
+/// milliseconds. Failing on the first `DatabaseAlreadyOpen` would make the
+/// new daemon exit non-zero and trigger launchd's respawn-on-failure, i.e.
+/// flapping. Retrying for a bounded window
+/// ([`WRITER_RETRY_ATTEMPTS`] × [`WRITER_RETRY_SLEEP_MS`]) lets the handoff
+/// complete. A *persistent* lock (a second live daemon) still fails loud at
+/// the end of the window — it MUST NOT degrade to a snapshot.
+/// What: Re-attempts `Database::create(path)` with exponential backoff. On
+/// success returns `OpenMode::ReadWrite`; if every attempt sees
+/// `DatabaseAlreadyOpen`, logs an ERROR and returns a clear `Err` naming the
+/// conflict and the path. Any *other* error (incompatible format, I/O) is
+/// surfaced immediately without retry.
+/// Test: `writer_intent_fails_on_locked_file`,
+/// `writer_intent_retries_then_succeeds_when_lock_released`.
+fn open_writer_with_handoff_retry(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    // Control flow (issue #1487): the call site already saw one
+    // `DatabaseAlreadyOpen` before delegating here. This loop performs
+    // [`WRITER_RETRY_ATTEMPTS`] (= 5) *real* `Database::create` attempts on top
+    // of that initial failure:
+    //   - attempt 0 fires IMMEDIATELY with no preceding sleep — an instant
+    //     re-probe that catches a lock already released between the call site's
+    //     failure and now;
+    //   - attempts 1..=4 each sleep `WRITER_RETRY_SLEEP_MS[attempt - 1]`
+    //     (50, 100, 400, 1000 ms) *before* the create, so all four backoff
+    //     slots are consumed exactly once, in order.
+    // Total worst-case wait across the loop is 0 + 50 + 100 + 400 + 1000 =
+    // ~1.55 s. The loop body does the create *after* the (conditional) sleep,
+    // so the final attempt (4) is not followed by a trailing sleep — the loop
+    // exits straight into the fail-loud path once attempt 4 also sees the lock.
+    for attempt in 0..WRITER_RETRY_ATTEMPTS {
+        if attempt > 0 {
+            // Sleep before every attempt after the first; index is attempt-1
+            // because the first retry uses the smallest backoff slot.
+            let sleep_ms = WRITER_RETRY_SLEEP_MS[(attempt - 1) as usize];
+            backoff_sleep_ms(sleep_ms);
+        }
+        // #7106: bounded page cache, same as every other palace-scoped open.
+        match create_palace_db(path) {
+            Ok(db) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        path = %path.display(),
+                        attempt = attempt + 1,
+                        "acquired redb write lock after a transient conflict \
+                         (graceful daemon handoff absorbed; issue #1487)"
+                    );
+                }
+                return Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::ReadWrite));
+            }
+            Err(DatabaseError::DatabaseAlreadyOpen) => {
+                // Still held — keep probing until the window is exhausted.
+                continue;
+            }
+            // A non-lock error (I/O, incompatible format that slipped past the
+            // caller's branch) is not a handoff race; fail immediately.
+            Err(e) => return Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
+        }
+    }
+
+    tracing::error!(
+        path = %path.display(),
+        attempts = WRITER_RETRY_ATTEMPTS,
+        "redb file is still locked by another process after the write-lock handoff \
+         retry window but this process requires write access (OpenIntent::Writer). \
+         Refusing to open a read-only snapshot — another live trusty-memory instance \
+         holds the write lock. Stop the other daemon first or ensure only one writer \
+         is active at a time."
+    );
+    Err(anyhow::anyhow!(
+        "palace redb file {} is still locked by another live trusty-memory instance \
+         after {} write-lock acquisition attempts; this daemon requires write access \
+         and refuses to degrade to read-only/snapshot mode. Stop the other daemon or \
+         run `trusty-memory stop` first.",
+        path.display(),
+        WRITER_RETRY_ATTEMPTS,
+    ))
+}
+
+/// Open a process-local read-only snapshot copy of a locked redb file.
+///
+/// Why (issue #59): a read-only stdio MCP client must still serve `recall`,
+/// `kg_query`, and `palace_info` while the HTTP daemon holds the exclusive
+/// `flock`. Copying the file to a per-process snapshot lets redb's lock check
+/// succeed against the copy.
+/// What: Copies `path` to a per-call-unique snapshot path, opens it as a
+/// fresh redb database, and returns it in `OpenMode::Snapshot` with a
+/// `SnapshotGuard` that deletes the copy on drop.
+/// Test: `snapshot_fallback_when_locked`, `snapshot_guard_removes_file_on_drop`.
+fn open_read_only_snapshot(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    let snap = snapshot_path_for(path);
+    // Snapshot paths are per-call unique (pid + monotonic counter), so no
+    // stale-file cleanup is needed here.
+    std::fs::copy(path, &snap).with_context(|| {
+        format!(
+            "snapshot {} -> {} for read-only fallback",
+            path.display(),
+            snap.display()
+        )
+    })?;
+    // #7106: a snapshot is a palace-scoped database too.
+    let db = create_palace_db(&snap).with_context(|| {
+        format!(
+            "open redb snapshot at {} (fallback for locked {})",
+            snap.display(),
+            path.display()
+        )
+    })?;
+    tracing::info!(
+        original = %path.display(),
+        snapshot = %snap.display(),
+        "redb file locked by another process; opened read-only snapshot"
+    );
+    Ok((Arc::new(db), SnapshotGuard::new(snap), OpenMode::Snapshot))
+}
+
+/// Sleep for `ms` milliseconds in a way that is safe from both sync and async
+/// Tokio contexts.
+///
+/// Why: `KgStoreRedb::open` and `open_or_get_cached_db` are sync fns but are
+/// called from async HTTP handlers (via `PalaceHandle::open`). A bare
+/// `std::thread::sleep` blocks the Tokio worker thread, starving other tasks.
+/// `tokio::task::block_in_place` signals the multi-thread scheduler to
+/// move pending tasks to other workers while this thread sleeps. On a
+/// `current_thread` scheduler (used in some unit tests) `block_in_place` panics,
+/// so we fall back to plain `std::thread::sleep` in that case. No-op when
+/// called outside any Tokio runtime.
+/// What: Detects the active runtime flavor; uses `block_in_place` on
+/// `MultiThread`, falls back to `std::thread::sleep` elsewhere.
+/// Test: Indirectly exercised by every retry-backoff test in `kg_redb` and
+/// `vector` (both sync and async test configurations).
+pub(crate) fn backoff_sleep_ms(ms: u64) {
+    let dur = std::time::Duration::from_millis(ms);
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| std::thread::sleep(dur));
+        }
+        _ => std::thread::sleep(dur),
+    }
+}
+
+// ── #6652: a genuinely read-only open, for measurement ─────────────────────
+
+/// A `kg.redb` handle that provably cannot write to the live file.
+///
+/// Why (#6652): the measurement pass that has to answer "how much of this
+/// 342 MB is noise?" must not be able to change the thing it measures.
+/// [`try_open_or_snapshot`] cannot serve that: its happy path is
+/// `Database::create`, which takes redb's exclusive lock and lets the caller
+/// open a write transaction — and `KgStoreRedb::open_with_intent` does open
+/// one, to touch every table and run two at-open migrations. A `--dry-run`
+/// that quietly migrated the palace would be a dry run in name only.
+/// What: two variants over one `begin_read` surface. `Live` is
+/// `redb::ReadOnlyDatabase`, which opens the file `O_RDONLY` and takes a
+/// SHARED lock, so it can coexist with other readers and is refused outright
+/// while a writer holds the file. `Snapshot` is the #59 fallback for exactly
+/// that refusal: a process-local copy, opened read-write because a torn copy
+/// of a live file may need redb's own recovery pass, with a [`SnapshotGuard`]
+/// that deletes it on drop. Either way the live file is never written.
+/// Test: `read_only_open_never_writes_the_live_file`,
+/// `read_only_open_falls_back_to_a_snapshot_when_locked`.
+pub enum ReadOnlyRedb {
+    /// The live file, opened `O_RDONLY` under a shared lock.
+    Live(redb::ReadOnlyDatabase),
+    /// A throw-away copy, taken because a writer holds the live file.
+    Snapshot { db: Database, _guard: SnapshotGuard },
+}
+
+impl ReadOnlyRedb {
+    /// Open `path` for reading, snapshotting only if a writer holds it.
+    ///
+    /// Why/What: see the type doc. A missing file is an error rather than an
+    /// empty database — a measurement of a palace that is not there is a
+    /// mistake to report, not a zero to print.
+    /// Test: `read_only_open_never_writes_the_live_file`.
+    pub fn open(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            anyhow::bail!("no redb file at {}", path.display());
+        }
+        // #7106: bounded page cache on the read-only measurement path too.
+        match trusty_common::redb_cache::open_palace_db_read_only(path) {
+            Ok(db) => Ok(Self::Live(db)),
+            Err(DatabaseError::DatabaseAlreadyOpen) => {
+                let snap = snapshot_path_for(path);
+                std::fs::copy(path, &snap).with_context(|| {
+                    format!(
+                        "snapshot {} -> {} for a read-only measurement",
+                        path.display(),
+                        snap.display()
+                    )
+                })?;
+                // #7106: bounded page cache on the measurement snapshot too.
+                let db = create_palace_db(&snap).with_context(|| {
+                    format!("open redb snapshot at {} read-only", snap.display())
+                })?;
+                Ok(Self::Snapshot {
+                    db,
+                    _guard: SnapshotGuard::new(snap),
+                })
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "open redb at {} read-only: {e}",
+                path.display()
+            )),
+        }
+    }
+
+    /// Begin a read transaction against whichever variant is open.
+    ///
+    /// Test: `read_only_open_never_writes_the_live_file`.
+    pub fn begin_read(&self) -> Result<redb::ReadTransaction> {
+        use redb::ReadableDatabase;
+        match self {
+            Self::Live(db) => db.begin_read().context("begin read-only txn (live)"),
+            Self::Snapshot { db, .. } => db.begin_read().context("begin read-only txn (snapshot)"),
+        }
+    }
+
+    /// Whether the read is being served from a copy rather than the live file.
+    ///
+    /// Why: a report built from a snapshot is a moment-in-time reading of a
+    /// file another process is still writing, and the operator should be told.
+    /// Test: `read_only_open_falls_back_to_a_snapshot_when_locked`.
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `begin_read` lives on the `ReadableDatabase` trait in redb 4.x; only the
+    // tests exercise it here, so the import is scoped to the test module to keep
+    // the non-test code free of an otherwise-unused trait import.
+    use redb::ReadableDatabase;
+    use tempfile::tempdir;
+
+    /// Why: Confirms the core contract — a second open against a path
+    /// that is already locked falls back to a snapshot and succeeds for a
+    /// read-only client.
+    /// What: Opens `db.redb` in this process (acquiring the lock), then
+    /// calls `try_open_or_snapshot` with `ReadOnlyClient`. The second
+    /// call must succeed in `Snapshot` mode.
+    /// Test: this test.
+    #[test]
+    fn snapshot_fallback_when_locked() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+
+        // First open holds the flock.
+        let live = Database::create(&path).expect("first open");
+
+        // Second open with ReadOnlyClient intent must succeed via snapshot.
+        let (snap_db, guard, mode) = try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient)
+            .expect("snapshot fallback should succeed for read-only client");
+        assert_eq!(mode, OpenMode::Snapshot);
+        assert!(mode.is_read_only());
+
+        // Read transactions work against the snapshot.
+        let rtx = snap_db.begin_read().expect("begin_read on snapshot");
+        drop(rtx);
+
+        // Holding `live` proves we never released the original lock.
+        drop(live);
+        drop(snap_db);
+        drop(guard); // snapshot file removed here
+    }
+
+    /// Why (issue #1152, Tier 3 + #1487): a daemon / writer that hits a
+    /// *persistent* `DatabaseAlreadyOpen` (a second live daemon, not a
+    /// transient handoff) must return `Err` rather than silently opening a
+    /// snapshot — writing to a snapshot copy would diverge from the live file
+    /// and corrupt the user's palace data. The error must arrive only after
+    /// the bounded retry window is exhausted (issue #1487), never degrading
+    /// to snapshot mode.
+    /// What: Opens `db.redb` in this process (acquiring the lock) and HOLDS it
+    /// for the whole test, then calls `try_open_or_snapshot` with `Writer`.
+    /// The call must return `Err` (after retrying the full window) with a
+    /// message naming the lock conflict.
+    /// Test: this test.
+    #[test]
+    fn writer_intent_fails_on_locked_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+
+        // First open holds the flock for the duration of the call below.
+        let _live = Database::create(&path).expect("first open");
+
+        // Writer intent must not fall back to a snapshot — must be Err after
+        // the retry window since the lock is never released.
+        let result = try_open_or_snapshot(&path, OpenIntent::Writer);
+        assert!(
+            result.is_err(),
+            "Writer intent must return Err on persistent lock contention, not silently snapshot"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("still locked") || msg.contains("write access"),
+            "error message must explain the lock conflict; got: {msg}"
+        );
+    }
+
+    /// Why (issue #1487): the `Writer` retry window must absorb a transient
+    /// lock — when the holding handle is released *within* the backoff window,
+    /// the writer open must eventually SUCCEED in `ReadWrite` mode (never a
+    /// snapshot). This guards the restart-handoff behaviour: a graceful
+    /// `bootout`→`bootstrap` overlap resolves into a clean writer open.
+    /// What: Holds the flock on `db.redb`, spawns a thread that drops the lock
+    /// after ~400 ms (comfortably inside the ~1.55 s retry window), then calls
+    /// `try_open_or_snapshot` with `Writer`. The open must return `ReadWrite`.
+    /// The 400 ms release is deliberately larger than the first backoff slot
+    /// (50 ms) so the success is observed on a later retry, yet leaves >1 s of
+    /// slack before the window closes — margin against slow-CI scheduling jitter
+    /// while staying fully deterministic (release always precedes the deadline).
+    /// Test: this test.
+    #[test]
+    fn writer_intent_retries_then_succeeds_when_lock_released() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+
+        // Hold the flock, then release it from a background thread after a
+        // delay that lands well inside the writer retry window with ample
+        // margin for slow CI (release at ~400 ms vs the ~1.55 s deadline).
+        let live = Database::create(&path).expect("first open");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(live); // releases the OS flock
+        });
+
+        // Writer intent should retry past the initial DatabaseAlreadyOpen and
+        // succeed once the background thread drops the lock.
+        let (_db, _guard, mode) = try_open_or_snapshot(&path, OpenIntent::Writer)
+            .expect("Writer open should succeed after the lock is released within the window");
+        assert_eq!(
+            mode,
+            OpenMode::ReadWrite,
+            "Writer must acquire the live lock (ReadWrite), never degrade to Snapshot"
+        );
+        assert!(!mode.is_read_only());
+
+        releaser.join().expect("releaser thread");
+    }
+
+    /// Why (issue #1487): the per-attempt backoff table must stay in lock-step
+    /// with the attempt count — one sleep precedes every attempt after the
+    /// first. A drift between the two would either skip a backoff or index
+    /// out of bounds.
+    /// What: Asserts `WRITER_RETRY_SLEEP_MS.len() == WRITER_RETRY_ATTEMPTS - 1`.
+    /// Test: this test.
+    #[test]
+    fn writer_retry_sleep_table_matches_attempt_count() {
+        assert_eq!(
+            WRITER_RETRY_SLEEP_MS.len(),
+            (WRITER_RETRY_ATTEMPTS - 1) as usize,
+            "one backoff value must precede every attempt after the first"
+        );
+    }
+
+    /// Why: The read/write path must NOT create a snapshot file when
+    /// there is no contention.
+    /// What: Opens a fresh path; asserts `ReadWrite` mode and no snapshot
+    /// file appears in `$TMPDIR`.
+    /// Test: this test.
+    #[test]
+    fn direct_open_when_uncontended() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+        let (_db, _guard, mode) =
+            try_open_or_snapshot(&path, OpenIntent::Writer).expect("direct open");
+        assert_eq!(mode, OpenMode::ReadWrite);
+        assert!(!mode.is_read_only());
+    }
+
+    /// Why: Snapshot files must be removed on guard drop so $TMPDIR does
+    /// not accumulate stale copies after a stdio session ends.
+    /// What: Force-creates a snapshot via lock contention (ReadOnlyClient),
+    /// captures the snapshot path from the guard via Debug, drops the guard,
+    /// and asserts the file is gone.
+    /// Test: this test.
+    #[test]
+    fn snapshot_guard_removes_file_on_drop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+        let _live = Database::create(&path).unwrap();
+
+        let (_snap_db, guard, _mode) =
+            try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient).expect("fallback");
+        // Extract the snapshot path before drop so we can re-check
+        // existence afterwards.
+        let snap_path = guard
+            .path
+            .clone()
+            .expect("snapshot guard should carry a path");
+        assert!(snap_path.exists(), "snapshot file should exist before drop");
+        drop(_snap_db); // release the redb handle on the snapshot file
+        drop(guard);
+        assert!(
+            !snap_path.exists(),
+            "snapshot file should be removed on guard drop"
+        );
+    }
+
+    /// Why: #702 — an incompatible-format (redb 2.x) file at the open path must
+    /// be moved aside and replaced with a fresh empty DB returned in
+    /// `Recreated` mode, NOT crash and NOT be treated as a healthy file. This
+    /// is the central palace-open guard against the #601/#694 false-healthy bug.
+    /// What: writes garbage to the palace path, opens via `try_open_or_snapshot`,
+    /// asserts `Recreated` mode, the backup exists, and the fresh DB is writable.
+    /// Test: this test.
+    #[test]
+    fn recreates_on_incompatible_format() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
+            .unwrap();
+
+        let (db, _guard, mode) = try_open_or_snapshot(&path, OpenIntent::Writer)
+            .expect("incompatible file must recover, not error");
+        assert_eq!(mode, OpenMode::Recreated);
+        assert!(mode.was_recreated());
+        assert!(!mode.is_read_only(), "recreated DB holds the live lock");
+        assert!(
+            path.with_file_name("kg.redb.v2-incompatible").exists(),
+            "incompatible file must be backed up"
+        );
+        // The fresh DB is writable.
+        let wtx = db.begin_write().unwrap();
+        wtx.commit().unwrap();
+    }
+
+    /// Why (issue #4911): `ReadOnlyClient` reads as a promise that the open
+    /// cannot disturb the caller's store, and the #702 recovery broke that
+    /// promise on an UNLOCKED palace — it renamed the store aside and handed
+    /// back a fresh empty one, so a read-only reporting tool could relocate an
+    /// operator's data. Asserting only that an error surfaces is not enough;
+    /// the property that matters is that the bytes did not move.
+    /// What: writes the same garbage fixture `recreates_on_incompatible_format`
+    /// uses into two temp dirs. The `ReadOnlyClient` open must return `Err`,
+    /// leave the file byte-identical, and create no `.v2-incompatible`
+    /// sibling. The `Writer` open over the identical fixture must still
+    /// recover — that arm is the anti-vacuous guard: it proves the fixture
+    /// really does trip `is_incompatible_format`, so the read-only assertions
+    /// cannot pass because redb simply accepted the file.
+    /// Test: this test.
+    #[test]
+    fn read_only_intent_refuses_incompatible_format_and_leaves_store_intact() {
+        const GARBAGE: [u8; 4096] = [0xABu8; 4096];
+
+        // Anti-vacuous guard: the identical fixture MUST reach the
+        // incompatible-format arm, or the read-only half proves nothing.
+        let writer_dir = tempdir().unwrap();
+        let writer_path = writer_dir.path().join("kg.redb");
+        std::fs::write(&writer_path, GARBAGE).unwrap();
+        let (_db, _guard, mode) = try_open_or_snapshot(&writer_path, OpenIntent::Writer)
+            .expect("fixture must reach the #702 writer recovery");
+        assert_eq!(
+            mode,
+            OpenMode::Recreated,
+            "fixture is not classified as an incompatible format, so the read-only \
+             assertions below would pass for the wrong reason"
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        std::fs::write(&path, GARBAGE).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let result = try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient);
+        assert!(
+            result.is_err(),
+            "a read-only-intent open must refuse an incompatible-format file, \
+             not recover it destructively"
+        );
+
+        // The direction that matters: the store did not move and did not change.
+        assert!(
+            path.exists(),
+            "the store must still be at its original path"
+        );
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "the store must be byte-identical after a refused read-only open"
+        );
+        let mut entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["kg.redb".to_string()],
+            "no backup sibling may be created — nothing was renamed aside"
+        );
+    }
+
+    /// Why (issue #4911): `open_or_get_cached_db` wraps every
+    /// `try_open_or_snapshot` result in `.with_context(…)` before its retry
+    /// loop inspects it. If the refusal marker did not survive that wrap the
+    /// loop would fall back to retrying, which is the 162 ms / five-ERROR-log
+    /// behaviour the marker exists to prevent — and nothing would fail, so the
+    /// regression would be invisible.
+    /// What: refuses an incompatible-format file, adds a context layer the way
+    /// the vector store does, and asserts the marker is still recognised and
+    /// the original message still reachable.
+    /// Test: this test.
+    #[test]
+    fn refusal_is_recognised_through_a_context_layer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("index.usearch.redb");
+        std::fs::write(&path, [0xABu8; 4096]).unwrap();
+
+        let Err(err) = try_open_or_snapshot(&path, OpenIntent::ReadOnlyClient) else {
+            panic!("read-only intent must refuse an incompatible-format file");
+        };
+        assert!(is_incompatible_format_refusal(&err));
+
+        let wrapped = err.context(format!("open vector redb at {}", path.display()));
+        assert!(
+            is_incompatible_format_refusal(&wrapped),
+            "the marker must survive the .with_context wrap open_or_get_cached_db applies"
+        );
+        assert!(
+            format!("{wrapped:#}").contains("incompatible/old on-disk format"),
+            "the operator-facing message must still be reachable through the wrap"
+        );
+    }
+
+    /// Why: A path is process-scoped; running tests in parallel must not
+    /// collide on the snapshot filename.
+    /// What: Asserts the snapshot path contains the current pid and the
+    /// original file's name.
+    /// Test: this test.
+    #[test]
+    fn snapshot_path_is_unique_per_process() {
+        let p = snapshot_path_for(Path::new("/tmp/palace/kg.redb"));
+        let s = p.to_string_lossy().into_owned();
+        assert!(s.contains(&format!("{}", std::process::id())));
+        assert!(s.ends_with("kg.redb"));
+    }
+
+    /// Why (#6652): the measurement pass must not be able to change the thing
+    /// it measures — a `--dry-run` that migrated the palace would make the
+    /// whole gate a lie. `Database::create`, which every other open path uses,
+    /// takes the exclusive lock and lets the caller open a write transaction.
+    /// What: reads the file's bytes, opens through [`ReadOnlyRedb`], runs a
+    /// read transaction, and compares the bytes again.
+    #[test]
+    fn read_only_open_never_writes_the_live_file() {
+        const T: redb::TableDefinition<'static, &'static str, &'static str> =
+            redb::TableDefinition::new("t");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ro.redb");
+        {
+            let db = Database::create(&path).unwrap();
+            let wtx = db.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(T).unwrap();
+                t.insert("k", "v").unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+
+        let ro = ReadOnlyRedb::open(&path).unwrap();
+        assert!(
+            !ro.is_snapshot(),
+            "nothing holds the file, so it opens live"
+        );
+        {
+            let rtx = ro.begin_read().unwrap();
+            let t = rtx.open_table(T).unwrap();
+            assert_eq!(t.get("k").unwrap().unwrap().value(), "v");
+        }
+        drop(ro);
+
+        assert_eq!(
+            before,
+            std::fs::read(&path).unwrap(),
+            "a read-only open wrote to the live file"
+        );
+    }
+
+    /// Why (#6652): `ReadOnlyDatabase::open` takes a shared lock and is refused
+    /// outright while a writer holds the file — which is the normal state on a
+    /// machine running the daemon. Without the fallback, `palace stats` would
+    /// be unusable in exactly the situation it exists for.
+    /// What: holds the live file open for writing, then opens it read-only and
+    /// asserts the read came from a snapshot and still sees the data.
+    #[test]
+    fn read_only_open_falls_back_to_a_snapshot_when_locked() {
+        const T: redb::TableDefinition<'static, &'static str, &'static str> =
+            redb::TableDefinition::new("t");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("locked.redb");
+        let live = Database::create(&path).unwrap();
+        {
+            let wtx = live.begin_write().unwrap();
+            {
+                let mut t = wtx.open_table(T).unwrap();
+                t.insert("k", "v").unwrap();
+            }
+            wtx.commit().unwrap();
+        }
+
+        let ro = ReadOnlyRedb::open(&path).unwrap();
+        assert!(
+            ro.is_snapshot(),
+            "a writer holds the file, so the read must come from a copy"
+        );
+        let rtx = ro.begin_read().unwrap();
+        let t = rtx.open_table(T).unwrap();
+        assert_eq!(t.get("k").unwrap().unwrap().value(), "v");
+    }
+}

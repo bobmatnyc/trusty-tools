@@ -104,7 +104,7 @@ pub const LEGACY_PREFIX_FULL: &str = "trusty-mpm-";
 /// names carrying a managed prefix are ever eligible for reaping. Centralising
 /// the check keeps ALL THREE prefix generations (current `tm-`, #1789-era
 /// `tmpm-`, and pre-#1789 `trusty-mpm-`) in one place shared with
-/// [`crate::core::external_session::SessionOrigin::classify`](crate::memory_core::filter::classify), so a daemon
+/// `trusty_memory::engine::filter::classify`, so a daemon
 /// upgrade never orphans or mis-classifies a session created under an older
 /// scheme.
 /// What: returns `true` when `name` starts with [`PREFIX`] (`tm-`),

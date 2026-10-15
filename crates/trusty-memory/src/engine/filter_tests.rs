@@ -1,0 +1,4381 @@
+//! Unit tests for the `memory_core::filter` content gate (issue #61, #1481).
+//!
+//! Why: split out of `filter.rs` so the production module stays under the
+//! 500-SLOC cap while the test suite (classified as a test file, 1500-SLOC cap)
+//! can grow with each new heuristic. Wired back in via
+//! `#[path = "filter_tests.rs"] mod tests;` in `filter.rs`.
+//! What: exercises token counting, every reject pattern, the git-SHA allowlist,
+//! and the secret/credential detector (including AWS access key IDs).
+//! Test: this *is* the test file.
+
+use super::*;
+
+#[test]
+fn meaningful_tokens_ignore_pure_punctuation() {
+    assert_eq!(count_meaningful_tokens("--- === >>>"), 0);
+    assert_eq!(count_meaningful_tokens("one two three"), 3);
+    assert_eq!(count_meaningful_tokens("foo --- bar"), 2);
+}
+
+#[test]
+fn non_alpha_ratio_detects_json() {
+    let json = r#"{"a":1,"b":[2,3,4]}"#;
+    let ratio = non_alphabetic_ratio(json);
+    assert!(
+        ratio > 0.5,
+        "expected JSON to register as mostly non-alphabetic; got {ratio}"
+    );
+    let prose = "The quick brown fox jumps over the lazy dog";
+    assert!(non_alphabetic_ratio(prose) < 0.2);
+}
+
+#[test]
+fn default_patterns_match_known_noise() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        "Tool use: search_files",
+        "Tool result: ok",
+        // NOTE (issue #1481): a bare 40-hex git SHA is NO LONGER rejected —
+        // it is a legitimate engineering memory. See
+        // `bare_git_sha_is_no_longer_rejected` below.
+        "feat(memory): add filter",
+        "fix: handle nulls",
+        "Running cargo test...",
+        "/Users/x/foo.rs",
+        "~/notes.md",
+    ];
+    for c in cases {
+        assert!(cfg.apply(c, false).is_err(), "expected reject for: {c}");
+    }
+}
+
+/// Why (issue #1481): regression lock — the previous behaviour rejected a
+/// bare 40-hex git SHA as noise, silently dropping a valid memory. The
+/// allowlist must keep it accepted.
+/// What: asserts `apply` accepts a bare full SHA.
+/// Test: itself.
+#[test]
+fn bare_git_sha_is_no_longer_rejected() {
+    let cfg = FilterConfig::default();
+    // pragma: allowlist secret (test fixture: a bare git SHA, not a credential)
+    assert!(
+        cfg.apply("abcdef0123456789abcdef0123456789abcdef01", false) // pragma: allowlist secret
+            .is_ok()
+    );
+}
+
+#[test]
+fn filter_config_default_blocks_known_noise() {
+    let cfg = FilterConfig::default();
+    let res = cfg.apply("Tool use: read_file", true);
+    assert!(matches!(res, Err(FilterReject::NoisePattern { .. })));
+}
+
+#[test]
+fn filter_config_too_short_triggers_token_error() {
+    // Use a config with the stricter MCP threshold (8) so the assertion
+    // is independent of the lower library default (3).
+    let cfg = FilterConfig {
+        min_tokens: MCP_MIN_TOKENS,
+        ..FilterConfig::default()
+    };
+    let res = cfg.apply("only four tokens here", true);
+    match res {
+        Err(FilterReject::TooShort { tokens }) => assert_eq!(tokens, 4),
+        other => panic!("expected TooShort, got {other:?}"),
+    }
+}
+
+#[test]
+fn note_mode_allows_short_content() {
+    // Use the stricter MCP threshold so the assertion documents the
+    // contract independently of the library default.
+    let cfg = FilterConfig {
+        min_tokens: MCP_MIN_TOKENS,
+        ..FilterConfig::default()
+    };
+    // 3 tokens, would fail with enforce_min=true, must pass with false.
+    assert!(cfg.apply("User prefers snake_case", false).is_ok());
+    assert!(cfg.apply("User prefers snake_case", true).is_err());
+}
+
+#[test]
+fn filter_accepts_real_content() {
+    let cfg = FilterConfig::default();
+    assert!(
+        cfg.apply(
+            "When refactoring search indices, prefer postcard over JSON for redb \
+                 values because of size and decode speed.",
+            true,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn filter_rejects_high_non_alpha_content() {
+    let cfg = FilterConfig::default();
+    let json = r#"{"id":1,"items":[2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]}"#;
+    let res = cfg.apply(json, false);
+    assert!(matches!(res, Err(FilterReject::NonAlphabetic { .. })));
+}
+
+#[test]
+fn classify_detects_commit_and_tool_use() {
+    assert_eq!(
+        classify("feat(memory): add filter", DrawerType::Unknown),
+        DrawerType::Commit
+    );
+    assert_eq!(
+        classify(
+            "abcdef0123456789abcdef0123456789abcdef01", // pragma: allowlist secret
+            DrawerType::Unknown
+        ),
+        DrawerType::Commit
+    );
+    assert_eq!(
+        classify("Tool use: search_code", DrawerType::Unknown),
+        DrawerType::SessionEvent
+    );
+    assert_eq!(
+        classify("Running cargo test...", DrawerType::Unknown),
+        DrawerType::SessionEvent
+    );
+    // Prose falls through to the supplied fallback.
+    assert_eq!(
+        classify(
+            "A regular curated knowledge fragment.",
+            DrawerType::AgentNote
+        ),
+        DrawerType::AgentNote
+    );
+}
+
+#[test]
+fn reject_messages_are_actionable() {
+    let too_short = FilterReject::TooShort { tokens: 3 };
+    assert!(too_short.to_string().contains("memory_note"));
+    let noise = FilterReject::NoisePattern {
+        pattern: "x".to_string(),
+    };
+    assert!(noise.to_string().contains("low-signal"));
+    let na = FilterReject::NonAlphabetic { ratio: 85.0 };
+    assert!(na.to_string().contains("force=true"));
+    // Issue #1481: the secret rejection must name the offending token.
+    let secret = FilterReject::PotentialSecret {
+        token: "sk-A…(48 chars)".to_string(),
+    };
+    let msg = secret.to_string();
+    assert!(msg.contains("sk-A"), "secret reject must name token: {msg}");
+    assert!(
+        msg.contains("secret"),
+        "secret reject must say 'secret': {msg}"
+    );
+}
+
+// ---- Issue #1481: git-SHA allowlist + secret detection ----
+
+#[test]
+fn git_sha_like_recognises_short_and_full() {
+    // 7-char abbreviation (git's default) through full 40-char SHA-1.
+    assert!(is_git_sha_like("0fda534"));
+    assert!(is_git_sha_like("4c536992"));
+    assert!(is_git_sha_like("0fda534e0fda534e0fda534e0fda534e0fda534e"));
+    // Case-insensitive: uppercase hex is still a SHA.
+    assert!(is_git_sha_like("0FDA534E"));
+}
+
+#[test]
+fn git_sha_like_rejects_overlong_and_nonhex() {
+    // 6 chars is below git's abbreviation floor.
+    assert!(!is_git_sha_like("0fda53"));
+    // 41 chars: was rejected under the old SHA-1-only cap (40); now accepted
+    // as within the 7–64 range that covers SHA-256 repos (issue #1484).
+    assert!(is_git_sha_like("0fda534e0fda534e0fda534e0fda534e0fda534e0"));
+    // 65 chars exceeds SHA-256 length and must be rejected.
+    let sixty_five = "a".repeat(65);
+    assert!(!is_git_sha_like(&sixty_five));
+    // Non-hex characters.
+    assert!(!is_git_sha_like("0fda534g"));
+    assert!(!is_git_sha_like("hello123"));
+}
+
+#[test]
+fn git_sha_prose_is_accepted() {
+    // The exact repro from issue #1481 must be stored, not skipped.
+    let cfg = FilterConfig::default();
+    let repro = "Shipped via PR #1466 squash 0fda534e -> merge 4c536992, CI green.";
+    assert!(
+        cfg.apply(repro, true).is_ok(),
+        "git-SHA prose must pass the gate; got {:?}",
+        cfg.apply(repro, true)
+    );
+    // A bare full SHA on its own is also legitimate now.
+    assert!(
+        cfg.apply("0fda534e0fda534e0fda534e0fda534e0fda534e", false)
+            .is_ok()
+    );
+}
+
+#[test]
+fn git_sha_like_is_not_secret() {
+    assert!(find_secret_token("merge 4c536992 into main").is_none());
+    assert!(find_secret_token("0fda534e0fda534e0fda534e0fda534e0fda534e").is_none());
+}
+
+#[test]
+fn secret_token_is_blocked() {
+    // A real high-entropy, mixed-case+digit credential token must still
+    // be rejected, and the reject must name the (redacted) trigger.
+    let cfg = FilterConfig::default();
+    let content = "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the deploy webhook"; // pragma: allowlist secret
+    match cfg.apply(content, true) {
+        Err(FilterReject::PotentialSecret { token }) => {
+            assert!(token.contains("AbCd"), "should name token: {token}");
+            assert!(token.contains("chars"), "should redact tail: {token}");
+        }
+        other => panic!("expected PotentialSecret, got {other:?}"),
+    }
+}
+
+#[test]
+fn base64_blob_is_blocked() {
+    let content = "config blob: aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA== embedded in the note"; // pragma: allowlist secret
+    assert!(matches!(
+        FilterConfig::default().apply(content, false),
+        Err(FilterReject::PotentialSecret { .. })
+    ));
+}
+
+#[test]
+fn known_key_prefixes_are_blocked() {
+    for tok in [
+        "sk-abcdef0123456789abcdef01",              // pragma: allowlist secret
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        "xoxb-1234-5678-abcdEFGH",                  // pragma: allowlist secret
+    ] {
+        assert!(
+            looks_like_secret(tok),
+            "prefix token should be a secret: {tok}"
+        );
+    }
+}
+
+/// Why (FN-1, issue #1481): AWS access key IDs (`AKIA…` long-term, `ASIA…`
+/// STS temp creds) are all-uppercase base32 — they fail the
+/// `has_lower && has_upper && has_digit` mixed-case heuristic, so before the
+/// `akia`/`asia` prefixes were added they slipped through the content gate
+/// and could be persisted into palace storage. This is a real secret-leak
+/// path that contradicted the doc comments.
+/// What: asserts both the `looks_like_secret` heuristic and the end-to-end
+/// `apply` gate reject the canonical AWS example key IDs as
+/// `PotentialSecret`.
+/// Test: itself.
+#[test]
+fn aws_access_key_ids_are_blocked() {
+    // Canonical AWS docs example access key ID + an STS temp-cred example.
+    let akia = "AKIAIOSFODNN7EXAMPLE"; // pragma: allowlist secret
+    let asia = "ASIAY34FZKBOKMUTVV7A"; // pragma: allowlist secret
+    for tok in [akia, asia] {
+        assert!(
+            looks_like_secret(tok),
+            "AWS access key ID must be flagged as secret: {tok}"
+        );
+    }
+    // End-to-end through the gate: an AWS key embedded in prose must reject.
+    let cfg = FilterConfig::default();
+    let content =
+        format!("Deploy creds leaked: access key {akia} and temp creds {asia} in the log");
+    assert!(
+        matches!(
+            cfg.apply(&content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "AWS access key IDs must reject end-to-end; got {:?}",
+        cfg.apply(&content, false)
+    );
+}
+
+/// Why (FN-1 over-blocking guard, issue #1481): the fix must not regress the
+/// git-SHA allowlist — a bare 40-hex commit SHA is legitimate engineering
+/// memory and must still pass the gate even though it is high-entropy.
+/// What: asserts a full 40-char hex SHA is accepted (not flagged secret).
+/// Test: itself.
+#[test]
+fn git_sha_still_allowed_after_aws_fix() {
+    let cfg = FilterConfig::default();
+    // 40 hex chars: a real git SHA-1 object id, NOT a credential.
+    let sha = "abcdef0123456789abcdef0123456789abcdef01"; // pragma: allowlist secret
+    assert!(
+        !looks_like_secret(sha),
+        "a 40-hex git SHA must not be flagged as a secret"
+    );
+    assert!(
+        cfg.apply(sha, false).is_ok(),
+        "a bare 40-hex git SHA must still pass the gate; got {:?}",
+        cfg.apply(sha, false)
+    );
+}
+
+#[test]
+fn ordinary_words_are_not_secret() {
+    for tok in [
+        "authentication",
+        "configuration",
+        "refactoring",
+        "snake_case",
+    ] {
+        assert!(!looks_like_secret(tok), "ordinary word flagged: {tok}");
+    }
+}
+
+#[test]
+fn non_alpha_masking_ignores_shas() {
+    // Masking turns SHAs into "sha" so the ratio reflects the prose only.
+    let masked = mask_git_shas("merge 4c536992 -> 0fda534e done");
+    assert!(masked.contains("sha"));
+    assert!(!masked.contains("4c536992"));
+}
+
+#[test]
+fn redact_token_masks_tail() {
+    let r = redact_token("AbCd1234EfGh5678IjKl9012"); // pragma: allowlist secret
+    assert!(r.starts_with("AbCd"));
+    assert!(r.contains("…"));
+    assert!(r.contains("chars"));
+    assert!(!r.contains("9012"), "tail must be masked: {r}");
+}
+
+#[test]
+fn filter_config_force_bypasses_all() {
+    // The `force` semantics live in the caller (we model it by skipping
+    // `apply` entirely); this test exists so the contract is documented:
+    // there is no way *inside* `apply` to bypass — the caller must not
+    // call it at all to force-store.
+    let cfg = FilterConfig::default();
+    assert!(cfg.apply("Tool use: x", true).is_err());
+}
+
+// ---- Issue #1484: advisory hardening follow-ups ----
+
+/// Why (issue #1484, gap 1): git 2.29+ repos using `--object-format=sha256`
+/// emit 64-hex-char commit SHAs. Before raising GIT_SHA_MAX_LEN from 40 to 64,
+/// a 64-char lowercase-hex token in prose would fail `is_git_sha_like` (too
+/// long), pass the secret detector (pure-lowercase-hex with no credential
+/// prefix), but then push the non-alpha ratio over the gate threshold when the
+/// content was hex-dense. This test locks in the allowlist at 64 chars.
+/// What: asserts 64-hex tokens are allowlisted as SHA-like and pass the gate.
+/// Test: itself.
+#[test]
+fn git_sha_like_recognises_sha256() {
+    // 64 hex chars: a SHA-256 git object id.
+    let sha256 = "a".repeat(63) + "b"; // 63 'a' + 1 'b' = 64 hex chars
+    assert!(
+        is_git_sha_like(&sha256),
+        "64-hex SHA-256 must be recognised as git-SHA-like"
+    );
+    // 65 chars: exceeds SHA-256, must NOT be allowlisted.
+    let too_long = "a".repeat(65);
+    assert!(
+        !is_git_sha_like(&too_long),
+        "65-hex token must not be allowlisted (exceeds SHA-256 length)"
+    );
+    // End-to-end: prose containing a SHA-256 commit reference must pass.
+    let cfg = FilterConfig::default();
+    let sha256_hex = "a".repeat(64);
+    let prose = format!("Merged commit {sha256_hex} into main via PR #42.");
+    assert!(
+        cfg.apply(&prose, true).is_ok(),
+        "prose with SHA-256 commit must pass the gate; got {:?}",
+        cfg.apply(&prose, true)
+    );
+}
+
+/// Why (issue #1484, gap 2): `looks_like_secret`'s fallback requires
+/// `has_lower && has_upper && has_digit`. Mixed-case alphabetic tokens with no
+/// digit (e.g. base58 wallet key segments) slip through unless they match a
+/// known prefix. This test documents the limitation so future reviewers know
+/// the known false-negative surface and do not mistake it for a bug introduced
+/// later.
+/// What: asserts a mixed-case-no-digit ≥20-char token is NOT flagged by the
+/// fallback heuristic (documents the known gap without changing behaviour).
+/// Test: itself.
+#[test]
+fn mixed_case_no_digit_limitation() {
+    // 24-char mixed-case alphabetic, no digit, no known prefix — would be a
+    // false negative if it were a real base58 key segment.
+    let mixed_alpha_only = "AbCdEfGhIjKlMnOpQrStUvWx";
+    assert_eq!(mixed_alpha_only.len(), 24);
+    assert!(
+        !looks_like_secret(mixed_alpha_only),
+        "known FN-2 limitation (issue #1484): mixed-case-no-digit tokens \
+         are not flagged by the fallback heuristic; document, do not panic"
+    );
+}
+
+/// Why (issue #1484, gap 3): `is_git_sha_like` uses `is_ascii_hexdigit()`
+/// which returns `true` for `0-9` as well as `a-f`/`A-F`. An all-digit string
+/// of 7–64 chars (e.g. a long account number) is therefore allowlisted as
+/// SHA-like. The risk is low, but callers should know the allowlist is broader
+/// than strictly "git commit SHA". This test documents the known behaviour.
+/// What: asserts that an all-digit 10-char string is accepted by
+/// `is_git_sha_like` (broader-than-SHA allowlist), and that it also passes the
+/// full gate as an allowlisted token.
+/// Test: itself.
+#[test]
+fn pure_digit_token_is_sha_like() {
+    // 10 ASCII digits: broader-than-SHA allowlist — known and documented.
+    let digits = "1234567890";
+    assert!(
+        is_git_sha_like(digits),
+        "known gap (issue #1484, gap 3): all-digit strings of SHA length \
+         pass is_git_sha_like because ASCII digits are valid hex"
+    );
+    // Verify it does not cause a false reject (it is allowlisted as safe).
+    assert!(
+        !looks_like_secret(digits),
+        "an all-digit short token must not be flagged as a secret"
+    );
+}
+
+/// Why (issue #1484, gap 5): a bare single-token SHA passed to `apply` with
+/// `enforce_min_tokens=true` is rejected as `TooShort` because it counts as
+/// only 1 meaningful token — below the MCP threshold of 8. This is correct
+/// behaviour (a bare SHA alone carries too little context for memory_remember)
+/// but the gap was that the `enforce_min_tokens=true` path for bare SHAs had
+/// no explicit test or doc coverage.
+/// What: asserts `apply` returns `TooShort` for a bare SHA with the MCP
+/// threshold and `enforce_min_tokens=true`, and `Ok` with `false`.
+/// Test: itself.
+#[test]
+fn bare_sha_with_enforce_min_tokens_is_too_short() {
+    let cfg = FilterConfig {
+        min_tokens: MCP_MIN_TOKENS, // 8 tokens
+        ..FilterConfig::default()
+    };
+    let bare_sha = "0fda534e0fda534e0fda534e0fda534e0fda534e"; // pragma: allowlist secret
+
+    // With enforcement: 1 token < 8 threshold → TooShort.
+    match cfg.apply(bare_sha, true) {
+        Err(FilterReject::TooShort { tokens }) => assert_eq!(tokens, 1),
+        other => {
+            panic!("expected TooShort(1) for bare SHA with enforce_min_tokens=true; got {other:?}")
+        }
+    }
+
+    // Without enforcement (e.g. memory_note path): the bare SHA passes.
+    assert!(
+        cfg.apply(bare_sha, false).is_ok(),
+        "bare SHA must pass gate when enforce_min_tokens=false"
+    );
+}
+
+// ---- Issue #1667: false-positive fixes for path/slug/key=value tokens ----
+
+/// Why (issue #1667): the `has_b64_sym` branch in `looks_like_secret` was
+/// flagging `/` (path separator) and `=` (key=value, semver operator) as
+/// base64 indicators, causing legitimate technical tokens to be rejected as
+/// credentials. `is_structural_token` now guards that branch.
+/// What: asserts each known-false-positive token is NOT flagged as a secret
+/// by `looks_like_secret`, and that the full gate accepts them.
+/// Test: itself.
+#[test]
+fn structural_tokens_are_not_flagged() {
+    // slash-path tokens (issue #1667 primary cases)
+    let slash_tokens = [
+        "verdict/grade/prose-summary", // 27 chars — the exact reported FP
+        "duettoresearch/duetto",       // org/repo slug
+        "duettoresearch/projects/19",  // org/repo/id path
+        "crates/trusty-review/src/pipeline/mapreduce/synthesis.rs", // file path
+    ];
+    for tok in slash_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "slash-path token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // key=value / semver-operator tokens
+    let eq_tokens = [
+        ">=2-medium->REQUEST_CHANGES", // semver + status slug
+    ];
+    for tok in eq_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "key=value/semver token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // version/crate tag strings
+    let version_tokens = [
+        "trusty-review-v0.6.0", // crate release tag — has hyphens, no b64 syms
+    ];
+    for tok in version_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "version tag should NOT be flagged as secret: {tok}"
+        );
+    }
+}
+
+/// Why (issue #1667): end-to-end gate must ACCEPT content containing
+/// the real false-positive tokens that were rejected before this fix.
+/// What: passes each FP token through `FilterConfig::apply` and asserts Ok.
+/// Test: itself.
+#[test]
+fn gate_accepts_fp_content() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        // The exact token from the rejection report:
+        "Use verdict/grade/prose-summary as the synthesized output key",
+        // Org/repo slug references:
+        "See duettoresearch/duetto for the upstream fork and duettoresearch/projects/19 for tracking",
+        // Semver / review-decision token:
+        "Review verdict: >=2-medium->REQUEST_CHANGES must block merge",
+        // File path reference:
+        "The synthesis module lives at crates/trusty-review/src/pipeline/mapreduce/synthesis.rs",
+        // Crate release tag:
+        "Released trusty-review-v0.6.0 with map-reduce support",
+        // Bare 40-char git SHA (regression lock from #1481):
+        "Merged 0fda534e0fda534e0fda534e0fda534e0fda534e into main",
+    ];
+    for content in cases {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "gate must ACCEPT: {content:?}\ngot: {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #1667 hardening): verifying the fix did NOT weaken real-secret
+/// detection. Prefix-based secrets (AKIA, ghp_, sk-, AIza) are caught by the
+/// `SECRET_PREFIXES` / `find_secret_token` layer that runs BEFORE
+/// `looks_like_secret`'s entropy heuristics; the assertions here go through
+/// the REAL public entry points (`find_secret_token` and `FilterConfig::apply`)
+/// so that the test proves the actual end-to-end blocking guarantee rather than
+/// only a lower-level heuristic.
+/// What: asserts every secret class (prefix-based and entropy-based) is rejected
+/// by both `find_secret_token` (the intermediate public guard) and `apply` (the
+/// full gate). For the GCP key (`AIzaSy…`), which is caught by the mixed-case+
+/// digit fallback rather than a prefix, `looks_like_secret` is also verified
+/// directly since that is the authoritative guard for that class.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_1667_fix() {
+    let cfg = FilterConfig::default();
+
+    // --- Prefix-based secrets: verified through the public guard ---
+    // `find_secret_token` is the REAL layer that catches these (the
+    // `SECRET_PREFIXES` check inside `looks_like_secret` is reached only via
+    // `find_secret_token`; calling `looks_like_secret` directly on a bare
+    // prefix token tests a sub-layer but not the actual end-to-end path).
+    let prefix_cases = [
+        ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
+        ("ASIAY34FZKBOKMUTVV7A", "AWS STS temp cred"), // pragma: allowlist secret
+        ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
+        ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
+    ];
+    for (tok, label) in prefix_cases {
+        // Layer 1: the intermediate public guard must find the secret token.
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must be caught by find_secret_token: {tok}"
+        );
+        // Layer 2: the full gate (apply) must return PotentialSecret when the
+        // token appears in prose, which is the actual blocking guarantee.
+        let prose = format!("Deployment secret: {tok}");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "{label} must be rejected by apply end-to-end; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // --- GCP API key: caught by the mixed-case+digit fallback, not a prefix ---
+    // For this class, `looks_like_secret` is the primary guard; verify all
+    // three layers: looks_like_secret, find_secret_token, and apply.
+    let gcp_key = "AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(gcp_key),
+        "GCP API key must be flagged by looks_like_secret: {gcp_key}"
+    );
+    assert!(
+        find_secret_token(gcp_key).is_some(),
+        "GCP API key must be caught by find_secret_token: {gcp_key}"
+    );
+    let gcp_prose = format!("API key: {gcp_key} — keep secret");
+    assert!(
+        matches!(
+            cfg.apply(&gcp_prose, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "GCP API key must be rejected by apply end-to-end; got {:?}",
+        cfg.apply(&gcp_prose, false)
+    );
+
+    // --- High-entropy base64 blob (with `+`): caught by the b64-symbol branch ---
+    // `+` is unambiguously base64 and is not a structural char, so this blob
+    // must be rejected even though it also contains `/` (which would be a
+    // structural indicator if `+` weren't present).
+    let b64_blob = "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NAaGVsbG8rd29ybGQ="; // pragma: allowlist secret
+    let b64_content = format!("Config blob: {b64_blob} stored in env");
+    assert!(
+        find_secret_token(&b64_content).is_some(),
+        "base64 blob must be caught by find_secret_token"
+    );
+    assert!(
+        matches!(
+            cfg.apply(&b64_content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "content with base64 blob must reject end-to-end; got {:?}",
+        cfg.apply(&b64_content, false)
+    );
+}
+
+// ---- Issue #1676: key=value tokens where the value is a slash-path ----
+
+/// Why (issue #1676): `is_structural_token` routed tokens containing both `=`
+/// and `/` to the slash-path branch first, where the first `/`-segment (e.g.
+/// `reviewer_model=openrouter`) contains `=` and fails `is_word_segment`,
+/// causing false positives. The fix: evaluate `=` before `/` and use a
+/// compositional check — LHS must be a word segment AND the RHS must be
+/// either a word segment or a slash-path.
+/// What: asserts that `key=slash/path/value` tokens are NOT flagged as secrets.
+/// Test: itself.
+#[test]
+fn key_equals_slashpath_not_flagged() {
+    // The exact token from the live false positive (issue #1676).
+    assert!(
+        !looks_like_secret("reviewer_model=openrouter/openai/gpt-5.4-mini-20260317"),
+        "reviewer_model=openrouter/openai/... must NOT be flagged as secret"
+    );
+
+    // Additional key=slash-path shapes.
+    let allowed = [
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+        "model=anthropic/claude-3-5-sonnet",
+        "provider=openai/gpt-4o",
+        "config=org/repo/settings.json",
+        "base_path=usr/local/bin",
+        // Plain key=word (unchanged existing behaviour).
+        "timeout=30s",
+        "env=production",
+        // key=version-tag
+        "version=v1.2.3",
+    ];
+    for tok in allowed {
+        assert!(
+            !looks_like_secret(tok),
+            "key=value token should NOT be flagged as secret: {tok}"
+        );
+    }
+}
+
+/// Why (issue #1676): end-to-end gate must ACCEPT content containing
+/// `key=slash/path` tokens.
+/// What: passes the confirmed live false positive and additional representative
+/// cases through `FilterConfig::apply` and asserts Ok.
+/// Test: itself.
+#[test]
+fn gate_accepts_key_equals_slashpath() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        // The exact rejection from the issue report:
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+        // Representative variations:
+        "Using model=anthropic/claude-3-5-sonnet for code review",
+        "Set provider=openai/gpt-4o in your config",
+        "Deploy with config=org/repo/settings.json",
+    ];
+    for content in cases {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "gate must ACCEPT: {content:?}\ngot: {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+// ---- Issue #2442: blocklist prefix-anchoring + secret-heuristic FP fixes ----
+
+/// Why (issue #2442): `blocklist_match` replaces the old substring-anywhere
+/// `str::contains` check with a `starts_with` anchor. Known auto-capture
+/// prefixes must still be caught at the start of (whitespace-trimmed)
+/// content.
+/// What: asserts the exact write-path prefixes are matched.
+/// Test: itself.
+#[test]
+fn blocklist_match_blocks_known_prefixes() {
+    assert_eq!(blocklist_match("Tool use: Bash"), Some("Tool use: "));
+    assert_eq!(
+        blocklist_match("   Tool use: Read"),
+        Some("Tool use: "),
+        "leading whitespace must not let it through"
+    );
+    assert_eq!(
+        blocklist_match("Claude Code session ended: abc"),
+        Some("Claude Code session")
+    );
+}
+
+/// Why (issue #2442): the "sharper problem" from the issue report — a coding
+/// agent's turn text routinely QUOTES phrases like `"Tool use: "` mid-prose
+/// when recapping tool output. The old `contains`-based match silently
+/// dropped these legitimate memories. Anchoring to the start of the content
+/// must let them through.
+/// What: asserts content that merely mentions the pattern (not framed by it)
+/// is NOT matched.
+/// Test: itself.
+#[test]
+fn blocklist_match_ignores_quoted_mid_text() {
+    assert_eq!(blocklist_match("I used Tool use: Bash here"), None);
+    assert_eq!(
+        blocklist_match("The transcript shows Claude Code session lifecycle events firing twice"),
+        None
+    );
+    assert_eq!(blocklist_match("an ordinary engineering note"), None);
+}
+
+/// Why (issue #2442, live false positive #1): a Rust source-location
+/// reference of the shape `crate/module/file.rs::function_name` was rejected
+/// by `looks_like_secret` because the `::` inside the final slash-segment
+/// broke `is_word_segment`, so the token fell through to the entropy
+/// heuristics — `/` tripped `has_b64_sym` and the token was flagged.
+/// What: asserts the exact real-world rejected token (and the full gate,
+/// end-to-end) now passes.
+/// Test: itself.
+#[test]
+fn path_like_token_with_rust_module_separator_not_flagged() {
+    let tok = "client/http_client/error.rs::response_or_body_error";
+    assert!(
+        !looks_like_secret(tok),
+        "Rust path::fn reference must NOT be flagged as secret: {tok}"
+    );
+    let cfg = FilterConfig::default();
+    let content = format!(
+        "Milestone: fixed the retry loop in {tok} so transient 5xxs no longer abort the batch"
+    );
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the path::fn reference; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2442, live false positive #2): a compact issue/PR/SHA ledger
+/// reference like `#2486→PR#2491(e993c18a)` mixes uppercase (`PR`), digits,
+/// and lowercase hex — enough to trip the old unconditional mixed-case+digit
+/// fallback — even though no real credential format contains `#`, arrows, or
+/// parentheses.
+/// What: asserts the exact real-world rejected token (and the full gate,
+/// end-to-end) now passes.
+/// Test: itself.
+#[test]
+fn ledger_reference_token_not_flagged() {
+    let tok = "#2486→PR#2491(e993c18a)";
+    let content = format!("Shipped {tok} closing the retry-loop regression");
+    assert!(
+        find_secret_token(&content).is_none(),
+        "issue/PR/SHA ledger token must NOT be flagged as secret: {content}"
+    );
+    let cfg = FilterConfig::default();
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the ledger reference; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2442 hardening): the ledger/path false-positive fixes must not
+/// weaken detection of real secrets — including ones that happen to sit next
+/// to ledger-shaped punctuation in the same content.
+/// What: asserts a known-prefix secret is still rejected even when the
+/// surrounding content also contains a ledger reference and a path::fn
+/// reference (both now allowlisted individually).
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_alongside_2442_fp_fixes() {
+    let cfg = FilterConfig::default();
+    let content = "See #2486->PR#2491(e993c18a) and crates/foo/bar.rs::baz — deploy secret \
+                    sk-abcdefghijklmnopqrstuvwxyz01234567890123"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "real credential must still be rejected end-to-end; got {:?}",
+        cfg.apply(content, false)
+    );
+}
+
+/// Why (issue #2442 hardening, path segment): confirm the `:` addition to
+/// `is_word_segment` does not let arbitrary secrets slip through when
+/// wrapped in a slash-path with colons — the wrapping segment must still be
+/// alnum/`-`/`_`/`.`/`:` ONLY. A segment containing `@` (as in a connection
+/// string `user:pass@host`) still fails structural detection.
+/// What: asserts a connection-string-shaped token with an embedded `@` is
+/// still flagged by the base64-symbol fallback.
+/// Test: itself.
+#[test]
+fn connection_string_shaped_token_still_flagged() {
+    let tok = "postgres://user:pass@host/dbname12345678901234567890"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(tok),
+        "connection-string-shaped token must still be flagged: {tok}"
+    );
+}
+
+/// Why (issue #1676): the compositional fix must NOT weaken detection of real
+/// secrets embedded as values in `key=value` tokens. The critical guard is the
+/// `+` early-exit in `is_structural_token`: a `key=base64blob` where the
+/// encoded blob itself contains `+` (a standard base64 symbol) is NEVER
+/// structural, regardless of the `=` reordering introduced by this fix.
+///
+/// Note: `key=alnum_only_blob` (no `+`, no `/` in value, all alnum) is treated
+/// as structural by `is_word_segment` — this is a KNOWN FALSE NEGATIVE that
+/// predates issue #1667 (the `=` branch already returned true for these), and
+/// the #1676 compositional fix does not change it. Real-world API keys with a
+/// slash in them are not emitted by any known provider. The `+` guard and the
+/// known-prefix layer (`sk-`, `ghp_`, `AKIA`, …) remain the primary defences.
+///
+/// What: verifies that `key=<blob-with-plus>` tokens are still flagged and that
+/// the known prefix layer (`AKIA…`) is still operative end-to-end when the
+/// token arrives as a standalone whitespace-delimited token (not embedded in
+/// `key=value` form, where the prefix check is bypassed).
+/// Test: itself.
+#[test]
+fn key_equals_secret_still_blocked_after_1676_fix() {
+    let cfg = FilterConfig::default();
+
+    // A `key=` token where the base64-ENCODED value itself contains `+` —
+    // the `+` early-exit in `is_structural_token` fires before the `=` branch,
+    // so the token is correctly non-structural even after the reordering.
+    // Base64 of arbitrary bytes that encodes to contain `+`:
+    // bytes [3, 224, 200] × 10 → "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"
+    let b64_value = "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"; // pragma: allowlist secret
+    let b64_kv = format!("token={b64_value}");
+    assert!(
+        find_secret_token(&b64_kv).is_some(),
+        "key=base64blob (with literal + in encoding) must still be flagged: {b64_kv}"
+    );
+    assert!(
+        matches!(
+            cfg.apply(&b64_kv, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "key=base64blob (with +) must be rejected by apply; got {:?}",
+        cfg.apply(&b64_kv, false)
+    );
+
+    // A standalone known-prefix secret — the prefix check runs BEFORE
+    // `is_structural_token`, so moving `=` before `/` in the structural check
+    // does NOT affect it.
+    let cases = [
+        ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
+        ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
+        ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
+    ];
+    for (tok, label) in cases {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must still be caught by find_secret_token after #1676 fix: {tok}"
+        );
+        let prose = format!("Config: {tok}");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "{label} must still be rejected by apply end-to-end; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+/// Why (issue #2520 review, BLOCKER): `is_plausible_credential_charset`'s
+/// allowed set (alnum + `-`/`_`/`.`) excluded `:`, so ANY colon anywhere in a
+/// token — even a colon that is not part of any structural shape recognised
+/// by `is_structural_token` — flunked the `.all()` check and disabled the
+/// mixed-case+digit fallback entirely. On `origin/main` (pre-#2442, no
+/// charset gate at all) `token:aBc123XyZ987uvW456QrS` was correctly flagged;
+/// after #2442 added the charset gate it silently stopped being flagged
+/// (`find_secret_token` returned `None`) — a real false-negative regression.
+/// The `path::fn` false positive this PR fixes is handled by a DIFFERENT,
+/// earlier code path (`is_structural_token`'s slash-path branch, which
+/// short-circuits `looks_like_secret` before the charset gate is ever
+/// reached), so the two functions do not need to (and must not be made to)
+/// share behaviour here — restoring `:` to the credential charset closes the
+/// regression without reopening the path::fn or ledger-reference false
+/// positives.
+/// What: asserts a bare colon-bearing credential-shaped token is flagged by
+/// both `find_secret_token` and the end-to-end `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn colon_bearing_credential_is_flagged() {
+    let tok = "key:aBc123XyZ987uvW456QrS"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(tok).is_some(),
+        "bare colon-bearing credential-shaped token must be flagged: {tok}"
+    );
+    let cfg = FilterConfig::default();
+    let content = format!("Config: {tok}");
+    assert!(
+        matches!(
+            cfg.apply(&content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "colon-bearing credential must be rejected end-to-end; got {:?}",
+        cfg.apply(&content, false)
+    );
+}
+
+// ---- Issue #2800: slash-separated issue/PR-number lists ----
+
+/// Why (issue #2800, observed live twice): a PM session checkpoint enumerating
+/// PRs as `#2763/#2774/#2780/#2782/#2790` was rejected as a secret. The token
+/// carries no letters at all, but the `/` separators set `has_b64_sym` and the
+/// digits set `has_digit`, so the base64-blob branch of `looks_like_secret`
+/// fired. `is_structural_token`'s slash-path branch does not rescue it because
+/// the `#` in each segment fails `is_word_segment`.
+/// What: asserts the EXACT token from the issue body passes both the token
+/// predicate and the end-to-end gate, in the prose shape it was written in.
+/// Test: itself.
+#[test]
+fn slash_separated_pr_number_list_not_flagged() {
+    let tok = "#2763/#2774/#2780/#2782/#2790";
+    assert!(
+        !looks_like_secret(tok),
+        "slash-separated PR-number list must NOT be flagged as secret: {tok}"
+    );
+    // `find_secret_token` trims the leading `#`, yielding the 28-char token
+    // quoted in the issue's rejection message — cover that shape too.
+    let content = format!("Merged {tok} closing the eviction epic");
+    assert!(
+        find_secret_token(&content).is_none(),
+        "PR-number list in prose must NOT be flagged; got {:?}",
+        find_secret_token(&content)
+    );
+    let cfg = FilterConfig::default();
+    assert!(
+        cfg.apply(&content, true).is_ok(),
+        "gate must ACCEPT the PR-number list; got {:?}",
+        cfg.apply(&content, true)
+    );
+}
+
+/// Why (issue #2800): the digit/separator exemption must be a keyhole, not a
+/// hole. Anything with an alphabetic character is outside the exemption, so
+/// every real-credential shape the module already blocks must still be blocked
+/// — including ones that sit next to a PR-number list in the same content, and
+/// including the adversarial case of a credential that is *mostly* digits and
+/// slashes with only a few letters smuggled in.
+/// What: asserts known-prefix, base64-blob, connection-string, and
+/// digits-plus-letters credentials all remain flagged after the exemption.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_2800_exemption() {
+    let cfg = FilterConfig::default();
+
+    // 1. Known-prefix credential sharing content with an allowlisted PR list —
+    //    the exemption must not shadow other tokens in the same memory.
+    let mixed = "Checkpoint #2763/#2774/#2780/#2782/#2790 deploy key \
+                 sk-abcdefghijklmnopqrstuvwxyz01234567890123"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(mixed, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "known-prefix credential must still be rejected beside a PR list; got {:?}",
+        cfg.apply(mixed, false)
+    );
+
+    // 2. LOAD-BEARING: a token that is `#`/digit/slash-shaped EXCEPT for a
+    //    smuggled alphabetic segment. One letter must take it out of the
+    //    #2800 exemption. If the exemption were written as "contains only
+    //    digits and separators, ignoring letters" — or applied before the
+    //    charset was fully checked — this is the token that would slip through.
+    //
+    //    #4312 changed what this asserts against, and the change is
+    //    deliberate. The invariant has always been "the #2800 exemption is a
+    //    keyhole, not a hole"; the original assertion probed it INDIRECTLY via
+    //    `looks_like_secret == true`. That proxy stopped holding once the
+    //    base64 branch gained `is_plausible_b64_charset`, which declines any
+    //    `#`-bearing token — `#` appears in no credential format, so declining
+    //    it loses no real detection, and this token is prose in every reading.
+    //    So assert the invariant itself rather than a downstream verdict that
+    //    a second, stricter gate now also owns. Coverage is not reduced: the
+    //    same token is still tested, for the same property.
+    let sneaky = "#2763/#2774/#abcd/#2782/#2790"; // pragma: allowlist secret
+    assert!(
+        !is_issue_number_list(sneaky),
+        "a `#`/digit/slash token containing letters must NOT be exempted by the \
+         #2800 issue-list allowlist: {sneaky}"
+    );
+
+    // 3. LOAD-BEARING: `+` is the unambiguous base64 indicator. It is outside
+    //    the exemption charset, so a digit-and-slash token carrying one must
+    //    stay flagged even though it has no letters at all.
+    let with_plus = "1234/5678/9012+3456/7890/1234"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(with_plus),
+        "`+` (base64 indicator) must defeat the exemption: {with_plus}"
+    );
+
+    // 4. Base64 blob with `=` padding — the same `has_b64_sym` branch the
+    //    exemption short-circuits. Letters present, so still flagged.
+    let b64 = "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4="; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(b64),
+        "padded base64 blob must still be flagged: {b64}"
+    );
+
+    // 5. Connection string — `/`-bearing and digit-bearing, letters present.
+    let conn = "postgres://user:pass@host/dbname12345678901234567890"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(conn),
+        "connection-string-shaped token must still be flagged: {conn}"
+    );
+}
+
+// ---- Issue #4312: backtick-joined Markdown inline-code spans ----
+
+/// Why (issue #4312, fourth recurrence of this shape after #1667, #2800,
+/// #4216): `find_secret_token` split only on whitespace, so two Markdown
+/// inline-code spans joined by a bare `/` — `` `foo`/`bar` `` — arrived at the
+/// heuristic as ONE token. `trim_matches` strips punctuation only from the
+/// outer boundary, so the interior backticks survived, `is_word_segment`
+/// rejected every `/`-segment (backtick is in neither its charset nor
+/// `is_issue_number_list`'s), and the token fell to the base64 branch: `/`
+/// sets `has_b64_sym`, a lowercase letter sets `has_lower` → flagged.
+/// What: asserts the three shapes from the issue — a backtick-joined
+/// identifier pair, a backtick-joined path, and a backtick-wrapped issue list
+/// (the #4216 regression) — all pass `find_secret_token` and the end-to-end
+/// gate.
+/// Test: itself.
+#[test]
+fn backtick_joined_spans_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for content in [
+        // 1. Two backtick-joined identifiers, 34 chars combined.
+        "`stale_skills`/`doctor_staleness.rs`",
+        // 2. Two backtick-joined path spans, ~51 chars combined.
+        "`crates/trusty-common/src/memory_core`/`filter_tests.rs`",
+        // 3. Backtick-wrapped issue-number list — straight regression of the
+        //    #4216 exemption, which recurs the moment the list is quoted.
+        "`#4601`/`#4602`/`#4603`",
+    ] {
+        assert!(
+            find_secret_token(content).is_none(),
+            "backtick-joined span must NOT be flagged: {content}; got {:?}",
+            find_secret_token(content)
+        );
+        let prose = format!("Checkpoint: touched {content} in this pass");
+        assert!(
+            find_secret_token(&prose).is_none(),
+            "backtick-joined span in prose must NOT be flagged: {prose}; got {:?}",
+            find_secret_token(&prose)
+        );
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "gate must ACCEPT backtick-joined prose; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4312): treating the backtick as a token delimiter must not open
+/// a hole. A backtick never appears in any credential alphabet (base64,
+/// base64url, hex, base32) nor in any known provider key format, so no genuine
+/// credential can be split by it — but that claim has to be proven, not
+/// asserted. These cases pin the three detection layers (known prefix, base64
+/// blob, mixed-case entropy) while a backtick is present in the same content.
+/// What: asserts a GitHub token, an OpenAI-style key, an AWS access key ID, a
+/// padded base64 blob, and a bare mixed-case credential all remain rejected
+/// when quoted in backticks or sitting beside backtick-quoted prose.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4312_backtick_split() {
+    let cfg = FilterConfig::default();
+
+    // 1. Credentials wrapped in backticks — the commonest way a leaked key
+    //    actually reaches a memory write (someone quotes it as code).
+    for tok in [
+        "`ghp_abcdefghijklmnopqrstuvwxyz0123456789`", // pragma: allowlist secret
+        "`sk-abcdefghijklmnopqrstuvwxyz01234567890123`", // pragma: allowlist secret
+        "`AKIAIOSFODNN7EXAMPLE`",                     // pragma: allowlist secret
+        "`dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=`", // pragma: allowlist secret
+        "`AbCd1234EfGh5678IjKl9012`",                 // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "backtick-quoted credential must STILL be flagged: {tok}"
+        );
+    }
+
+    // 2. LOAD-BEARING: a real credential sharing content with the exact
+    //    backtick-joined shape #4312 exempts. The delimiter change must not
+    //    shadow other tokens in the same memory.
+    let mixed = "Touched `stale_skills`/`doctor_staleness.rs`; deploy key \
+                 ghp_abcdefghijklmnopqrstuvwxyz0123456789"; // pragma: allowlist secret
+    assert!(
+        matches!(
+            cfg.apply(mixed, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "credential beside a backtick-joined span must still reject; got {:?}",
+        cfg.apply(mixed, false)
+    );
+
+    // 3. LOAD-BEARING (detection TIGHTENED, not loosened): a credential
+    //    written flush against surrounding text and a backtick. Under
+    //    whitespace-only splitting this arrived as one token whose backtick
+    //    defeated `is_plausible_credential_charset`, silently disabling the
+    //    mixed-case fallback — the secret was NOT flagged. Splitting on the
+    //    backtick isolates the 24-char credential and catches it.
+    let adjacent = "token`AbCd1234EfGh5678IjKl9012`)"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(adjacent).is_some(),
+        "credential flush against a backtick must be flagged: {adjacent}"
+    );
+
+    // 4. LOAD-BEARING, and the ONE direction this change can regress: a
+    //    backtick INSIDE a credential-bearing token rather than adjacent to
+    //    it. Machine-generated credentials cannot contain one, but a
+    //    user-chosen password in a connection-string URL can — the charset
+    //    there is unbounded. The split divides it, the left fragment falls
+    //    under the 20-char floor, and the right fragment loses the `/` that
+    //    set `has_b64_sym`, so the credential is MISSED. That is a real
+    //    limitation, it is documented on `find_secret_token`, and it is
+    //    pinned here so a future reader meets the behaviour rather than the
+    //    paragraph. If this assertion ever starts failing, the limitation was
+    //    closed — update the doc comment, do not delete the test.
+    let interior = "mongodb://user:pa`ss@cluster0.mongodb.net"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(interior).is_none(),
+        "KNOWN LIMITATION (#4312): a backtick inside a connection-string \
+         password splits the token and the credential is missed. Got {:?}",
+        find_secret_token(interior)
+    );
+    // The same connection string WITHOUT the interior backtick must still be
+    // caught — this is what bounds the limitation to the split, and proves the
+    // detector has not simply stopped seeing connection strings.
+    let clean = "mongodb://user:passw0rdX@cluster0.mongodb.net"; // pragma: allowlist secret
+    assert!(
+        find_secret_token(clean).is_some(),
+        "connection-string credential must still be flagged: {clean}"
+    );
+}
+
+/// Why (issue #4312 round 3): the first cut of `is_url_credential_shaped`
+/// exempted any token containing `://` or `@`, which is monotone-WIDENING — it
+/// held open 14 URL-shaped prose false positives that the entropy floor would
+/// otherwise have closed. Bare documentation links, `git@…` remotes and plain
+/// addresses are not credentials, and this project's own always-clickable-links
+/// convention puts one of these tokens in essentially every session checkpoint.
+/// Narrowing the predicate to `scheme://user:pass@host` — a colon-bearing
+/// userinfo before the first `@` — closes 10 of the 14 while exempting zero
+/// prose and keeping every connection string (asserted in
+/// `real_secrets_still_blocked_after_4312_charset_gate`).
+/// What: asserts the ten URL-shaped prose tokens the narrowing fixes. All ten
+/// are false positives on `origin/main`.
+/// Test: itself.
+#[test]
+fn url_shaped_prose_is_not_flagged() {
+    for tok in [
+        "https://crates.io/crates/trusty-common/versions",
+        "https://docs.rs/trusty-common/latest/trusty_common",
+        "https://api.github.com/repos/bobmatnyc/trusty-tools",
+        "https://example.com/docs/getting-started-guide",
+        "https://bobmatnyc.github.io/trusty-tools/reference",
+        "git@github.com:bobmatnyc/trusty-tools.git",
+        "contact@example.com/support-team-list",
+        "amqp://rabbitmq.svc.cluster.local/vhost-production",
+        "redis://cache.internal/keyspace-notifications",
+        "postgres://localhost/trusty_dev",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "URL-shaped prose must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        // The narrowed predicate must not exempt prose — exempting it would
+        // mask the result above rather than earn it.
+        assert!(
+            !is_url_credential_shaped(tok),
+            "prose must not be exempted by is_url_credential_shaped: {tok}"
+        );
+    }
+}
+
+// #4312's `url_prose_residue_is_a_known_pre_existing_bound` lived here. It
+// pinned four URL-shaped prose tokens as still-flagged and instructed the
+// follow-up to move them when it landed. #5513 is that follow-up: all four now
+// store clean and are asserted in `bare_github_urls_are_not_flagged`.
+
+// ---- Issue #4312: the base64-branch charset gate + entropy floor ----
+
+/// Why (issue #4312): the delimiter change alone closes the backtick shape but
+/// not its cause. The base64 branch of `looks_like_secret` fired on ANY ≥20-char
+/// token containing `/` plus one letter that `is_structural_token` declined to
+/// rescue — and `is_word_segment`'s charset is deliberately narrow, so EVERY
+/// Markdown decoration (backtick, `**`, `"`, `'`, `[`, `(`, `|`, `%`, `,`) put
+/// ordinary prose on the credential path. Backtick was simply the fourth
+/// character to be noticed. Gating the branch on the charset a real blob is made
+/// of, plus an entropy floor, attacks the cause instead of enumerating shapes.
+/// What: asserts all FOUR reproductions enumerated in #4312 comment 2 — which
+/// the issue explicitly asks to be presented as must-not-flag regression cases —
+/// plus the three backtick shapes and eleven further Markdown/prose shapes that
+/// reproduce the identical defect with different punctuation.
+/// Test: itself.
+#[test]
+fn four_4312_acceptance_cases_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    // The four reproductions from #4312 comment 2, verbatim.
+    let acceptance = [
+        ("file:line citation", "credentials/secret.rs:106,:118"),
+        (
+            "cargo feature list",
+            "--features credentials,inference-client",
+        ),
+        ("hyphenated English", "old-leaks/new-doesn't"),
+        ("plus-joined phrase", "ticker+shutdown-channel"),
+    ];
+    for (label, tok) in acceptance {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#4312 acceptance case ({label}) must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Checkpoint: noted {tok} during the pass");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "gate must ACCEPT #4312 acceptance case ({label}); got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4312): the same defect, with the backtick swapped for every
+/// other decoration a Markdown-shaped memory write actually contains. A
+/// Markdown link to a source file and a Markdown table row are not exotic —
+/// they are what these writes are made of, and each was a live false positive
+/// before the charset gate. Pinning them here is what makes the fix a fix
+/// rather than a fifth per-shape exemption.
+/// What: asserts eleven decorated path/issue-list shapes pass the token
+/// predicate.
+/// Test: itself.
+#[test]
+fn markdown_decorated_paths_are_not_flagged() {
+    for tok in [
+        "**stale_skills**/**doctor_staleness.rs**",
+        "\"stale_skills\"/\"doctor_staleness.rs\"",
+        "'stale_skills'/'doctor_staleness.rs'",
+        "[filter.rs](crates/trusty-common/src/filter.rs)",
+        "|crates/common|src/memory_core/filter.rs|",
+        "[stale_skills]/[doctor_staleness.rs]",
+        "(stale_skills)/(doctor_staleness.rs)",
+        "\"#4601\"/\"#4602\"/\"#4603\"",
+        "**#4601**/**#4602**/**#4603**",
+        "docs/my%20file/spec%20v2.md",
+        "82%-100%/idle-across-the-window",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "Markdown-decorated path must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+    }
+}
+
+/// Why (issue #4312): the charset gate and the entropy floor both NARROW the
+/// base64 branch, which is the one direction that can lose detection. Over-
+/// blocking is the reported bug; under-blocking would be a security regression,
+/// so the narrowing has to be pinned against every credential family the branch
+/// is responsible for.
+///
+/// The entropy floor (`has_upper || has_digit`) is the riskier of the two: an
+/// all-lowercase, digit-free connection string is a genuine credential that the
+/// floor alone would drop. `is_url_credential_shaped` is what keeps it, and the
+/// lowercase connection strings below are what prove that exemption carries its
+/// weight rather than being decorative.
+///
+/// Fixed by #4977: `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` (a canonical AWS
+/// *secret access key*) used to be swallowed by `is_structural_token`'s
+/// slash-path branch before either gate ran, and was asserted here as a
+/// pre-existing baseline miss. It is now in the must-flag battery below.
+/// What: asserts every provider-prefix, base64, base64url, JWT, bare-blob and
+/// connection-string shape stays flagged after the narrowing.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4312_charset_gate() {
+    for (label, tok) in [
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"),                     // pragma: allowlist secret
+        ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"),                     // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"),                 // pragma: allowlist secret
+        (
+            "padded base64",
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=",
+        ), // pragma: allowlist secret
+        (
+            "base64 with +/",
+            "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA==",
+        ), // pragma: allowlist secret
+        ("base64 with +", "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"), // pragma: allowlist secret
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"),       // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("digits/slash/plus", "1234/5678/9012+3456/7890/1234"),     // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        (
+            "postgres conn",
+            "postgres://user:pass@host/dbname12345678901234567890",
+        ), // pragma: allowlist secret
+        (
+            "hyphenated host conn",
+            "postgres://user:pass@db-primary.internal/appdb1234567890",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        ("mysql conn", "mysql://root:s3cr3tP4ss@127.0.0.1:3306/appdb"), // pragma: allowlist secret
+        // LOAD-BEARING for the `is_url_credential_shaped` exemption: these
+        // carry no uppercase and no digit, so the entropy floor alone would
+        // drop every one of them.
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+        (
+            "lowercase redis conn",
+            "redis://default:supersecretpass@cache.local/one",
+        ), // pragma: allowlist secret
+        (
+            "lowercase mongo srv",
+            "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+        ), // pragma: allowlist secret
+        (
+            "lowercase ftp conn",
+            "ftp://deployer:deploypassword@files.internal/pub",
+        ), // pragma: allowlist secret
+        (
+            "lowercase mysql conn",
+            "mysql://admin:letmein@localhost/mydb",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the narrowed `is_url_credential_shaped` (#4312
+        // round 3): a userinfo-free URL whose PATH carries the secret. This is
+        // why "a bare URL is not a credential" cannot be a blanket exemption —
+        // it would lose every webhook secret. Caught here by the entropy floor
+        // (uppercase + digits), not by the URL predicate. Host is deliberately
+        // generic: the real vendor form trips GitHub push protection, which is
+        // itself a second opinion that this shape reads as a credential.
+        (
+            "webhook URL with secret path",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+        ), // pragma: allowlist secret
+        // #4977: this row asserted the OPPOSITE until this PR — it was the
+        // pinned baseline miss for the slash-path bypass, missed identically on
+        // every revision from #1667 to #5043. Branch (b) now asks whether each
+        // `/`-segment READS as a path segment instead of whether its characters
+        // could appear in one, and `wJalrXUtnFEMI` does not.
+        (
+            "AWS secret access key",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must STILL be flagged after the #4312 narrowing: {tok}"
+        );
+    }
+
+    // KNOWN MISS INTRODUCED BY #4312, asserted rather than left implicit.
+    //
+    // Narrowing `is_url_credential_shaped` to require `user:pass@` removed a
+    // shield that the round-2 broad predicate had incidentally given to
+    // userinfo-free URLs. The class that moved is exactly: a URL whose PATH
+    // carries a secret that is all-lowercase and digit-free, so the entropy
+    // floor reads it as English. Measured against origin/main, where both
+    // flag:
+    //     https://webhook.example.com/services/abcdefghij/…   flagged -> missed
+    //
+    // This is the entropy floor's already-accepted bound, not a new class of
+    // hole, and the exposure is narrow: real webhook tokens are near-universally
+    // mixed-case or digit-bearing, which is why the uppercase form above is
+    // still caught in the must-flag battery. Pinned here so a future change that
+    // fixes OR worsens it is visible instead of silent. If these start flagging,
+    // the follow-up landed — move them into the battery above.
+    for missed in [
+        "https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij", // pragma: allowlist secret
+        "https://hooks.example.org/t/aaaaaaaaaa/bbbbbbbbbb/cccccccccc", // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(missed).is_none(),
+            "KNOWN MISS (#4312): an all-lowercase, digit-free URL path secret is \
+             not flagged after the userinfo narrowing. If it now flags, the bound \
+             changed — update the doc on `is_url_credential_shaped`. Token: {missed}"
+        );
+    }
+}
+
+// ---- Issue #4739: the mixed-case branch, capitalised identifier segments ----
+
+/// Why (issue #4739, the FIFTH recurrence in this detector after #1667, #2800,
+/// #4216 and #4312): `Agents.app.bak-20260729-000028` — an ordinary macOS app
+/// bundle backup — was rejected as `Agen…(30 chars)`. It carries no `+`, `/` or
+/// `=`, so the base64 branch #4312 narrowed never runs; it reaches the mixed-case
+/// branch and `is_structural_token`'s segmented-identifier branch declines to
+/// rescue it, because that branch split on `-` alone and admitted only
+/// all-lowercase and ALL-UPPERCASE segments. A leading capital — the single most
+/// ordinary thing about an English word or an app bundle name — read as internal
+/// mixed case.
+///
+/// What this pins: the reproduction verbatim, plus fourteen further shapes of the
+/// same class (release artifacts, screenshots, plist backups, snapshots, branch
+/// and milestone labels) that reproduce the identical defect with different
+/// delimiters. Each is asserted at BOTH levels — the token predicate and the full
+/// `FilterConfig::apply` gate — because the gate is what a memory write actually
+/// hits.
+/// Test: itself.
+#[test]
+fn dotted_capitalised_filenames_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        // The #4739 reproduction, verbatim from the issue body.
+        ("4739 repro", "Agents.app.bak-20260729-000028"),
+        (
+            "4739 repro, full line",
+            "/Applications/Trusty Agents.app.bak-20260729-000028",
+        ),
+        ("release artifact", "Trusty-Agents-v1.3.5-darwin-arm64"),
+        ("macOS screenshot", "Screenshot-2026-08-04-at-10.31.22.png"),
+        ("lockfile backup", "Cargo.lock-backup-20260803-091500"),
+        ("draft doc", "README-Draft-20260804-final.md"),
+        ("instructions backup", "INSTRUCTIONS.md.bak-20260731-000028"),
+        ("session snapshot", "Session-Snapshot-20260804-093000.json"),
+        (
+            "reverse-dns plist backup",
+            "com.apple.Finder.plist.bak-20260101",
+        ),
+        ("app with build number", "Xcode.app-15.4.0-build-2026"),
+        (
+            "double-extension backup",
+            "Agents.app.bak-20260729-000028.zip",
+        ),
+        ("milestone label", "Milestone-1.3.5-Release-Candidate"),
+        ("person-dated note", "Bob.Matsuoka-20260804-notes.md"),
+        // Underscore is an identifier delimiter too (#4739): these were false
+        // positives on origin/main for the same reason, one delimiter over.
+        ("snake_case capitalised", "Trusty_Agents_20260804"),
+        ("dotted snake backup", "Session_Log.2026.08.04.txt"),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#4739 ({label}): a capitalised, delimiter-segmented filename must \
+             NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Checkpoint: rolled back to {tok} after the bounce");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#4739 ({label}): the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4739): widening `is_human_word_segment` widens
+/// `is_structural_token`, and `is_structural_token` returning `true` makes
+/// `looks_like_secret` return `false` — so this change NARROWS flagging and can
+/// only lose detection, never add it. #4723 shipped a doc claiming the opposite
+/// direction for a neighbouring predicate and a measurement disproved it, so the
+/// narrowing is pinned here against every credential family the mixed-case branch
+/// is responsible for.
+///
+/// The load-bearing cases are the delimiter-segmented MIXED-CASE blobs. A
+/// careless widening — anything that admits a segment with two uppercase letters
+/// — loses every one of them, because run-of-two case alternation (`AbCd`,
+/// `EfGh`) is exactly the signature of an encoded blob. The predicate admits at
+/// most ONE uppercase letter in a non-uppercase segment, and only as its first
+/// letter, which is what keeps these caught.
+/// What: asserts the mixed-case credential families stay flagged, then pins the
+/// CamelCase residue that this change deliberately did NOT fix.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4739_capitalised_segments() {
+    for (label, tok) in [
+        // LOAD-BEARING: delimiter-segmented mixed-case blobs. If the segment
+        // predicate ever admits two uppercase letters, every one of these is lost.
+        ("hyphenated mixed-case cred", "AbCd1234-EfGh5678-IjKl9012"), // pragma: allowlist secret
+        ("dotted mixed-case cred", "AbCd1234.EfGh5678.IjKl9012"),     // pragma: allowlist secret
+        ("underscored mixed-case cred", "AbCd1234_EfGh5678_IjKl9012"), // pragma: allowlist secret
+        ("camelCase blob segments", "xYzAbc123-qRsTuv456-mNoPqr789"), // pragma: allowlist secret
+        ("slug-prefixed api key", "apikey-Xy7Kp2Qm9Rt4Vw8Nz3Bc6Fj"),  // pragma: allowlist secret
+        ("capitalised head, blob tail", "Prod-AbCd1234EfGh5678IjKl"), // pragma: allowlist secret
+        (
+            "dotted capitalised head, blob tail",
+            "Prod.Key.AbCd1234EfGh5678",
+        ), // pragma: allowlist secret
+        // Unchanged families, re-asserted because the widened predicate sits on
+        // the path every one of them takes.
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("colon-bearing credential", "token:aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"),               // pragma: allowlist secret
+        (
+            "padded base64",
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must STILL be flagged after the #4739 widening: {tok}"
+        );
+    }
+
+    // KNOWN RESIDUE, deliberately not fixed by #4739, asserted rather than left
+    // implicit. A CamelCase segment has TWO capitalised runs, so it is not a word
+    // under `is_human_word_segment` and these stay flagged. Admitting CamelCase
+    // would mean admitting multi-uppercase segments, which is the exact signature
+    // of `AbCdEfGhIjKlMnOpQrSt-1234` — i.e. it would buy two prose cases at the
+    // cost of a credential miss. Measured at both revisions: 17 -> 2 prose false
+    // positives with 0 -> 0 credential misses. If these start passing, the
+    // follow-up landed — move them into
+    // `dotted_capitalised_filenames_are_not_flagged`.
+    for residue in [
+        "TrustyMemory.app.bak-20260801-120000",
+        "MyDocument.Backup.2026.tar.gz",
+    ] {
+        assert!(
+            find_secret_token(residue).is_some(),
+            "KNOWN RESIDUE (#4739): CamelCase segments are still not words, so \
+             this is still flagged. If it now passes, update the bound stated on \
+             `is_human_word_segment`. Token: {residue}"
+        );
+    }
+}
+
+/// Why (issue #4739, review round 1): the battery above probes the REJECTED
+/// side of `is_human_word_segment`'s bound — shapes that must stay flagged.
+/// Nothing probed the ACCEPTED side at token scale, which left the widening
+/// reading as a stronger guarantee than it gives. What `is_segmented_identifier`
+/// actually admits is a token whose every segment is independently case-uniform,
+/// and at short segment lengths that includes shapes which are not human words
+/// at all. These moved FLAG -> pass in this PR; they are neither prose nor
+/// credentials the module is expected to catch, and they are accepted (see the
+/// bound stated on `is_human_word_segment`) rather than fixed.
+///
+/// This block is modelled on the #4312 known-miss pin it sits beside: that one
+/// is the reason the URL-path misses stayed visible across two PRs instead of
+/// being rediscovered. The accepted side of this bound gets the same treatment,
+/// so any future movement — in either direction — is caught rather than found.
+/// What: pins two of the admitted shapes, plus the corrected doc example.
+/// Test: itself.
+#[test]
+fn per_segment_case_uniformity_is_a_known_accepted_bound() {
+    for (label, tok) in [
+        (
+            "capitalised 3-char groups",
+            "Xy7-Kp2-Qm9-Rt4-Vw8-Nz3-Bc6-Fj0",
+        ),
+        ("capitalised 4-char groups", "A1b2-C3d4-E5f6-G7h8-I9j0-K1l2"),
+        // The corrected doc example. The earlier revision cited
+        // `Abcd-1234-Efgh-5678`, which at 19 chars is below the 20-char floor in
+        // `looks_like_secret` and so never reaches this branch at all — it could
+        // not illustrate the bound it was cited for. This form does.
+        ("corrected doc example", "Abcd-1234-Efgh-5678-Ijkl"),
+    ] {
+        assert!(
+            tok.len() >= 20,
+            "{label}: this pin is meaningless below the 20-char secret floor — \
+             the token would never reach the segmented-identifier branch. \
+             Token: {tok} ({} chars)",
+            tok.len()
+        );
+        assert!(
+            find_secret_token(tok).is_none(),
+            "KNOWN ACCEPTED BOUND (#4739, {label}): every segment is \
+             independently case-uniform, so this is admitted even though it is \
+             not a human-readable identifier. If it now FLAGS, the bound \
+             tightened — update the doc on `is_human_word_segment`. Token: {tok}"
+        );
+    }
+}
+
+// ---- Issue #4898: plus-joined phrases, internal-caps segments, length floor ----
+
+/// Why (issue #4898, the SIXTH recurrence in this detector after #1667, #2800,
+/// #4216, #4312 and #4739): three separate shapes of ordinary memory-palace
+/// content were rejected as credentials in one session.
+///
+/// 1. `PM+instructions+subagents` — an English phrase joined by `+`.
+///    `is_structural_token` refused every `+`-bearing token outright, so the
+///    token fell to the base64 branch, where the `has_upper || has_digit`
+///    entropy floor was satisfied by the two capitals in `PM`. The doc on
+///    `is_plausible_b64_charset` already named this gap: the floor excluded only
+///    the all-lowercase case.
+/// 2. `fix-3696-slice1-gapA-emit` — a git branch name. `is_human_word_segment`
+///    admitted a capital only in first position, so the segment `gapA` was not a
+///    word and the whole token missed the structural rescue.
+/// 3. A four-character token equal to a `SECRET_PREFIXES` entry (`Asia`, the
+///    continent). The prefix test ran BEFORE the 20-char floor, so length never
+///    entered into it.
+///
+/// What: pins all three reproductions verbatim, at both the token predicate and
+/// the `FilterConfig::apply` gate a memory write actually hits, plus further
+/// shapes of each class.
+/// Test: itself.
+#[test]
+fn three_4898_reproductions_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        // (1) plus-joined English phrase carrying an uppercase run.
+        ("4898 repro 1", "PM+instructions+subagents"),
+        ("plus phrase, lowercase", "ticker+shutdown-channel"),
+        ("plus phrase, capitalised", "Instructions+Agents+Skills"),
+        ("plus phrase with digits", "milestone+1.3.5+release"),
+        // (2) branch name with an internal capital inside one segment.
+        ("4898 repro 2", "fix-3696-slice1-gapA-emit"),
+        ("branch with trailing cap", "feat-4172-l0-scoping-partB"),
+        ("issue slug with inner cap", "docs-4898-secretScanner-notes"),
+        ("snake segment with cap", "trusty_mpm_phase2B_rollout"),
+        // (3) short tokens that merely start with a credential prefix.
+        ("4898 repro 3", "Asia"),
+        ("prefix word, uppercase", "ASIA"),
+        ("prefix word, hyphenated", "Asia-Pacific"),
+        ("prefix word in a slug", "asia-pacific-rollout-notes"),
+        ("truncated sk prefix", "sk-1"),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#4898 ({label}): ordinary content must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Checkpoint: the {tok} work landed on main this morning");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#4898 ({label}): the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #4898): every one of the three changes NARROWS flagging —
+/// widening `is_human_word_segment` and `is_structural_token` makes
+/// `looks_like_secret` return `false` sooner, and moving the length floor above
+/// the prefix test removes matches outright. A narrowing can only lose
+/// detection, so the true-positive corpus is re-asserted in full against the
+/// post-change code rather than assumed intact.
+///
+/// The load-bearing entries are the `+`-bearing blobs and the delimiter-
+/// segmented mixed-case blobs. `A+DIA+DIA+…` is what pins the word-length
+/// requirement inside `is_plus_joined_word_phrase`: every one of its segments is
+/// case-uniform, so segment shape ALONE would have exempted it.
+/// What: asserts each provider-prefix, base64, base64url, JWT, bare-blob,
+/// connection-string and AWS shape stays flagged.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_4898_narrowing() {
+    for (label, tok) in [
+        // LOAD-BEARING for `is_plus_joined_word_phrase`'s word-length floor.
+        ("base64 with +", "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"), // pragma: allowlist secret
+        // LOAD-BEARING for its alphanumeric-segment charset gate: the `token=A`
+        // first segment clears the word-length floor on its own, and the
+        // `srv://svcuser:hunterhunter@cluster` segment is uniformly lowercase.
+        // Both passed before the charset gate was added.
+        (
+            "key= base64 with +",
+            "token=A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI",
+        ), // pragma: allowlist secret
+        (
+            "base64 with +/",
+            "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA==",
+        ), // pragma: allowlist secret
+        ("digits/slash/plus", "1234/5678/9012+3456/7890/1234"), // pragma: allowlist secret
+        // LOAD-BEARING for the one-uppercase-anywhere segment predicate: run-of-
+        // two case alternation carries TWO capitals per segment and stays out.
+        ("hyphenated mixed-case cred", "AbCd1234-EfGh5678-IjKl9012"), // pragma: allowlist secret
+        ("dotted mixed-case cred", "AbCd1234.EfGh5678.IjKl9012"),     // pragma: allowlist secret
+        ("underscored mixed-case cred", "AbCd1234_EfGh5678_IjKl9012"), // pragma: allowlist secret
+        ("camelCase blob segments", "xYzAbc123-qRsTuv456-mNoPqr789"), // pragma: allowlist secret
+        ("slug-prefixed api key", "apikey-Xy7Kp2Qm9Rt4Vw8Nz3Bc6Fj"),  // pragma: allowlist secret
+        ("capitalised head, blob tail", "Prod-AbCd1234EfGh5678IjKl"), // pragma: allowlist secret
+        // LOAD-BEARING for the prefix length floor and the AWS shape gate.
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"), // pragma: allowlist secret
+        // LOAD-BEARING for `is_aws_access_key_id` being a PREFIX predicate: the
+        // whole-token form of it lost every one of these (#4898 review round 1).
+        ("AWS key id + suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        (
+            "AWS key id + secret access key",
+            "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the character-class-uniformity gate: real
+        // `base64(urandom(15))` output whose every `+`-segment is case-uniform.
+        ("base64 of 15 random bytes", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
+        ("OpenAI key, short form", "sk-abcdef0123456789abcdef01"), // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"),            // pragma: allowlist secret
+        // Unchanged families, re-asserted because the changed predicates all sit
+        // on the path these take.
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("colon-bearing credential", "token:aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+        (
+            "padded base64",
+            "dGhpcyBpcyBhIHZlcnkgbG9uZyBzZWNyZXQgdG9rZW4=",
+        ), // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+        (
+            "lowercase mongo srv",
+            "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+        ), // pragma: allowlist secret
+        (
+            "webhook URL with secret path",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must STILL be flagged after the #4898 narrowing: {tok}"
+        );
+    }
+
+    // End-to-end, not just the token predicate: the gate is what a write hits.
+    let cfg = FilterConfig::default();
+    for content in [
+        "Deploy creds leaked: access key AKIAIOSFODNN7EXAMPLE in the log", // pragma: allowlist secret
+        "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the webhook", // pragma: allowlist secret
+        "config blob: aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA== embedded here", // pragma: allowlist secret
+    ] {
+        assert!(
+            matches!(
+                cfg.apply(content, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "the gate must still REJECT leaked-credential prose; got {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #4898): the `+` exemption is gated on segment shape AND on one
+/// segment reaching word length, and the prefix floor is a flat 20 characters.
+/// Both bounds admit shapes that are not prose. They are accepted rather than
+/// fixed, and pinned here so future movement in either direction is visible —
+/// the same treatment the #4312 and #4739 bounds already get above.
+/// What: pins the accepted side of each new bound.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_4898() {
+    // A `+`-joined token whose every segment is case-uniform AND long enough to
+    // read as a word is admitted, even though no English dictionary is
+    // consulted. Base64 does not produce this: its `+` density is ~1.6%, so its
+    // segments run ~60 chars and cannot be case-uniform.
+    for tok in ["Abcdefgh+Ijklmnop+Qrstuvwx", "alphabet+bravocode+charlie"] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "KNOWN ACCEPTED BOUND (#4898): a `+`-joined token of case-uniform \
+             word-length segments is admitted. If it now FLAGS, the bound \
+             tightened — update the doc on `is_plus_joined_word_phrase`. \
+             Token: {tok}"
+        );
+    }
+    // The prefix floor is length-only for the punctuation-bearing prefixes, so a
+    // 20+-char token that merely STARTS with one is still flagged. That is the
+    // pre-#4898 behaviour for every length at or above the floor, unchanged.
+    assert!(
+        find_secret_token("sk-eleton-key-for-the-front-door").is_some(),
+        "KNOWN ACCEPTED BOUND (#4898): the prefix test is length-gated, not \
+         shape-gated, for `sk-`/`ghp_`/`xoxb-`. A long prose token that starts \
+         with one is still flagged."
+    );
+    // The AWS prefixes are shape-gated over the first SECRET_MIN_LEN bytes.
+    //
+    // These two assertions are a PAIR and must be read together (#4898 review
+    // round 1). The first cut of `is_aws_access_key_id` checked the whole token,
+    // which satisfied the `ASIA-PACIFIC…` half while silently losing every AWS
+    // key with a neighbouring character — so an assertion on the prose token
+    // alone passes in both the correct and the broken world and discriminates
+    // nothing. What separates them is where the non-key character sits: inside
+    // the first 20 bytes (prose) or after them (a real key with a suffix).
+    assert!(
+        find_secret_token("ASIA-PACIFIC-ROLLOUT-NOTES").is_none(),
+        "#4898: `ASIA-PACIFIC-ROLLOUT-NOTES` breaks the key-id shape at byte 4, \
+         inside the first 20, so it is prose and must not be flagged"
+    );
+    assert!(
+        find_secret_token("ASIAY34FZKBOKMUTVA7Q-staging").is_some(), // pragma: allowlist secret
+        "#4898: `ASIAY34FZKBOKMUTVA7Q-staging` holds the key-id shape for a full \
+         20 bytes and breaks it only afterwards, so it is a real AWS key id with \
+         a suffix and must STILL be flagged. If this fails while the assertion \
+         above passes, the whole-token regression is back."
+    );
+}
+
+// ---- Issue #4898: generated-encoder corpus ----
+
+/// Why (issue #4898 review round 1, MEDIUM finding): every hand-written battery
+/// in this file is a list of shapes someone thought of. Two of the three defects
+/// found in review lived in encoder output nobody had written down —
+/// `j1u7nJd+tvZers+wdZyr` and `9h6Nn6_ivJd6vmb-xEk4` are both what
+/// `base64(urandom(15))` actually produces, and both flipped FLAG -> MISS. A
+/// generated corpus is the only thing that finds those.
+///
+/// What: xorshift64*, seeded by constant, so the corpus is byte-identical on
+/// every machine and every run. No `rand` dev-dependency, no flake.
+/// Test: used by `generated_encoder_corpus_stays_flagged`.
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn fill(&mut self, buf: &mut [u8]) {
+        for b in buf.iter_mut() {
+            *b = (self.next_u64() >> 24) as u8;
+        }
+    }
+}
+
+/// Standard base64 (`A–Za–z0–9+/`) and base64url (`A–Za–z0–9-_`) alphabets.
+fn b64_alphabet(url_safe: bool) -> Vec<u8> {
+    let mut a: Vec<u8> = Vec::with_capacity(64);
+    a.extend(b'A'..=b'Z');
+    a.extend(b'a'..=b'z');
+    a.extend(b'0'..=b'9');
+    if url_safe {
+        a.extend_from_slice(b"-_");
+    } else {
+        a.extend_from_slice(b"+/");
+    }
+    a
+}
+
+/// Minimal base64 encoder — this file cannot take a dev-dependency on `base64`
+/// (it is an optional production dep behind a feature the memory-core test
+/// profile does not enable).
+fn b64_encode(bytes: &[u8], alphabet: &[u8], pad: bool) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(alphabet[((n >> 18) & 63) as usize] as char);
+        out.push(alphabet[((n >> 12) & 63) as usize] as char);
+        match chunk.len() {
+            1 => {
+                if pad {
+                    out.push_str("==");
+                }
+            }
+            2 => {
+                out.push(alphabet[((n >> 6) & 63) as usize] as char);
+                if pad {
+                    out.push('=');
+                }
+            }
+            _ => {
+                out.push(alphabet[((n >> 6) & 63) as usize] as char);
+                out.push(alphabet[(n & 63) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+/// Count how many of `n` generated encoder tokens the detector MISSES.
+fn encoder_miss_count(seed: u64, n: usize, input_len: usize, url_safe: bool, pad: bool) -> usize {
+    let mut rng = Xorshift(seed);
+    let alphabet = b64_alphabet(url_safe);
+    let mut buf = vec![0u8; input_len];
+    let mut misses = 0usize;
+    for _ in 0..n {
+        rng.fill(&mut buf);
+        let tok = b64_encode(&buf, &alphabet, pad);
+        if find_secret_token(&tok).is_none() {
+            misses += 1;
+        }
+    }
+    misses
+}
+
+/// Why (issue #4898 review round 1, MEDIUM finding): a ratchet on generated
+/// encoder output. Two of the three defects found in review lived in shapes
+/// nobody had written into a battery.
+///
+/// Read the ceilings as a ratchet, not as a pass mark.
+///
+/// The #4898 explanation of what the standard-base64 rows were made of — that
+/// they are a pre-existing baseline caused by unpadded blobs never reaching the
+/// base64 branch, plus `find_secret_token` trimming trailing `=` — was
+/// **measured wrong**, and issue #4977 is the correction: that mechanism accounts
+/// for 0.5% of the misses. 96.4% were `/`-bearing blobs exempted by the
+/// slash-path branch. The rows moved when that branch was fixed, which is what a
+/// wrong explanation of a number looks like from the outside.
+///
+/// Measured at this seed and N, before and after the #4977 fix:
+///
+/// ```text
+///                          before #4977   after #4977    delta
+///   base64        15 bytes      7472          2465       -5007
+///   base64        16 bytes      6289           556       -5733
+///   base64        20 bytes      6620           166       -6454
+///   base64 padded 17 bytes      6343           401       -5942
+///   base64 padded 25 bytes      7203            26       -7177
+///   base64url     15 bytes      1012          1012           0
+///   base64url     16 bytes       833           833           0
+///   base64url     20 bytes       291           291           0
+/// ```
+///
+/// base64url is unchanged to the token, as it must be: its alphabet has no `/`,
+/// so no base64url blob ever reached the branch #4977 fixed. Those three rows
+/// remain the KNOWN RESIDUAL MISS documented on [`is_human_word_segment`] —
+/// see that doc for why the narrowing that would close it costs the `gapA` class
+/// #4898 exists to fix.
+/// What: 30k generated tokens per configuration, asserting the miss count is at
+/// or below the pinned ceiling.
+/// Test: itself.
+#[test]
+fn generated_encoder_corpus_stays_flagged() {
+    const N: usize = 30_000;
+    const SEED: u64 = 0x4898_1234_5678_9abc;
+    for (label, url_safe, input_len, pad, ceiling) in [
+        ("base64", false, 15usize, false, 2465usize),
+        ("base64", false, 16, false, 556),
+        ("base64", false, 20, false, 166),
+        ("base64 padded", false, 17, true, 401),
+        ("base64 padded", false, 25, true, 26),
+        ("base64url", true, 15, false, 1012),
+        ("base64url", true, 16, false, 833),
+        ("base64url", true, 20, false, 291),
+    ] {
+        let misses = encoder_miss_count(SEED, N, input_len, url_safe, pad);
+        assert!(
+            misses <= ceiling,
+            "#4898 ratchet: {label} at {input_len} input bytes missed {misses} of \
+             {N}, above the pinned ceiling {ceiling}. Something widened the \
+             structural bypass — re-measure against origin/main before touching \
+             this number."
+        );
+    }
+}
+
+/// Why (issue #4898 review round 1, CRITICAL finding): the first cut of
+/// `is_aws_access_key_id` required the WHOLE token to be uppercase-alphanumeric,
+/// converting what had been a prefix predicate into a shape predicate. One
+/// adjacent character then dropped the token through to `is_structural_token`,
+/// whose segmented-identifier branch rescued it, and the mixed-case branch could
+/// not fire because an AWS key id has no lowercase. AWS detection was lost
+/// entirely for any key not standing completely alone — including AWS's own
+/// canonical key-id/secret-key pair, which stored clean.
+///
+/// Every row below was verified FLAG on `origin/main` (`c679c3c3`) and MISS on
+/// the first cut of this branch. They are the discriminating cases: a test that
+/// only asserts the bare 20-character key id passes in both worlds.
+/// What: asserts AWS key ids stay flagged with text on either side, at both the
+/// token predicate and the `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn aws_key_ids_with_adjacent_text_are_blocked() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        ("trailing hyphen suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        ("file extension", "AKIAIOSFODNN7EXAMPLE.csv"),         // pragma: allowlist secret
+        ("STS id with env suffix", "ASIAY34FZKBOKMUTVA7Q-staging"), // pragma: allowlist secret
+        ("underscore suffix", "AKIAIOSFODNN7EXAMPLE_backup"),   // pragma: allowlist secret
+        (
+            // AWS's canonical key-id + secret-access-key pair.
+            "key id followed by secret access key",
+            "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#4898 ({label}): an AWS key id with an adjacent character must STILL \
+             be flagged: {tok}"
+        );
+        let prose = format!("Rotate {tok} before Friday");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#4898 ({label}): the gate must REJECT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+// ---- Issue #5043: the consolidated recurrence corpus ----
+
+/// Every false positive reported against this detector, across all seven
+/// recurrence cycles, in one table.
+///
+/// Why (issue #5043, the SEVENTH recurrence after #1667, #1676, #2800/#4216,
+/// #4312, #4739 and #4898): each prior round shipped its own private battery, so
+/// the eighth implementer must find and read six scattered test functions before
+/// knowing what the predicate already owes. Six rounds of that produced six
+/// fixes that each narrowed one shape and none that saw the whole set. One
+/// table, walked by one test, makes the accumulated obligation visible at the
+/// point of change instead of discoverable by archaeology.
+///
+/// This does NOT replace the per-cycle batteries above — those pin the exact
+/// redacted previews and `FilterConfig::apply` behaviour their issues reported.
+/// It is the index over them: add every new false positive here as well as to
+/// its own battery.
+/// What: `(cycle, token)` pairs. Every entry must yield `None` from
+/// [`find_secret_token`].
+/// Test: `recurrence_corpus_has_no_false_positives`.
+const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
+    // #1667 — slash paths, slugs, semver-operator tokens.
+    ("#1667", "verdict/grade/prose-summary"),
+    ("#1667", "duettoresearch/duetto"),
+    ("#1667", "duettoresearch/projects/19"),
+    ("#1667", ">=2-medium->REQUEST_CHANGES"),
+    // #1676 — key=value whose value is itself a slash path.
+    (
+        "#1676",
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+    ),
+    // #2442 — source-location references and issue/PR ledger markers.
+    (
+        "#2442",
+        "client/http_client/error.rs::response_or_body_error",
+    ),
+    ("#2442", "#2486→PR#2491(e993c18a)"),
+    // #2800 / #4216 — slash-separated issue/PR-number lists.
+    ("#2800", "#2763/#2774/#2780/#2782/#2790"),
+    ("#4216", "#4292/#4296/#4298/#4302"),
+    // #4312 — plus/hyphen prose and URL-shaped doc links.
+    ("#4312", "ticker+shutdown-channel"),
+    (
+        "#4312",
+        "https://docs.example.com/guide/getting-started/install",
+    ),
+    // #4739 — dotted filename carrying a leading capital and a timestamp.
+    ("#4739", "Agents.app.bak-20260729-000028"),
+    // #4898 — `+`-joined prose, branch names, prefix-shaped English words.
+    ("#4898", "PM+instructions+subagents"),
+    ("#4898", "fix-3696-slice1-gapA-emit"),
+    ("#4898", "Asia"),
+    ("#4898", "Asia-Pacific"),
+    ("#4898", "asia-pacific-rollout-notes"),
+    // #5043 — `::`-joined symbol paths whose segments are CamelCase.
+    ("#5043", "Bm25Index::queryTopK"),
+    ("#5043", "Sha256Hasher::finalizeInto"),
+    ("#5043", "OAuth2Client::refreshToken"),
+    ("#5043", "Utf8Error::validUpTo"),
+    ("#5043", "std::str::Utf8Error::to_str"),
+    ("#5043", "PalaceHandle::remember_with_options"),
+    ("#5043", "trusty_memory::engine::Sha1Hash::as_ref"),
+    ("#5043", "Base64Decoder::decodeInto2Buffers"),
+    ("#5043", "Http2Client::sendRequestV3"),
+    // #5043 review round 2: two-letter module names cannot reach the word floor
+    // the round-1 HIGH fix introduced, so every path through one was flagged.
+    // `is_symbol_path_segment` decides a sub-word-length segment on case
+    // uniformity instead.
+    ("#5043", "std::io::BufReader::read_u32"),
+    ("#5043", "tokio::io::AsyncReadExt::read_u64"),
+    ("#5043", "trusty_common::io::Sha256Hasher::finalizeInto"),
+    ("#5043", "hyper::rt::Executor::execute2"),
+    // #5513 — a bare, userinfo-free URL whose path carries a digit.
+    (
+        "#5513",
+        "https://github.com/bobmatnyc/trusty-tools/issues/5511",
+    ),
+    (
+        "#5513",
+        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
+    ),
+    ("#5513", "file:///Users/masa/trusty-tools/crates/common"),
+    ("#5513", "mongodb://cluster0.mongodb.net/analytics-store"),
+    // #4977 — the paths and CamelCase filenames the tightened slash-path branch
+    // must keep admitting while it stops admitting blobs.
+    ("#4977", "src/components/MyComponent.tsx"),
+    (
+        "#4977",
+        "crates/trusty-common/src/memory_core/filter_tests.rs",
+    ),
+    ("#4977", "docs/adr/0029-msrv-1-94-and-edition-policy.md"),
+];
+
+/// Every credential shape the detector must still catch, in one table.
+///
+/// Why (issue #5043): every change to this module so far has been a NARROWING —
+/// it makes [`looks_like_secret`] return `false` sooner. A narrowing can only
+/// lose detection, so the true-positive side is the half that actually needs
+/// re-asserting, and it is the half that was spread thinnest across the
+/// per-cycle batteries. #4898's review found two self-inflicted regressions this
+/// way, caught only because that PR happened to re-run older batteries.
+/// What: `(label, token)` pairs. Every entry must yield `Some` from
+/// [`find_secret_token`].
+/// Test: `recurrence_corpus_true_positives_stay_flagged`.
+const RECURRENCE_TRUE_POSITIVES: &[(&str, &str)] = &[
+    ("aws key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+    ("aws sts key id", "ASIAY34FZKBOKMUTVA7Q"), // pragma: allowlist secret
+    ("aws key id, suffixed", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+    (
+        "aws key id + secret access key",
+        "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ), // pragma: allowlist secret
+    // Provider-key rows reuse this file's established synthetic literals rather
+    // than realistic ones — a realistic Slack token trips GitHub push
+    // protection, which is the correct behaviour of a different scanner and no
+    // reason to weaken this one's fixtures.
+    ("openai key", "sk-abcdef0123456789abcdef01"), // pragma: allowlist secret
+    ("github pat", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+    ("slack bot token", "xoxb-1234-5678-abcdEFGH"), // pragma: allowlist secret
+    (
+        "base64 carrying +",
+        "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI",
+    ), // pragma: allowlist secret
+    ("base64 urandom(15)", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
+    (
+        "key= prefixed base64",
+        "token=A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI",
+    ), // pragma: allowlist secret
+    ("bare mixed-case blob", "aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+    ("segmented mixed-case blob", "AbCd1234-EfGh5678-IjKl9012"), // pragma: allowlist secret
+    (
+        "segmented mixed-case blob 2",
+        "xYzAbc123-qRsTuv456-mNoPqr789",
+    ), // pragma: allowlist secret
+    ("slug-prefixed blob", "apikey-Xy7Kp2Qm9Rt4Vw8Nz3Bc6Fj"), // pragma: allowlist secret
+    ("camel-run blob", "AbCdEfGhIjKlMnOpQrSt-1234"), // pragma: allowlist secret
+    ("colon-delimited credential", "token:aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+    (
+        "jwt",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ), // pragma: allowlist secret
+    (
+        "mongodb+srv connection string",
+        "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+    ), // pragma: allowlist secret
+    (
+        "postgres connection string",
+        "postgres://user:password@host/database",
+    ), // pragma: allowlist secret
+    // #5043 LOAD-BEARING: a credential a human wrapped in `::` path syntax must
+    // NOT inherit the symbol-path exemption. Each has a colon-segment carrying
+    // no word, or interleaving digits the way encoder output does.
+    (
+        "credential behind a `::` label",
+        "secretKey::aBc123XyZ987uvW456QrS",
+    ), // pragma: allowlist secret
+    (
+        "credential behind two `::` labels",
+        "Config::token::aBc123XyZ987uvW456QrS",
+    ), // pragma: allowlist secret
+    (
+        "base64url blob as a `::` segment",
+        "apiKey::9h6Nn6i2vJd6vmb4xEk4Qz",
+    ), // pragma: allowlist secret
+    // #4977 LOAD-BEARING: a `/`-bearing blob must not inherit the slash-path
+    // exemption. The first row is AWS's own canonical secret access key, missed
+    // by every revision of this file from #1667 to #5043.
+    (
+        "aws secret access key",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ), // pragma: allowlist secret
+    (
+        "base64 blob split by one slash",
+        "aGVsbG8vd29ybGRmb29iYXJsb25nYmFzZTY0Q0FGRQ",
+    ), // pragma: allowlist secret
+    // #5513 LOAD-BEARING: a userinfo-free URL whose path IS the secret must not
+    // inherit the bare-URL exemption.
+    (
+        "webhook url with secret path",
+        "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+    ), // pragma: allowlist secret
+    (
+        "bare url carrying a mixed-case blob",
+        "https://example.com/callback/aBc123XyZ987uvW456QrS",
+    ), // pragma: allowlist secret
+];
+
+/// Why (issue #5043): the corpus is only worth its lines if something walks it.
+/// What: asserts every recorded false positive stores clean, at the token
+/// predicate and at the `FilterConfig::apply` gate a memory write actually hits.
+/// Test: itself.
+#[test]
+fn recurrence_corpus_has_no_false_positives() {
+    let cfg = FilterConfig::default();
+    let mut failures = Vec::new();
+    for (cycle, tok) in RECURRENCE_FALSE_POSITIVES {
+        if let Some(preview) = find_secret_token(tok) {
+            failures.push(format!("  {cycle} {tok} -> {preview}"));
+            continue;
+        }
+        let prose = format!("Checkpoint: the {tok} work landed on main this morning");
+        if let Err(e) = cfg.apply(&prose, true) {
+            failures.push(format!("  {cycle} {tok} -> gate rejected the prose: {e}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "#5043 recurrence corpus: {} of {} recorded false positives are flagged \
+         again. Every entry is a shape a previous cycle already fixed — a hit \
+         means this change REGRESSED a closed issue, not that the corpus is \
+         stale.\n{}",
+        failures.len(),
+        RECURRENCE_FALSE_POSITIVES.len(),
+        failures.join("\n")
+    );
+}
+
+/// Why (issue #5043): see [`RECURRENCE_TRUE_POSITIVES`] — every change here
+/// narrows flagging, and a narrowing can only lose detection.
+/// What: asserts every recorded credential shape is still flagged.
+/// Test: itself.
+#[test]
+fn recurrence_corpus_true_positives_stay_flagged() {
+    let mut misses = Vec::new();
+    for (label, tok) in RECURRENCE_TRUE_POSITIVES {
+        if find_secret_token(tok).is_none() {
+            misses.push(format!("  {label}: {tok}"));
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "#5043 recurrence corpus: {} of {} credential shapes are no longer \
+         detected. A narrowing lost detection — tighten the exemption's guard, \
+         do not delete the row.\n{}",
+        misses.len(),
+        RECURRENCE_TRUE_POSITIVES.len(),
+        misses.join("\n")
+    );
+}
+
+/// Why (issue #5043, the SEVENTH recurrence): a 38-character Rust method path
+/// was rejected during a drawer write. The four reproductions below were
+/// confirmed by execution against `origin/main`, and their redacted previews are
+/// pinned so a change that alters the tokenizer is caught rather than silently
+/// reshaping the message.
+///
+/// Why the issue body's own suggested fix would not have worked: it proposed
+/// treating `::` as an identifier delimiter "on the same segment-based logic
+/// #4967 used for `+`/`-`/`_`/`.`". That alone changes nothing — `Bm25Index` and
+/// `queryTopK` each carry two capitals, so `is_human_word_segment` declines them
+/// however the token is split. The blocking predicate is the CamelCase rule, not
+/// the delimiter set; measured, not assumed.
+/// What: pins the four reproductions and their `origin/main` previews.
+/// Test: itself.
+#[test]
+fn rust_symbol_paths_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (tok, pre_fix_preview) in [
+        ("Bm25Index::queryTopK", "Bm25…(20 chars)"),
+        ("Sha256Hasher::finalizeInto", "Sha2…(26 chars)"),
+        ("OAuth2Client::refreshToken", "OAut…(26 chars)"),
+        ("Utf8Error::validUpTo", "Utf8…(20 chars)"),
+    ] {
+        assert!(
+            tok.len() >= SECRET_MIN_LEN,
+            "#5043: {tok} is below the {SECRET_MIN_LEN}-char floor, so it could \
+             never have reached the mixed-case branch — this row proves nothing"
+        );
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#5043: a Rust symbol path must NOT be flagged: {tok} (was \
+             {pre_fix_preview} on origin/main); got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("The regression is in {tok}, reached from the recall path");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#5043: the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #5043): [`is_symbol_path`] is an exemption, and an exemption is a
+/// hole unless something measures its width. The shape it must not shelter is a
+/// credential a human wrote in `::` path syntax — the ONLY way encoder output
+/// reaches the predicate at all, since `::` appears in no encoder alphabet.
+///
+/// Two shapes, both measured at this test's own seed against `origin/main`
+/// (`5a055380`). A credential wrapped in `::` labels, 30k tokens per row:
+///
+/// ```text
+///                                      origin/main   this branch
+///   secretKey::<base64url 20ch>            1017          2022
+///   secretKey::<base64url 27ch>             282           767
+///   Config::token::<base64url 20ch>        1017          2022
+/// ```
+///
+/// And a blob CHUNKED into `::`-joined groups, 20k tokens of 24 characters:
+///
+/// ```text
+///                     origin/main   first cut   round-1 fix   now
+///   chunk width 2         355          ~355          355       355
+///   chunk width 4         355          4629          366       366
+///   chunk width 6         355          3282          732       732
+///   chunk width 8         355          2521         1273      1273
+///   chunk width 11        355           ————          355       392
+/// ```
+///
+/// Width 2 reads flat across every column, which is the point of carrying it:
+/// it is not a measurement of this PR, it is an alarm for the two-character arm
+/// [`is_symbol_path_segment`] applies below [`SYMBOL_SEGMENT_SHORT_WORD_LEN`].
+///
+/// The two rows catch DIFFERENT widenings of that arm, which is why both are
+/// here. Measured by mutating the arm and re-running this test:
+///
+/// ```text
+///   arm widened to...          width 2 misses   width 11 misses
+///   any-alphabetic (`Ab`)         under 500           417
+///   accept unconditionally         20000             (n/a)
+/// ```
+///
+/// Relaxing single-case to any-alphabetic does NOT blow up width 2 — every one
+/// of the twelve 2-character segments must still be alphabetic, and a base64url
+/// character is alphabetic only 52/64 of the time, so the token still usually
+/// fails. Width 11 is what catches that widening, at 417 over its 400 ceiling.
+/// Dropping the charset check entirely is what width 2 catches, and it catches
+/// it total: 20000 of 20000.
+///
+/// A third tripwire covers the same ground from another direction — the
+/// `std::rc::Rc::downgrade2` assertion at the end of this test, which names the
+/// cause in its message.
+///
+/// Width 8 is the worst case, confirmed by sweeping widths 2-12. Width 11 is the
+/// one place review round 2's sub-word-length arm costs anything: 24 characters
+/// chunk to 11/11/2, and a 2-character segment is exactly what that arm decides
+/// on case uniformity rather than word length. Widths 10 and 12 leave no 2-char
+/// remainder and are unchanged, which is what identifies the arm as the cause.
+/// 37 misses per 20k buys back `io`, `rt` and every other two-letter module
+/// name; the round-1 fix flagged every symbol path through one.
+///
+/// Why the second table exists (review round 1, HIGH): the first cut of this PR
+/// EXEMPTED a segment of at most `SYMBOL_SEGMENT_SHORT_LEN` bytes from the word
+/// requirement, so a blob chunked into short groups took the exemption whole —
+/// a 7-13x loss. Nothing alarmed: this ratchet's first table, the recurrence
+/// corpus and `generated_encoder_corpus_stays_flagged` all reported healthy
+/// while it happened, because none of them generates a chunked shape. A check
+/// reporting healthy over real loss is the finding; this row is the fix.
+///
+/// The first table's baseline is not zero — those are the pre-existing
+/// `is_segmented_identifier` misses documented on [`is_human_word_segment`],
+/// reached because a base64url token carries `-`/`_`. This change roughly doubles
+/// them on colon-wrapped shapes and leaves every non-colon shape byte-identical:
+/// `generated_encoder_corpus_stays_flagged`'s eight ceilings are unmoved.
+/// What: generated tokens per configuration, asserting the miss count is at or
+/// below the pinned ceiling.
+/// Test: itself.
+#[test]
+fn symbol_path_keyhole_does_not_shelter_credentials() {
+    const SEED: u64 = 0x5043_1234_5678_9abc;
+    const N: usize = 30_000;
+    for (label, prefix, input_len, ceiling) in [
+        ("one label", "secretKey::", 15usize, 2100usize),
+        ("one label, longer blob", "secretKey::", 20, 800),
+        ("two labels", "Config::token::", 15, 2100),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(true);
+        let mut buf = vec![0u8; input_len];
+        let mut misses = 0usize;
+        for _ in 0..N {
+            rng.fill(&mut buf);
+            let tok = format!("{prefix}{}", b64_encode(&buf, &alphabet, false));
+            if find_secret_token(&tok).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#5043 ratchet: {label} at {input_len} input bytes missed {misses} of \
+             {N}, above the pinned ceiling {ceiling}. The `::` exemption widened \
+             — re-measure against origin/main before touching this number."
+        );
+    }
+
+    // Review round 1, HIGH: the chunked shape, which no other check generates.
+    // Width 8 is the measured worst case (swept 2-12). Width 11 is here for a
+    // different reason: at 24 characters it chunks to 11/11/2, and that 2-char
+    // remainder is the only place the sub-word-length arm added by review round 2
+    // costs anything — 355 -> 392. Widths 10 and 12 leave no 2-char remainder and
+    // are unchanged, which is what identifies the arm as the cause.
+    const CHUNK_N: usize = 20_000;
+    for (chunk, ceiling) in [
+        // Width 2 catches the two-character arm losing its charset check
+        // entirely: every segment is 2 chars, so an unconditional accept takes
+        // this row to 20000 of 20000. A milder widening (any-alphabetic) leaves
+        // it under 500 — width 11 is what catches that one. See the doc above.
+        (2usize, 500usize),
+        (4, 500),
+        (6, 900),
+        // Width 8 is the swept worst case across widths 2-12.
+        (8, 1400),
+        // Width 11 chunks to 11/11/2 — the only width whose remainder reaches
+        // the two-character arm. Ceiling 400 sits between the arm's current cost
+        // (392) and its unconditional-accept maximum (448), so this row can
+        // actually fire. The 450 it replaces was above that maximum: inert.
+        (11, 400),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(true);
+        let mut buf = vec![0u8; 18];
+        let mut misses = 0usize;
+        for _ in 0..CHUNK_N {
+            rng.fill(&mut buf);
+            let blob = b64_encode(&buf, &alphabet, false);
+            let joined: Vec<String> = blob
+                .as_bytes()
+                .chunks(chunk)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            if find_secret_token(&joined.join("::")).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#5043 ratchet: a 24-char blob chunked into `::`-joined groups of \
+             {chunk} missed {misses} of {CHUNK_N}, above the pinned ceiling \
+             {ceiling}. A short segment must keep a word floor, never an \
+             exemption — see `SYMBOL_SEGMENT_SHORT_WORD_LEN`."
+        );
+    }
+
+    // The literal from the review finding: FLAG on origin/main, MISS on the
+    // first cut of this PR, FLAG again now.
+    assert!(
+        find_secret_token("Ab12cdEf::Gh34ijKl::Mn56opQr").is_some(),
+        "#5043 review round 1: a blob chunked into 8-char `::` groups must be \
+         flagged; the short-segment exemption let this through"
+    );
+
+    // Review round 2, the accepted residue of the sub-word-length arm. A
+    // two-character segment must be single-case ALPHABETIC, so `Rc` —
+    // Capitalized — does not qualify and `std::rc::Rc::downgrade2` stays
+    // flagged. This is the tripwire for the mildest widening of that arm, the
+    // one the chunk rows are least sensitive to: relaxing single-case to
+    // any-alphabetic moves width 11 by 25 and width 2 not at all, but flips this
+    // assertion outright. Pinned so the trade is visible rather than
+    // rediscovered.
+    assert!(
+        find_secret_token("std::rc::Rc::downgrade2").is_some(),
+        "#5043: this is a KNOWN ACCEPTED BOUND, not a target. If it now stores \
+         clean, the two-character arm was widened to admit Capitalized — check \
+         the chunk-width-11 row above for what that costs, and note the \
+         chunk-width-2 row will NOT have caught it."
+    );
+}
+
+// ---- Issue #4977: the slash-path branch stops exempting base64 ----
+
+/// Count how many of `n` generated standard-base64 tokens that carry a `/` and
+/// no `+` the detector MISSES.
+///
+/// Why this class specifically (issue #4977): a `+` diverts the token to
+/// [`is_plus_joined_word_phrase`] and is decided there, so the tokens branch (b)
+/// actually owns are the `/`-bearing, `+`-free ones. Code-critic's measurement
+/// during the #4967 review classified all 70,736 misses in a 300k sample and
+/// found 96.4% of them in exactly this class.
+/// What: rejection-samples the encoder until `n` tokens of the class are drawn,
+/// so the denominator is the class size rather than the draw count.
+/// Test: used by `slash_bearing_base64_blobs_are_blocked`.
+fn slash_only_b64_miss_count(seed: u64, n: usize, input_len: usize) -> usize {
+    let mut rng = Xorshift(seed);
+    let alphabet = b64_alphabet(false);
+    let mut buf = vec![0u8; input_len];
+    let (mut drawn, mut misses) = (0usize, 0usize);
+    while drawn < n {
+        rng.fill(&mut buf);
+        let tok = b64_encode(&buf, &alphabet, false);
+        if !tok.contains('/') || tok.contains('+') {
+            continue;
+        }
+        drawn += 1;
+        if find_secret_token(&tok).is_none() {
+            misses += 1;
+        }
+    }
+    misses
+}
+
+/// Why (issue #4977): branch (b) of `is_structural_token` decided a `/`-bearing
+/// token on charset alone, and every `/`-separated run of a standard-base64 blob
+/// is pure alphanumeric. The blob was therefore exempted before the base64 branch
+/// of `looks_like_secret` could see it. This is the detector's largest measured
+/// gap — larger than every false-positive round in this file's history combined —
+/// and the only one so far in the losing direction.
+///
+/// Measured on this seed, 20k drawn tokens per row, against `origin/main`
+/// (`9bd0fbc5f`) and this branch:
+///
+/// ```text
+///   input bytes   origin/main   this branch
+///        15         19699          3127
+///        20         19043           162
+///        24         18704            44
+///        32         19274             1
+///        48         19166             0
+/// ```
+///
+/// The residue at 15 input bytes is the short-token case: a 20-character encoding
+/// split by a `/` leaves two ~10-character runs, and a run that happens to be
+/// case-uniform rides in on `is_human_word_segment`'s permissive arm — the same
+/// accepted bound that arm already carries elsewhere in this file. It decays to
+/// nothing as tokens lengthen, because more runs means more chances for one to
+/// carry mixed case.
+/// What: a ratchet, not a pass mark. If a row rises, something widened the
+/// structural bypass again — re-measure against `origin/main` before touching a
+/// number.
+/// Test: itself.
+#[test]
+fn slash_bearing_base64_blobs_are_blocked() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x4977_0000_0000_0001;
+    for (input_len, ceiling) in [(15usize, 3127usize), (20, 162), (24, 44), (32, 1), (48, 0)] {
+        let misses = slash_only_b64_miss_count(SEED, N, input_len);
+        assert!(
+            misses <= ceiling,
+            "#4977 ratchet: slash-bearing base64 at {input_len} input bytes missed \
+             {misses} of {N}, above the pinned ceiling {ceiling}. origin/main \
+             missed ~19k of 20k at every row; a rise means the slash-path branch \
+             is exempting blobs again."
+        );
+    }
+
+    // The hand-written half of the same claim. AWS's own canonical secret access
+    // key is the shape the issue names: three `/`-joined runs, each pure
+    // alphanumeric, so the charset test called every one of them a path segment.
+    // Flagged now, missed on origin/main.
+    for (label, tok) in [
+        (
+            "AWS secret access key",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ), // pragma: allowlist secret
+        (
+            "base64 blob split by one slash",
+            "aGVsbG8vd29ybGRmb29iYXJsb25nYmFzZTY0Q0FGRQ", // pragma: allowlist secret
+        ),
+        (
+            "key= prefixed slash blob",
+            "token=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", // pragma: allowlist secret
+        ),
+        (
+            "provider key parked in a path",
+            "hooks/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#4977 ({label}) must be flagged: {tok}"
+        );
+    }
+}
+
+// ---- Issue #5513: a bare, userinfo-free URL is not a credential ----
+
+/// Why (issue #5513): storing `https://github.com/bobmatnyc/trusty-tools/issues/5511`
+/// in a drawer was rejected as `http…(53 chars)`, and the write failed — a
+/// rejected memory write is a durable fact that never exists. The `://` puts a
+/// `/` in the token, so the base64 branch owns it; the empty segment between the
+/// two slashes of `://` defeated branch (b); and the entropy floor was then
+/// satisfied by the issue number, which is the one thing every issue link has.
+///
+/// The four tokens `url_prose_residue_is_a_known_pre_existing_bound` pinned as a
+/// deliberately-deferred bound live here now — that test's own instruction was to
+/// move them when the follow-up landed, and this is that follow-up.
+/// What: asserts bare URLs store clean at the token predicate AND at the
+/// `FilterConfig::apply` gate a memory write actually hits.
+/// Test: itself.
+#[test]
+fn bare_github_urls_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for tok in [
+        // The #5513 reproduction, verbatim.
+        "https://github.com/bobmatnyc/trusty-tools/issues/5511",
+        // The four ex-residue tokens from #4312 round 3.
+        "https://github.com/bobmatnyc/trusty-tools/pull/4723",
+        "https://github.com/bobmatnyc/trusty-tools/issues/4312",
+        "file:///Users/masa/trusty-tools/crates/common",
+        "mongodb://cluster0.mongodb.net/analytics-store",
+        // Further ordinary shapes of the same class.
+        "https://github.com/bobmatnyc/trusty-tools/pull/4967#issuecomment-1",
+        "https://github.com/bobmatnyc/trusty-tools/blob/main/README.md",
+        "https://github.com/bobmatnyc/trusty-tools/commit/9bd0fbc5f",
+        "https://docs.rs/trusty-common/0.33.0/trusty_common/memory_core",
+        "https://crates.io/crates/trusty-common/0.33.0",
+        "https://api.github.com/repos/bobmatnyc/trusty-tools/issues/5513",
+        "https://example.com/api/v2/users/12345/settings",
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#5513: a bare URL must NOT be flagged: {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Filed the boundary defect as {tok} this afternoon");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#5513: the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #5513): the loosening this issue asks for pulls against #4977 in
+/// the same function, so the URL exemption has to be a decomposition rather than
+/// a blanket rule. #4312 already recorded why: a userinfo-free URL can carry the
+/// secret in its PATH, and exempting bare URLs wholesale loses every webhook
+/// token. This is the test that holds that line.
+///
+/// The boundary, stated once: a URL is exempt when every one of its
+/// authority/path segments reads as a path segment on its own. `…/issues/5511`
+/// is a path all the way down. `…/services/T00000000/B00000000/XXXX…` is not —
+/// `T00000000` is a letter and a digit run with no word in it, and the 24-char
+/// tail exceeds the longest alphabetic run a path segment may carry.
+/// What: asserts URL-shaped credentials stay flagged, at the token predicate and
+/// the gate.
+/// Test: itself.
+#[test]
+fn url_path_secrets_are_still_blocked() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        (
+            "webhook URL with secret path",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "postgres connection string",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+        (
+            "mongodb+srv connection string",
+            "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying a mixed-case blob",
+            "https://example.com/callback/aBc123XyZ987uvW456QrS",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying a provider key",
+            "https://example.com/hook/ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "bare URL carrying an AWS key id",
+            "https://example.com/x/AKIAIOSFODNN7EXAMPLE",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#5513 ({label}): a URL whose path IS the secret must STILL be \
+             flagged: {tok}"
+        );
+        let prose = format!("Rotate {tok} before Friday");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#5513 ({label}): the gate must REJECT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // KNOWN MISS, carried forward unchanged from #4312 and re-pinned here because
+    // this PR is what made bare URLs exempt by shape rather than by entropy: an
+    // all-lowercase, digit-free URL path secret is indistinguishable from a slug,
+    // so `is_human_word_segment`'s permissive arm admits it exactly as the
+    // entropy floor did before. If these start flagging, the bound moved — update
+    // the doc on `is_readable_path_segment`.
+    for missed in [
+        "https://webhook.example.com/services/abcdefghij/klmnopqrst/uvwxyzabcdefghij", // pragma: allowlist secret
+        "https://hooks.example.org/t/aaaaaaaaaa/bbbbbbbbbb/cccccccccc", // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(missed).is_none(),
+            "KNOWN MISS (#4312, re-pinned by #5513): {missed}"
+        );
+    }
+}
+
+#[test]
+fn custom_patterns_compile_once() {
+    // #6199: a non-default `reject_patterns` set must compile exactly once and
+    // never leak. Before the fix, `compiled_patterns` recompiled and `Box::leak`ed
+    // a fresh slice on EVERY call — a permanent per-call leak. Now the set is
+    // memoised process-wide; this test proves compile-once by observing the
+    // not-cached -> cached transition on a pattern unique to this test (so the
+    // process-wide assertion is not raced by a sibling test). `compiled_patterns`
+    // and `custom_patterns_cached` are private but reachable here because this
+    // suite is a child module of `filter`.
+    let cfg = FilterConfig {
+        reject_patterns: vec![r"(?i)^custom-noise-6199:".to_string()],
+        ..FilterConfig::default()
+    };
+
+    assert!(
+        !custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must not be cached before first use"
+    );
+    // First use compiles and memoises; a second use must find it cached rather
+    // than recompiling (and, in the old code, leaking) again.
+    let first = cfg.compiled_patterns();
+    assert_eq!(first.len(), 1);
+    assert!(
+        custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must be memoised after first use"
+    );
+    let _second = cfg.compiled_patterns();
+    assert!(
+        custom_patterns_cached(&cfg.reject_patterns),
+        "pattern set must stay memoised — no recompile per call"
+    );
+
+    // Repeated `apply` keeps matching/accepting correctly on the memoised set.
+    for _ in 0..3 {
+        assert!(
+            matches!(
+                cfg.apply("custom-noise-6199: drop me", true),
+                Err(FilterReject::NoisePattern { .. })
+            ),
+            "custom reject pattern must still fire on repeated apply"
+        );
+        assert!(
+            cfg.apply(
+                "A genuinely useful engineering memory about the parser",
+                true
+            )
+            .is_ok(),
+            "legitimate content must still pass on repeated apply"
+        );
+    }
+}
+
+// ---- Issue #7482: public resource ids (Vercel `dpl_` deployment ids) ----
+
+/// Why (issue #7482, the same family as #4898 and one shape further on): a
+/// Vercel deployment id is a PUBLIC identifier — it is what `vercel` CLI output
+/// and the REST API's `uid` field carry — but `dpl_` is not a `SECRET_PREFIXES`
+/// entry, the token carries no `+`, `=` or `/` for `is_structural_token` to
+/// decompose, and its single `_` leaves one segment that is neither case-uniform
+/// nor a human word. So it fell to the mixed-case fallback of
+/// `looks_like_secret`, which its upper+lower+digit tail satisfies, and every
+/// memory write mentioning a deployment was rejected.
+///
+/// What: pins the reproduction shape at both the token predicate and the
+/// `FilterConfig::apply` gate a write actually hits. The first two entries are
+/// the two ids that appear VERBATIM in Vercel's REST API reference, so the
+/// accepted shape is anchored to the vendor's own documented output rather than
+/// to an invented sample; both carry a 28-character tail, which is the "32
+/// hex/alphanumeric chars" #7482 reported with the 4-character prefix counted in.
+/// Test: itself.
+#[test]
+fn vercel_deployment_ids_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (label, tok) in [
+        // Verbatim from Vercel's REST API reference: `uid` in the response of
+        // `GET /v7/deployments` and of `GET /v13/deployments/{idOrUrl}`.
+        (
+            "vercel docs, list-deployments",
+            "dpl_2euZBFqxYdDMDG1jTrHFnNZ2eUVa",
+        ),
+        (
+            "vercel docs, get-a-deployment",
+            "dpl_89qyp1cskzkLrVicDaZoDbjyHuDJ",
+        ),
+        // A constructed tail of the same length and class mix, so the exemption
+        // is shown to key on the SHAPE rather than on those two literals. Every
+        // entry in this list must mix case AND carry a digit — that is what the
+        // pre-fix detector flagged, so an entry without it would pass in both
+        // the fixed and the broken world and discriminate nothing (#4898 review).
+        (
+            "constructed 28-char tail",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9S",
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#7482 ({label}): a public Vercel deployment id must NOT be flagged: \
+             {tok}; got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("Deployment {tok} is live on preview as of this morning");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#7482 ({label}): the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #7482): the exemption is an allowlist, so it can only LOSE
+/// detection. The corpus the last narrowing (#4898) pinned is re-asserted
+/// against the post-change code rather than assumed intact, and the shapes that
+/// probe the new predicate's own bounds are added to it.
+///
+/// The load-bearing entries are the ones that wear the `dpl_` prefix while
+/// breaking the tail contract. Each must fail for exactly ONE reason, or it
+/// pins nothing (#7482 review round 1 caught a base64 entry that passed on
+/// LENGTH — `find_secret_token` strips the trailing `==` before classification,
+/// so the charset check it was labelled for never ran):
+///
+/// - CHARSET: a `/` INSIDE a tail that is otherwise exactly
+///   `PUBLIC_ID_TAIL_LEN` characters, so only the alphanumeric check can reject
+///   it.
+/// - LENGTH: one character under and one character over the exact tail length,
+///   so either end of the bound fails on loosening.
+/// - CASE: `DPL_`, which Vercel does not mint.
+///
+/// What: asserts every provider-prefix, base64, base64url, JWT, bare-blob,
+/// connection-string and AWS shape stays flagged, then the one-reason near-miss
+/// `dpl_` shapes, then pins the three pre-existing misses of this family.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_7482_public_id_exemption() {
+    for (label, tok) in [
+        // LOAD-BEARING for the CHARSET half of the tail contract, and for that
+        // half ALONE: the tail is 28 characters — exactly `PUBLIC_ID_TAIL_LEN` —
+        // so the length check passes and the interior `/` is the only thing that
+        // can reject it. Put a character outside the alphanumeric set anywhere
+        // in the tail and the exemption must decline the token.
+        (
+            "interior slash, tail at the exact length",
+            "dpl_AbCd1234/EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        (
+            "interior plus, tail at the exact length",
+            "dpl_AbCd1234+EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        (
+            "second underscore, tail at the exact length",
+            "dpl_AbCd1234_EfGh5678IjKl9012MnO",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for the LENGTH half, at BOTH ends: the bound is one exact
+        // length, so 27 and 29 are the two shapes that catch any loosening of it.
+        (
+            "tail one character short",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9",
+        ), // pragma: allowlist secret
+        (
+            "tail one character long",
+            "dpl_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St",
+        ), // pragma: allowlist secret
+        // LOAD-BEARING for case sensitivity: Vercel mints `dpl_`, not `DPL_`.
+        ("uppercase prefix", "DPL_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9S"), // pragma: allowlist secret
+        // The #4898 corpus, re-asserted in full.
+        ("AWS key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        ("AWS STS id", "ASIAY34FZKBOKMUTVV7A"), // pragma: allowlist secret
+        ("AWS key id + suffix", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+        ("GitHub PAT", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        ("OpenAI key", "sk-abcdefghijklmnopqrstuvwxyz01234567890123"), // pragma: allowlist secret
+        ("Slack token", "xoxb-1234-5678-abcdEFGH"), // pragma: allowlist secret
+        ("bare mixed-case blob", "AbCd1234EfGh5678IjKl9012"), // pragma: allowlist secret
+        ("base64url token", "AbCd1234EfGh5678IjKl9012_MnOp-QrSt="), // pragma: allowlist secret
+        ("base64 of 15 random bytes", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        ), // pragma: allowlist secret
+        (
+            "basic-auth URL",
+            "https://admin:Sup3rS3cret@internal.example.com/api",
+        ), // pragma: allowlist secret
+        (
+            "lowercase postgres conn",
+            "postgres://user:password@host/database",
+        ), // pragma: allowlist secret
+    ] {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "#7482 ({label}) must STILL be flagged after the public-id \
+             exemption: {tok}"
+        );
+    }
+
+    // End-to-end, not just the token predicate: the gate is what a write hits.
+    let cfg = FilterConfig::default();
+    for content in [
+        "Deploy creds leaked: access key AKIAIOSFODNN7EXAMPLE in the log", // pragma: allowlist secret
+        "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the webhook", // pragma: allowlist secret
+        "Rotate dpl_AbCd1234_EfGh5678_IjKl9012 before Friday", // pragma: allowlist secret
+    ] {
+        assert!(
+            matches!(
+                cfg.apply(content, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#7482: the gate must still REJECT leaked-credential prose; got {:?}",
+            cfg.apply(content, false)
+        );
+    }
+
+    // KNOWN MISS 1 — THE COST OF THIS EXEMPTION, stated as it actually is
+    // (#7482 review round 1). A deployment id is character-for-character
+    // indistinguishable from any other 28-character alphanumeric run, so a
+    // credential whose body is EXACTLY that long is exempted when written flush
+    // behind the prefix. No predicate separates the two; one exact length is
+    // what shrinks the hole to this single shape (a window of 20..=40 also
+    // swallowed a 24-char Vercel API token, a Google `AIza` key, a 32-char
+    // generic key, a SendGrid body and a base64 blob).
+    //
+    // The two assertions are a PAIR and must be read together: the first shows
+    // the body IS a credential this detector catches, the second shows the
+    // prefix hides it. An assertion on the glued form alone would pass in a
+    // world where the detector caught neither, and discriminate nothing.
+    let body_28 = "AbCd1234EfGh5678IjKl9012MnOp"; // pragma: allowlist secret
+    assert_eq!(body_28.len(), PUBLIC_ID_TAIL_LEN);
+    assert!(
+        find_secret_token(body_28).is_some(),
+        "the 28-char credential body must be flagged BARE, or the miss below \
+         proves nothing about the prefix"
+    );
+    assert!(
+        find_secret_token(&format!("dpl_{body_28}")).is_none(),
+        "KNOWN MISS (#7482, accepted): a credential body of exactly \
+         PUBLIC_ID_TAIL_LEN alphanumeric characters is exempt when glued behind \
+         `dpl_`. This is the documented cost of the exemption, not a defect to \
+         patch with another predicate — the two shapes are identical. If it now \
+         FLAGS, something separated them; delete this assertion and say how."
+    );
+
+    // WAS KNOWN MISS 2, CLOSED by #7549. #7482 recorded it as accepted: an
+    // all-lowercase `_`-segmented token is a segmented identifier, so a provider
+    // key with any lowercase segment typed in front of it was rescued by
+    // `is_structural_token` branch (c) before the prefix test could see it. The
+    // prefix test now matches at a delimiter boundary as well as at offset 0, so
+    // the rescue never runs. Kept here, with the assertion inverted, because the
+    // shape belongs to this corpus: the exemption must not re-open it.
+    assert!(
+        find_secret_token("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_some(), // pragma: allowlist secret
+        "#7549: a provider key behind a prepended lowercase segment must be \
+         flagged. This was #7482's KNOWN MISS 2; if it is missed again, the \
+         boundary arm of `carries_secret_prefix` regressed or the public-id \
+         exemption grew in front of it."
+    );
+
+    // KNOWN REJECTION, and the bound on what #7482 fixed: a deployment id inside
+    // a dashboard URL is still refused. `find_secret_token` splits on whitespace
+    // and backticks only, so the whole URL is ONE token and the exemption — a
+    // whole-token predicate — never sees the id as a token at all. Covering it
+    // means teaching `is_readable_path_segment` about public ids, which is shared
+    // with #5513's URL-path-secret corpus; out of scope here, where the reported
+    // evidence is a bare token. Pinned so the next report of the URL form is
+    // recognised as this known gap and not as a regression.
+    assert!(
+        find_secret_token("https://vercel.com/acme/site/dpl_2euZBFqxYdDMDG1jTrHFnNZ2eUVa")
+            .is_some(),
+        "KNOWN REJECTION (#7482 bound): the URL-embedded form of a deployment id \
+         is still flagged — only the bare token is fixed. If this now passes, the \
+         exemption reached into URL path segments; that is a #5513-adjacent \
+         change and needs its corpus re-run."
+    );
+}
+
+/// Why (issue #7482): the exemption is keyed on a literal prefix list, not on a
+/// general notion of "public id". Every other vendor's public id — and every
+/// `dpl_`-shaped token a future provider might mint as a credential — keeps
+/// today's behaviour. Pinning both sides of that bound is what makes a later
+/// widening visible instead of silent.
+/// What: pins the accepted side (the prefix list's exact membership) and the
+/// unchanged side (a neighbouring vendor prefix).
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_7482() {
+    assert_eq!(
+        PUBLIC_ID_PREFIXES,
+        &["dpl_"],
+        "KNOWN ACCEPTED BOUND (#7482): exactly one public-id prefix is exempt. \
+         Adding an entry widens the only prefix-keyed bypass in this detector — \
+         state the vendor's id format and its length bound on \
+         `PUBLIC_ID_PREFIXES` first."
+    );
+    // The exemption's width IS this number: every character of slack in it is a
+    // foreign credential body that gets exempted too (see KNOWN MISS 1 in
+    // `real_secrets_still_blocked_after_7482_public_id_exemption`). 28 is what
+    // Vercel's REST API reference documents. Raising it, or turning it back into
+    // a range, must be a deliberate edit with new vendor evidence — not a
+    // by-the-way loosening, which is how the first cut of #7482 shipped a bound
+    // that `4..=40` satisfied just as well.
+    assert_eq!(
+        PUBLIC_ID_TAIL_LEN, 28,
+        "KNOWN ACCEPTED BOUND (#7482): the exempt tail is exactly 28 \
+         alphanumeric characters, per the two `uid` samples in Vercel's REST API \
+         reference. Changing this widens or narrows the blind spot directly."
+    );
+    // A neighbouring Vercel id kind is NOT exempt: `dpl_` is the only prefix
+    // #7482 produced evidence for, and a mixed-case tail still flags. This is
+    // unchanged pre-#7482 behaviour, recorded so the next false positive of this
+    // family is recognised as the same bug rather than a new one.
+    assert!(
+        find_secret_token("prj_5m8CQaRBm3FnPPiRHUBhAhY5RmVy").is_some(),
+        "KNOWN ACCEPTED BOUND (#7482): a Vercel PROJECT id (`prj_`) is not on \
+         the exemption list and still flags. If it now passes, the list grew — \
+         add it to the assertion above."
+    );
+}
+
+// ---- Issue #7549: SECRET_PREFIXES match at a delimiter boundary, not only at
+// ---- the start of the token.
+
+/// Why (issue #7549): the prefix layer tested `lower.starts_with(p)`, so one
+/// lowercase segment typed ahead of a real provider key defeated it entirely —
+/// and because the prefix layer runs FIRST, its miss then handed the token to
+/// `is_structural_token`, whose segmented-identifier branch rescued it outright.
+/// Every entry below was MISSED before this change, each for a different reason
+/// in the same family, so the set pins the fix by placement rather than by one
+/// representative shape:
+///
+/// - prepended segment: rescued by `is_segmented_identifier` (the `dpl_ghp_…`
+///   reproduction the issue reports).
+/// - after `=`: rescued by branch (a), a word-shaped LHS plus a word-shaped RHS.
+/// - behind a quote: not rescued at all — the `"` fails
+///   `is_plausible_b64_charset`, and an all-lowercase body fails the mixed-case
+///   branch, so nothing was left to flag it.
+/// - inside a JSON pair: rescued by `is_segmented_identifier` again, because the
+///   quote and colon sit INSIDE a segment, where `is_human_word_segment` ignores
+///   them.
+/// - after a hyphen: rescued by `is_segmented_identifier`.
+///
+/// What: asserts each placement is flagged by `find_secret_token`, then that the
+/// end-to-end gate rejects the same key written into ordinary prose.
+/// Test: itself.
+#[test]
+fn prefixed_provider_keys_are_blocked_after_7549() {
+    let mut missed: Vec<String> = Vec::new();
+    for (label, tok) in [
+        (
+            "prepended lowercase segment",
+            "dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "after an `=` in an env-var assignment",
+            "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ), // pragma: allowlist secret
+        (
+            "behind a quote",
+            "token=\"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"",
+        ), // pragma: allowlist secret
+        (
+            "inside a JSON pair",
+            "{\"token\":\"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"}",
+        ), // pragma: allowlist secret
+        (
+            "after a hyphen, mid-token",
+            "backup-sk-abcdefghijklmnopqrstuvwxyz01234567890123",
+        ), // pragma: allowlist secret
+    ] {
+        // Collected, not asserted per iteration: each entry is a DIFFERENT
+        // rescue path, so a report naming only the first missed placement hides
+        // how many of them a regression reopened.
+        if find_secret_token(tok).is_none() {
+            missed.push(format!("{label} ({tok})"));
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "#7549: a provider key carrying a {SECRET_MIN_LEN}+ character run \
+         behind its prefix must be flagged wherever the prefix sits in the \
+         token. Missed placements: {missed:#?}"
+    );
+
+    // End-to-end, not just the token predicate: the gate is what a write hits.
+    let cfg = FilterConfig::default();
+    for content in [
+        "Rotate GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 before the release", // pragma: allowlist secret
+        "The deploy log printed dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789 in plain text", // pragma: allowlist secret
+    ] {
+        assert!(
+            matches!(
+                cfg.apply(content, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "#7549: the gate must REJECT prose carrying a boundary-prefixed key; \
+             got {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #7549): widening the prefix test to interior matches is only safe
+/// because the match must sit at a delimiter boundary. `sk-` is a substring of
+/// `disk-`, `risk-` and `task-`, three of the most ordinary words in this
+/// project's own prose. Measured over this checkout — 7,378 files, tokenised
+/// exactly as `find_secret_token` does — a boundary-free interior match flags 46
+/// distinct prose tokens, 32 of them ordinary English; requiring the delimiter
+/// takes it to 14, and every token below is one the delimiter rule removes.
+///
+/// The trailing entries are a different shape: they clear the boundary rule (the
+/// prefix does follow a `=`) and the SECOND gate rejects them — the
+/// `SECRET_MIN_LEN` floor on the suffix the prefix opens, itself included. Both
+/// gates therefore have a reason to exist in this test, not only in the doc. Each
+/// such entry names the suffix length it actually presents, because a label that
+/// only said "short" carried a wrong number through review once.
+///
+/// The floor itself is then bracketed by a PAIR of assertions one filler byte
+/// apart, with the lengths asserted rather than eyeballed. A single
+/// under-the-floor case pins nothing: it passes just as well if the floor is 18,
+/// 19 or 25. The 19/20 pair is what fails the moment the floor moves.
+/// What: asserts the token predicate declines each shape, brackets the floor,
+/// and asserts the end-to-end gate accepts prose carrying these tokens.
+/// Test: itself.
+#[test]
+fn prose_prefix_substrings_are_not_flagged_after_7549() {
+    for (label, tok) in [
+        // `sk-` inside `disk-`, `risk-`, `task-` — rejected by the boundary rule,
+        // because the character before the prefix is a letter.
+        (
+            "branch name with `disk-`",
+            "feat/7313-disk-survey-by-session",
+        ),
+        (
+            "hyphenated phrase with `task-`",
+            "single-primary-task-plus-secondaries",
+        ),
+        (
+            "slash-joined flags with `disk-`",
+            "--cpu/--memory/--disk-size",
+        ),
+        ("path with `task-`", "autonomous/task-dispatch-for-autonomy"),
+        (
+            "anchor link with `Disk-`",
+            "trusty-mpm/INSTRUCTIONS.md#macOS-Full-Disk-Access",
+        ),
+        ("compound with `risk-`", "2026-Q3-risk-register-rollup"),
+        // Prefix at a real boundary, but the suffix it opens (prefix counted in,
+        // as `carries_secret_prefix` measures it) is under SECRET_MIN_LEN — a
+        // documentation placeholder, not a key. The length each one actually
+        // presents is named, because "short" alone let a wrong number sit here.
+        ("docs placeholder, suffix 7", "GITHUB_TOKEN=ghp_xxx"),
+        (
+            "docs placeholder, suffix 17",
+            "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxx",
+        ),
+        // THE FLOOR'S LOWER EDGE, load-bearing: `xoxb-` plus 14 filler is a
+        // 19-byte suffix, one under SECRET_MIN_LEN. Paired with the 20-byte case
+        // in the positive direction below — neither assertion pins the boundary
+        // alone, and without the pair the floor could drift to 18 or 19 with the
+        // whole corpus still green.
+        (
+            "suffix one byte under the floor",
+            "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx",
+        ),
+    ] {
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#7549 ({label}): an ordinary token carrying a prefix SUBSTRING must \
+             NOT be flagged. If it now flags, the boundary rule or the \
+             SECRET_MIN_LEN floor on the interior run was dropped: {tok}"
+        );
+    }
+
+    // The floor's two sides, measured rather than eyeballed. `at` differs from
+    // `under` by ONE filler byte, so the pair brackets SECRET_MIN_LEN exactly:
+    // move the floor either way and one of the two assertions fails.
+    let boundary_at = "SLACK_BOT_TOKEN=".len();
+    let under = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxx";
+    let at = "SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxxx";
+    assert_eq!(under.len() - boundary_at, SECRET_MIN_LEN - 1);
+    assert_eq!(at.len() - boundary_at, SECRET_MIN_LEN);
+    assert!(
+        find_secret_token(under).is_none(),
+        "#7549: a {}-byte suffix is one under SECRET_MIN_LEN and must not flag",
+        SECRET_MIN_LEN - 1
+    );
+    assert!(
+        find_secret_token(at).is_some(),
+        "#7549: a suffix of exactly SECRET_MIN_LEN bytes at a delimiter boundary \
+         must flag. With the assertion above, this pins the floor at \
+         {SECRET_MIN_LEN} — if only this one fails, the floor rose."
+    );
+
+    let cfg = FilterConfig::default();
+    for content in [
+        "The disk-survey work landed on feat/7313-disk-survey-by-session this week",
+        "Set GITHUB_TOKEN=ghp_xxx in the example env file and move on",
+    ] {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "#7549: the gate must ACCEPT prose carrying a prefix substring; got \
+             {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #7549): the widened prefix test asks nothing of the characters
+/// BEHIND the prefix beyond how many there are. That was already true at offset
+/// 0 — `known_accepted_bounds_after_4898` pins `sk-eleton-key-for-the-front-door`
+/// as flagged — and making an interior boundary count carries the same bound to
+/// every delimiter in the token. Pinning both halves is what makes a later
+/// tightening or loosening visible instead of silent.
+/// What: pins the predicate's two arms directly (offset 0, and a boundary with
+/// the length floor), then the accepted cost of the length-only rule.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_7549() {
+    // The predicate's own contract, asserted on the lowercased form the caller
+    // passes it, so a change to either arm shows up here and not only through
+    // `looks_like_secret`'s later branches.
+    assert!(
+        carries_secret_prefix("ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        "#7549: offset 0 must match exactly as it did before the change"
+    );
+    assert!(
+        carries_secret_prefix("dpl_ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+        "#7549: a prefix after a delimiter, with a long run behind it, matches"
+    );
+    assert!(
+        !carries_secret_prefix("feat/7313-disk-survey-by-session"),
+        "#7549: a prefix substring beginning mid-word does not match"
+    );
+    assert!(
+        !carries_secret_prefix("github_token=ghp_xxx"),
+        "#7549: a prefix at a boundary with a sub-SECRET_MIN_LEN run does not match"
+    );
+
+    // KNOWN ACCEPTED BOUND: the interior arm inherits the length-only rule from
+    // offset 0, so a hyphenated English phrase behind `sk-` is a credential here
+    // too. The two assertions are a PAIR: the first shows the bare token was
+    // ALREADY flagged before this change (#4898 pins it), the second shows the
+    // boundary arm carries that verdict to the same run inside a path. Widening
+    // this is not a #7549 regression; narrowing it means narrowing offset 0 too.
+    assert!(
+        find_secret_token("sk-eleton-key-for-the-front-door").is_some(),
+        "the bare form must be flagged, or the bound below proves nothing"
+    );
+    assert!(
+        find_secret_token("notes/sk-eleton-key-for-the-front-door").is_some(),
+        "KNOWN ACCEPTED BOUND (#7549): the prefix test is length-gated, not \
+         shape-gated, at an interior boundary exactly as it is at offset 0. If \
+         this stops flagging, the interior arm grew a shape check that offset 0 \
+         does not have — make both arms agree."
+    );
+}
+
+// ---- Issues #8589 and #277: identifier paths and Google document URLs ----
+
+/// Why (issue #277, the kuzu-memory import): 9,058 of 9,171 refused memories
+/// were ordinary relative source paths. A Java or TSX class name is one long
+/// CamelCase run, so the old per-segment alphabetic-run cap of 20 read
+/// `ReservationForecastAdjustmentServiceImpl.java` as an encoded run and the
+/// path fell through to the base64 branch.
+/// What: asserts identifier paths pass `check_secret` and the
+/// `FilterConfig::apply` gate.
+/// Test: itself.
+#[test]
+fn camel_case_source_paths_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    for path in [
+        "src/main/java/com/example/forecast/ReservationForecastAdjustmentServiceImpl.java",
+        "web/src/components/RoomTypeAvailabilityCalendarGrid.tsx",
+        "src/main/java/com/example/pricing/RateRecommendationEngineConfigurationProperties.java",
+        "src/test/java/com/example/forecast/ReservationForecastAdjustmentServiceImplTest.java",
+        "app/services/HTTPServerConnectionPoolManagerFactory.rb",
+        "lib/utils/getUserAccountPreferencesFromLocalStorage.ts",
+        "packages/ui/src/hooks/useDebouncedWindowResizeObserver.ts",
+        "src/main/java/com/example/repo/FindReservationByIdAndDateRangeQuery.java",
+        "src/main/java/com/example/http/HttpClientConfigurationFactory.java",
+    ] {
+        assert!(
+            check_secret(path).is_ok(),
+            "#277: an identifier path must pass check_secret: {path}; got {:?}",
+            check_secret(path)
+        );
+        let prose = format!("The forecast adjustment logic lives in {path} today");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // KNOWN BOUND: a file-name segment of SECRET_MIN_LEN (20) or more
+    // characters, extension included, that mixes case and carries a digit is
+    // refused as a mixed-case credential unless its stem passes
+    // `is_identifier_file_segment` (#277). `Http` has no vowel, which pulls
+    // `Http2ClientPool` under the 27% floor; `OAuth` holds a one-letter word.
+    // #8589: a 15-character stem under plain directories now passes
+    // `is_short_stem_file_at`, so `Http2ClientPool` is admitted.
+    for (path, refused) in [
+        ("src/main/java/com/example/Http2ClientKit.java", false), // 19 chars
+        ("src/main/java/com/example/Http2ClientPool.java", false), // 20 chars
+        (
+            "src/main/java/com/example/Oauth2ClientRegistration.java",
+            false,
+        ),
+        (
+            "src/main/java/com/example/OAuth2AuthorizationRequestRedirectFilter.java",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            check_secret(path).is_err(),
+            refused,
+            "#277 known bound moved for {path}; update the #8589 changelog"
+        );
+    }
+}
+
+/// Why (issue #8589 review): each clause of `is_readable_alpha_run` is what
+/// keeps one class of generated run out, so each needs a row that turns red
+/// when the clause is removed.
+/// What: pins the two generated runs the rule was built against, then one
+/// row just inside and one just outside each limit that has an outside.
+/// Test: itself.
+#[test]
+fn readable_alpha_run_clause_boundaries_after_8589() {
+    for (clause, run, readable) in [
+        // #277: MIN_VOWEL_PERCENT is 27. 6 vowels of 22 letters is 27.3%;
+        // 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel", true),
+        ("vowel floor, outside", "DrenkPlostVarmikStuvelGrap", false),
+        // A 5-capital acronym is MAX_ACRONYM_LEN; 6 is over.
+        ("acronym cap, inside", "ConnectionPoolHTTPSManager", true),
+        ("acronym cap, outside", "ConnectionPoolHTTPSXManager", false),
+        // 24 letters in 6 words is a mean of exactly 4; 23 letters is under.
+        ("mean word length, inside", "UserDataFormTypeCodeView", true),
+        (
+            "mean word length, outside",
+            "UserDataFormTypeCodeMap",
+            false,
+        ),
+        // A lowercase first word is admitted. There is no outside row:
+        // `camel_words` starts every later word at a capital, so an
+        // alphabetic run cannot hold a second all-lowercase word.
+        (
+            "lowercase first word, inside",
+            "getUserAccountPreferencesFromLocalStorage",
+            true,
+        ),
+    ] {
+        assert_eq!(
+            is_readable_alpha_run(run),
+            readable,
+            "#8589 {clause}: is_readable_alpha_run({run})"
+        );
+    }
+    // Base64 runs from the #8589 ratchet corpus: a stray capital, and a run
+    // only the vowel floor refuses.
+    for run in [
+        "CtbSRaHnXUQBzuFosCPKRreEnRKPWJHoWU",
+        "SSJyphDcjmbsJvssQghrw",
+    ] {
+        assert!(!is_readable_alpha_run(run), "#8589: {run} must be refused");
+    }
+}
+
+/// Why (issue #8589): a Google Docs/Sheets/Drive URL carries a 33-44 character
+/// mixed-case document id in its path, which the per-segment readability test
+/// reads as a credential, so the URL was refused. The id is public by position:
+/// it sits after `/d/` (or `/folders/`) on a Google document host.
+/// What: asserts document URLs pass `check_secret` and the gate, with and
+/// without a trailing action, query or fragment.
+/// Test: itself.
+#[test]
+fn google_document_urls_are_not_flagged_after_8589() {
+    let cfg = FilterConfig::default();
+    // Every row but `edit#gid=0` and `edit?usp=sharing` fails with the
+    // document-id exemption switched off; those two passed before #8589 and
+    // stay as pins.
+    for url in [
+        // The #8589 reproduction, verbatim.
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit#gid=0",
+        "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/edit?usp=sharing",
+        "https://docs.google.com/spreadsheets/u/0/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit",
+        "https://docs.google.com/presentation/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U0/pub",
+        "https://drive.google.com/file/d/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw/view",
+        "https://drive.google.com/drive/folders/1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw",
+        "https://drive.google.com/file/d/0BwwA4oUTeiV1TGRPeTVjaWRDY1E/view",
+        "https://drive.google.com/drive/folders/0AGRtHG9m3Z0-Uk9PVA",
+    ] {
+        assert!(
+            check_secret(url).is_ok(),
+            "#8589: a Google document URL must pass check_secret: {url}; got {:?}",
+            check_secret(url)
+        );
+        let prose = format!("The hotstats report source is {url} for this quarter");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#8589: the gate must ACCEPT prose carrying {url}; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
+
+/// Why (issues #8589, #277): both loosenings above touch the per-segment path
+/// test and the URL decomposition, which are what keep a `/`-bearing blob and
+/// a URL-path secret flagged. Every credential shape the fix was checked
+/// against is re-asserted here through `check_secret`, the call the kuzu
+/// importer makes.
+/// What: asserts each credential is refused bare, inside a path, and in the
+/// Google document-id position on a foreign host or with a provider-key shape.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_8589_path_rules() {
+    for (label, tok) in [
+        (
+            "40-char base64 blob with + and /",
+            "aGVsbG8+d29ybGQ/Zm9vYmFyQmF6UXV4MTIzNDU2", // pragma: allowlist secret
+        ),
+        ("AWS access key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+        (
+            "GitHub ghp_ token",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        (
+            "JWT",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", // pragma: allowlist secret
+        ),
+        (
+            "PEM block",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MhgHcTz6sE2I2yPB\n-----END RSA PRIVATE KEY-----", // pragma: allowlist secret
+        ),
+        (
+            "34-char mixed-case alphanumeric, no path",
+            "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "provider key as a path segment",
+            "config/ghp_abcdefghijklmnopqrstuvwxyz0123456789/x", // pragma: allowlist secret
+        ),
+        (
+            "mixed-case blob as a path segment",
+            "src/main/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY/Impl.java", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id as a path segment",
+            "deploy/AKIAIOSFODNN7EXAMPLE/notes.md", // pragma: allowlist secret
+        ),
+        (
+            "all-uppercase webhook tail",
+            "https://webhook.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape on a foreign host",
+            "https://evil.example.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "document-id shape without the /d/ marker",
+            "https://docs.google.com/spreadsheets/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "second blob after a Google document id",
+            "https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            "AWS key id in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AKIAIOSFODNN7EXAMPLE", // pragma: allowlist secret
+        ),
+        (
+            "GitHub token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        // Provider keys SECRET_PREFIXES does not list, in the /d/ position.
+        // Each length (32, 39, 26, 40, 37) sits outside GOOGLE_DOC_ID_LENS.
+        (
+            "Stripe live key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/sk_fake_agzEZ9gCn1PkSMUwlUWRUCM5", // pragma: allowlist secret
+        ),
+        (
+            "Google API key in the document-id position",
+            "https://docs.google.com/spreadsheets/d/AIzabIyOPcjDbcPPh0Gmu5TBGMCIPUkQEPOD9oQ", // pragma: allowlist secret
+        ),
+        (
+            "GitLab token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/glpfk-p22pgHyyOAS6GV1bzsfl", // pragma: allowlist secret
+        ),
+        (
+            "npm token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/npm_r98TKQUmou8MlZZVJRAXgazFWJ1OW6GtcyXF", // pragma: allowlist secret
+        ),
+        (
+            "Hugging Face token in the document-id position",
+            "https://docs.google.com/spreadsheets/d/hf_Z687CfNSvP5QQzSxexvprga3UBkYilM0Zv", // pragma: allowlist secret
+        ),
+        (
+            "published id one character short of 86",
+            "https://docs.google.com/document/d/e/2PACX-1vRk3Xq9Tz7bW2mNpL5sYh8cVd4gJfA6eUoQiZrKt1HxCnBwMy0lPjSaDvGuEoYXbJ1uVaXeTGVOt0U/pub", // pragma: allowlist secret
+        ),
+        // Host tricks: the host must be the exact lowercase string. An
+        // uppercase host or an explicit :443 names the same server, but
+        // Google's share links carry neither, so they stay refused.
+        (
+            "Google host as userinfo before a foreign host",
+            "https://docs.google.com@evil.example/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host as a subdomain of a foreign host",
+            "https://docs.google.com.evil.com/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "uppercase Google host",
+            "https://DOCS.GOOGLE.COM/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+        (
+            "Google host with an explicit port",
+            "https://docs.google.com:443/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk", // pragma: allowlist secret
+        ),
+    ] {
+        assert!(
+            matches!(check_secret(tok), Err(FilterReject::PotentialSecret { .. })),
+            "#8589/#277 ({label}) must STILL be refused: {tok}"
+        );
+    }
+
+    // KNOWN BOUND: a BARE document id is character-for-character a 44-char
+    // mixed-case credential, so with no context naming a Google document it
+    // stays refused. `bare_google_doc_ids_named_by_context_after_8589` covers
+    // the context-named form.
+    assert!(
+        check_secret("17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk").is_err(),
+        "#8589: a bare document id is indistinguishable from a credential"
+    );
+}
+
+/// Why (issue #8589): the reported false positive's second form is the bare
+/// 44-character spreadsheet id, written in prose that says what it is. A bare
+/// id is admitted only with that context and the exact Google id signature;
+/// real credentials of comparable entropy stay refused even next to the same
+/// context words.
+/// What: one table. `true` rows must pass `check_secret`; `false` rows must be
+/// refused as `PotentialSecret`.
+/// Test: itself.
+#[test]
+fn bare_google_doc_ids_named_by_context_after_8589() {
+    for (allow, label, content) in [
+        // The reported false positives (allow).
+        (
+            true,
+            "#8589 repro URL",
+            "Source sheet: https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        ),
+        (
+            true,
+            "#8589 repro bare id in prose",
+            "hotstats-reporting spreadsheet id is 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk.",
+        ),
+        (
+            true,
+            "bare id after a camelCase key word",
+            "spreadsheetId: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        ),
+        (
+            true,
+            "33-char Drive folder id",
+            "Drive folder 1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw holds the exports",
+        ),
+        (
+            true,
+            "28-char legacy Drive id",
+            "old doc 0BwwA4oUTeiV1TGRPeTVjaWRDY1E",
+        ),
+        // Real-secret shapes (deny), each written next to a context word.
+        (
+            false,
+            "bare id with no context word",
+            "the value is 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        ),
+        (
+            false,
+            "GitHub token next to 'sheet'",
+            "sheet token ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "AWS key id next to 'docs'",
+            "docs key AKIAIOSFODNN7EXAMPLE", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "44-char key not opening with 1",
+            "spreadsheet key aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1Qw2Er3Ty4U", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "43-char base64url key (32 bytes)",
+            "doc secret 1B3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1Qw2Er3Ty4", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "44-char base64 with + and /",
+            "Google key 1B3dE5fG7hJ9kL1+N2pQ4rS6tU8vW0x/z1Qw2Er3Ty4U", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "34-char mixed-case credential",
+            "drive secret aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "second credential after an admitted id",
+            "sheet 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk key aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+    ] {
+        let got = check_secret(content);
+        if allow {
+            assert!(
+                got.is_ok(),
+                "#8589 ({label}) must pass: {content}; got {got:?}"
+            );
+        } else {
+            assert!(
+                matches!(got, Err(FilterReject::PotentialSecret { .. })),
+                "#8589 ({label}) must STILL be refused: {content}"
+            );
+        }
+    }
+}
+
+/// Why (issues #8589, #277): `is_readable_alpha_run` admits a long alphabetic
+/// run in a path segment, which is exactly where a generated blob parked as a
+/// filename lands. This corpus wraps encoder output in a Java source path and
+/// counts misses, so a loosening of the run rule shows up as a number.
+///
+/// Measured at this seed, 20k tokens per row. `origin/main` (`186b51e17`) and
+/// this branch are identical in every row. The first cut of #8589, which only
+/// capped the longest CamelCase word, raised the 20- and 24-byte rows:
+///
+/// ```text
+///   input bytes   base64 (main / first cut)   base64url (main / first cut)
+///        20             15 / 47                    19 / 53
+///        24             10 / 22                    10 / 22
+///        32              0 / 1                      0 / 0
+///        40              0                          0
+///        48              0                          0
+/// ```
+///
+/// The 40- and 48-byte rows (54 and 64 characters) were measured on this
+/// branch only. They carry alphabetic runs well past `MAX_PATH_WORD_LEN`, so
+/// they exercise the long-run rule; a 15-byte blob (20 characters) never
+/// reaches it. The residue at 20-24 bytes is not this rule's: those blobs are
+/// short enough that a `/`-free run has no digit and falls to FN-2 (#1484).
+///
+/// #8589 (owner ruling): the short-stem rule leaves every row unchanged. A `/`
+/// inside the blob makes a short "stem"; admitting it alone measured 347 at
+/// 20 base64 bytes, so `is_short_stem_file_at` counts mixed-case directories
+/// toward the stem's length. Five further seeds also match their pre-rule
+/// counts.
+/// What: a ratchet, not a pass mark.
+/// Test: itself.
+#[test]
+fn path_wrapped_encoder_blobs_stay_flagged_after_8589() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x8589_0000_0000_0001;
+    for (url_safe, input_len, ceiling) in [
+        (false, 20usize, 15usize),
+        (false, 24, 10),
+        (false, 32, 0),
+        (false, 40, 0),
+        (false, 48, 0),
+        (true, 20, 19),
+        (true, 24, 10),
+        (true, 32, 0),
+        (true, 40, 0),
+        (true, 48, 0),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(url_safe);
+        let mut buf = vec![0u8; input_len];
+        let mut misses = 0usize;
+        for _ in 0..N {
+            rng.fill(&mut buf);
+            let tok = format!("src/main/java/{}.java", b64_encode(&buf, &alphabet, false));
+            if find_secret_token(&tok).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#8589 ratchet: path-wrapped {} at {input_len} input bytes missed \
+             {misses} of {N}, above the pinned ceiling {ceiling}. The long-run \
+             rule in is_readable_alpha_run is admitting encoder output.",
+            if url_safe { "base64url" } else { "base64" }
+        );
+    }
+}
+
+// ---- Issues #277 and #8589, round 3: identifier filenames and small families ----
+
+/// Every row whose `check_secret` verdict is not `refused`, formatted for an
+/// assertion message, so one run names every mismatching row at once.
+fn verdict_mismatches(rows: &[&str], refused: bool) -> Vec<String> {
+    rows.iter()
+        .filter(|tok| check_secret(tok).is_err() != refused)
+        .map(|tok| format!("{tok} -> {:?}", check_secret(tok)))
+        .collect()
+}
+
+/// Why (issue #277): 70% of the memories the kuzu import still refused carry a
+/// `<Stem>.<ext>` file name that is an ordinary identifier but misses the
+/// `is_symbol_path_segment` word floor (`BituKura.java`: no word of five
+/// letters) or is a 20+ character name with a digit (`BorFuigebWaokdaw7.java`),
+/// which the whole-segment mixed-case test refuses.
+/// What: identifier file names in the shapes the import refused (letters
+/// invented), each refused before `is_identifier_file_segment`, then the
+/// shapes the rule still refuses on purpose.
+/// Test: itself.
+#[test]
+fn identifier_file_names_are_not_flagged_after_277() {
+    let accepted = [
+        // Two four-letter Title words.
+        "mape/hwl/niiw/BituKura.java",
+        // A four-capital acronym and two four-letter Title words.
+        "ucr/lnt/KDVBRolaTavu.java",
+        // A 17-character stem with one digit run.
+        "ona/sbw/ku/BorFuigebWaokdaw7.java",
+        // A 22-character stem with one digit run.
+        "edo/wkm/ceod/DoravelMunitokGesaPola7.java",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: identifier file names must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // KNOWN BOUND: an acronym plus a short word (vowel share 14%), a word
+    // mean of 3, and a lowercase first word are what random stems look like.
+    // #8589: under plain directories and below 20 characters those stems are
+    // admitted now (`short_stem_file_names_are_not_flagged_after_8589`); the
+    // same shapes stay refused once a mixed-case directory or a 20th stem
+    // character takes them to credential length.
+    let still_refused = [
+        "src/RateForecasts/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTomP.java",
+        "lib/UtilsHelpers/getUserId.java",
+    ];
+    let moved = verdict_mismatches(&still_refused, true);
+    assert!(
+        moved.is_empty(),
+        "#277 known bound moved; update the #8589 changelog:\n{}",
+        moved.join("\n")
+    );
+    let cfg = FilterConfig::default();
+    for path in accepted {
+        let prose = format!("The pricing adapter is defined in {path} for now");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#277: the gate must ACCEPT prose carrying {path}"
+        );
+    }
+}
+
+/// Why (issue #277): each clause of `is_identifier_file_segment` keeps one
+/// class of generated or credential-shaped file name out, so each needs a row
+/// just outside it.
+/// What: an inside and an outside row per clause of the predicate, then rows
+/// outside each clause refused end to end by `check_secret`.
+/// Test: itself.
+#[test]
+fn identifier_file_name_clause_boundaries_after_277() {
+    // The extension and acronym limits are pinned on the predicate: a
+    // six-letter extension or a six-capital acronym is itself a five-letter
+    // word, so `is_symbol_path_segment` admits those rows end to end anyway.
+    for (clause, seg, admitted) in [
+        ("extension of 5, inside", "BituKura.abcde", true),
+        ("extension of 6, outside", "BituKura.abcdef", false),
+        ("extension with a capital, outside", "BituKura.Java", false),
+        (
+            "extension opening with a digit, outside",
+            "BituKura.7z",
+            false,
+        ),
+        ("acronym of 5, inside", "KDVBQRolaTavu.java", true),
+        ("acronym of 6, outside", "KDVBQXRolaTavu.java", false),
+        ("one digit run, inside", "Bora4FuigebWaok.java", true),
+        ("two digit runs, outside", "Bora4Fuigeb7Waok.java", false),
+        ("one stray letter, inside", "BituKura-a7.java", true),
+        ("two stray letters, outside", "BituKura-a7b.java", false),
+        ("Title first word, inside", "RateCode.java", true),
+        ("lowercase first word, outside", "rateCode.java", false),
+        // 12 letters in 3 words is a mean of exactly 4; 11 is under.
+        ("mean word length 4, inside", "BankKovaLett.java", true),
+        ("mean word length 11/3, outside", "BankKovLett.java", false),
+        // 6 vowels of 22 letters is 27.3%; 7 of 26 is 26.9%.
+        ("vowel floor, inside", "DrenkPlostVarmikStuvel.java", true),
+        (
+            "vowel floor, outside",
+            "DrenkPlostVarmikStuvelGrap.java",
+            false,
+        ),
+    ] {
+        assert_eq!(
+            is_identifier_file_segment(seg),
+            admitted,
+            "#277 {clause}: is_identifier_file_segment({seg})"
+        );
+    }
+    let refused = [
+        // Extension of six characters, no five-letter word.
+        "ucr/lnt/BituKura.abc123",
+        // Extension with an uppercase letter.
+        "ucr/lnt/BituKura.Java",
+        // Two digit runs in one piece.
+        "ona/sbw/Bora4Fuigeb7Waok.java",
+        // Two stray letters in one piece.
+        "ucr/lnt/BituKura-a7b.java",
+        // #8589: mean word length 2, once a mixed-case directory takes the
+        // stem past 19 characters.
+        "ucr/RateForecasts/AbCdEfGh.json",
+        // #8589: a vowel-free word, in a 20-character stem.
+        "src/main/java/com/example/Http2ClientPoolWorkr.java",
+        // A stray capital inside a word.
+        "src/main/java/OAuth2AuthorizationRequestRedirectFilter.java",
+        // Credential stems.
+        "keys/ghp_abcdefghijklmnopqrstuvwxyz0123456789.json", // pragma: allowlist secret
+        "keys/AKIAIOSFODNN7EXAMPLE.json",                     // pragma: allowlist secret
+        "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json",   // pragma: allowlist secret
+        "keys/aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1.json",       // pragma: allowlist secret
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these file names must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+    // #8589: these two rows were refused here before the owner ruling; their
+    // stems are under 20 characters under plain directories, so
+    // `is_short_stem_file_at` admits them.
+    let moved = verdict_mismatches(
+        &[
+            "ucr/lnt/AbCdEfGh.json",
+            "src/main/java/com/example/Http2ClientPool.java",
+        ],
+        false,
+    );
+    assert!(
+        moved.is_empty(),
+        "#8589: short stems under plain directories must pass:\n{}",
+        moved.join("\n")
+    );
+}
+
+/// Why (issue #277): four small families of the refused import memories are
+/// not paths at all — a GitHub noreply commit email, an environment variable
+/// holding an ordinary URL, an npm `name@version` inside a path, and a ticket
+/// key leading a CamelCase title. Each has a fixed grammar, so each gets its
+/// own narrow matcher.
+/// What: three accepted rows per family (letters invented), each refused
+/// before the matcher existed.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_shapes_are_not_flagged_after_277() {
+    let accepted = [
+        // GitHub noreply commit emails.
+        "70822+tahrisrut@users.noreply.github.com",
+        "603736402+Tafafeo-Coz@users.noreply.github.com",
+        "41234+Kovu7Delam@users.noreply.github.com",
+        // KEY=<ordinary URL>.
+        "WIDGET_CACHE_REDIS_URL=redis://cache-host:6379",
+        "METRICS_INGEST_ENDPOINT=https://metrics.example.com/v1/ingest",
+        "LIASRO_EEUPC_NOREPEVF_UKU=fcbp://wejemvovc:3073",
+        // npm name@version in a path.
+        "bovlat/zenimo-kr-tapuvelosk@3.1.5",
+        "node_modules/lekaro-vitun@2.14.0/dist/index.js",
+        "fomik/rudavel-sotep@12.0.4-beta.2",
+        // Ticket key plus CamelCase title.
+        "QX-4821-TelvoMarunDesiKobat",
+        "ABCDEFGHIJ-123456-VorinTapelMusko",
+        "KR-77-HovaPlentiDrasoMik",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): the four matchers above each admit one grammar, so a row
+/// just outside each grammar must fall back to the heuristics and be refused.
+/// What: boundary rows per family, all refused by `check_secret`.
+/// Test: itself.
+#[test]
+fn noreply_key_url_npm_and_ticket_boundaries_after_277() {
+    let refused = [
+        // noreply: a lookalike host, a non-digit id, a login with `_`.
+        "70822+tahrisrut@users.noreply.github.com.evil.io",
+        "7a822+Tahrisrut9@users.noreply.github.com",
+        "70822+Tahri_srut9@users.noreply.github.com",
+        // noreply: a 13-digit id, a 40-char login, and a base62 key as the
+        // login, which only the `looks_like_secret(login)` screen refuses.
+        "1234567890123+tahrisrut@users.noreply.github.com",
+        "70822+tahrisrutkovudelamtafafeocozbimaselovipa@users.noreply.github.com",
+        "70822+aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1abcde@users.noreply.github.com", // pragma: allowlist secret
+        // KEY=url: userinfo with and without a password, a secret in the path,
+        // and a credential-shaped key.
+        "DB_URL=postgres://svcuser:hunter2hunter2@db.example.com/app", // pragma: allowlist secret
+        "DB_URL=postgres://Svcuser9@db.example.com:5432/app",
+        // `svcuser@1.2.3` reads as an npm segment, so `is_ordinary_url` passes
+        // this URL and only the `no_userinfo` clause refuses it.
+        "DB_URL=redis://svcuser@1.2.3/app",
+        "HOOK_URL=https://hooks.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", // pragma: allowlist secret
+        "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1=https://example.com/x", // pragma: allowlist secret
+        // npm: a two-part version, an uppercase name.
+        "bovlat/zenimo-kr-tapuvelosk@3.15",
+        "bovlat/Zenimo-Kr-Tapuvelosk@3.1.5",
+        // Ticket: an 11-letter key, a 7-digit number, an underscore, a stray
+        // capital, a digit in the title.
+        "ABCDEFGHIJK-4821-TelvoMarunDesiKobat",
+        "QX-4821123-TelvoMarunDesiKobat",
+        "QX4821_TelvoMarunDesiKobat",
+        "QX-4821-TelvoXMarunDesiKobat",
+        "QX-4821-Telvo9MarunDesiKobat",
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#277: these shapes must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (issue #277): 545 refused import memories carry a long CamelCase class
+/// name whose vowel share sits between 27% and 30%, under the #8589 floor.
+/// English identifiers run 35-40% and base64 letters about 23%, so 27% keeps
+/// the margin over base64 while admitting those names.
+/// What: long runs at 27.3%, 27.6% and 28% vowels, in a file name, a directory
+/// and a URL path, each refused at the 30% floor.
+/// Test: itself.
+#[test]
+fn long_class_names_at_27_percent_vowels_are_not_flagged_after_277() {
+    let accepted = [
+        "ivp/bsl/DrenkPlostVarmikStuvel.java",
+        "src/main/GrintSkolvarMendrupTaskelFrom.java",
+        "lib/GrintSkolvarMendrupTaskel/core.py",
+        "https://git.example.com/tree/main/GrintSkolvarMendrupTaskel",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#277: long class names at 27% vowels must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    // 7 vowels of 26 letters is 26.9%, under the floor.
+    assert!(
+        check_secret("ivp/bsl/DrenkPlostVarmikStuvelGrap.java").is_err(),
+        "#277: a 26.9% vowel share is under the 27% floor"
+    );
+}
+
+/// `len` characters drawn from `alphabet` by `rng`.
+fn random_stem(rng: &mut Xorshift, alphabet: &[u8], len: usize) -> String {
+    (0..len)
+        .map(|_| alphabet[(rng.next_u64() >> 24) as usize % alphabet.len()] as char)
+        .collect()
+}
+
+/// Why (issue #277): `is_identifier_file_segment` admits a file name by the
+/// shape of its stem, which is where a generated key saved as a file name
+/// lands. This corpus parks random base62 and base64url stems as
+/// `src/main/<stem>.json` and counts admits, so a loosening shows up as a
+/// number.
+///
+/// Measured at this seed, 20k stems per row, `c545780f4` before the rule and
+/// this change after it:
+///
+/// ```text
+///   stem chars   base62 (before / after)   base64url (before / after)
+///       16            445 / 447                  385 / 389
+///       20            203 / 205                  202 / 202
+///       24              2 / 2                     40 / 40
+///       32              0 / 0                      6 / 6
+///       40              0 / 0                      3 / 3
+/// ```
+///
+/// A looser floor below 20 characters measured +212 and +233 at 16, and a
+/// lowercase first word +4 and +8; see `is_identifier_word_run`.
+///
+/// #8589 (owner ruling 2026-09-25): a stem under 20 characters under plain
+/// directories is no longer refused for its word shape
+/// (`is_short_stem_file_at`). The 16-character rows measure that rule, so
+/// they rise: base62 447 -> 2684, base64url 389 -> 3425. Each such stem is
+/// below `SECRET_MIN_LEN` and passes `check_secret` standing alone. The 20-,
+/// 24-, 32- and 40-character rows are unchanged. Two `MainApp` rows keep the
+/// old 16-character ceilings (447, 389) on the #277 word floors: a 7-letter
+/// mixed-case directory takes the stem past the short-stem rule's 19.
+/// What: a ratchet, 20k stems per row at a fixed seed.
+/// Test: itself.
+#[test]
+fn random_stems_as_file_names_stay_flagged_after_277() {
+    const N: usize = 20_000;
+    const SEED: u64 = 0x0277_0000_0000_0001;
+    let url_alphabet = b64_alphabet(true);
+    let base62 = &url_alphabet[..62];
+    for (label, alphabet, dir, stem_len, ceiling) in [
+        // #8589: 447 -> 2684, the short-stem rule's measured admits.
+        ("base62", base62, "main", 16usize, 2684usize),
+        ("base62", base62, "main", 20, 205),
+        ("base62", base62, "main", 24, 2),
+        ("base62", base62, "main", 32, 0),
+        ("base62", base62, "main", 40, 0),
+        // #8589: 389 -> 3425, the short-stem rule's measured admits.
+        ("base64url", &url_alphabet[..], "main", 16, 3425),
+        ("base64url", &url_alphabet[..], "main", 20, 202),
+        ("base64url", &url_alphabet[..], "main", 24, 40),
+        ("base64url", &url_alphabet[..], "main", 32, 6),
+        ("base64url", &url_alphabet[..], "main", 40, 3),
+        // #8589 review: `MainApp` (7) + 16 is over 19, so these rows bypass
+        // `is_short_stem_file_at` and keep ratcheting the #277 word floors.
+        ("base62", base62, "MainApp", 16, 447),
+        ("base64url", &url_alphabet[..], "MainApp", 16, 389),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let admits = (0..N)
+            .filter(|_| {
+                let tok = format!(
+                    "src/{dir}/{}.json",
+                    random_stem(&mut rng, alphabet, stem_len)
+                );
+                find_secret_token(&tok).is_none()
+            })
+            .count();
+        assert!(
+            admits <= ceiling,
+            "#277 ratchet: {label} stems of {stem_len} characters under `{dir}` \
+             admitted {admits} of {N}, above the pinned ceiling {ceiling}"
+        );
+    }
+}
+
+/// Why (#277 review): `is_identifier_file_segment` judges a stem by word
+/// shape, so a passphrase built from words with one digit group reads as an
+/// identifier. It was refused before #277 and is admitted now.
+/// What: pins that bound, so a change in either direction is deliberate.
+/// Test: itself.
+#[test]
+fn known_accepted_bounds_after_277() {
+    assert!(
+        find_secret_token("vault/CorrectHorseBatteryStaple7.txt").is_none(),
+        "KNOWN ACCEPTED BOUND (#277): a word-composed passphrase with one digit \
+         group, used as a file stem, is admitted (same class as FN-2, #1484). \
+         If it now FLAGS, the bound tightened — update the doc on \
+         `is_identifier_file_segment`."
+    );
+}
+
+// ---- Issue #8589, owner ruling 2026-09-25: short file stems ----
+
+/// Why (issue #8589): 2,237 of the 3,057 memories the kuzu import still
+/// refused failed only on a file name whose stem is under 20 characters and
+/// misses the #277 identifier floors. The owner ruled that such a stem is not
+/// refused for its shape alone.
+/// What: the three #277 known-bound shapes, a vowel-free word, a mean word
+/// length of 2, and a 19-character stem, each under plain directories, as a
+/// bare path, a URL path and a `KEY=path` value, and inside prose through
+/// the `FilterConfig` gate. Each was refused before the rule.
+/// Test: itself.
+#[test]
+fn short_stem_file_names_are_not_flagged_after_8589() {
+    let accepted = [
+        "ucr/lnt/ruld/GTSBejm.java",
+        "abc/src/BanKovLet7SivDakTom.java",
+        "lib/utils/getUserId.java",
+        "src/main/java/com/example/Http2ClientPool.java",
+        "ucr/lnt/AbCdEfGh.json",
+        "https://git.example.com/acme/rates/blob/main/src/GTSBejm.java",
+        "RATE_SRC=src/main/java/GTSBejm.java",
+        // A mixed-case directory counts toward the 19: 12 + 7.
+        "src/RateForecast/GTSBejm.java",
+    ];
+    let mismatches = verdict_mismatches(&accepted, false);
+    assert!(
+        mismatches.is_empty(),
+        "#8589: short stems under plain directories must pass check_secret:\n{}",
+        mismatches.join("\n")
+    );
+    let cfg = FilterConfig::default();
+    for path in accepted {
+        let prose = format!("The rate loader is defined in {path} for now");
+        assert!(
+            cfg.apply(&prose, false).is_ok(),
+            "#8589: the gate must ACCEPT prose carrying {path}"
+        );
+    }
+}
+
+/// Why (issue #8589): each clause of `is_short_stem_file_at` keeps one class
+/// of generated or credential-shaped file name out, and a secret used as a
+/// short stem must still be refused by the rule that catches it alone.
+/// What: an inside and an outside row per clause on the predicate, then
+/// end-to-end rows that `check_secret` must still refuse.
+/// Test: itself.
+#[test]
+fn short_stem_rule_boundaries_after_8589() {
+    for (clause, segments, admitted) in [
+        (
+            "stem of 19, inside",
+            &["abc", "BanKovLet7SivDakTom.java"][..],
+            true,
+        ),
+        (
+            "stem of 20, outside",
+            &["abc", "BanKovLet7SivDakTomP.java"][..],
+            false,
+        ),
+        (
+            "mixed dir 12 + 7, inside",
+            &["src", "RateForecast", "GTSBejm.java"][..],
+            true,
+        ),
+        (
+            "mixed dir 13 + 7, outside",
+            &["src", "RateForecasts", "GTSBejm.java"][..],
+            false,
+        ),
+        (
+            "digit dir counts, inside",
+            &["lib2", "GTSBejm.java"][..],
+            true,
+        ),
+        // #8589 review: 13 + 7 is 20.
+        (
+            "digit dir counts, outside",
+            &["lib234567890a", "GTSBejm.java"][..],
+            false,
+        ),
+        // #8589 review: a segment after the file counts too.
+        (
+            "mixed segment after the file, outside",
+            &["src", "GTSBejm.java", "RateForecasts"][..],
+            false,
+        ),
+        ("one digit run, inside", &["lnt", "GTSBejm7.java"][..], true),
+        (
+            "two digit runs, outside",
+            &["lnt", "GT5Bejm7.java"][..],
+            false,
+        ),
+        ("one stray letter, inside", &["lnt", "xAbCd.java"][..], true),
+        (
+            "two stray letters, outside",
+            &["lnt", "xAbC.java"][..],
+            false,
+        ),
+        (
+            "extension of 6, outside",
+            &["lnt", "GTSBejm.abcdef"][..],
+            false,
+        ),
+        (
+            "provider prefix stem, outside",
+            &["keys", "ghp_abcdefg.json"][..],
+            false,
+        ),
+        ("no extension, outside", &["lnt", "GTSBejm"][..], false),
+    ] {
+        // The file name is the first segment with a `.`, else the last.
+        let i = segments
+            .iter()
+            .position(|s| s.contains('.'))
+            .unwrap_or(segments.len() - 1);
+        assert_eq!(
+            is_short_stem_file_at(segments, i),
+            admitted,
+            "#8589 {clause}: is_short_stem_file_at({segments:?}, {i})"
+        );
+    }
+    let refused = [
+        // A provider key or AWS key id as the stem.
+        "keys/AKIAIOSFODNN7EXAMPLE.json", // pragma: allowlist secret
+        "keys/ghp_abcdefghijklmn.json",   // pragma: allowlist secret
+        "keys/sk-abcdefghijklmnop.json",  // pragma: allowlist secret
+        // Encoder-shaped short stems: two digit runs, then two stray letters.
+        "keys/aB3dE5fG7hJ9.json", // pragma: allowlist secret
+        "keys/qXwErTyUiO.json",
+        // A mixed-case directory takes a short stem to credential length.
+        "https://git.example.com/x/RateForecasts/GTSBejm.java",
+        "RATE_SRC=src/RateForecasts/GTSBejm.java",
+        // #8589 review: the same material placed after the file name.
+        "https://git.example.com/x/GTSBejm.java/RateForecasts",
+        // A long secret stem is outside the rule.
+        "keys/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY.json", // pragma: allowlist secret
+    ];
+    let mismatches = verdict_mismatches(&refused, true);
+    assert!(
+        mismatches.is_empty(),
+        "#8589: these file names must STILL be refused:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Why (#8589 review): the `=` branch of `is_structural_token` checked the
+/// LHS only for its charset, so a random 40-character LHS was admitted in
+/// front of any path RHS.
+/// What: generated base62 and base64url LHS values in front of a path are
+/// refused, as is one fixed row; ordinary `KEY=path` rows still pass.
+/// Test: itself.
+#[test]
+fn key_equals_path_lhs_is_screened_after_8589() {
+    let refused = verdict_mismatches(
+        &["aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1AbCdEf=src/main.rs"], // pragma: allowlist secret
+        true,
+    );
+    assert!(
+        refused.is_empty(),
+        "#8589: a credential-shaped LHS must be refused:\n{}",
+        refused.join("\n")
+    );
+    let url_alphabet = b64_alphabet(true);
+    for (label, alphabet) in [
+        ("base62", &url_alphabet[..62]),
+        ("base64url", &url_alphabet[..]),
+    ] {
+        // The LHS gets the verdict it gets standing alone: only a bare-token
+        // miss (FN-2, mixed case with no digit, #1484) may pass as a key.
+        let mut rng = Xorshift(0x8589_0000_0000_00a1);
+        let (mut admits, mut unscreened) = (0usize, 0usize);
+        for _ in 0..2_000 {
+            let lhs = random_stem(&mut rng, alphabet, 40);
+            if check_secret(&format!("{lhs}=src/main.rs")).is_ok() {
+                admits += 1;
+                unscreened += usize::from(check_secret(&lhs).is_err());
+            }
+        }
+        assert_eq!(
+            unscreened, 0,
+            "#8589: {unscreened} random 40-char {label} LHS values refused alone \
+             were admitted as a key"
+        );
+        assert!(
+            admits <= 20,
+            "#8589: random 40-char {label} LHS admitted {admits} of 2000"
+        );
+    }
+    let accepted = verdict_mismatches(
+        &[
+            "RATE_SRC=src/main.rs",
+            "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+            "config_path=crates/trusty-common/src/lib.rs",
+        ],
+        false,
+    );
+    assert!(
+        accepted.is_empty(),
+        "#8589: ordinary KEY=path rows must pass:\n{}",
+        accepted.join("\n")
+    );
+}
+
+/// Why (#8589 review, CRITICAL): the `=` branch of `is_structural_token`
+/// checked a `/`-free RHS only for its charset, and its fallback admitted on
+/// a word-shaped LHS alone, so `TOKEN=<secret>` and `TOKEN=<base64>==` were
+/// admitted although the value alone is refused.
+/// What: a bare high-entropy RHS, a `==`-padded RHS and an empty LHS are
+/// refused; ordinary `KEY=value` rows pass; and a generated RHS gets the
+/// verdict it gets standing alone. Only the #1484 bare-token miss (mixed case
+/// with no digit, about 1 in 1,000 base62 values of 40 characters) may pass,
+/// so the ceiling is 20 of 2,000.
+/// Test: itself.
+#[test]
+fn key_equals_value_rhs_is_screened_after_8589() {
+    // Rows are assembled at run time so no `KEY=<value>` literal sits in the
+    // source for a push-time credential scanner to match.
+    let sample = "aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1"; // pragma: allowlist secret
+    let blob = "Zm9vYmFyYmF6cXV4UXV1eFRlc3Q0MjAyNg";
+    let rows = [
+        format!("TOKEN={sample}"),
+        format!("TOKEN={blob}=="),
+        format!("api_key={sample}"),
+    ];
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let refused = verdict_mismatches(&rows, true);
+    assert!(
+        refused.is_empty(),
+        "#8589: a credential-shaped RHS must be refused:\n{}",
+        refused.join("\n")
+    );
+    // `find_secret_token` trims a leading `=`, so the empty-LHS shape is
+    // pinned on the predicate.
+    assert!(
+        !is_structural_token(&format!("={sample}")),
+        "#8589: an empty LHS must not make a token structural"
+    );
+    let url_alphabet = b64_alphabet(true);
+    for (label, alphabet) in [
+        ("base62", &url_alphabet[..62]),
+        ("base64url", &url_alphabet[..]),
+    ] {
+        let mut rng = Xorshift(0x8589_0000_0000_00b2);
+        let (mut admits, mut unscreened) = (0usize, 0usize);
+        for _ in 0..2_000 {
+            let rhs = random_stem(&mut rng, alphabet, 40);
+            if check_secret(&format!("TOKEN={rhs}")).is_ok() {
+                admits += 1;
+                unscreened += usize::from(check_secret(&rhs).is_err());
+            }
+        }
+        assert_eq!(
+            unscreened, 0,
+            "#8589: {unscreened} random 40-char {label} values refused alone \
+             were admitted after `TOKEN=`"
+        );
+        assert!(
+            admits <= 20,
+            "#8589: random 40-char {label} RHS admitted {admits} of 2000"
+        );
+    }
+    let accepted = verdict_mismatches(
+        &[
+            "SOME_ENV=src/x.rs",
+            "RATE_SRC=src/main.rs",
+            "LOG_LEVEL=debug",
+            "MODE=production",
+            "PORT=8080",
+            "RETRIES=3",
+            "region=us-east-1",
+            ">=2-medium->REQUEST_CHANGES",
+        ],
+        false,
+    );
+    assert!(
+        accepted.is_empty(),
+        "#8589: ordinary KEY=value rows must pass:\n{}",
+        accepted.join("\n")
+    );
+}

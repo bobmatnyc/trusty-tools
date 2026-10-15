@@ -51,7 +51,7 @@
 #                                                  # pre-fix one out of git, to
 #                                                  # confirm these cases still
 #                                                  # reproduce the defect
-#   (names: optional_dep_order filter_closure dev_dep_edge)
+#   (names: self_dev_edge optional_dep_order filter_closure dev_dep_edge)
 #
 # Exit: 0 when every case holds; 1 (naming the case, with the order it got)
 #   when one does not.
@@ -67,7 +67,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURE="$REPO_ROOT/scripts/test-data/publish-dry-run-order/metadata.json"
 UNDER_TEST="$REPO_ROOT/scripts/publish-dry-run-order.sh"
 
-KNOWN="optional_dep_order filter_closure dev_dep_edge"
+KNOWN="self_dev_edge optional_dep_order filter_closure dev_dep_edge"
 
 ONLY=""
 while [ "$#" -gt 0 ]; do
@@ -226,6 +226,21 @@ want() {
   esac
   return 1
 }
+
+# ===========================================================================
+# 0. The SELF dev-edge (demo-common -> demo-common, #9271). trusty-memory
+#    dev-depends on itself to turn its own test features on; cargo publish
+#    strips a path-only dev-dependency, so it is no ordering constraint. Read
+#    as an edge it is a one-crate cycle and the script stopped with "dependency
+#    cycle". First, and `|| true`, so the pre-fix script prints this case's
+#    diagnostic instead of aborting the run silently under `set -e`.
+# ===========================================================================
+if want self_dev_edge; then
+  d="$(new_fixture_dir)"
+  o="$(order_of "$d" || true)"
+  expect_before "self dev-edge is not a cycle" "$o" demo-common demo-review
+  rm -rf "$d"
+fi
 
 # ===========================================================================
 # 1. The OPTIONAL, feature-gated edge (demo-analyze -> demo-review).
