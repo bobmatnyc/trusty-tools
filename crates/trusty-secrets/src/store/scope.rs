@@ -138,6 +138,28 @@ pub fn parse_remote_identity(url: &str) -> Result<(OwnerName, RepoName), RemoteR
     Ok((owner, repo))
 }
 
+/// The github.com repository a checkout's `origin` remote names (#9069).
+///
+/// Why: D6 — a sync target pushes to the checkout's own repository, never
+/// to one a vault name or a config file chose.
+/// What: the validated, lowercased owner and repository names.
+/// Test: `github_push_targets_the_remote_repo_not_the_vault_override`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RemoteIdentity {
+    /// The repository's owner.
+    pub owner: OwnerName,
+    /// The repository's name.
+    pub repo: RepoName,
+}
+
+impl RemoteIdentity {
+    /// The identity `<owner>/<repo>`.
+    pub fn new(owner: OwnerName, repo: RepoName) -> Self {
+        Self { owner, repo }
+    }
+}
+
 /// A `secrets.vault` override and the file it came from.
 ///
 /// Why: #9328 (owner ruling 06 R2) — the tracked repo file is editable by
@@ -223,6 +245,20 @@ impl ScopeSet {
         tracked: Option<VaultName>,
         machine: Option<&MachineSecretsConfig>,
     ) -> Result<Self, SecretsError> {
+        Self::derive_with_identity(dir, tracked, machine).map(|(scopes, _)| scopes)
+    }
+
+    /// [`Self::derive`], also returning the origin remote's identity.
+    ///
+    /// Why: #9069 D6 — a push goes to the checkout's own repository, which a
+    /// machine `project_vaults` override must not change, so the identity
+    /// is kept beside the scopes it derived.
+    /// Test: `github_push_targets_the_remote_repo_not_the_vault_override`.
+    pub fn derive_with_identity(
+        dir: &Path,
+        tracked: Option<VaultName>,
+        machine: Option<&MachineSecretsConfig>,
+    ) -> Result<(Self, RemoteIdentity), SecretsError> {
         // #9328: no remote, no owner — a tracked override cannot be checked.
         let url = platform::origin_remote_url(dir).ok_or(SecretsError::ScopeUndetermined {
             dir: dir.to_path_buf(),
@@ -233,7 +269,8 @@ impl ScopeSet {
             Some(vault) => Some(VaultOverride::Machine(vault.clone())),
             None => tracked.map(VaultOverride::Tracked),
         };
-        Self::from_identity(&owner, &repo, vault_override)
+        let scopes = Self::from_identity(&owner, &repo, vault_override)?;
+        Ok((scopes, RemoteIdentity { owner, repo }))
     }
 
     /// The project vault.

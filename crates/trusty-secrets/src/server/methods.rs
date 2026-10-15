@@ -386,6 +386,9 @@ impl CopySelection {
 /// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
 /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
+/// #9069: a sync-target destination goes to `sync_target::push` after the
+/// project resolves; a sync-target source is [`ErrorKind::Unsupported`]
+/// (`server_copy_from_a_sync_target_is_unsupported`).
 pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
     audited(
         state,
@@ -403,6 +406,14 @@ pub(crate) fn copy(state: &State, caller: Caller, params: Value) -> Result<Value
             gate.project(&project);
             let vault = project.scopes().project().clone();
             gate.name(&vault, None);
+            // #9069: a sync target is never read back, so never a source.
+            if request.from_backend.is_sync_target() {
+                return Err(ErrorKind::Unsupported);
+            }
+            // #9069: a push has its own refusals and no index row.
+            if request.to_backend.is_sync_target() {
+                return super::sync_target::push(state, caller, gate, &request, &project);
+            }
             // #7524 H1: the destination's posture check runs before any backend
             // opens; `tm secrets copy --to file` moved Keychain values to files.
             let destination = project.open_for_write(state, &request.to_backend)?;

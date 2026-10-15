@@ -439,7 +439,8 @@ async fn server_copy_refuses_the_same_backend_twice() {
     let unknown = call(
         &fx.settings.socket,
         method::COPY,
-        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "vercel"}),
+        // #9069: `vercel` is now a sync-target id, so name one nothing knows.
+        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "nosuch"}),
     )
     .await;
     assert_eq!(
@@ -691,6 +692,8 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("file", false, String::new(), Some(Unavailable::NotCompiled)),
             ("onepassword", false, String::new(), Some(cli)),
             ("keeper", false, String::new(), Some(cli)),
+            // #9069: the sync target, listed after the stores.
+            ("github-actions", false, String::new(), Some(cli)),
         ]
     );
     assert!(
