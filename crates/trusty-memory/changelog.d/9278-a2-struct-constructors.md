@@ -1,0 +1,2 @@
+Added
+- Public constructors for four engine structs other crates build: `engine::palace::Palace::new(id, name, data_dir)` with `with_description`, `engine::store::kg::Triple::new(subject, predicate, object)`, `engine::store::chat_sessions::ChatMessage::new(role, content)` with `with_attachments`, and `engine::retrieval::VerifyNotStored::new(drawer, reason)`. A caller can build each without a struct literal, which a later `#[non_exhaustive]` will forbid outside trusty-memory ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))

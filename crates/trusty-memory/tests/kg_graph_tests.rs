@@ -13,7 +13,6 @@
 //! Test: `cargo test -p trusty-memory --test
 //! kg_graph_tests`.
 
-use chrono::Utc;
 use tempfile::tempdir;
 use trusty_memory::engine::store::kg::{KgEdge, KnowledgeGraph, Triple};
 
@@ -23,15 +22,7 @@ use trusty_memory::engine::store::kg::{KgEdge, KnowledgeGraph, Triple};
 /// and no provenance.
 /// Test: Indirect — used by every test in this file.
 fn t(subject: &str, predicate: &str, object: &str) -> Triple {
-    Triple {
-        subject: subject.into(),
-        predicate: predicate.into(),
-        object: object.into(),
-        valid_from: Utc::now(),
-        valid_to: None,
-        confidence: 1.0,
-        provenance: None,
-    }
+    Triple::new(subject, predicate, object)
 }
 
 /// Why: After dropping a `KnowledgeGraph` handle and re-opening the same

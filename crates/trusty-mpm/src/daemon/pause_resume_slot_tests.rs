@@ -229,10 +229,10 @@ fn an_unsafe_branch_gets_no_command() {
 #[cfg(feature = "sm-memory")]
 #[test]
 fn the_verify_not_stored_marker_matches_the_error_text() {
-    let missed = trusty_memory::engine::retrieval::VerifyNotStored {
-        drawer: uuid::Uuid::nil(),
-        reason: "kg write failed".to_string(),
-    };
+    let missed = trusty_memory::engine::retrieval::VerifyNotStored::new(
+        uuid::Uuid::nil(),
+        "kg write failed",
+    );
     assert!(
         missed.to_string().contains(super::VERIFY_NOT_STORED_MARKER),
         "{missed}"

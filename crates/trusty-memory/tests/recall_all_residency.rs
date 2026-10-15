@@ -41,13 +41,11 @@ fn seed_estate(data_root: &Path) -> Vec<PalaceId> {
     let mut ids = Vec::with_capacity(ESTATE);
     for i in 0..ESTATE {
         let id = PalaceId::new(format!("estate-{i:02}"));
-        let palace = Palace {
-            id: id.clone(),
-            name: id.as_str().to_string(),
-            description: None,
-            created_at: chrono::Utc::now(),
-            data_dir: data_root.join(id.as_str()),
-        };
+        let palace = Palace::new(
+            id.clone(),
+            id.as_str().to_string(),
+            data_root.join(id.as_str()),
+        );
         registry
             .create_palace(data_root, palace)
             .unwrap_or_else(|e| panic!("create_palace({id}) failed: {e:#}"));

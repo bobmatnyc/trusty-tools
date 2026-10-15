@@ -14,7 +14,6 @@
 
 use std::process::Command;
 
-use chrono::Utc;
 use trusty_memory::engine::palace::Drawer;
 use trusty_memory::engine::store::kg::{KnowledgeGraph, Triple};
 
@@ -90,17 +89,9 @@ async fn engine_round_trips_a_triple_through_trusty_memory_engine() {
     let path = dir.path().join("kg.db");
     {
         let kg = KnowledgeGraph::open(&path).expect("open kg");
-        kg.assert(Triple {
-            subject: "engine".into(),
-            predicate: "lives_in".into(),
-            object: "trusty-memory".into(),
-            valid_from: Utc::now(),
-            valid_to: None,
-            confidence: 1.0,
-            provenance: None,
-        })
-        .await
-        .expect("assert triple");
+        kg.assert(Triple::new("engine", "lives_in", "trusty-memory"))
+            .await
+            .expect("assert triple");
     }
     let kg = KnowledgeGraph::open(&path).expect("reopen kg");
     let active = kg.query_active("engine").await.expect("query");

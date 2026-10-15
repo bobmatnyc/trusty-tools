@@ -46,6 +46,18 @@ pub struct VerifyNotStored {
     pub reason: String,
 }
 
+impl VerifyNotStored {
+    /// Why: other crates build this error without a struct literal (#9278).
+    /// What: sets `drawer` and `reason`.
+    /// Test: `verify_not_stored_new_carries_the_drawer_and_reason`.
+    pub fn new(drawer: Uuid, reason: impl Into<String>) -> Self {
+        Self {
+            drawer,
+            reason: reason.into(),
+        }
+    }
+}
+
 /// Refuse a `verify_with` command this write cannot store (#9390).
 ///
 /// Why: a command on a drawer with no slot has nothing to re-check, and a

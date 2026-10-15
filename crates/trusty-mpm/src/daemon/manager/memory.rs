@@ -323,7 +323,6 @@ mod live {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use chrono::Utc;
     use trusty_memory::engine::palace::{Palace, PalaceId, RoomType};
     use trusty_memory::engine::registry::PalaceRegistry;
     use trusty_memory::engine::retrieval::{
@@ -453,19 +452,19 @@ mod live {
                 });
             }
 
-            let palace = Palace {
-                id: self.palace_id.clone(),
-                name: "tm manager (portfolio)".to_string(),
-                description: Some(
-                    "Portfolio-scoped tm manager palace (DOC-36 §3.4): digest \
-                     history, escalation dispositions, and portfolio chat turns — \
-                     manager-level observations about the portfolio, never \
-                     project-scoped facts."
-                        .to_string(),
-                ),
-                created_at: Utc::now(),
-                data_dir: self.data_root.join(self.palace_id.as_str()),
-            };
+            // #9278: built by constructor; a later #[non_exhaustive] forbids the literal.
+            let palace = Palace::new(
+                self.palace_id.clone(),
+                "tm manager (portfolio)",
+                self.data_root.join(self.palace_id.as_str()),
+            )
+            .with_description(Some(
+                "Portfolio-scoped tm manager palace (DOC-36 §3.4): digest \
+                 history, escalation dispositions, and portfolio chat turns — \
+                 manager-level observations about the portfolio, never \
+                 project-scoped facts."
+                    .to_string(),
+            ));
             self.registry
                 .create_palace(&self.data_root, palace)
                 .map_err(|source| PortfolioMemoryError::Palace {

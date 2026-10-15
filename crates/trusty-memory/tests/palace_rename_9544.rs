@@ -41,13 +41,7 @@ impl Fixture {
             .registry
             .create_palace(
                 root,
-                Palace {
-                    id: PalaceId::new(id),
-                    name: id.to_string(),
-                    description: None,
-                    created_at: chrono::Utc::now(),
-                    data_dir: root.join(id),
-                },
+                Palace::new(PalaceId::new(id), id.to_string(), root.join(id)),
             )
             .expect("create palace");
     }

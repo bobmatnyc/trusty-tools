@@ -208,13 +208,11 @@ fn hydration_never_exceeds_the_startup_open_limit() {
     const LIMIT: usize = 2;
     for i in 0..PALACES {
         let id = format!("palace-{i}");
-        let palace = trusty_memory::engine::palace::Palace {
-            id: trusty_memory::engine::palace::PalaceId::new(id.clone()),
-            name: id.clone(),
-            description: None,
-            created_at: chrono::Utc::now(),
-            data_dir: state_root.join(&id),
-        };
+        let palace = trusty_memory::engine::palace::Palace::new(
+            trusty_memory::engine::palace::PalaceId::new(id.clone()),
+            id.clone(),
+            state_root.join(&id),
+        );
         trusty_memory::engine::store::PalaceStore::save_palace(&palace)
             .expect("seed palace metadata");
     }

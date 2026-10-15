@@ -75,13 +75,11 @@ impl Aliased {
             .registry
             .create_palace(
                 &data_root,
-                Palace {
-                    id: PalaceId::new(canonical.clone()),
-                    name: canonical.clone(),
-                    description: None,
-                    created_at: chrono::Utc::now(),
-                    data_dir: data_root.join(&canonical),
-                },
+                Palace::new(
+                    PalaceId::new(canonical.clone()),
+                    canonical.clone(),
+                    data_root.join(&canonical),
+                ),
             )
             .expect("create canonical palace");
         PalaceAliasStore::register_alias(&data_root, &alias, &canonical)

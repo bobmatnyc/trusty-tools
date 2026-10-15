@@ -35,13 +35,7 @@ fn open_palace(name: &str) -> (Arc<PalaceHandle>, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir");
     let data_dir = dir.path().join(name);
     std::fs::create_dir_all(&data_dir).expect("mkdir");
-    let palace = Palace {
-        id: PalaceId::new(name),
-        name: name.into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir: data_dir.clone(),
-    };
+    let palace = Palace::new(PalaceId::new(name), name, data_dir.clone());
     let handle = PalaceHandle::open(&palace).expect("open palace");
     std::mem::forget(dir); // keep the tempdir alive for the test's lifetime
     (handle, data_dir)
@@ -54,23 +48,24 @@ fn open_palace(name: &str) -> (Arc<PalaceHandle>, std::path::PathBuf) {
 /// What: calls `remember_with_options` with `force=true` and the requested
 /// `classify_as`.
 /// Test: used by both tests below.
+// #9278: default-then-assign; A2b's #[non_exhaustive] forbids the `..Default::default()` literal.
+#[allow(clippy::field_reassign_with_default)]
 async fn remember_typed(
     handle: &Arc<PalaceHandle>,
     content: &str,
     importance: f32,
     drawer_type: DrawerType,
 ) -> uuid::Uuid {
+    let mut opts = RememberOptions::default();
+    opts.force = true;
+    opts.classify_as = Some(drawer_type);
     handle
         .remember_with_options(
             content.to_string(),
             RoomType::General,
             vec![],
             importance,
-            RememberOptions {
-                force: true,
-                classify_as: Some(drawer_type),
-                ..RememberOptions::default()
-            },
+            opts,
         )
         .await
         .expect("remember")
@@ -204,13 +199,7 @@ async fn task_completed_at_round_trips_through_reopen() {
     handle.flush().expect("flush");
     drop(handle); // release the redb write lock before reopening
 
-    let palace = Palace {
-        id: PalaceId::new("task-completed"),
-        name: "task-completed".into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir,
-    };
+    let palace = Palace::new(PalaceId::new("task-completed"), "task-completed", data_dir);
     let reopened = PalaceHandle::open(&palace).expect("reopen palace");
     let drawers = reopened.drawers.read();
     let d = drawers
@@ -246,13 +235,7 @@ async fn new_drawer_types_survive_a_palace_reopen() {
     handle.flush().expect("flush");
     drop(handle); // release the redb write lock before reopening
 
-    let palace = Palace {
-        id: PalaceId::new("typed-reopen"),
-        name: "typed-reopen".into(),
-        description: None,
-        created_at: Utc::now(),
-        data_dir,
-    };
+    let palace = Palace::new(PalaceId::new("typed-reopen"), "typed-reopen", data_dir);
     let reopened = PalaceHandle::open(&palace).expect("reopen palace");
     let drawers = reopened.drawers.read();
     for (id, want) in written {
