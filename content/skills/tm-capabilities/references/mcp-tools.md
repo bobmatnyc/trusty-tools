@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-36 tools.
+37 tools.
 
 ## `session_list`
 
@@ -333,6 +333,15 @@ Resolve a secret key to its `secret://` reference for one project, on demand, th
 |---|---|---|
 | `key` | `string` | yes |
 | `project` | `string` | yes |
+
+## `ask_owner`
+
+Ask the owner one question as a Slack DM, through the daemon's bot. Only the live managed Architect session may ask: the daemon proves the caller from the calling process, and refuses everyone else. The recipient must be a Slack user id (`U…`) that a channel route names; a channel or group-DM id is refused. Returns `{ question_id, route, dm_channel_id, thread_ts }` once the question is posted and recorded; an answer binds to `question_id`. Every refusal sends nothing and names its rule (`asker_unproven`, `recipient_not_user_id`, `no_route`, `snapshot_stale`, `user_token_refused`, `table_unavailable`, ...). `send_outcome_unknown` means the question may have been posted; its id is never reused.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `question` | `string` | yes |
+| `recipient` | `string` | yes |
 
 ## Sibling Daemon MCP Surfaces
 

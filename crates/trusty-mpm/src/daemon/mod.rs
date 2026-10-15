@@ -71,6 +71,8 @@ pub mod lock;
 pub mod log_drain;
 pub mod managed_routes;
 pub mod manager;
+// #9856: the `ask_owner` MCP tool's daemon body.
+pub mod mcp_ask_owner;
 pub mod mcp_backend;
 pub mod mcp_bugreport;
 pub mod mcp_console;

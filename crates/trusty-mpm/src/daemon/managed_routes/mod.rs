@@ -26,6 +26,9 @@ use crate::session_manager::ManagedSessionId;
 use crate::session_manager::decommission_force::ProvisioningDirt;
 
 pub mod activity;
+// #9856: `POST /api/v1/channels/ask-owner` and the `ask_owner` MCP body.
+#[cfg(feature = "channels")]
+pub mod ask_owner;
 pub(crate) mod auto_relaunch;
 pub(crate) mod cores;
 pub mod delete;
@@ -135,6 +138,16 @@ pub fn egress_verdict_router() -> axum::Router<Arc<DaemonState>> {
     {
         axum::Router::new()
     }
+}
+
+/// The daemon's channel sub-routers: the egress verdict (#8454 VC) and
+/// `ask_owner` (#9856). `api.rs` merges this one router, so a new channel
+/// route never grows that file past its frozen SLOC budget.
+pub fn channels_router() -> axum::Router<Arc<DaemonState>> {
+    let router = egress_verdict_router();
+    #[cfg(feature = "channels")]
+    let router = router.merge(ask_owner::router());
+    router
 }
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
