@@ -7,7 +7,8 @@
 //! the listing instead (D8): exit 0 alone never counts.
 //! What, for a key `K`, each run in a fresh empty 0700 directory passed as
 //! `--cwd` with `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the account's
-//! mapping (V4) and every inherited `VERCEL_*` removed:
+//! mapping (V4) and every inherited `VERCEL_*`, `NODE_*`, `NOW_*`,
+//! `npm_config_*`/`NPM_CONFIG_*`, proxy and `SSL_CERT_*` variable removed:
 //! 1. baseline: `vercel env ls <target>` for `production`, then `preview`.
 //!    It proves the login and the link; a signed-out CLI is
 //!    [`SecretsError::BackendLocked`] and nothing is pushed.
