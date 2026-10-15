@@ -656,25 +656,25 @@ trusty_memory::engine::registry::PalaceRegistry::with_max_open	method	NARROW	no 
 trusty_memory::engine::registry::PalaceRegistry::with_open_queue_timeout	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
 trusty_memory::engine::registry::PalaceRegistry::with_writer_intent	method	KEEP	trusty-mpm src/core/sm/memory_tests.rs	A4
 trusty_memory::engine::registry::PalaceRenameError	enum	KEEP	service::rename::RenameError::Palace field type (server)	A4
-trusty_memory::engine::registry::PalaceRenameError::Busy	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Busy	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Busy::detail	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Busy::palace	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::InvalidTarget	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::InvalidTarget	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::InvalidTarget::reason	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::Io	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::Io	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Io::context	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::Io::source	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::NotFound	variant	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::alias	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::SourceIsAlias::target	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetExists	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetExists	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetExists::new	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetIsAlias::target	field	KEEP	member of PalaceRenameError	A4
-trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty	variant	KEEP	member of PalaceRenameError	A4
+trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty	variant	KEEP	variant-pending T3: member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::new	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::TargetNotEmpty::reason	field	KEEP	member of PalaceRenameError	A4
 trusty_memory::engine::registry::PalaceRenameError::is_conflict	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A4
@@ -1057,12 +1057,12 @@ trusty_memory::engine::share::ImportSummary::merged	field	KEEP	ADR-0067 intercha
 trusty_memory::engine::share::ImportSummary::skipped	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::ImportSummary::unchanged	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::DigestMismatch	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownFormatVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::RecordError::UnknownHashVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::SUPERSEDED_BY	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z)	A5
@@ -1106,12 +1106,12 @@ trusty_memory::engine::share::import_palace_records	fn	KEEP	ADR-0067 interchange
 trusty_memory::engine::share::merge_records	fn	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record	mod	KEEP	path of the share interchange API (ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z))	A5
 trusty_memory::engine::share::record::RecordError	enum	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::DigestMismatch	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::DigestMismatch	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::DigestMismatch::computed	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::DigestMismatch::declared	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::UnknownFormatVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownFormatVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::UnknownFormatVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
-trusty_memory::engine::share::record::RecordError::UnknownHashVersion	variant	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
+trusty_memory::engine::share::record::RecordError::UnknownHashVersion	variant	KEEP	variant-pending T3: ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::RecordError::UnknownHashVersion::found	field	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::SHARE_FORMAT_VERSION	const	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller	A5
 trusty_memory::engine::share::record::SharedMemoryRecord	struct	KEEP	ADR-0067 interchange format: export JSONL and SHARE_FORMAT_VERSION (Q2 KEEP, Architect 05:16Z); deletion candidate, Bob decides (Architect 05:16Z): no non-test caller; tests/recall_supersession.rs	A5
@@ -1490,14 +1490,14 @@ trusty_memory::engine::store::hnsw_store::HnswStore::unalias	method	NARROW	no co
 trusty_memory::engine::store::hnsw_store::HnswStore::upsert	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
 trusty_memory::engine::store::hnsw_store::HnswStore::with_palace	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError	enum	KEEP	named by hnsw_store::Result	A3b
-trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount	variant	KEEP	variant-pending T2: member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount::got	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::ChunkCount::max	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
-trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch	variant	KEEP	variant-pending T2: member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch::expected	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::DimensionMismatch::got	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::DrawerKey	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
-trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
+trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed	variant	KEEP	variant-pending T2: member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed::last_candidate	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::IdAllocationFailed::probes	field	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
 trusty_memory::engine::store::hnsw_store::HnswStoreError::InvalidUuid	variant	KEEP	member of HnswStoreError (named by hnsw_store::Result)	A3b
@@ -1522,11 +1522,11 @@ trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::budget	method	NA
 trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::is_tripped	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBreaker::spawned_ops	method	NARROW	no consumer outside the library; unit tests only, #[cfg(test)]	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError	enum	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
-trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded	variant	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded	variant	KEEP	variant-pending T2: tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::budget	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::op	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::BudgetExceeded::palace	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
-trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged	variant	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
+trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged	variant	KEEP	variant-pending T2: tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::OpBudgetError::Wedged::palace	field	KEEP	tests/hnsw_abandoned_health_9487.rs; HnswStoreError::OpBudget payload	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::abandoned_ops_in_flight	fn	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::hnsw_store::op_budget::default_op_budget	fn	NARROW	no consumer outside the library	A3b
@@ -1536,11 +1536,11 @@ trusty_memory::engine::store::incompatible_backup_path	reexport	NARROW	re-export
 trusty_memory::engine::store::is_incompatible_format	reexport	NARROW	re-export; no consumer outside the library	A3b
 trusty_memory::engine::store::kg	mod	KEEP	tests/kg_graph_tests.rs	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync	enum	KEEP	error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424)	A3a
-trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale	variant	KEEP	variant-pending T1: member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::cause	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::committed	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::CommittedButStale::operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
-trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale	variant	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
+trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale	variant	KEEP	variant-pending T1: member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::earlier_committed	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::earlier_operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
 trusty_memory::engine::store::kg::AdjacencyDesync::HandleStale::operation	field	KEEP	member of AdjacencyDesync (error KnowledgeGraph::assert/retract return through anyhow; documented downcast contract (#5424))	A3a
@@ -1790,50 +1790,50 @@ trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_FORMAT_VERSION	const	N
 trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_KIND	const	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SNAPSHOT_MANIFEST	const	NARROW	no consumer outside the library	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError	enum	KEEP	engine::PalaceHandle::snapshot error type (A4)	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::BackupRootUnsafe::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ChecksumMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::actual	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::expected	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::CountMismatch::table	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::DestinationExists::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::name	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidBackupName::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::InvalidManifest::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Io::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ManifestJson::source	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::NoDataDir::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::found	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::PalaceFormatTooNew::supported	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::ReadOnlyHandle::palace	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::op	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::Redb::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::TargetNotEmpty::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnknownTables::tables	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
-trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	variant	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
+trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent	variant	KEEP	variant-pending T3: member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::path	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotError::UnsafeBackupComponent::reason	field	KEEP	member of SnapshotError (engine::PalaceHandle::snapshot error type (A4))	A3a
 trusty_memory::engine::store::kg_redb::snapshot::SnapshotFile	struct	NARROW	no consumer outside the library	A3a
@@ -1991,46 +1991,46 @@ trusty_memory::engine::store::palace_store::PalaceStore::metadata_present	method
 trusty_memory::engine::store::palace_store::PalaceStore::save_identity	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::palace_store::PalaceStore::save_palace	method	KEEP	tests/palace_backup_9282.rs	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError	enum	KEEP	error type of PalaceStore::metadata_present and save_palace	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::BackupFailed::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::actual	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::expected	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::BackupVerifyMismatch::file	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::marker	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::mirror	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerMismatch::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMarkerUnreadable::reason	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::from	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::reason	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatMigrationFailed::to	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatNeedsMigration::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooNew::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::found	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::palace	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::FormatTooOld::supported	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::available	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::needed	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::InsufficientSpace::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::Io	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Io	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::Io::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::Io::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
-trusty_memory::engine::store::palace_store::PalaceStoreError::Json	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
+trusty_memory::engine::store::palace_store::PalaceStoreError::Json	variant	KEEP	variant-pending T2: member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::Json::path	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::Json::source	field	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
 trusty_memory::engine::store::palace_store::PalaceStoreError::NotFound	variant	KEEP	member of PalaceStoreError (error type of PalaceStore::metadata_present and save_palace)	A3b
@@ -2191,7 +2191,7 @@ trusty_memory::engine::store::write_deadline::DeadlinedWrite::check	method	NARRO
 trusty_memory::engine::store::write_deadline::DeadlinedWrite::check_before_commit	method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::write_deadline::DeadlinedWrite::deref	trait_method	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError	enum	KEEP	HnswStoreError::WriteDeadline payload	A3b
-trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded	variant	KEEP	HnswStoreError::WriteDeadline payload	A3b
+trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded	variant	KEEP	variant-pending T1: HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::budget	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::held	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
 trusty_memory::engine::store::write_deadline::WriteTxnError::DeadlineExceeded::palace	field	KEEP	HnswStoreError::WriteDeadline payload	A3b
