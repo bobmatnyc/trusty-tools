@@ -3,13 +3,18 @@
 - **Status:** Accepted
 - **Date:** 2026-10-06
 - **Accepted:** 2026-10-06 (Bob, ruling d7)
+- **Amended:** 2026-10-15
+  ([#9918](https://github.com/bobmatnyc/trusty-tools/issues/9918)): the N-1
+  rule is replaced by a chained migration from every supported older format.
+  Changed in place: D3 rules 2–4, D4, D6, D7, Consequences and Alternatives;
+  see [Amendment 2026-10-15](#amendment-2026-10-15-chained-migration-9918)
 - **Scope:** crate `trusty-memory` (engine store layer after
   [#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271); today
   `trusty-common` `memory_core::store`), the palace directory layout under
   the data root, the export format
 - **Reversibility Cost:** High — once a 1.x release stamps format versions on
-  user palaces, every later release must honour those numbers and keep an
-  N-1 migration for each one
+  user palaces, every later release must honour those numbers and keep the
+  migration step from each one to the next (amended 2026-10-15, #9918)
 - **Decision Drivers:** owner ruling 2026-10-06 (Bob): the on-disk palace
   format is part of the 1.0 contract, and memory sync lands in 1.x through
   the versioned format plus a migration; the triple-key marker that treats a
@@ -132,23 +137,28 @@ them (DOC-80 §3), and is outside this format.
    touch. The error names the palace, both versions, and "upgrade
    trusty-memory to a release that reads format <v>". Other palaces open
    normally. Fixes the `>=` check at `migrate.rs:103`.
-2. **Auto-migrate N-1 only.** At open, a writer-intent open migrates a
-   format N-1 palace to N. A read-only open of an N-1 palace is refused, and
-   the error tells the caller to let the daemon migrate it. A palace at N-2
-   or older is refused with an error naming the last release line that reads
-   it. The upgrade guide
+2. **Auto-migrate every supported older format, in order** (amended
+   2026-10-15, #9918). At open, a writer-intent open migrates a palace at any
+   format from `OLDEST_MIGRATABLE_FORMAT` up to N by running each step
+   k → k+1 in ascending order, behind one verified backup taken before the
+   first step. A read-only or observer open of an older palace is refused,
+   and the error tells the caller to start the daemon so it migrates the
+   palace. A palace older than `OLDEST_MIGRATABLE_FORMAT` (0 today, so no
+   palace) is refused `FormatTooOld`, and the error tells the operator to
+   migrate it with a release that reads its format. The upgrade guide
    ([#9282](https://github.com/bobmatnyc/trusty-tools/issues/9282), E14) keeps
-   that table.
+   the table of release lines.
 3. **Back up before migrating, and abort if the backup fails.**
    - **What:** every primary file in D2 is copied to
      `<data_root>/backups/format-migration/<palace_id>/<from>-to-<to>-<UTC timestamp>/`.
-     Derived files are not copied.
+     Derived files are not copied. A chain takes one backup: `<from>` is the
+     format before its first step and `<to>` is N (#9918).
    - **Verify:** the copy is fsynced and each file is checked by length and
      content hash against the source. The existing `ensure_verified_backup`
      (`migrate.rs:298`) checks length only, and it reuses any earlier backup
      file of the same length.
    - **Abort:** any copy or verify failure aborts the migration before the
-     first write, and the palace stays at N-1 and refuses to open.
+     first write, and the palace stays at its format and refuses to open.
    - **Retention:** the two newest migration backups per palace are kept.
      `doctor` reports their total size. Nothing else deletes them.
    - **Replace the sidecars:** the in-directory `*.pre-4810.bak` pattern is
@@ -156,12 +166,16 @@ them (DOC-80 §3), and is outside this format.
 4. **Crash-safe means re-runnable.**
    - **Order:** a migration runs as ordered steps, and each step is
      idempotent.
-   - **Commit point:** the last step writes the `palace_format` marker in the
-     same redb transaction as the final `kg.redb` change. The `palace.json`
-     mirror is written after that, by atomic rename.
-   - **After a crash:** the marker still says N-1, so the next open redoes
-     every step. It starts from the files on disk, never from a staged copy,
-     and keeps the backup it already verified.
+   - **Commit point** (amended 2026-10-15, #9918): each step k → k+1 writes
+     the `palace_format` marker k+1 in the same redb transaction as its
+     `kg.redb` change. The `palace.json` mirror for k+1 is written just
+     before that transaction, by atomic rename, so an older binary refuses
+     the palace from the first changed byte. While the migration record
+     exists, a mirror above the marker means "resume", not a mismatch.
+   - **After a crash:** the marker still says the format of the last
+     committed step, so the next writer open resumes the chain from there.
+     It starts from the files on disk, never from a staged copy, and keeps
+     the backup it already verified. A failed step never advances the marker.
    - **Failure is fail-closed:** a failed migration leaves the palace
      refused, never opened un-migrated. The palace is excluded from recall
      and `doctor` reports it, while the other palaces keep working. This
@@ -187,7 +201,11 @@ runs these tests:
 - a backup into an unwritable directory aborts, and the fixture bytes are
   unchanged;
 - a fault hook kills the migration after each step, and the next open
-  completes it.
+  completes it;
+- (amended 2026-10-15, #9918) every format below N+1 has a fixture and a
+  `kg.redb` step, and each fixture migrates to N+1 through the chain. A
+  length check fails a format bump that adds no step or no fixture. Format 0
+  has a hand-written builder, not a checked-in blob.
 
 ### D5. The `*.v2-incompatible` quarantine
 
@@ -211,7 +229,8 @@ size. Recovering one is a manual step that the E14 guide documents.
   `{uuid}#{n}` row can exist. The stamp is a fence: a 1.x binary that reads
   format 1 would skip, orphan or, in its dream rebuild, discard chunk rows,
   and the stamp makes it refuse the palace (`FormatTooNew`) instead. A
-  format-0 palace is refused `FormatTooOld`; open it first with 0.33.x.
+  format-0 palace runs the 0 → 1 step first, then this one (amended
+  2026-10-15, #9918).
   Re-embedding the drawers over the window is separate work that follows
   this stamp; until it runs, such a drawer keeps its one truncated vector.
   The backup covers primary files only, so it stays small.
@@ -246,16 +265,21 @@ review:
   ([#9283](https://github.com/bobmatnyc/trusty-tools/issues/9283)), and an age
   rule would delete the only restore point first. `doctor` reports the total
   size (D3 rule 3).
-- **N-2 path.** Decided (Bob, 2026-10-06): no `palace migrate --chain` command
-  in 1.x; the E14 table of release lines is the N-2 path. The owner's N-1 rule
-  keeps one migration per binary. A chain would keep every past migration in
-  the binary and multiply the D4 fixture matrix, which is why "auto-migrate
-  any older format" is rejected below.
+- **N-2 path.** ~~Decided (Bob, 2026-10-06): no `palace migrate --chain`
+  command in 1.x; the E14 table of release lines is the N-2 path. The owner's
+  N-1 rule keeps one migration per binary. A chain would keep every past
+  migration in the binary and multiply the D4 fixture matrix, which is why
+  "auto-migrate any older format" is rejected below.~~ Replaced 2026-10-15
+  (#9918): the writer open runs the chain itself, with no separate command.
+  A step is never removed while a supported format needs it. Dropping a
+  format needs a superseding ADR, `OLDEST_MIGRATABLE_FORMAT` raised in the
+  same PR, and the `FormatTooOld` message naming the last release that reads
+  the dropped format.
 - **Read-only access to a refused palace.** Decided (Bob, 2026-10-06): a
   failed-migration palace stays fully offline in the binary that failed. The
-  backup is a complete format N-1 palace, so an operator who needs its data
-  restores it (Consequences) and reads it with the release line that writes
-  N-1. A second read path into a backup directory would be a new surface with
+  backup is a complete palace at the format the migration started from
+  (#9918), so an operator who needs its data restores it (Consequences) and
+  reads it with the release line that writes that format. A second read path into a backup directory would be a new surface with
   its own tests, used only in a failure case.
 - **`recall.redb` class.** Decided (Bob, 2026-10-06): `recall.redb` is
   auxiliary. It holds hit/miss telemetry
@@ -288,8 +312,8 @@ review:
 
 - Once a palace migrates, a downgrade within 1.x is not supported. Restore
   means using the backup and losing the writes made since.
-- N-1 only means a user who skips several format bumps must step through
-  intermediate releases. The E14 table carries that cost.
+- Every release carries one migration step per past supported format, and
+  one fixture per format (D4) (amended 2026-10-15, #9918).
 - **Accepted: a failed migration takes that palace offline.** The palace is
   refused, never opened un-migrated, where today it opens degraded
   (`migrate.rs:22`). This is fail-closed, in line with the 1.0 data-loss
@@ -301,8 +325,9 @@ review:
     writer-intent open redoes every step from the files on disk (D3 rule 4).
   - **Restore:** copy the primary files back from
     `<data_root>/backups/format-migration/<palace_id>/<from>-to-<to>-<UTC timestamp>/`.
-    The palace is then at N-1 again, and the next open migrates it, or a
-    release from the line that writes N-1 reads it.
+    The palace is then at the format the migration started from again, and
+    the next open migrates it, or a release from the line that writes that
+    format reads it.
 - Each migration release adds a fixture to `testdata/` for good.
 - The 0 → 1 migration touches the whole estate (116 directories under
   `palaces/` on the owner's machine) on the first 1.0 open, so its backup
@@ -323,8 +348,10 @@ None remaining at review (2026-10-06).
 - **Keep per-feature markers.** Rejected: three markers already disagree in
   semantics (gate vs record), and each new change would add a marker and a
   gate.
-- **Auto-migrate any older format.** Rejected by the owner's N-1 rule. It
-  also multiplies the fixture matrix by every past format.
+- **Auto-migrate any older format without a bound.** Rejected. The
+  2026-10-15 amendment (#9918) migrates every format from
+  `OLDEST_MIGRATABLE_FORMAT` up, one step and one fixture per format, so the
+  test matrix grows by one fixture per format bump.
 - **Migrate into a staged copy and swap the directory.** Rejected for now:
   a directory swap is not atomic with a live daemon holding locks on files
   inside it. Idempotent steps with a redb commit point give re-runnability
@@ -355,3 +382,50 @@ Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
   (D6). The connector state directory and the sync wire format are outside
   this format.
 - **ADR-0029 (MSRV and edition policy):** No interaction.
+- **ADR-0066 (1.x compatibility contract), after the 2026-10-15 amendment:**
+  Consistent. Its "auto-migrate N-1" wording for surface 3 now reads as this
+  ADR's D3 rule 2: every supported older format migrates, in order.
+
+## Amendment 2026-10-15: chained migration (#9918)
+
+**Why:** trusty-memory 0.35.0 refused every format-0 palace `FormatTooOld`
+when an upgrade skipped 0.33.x, and no release after 0.33.x carried the
+0 → 1 step (PR [#9739](https://github.com/bobmatnyc/trusty-tools/pull/9739)
+removed it). The N-1 rule stranded those palaces. This amendment replaces
+D3 rule 2 and the D7 "N-2 path"; the edits above are marked with the date.
+
+**What the binary does** (`crates/trusty-memory/src/engine/store/`, PRs
+[#9920](https://github.com/bobmatnyc/trusty-tools/pull/9920) and
+[#9921](https://github.com/bobmatnyc/trusty-tools/pull/9921)):
+
+- **Steps.** `kg_redb::migrate::STEPS` holds step k → k+1 at index k: the
+  0 → 1 triple-key rewrite restored from 0.33.0, and the 1 → 2 stamp. The
+  test `the_step_table_has_one_step_per_older_format` fails when
+  `PALACE_FORMAT_SUPPORTED` rises without a new step.
+- **Classification.** `check_format` returns `FormatNeedsMigration` for any
+  format from `OLDEST_MIGRATABLE_FORMAT` (0) up to N-1, and `FormatTooOld`
+  only below that bound, which no palace reaches today.
+- **One backup, one record, one lock per chain.** The backup directory is
+  `<from>-to-<N>-<UTC>`, taken before the first step. The migration record
+  names it and is removed after the last step.
+- **Each step.** The `palace.json` mirror is written first, by atomic rename.
+  The `kg.redb` step then reads both markers inside its write transaction,
+  fails before any write unless they name the format it moves from, and
+  commits its table work and both markers together. The 0 → 1 step needs no
+  `palace_format` row and a triple-key marker that is absent (legacy keys,
+  rewritten) or v1; the 1 → 2 step needs format 1 and triple key v1. A failed
+  `kg.redb` step is `FormatMigrationFailed` naming that step, and the marker
+  stays at the step's starting format.
+- **Resume.** The next writer open starts the chain at the format `kg.redb`
+  holds, behind the backup the record names, after that backup verifies. A
+  record of a 0 → 1 move left by an interrupted 0.33.x migration is resumed
+  to N behind its own backup instead of refused.
+- **Read-only and observer opens** of an older palace, or of one with a
+  migration record, are refused; the read-only refusal is
+  `FormatNeedsMigration`.
+
+**Release lines:** trusty-memory 0.32.x and older wrote format 0, 0.33.x
+wrote format 1, and 0.35.0 and later write format 2.
+
+**Later format bumps** append one step and one fixture (D4) and keep every
+older step.

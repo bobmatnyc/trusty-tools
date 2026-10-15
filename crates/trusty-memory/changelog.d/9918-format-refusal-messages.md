@@ -1,0 +1,2 @@
+Changed
+- The `FormatNeedsMigration` and `FormatTooOld` error messages say what to do next. `FormatNeedsMigration` no longer says "one behind": it names the palace's format and tells the operator to start the trusty-memory daemon, which migrates the palace behind a verified backup, then retry. `FormatTooOld` tells the operator to install a release that reads the palace's format, start its daemon once, then retry with this release ([#9918](https://github.com/bobmatnyc/trusty-tools/issues/9918))
