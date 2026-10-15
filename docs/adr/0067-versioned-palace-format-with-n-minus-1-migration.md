@@ -6,7 +6,8 @@
 - **Amended:** 2026-10-15
   ([#9918](https://github.com/bobmatnyc/trusty-tools/issues/9918)): the N-1
   rule is replaced by a chained migration from every supported older format.
-  Changed in place: D3 rules 2–4, D4, D6, D7, Consequences and Alternatives;
+  Changed in place: D3 rules 2–4, D4, D6, D7, Reversibility Cost, Consequences,
+  Alternatives and Related Decisions;
   see [Amendment 2026-10-15](#amendment-2026-10-15-chained-migration-9918)
 - **Scope:** crate `trusty-memory` (engine store layer after
   [#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271); today
@@ -75,8 +76,8 @@ to it.
 Both places, with defined roles:
 
 - **Authoritative:** a `palace_format` key in the existing `kg_schema` table
-  of `kg.redb`. It is committed in the same redb write transaction as the
-  last step of each migration, so the version and the data cannot disagree.
+  of `kg.redb`. It is committed in the same redb write transaction as
+  each step of a migration, so the version and the data cannot disagree.
 - **Mirror:** a new `format_version` field in `palace.json`. It is read
   before any store opens, so a newer palace is refused without opening redb.
   It is not `schema_version`, which pre-1.0 binaries overwrite with `1`.
@@ -322,7 +323,7 @@ review:
   of two ways, which the E14 guide documents:
   - **Re-run:** fix the cause that `doctor` reports (disk space,
     permissions, an unreadable file), then restart the daemon. The next
-    writer-intent open redoes every step from the files on disk (D3 rule 4).
+    writer-intent open resumes from the format `kg.redb` holds, on the files on disk (D3 rule 4).
   - **Restore:** copy the primary files back from
     `<data_root>/backups/format-migration/<palace_id>/<from>-to-<to>-<UTC timestamp>/`.
     The palace is then at the format the migration started from again, and
@@ -362,7 +363,9 @@ None remaining at review (2026-10-06).
 Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
 
 - **ADR-0066 (trusty-memory 1.x compatibility contract):** Extends. This ADR
-  is ADR-0066's surface 3.
+  is ADR-0066's surface 3. After the 2026-10-15 amendment its "auto-migrate
+  N-1" wording for surface 3 reads as this ADR's D3 rule 2: every supported
+  older format migrates, in order.
 - **ADR-0027 (Rooms, wings and closets):** Consistent. Its additive,
   at-open, fail-open backfill stays legal for changes that need no bump
   (D3). A format migration may re-encode rows but never reclassifies,
@@ -382,9 +385,6 @@ Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
   (D6). The connector state directory and the sync wire format are outside
   this format.
 - **ADR-0029 (MSRV and edition policy):** No interaction.
-- **ADR-0066 (1.x compatibility contract), after the 2026-10-15 amendment:**
-  Consistent. Its "auto-migrate N-1" wording for surface 3 now reads as this
-  ADR's D3 rule 2: every supported older format migrates, in order.
 
 ## Amendment 2026-10-15: chained migration (#9918)
 

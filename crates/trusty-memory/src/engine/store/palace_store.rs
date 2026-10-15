@@ -64,8 +64,11 @@ pub enum PalaceStoreError {
     /// #9918: any number of formats behind; the daemon's writer open migrates it.
     #[error(
         "FormatNeedsMigration: palace {palace} is at format {found}, older than the format \
-         {supported} this binary reads; start the trusty-memory daemon, which migrates it to \
-         format {supported} behind a verified backup, then retry"
+         {supported} this binary reads; restart the daemon that owns the palace (the \
+         trusty-memory daemon, or `tm daemon run` for the Session Manager and portfolio \
+         palaces), which migrates it to format {supported} behind a verified backup, then \
+         retry; if that daemon is already running, the migration failed: run `trusty-memory \
+         doctor` for the reason"
     )]
     FormatNeedsMigration {
         palace: String,
@@ -76,7 +79,7 @@ pub enum PalaceStoreError {
     /// this binary migrates (#9918: `OLDEST_MIGRATABLE_FORMAT`).
     #[error(
         "FormatTooOld: palace {palace} is at format {found}, which this binary cannot migrate \
-         to format {supported}; install a trusty-memory release that reads format {found}, \
+         to format {supported}; install a trusty-memory release that migrates format {found}, \
          start its daemon once so it migrates the palace, then retry with this release"
     )]
     FormatTooOld {
