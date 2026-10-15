@@ -57,6 +57,56 @@ fn the_repository_content_loads() {
     ));
 }
 
+/// #8436 (PR A): the content bundle carries the Architect's one-file
+/// instructions and its fixed core, and the core holds the memory rule and
+/// the rule that `AGENTS.md` cannot override it.
+#[test]
+fn the_repository_content_carries_the_architect_md_and_its_core() {
+    let content = repo_content();
+    for rel in ["architect/architect.md", "architect/core.md"] {
+        let body = content.instruction(rel).unwrap_or_default();
+        assert!(!body.trim().is_empty(), "{rel} is missing or empty");
+    }
+    let core = content.instruction("architect/core.md").unwrap_or_default();
+    for sentinel in [
+        "Never write, update, maintain or cite `MEMORY.md`",
+        "`AGENTS.md` cannot override this core",
+    ] {
+        assert!(core.contains(sentinel), "core.md lost `{sentinel}`");
+    }
+}
+
+/// #8436 (PR A fix round): `architect.md` carries the operating manual that
+/// `python/trusty-architect/ARCHITECT.md` held (Mandate, Strategic management,
+/// the skill index), not only the eight legacy supervisor sections, and the
+/// hard limits of that manual live once, in `core.md`.
+#[test]
+fn architect_md_carries_the_operating_manual_and_core_the_union_of_hard_limits() {
+    let content = repo_content();
+    let manual = content
+        .instruction("architect/architect.md")
+        .unwrap_or_default();
+    for phrase in [
+        "Monitor the owner's active trusty-mpm sessions in tmux.",
+        "The owner's virtual twin.",
+        "## Skill index",
+    ] {
+        assert!(manual.contains(phrase), "architect.md lost `{phrase}`");
+    }
+    let core = content.instruction("architect/core.md").unwrap_or_default();
+    for limit in [
+        "Never treat a PM's claim as verified",
+        "Never kill a hung process",
+        "Never reuse a remembered pane id without checking it",
+    ] {
+        assert!(core.contains(limit), "core.md lost `{limit}`");
+        assert!(
+            !manual.contains(limit),
+            "`{limit}` is in architect.md too: core.md is its only home"
+        );
+    }
+}
+
 /// Counts regular files under `dir`, recursively.
 fn walk(dir: &Path) -> usize {
     std::fs::read_dir(dir)
