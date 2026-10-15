@@ -164,6 +164,17 @@
 #   directory name (`trusty-git-analytics`), so a release tag's prefix can be
 #   handed straight to it in either accepted form (#1128).
 #
+#   bash scripts/check_semver.sh --crate trusty-memory --profile engine-nodefault
+#     Surface profile (#9278): compare ONE declared surface instead of the
+#     all-features build — here trusty-memory's frozen engine API, built with no
+#     features (ADR-0066). The row in scripts/semver-surface-profiles.tsv names
+#     the features, the baseline (auto or pinned) and the mode. `informational`
+#     reports a computed break and exits 0; every fault (missing table or row, a
+#     bad row anywhere in the table, no baseline, a tool error) exits 3. Needs
+#     --crate; refused with --probe. Logic: scripts/lib/semver_profile.sh.
+#     Without --profile the gate runs exactly as before.
+#   SEMVER_GATE_PROFILES=<file>      read profiles from <file>. A self-test seam.
+#
 #   SEMVER_GATE_TOOLCHAIN_BIN=<dir>  pin the rustc/cargo the check runs under.
 #   SEMVER_GATE_TOOLCHAIN_BIN=       (set but empty) keep the ambient toolchain.
 #   SEMVER_GATE_CRATE_EXCLUSIONS=<file>  read crate exclusions from <file>. A
@@ -201,6 +212,9 @@
 #      failure), the diff scanned nothing, the registry was unreachable, the
 #      tool is missing, or a crate exclusion's premise has died. Nothing was
 #      compared, so nothing may be concluded.
+#   Under --profile (#9278): an `informational` break is exit 0 and a `blocking`
+#   one exit 1; a missing table or row, an unparsable table, a missing or
+#   unusable baseline and every tool fault are exit 3.
 #
 # Test: `scripts/check_semver_selftest.sh` proves every way this gate could lie
 #   — a vacuous scan, an unreachable registry, and (since #5289) a rustdoc build
@@ -247,6 +261,11 @@ EXCLUSIONS_FILE="${REPO_ROOT}/scripts/semver-checks-feature-exclusions.tsv"
 # file; the default is the only path any caller uses.
 CRATE_EXCLUSIONS_REL="scripts/semver-checks-crate-exclusions.tsv"
 CRATE_EXCLUSIONS_FILE="${SEMVER_GATE_CRATE_EXCLUSIONS:-${REPO_ROOT}/${CRATE_EXCLUSIONS_REL}}"
+# #9278: surface profiles, read only when --profile is given.
+PROFILE=""
+PROFILE_INFO_BREAKS=0
+PROFILES_REL="scripts/semver-surface-profiles.tsv"
+PROFILES_FILE="${SEMVER_GATE_PROFILES:-${REPO_ROOT}/${PROFILES_REL}}"
 
 # Exit statuses. `1` is reserved for a COMPUTED verdict that says break; every
 # way the gate can fail to compute one is `3` (#5289). Callers that only test
@@ -292,6 +311,14 @@ while [[ $# -gt 0 ]]; do
       PROBE_VERSION_OVERRIDE="$2"
       shift 2
       ;;
+    --profile)
+      [[ $# -lt 2 ]] && {
+        echo "ERROR: --profile needs a profile name" >&2
+        exit 2
+      }
+      PROFILE="$2"
+      shift 2
+      ;;
     -h | --help)
       # Prints the contiguous comment block after the shebang, so editing the
       # header above never silently truncates --help against a stale line range.
@@ -305,6 +332,32 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# #9278: a profile is a per-crate question, and the whole table is checked
+# before anything else runs — a bad row anywhere stops the run.
+if [[ -n "$PROFILE" ]]; then
+  if [[ -n "$PROBE_ONLY" ]]; then
+    echo "ERROR: --profile does not combine with --probe" >&2
+    exit 2
+  fi
+  if [[ -z "$EXPLICIT_CRATES" ]]; then
+    echo "ERROR: --profile needs --crate <name>" >&2
+    exit 2
+  fi
+  # shellcheck source=lib/semver_profile.sh
+  . "${REPO_ROOT}/scripts/lib/semver_profile.sh"
+  if [[ ! -f "$PROFILES_FILE" ]]; then
+    echo "FAIL: PROFILE FILE MISSING — ${PROFILES_FILE} does not exist." >&2
+    echo "      Profile '${PROFILE}' cannot be resolved, so nothing was compared. This is NOT a pass." >&2
+    exit "$EXIT_NO_VERDICT"
+  fi
+  if ! profile_err="$(semver_profile_validate "$PROFILES_FILE" 2>&1)"; then
+    echo "FAIL: PROFILE FILE UNPARSABLE — ${PROFILES_FILE}:" >&2
+    printf '%s\n' "$profile_err" | sed 's/^/      /' >&2
+    echo "      Nothing was compared. This is NOT a pass (issue #9278)." >&2
+    exit "$EXIT_NO_VERDICT"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # registry_probe <crate> <declared-version-or-empty> — print three lines:
 #     1. the latest non-yanked version on crates.io, of any kind, or `NONE`
@@ -312,6 +365,9 @@ done
 #        <declared-version>, or `NONE`
 #     3. the greatest non-yanked PRE-RELEASE strictly below it, or `NONE` —
 #        diagnostic only, so a skip can name what it declined to use
+#     4. with an optional third argument <pin> (#9278), `yes` when <pin> is a
+#        non-yanked release and `no` otherwise; `-` without one. Only the
+#        profile path reads it.
 # With an empty declared version there is no upper bound, so every release is a
 # candidate (that is the `--probe` form, which may be handed a crate this
 # workspace does not build).
@@ -346,7 +402,7 @@ done
 #   is CDN-cached and unrate-limited.
 # ---------------------------------------------------------------------------
 registry_probe() {
-  local crate="$1" current="${2:-}" path body code
+  local crate="$1" current="${2:-}" pin="${3:-}" path body code
   case "${#crate}" in
     1) path="1/${crate}" ;;
     2) path="2/${crate}" ;;
@@ -382,7 +438,7 @@ registry_probe() {
   fi
 
   local answer rc=0
-  answer="$(python3 - "$body" "$current" <<'PY'
+  answer="$(python3 - "$body" "$current" "$pin" <<'PY'
 import json, sys
 
 def prerelease(v):
@@ -412,6 +468,10 @@ def key(v):
 ceiling = key(sys.argv[2]) if sys.argv[2] else None
 
 latest = prev = pre_below = None
+# #9278: a profile's pinned baseline — line 4 says whether it is a non-yanked
+# release. `-` when no pin was asked about.
+pin = sys.argv[3] if len(sys.argv) > 3 else ""
+pin_seen = False
 with open(sys.argv[1]) as fh:
     for line in fh:
         line = line.strip()
@@ -421,6 +481,8 @@ with open(sys.argv[1]) as fh:
         if rec.get("yanked"):
             continue
         v = rec["vers"]
+        if pin and v == pin:
+            pin_seen = True
         if latest is None or key(v) > key(latest):
             latest = v
         # STRICTLY below: a version equal to the declared one is the release
@@ -438,6 +500,7 @@ with open(sys.argv[1]) as fh:
 print(latest if latest else "NONE")
 print(prev if prev else "NONE")
 print(pre_below if pre_below else "NONE")
+print(("yes" if pin_seen else "no") if pin else "-")
 PY
   )" || rc=$?
 
@@ -1104,6 +1167,16 @@ else
   CANDIDATES="$(printf '%s' "$CANDIDATES" | grep -v '^$' | LC_ALL=C sort -u || true)"
 fi
 
+# #9278: every requested crate must have a row before any of them is compared.
+if [[ -n "$PROFILE" ]]; then
+  while IFS= read -r crate; do
+    [[ -z "$crate" ]] && continue
+    if ! semver_profile_row "$PROFILES_FILE" "$crate" "$PROFILE" > /dev/null 2>&1; then
+      semver_profile_fail "$crate" "NO PROFILE ENTRY" "The table has no row for this crate and profile."
+    fi
+  done <<< "$CANDIDATES"
+fi
+
 if [[ -z "$CANDIDATES" ]]; then
   echo "semver gate: scanned ${SCANNED}; no crate source changed (docs-only / CI-only) — OK."
   emit_verdict_line 0 0 0 0
@@ -1186,6 +1259,12 @@ semver_checks_run() {
 
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
+
+  # #9278: a profile run is its own arm; the default arm below is untouched.
+  if [[ -n "$PROFILE" ]]; then
+    semver_profile_check_crate "$crate"
+    continue
+  fi
 
   # Crate exclusion. This gate protects LIBRARY consumers — a dependent that
   # re-resolves a version floor on a lockfile-free `cargo install` and stops
@@ -1444,6 +1523,9 @@ if [[ "$inventoried" -ne 0 ]]; then
 fi
 if [[ "$inventory_blind" -ne 0 ]]; then
   SUMMARY="${SUMMARY}, ${inventory_blind} inventory NOT computed"
+fi
+if [[ "$PROFILE_INFO_BREAKS" -ne 0 ]]; then
+  SUMMARY="${SUMMARY}, ${PROFILE_INFO_BREAKS} informational break(s) under profile ${PROFILE} (not blocking)"
 fi
 echo "${SUMMARY} — OK."
 emit_verdict_line "$checked" "$skipped" "$inventoried" "$inventory_blind"
