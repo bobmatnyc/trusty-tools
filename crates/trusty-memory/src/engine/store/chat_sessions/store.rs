@@ -60,8 +60,8 @@ impl ChatSessionStore {
     /// 1. Resolves the redb path. `chat_sessions.db` is rewritten to
     ///    `chat_sessions.redb` next to it; other extensions are kept as-is.
     /// 2. Refuses a palace directory whose format is newer than this binary
-    ///    (`palace_format::gate_palace`); the `PalaceStoreError` is the root
-    ///    of the returned error, so `is_format_refusal` matches it. #9274:
+    ///    (`palace_format::gate_palace`) with `ChatSessionStoreError::Palace`,
+    ///    which `is_format_refusal` matches (#9278 T2). #9274:
     ///    a format-0 palace still opens it — the 0 → 1 migration does not
     ///    change this file — and the daemon migrates the palace itself.
     /// 3. Creates parent directories if missing.
@@ -71,8 +71,9 @@ impl ChatSessionStore {
     ///
     /// Test: `create_then_get_session_round_trips`,
     /// `roundtrip_persists_across_reopen`,
-    /// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`.
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
+    /// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`,
+    /// `chat_session_store_paths_return_chat_session_store_error`.
+    pub fn open(path: &Path) -> Result<Self> {
         // #9274: ADR-0067 D3 rule 1 — gate before the open and its init
         // write transaction touch `chat_sessions.redb`, a D2 primary file.
         if let Some(dir) = resolve_redb_path(path).parent()
@@ -82,12 +83,9 @@ impl ChatSessionStore {
                 || dir.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            palace_format::gate_palace(dir, &label)?;
+            // #9278 T2: typed, so the refusal no longer travels as anyhow.
+            palace_format::gate_palace(dir, &label).map_err(ChatSessionStoreError::Palace)?;
         }
-        Self::open_inner(path).map_err(anyhow::Error::from)
-    }
-
-    fn open_inner(path: &Path) -> Result<Self> {
         let redb_path = resolve_redb_path(path);
 
         if let Some(parent) = redb_path.parent()
@@ -141,7 +139,8 @@ impl ChatSessionStore {
     /// What: Generates a fresh UUID, writes a row with empty history and
     /// `created_at == updated_at == now`.
     /// Test: `create_then_get_session_round_trips`.
-    pub fn create_session(&self, title: Option<String>) -> anyhow::Result<String> {
+    // #9278 T2: `write_record` is typed already.
+    pub fn create_session(&self, title: Option<String>) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let record = ChatSessionRecord {

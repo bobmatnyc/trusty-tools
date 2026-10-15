@@ -411,6 +411,18 @@ fn format_refusal_is_seen_through_kg_error() {
     ))));
     let other = KgError::from_internal(anyhow::anyhow!("boom"));
     assert!(!is_format_refusal(&anyhow::Error::from(other)));
+    // #9278 T2: the same through a `HnswStoreError::Palace` from `from_internal`.
+    use crate::engine::store::hnsw_store::HnswStoreError;
+    let too_new = PalaceStoreError::FormatTooNew {
+        palace: "p".into(),
+        found: 2,
+        supported: 1,
+    };
+    let hnsw = HnswStoreError::from_internal(anyhow::Error::from(too_new));
+    assert!(matches!(hnsw, HnswStoreError::Palace(_)), "{hnsw:?}");
+    assert!(is_format_refusal(
+        &anyhow::Error::from(hnsw).context("open")
+    ));
 }
 
 /// Every distance from the supported format lands on its own arm.
@@ -541,7 +553,7 @@ fn save_palace_keeps_the_format_mirror_and_refuses_a_newer_one() {
 /// still a `PalaceStoreError` through `is_format_refusal`.
 #[test]
 fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
-    use crate::engine::store::chat_sessions::ChatSessionStore;
+    use crate::engine::store::chat_sessions::{ChatSessionStore, ChatSessionStoreError};
 
     let root = tempdir().expect("tempdir");
     let palace = saved_palace(root.path(), "chat-newer");
@@ -564,15 +576,17 @@ fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
     let err = ChatSessionStore::open(&chat)
         .err()
         .expect("a newer palace must refuse the chat store");
+    // #9278 T2: the refusal is the typed `ChatSessionStoreError::Palace`.
     assert!(
         matches!(
-            store_error(&err),
-            PalaceStoreError::FormatTooNew { found, supported, .. }
+            &err,
+            ChatSessionStoreError::Palace(PalaceStoreError::FormatTooNew { found, supported, .. })
                 if *found == PALACE_FORMAT_SUPPORTED + 1
                     && *supported == PALACE_FORMAT_SUPPORTED
         ),
-        "{err:#}"
+        "{err:?}"
     );
+    let err = anyhow::Error::from(err);
     assert!(is_format_refusal(&err), "{err:#}");
     assert_eq!(
         before,

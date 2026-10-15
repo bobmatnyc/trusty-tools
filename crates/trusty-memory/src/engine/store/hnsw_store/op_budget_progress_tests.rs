@@ -224,8 +224,10 @@ async fn a_stalled_group_trips_for_good_and_is_never_counted_complete() {
         "points before the park are indexed"
     );
 
-    let wedged =
-        |err: &anyhow::Error| matches!(op_budget_error(err), Some(OpBudgetError::Wedged { .. }));
+    // #9278 T2: `chunk_shapes` and `upsert_chunks` return `HnswStoreError`.
+    let wedged = |err: &(dyn std::error::Error + 'static)| {
+        matches!(op_budget_error(err), Some(OpBudgetError::Wedged { .. }))
+    };
     let shapes = store
         .chunk_shapes()
         .expect_err("chunk health must not count a tripped store's groups");
@@ -237,7 +239,10 @@ async fn a_stalled_group_trips_for_good_and_is_never_counted_complete() {
                 .upsert(Uuid::new_v4(), spread(1, DIM, 4).remove(0))
                 .await,
             store.remove(id).await,
-            store.upsert_chunks(id, spread(2, DIM, 5)).await,
+            store
+                .upsert_chunks(id, spread(2, DIM, 5))
+                .await
+                .map_err(anyhow::Error::from),
         ]
     };
     for refused in tokio::time::timeout(WATCHDOG, refusals)
@@ -245,7 +250,7 @@ async fn a_stalled_group_trips_for_good_and_is_never_counted_complete() {
         .expect("refusals")
     {
         let err = refused.expect_err("a tripped store must refuse");
-        assert!(wedged(&err), "expected Wedged, got {err:#}");
+        assert!(wedged(&*err), "expected Wedged, got {err:#}");
     }
 
     let spawned = breaker.spawned_ops();
