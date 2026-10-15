@@ -11,10 +11,11 @@
 //! `web::tests`.
 
 use crate::attribution::CreatorInfo;
+use crate::engine::PalaceRegistry;
 use crate::engine::palace::{Palace, PalaceId, RoomType};
+use crate::engine::palace_not_found::PalaceNotFound;
 use crate::engine::retrieval::RememberOptions;
 use crate::engine::store::{PalaceStore, PalaceStoreError};
-use crate::engine::{PalaceNotFound, PalaceRegistry};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};

@@ -34,7 +34,10 @@ pub mod palace;
 // #9544: the one statement of "this palace is empty" (rename, delete).
 pub mod palace_emptiness;
 // #9751: the one caller-facing palace-not-found error; it never holds a path.
-pub mod palace_not_found;
+// #9278: crate-only, the path-free form of `PalaceStoreError::NotFound`.
+// #9278: the listing is read only by the `server` surfaces.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) mod palace_not_found;
 #[cfg(test)]
 pub(crate) mod palace_not_found_tests;
 pub mod registry;

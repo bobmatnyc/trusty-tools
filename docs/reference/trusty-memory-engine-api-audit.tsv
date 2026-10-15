@@ -24,6 +24,13 @@ trusty_memory::engine::DrawerType::Task	variant	NARROW	removed: one path per typ
 trusty_memory::engine::DrawerType::Turn	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::Unknown	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::DrawerType::UserFact	variant	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::ExistingPalaces	enum	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed::shown	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Listed::total	field	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::NotListed	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::ExistingPalaces::Unavailable	variant	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::MAX_LISTED_PALACES	const	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::Palace	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Palace::created_at	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::Palace::data_dir	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
@@ -46,6 +53,7 @@ trusty_memory::engine::PalaceHandle::recall_log	field	NARROW	re-export; no consu
 trusty_memory::engine::PalaceHandle::vector_store	field	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
 trusty_memory::engine::PalaceHandle::write_mutex	field	NARROW	re-export; no consumer outside the library	A4
 trusty_memory::engine::PalaceId	struct	NARROW	removed: one path per type before 1.0 (ruling 2026-10-14)	A4
+trusty_memory::engine::PalaceNotFound	struct	NARROW	removed: re-export of a crate-only item (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::PalaceRegistry	struct	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::Room	struct	NARROW	removed: no caller anywhere	A4
 trusty_memory::engine::Room::id	field	NARROW	removed: no caller anywhere	A4
@@ -148,6 +156,22 @@ trusty_memory::engine::palace_emptiness::PalaceNotEmpty::Unconfirmed	variant	KEE
 trusty_memory::engine::palace_emptiness::check_palace_empty	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::palace_emptiness::conservative_legacy_probe	fn	NARROW	no consumer outside the library	A4
 trusty_memory::engine::palace_emptiness::count_chat_sessions	fn	NARROW	no consumer outside the library	A4
+trusty_memory::engine::palace_not_found	mod	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces	enum	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed::shown	field	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Listed::total	field	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::NotListed	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::ExistingPalaces::Unavailable	variant	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::MAX_LISTED_PALACES	const	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound	struct	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::existing	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::fmt	trait_method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::from_ids	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::listed_absence	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::listing	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::new	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
+trusty_memory::engine::palace_not_found::PalaceNotFound::palace	method	NARROW	crate-only: path-free form of PalaceStoreError::NotFound (#9278 rebase ruling 2026-10-15)	A4
 trusty_memory::engine::registry	mod	KEEP	path of PalaceRegistry (trusty-mpm, tests/)	A4
 trusty_memory::engine::registry::DEFAULT_MAX_OPEN_PALACES	const	NARROW	no consumer outside the library	A4
 trusty_memory::engine::registry::DEFAULT_RENAME_BUSY_WAIT	const	NARROW	no consumer outside the library	A4

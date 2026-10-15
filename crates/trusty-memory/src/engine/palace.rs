@@ -48,6 +48,7 @@ impl PalaceId {
 /// Test: covered indirectly by `health_probe_palace_is_invisible` in
 /// `web::tests` (drives a full `/health` round-trip and asserts the probe
 /// palace does not appear in `MemoryService::list_palaces`).
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
     id.as_str().starts_with("__")
 }

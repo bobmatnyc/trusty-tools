@@ -440,7 +440,7 @@ pub(crate) fn require_maintenance_lease(state: &AppState) -> Result<()> {
 /// What: unchanged behaviour, plus a [`crate::worker_liveness`] registration
 /// held for the duration of the open. Writes register once for their whole
 /// duration in [`begin_budgeted_write`] instead. A missing palace fails with
-/// the bare [`crate::engine::PalaceNotFound`] (id, no path, no list): this
+/// the bare [`crate::engine::palace_not_found::PalaceNotFound`] (id, no path, no list): this
 /// is the read path, `memory_recall` among it, which the UserPromptSubmit hook
 /// calls on every prompt, and the list costs a walk that JSON-decodes every
 /// `palace.json` (#9751). Only the write tools list, via
@@ -475,7 +475,7 @@ pub(crate) fn open_palace_handle(
 /// caller runs inside [`begin_budgeted_write`], whose [`WriteGuard`] already
 /// counts the write once. Read paths keep calling [`open_palace_handle`], which
 /// stamps a full budget and therefore behaves exactly as before. A missing
-/// palace fails with the listed [`crate::engine::PalaceNotFound`] (#9751):
+/// palace fails with the listed [`crate::engine::palace_not_found::PalaceNotFound`] (#9751):
 /// this is the write path (`memory_remember`, `memory_note`), where
 /// a caller needs the ids it could have used and one walk is not per-prompt.
 /// Test: `tools::tests::write_budget_tests`, `tools::tests::write_liveness_tests`,
@@ -514,11 +514,16 @@ fn open_within(
         .open_palace_within(&state.data_root, &pid, budget)
         .map_err(|e| {
             // #9751: an absence answers with the id, no path.
-            if e.downcast_ref::<crate::engine::PalaceNotFound>().is_none() {
+            if e.downcast_ref::<crate::engine::palace_not_found::PalaceNotFound>()
+                .is_none()
+            {
                 return e.context(format!("open palace {palace_id}"));
             }
             if list_existing {
-                match crate::engine::PalaceNotFound::listed_absence(&e, &state.data_root) {
+                match crate::engine::palace_not_found::PalaceNotFound::listed_absence(
+                    &e,
+                    &state.data_root,
+                ) {
                     Some(absent) => absent.into(),
                     None => e,
                 }

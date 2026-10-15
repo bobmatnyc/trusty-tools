@@ -750,11 +750,11 @@ impl PalaceRegistry {
     /// `load_palace` stopped making one layer down. This is the only place that
     /// knows which of `open_palace`'s failure modes is absence, so the answer
     /// lives here instead of being re-derived at each call site.
-    /// What: walks the `anyhow` chain for a [`PalaceNotFound`], which
-    /// `open_palace` raises in place of `PalaceStoreError::NotFound` (#9751:
-    /// that variant carries the metadata path, which callers relayed). Every
-    /// other failure — including `Io` and `Json` from `load_palace` — returns
-    /// `false`.
+    /// What: `true` for a root [`PalaceStoreError::NotFound`] or a root
+    /// [`PalaceNotFound`], the crate-only form of that variant `open_palace`
+    /// raises (#9751: the variant carries the metadata path, which callers
+    /// relayed). Every other failure — including `Io` and `Json` from
+    /// `load_palace` — returns `false`.
     /// Test: `open_error_is_absent_only_for_a_genuine_absence` covers a denied
     /// read and the path-free absence; `open_error_is_not_absent_for_an_unstattable_palace_json`
     /// covers a denied stat, the shape #5574 turned from `NotFound` into `Io`.
