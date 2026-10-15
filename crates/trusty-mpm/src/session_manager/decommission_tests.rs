@@ -283,6 +283,7 @@ fn sentinel_present_passes_safety_gate() {
 /// for a freshly-provisioned session.
 fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id,
         tmux_name: format!("tm-owner-gate-{id}"),
         cwd: std::path::PathBuf::from("/tmp"),

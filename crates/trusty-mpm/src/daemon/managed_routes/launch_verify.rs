@@ -463,6 +463,7 @@ mod tests {
     #[rustfmt::skip]
     fn stub_record(runtime: crate::runtime::RuntimeKind) -> crate::session_manager::SessionRecord {
         crate::session_manager::SessionRecord {
+            context_usage: None,
             id: crate::session_manager::ManagedSessionId::new(),
             tmux_name: "tmpm-probe".to_owned(),
             cwd: std::path::PathBuf::from("/tmp/project"),

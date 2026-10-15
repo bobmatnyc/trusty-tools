@@ -376,6 +376,7 @@ mod tests {
 
     fn make_record(workspace: Option<PathBuf>) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-snap-test".into(),
             cwd: PathBuf::from("/tmp/cwd"),

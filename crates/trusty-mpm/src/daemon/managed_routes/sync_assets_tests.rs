@@ -80,6 +80,7 @@ async fn seed(state: &Arc<DaemonState>, record: SessionRecord) {
 /// Build a record with every optional field at its default/absent value.
 fn base_record(id: ManagedSessionId, state: ManagedSessionState, cwd: PathBuf) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id,
         tmux_name: format!("tmpm-test-{id}"),
         cwd,

@@ -316,7 +316,8 @@ fn record_session_facts_at(
 /// environment with no home directory), which omits the segment.
 /// Test: covered through `savings_segment_probe`; the resolver has its own
 /// precedence tests (`test_resolve_env_wins_over_config`).
-fn savings_root() -> Option<PathBuf> {
+// #8394: `pub(super)` so the context-usage record lands on the same root.
+pub(super) fn savings_root() -> Option<PathBuf> {
     crate::commands::managed_root::resolve_managed_paths(None)
         .ok()
         .map(|paths| paths.root)

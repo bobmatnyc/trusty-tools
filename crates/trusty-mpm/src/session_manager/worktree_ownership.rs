@@ -887,6 +887,7 @@ mod tests {
             .expect("SessionManager::new");
         let id = ManagedSessionId::new();
         let record = SessionRecord {
+            context_usage: None,
             id,
             tmux_name: "tm-ownerless-test".into(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -1047,6 +1048,7 @@ mod tests {
         .expect("write sentinel");
 
         let record = SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: "tm-fallback-test".into(),
             cwd: ws.path().to_path_buf(),

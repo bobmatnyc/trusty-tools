@@ -270,6 +270,7 @@ mod tests {
         workspace_path: PathBuf,
     ) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id,
             tmux_name: format!("tm-foreign-claim-{id}"),
             cwd: PathBuf::from("/tmp/unrelated-cwd"),

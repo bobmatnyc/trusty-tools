@@ -215,6 +215,7 @@ async fn reap_spares_a_stopped_records_workspace() {
         .await
         .expect("seed session record");
     let stopped = SessionRecord {
+        context_usage: None,
         state: ManagedSessionState::Stopped,
         ..record
     };

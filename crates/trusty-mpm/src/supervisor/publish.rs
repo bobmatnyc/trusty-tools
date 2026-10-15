@@ -122,7 +122,8 @@ pub enum PublishError {
 /// resume failures, classifications — inside its `run_stats` field.
 /// Test: `published_metrics_round_trip`,
 /// `snapshot_without_interval_falls_back_to_the_default_cadence`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// #8394: not `Eq` — `FleetMetrics` now carries `f64` context figures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PublishedMetrics {
     /// When the supervisor wrote this snapshot.
     pub written_at: DateTime<Utc>,
@@ -155,7 +156,8 @@ fn default_interval_secs() -> u64 {
 /// `Unavailable` carries the operator-facing reason.
 /// Test: `read_status_absent_is_unavailable`, `read_status_corrupt_is_unavailable`,
 /// `read_status_old_snapshot_is_stale`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// #8394: not `Eq`, for the same reason as `PublishedMetrics`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorMetricsStatus {
     /// A snapshot no older than its own [`stale_after_secs`] window.
     Current {

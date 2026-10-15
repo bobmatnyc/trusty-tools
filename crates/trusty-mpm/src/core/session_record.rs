@@ -78,6 +78,16 @@ pub const KIND_TRANSCRIPT: &str = "session-transcript";
 /// `startup_context_tests.rs`.
 pub const KIND_STARTUP_CONTEXT: &str = "session-startup-context";
 
+/// Record kind holding the session's latest context-window and plan figures
+/// (#8394).
+///
+/// Why: same shape as the kinds above — written by the statusline, read by the
+/// daemon and supervisor in other processes. The value is one JSON
+/// [`crate::core::context_usage::ContextUsage`]; unlike the other kinds it is
+/// rewritten on every tick, because its `updated_at` is what marks it stale.
+/// Test: the store suite in `context_usage_tests.rs`.
+pub const KIND_CONTEXT_USAGE: &str = "session-context-usage";
+
 /// Is `session_id` a safe single path segment?
 ///
 /// Why: `session_id` arrives from Claude Code's stdin JSON, so it is

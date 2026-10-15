@@ -50,6 +50,7 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
 
 fn session_with_repo(repo_url: &str) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -86,6 +87,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
 
 fn session_no_repo() -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: "no-repo".into(),
         cwd: PathBuf::from("/tmp"),

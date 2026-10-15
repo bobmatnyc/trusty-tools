@@ -43,6 +43,7 @@ fn record_at(
     stop_cause: Option<StopCause>,
 ) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: workspace.path().to_path_buf(),

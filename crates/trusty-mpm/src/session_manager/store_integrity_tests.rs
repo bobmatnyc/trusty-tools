@@ -33,6 +33,7 @@ use crate::session_manager::store::{SessionStore, StoreError};
 /// Test: used by every fixture in this file.
 fn record(id: ManagedSessionId, task: &str) -> SessionRecord {
     SessionRecord {
+        context_usage: None,
         id,
         tmux_name: format!("tm-5007-{id}"),
         cwd: PathBuf::from("/tmp"),

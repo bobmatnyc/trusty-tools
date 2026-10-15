@@ -313,6 +313,7 @@ mod tests {
     /// `session_manager::store::tests::make_record`).
     fn bare_session(tmux_name: &str) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: tmux_name.to_string(),
             cwd: PathBuf::from("/tmp"),
@@ -354,6 +355,7 @@ mod tests {
     /// gate-rejected fixture instead.
     fn intact_session(tmux_name: &str, workspace: &Path) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             workspace_path: Some(workspace.to_path_buf()),
             state: ManagedSessionState::Active,
             workspace_owned: true,

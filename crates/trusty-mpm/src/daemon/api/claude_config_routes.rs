@@ -711,6 +711,7 @@ mod restart_pane_selection_tests {
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: tmux_name.to_string(),
             cwd: PathBuf::from("/tmp"),

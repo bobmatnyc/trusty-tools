@@ -272,6 +272,7 @@ fn architect_record(
         _ => "the Architect's helper (tm fleet init)",
     };
     SessionRecord {
+        context_usage: None,
         id,
         tmux_name: name.to_owned(),
         cwd: dir.to_path_buf(),

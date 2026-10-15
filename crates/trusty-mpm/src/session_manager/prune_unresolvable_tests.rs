@@ -46,6 +46,7 @@ async fn seed_live(
     pane_id: Option<&str>,
 ) {
     let record = SessionRecord {
+        context_usage: None,
         id,
         tmux_name: tmux_name.to_owned(),
         cwd,

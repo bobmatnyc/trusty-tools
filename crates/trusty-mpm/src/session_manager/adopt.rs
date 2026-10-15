@@ -300,6 +300,7 @@ impl SessionManager {
         // One construction site for the adopted record, so the no-collision
         // and recycled-name arms below cannot drift apart on any field.
         let build_record = |final_name: String| SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: final_name,
             cwd: cwd.clone(),
@@ -527,6 +528,7 @@ mod tests {
 
     fn make_record_with_workspace(workspace: PathBuf) -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-test".into(),
             cwd: workspace.clone(),
@@ -563,6 +565,7 @@ mod tests {
 
     fn make_record_unknown_cwd() -> SessionRecord {
         SessionRecord {
+            context_usage: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-external".into(),
             cwd: PathBuf::from("/unknown"),

@@ -304,6 +304,7 @@ impl SessionManager {
         }
 
         let record = SessionRecord {
+            context_usage: None,
             id,
             tmux_name: tmux_name.clone(),
             cwd,
