@@ -17,8 +17,8 @@ use std::path::PathBuf;
 ///
 /// Why: the caller of a tier-3 resolve must tell "no grant" from "server
 /// gone" from "refused", and must never mistake any of them for a value.
-/// What: the token branches (`NoGrant`, `TokenUnreadable`, `InvalidToken`,
-/// `Rearm`), the dial branches (`HomeUnavailable`, `UntrustedSocket`,
+/// What: the token branches (`NoGrant`, `TokenUnreadable`, `InvalidToken`),
+/// the dial branches (`HomeUnavailable`, `UntrustedSocket`,
 /// `Unavailable`, `Transport`, `Timeout`) and the answer branches
 /// (`Refused`, `EmptyResponse`, `Decode`, `KeyMismatch`).
 /// Test: `granted_client_debug_and_errors_never_show_token_or_value`,
@@ -30,15 +30,14 @@ pub enum GrantedError {
     /// stdin, stdout or stderr.
     #[error("no exec grant: TRUSTY_SECRETS_TOKEN_FD is unset or not an fd")]
     NoGrant,
-    /// The fd is not open, not a pipe, or holds no token yet.
+    /// The fd is not open, is not a read-only fd on an unlinked regular
+    /// file, or could not be read.
     #[error("the grant token could not be read")]
     TokenUnreadable(#[source] io::Error),
-    /// The fd held something other than 64 lowercase hex digits.
+    /// The token file held something other than exactly 64 lowercase hex
+    /// digits.
     #[error("the grant token is malformed")]
     InvalidToken,
-    /// The token could not be put back on its fd for child processes.
-    #[error("the grant token could not be passed on to child processes")]
-    Rearm(#[source] io::Error),
     /// No home directory is known, or it is empty, so the socket path is
     /// unknown.
     #[error("home directory is unavailable")]
@@ -91,7 +90,6 @@ impl GrantedError {
             Self::NoGrant => Self::NoGrant,
             Self::TokenUnreadable(e) => Self::TokenUnreadable(copy(e)),
             Self::InvalidToken => Self::InvalidToken,
-            Self::Rearm(e) => Self::Rearm(copy(e)),
             Self::HomeUnavailable => Self::HomeUnavailable,
             Self::UntrustedSocket { path, reason } => Self::UntrustedSocket {
                 path: path.clone(),
