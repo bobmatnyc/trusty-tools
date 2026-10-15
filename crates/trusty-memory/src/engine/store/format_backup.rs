@@ -4,7 +4,7 @@
 //! primary file is copied and proven identical, and a failed copy aborts it.
 //! The `.pre-4810.bak` sidecar (`kg_redb/migrate.rs`) checks length only and
 //! reuses any older file of the same length, so it cannot serve (#9274).
-//! What: [`ensure_format_backup`] copies the ADR-0067 D2 primary files into
+//! What: `ensure_format_backup` (test-only, so no doc link) copies the ADR-0067 D2 primary files into
 //! `<data_root>/backups/format-migration/<palace>/<from>-to-<to>-<UTC>/`. It
 //! needs 1.1x the source size free first. Each file is hashed while it is
 //! copied, the copy is fsynced and re-read, and the source is hashed again; any
