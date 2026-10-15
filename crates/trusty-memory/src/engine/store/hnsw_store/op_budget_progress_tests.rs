@@ -98,7 +98,7 @@ async fn a_legal_group_slower_than_the_budget_completes_without_tripping() {
 }
 
 /// Why (#9728): health reads `oldest_op` and reports an op older than its
-/// wedge line (twice the budget by default) as a wedged `hnsw` lock. A group
+/// wedge line as a wedged `hnsw` lock. A group
 /// that keeps making progress may legally outlast the budget, so its op's age
 /// must follow progress, not the call's start.
 /// What: 200 chunks at 5 ms a point under a 300 ms budget; samples the op's
@@ -267,7 +267,7 @@ async fn a_stalled_group_trips_for_good_and_is_never_counted_complete() {
 /// Health has to keep seeing a stalled group's op age past its wedge line.
 /// What: a 20-chunk group parks before point 5 and trips. Reads the parked
 /// op, waits one more budget, and asserts its start never moved and its age
-/// passed twice the budget, the default wedge line.
+/// passed twice the budget.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stalled_group_op_age_keeps_growing_past_the_budget() {

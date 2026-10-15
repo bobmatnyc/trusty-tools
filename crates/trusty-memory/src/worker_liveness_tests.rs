@@ -138,27 +138,124 @@ fn wedge_threshold_exceeds_the_open_queue_bound() {
     );
 }
 
-/// Why (issue #4001): writers queued on the palace write lock are tracked now,
-/// and they wait up to `write_lock_timeout()`. If the line followed only the
-/// open-queue bound, raising `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` would make a
-/// writer legitimately queued inside its bound read as wedged.
-/// What: drives the pure derivation with each bound in turn as the larger, and
-/// checks the operator override still wins outright.
+/// Bounds with every input distinct, so a test can tell which one moved.
+fn bounds(open_queue: u64, write_lock: u64, budget: u64, pipeline: u64) -> WedgeBounds {
+    WedgeBounds {
+        open_queue: Duration::from_secs(open_queue),
+        write_lock: Duration::from_secs(write_lock),
+        write_op_budget: Duration::from_secs(budget),
+        write_pipeline: Duration::from_secs(pipeline),
+    }
+}
+
+/// Why (#4001, #9783): the line must clear a write's whole legal span (its
+/// acquisition budget plus its pipeline ceiling) and still sit past the old
+/// wait line, so raising any one bound must move it. A raised
+/// `TRUSTY_WRITE_LOCK_TIMEOUT_SECS` that did not move it would make a writer
+/// queued inside its bound read as wedged (#4001).
+/// What: checks the exact derivation at the defaults, then raises each bound in
+/// turn and checks the line rises by the matching amount, and that the operator
+/// override still wins outright.
 /// Test: itself.
 #[test]
-fn wedge_threshold_doubles_the_larger_wait_bound() {
-    let short = Duration::from_secs(60);
-    let long = Duration::from_secs(300);
+fn wedge_line_is_the_write_span_plus_the_wait_line() {
+    let defaults = bounds(60, 60, 60, 240);
     assert_eq!(
-        derive_wedge_threshold(None, short, long),
-        long * 2,
-        "a raised write-lock bound must move the wedge line"
+        derive_wedge_threshold(None, &defaults),
+        Duration::from_secs(60 + 240 + 2 * 60),
+        "budget + pipeline + 2 x max(open_queue, write_lock)"
     );
-    assert_eq!(derive_wedge_threshold(None, long, short), long * 2);
+    let base = derive_wedge_threshold(None, &defaults);
+    let raised = [
+        (bounds(300, 60, 60, 240), 2 * 240, "open queue"),
+        (bounds(60, 300, 60, 240), 2 * 240, "write lock"),
+        (bounds(60, 60, 360, 240), 300, "write op budget"),
+        (bounds(60, 60, 60, 900), 660, "write pipeline"),
+    ];
+    for (b, rise, what) in raised {
+        assert_eq!(
+            derive_wedge_threshold(None, &b),
+            base + Duration::from_secs(rise),
+            "a raised {what} bound must move the wedge line"
+        );
+    }
     assert_eq!(
-        derive_wedge_threshold(Some(7), long, long),
+        derive_wedge_threshold(Some(7), &defaults),
         Duration::from_secs(7),
         "the operator override is taken verbatim"
+    );
+}
+
+/// Why (#9783, fail-open check): a zero, missing or absurd bound must not leave
+/// a line that no stall can cross, and must not panic the daemon at
+/// construction (the old `* 2` overflowed on a huge open-queue bound).
+/// What: a zero acquisition budget still leaves a finite line past the
+/// pipeline ceiling; all-zero bounds give a zero line, under which a 1 ms hold
+/// already reads wedged (fails closed); `u64::MAX`-second bounds saturate
+/// instead of panicking. The env path never reaches the all-zero case, because
+/// a zero `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS` is floored to the 240 s default.
+/// Test: itself.
+#[test]
+fn a_zero_or_absurd_bound_never_disables_wedge_detection() {
+    let no_budget = derive_wedge_threshold(None, &bounds(60, 60, 0, 240));
+    assert_eq!(no_budget, Duration::from_secs(240 + 120));
+    assert!(
+        Duration::from_secs(1800) > no_budget,
+        "a #3992-sized stall (1800 s) must still cross the line"
+    );
+
+    let zero = derive_wedge_threshold(None, &bounds(0, 0, 0, 0));
+    assert!(
+        Duration::from_millis(1) > zero,
+        "an all-zero line must over-report, never disable detection"
+    );
+    let floored = crate::engine::timeouts::floor_write_pipeline(Duration::ZERO);
+    assert!(
+        floored > Duration::ZERO,
+        "the env path floors a zero pipeline ceiling, so the line stays finite and non-zero"
+    );
+
+    let huge = derive_wedge_threshold(None, &bounds(u64::MAX, u64::MAX, u64::MAX, u64::MAX));
+    assert_eq!(
+        huge,
+        Duration::MAX,
+        "absurd bounds saturate rather than panic"
+    );
+}
+
+/// Why (#9783): a `memory_remember` waits up to `write_op_budget()` (60 s) for
+/// the palace write lock, then holds it across embed, upsert and persist for up
+/// to `write_pipeline_timeout()` (240 s). The pre-#9783 line,
+/// `2 x max(open_queue, write_lock)` = 120 s, called that write wedged while it
+/// was still inside both bounds.
+/// What: under the default env, a hold one second short of the pipeline
+/// ceiling, and the whole legal write span, must both sit inside
+/// `wedge_threshold()` — the `age > threshold` comparison `/health` makes for
+/// the lock arm and the pool arm.
+/// Test: itself.
+#[test]
+fn a_legal_write_span_does_not_cross_the_default_wedge_line() {
+    let _env = crate::env_test_lock::env_test_lock().blocking_lock();
+    if std::env::var("TRUSTY_WEDGE_THRESHOLD_SECS").is_ok() {
+        return; // operator override in effect; the relationship is theirs to pick
+    }
+    let line = wedge_threshold();
+    let pipeline = crate::engine::timeouts::write_pipeline_timeout();
+    let span = crate::engine::timeouts::write_op_budget() + pipeline;
+    let progressing = pipeline - Duration::from_secs(1);
+    assert!(
+        progressing > Duration::from_secs(120),
+        "precondition: the hold must sit past the pre-#9783 120 s line"
+    );
+    assert!(
+        line > progressing,
+        "a write {progressing:?} into its {pipeline:?} pipeline ceiling is progressing, \
+         yet the wedge line is {line:?}"
+    );
+    assert!(
+        line > span,
+        "the wedge line {line:?} must clear the full legal write span {span:?} \
+         (acquisition budget + pipeline ceiling)"
     );
 }
 

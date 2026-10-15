@@ -21,7 +21,8 @@ pub(super) const LOCK_STALL_ENV: &str = "TRUSTY_DOCTOR_LOCK_STALL_SECS";
 ///
 /// Why: past `write_lock_timeout()` (default 60 s) a writer queued behind the
 /// lock has already given up, so the stall is user-visible; the daemon's own
-/// wedge line sits at twice that. Env-overridable so an operator running long
+/// wedge line sits above a write's full legal span (#9783), so doctor warns
+/// first. Env-overridable so an operator running long
 /// deliberate transactions can move it.
 /// What: `TRUSTY_DOCTOR_LOCK_STALL_SECS` if set and parseable, else
 /// `write_lock_timeout()`.

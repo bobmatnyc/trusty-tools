@@ -598,8 +598,10 @@ pub struct AppState {
     /// global, which is what lets tests drive the wedge condition
     /// deterministically instead of mutating shared env state and racing each
     /// other.
-    /// What: defaults to [`worker_liveness::wedge_threshold`].
-    /// Test: `web::tests::health_tests::health_reports_wedged_worker_pool`.
+    /// What: defaults to [`worker_liveness::wedge_threshold`]; the two
+    /// write-bound builders re-derive it (#9783).
+    /// Test: `web::tests::health_tests::health_reports_wedged_worker_pool`,
+    /// `the_wedge_line_follows_the_configured_write_budgets`.
     pub wedge_threshold: std::time::Duration,
     /// Stamps for handle locks found held (#4001).
     ///
@@ -874,11 +876,16 @@ impl AppState {
     /// Why: tests must prove the two write legs draw on ONE budget without
     /// setting `TRUSTY_WRITE_OP_BUDGET_SECS`, which is process-wide and would
     /// race any test running in parallel.
-    /// What: consuming builder that overwrites [`AppState::write_op_budget`].
-    /// Test: `tools::tests::write_budget_tests`.
+    /// What: consuming builder that overwrites [`AppState::write_op_budget`]
+    /// and re-derives [`AppState::wedge_threshold`] from it.
+    /// Test: `tools::tests::write_budget_tests`,
+    /// `the_wedge_line_follows_the_configured_write_budgets`.
     #[must_use]
     pub fn with_write_op_budget(mut self, budget: std::time::Duration) -> Self {
         self.write_op_budget = budget;
+        // #9783: the wedge line follows the write bounds this state enforces.
+        self.wedge_threshold =
+            worker_liveness::wedge_threshold_for(self.write_op_budget, self.write_pipeline_budget);
         self
     }
 
@@ -888,11 +895,16 @@ impl AppState {
     /// the ceiling fires must not set `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`,
     /// which is process-wide and would race any parallel test.
     /// What: consuming builder that overwrites
-    /// [`AppState::write_pipeline_budget`].
-    /// Test: `tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling`.
+    /// [`AppState::write_pipeline_budget`] and re-derives
+    /// [`AppState::wedge_threshold`] from it.
+    /// Test: `tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling`,
+    /// `the_wedge_line_follows_the_configured_write_budgets`.
     #[must_use]
     pub fn with_write_pipeline_budget(mut self, budget: std::time::Duration) -> Self {
         self.write_pipeline_budget = budget;
+        // #9783: the wedge line follows the write bounds this state enforces.
+        self.wedge_threshold =
+            worker_liveness::wedge_threshold_for(self.write_op_budget, self.write_pipeline_budget);
         self
     }
 
