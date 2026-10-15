@@ -405,8 +405,8 @@ async fn purge_expired_leaves_tier_c_drawers_alone() {
 ///
 /// Why this is the one that matters: `purge_expired` has no non-test call site,
 /// while the open-time prune runs on every palace open and is the only sweep a
-/// production daemon actually executes. It also deletes from redb directly
-/// (`delete_drawer_sync`), so an unexempted Tier C fact would be gone from disk,
+/// production daemon actually executes. It also deletes from redb directly,
+/// so an unexempted Tier C fact would be gone from disk,
 /// not merely dropped from the in-memory table. Covering only `purge_expired`
 /// would leave the live deletion path untested (#4909 review).
 #[tokio::test]

@@ -33,7 +33,7 @@ use std::path::Path;
 pub const PALACE_FORMAT_SUPPORTED: u32 = 2;
 
 /// The `kg_schema` key that holds the authoritative palace format.
-pub const KG_SCHEMA_PALACE_FORMAT: &str = "palace_format";
+pub(crate) const KG_SCHEMA_PALACE_FORMAT: &str = "palace_format";
 
 /// The KG file the marker lives in, inside the palace directory.
 pub(crate) const KG_FILE: &str = "kg.redb";
@@ -84,7 +84,8 @@ pub(crate) enum FormatState {
 /// The format state of a palace, for `trusty-memory doctor` (#9274).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PalaceFormatStatus {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) enum PalaceFormatStatus {
     /// At this binary's format.
     Current,
     /// Behind; the daemon migrates it at its next writer-intent open.
@@ -362,7 +363,8 @@ pub(crate) fn gate_palace(data_dir: &Path, palace: &str) -> Result<()> {
 /// `Unverified`, never `Current`: the daemon may refuse that palace.
 /// Test: `status_reports_needs_migration_for_a_format_1_palace`,
 /// `status_reports_a_held_kg_as_unverified`.
-pub fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus> {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn palace_format_status(data_dir: &Path) -> Result<PalaceFormatStatus> {
     let label = data_dir.file_name().map_or_else(
         || data_dir.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -450,7 +452,7 @@ pub(crate) fn stamp_format(wtx: &redb::WriteTransaction, format: u32) -> anyhow:
 /// Why: a refusal never resolves by waiting, so the open retry loops stop on
 /// it (#9274), as they do for `is_incompatible_format_refusal`.
 /// Test: `format_errors_are_not_retried`.
-pub fn is_format_refusal(err: &anyhow::Error) -> bool {
+pub(crate) fn is_format_refusal(err: &anyhow::Error) -> bool {
     err.chain()
         .filter_map(|e| e.downcast_ref::<PalaceStoreError>())
         .any(PalaceStoreError::is_format_refusal)

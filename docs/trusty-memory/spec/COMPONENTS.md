@@ -93,7 +93,7 @@ the cross-cutting keyword → drawer-ids inverted index held on `PalaceHandle`
 - `engine/registry.rs` — `PalaceRegistry` (`DashMap<PalaceId, Arc<PalaceHandle>>`).
 - `engine/store/palace_store.rs` — `palace.json` + `identity.txt` atomic persistence.
 - `engine/store/l1_cache.rs` — L1 essential-drawer snapshot.
-- `engine/store/payload_store/`, `chat_sessions.rs` — redb sidecars (#46/#52/#56).
+- `engine/store/chat_sessions.rs` — redb sidecar (#56).
 - `project_root.rs` — `project_slug()` + `personal` sentinel, plus `.trusty-tools/trusty-memory.yaml` pin-file management (#88, #446). `ProjectPin`, `PIN_FILE_REL`, `write_project_pin`, `read_project_pin`.
 - `startup_scan.rs` — `scan_pin_map` builds `AppState::pin_project_map` at startup from a single directory-tree pass (#470).
 - `attribution.rs` — `creator:*` tag namespace on every write (#202).
@@ -340,7 +340,7 @@ no rusqlite/usearch native chain on the default path (the redb sweep, #43–#56)
 - KG: `kg.rs` / `kg_redb.rs` / `kg_store.rs` / `kg_writer.rs` (redb, #44);
   `kg_sqlite.rs` (legacy, `sqlite-kg`).
 - Metadata/cache: `palace_store.rs`, `l1_cache.rs`.
-- Sidecars: `payload_store.rs` (#46/#52), `chat_sessions.rs` (#56).
+- Sidecar: `chat_sessions.rs` (#56).
 - Concurrency: `concurrent_open.rs` (snapshot-on-lock, #59).
 - Import: `kuzu.rs` (read-only; `kuzu` feature for real Cypher).
 - Embeddings: `embed.rs` (re-export of unified `FastEmbedder`, 384-dim).

@@ -7,6 +7,7 @@ use trusty_common::chat_attachments::{Attachment, decode_image, validate_metadat
 // #9282: crate-visible so a palace snapshot can copy this table.
 pub(crate) const ASSETS: TableDefinition<&str, &[u8]> = TableDefinition::new("chat_image_assets");
 #[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct ChatImageAsset {
     pub session_id: String,
     pub name: String,
@@ -17,7 +18,8 @@ impl ChatSessionStore {
     /// Why: image history must survive restarts without repeating bytes in every history page.
     /// What: validate and atomically store an image under a generated opaque ID in this palace.
     /// Test: `asset_ownership_and_restart_are_enforced`.
-    pub fn put_chat_asset(&self, asset: ChatImageAsset) -> anyhow::Result<String> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn put_chat_asset(&self, asset: ChatImageAsset) -> anyhow::Result<String> {
         anyhow::ensure!(
             !asset.session_id.is_empty() && asset.session_id.len() <= 256,
             "Invalid session ID"
@@ -45,7 +47,8 @@ impl ChatSessionStore {
     /// Why: an opaque ID alone must not authorize another session's image.
     /// What: require a live session, valid ID and matching stored owner; reject missing or oversized records.
     /// Test: `asset_ownership_and_restart_are_enforced`.
-    pub fn get_chat_asset(&self, session: &str, id: &str) -> anyhow::Result<ChatImageAsset> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn get_chat_asset(&self, session: &str, id: &str) -> anyhow::Result<ChatImageAsset> {
         anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid asset ID");
         anyhow::ensure!(
             self.get_session(session)?.is_some(),
@@ -67,6 +70,7 @@ impl ChatSessionStore {
         );
         Ok(asset)
     }
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub(super) fn validate_chat_attachments(
         &self,
         session: &str,

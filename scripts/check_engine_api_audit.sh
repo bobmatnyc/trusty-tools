@@ -52,13 +52,12 @@
 if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
-# See #9278: one line per audited prefix. A3a = store knowledge-graph modules.
+# See #9278: one prefix covers the whole `engine::store` module, so a new
+# submodule or store-root re-export is in scope the moment it appears and fails
+# UNAUDITED until it has a row. `engine::storex` is not under it (the match
+# needs `::` after the prefix).
 SCOPE_PREFIXES='
-trusty_memory::engine::store::kg
-trusty_memory::engine::store::kg_redb
-trusty_memory::engine::store::kg_store
-trusty_memory::engine::store::kg_writer
-trusty_memory::engine::store::KnowledgeGraph
+trusty_memory::engine::store
 '
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

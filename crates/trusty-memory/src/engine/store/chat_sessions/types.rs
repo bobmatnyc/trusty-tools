@@ -36,6 +36,7 @@ pub struct ChatMessage {
 /// What: Carries id, title, timestamps, and message count.
 /// Test: `list_sessions_returns_meta`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct ChatSessionMeta {
     pub id: String,
     pub title: Option<String>,
@@ -52,6 +53,7 @@ pub struct ChatSessionMeta {
 /// Test: `create_then_get_session_round_trips`,
 /// `roundtrip_persists_across_reopen`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub struct ChatSession {
     pub id: String,
     pub title: Option<String>,
@@ -138,6 +140,7 @@ pub enum ChatSessionStoreError {
         source: postcard::Error,
     },
     #[error("chat session store json error: {source}")]
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     Json {
         #[source]
         source: Box<serde_json::Error>,
@@ -150,12 +153,14 @@ pub enum ChatSessionStoreError {
     /// lets a chat-resume caller tell "prior conversation lost" from "new empty
     /// session". Carries `id` so the operator knows which row is corrupt.
     #[error("chat session {id} has corrupt history json: {source}")]
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     CorruptHistory {
         id: String,
         #[source]
         source: Box<serde_json::Error>,
     },
     #[error("chat session store timestamp parse error for {field}: {source}")]
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     Timestamp {
         field: &'static str,
         #[source]
@@ -167,6 +172,7 @@ pub enum ChatSessionStoreError {
 pub(super) type Result<T> = std::result::Result<T, ChatSessionStoreError>;
 
 /// Internal: parse an RFC-3339 timestamp into `DateTime<Utc>`.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(super) fn parse_timestamp(s: &str, field: &'static str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))

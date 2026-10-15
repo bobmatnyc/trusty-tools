@@ -38,14 +38,14 @@ use super::{HnswStore, HnswStoreError, Result};
 use crate::engine::timeouts::write_txn_deadline;
 
 /// Environment variable overriding [`default_op_budget`], in whole seconds.
-pub const OP_BUDGET_ENV: &str = "TRUSTY_HNSW_OP_BUDGET_SECS";
+pub(crate) const OP_BUDGET_ENV: &str = "TRUSTY_HNSW_OP_BUDGET_SECS";
 
 /// The default budget is this many redb write-transaction deadlines (#9487).
 ///
 /// Why: an upsert's `begin_write` can legitimately wait out one deadlined
 /// transaction (an unalias, a compaction) before its own runs; a budget equal
 /// to that deadline would trip the sticky breaker on a healthy store.
-pub const OP_BUDGET_TXN_DEADLINES: u32 = 2;
+pub(crate) const OP_BUDGET_TXN_DEADLINES: u32 = 2;
 
 /// Why an HNSW operation was refused (#9487).
 ///
@@ -94,13 +94,13 @@ pub fn op_budget_error(err: &anyhow::Error) -> Option<&OpBudgetError> {
 
 /// The default budget for a given redb write-transaction deadline (#9487).
 /// Test: `the_default_budget_outlasts_the_write_txn_deadline`.
-pub fn op_budget_for_txn_deadline(txn_deadline: Duration) -> Duration {
+pub(crate) fn op_budget_for_txn_deadline(txn_deadline: Duration) -> Duration {
     txn_deadline.saturating_mul(OP_BUDGET_TXN_DEADLINES)
 }
 
 /// Budget for one HNSW operation when [`OP_BUDGET_ENV`] is unset or malformed:
 /// [`OP_BUDGET_TXN_DEADLINES`] times the live `write_txn_deadline` (#9487).
-pub fn default_op_budget() -> Duration {
+pub(crate) fn default_op_budget() -> Duration {
     op_budget_for_txn_deadline(write_txn_deadline())
 }
 
@@ -148,7 +148,8 @@ static ABANDONED_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 /// falls when that operation's blocking task finally returns.
 /// Test: `a_dropped_caller_still_trips_the_breaker_at_the_budget`;
 /// trusty-memory's `health_stays_not_ok_after_a_palace_with_an_abandoned_op_is_evicted`.
-pub fn abandoned_ops_in_flight() -> u64 {
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) fn abandoned_ops_in_flight() -> u64 {
     ABANDONED_IN_FLIGHT.load(Ordering::Acquire)
 }
 
@@ -319,22 +320,24 @@ impl OpBreaker {
     }
 
     /// The budget each bounded operation on this store gets.
-    pub fn budget(&self) -> Duration {
+    pub(crate) fn budget(&self) -> Duration {
         Duration::from_millis(self.budget_ms.load(Ordering::Relaxed))
     }
 
     /// True once any operation on this store exceeded its budget.
-    pub fn is_tripped(&self) -> bool {
+    pub(crate) fn is_tripped(&self) -> bool {
         self.tripped.load(Ordering::Acquire)
     }
 
     /// Operations abandoned at the budget since this store opened.
-    pub fn abandoned_ops(&self) -> u64 {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn abandoned_ops(&self) -> u64 {
         self.abandoned.load(Ordering::Relaxed)
     }
 
     /// Blocking tasks [`HnswStore::run_bounded`] has spawned on this store.
-    pub fn spawned_ops(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn spawned_ops(&self) -> u64 {
         self.spawned.load(Ordering::Relaxed)
     }
 
@@ -390,7 +393,7 @@ impl OpBreaker {
 
 impl HnswStore {
     /// This store's budget, breaker and counters (#9487).
-    pub fn op_breaker(&self) -> &OpBreaker {
+    pub(crate) fn op_breaker(&self) -> &OpBreaker {
         &self.breaker
     }
 

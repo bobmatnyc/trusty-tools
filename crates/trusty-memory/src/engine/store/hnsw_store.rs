@@ -43,10 +43,12 @@ mod key_cache;
 use key_cache::KeyCache;
 
 mod op_watch;
+pub use op_watch::HnswOp;
+#[cfg(test)]
+pub(crate) use op_watch::HnswOpKind;
 #[cfg(any(test, feature = "embedder-test-support"))]
 pub use op_watch::OpPark;
 pub(crate) use op_watch::OpWatch;
-pub use op_watch::{HnswOp, HnswOpKind};
 // #9487 AC4: per-operation budget and sticky breaker.
 pub mod op_budget;
 mod quiet_insert;
@@ -175,14 +177,14 @@ pub type Result<T> = std::result::Result<T, HnswStoreError>;
 /// What: the two counts plus the offending groups, each `(vector_id, uuids)`.
 /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
 #[derive(Debug, Clone, Default)]
-pub struct AliasAudit {
+pub(crate) struct AliasAudit {
     /// Rows in `VECTOR_KEYS` — one per drawer that has ever been embedded.
-    pub key_rows: usize,
+    pub(crate) key_rows: usize,
     /// Distinct `vector_id`s those rows point at. Equal to `key_rows` iff no
     /// drawer's vector has been overwritten by another drawer's.
-    pub distinct_vector_ids: usize,
+    pub(crate) distinct_vector_ids: usize,
     /// Every `vector_id` claimed by more than one uuid, with its uuids sorted.
-    pub aliased: Vec<(u64, Vec<String>)>,
+    pub(crate) aliased: Vec<(u64, Vec<String>)>,
 }
 
 impl AliasAudit {
@@ -193,12 +195,14 @@ impl AliasAudit {
     /// `key_rows - distinct_vector_ids` on a consistent audit.
     /// What: sums the group sizes.
     /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
-    pub fn aliased_key_count(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn aliased_key_count(&self) -> usize {
         self.aliased.iter().map(|(_, uuids)| uuids.len()).sum()
     }
 
     /// Whether no drawer's vector is shared with another drawer.
-    pub fn is_clean(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_clean(&self) -> bool {
         self.aliased.is_empty()
     }
 }
@@ -294,7 +298,8 @@ impl HnswStore {
     /// `max(VECTORS, VECTOR_KEYS) + 1` (#5005).
     /// Test: `hydration_restores_index`,
     /// `reopening_a_palace_answers_every_query_identically`.
-    pub fn open(db: Arc<Database>, dim: usize) -> Result<Self> {
+    #[cfg(test)]
+    pub(crate) fn open(db: Arc<Database>, dim: usize) -> Result<Self> {
         Self::open_with_mode(db, dim, false)
     }
 
@@ -309,7 +314,7 @@ impl HnswStore {
     /// What: Identical to `open` except it skips the schema-touch write
     /// txn when `read_only` is true and sets the `read_only` flag.
     /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
-    pub fn open_with_mode(db: Arc<Database>, dim: usize, read_only: bool) -> Result<Self> {
+    pub(crate) fn open_with_mode(db: Arc<Database>, dim: usize, read_only: bool) -> Result<Self> {
         // Touch the tables in a write txn so a brand-new redb file carries
         // them. redb only persists a table after it is opened for write at
         // least once. In read-only mode we skip this — the snapshot copy
@@ -432,7 +437,7 @@ impl HnswStore {
     ///
     /// Why: the store opens on a shared `Database` and never sees its path.
     /// Test: `compact_orphans_past_its_deadline_removes_nothing`.
-    pub fn with_palace(mut self, palace: Arc<str>) -> Self {
+    pub(crate) fn with_palace(mut self, palace: Arc<str>) -> Self {
         self.palace = palace;
         self
     }
@@ -468,7 +473,7 @@ impl HnswStore {
     /// meaningful error instead of a redb traceback.
     /// What: Returns the value of the `read_only` flag.
     /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
-    pub fn is_read_only(&self) -> bool {
+    pub(crate) fn is_read_only(&self) -> bool {
         self.read_only
     }
 
@@ -500,7 +505,8 @@ impl HnswStore {
     /// can never silently overwrite another drawer's vector.
     /// Test: `upsert_and_search_round_trips`,
     /// `two_live_stores_over_one_file_never_alias_ids`.
-    pub fn upsert(&self, uuid: &str, vector: &[f32]) -> Result<u64> {
+    #[cfg(test)]
+    pub(crate) fn upsert(&self, uuid: &str, vector: &[f32]) -> Result<u64> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
@@ -566,7 +572,7 @@ impl HnswStore {
     /// `search_finds_drawers_the_graph_cannot_reach`,
     /// `search_reads_vector_keys_once_until_a_store_write`,
     /// `top_k_counts_drawers_not_chunks`.
-    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
+    pub(crate) fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
                 expected: self.dim,
@@ -641,7 +647,7 @@ impl HnswStore {
     /// if a mapping was found and tombstoned, `false` if the UUID was not
     /// known. The vector row itself stays in `VECTORS` until compaction.
     /// Test: `delete_filters_results`.
-    pub fn delete(&self, uuid: &str) -> Result<bool> {
+    pub(crate) fn delete(&self, uuid: &str) -> Result<bool> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
@@ -671,24 +677,13 @@ impl HnswStore {
     /// What: Reads both `VECTORS` and `DELETED_VECTORS` lengths and returns
     /// the difference, clamped at zero.
     /// Test: Indirectly via the unit tests below.
-    pub fn len(&self) -> Result<usize> {
+    pub(crate) fn len(&self) -> Result<usize> {
         let rtx = self.db.begin_read()?;
         let vectors = rtx.open_table(VECTORS)?;
         let dead = rtx.open_table(DELETED_VECTORS)?;
         let total = vectors.len()? as usize;
         let tombstoned = dead.len()? as usize;
         Ok(total.saturating_sub(tombstoned))
-    }
-
-    /// True if no live vectors remain.
-    ///
-    /// Why: clippy `len_without_is_empty` requires this alongside `len`,
-    /// and callers benefit from a zero-allocation existence check that
-    /// short-circuits before iterating.
-    /// What: Returns `Ok(true)` when `len()? == 0`.
-    /// Test: Indirectly via the unit tests below.
-    pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.len()? == 0)
     }
 
     /// Snapshot every drawer key currently mapped to a vector.
@@ -725,7 +720,7 @@ impl HnswStore {
     /// count, the distinct-id count, and every group with more than one uuid.
     /// Cheap: `VECTOR_KEYS` is one small row per drawer and holds no vectors.
     /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
-    pub fn audit_aliases(&self) -> Result<AliasAudit> {
+    pub(crate) fn audit_aliases(&self) -> Result<AliasAudit> {
         let mut by_id: HashMap<u64, Vec<String>> = HashMap::new();
         let mut key_rows = 0usize;
         {
@@ -780,7 +775,7 @@ impl HnswStore {
     /// under the write-transaction deadline, like `compact_orphans`.
     /// Test: `unalias_frees_every_uuid_in_a_collision_group`,
     /// `unalias_frees_the_whole_drawer_when_a_chunk_row_collides`.
-    pub fn unalias(&self) -> Result<Vec<String>> {
+    pub(crate) fn unalias(&self) -> Result<Vec<String>> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
@@ -844,7 +839,7 @@ impl HnswStore {
     /// Test: `compact_orphans_removes_dangling`,
     /// `compact_orphans_keeps_a_vector_upserted_after_the_live_snapshot`,
     /// `compact_orphans_past_its_deadline_removes_nothing`.
-    pub fn compact_orphans(&self) -> Result<usize> {
+    pub(crate) fn compact_orphans(&self) -> Result<usize> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
         }
