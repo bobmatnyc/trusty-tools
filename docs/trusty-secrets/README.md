@@ -51,8 +51,14 @@ them back. The local store stays the source. A sync target is write-only,
 never read back, never a configured backend, and never swept by `delete`.
 Design: [DOC-74](../specs/DOC-74-secrets-integration.md) section 15.4.
 
-Today there is one: `github-actions`. It is provisional. No test has run
-against a real repository, so the `gh` messages are not yet confirmed
+On main there is one: `github-actions`. It needs a build with the non-default
+`cli-backends` feature (Unix only); without it the target does not open. Build
+it with `cargo install trusty-secrets --version <version> --features
+cli-backends --locked`. It is not in a published release yet: the last release
+is 0.1.6, and the change is unreleased.
+
+It is provisional. No test has run against a real repository, so the `gh`
+output shapes and messages are not yet confirmed
 ([#9069](https://github.com/bobmatnyc/trusty-tools/issues/9069)). A Vercel
 target is in progress and is not described here.
 
@@ -67,7 +73,7 @@ tm secrets copy --from <local> --to github-actions KEY_ONE KEY_TWO
 | Keys | A key list is required. An empty list fails with `invalid_params`. |
 | Repository | The `github.com/<owner>/<repo>` of the checkout's `origin` remote. A vault override changes where keys are read from, never the repository. |
 | Enabling | Only the account's own machine config section `secrets.github_actions` enables the target. A tracked project file with a `github_actions:` section is refused. A sandboxed server opens no sync target. |
-| Login | `gh` uses its own stored login. Inherited `GH_*`, `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` variables are removed. A signed-out `gh` fails with `backend_locked` and nothing is pushed. |
+| Login | `gh` uses its own stored login. Inherited `GH_*`, `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` variables are removed. A signed-out `gh` pushes nothing: every key is listed in `failed`, and its audit record says `backend_locked`. It is not a request-level error. |
 | Value | The value reaches `gh secret set` on stdin only. It is never an argument. |
 | Agents | A caller with a Claude Code ancestor is refused with `agent_use_refused`, whatever the key's "agents may use" flag says. |
 | Key names | `[A-Za-z0-9_]`, not starting with a digit or `GITHUB_`. GitHub stores them uppercased. |
@@ -78,6 +84,10 @@ count. A failed key is listed in `failed` and the next key still runs.
 
 The server writes one audit record per key, and one denial for a refusal
 before any key moves. If the audit log cannot be opened, nothing is pushed.
+If a record cannot be written after a push, the call stops with
+`audit_unavailable` and returns no `copied` or `failed` list. That key and the
+keys before it may already be in GitHub. After the request deadline, the
+remaining keys fail without running.
 
 ## Safety rules
 
