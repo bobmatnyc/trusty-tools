@@ -54,13 +54,13 @@ impl Fixture {
 }
 
 /// A fixture writer: `format_v0_fixture` or `format_v1_fixture`.
-type Writer = fn(&Path, &str, fn(&redb::WriteTransaction)) -> anyhow::Result<()>;
+pub(super) type Writer = fn(&Path, &str, fn(&redb::WriteTransaction)) -> anyhow::Result<()>;
 
 /// Build a palace under `<root>/palaces/<id>` with `write`.
 ///
 /// `extra` runs inside the KG write transaction, so a test can add a
 /// malformed row or overwrite a marker.
-fn build_with(id: &str, write: Writer, extra: fn(&redb::WriteTransaction)) -> Fixture {
+pub(super) fn build_with(id: &str, write: Writer, extra: fn(&redb::WriteTransaction)) -> Fixture {
     let root = tempfile::tempdir().expect("tempdir");
     let dir = root.path().join("palaces").join(id);
     write(&dir, id, extra).expect("write fixture palace");
@@ -376,8 +376,9 @@ fn a_resume_refuses_a_record_whose_backup_no_longer_verifies() {
     assert_eq!(marker(&v0.kg()), Some(1));
 }
 
-/// AC5: a format-0 KG opened directly is refused (`FormatTooOld` since
-/// #9275), never opened un-migrated, and its legacy rows stay where they are.
+/// AC5: a format-0 KG opened directly is refused (`FormatNeedsMigration`
+/// since #9918: only a palace writer open migrates), never opened
+/// un-migrated, and its legacy rows stay where they are.
 #[test]
 fn a_direct_kg_open_of_a_format_0_file_is_refused() {
     let v0 = build_v0("v0-direct");

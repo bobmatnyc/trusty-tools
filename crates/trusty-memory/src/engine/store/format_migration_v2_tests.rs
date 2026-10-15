@@ -1,8 +1,8 @@
-//! #9275 PR D: palace format 2 — N-1 only, a guarded stamp, the downgrade fence.
+//! #9275 PR D: palace format 2 — guarded steps, the downgrade fence.
 //!
-//! Why: ADR-0067 D3 rule 2 migrates N-1 only, so format 0 is now refused
-//! `FormatTooOld`, including the record an interrupted 0.33.x migration left.
-//! The 1 → 2 step must fail closed, never advancing the stored format; and a
+//! Why: #9918 — format 0 is migrated by the chain, never refused too old,
+//! including from the record an interrupted 0.33.x migration left. Each step
+//! must fail closed, never advancing the stored format; and a
 //! format-2 palace must be refused by a format-1 gate (the shipped 0.33.x
 //! binary) from before the first `{uuid}#{n}` chunk row can exist.
 //! What: the v0 and v1 fixtures from format_migration_tests.rs; the gate is
@@ -11,8 +11,8 @@
 //! Test: this file.
 
 use super::tests::{
-    Fixture, build_v0, build_v1, build_v1_with, hash_tree, interrupt_after, marker, mirror, open,
-    write_format_0_palace_with,
+    Fixture, assert_migrated, build_v0, build_v1, build_v1_with, complete_backups, hash_tree,
+    interrupt_after, marker, mirror, open, write_format_0_palace_with,
 };
 use super::{Seams, migrate};
 use crate::engine::palace::{Drawer, Palace, PalaceId};
@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The [`PalaceStoreError`] anywhere in `err`'s chain.
-fn store_error(err: &anyhow::Error) -> Option<&PalaceStoreError> {
+pub(super) fn store_error(err: &anyhow::Error) -> Option<&PalaceStoreError> {
     err.chain()
         .find_map(|e| e.downcast_ref::<PalaceStoreError>())
 }
@@ -52,13 +52,13 @@ fn refused_too_new_by_format_1(r: Result<FormatState, PalaceStoreError>) -> bool
     )
 }
 
-/// T3: a format-0 palace is two behind. The writer and read-only intents
-/// refuse it `FormatTooOld` naming the release line that reads it; nothing
-/// under it changes and no backup starts. The observer intent refuses it too:
-/// the fixture has no vector index, and an observer never creates one.
+/// T3, #9918: a format-0 palace is behind, not too old. A read-only open
+/// refuses it `FormatNeedsMigration`, and an observer open refuses it too
+/// (the fixture has no vector index, and an observer never creates one);
+/// neither changes a byte or starts a backup.
 #[test]
-fn a_format_0_palace_is_refused_too_old_under_every_intent_bytes_unchanged() {
-    let v0 = build_v0("v0-too-old");
+fn a_format_0_palace_is_refused_read_only_and_left_for_the_writer() {
+    let v0 = build_v0("v0-read-only");
     let before = hash_tree(v0.dir());
     let err = open(&v0, OpenIntent::Observer)
         .err()
@@ -68,36 +68,30 @@ fn a_format_0_palace_is_refused_too_old_under_every_intent_bytes_unchanged() {
         hash_tree(v0.dir()),
         "observer: a byte changed: {err:#}"
     );
-    for intent in [OpenIntent::Writer, OpenIntent::ReadOnlyClient] {
-        let err = open(&v0, intent)
-            .err()
-            .unwrap_or_else(|| panic!("{intent:?}: a format-0 palace must be refused"));
-        assert!(
-            matches!(
-                store_error(&err),
-                Some(PalaceStoreError::FormatTooOld {
-                    found: 0,
-                    supported: 2,
-                    ..
-                })
-            ),
-            "{intent:?}: {err:#}"
-        );
-        assert!(
-            format!("{err:#}").contains("reads format 1"),
-            "{intent:?}: {err:#}"
-        );
-        assert_eq!(before, hash_tree(v0.dir()), "{intent:?}: a byte changed");
-        assert!(!v0.backups().exists(), "{intent:?}: a backup started");
-    }
+    let err = open(&v0, OpenIntent::ReadOnlyClient)
+        .err()
+        .expect("a read-only open of a format-0 palace is refused");
+    assert!(
+        matches!(
+            store_error(&err),
+            Some(PalaceStoreError::FormatNeedsMigration {
+                found: 0,
+                supported: 2,
+                ..
+            })
+        ),
+        "{err:#}"
+    );
+    assert_eq!(before, hash_tree(v0.dir()), "read-only: a byte changed");
+    assert!(!v0.backups().exists(), "a backup started");
 }
 
-/// T4 (plan Q7): the record of a 0 → 1 migration a 0.33.x binary left
-/// interrupted is not resumable by a format-2 binary. It is refused
-/// `FormatTooOld` under every intent, not failed as a generic
-/// `FormatMigrationFailed`, and nothing changes.
+/// T4, #9918 (plan Q5): the record of a 0 → 1 migration a 0.33.x binary left
+/// interrupted is resumed. Read-only and observer opens refuse the palace
+/// with nothing changed; the writer runs the chain to 2 behind the 0.33.x
+/// backup and takes no new one.
 #[test]
-fn a_stale_0_to_1_record_is_refused_as_too_old() {
+fn a_stale_0_to_1_record_is_resumed_by_the_chain() {
     let v0 = build_v0("v0-stale-record");
     let backup = ensure_format_backup(v0.root.path(), v0.palace.id.as_str(), v0.dir(), 0, 1)
         .expect("the 0.33.x backup");
@@ -106,18 +100,14 @@ fn a_stale_0_to_1_record_is_refused_as_too_old() {
     });
     std::fs::write(v0.dir().join(MIGRATION_RECORD), record.to_string()).expect("record");
     let before = hash_tree(v0.dir());
-    for intent in [
-        OpenIntent::Writer,
-        OpenIntent::ReadOnlyClient,
-        OpenIntent::Observer,
-    ] {
+    for intent in [OpenIntent::ReadOnlyClient, OpenIntent::Observer] {
         let err = open(&v0, intent)
             .err()
             .unwrap_or_else(|| panic!("{intent:?}: a stale record must be refused"));
         assert!(
             matches!(
                 store_error(&err),
-                Some(PalaceStoreError::FormatTooOld {
+                Some(PalaceStoreError::FormatNeedsMigration {
                     found: 0,
                     supported: 2,
                     ..
@@ -127,6 +117,13 @@ fn a_stale_0_to_1_record_is_refused_as_too_old() {
         );
         assert_eq!(before, hash_tree(v0.dir()), "{intent:?}: a byte changed");
     }
+    drop(open(&v0, OpenIntent::Writer).expect("the writer resumes the 0.33.x record"));
+    assert_migrated(&v0);
+    assert_eq!(
+        complete_backups(&v0),
+        [backup],
+        "the 0.33.x backup is reused"
+    );
 }
 
 /// Every `kg_schema` row, raw; none when the table does not exist.

@@ -1,13 +1,13 @@
-//! A pre-#4810 (format-0) palace under a format-2 binary (#9275).
+//! A pre-#4810 (format-0) palace under a format-2 binary (#9275, #9918).
 //!
-//! Why: the #4810 triple-key rewrite was the KG step of the 0 → 1 migration
-//! (#9274), which shipped in trusty-memory 0.33.x. ADR-0067 D3 rule 2 migrates
-//! N-1 only, so a format-2 binary carries no 0 → 1 step: a legacy-key palace
-//! must be refused `FormatTooOld` through the surfaces a real caller uses, and
-//! never opened un-migrated or half-rewritten.
+//! Why: the #4810 triple-key rewrite is the KG step of the 0 → 1 migration
+//! (#9274). #9918: a format-2 binary chains 0 → 1 → 2 at the first
+//! writer-intent open, so a legacy-key palace is migrated through the surface
+//! a real caller uses, and never opened un-migrated or half-rewritten.
 //! What: writes a palace in the pre-#4810 key shape with no schema marker,
-//! checks a direct `KnowledgeGraph` open and a writer-intent `PalaceHandle`
-//! open both refuse it, and that `kg.redb` and the backup root are untouched.
+//! checks a direct `KnowledgeGraph` open still refuses it unchanged, then that
+//! a writer-intent `PalaceHandle` open migrates it behind one backup with every
+//! fact readable under the #4810 key.
 //! Test: `cargo test -p trusty-memory --test
 //! kg_triple_key_migration_tests -- --include-ignored`.
 
@@ -30,11 +30,11 @@ fn legacy_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
     out
 }
 
-/// Why: a format-2 binary has no 0 → 1 step (ADR-0067 D3 rule 2, #9275).
-/// What: seeds legacy-keyed facts with no schema marker; both open paths
-/// refuse the palace and nothing under it, or beside it, changes.
+/// Why: #9918 — a palace two formats behind is migrated, not refused.
+/// What: seeds legacy-keyed facts with no schema marker; a direct KG open
+/// refuses them with no byte changed, and the writer open migrates them.
 #[tokio::test]
-async fn a_legacy_key_palace_is_refused_too_old_and_left_unchanged() {
+async fn a_legacy_key_palace_is_migrated_by_the_first_writer_open() {
     let root = tempdir().unwrap();
     let dir = root.path().join("palaces").join("legacy");
     std::fs::create_dir_all(&dir).unwrap();
@@ -76,17 +76,12 @@ async fn a_legacy_key_palace_is_refused_too_old_and_left_unchanged() {
         drop(db);
     }
 
-    // --- #9275: refused too old, never opened un-migrated -----------------
+    // --- #9918: a direct KG open refuses; the writer open migrates -------
     let before = std::fs::read(&redb_path).unwrap();
     assert!(
         KnowledgeGraph::open(&dir.join("kg.db")).is_err(),
         "a format-0 KG must be refused, not opened un-migrated"
     );
-    let palace = Palace::new(PalaceId::new("legacy"), "legacy", dir.clone());
-    let err = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
-        .err()
-        .expect("a format-0 palace is refused under writer intent");
-    assert!(format!("{err:#}").contains("FormatTooOld"), "{err:#}");
     assert_eq!(
         before,
         std::fs::read(&redb_path).unwrap(),
@@ -96,4 +91,11 @@ async fn a_legacy_key_palace_is_refused_too_old_and_left_unchanged() {
         !backup_root(root.path(), "legacy").exists(),
         "a refused palace starts no backup"
     );
+    let palace = Palace::new(PalaceId::new("legacy"), "legacy", dir.clone());
+    let handle = PalaceHandle::open_with_intent(&palace, OpenIntent::Writer)
+        .expect("a format-0 palace is migrated under writer intent");
+    let alice = handle.kg.query_active("alice").await.unwrap();
+    assert_eq!(alice.len(), 1, "{alice:?}");
+    assert_eq!(alice[0].object, "bob");
+    assert!(backup_root(root.path(), "legacy").exists(), "no backup");
 }

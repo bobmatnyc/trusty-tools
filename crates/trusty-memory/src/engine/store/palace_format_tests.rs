@@ -418,9 +418,10 @@ fn check_format_classifies_every_distance() {
     assert_eq!(name(3), Some("FormatTooNew"));
     assert_eq!(name(2), None);
     assert_eq!(name(1), Some("FormatNeedsMigration"));
-    assert_eq!(name(0), Some("FormatTooOld"));
-    let old = check_format("p", 0, 2).expect_err("too old").to_string();
-    assert!(old.contains("reads format 1"), "{old}");
+    // #9918: format 0 is migrated by the chain, not refused too old.
+    assert_eq!(name(0), Some("FormatNeedsMigration"));
+    let old = check_format_with("p", 0, 2, 1).expect_err("below the oldest");
+    assert_eq!(old.variant_name(), "FormatTooOld", "{old}");
 }
 
 /// Every new arm reports its variant name first, so the MCP message names it.

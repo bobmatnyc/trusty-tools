@@ -41,9 +41,9 @@ fn kg_at(dir: &Path, format: Option<u32>) {
     wtx.commit().expect("commit");
 }
 
-/// #9274 AC7, re-pointed by #9275: a format-1 palace is its own "needs
-/// migration by the daemon" state (`Warn`), distinct from a current palace
-/// (`Pass`) and a refused one (`Fail`, newer or format 0); the check writes
+/// #9274 AC7, re-pointed by #9275 and #9918: a format-1 or format-0 palace is
+/// its own "needs migration by the daemon" state (`Warn`), distinct from a
+/// current palace (`Pass`) and a refused newer one (`Fail`); the check writes
 /// nothing.
 #[test]
 fn palace_format_check_names_a_palace_that_needs_migration() {
@@ -70,13 +70,15 @@ fn palace_format_check_names_a_palace_that_needs_migration() {
     assert!(shown.contains("FormatTooNew"), "{shown}");
     assert!(shown.contains("old (format 1)"), "{shown}");
 
-    // #9275: format 0 is two behind — refused, not "needs migration".
+    // #9918: format 0 is behind, and the daemon migrates it like format 1.
+    std::fs::remove_dir_all(root.path().join("newer")).expect("rm newer");
     let older = palace(root.path(), "older", None);
     kg_at(&older, None);
     let r = palace_format_verdict(root.path());
-    assert_eq!(r.status, CheckStatus::Fail, "{r:?}");
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
     let shown = format!("{r:?}");
-    assert!(shown.contains("FormatTooOld"), "{shown}");
+    assert!(shown.contains("older (format 0)"), "{shown}");
+    assert!(!shown.contains("FormatTooOld"), "{shown}");
 }
 
 /// #9274 (PR3 critic MEDIUM): a palace whose `kg.redb` is held — as the
