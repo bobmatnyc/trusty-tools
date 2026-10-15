@@ -74,6 +74,7 @@ pub enum AdjacencyDesync {
          happen — do not retry it. Graph views on this handle are stale until \
          the palace is reopened."
     )]
+    #[non_exhaustive] // #9278 T1a: fields stay additive for other crates.
     CommittedButStale {
         /// The `KnowledgeGraph` method whose commit went unindexed.
         operation: &'static str,
@@ -90,6 +91,7 @@ pub enum AdjacencyDesync {
          authoritative and that write stands; reopen the palace to rebuild the \
          adjacency. A `0` from this call would NOT mean the fact is absent."
     )]
+    #[non_exhaustive] // #9278 T1a: fields stay additive for other crates.
     HandleStale {
         /// The method being refused.
         operation: &'static str,

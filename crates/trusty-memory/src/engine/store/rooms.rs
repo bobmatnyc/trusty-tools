@@ -22,7 +22,7 @@ use crate::engine::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, default_wing_key, mint_room_id, room_label, room_to_uuid,
     room_type_from_parts, room_type_tag,
 };
-use crate::engine::store::kg::KnowledgeGraph;
+use crate::engine::store::kg::{KgError, KnowledgeGraph};
 use crate::engine::store::kg_redb::KgStoreRedb;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -213,8 +213,13 @@ pub(crate) async fn resolve_or_create_room_in_wing(
 /// cannot be clobbered; we re-read the key afterwards to return the winner's
 /// id rather than our own.
 /// Test: `resolve_or_create_is_idempotent`.
-pub fn resolve_or_create_room_sync(store: &Arc<KgStoreRedb>, room: &RoomType) -> Result<Uuid> {
+pub fn resolve_or_create_room_sync(
+    store: &Arc<KgStoreRedb>,
+    room: &RoomType,
+) -> std::result::Result<Uuid, KgError> {
+    // #9278: typed shell over the crate-internal anyhow body.
     resolve_or_create_room_in_wing_sync(store, room, DEFAULT_WING_ID)
+        .map_err(KgError::from_internal)
 }
 
 /// Blocking half of [`resolve_or_create_room_in_wing`].

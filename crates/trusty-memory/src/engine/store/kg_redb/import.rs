@@ -15,7 +15,7 @@ use crate::engine::store::kg_store::{
 use anyhow::{Context, Result};
 use redb::ReadableTable;
 
-use super::super::kg::Triple;
+use super::super::kg::{KgError, Triple};
 use super::drawer_ops::{batch_delete_drawer, batch_upsert_drawer};
 use super::store::KgStoreRedb;
 use super::types::{BatchOpResult, BatchWriteOp};
@@ -41,7 +41,17 @@ impl KgStoreRedb {
     /// and the earlier one is preserved under a `hist:` key.
     /// Test: Covered by the kg_migration integration test in
     /// `crates/trusty-common/tests/kg_migration_tests.rs`.
-    pub fn import_all(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
+    pub fn import_all(
+        &self,
+        triples: Vec<Triple>,
+        drawers: Vec<Drawer>,
+    ) -> std::result::Result<(), KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.import_all_inner(triples, drawers)
+            .map_err(KgError::from_internal)
+    }
+
+    fn import_all_inner(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
         self.check_writable()?;
         // #6652: the swap-exclusion guard must outlive the txn.
         // #8749: exempt from the transaction deadline — a one-shot migration
@@ -207,7 +217,15 @@ impl KgStoreRedb {
     /// Test: `apply_batch_groups_asserts_into_single_commit` and
     /// `apply_batch_rolls_back_on_error` in this module;
     /// `a_stalled_batch_rolls_back_and_the_next_writer_proceeds`.
-    pub fn apply_batch(&self, ops: &[BatchWriteOp]) -> Result<Vec<BatchOpResult>> {
+    pub fn apply_batch(
+        &self,
+        ops: &[BatchWriteOp],
+    ) -> std::result::Result<Vec<BatchOpResult>, KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.apply_batch_inner(ops).map_err(KgError::from_internal)
+    }
+
+    fn apply_batch_inner(&self, ops: &[BatchWriteOp]) -> Result<Vec<BatchOpResult>> {
         self.check_writable()?;
         if ops.is_empty() {
             return Ok(Vec::new());

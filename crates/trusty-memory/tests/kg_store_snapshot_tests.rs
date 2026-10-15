@@ -13,7 +13,7 @@
 
 use tempfile::tempdir;
 use trusty_memory::engine::palace::Drawer;
-use trusty_memory::engine::store::kg::Triple;
+use trusty_memory::engine::store::kg::{KgError, Triple};
 use trusty_memory::engine::store::kg_redb::{KgStoreRedb, READ_ONLY_ERROR_MSG};
 use trusty_memory::engine::store::vector::{UsearchStore, VectorStore};
 use uuid::Uuid;
@@ -61,6 +61,7 @@ fn write_on_kg_snapshot_returns_read_only_error() {
 
     // Triple assert must be rejected.
     let err = snap.assert(&triple("alice", "knows", "bob")).unwrap_err();
+    assert!(matches!(err, KgError::ReadOnly), "#9278: {err:?}");
     assert!(
         err.to_string().contains(READ_ONLY_ERROR_MSG),
         "assert on snapshot must return READ_ONLY_ERROR_MSG, got: {err}"
@@ -69,6 +70,7 @@ fn write_on_kg_snapshot_returns_read_only_error() {
     // Drawer upsert must also be rejected.
     let drawer = Drawer::new(Uuid::new_v4(), "test");
     let err = snap.upsert_drawer(&drawer).unwrap_err();
+    assert!(matches!(err, KgError::ReadOnly), "#9278: {err:?}");
     assert!(
         err.to_string().contains(READ_ONLY_ERROR_MSG),
         "upsert_drawer on snapshot must return READ_ONLY_ERROR_MSG, got: {err}"

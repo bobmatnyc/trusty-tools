@@ -18,6 +18,10 @@
 //! the public API; storage-engine tests live in `kg_redb.rs`.
 
 mod adjacency;
+// #9278 T1a: the typed `KgError`; mapping tests in `error_tests`.
+mod error;
+#[cfg(test)]
+mod error_tests;
 // #4670: progressive (seed + expand) exploration over the resident adjacency.
 mod explore;
 mod graph;
@@ -34,6 +38,7 @@ pub(crate) mod tests;
 mod supersession_tests;
 
 // See #9278: only the items with a consumer outside the library stay public.
+pub use error::KgError;
 #[cfg(feature = "server")]
 pub(crate) use explore::{ExpandDirection, SeedNode};
 pub use graph::KnowledgeGraph;

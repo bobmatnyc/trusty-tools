@@ -21,7 +21,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use super::super::kg::Triple;
+use super::super::kg::{KgError, Triple};
 use super::store::KgStoreRedb;
 use super::types::{drawer_from_row, triple_from_parts};
 
@@ -38,7 +38,13 @@ impl KgStoreRedb {
     /// rows distinct.
     /// Test: `assert_then_query_returns_triple`,
     /// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
-    pub fn query_active(&self, subject: &str) -> Result<Vec<Triple>> {
+    pub fn query_active(&self, subject: &str) -> std::result::Result<Vec<Triple>, KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.query_active_inner(subject)
+            .map_err(KgError::from_internal)
+    }
+
+    fn query_active_inner(&self, subject: &str) -> Result<Vec<Triple>> {
         let prefix = subject_prefix(subject);
         let rtx = self.db().begin_read().context("begin query_active txn")?;
         let triples = rtx
@@ -214,7 +220,13 @@ impl KgStoreRedb {
     /// - Counts only ACTIVE triples — a superseded or retracted triple is
     ///   excluded even though its history row survives.
     /// - The sum saturates rather than overflowing `u64`.
-    pub fn count_active_triples(&self) -> Result<u64> {
+    pub fn count_active_triples(&self) -> std::result::Result<u64, KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.count_active_triples_inner()
+            .map_err(KgError::from_internal)
+    }
+
+    fn count_active_triples_inner(&self) -> Result<u64> {
         // #5384: propagate instead of returning 0 — a failed read must not be
         // reportable as an empty graph.
         let rtx = self
@@ -347,7 +359,12 @@ impl KgStoreRedb {
     /// What: Iterate DRAWERS keys, parse each 16-byte slice into a `Uuid`,
     /// collect into a `HashSet`.
     /// Test: `load_drawer_ids_matches_load_drawers`.
-    pub fn load_drawer_ids(&self) -> Result<HashSet<Uuid>> {
+    pub fn load_drawer_ids(&self) -> std::result::Result<HashSet<Uuid>, KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.load_drawer_ids_inner().map_err(KgError::from_internal)
+    }
+
+    fn load_drawer_ids_inner(&self) -> Result<HashSet<Uuid>> {
         let rtx = self
             .db()
             .begin_read()

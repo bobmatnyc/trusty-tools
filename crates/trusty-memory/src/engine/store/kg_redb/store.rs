@@ -24,7 +24,8 @@ use redb::Database;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::types::{GuardedWrite, KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
+use super::types::{GuardedWrite, KgDbState, canonical_key, db_cache};
+use crate::engine::store::kg::KgError;
 
 #[cfg(test)]
 thread_local! {
@@ -56,8 +57,9 @@ impl KgStoreRedb {
     /// What: Delegates to [`KgStoreRedb::open_with_intent`] with
     /// [`OpenIntent::ReadOnlyClient`].
     /// Test: `open_then_reopen_persists_state`.
-    pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with_intent(path, OpenIntent::ReadOnlyClient)
+    pub fn open(path: &Path) -> std::result::Result<Self, KgError> {
+        // #9278: typed shell; a format refusal stays a `PalaceStoreError`.
+        Self::open_with_intent(path, OpenIntent::ReadOnlyClient).map_err(KgError::from_internal)
     }
 
     /// Open or create the redb database at `path` with the caller's intent.
@@ -482,12 +484,13 @@ impl KgStoreRedb {
     /// Why: Every write path (`assert`, `retract`, drawer upsert/delete)
     /// must surface the same actionable error so users see the same
     /// guidance regardless of which mutation they attempted.
-    /// What: Returns `Err(READ_ONLY_ERROR_MSG)` when `is_read_only()`,
+    /// What: Returns `Err(KgError::ReadOnly)` when `is_read_only()`,
     /// otherwise `Ok(())`.
     /// Test: `write_on_snapshot_returns_read_only_error`.
-    pub(super) fn check_writable(&self) -> Result<()> {
+    pub(super) fn check_writable(&self) -> std::result::Result<(), KgError> {
         if self.is_read_only() {
-            Err(anyhow::anyhow!(READ_ONLY_ERROR_MSG))
+            // #9278: typed at the raise site; Display is `READ_ONLY_ERROR_MSG`.
+            Err(KgError::ReadOnly)
         } else {
             Ok(())
         }

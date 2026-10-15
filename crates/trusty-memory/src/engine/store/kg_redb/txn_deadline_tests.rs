@@ -127,7 +127,7 @@ fn a_stalled_batch_rolls_back_and_the_next_writer_proceeds() {
         .expect_err("#8749: a batch past its deadline must fail, not commit");
     assert!(
         matches!(
-            deadline_error(&err),
+            err.as_write_deadline(), // #9278: `apply_batch` returns `KgError`
             Some(WriteTxnError::DeadlineExceeded {
                 store: "kg.redb",
                 ..
@@ -164,7 +164,7 @@ fn a_stalled_commit_is_logged_with_the_palace_and_the_lock_hold() {
     let (outcome, lines) =
         trusty_common::log_buffer::capture_logs(|| kg.apply_batch(&[assert_op("logged")]));
     let err = outcome.expect_err("#8749: the stalled batch must not commit");
-    assert!(deadline_error(&err).is_some(), "{err:#}");
+    assert!(err.as_write_deadline().is_some(), "{err:#}");
     let warn = lines
         .iter()
         .find(|l| l.contains("WARN") && l.contains("#8749"))

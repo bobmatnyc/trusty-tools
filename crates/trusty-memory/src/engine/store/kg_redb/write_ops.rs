@@ -26,7 +26,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-use super::super::kg::Triple;
+use super::super::kg::{KgError, Triple};
 use super::drawer_ops::{batch_delete_drawer, batch_upsert_drawer};
 use super::store::KgStoreRedb;
 use super::types::{Tbl, now_ms};
@@ -49,7 +49,12 @@ impl KgStoreRedb {
     /// `assert_functional_predicate_still_supersedes`,
     /// `assert_multiple_objects_for_multivalued_predicate_all_survive`,
     /// `single_assert_and_apply_batch_one_op_agree_on_valid_from`.
-    pub fn assert(&self, triple: &Triple) -> Result<()> {
+    pub fn assert(&self, triple: &Triple) -> std::result::Result<(), KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.assert_inner(triple).map_err(KgError::from_internal)
+    }
+
+    fn assert_inner(&self, triple: &Triple) -> Result<()> {
         self.check_writable()?;
         // #6652: the swap-exclusion guard must outlive the txn.
         let gw = self.begin_write_guarded().context("begin assert txn")?;
@@ -173,7 +178,13 @@ impl KgStoreRedb {
     /// the row it describes.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`,
     /// `fact_key_index_tracks_upsert_and_delete`.
-    pub fn upsert_drawer(&self, drawer: &Drawer) -> Result<()> {
+    pub fn upsert_drawer(&self, drawer: &Drawer) -> std::result::Result<(), KgError> {
+        // #9278: typed shell over the anyhow body.
+        self.upsert_drawer_inner(drawer)
+            .map_err(KgError::from_internal)
+    }
+
+    fn upsert_drawer_inner(&self, drawer: &Drawer) -> Result<()> {
         self.check_writable()?;
         // #6652: the swap-exclusion guard must outlive the txn.
         let gw = self

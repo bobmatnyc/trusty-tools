@@ -45,6 +45,7 @@ pub enum WriteTxnError {
          TRUSTY_WRITE_TXN_DEADLINE_SECS if writes on this palace are legitimately \
          this slow"
     )]
+    #[non_exhaustive] // #9278 T1a: fields stay additive for other crates.
     DeadlineExceeded {
         palace: Arc<str>,
         store: &'static str,
