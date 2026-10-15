@@ -132,14 +132,15 @@ operator's real config, and always was — `#[serial]` never did that job.
 Every `-p <crate>` cell above assumes the crate's default feature set compiles
 what you changed. `trusty-common` declares `default = []` and gates 25+ modules,
 so `cargo test -p trusty-common` used to run 328 of the crate's ~2062 tests and
-exit 0 — a green that covered neither `memory_core` nor `uds` nor `sld`, and
-held even when a `memory_core` file did not compile (#4901; PR #4899 shipped on
+exit 0 — a green that covered neither `memory_core` (the memory engine, then in
+trusty-common) nor `uds` nor `sld`, and held even when a `memory_core` file did
+not compile (#4901; PR #4899 shipped on
 that green). Since #4901 that form is a `compile_error!` instead. Substitute
 these wherever a rung says `cargo test -p trusty-common`:
 
 | What you changed | Command |
 |---|---|
-| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| the memory engine (`trusty-common`'s `memory_core` until #9271) | `cargo test -p trusty-memory --no-fail-fast` — the engine is `crates/trusty-memory/src/engine/` now, and trusty-common's `memory-core` feature is a no-op |
 | any other gated module | `cargo test -p trusty-common --features <feature>` |
 | only unconditional modules | `cargo test -p trusty-common --features unconditional-only` |
 | the whole crate (every test, once) | `./scripts/test_trusty_common_lanes.sh` — runs each coverage lane in `[package.metadata.trusty-test-coverage]` with `--no-fail-fast`; CI's `trusty-common coverage lanes` job runs the same command. Name lanes to run a subset: `./scripts/test_trusty_common_lanes.sh core` |

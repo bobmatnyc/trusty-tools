@@ -17,6 +17,8 @@ All citations are against `origin/main` at `ea58a8c4b` (2026-09-13), read
 directly from the working tree and with `gh pr diff`/`gh issue view` for
 in-flight work. No source file was edited to produce this document.
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../adr/README.md#path-moves).
+
 ---
 
 ## 1. What exists today

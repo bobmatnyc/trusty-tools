@@ -190,7 +190,7 @@ process isolation is part of the contract.
 - Per-project coding workflow enforcement (trusty-code)
 - Multi-project session management, circuit breaker, or hook relay (trusty-mpm)
 - Search infrastructure (trusty-search)
-- Memory storage engine (trusty-common's `memory-core` feature, plus trusty-memory)
+- Memory storage engine (trusty-memory's `engine` module; trusty-common's `memory-core` feature until #9271)
 
 The harness-adapter framework — which recognises whether a Claude Code,
 claude-mpm, Codex, Gemini, or shell process occupies a given pane — and the
@@ -250,7 +250,7 @@ Feature-gated modules the harnesses draw on:
 | `memory-rpc` | `trusty_common::memory_rpc` | Discovery-based JSON-RPC client for the trusty-memory daemon. What `trusty_common::mcp` left behind. |
 | `rpc` | `trusty_common::rpc` | General-purpose JSON-RPC client plus stdio and HTTP transports |
 | `stdio-mcp-client` | `trusty_common::stdio_mcp_client` | Client that spawns and talks to a stdio MCP server |
-| `memory-core` | `trusty_common::memory_core` | Memory palace storage engine — trusty-memory's backend, also used by trusty-agents |
+| (in trusty-memory) | `trusty_memory::engine` | Memory palace storage engine — trusty-memory's own module since #9271, also used by trusty-agents. trusty-common's `memory-core` feature, which held it as `trusty_common::memory_core`, is now a no-op. |
 | `session-naming` | `trusty_common::session_naming` | The one canonical tmux session-naming rule, shared so trusty-mpm's and trusty-agents' session managers never orphan each other's sessions |
 | `search-index` | `trusty_common::search_index` | Best-effort "ensure this project is indexed" entry point, used by trusty-mpm at session launch and trusty-code at task start |
 | `axum-server` | `trusty_common::server` | Shared axum middleware and the same-origin write guard used by every HTTP daemon |

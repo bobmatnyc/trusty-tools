@@ -36,11 +36,13 @@ PR #5904.)
 
 🔴 **`trusty-common` takes `--features` on every test run.** Its default feature
 set is empty, so a bare `cargo test -p trusty-common` is a `compile_error!`.
-Name what you changed — `--features memory-core,embedder-test-support` — or
+Name what you changed — `--features <feature>`, e.g. `--features embedder` — or
 `--features unconditional-only` for the always-compiled surface.
 `--all-features` is unavailable: the `embedder-*` ORT variants are mutually
 exclusive. `cargo build` and `cargo check -p trusty-common` are unaffected.
 The whole crate, every test once: `./scripts/test_trusty_common_lanes.sh`.
+The memory engine left trusty-common in #9271 (its `memory-core` feature is a
+no-op): test it with `cargo test -p trusty-memory --no-fail-fast`.
 
 ## Workspace-wide
 

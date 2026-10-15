@@ -1,6 +1,6 @@
 # 0001. Frontend/core split: trusty-memory ⇄ trusty-common `memory_core`
 
-- **Status:** Accepted
+- **Status:** Amended by [workspace ADR-0066](../../adr/0066-trusty-memory-1x-compatibility-contract.md)
 - **Date:** 2026-05-29
 - **Scope:** Crates `trusty-memory` and `trusty-common`
 - **Supersedes / Superseded by:** Absorbs the former `trusty-memory-core` crate (issue #5)

@@ -5,6 +5,8 @@
 **Date**: 2026-06-25  
 **Author**: Claude Code (Design Agent)
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../adr/README.md#path-moves).
+
 ---
 
 ## Summary

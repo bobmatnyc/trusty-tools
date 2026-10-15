@@ -626,7 +626,8 @@ that load path — flipping the automatic hook to hardened-by-default risked
 silently breaking `tctl install trusty-search` on every machine with a
 Developer ID cert already installed. trusty-memory and trusty-analyze take the same
 conservative side of the split — trusty-memory links `ort`/`fastembed`
-transitively through `trusty-common`'s `memory-core` feature, trusty-analyze as
+through the `trusty-common` `embedder` and `embedder-bundled-ort` features it
+names itself (through `memory-core` until #9271), trusty-analyze as
 a direct dependency (`cargo tree -p <crate> -i fastembed` confirms each on its
 own), so both carry the identical unverified exposure. trusty-mpm and tagent
 load no dylibs, so they are hardened unconditionally. **This split does not affect TCC grant stability** —
@@ -871,7 +872,8 @@ Developer ID certificate is a warning, not a hard failure.
 
 🟡 **Hardened Runtime is applied on explicit signing only** — the same split
 trusty-search gets, and for the same reason. `trusty-memory` links
-`ort`/`fastembed` through `trusty-common`'s `memory-core` feature
+`ort`/`fastembed` through the `trusty-common` `embedder` and
+`embedder-bundled-ort` features it names itself (through `memory-core` until #9271)
 (`cargo tree -p trusty-memory -i fastembed`), and ONNX dylib loading under
 Hardened Runtime's library validation has not been empirically verified. So
 `tctl sign trusty-memory` and the script sign with `--options runtime

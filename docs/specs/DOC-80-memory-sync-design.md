@@ -33,6 +33,8 @@ spec_refs:
 **Decisions:** [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md), [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md), [ADR-0070](../adr/0070-memory-store-reference-implementation-repository.md), all Proposed.
 **DOC-N claim:** see DOC-79's header.
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../adr/README.md#path-moves).
+
 Marking rule: **VERIFIED** means the cited `path:line` was read at `origin/main` e3ff4c7358 on 2026-10-04. **PROPOSED** means design, not code. Planned files and modules are written without backticks because they do not exist.
 
 ---

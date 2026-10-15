@@ -499,6 +499,12 @@ upstream break. A crate-exclusion row is not available either: the gate re-check
 that premise on every run and would refuse the skip, `trusty-common` having 17
 in-repo dependents.
 
+Note (2026-10-12, #9271): the memory engine moved from trusty-common to
+`trusty-memory`, and trusty-common's `memory-core` feature is now a no-op.
+`unicode-normalization` left trusty-common's dependency graph with the engine
+and is a direct dependency of `trusty-memory`. The two paragraphs above record
+the state when this incident was triaged.
+
 ## Which toolchain the gate runs under (#5289)
 
 `cargo-semver-checks` resolves dependencies in a scratch project that **ignores

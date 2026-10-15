@@ -2,6 +2,8 @@
 
 Research date 2026-10-04, main at e3ff4c7358. Read-only; no cargo, no gh.
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../../adr/README.md#path-moves).
+
 ## 0. Surprises
 - A worktree for this PR already exists: `.claude/worktrees/docs-memory-sync`, branch docs/memory-sync-specs at e3ff4c7358 (main tip), clean, no commits.
 - `docs/trusty-memory/decisions/` is a crate-scoped ADR dir (one record, `0001-frontend-core-split.md`). `docs/adr/README.md:41-49` ("Hybrid scope rule") sends crate-specific decisions there. Decide whether the three ADRs are workspace-wide (`docs/adr/`) or crate-scoped (`docs/trusty-memory/decisions/`, independent numbering).

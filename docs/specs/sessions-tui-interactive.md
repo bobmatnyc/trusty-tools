@@ -17,6 +17,8 @@ framework), **#1277** (lifecycle cmds), **#1278** (live refresh/scroll), **#1279
 (hardening), **#1268** (daemon URL vs bind port), **#1269** (trust-dialog /
 headless-spawn blocker).
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../adr/README.md#path-moves).
+
 > **Scope note.** This is a **behavior + UX requirements** spec for the
 > *interactive* sessions TUI — the Claude-Code-style operator surface launched by
 > `tm sessions tui`. It is the **authoritative spec the #1272 children implement

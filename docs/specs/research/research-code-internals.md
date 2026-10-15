@@ -4,6 +4,8 @@ Repo: trusty-tools, main checkout, HEAD e3ff4c7358, tree clean at start. Read-on
 Paths are repo-relative. `tm` below means the trusty-memory crate (`crates/trusty-memory`), `tc` means `crates/trusty-common`.
 VERIFIED = I read the cited lines. INFERENCE = my reading, no direct citation; labelled each time.
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../../adr/README.md#path-moves).
+
 ## 0. Findings that change the brief's premises
 
 1. VERIFIED: the dream cycle is NOT a separate process. It is per-palace `tokio::spawn` tasks inside the daemon. "Separate process supervised like the dream cycle" has no precedent in the dream path (see Q1). The nearest precedents are `EmbedderSupervisor` and `UdsServiceSupervisor` in trusty-common.

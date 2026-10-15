@@ -3,6 +3,7 @@
 > **Status:** Historical product baseline · not a current behavior contract
 > **Last reviewed:** 2026-06-08
 > **Derived from:** code/docs/tickets audit (v0.15.0)
+> **Path note (2026-10-12, #9271):** the storage engine this document places in trusty-common's `memory_core` module (`memory-core` feature) is now trusty-memory's own `engine` module, `crates/trusty-memory/src/engine/`. Path citations were repointed where the new file exists; prose about the trusty-common split describes the earlier layout.
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 Each requirement is framed **Vision / Current / Gap**.
@@ -121,24 +122,25 @@ provision.
 
 Grouped by capability area. Each requirement carries Vision / Current / Gap and
 an inline status tag. Source paths are cited where known. Module paths under
-`memory_core/` refer to `crates/trusty-common/src/memory_core/`; all others refer
+`engine/` refer to `crates/trusty-memory/src/engine/` (until #9271, 2026-10-12,
+`crates/trusty-common/src/memory_core/`); all others refer
 to `crates/trusty-memory/src/`.
 
-### 4.1 Remember / Recall (`tools.rs`, `memory_core/retrieval.rs`)
+### 4.1 Remember / Recall (`tools.rs`, `engine/retrieval/`)
 
 **FR-1.1 — Store a memory (`memory_remember` / `memory_note`)** ✅
 - *Vision:* A caller stores a natural-language fact in a palace and gets back a stable `drawer_id`; tags, room, and creator attribution are attached automatically.
-- *Current:* Implemented (`tools.rs`, `attribution.rs`). Writes pass a **signal/noise filter** (`memory_core/filter.rs`, #61) and a **rolling Jaro-Winkler dedup window** (#220) before storage; creator tags (`creator:*`, #202) tag every write path (HTTP/MCP/CLI/hook). Auto-KG extraction (`kg_extract.rs`, #97) populates the graph on write.
+- *Current:* Implemented (`tools.rs`, `attribution.rs`). Writes pass a **signal/noise filter** (`engine/filter.rs`, #61) and a **rolling Jaro-Winkler dedup window** (#220) before storage; creator tags (`creator:*`, #202) tag every write path (HTTP/MCP/CLI/hook). Auto-KG extraction (`kg_extract.rs`, #97) populates the graph on write.
 - *Gap:* None material.
 
 **FR-1.2 — Hybrid recall (`memory_recall`)** ✅
 - *Vision:* A query returns the most relevant drawers using BM25 *and* vector similarity, cheaply.
-- *Current:* Implemented over the **4-layer progressive retrieval** (`memory_core/retrieval.rs`): L0 (palace identity) + L1 (top-N essential, persisted as `l1_cache.json`) are always loaded (~900 tokens); L2 (on-demand vector) is paid only when the query needs it. BM25 comes from the in-process lexical lane (#5329); vectors from the in-process HNSW index.
+- *Current:* Implemented over the **4-layer progressive retrieval** (`engine/retrieval/`): L0 (palace identity) + L1 (top-N essential, persisted as `l1_cache.json`) are always loaded (~900 tokens); L2 (on-demand vector) is paid only when the query needs it. BM25 comes from the in-process lexical lane (#5329); vectors from the in-process HNSW index.
 - *Gap:* None material.
 
 **FR-1.3 — Deep recall (`memory_recall_deep`)** ✅
 - *Vision:* A slower, higher-recall path (L3 deep search) for queries the fast layers miss.
-- *Current:* Implemented (L3 layer in `memory_core/retrieval.rs`).
+- *Current:* Implemented (L3 layer in `engine/retrieval/`).
 - *Gap:* None material.
 
 **FR-1.4 — Cross-palace recall (`memory_recall_all`)** ✅
@@ -151,11 +153,11 @@ to `crates/trusty-memory/src/`.
 - *Current:* Implemented; `memory_forget` cascade-deletes auto-derived triples (#278).
 - *Gap:* None material.
 
-### 4.2 Palace Management (`tools.rs`, `project_root.rs`, `memory_core/palace.rs`, `registry.rs`)
+### 4.2 Palace Management (`tools.rs`, `project_root.rs`, `engine/palace.rs`, `registry.rs`)
 
 **FR-2.1 — Palace CRUD (`palace_create/list/info/update/delete`)** ✅
 - *Vision:* Create, list, inspect, update, and delete palace namespaces; deletion removes on-disk state.
-- *Current:* All five implemented (`tools.rs`); `palace_delete` backs `DELETE /api/v1/palaces/{id}` (#180). The `PalaceRegistry` is a concurrent `DashMap<PalaceId, Arc<PalaceHandle>>` (`memory_core/registry.rs`).
+- *Current:* All five implemented (`tools.rs`); `palace_delete` backs `DELETE /api/v1/palaces/{id}` (#180). The `PalaceRegistry` is a concurrent `DashMap<PalaceId, Arc<PalaceHandle>>` (`engine/registry.rs`).
 - *Gap:* None material.
 
 **FR-2.2 — Palace-as-project enforcement** ✅
@@ -220,11 +222,11 @@ to `crates/trusty-memory/src/`.
 - *Gap:* None material.
 
 
-### 4.6 Knowledge Graph & Facts (`kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `memory_core/store/kg*.rs`)
+### 4.6 Knowledge Graph & Facts (`kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `engine/store/kg*`)
 
 **FR-6.1 — Temporal triple store (`kg_assert`, `kg_query`)** ✅
 - *Vision:* Assert and query time-bounded triples (`valid_from`/`valid_to`); back the store with pure-Rust embedded storage.
-- *Current:* `KnowledgeGraph` over **redb** (`memory_core/store/kg.rs`, `kg_redb.rs`, #44). The legacy `sqlite-kg` feature flag and all associated rusqlite/r2d2/r2d2_sqlite dependencies were removed in issue #989 — all production palaces migrated to redb (#44, #45, #46, #56, #57) and the migration tooling has been retired.
+- *Current:* `KnowledgeGraph` over **redb** (`engine/store/kg/`, `kg_redb.rs`, #44). The legacy `sqlite-kg` feature flag and all associated rusqlite/r2d2/r2d2_sqlite dependencies were removed in issue #989 — all production palaces migrated to redb (#44, #45, #46, #56, #57) and the migration tooling has been retired.
 - *Gap:* None. SQLite KG retirement completed (#47 / #989). ✅
 
 **FR-6.2 — Auto-extraction on write** ✅
@@ -249,19 +251,19 @@ to `crates/trusty-memory/src/`.
 
 **FR-6.6 — Knowledge gaps (`kg_gaps`)** ✅
 - *Vision:* Detect sparse "knowledge gap" communities in the KG to drive consolidation.
-- *Current:* In-tree Louvain community detection (`memory_core/community.rs`, #52); a community is a gap when internal density < 0.2.
+- *Current:* In-tree Louvain community detection (`engine/community.rs`, #52); a community is a gap when internal density < 0.2.
 - *Gap:* Leiden phase-2 refinement deferred (Louvain only). 🔵
 
-### 4.7 Dream / Consolidation (`memory_core/dream.rs`, `semantic_consolidation.rs`, `decay.rs`)
+### 4.7 Dream / Consolidation (`engine/dream/`, `semantic_consolidation.rs`, `decay.rs`)
 
 **FR-7.1 — Idle-time NLP consolidation** ✅
 - *Vision:* A background idle clock periodically dedups, prunes low-value/stale drawers, refreshes closet indexes, and compacts storage.
-- *Current:* `Dreamer` + `dream_cycle` (`memory_core/dream.rs`) with content-prune (#222), dedup, prune, compaction, closet refresh. Temporal decay (`memory_core/decay.rs`) de-weights old drawers (90-day half-life). Triggerable via `memory_dream` / `POST /api/v1/dream/run`.
+- *Current:* `Dreamer` + `dream_cycle` (`engine/dream/`) with content-prune (#222), dedup, prune, compaction, closet refresh. Temporal decay (`engine/decay.rs`) de-weights old drawers (90-day half-life). Triggerable via `memory_dream` / `POST /api/v1/dream/run`.
 - *Gap:* None material.
 
 **FR-7.2 — LLM-backed semantic consolidation** ✅
 - *Vision:* When an inference backend is available, an extra phase canonicalizes paraphrases and aliases the NLP passes miss (Alias / Merge / Flag actions), additively (originals preserved; `superseded_by` triples link lineage), with a per-cycle call budget and SHA-256 response caching.
-- *Current:* `SemanticConsolidator` (`memory_core/semantic_consolidation.rs`, #87). Backend priority: OpenRouter (`OPENROUTER_API_KEY`) > Ollama (`local_model.enabled`) > disabled no-op. Default model `anthropic/claude-haiku-4-5`. `MockInference` keeps `cargo test` offline.
+- *Current:* `SemanticConsolidator` (`engine/semantic_consolidation/`, #87). Backend priority: OpenRouter (`OPENROUTER_API_KEY`) > Ollama (`local_model.enabled`) > disabled no-op. Default model `anthropic/claude-haiku-4-5`. `MockInference` keeps `cargo test` offline.
 - *Gap:* None material.
 
 ### 4.8 Inter-Project Messaging (`messaging.rs`, `commands/send_message.rs`, `commands/inbox_check.rs`)
