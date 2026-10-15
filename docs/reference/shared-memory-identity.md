@@ -1,6 +1,6 @@
 # Shared-Memory Identity — the seven decisions
 
-**Status:** implemented in `trusty-common` `memory_core` (#5902). The CLI
+**Status:** implemented in `trusty-memory` `engine` (#5902; in `trusty-common` `memory_core` until #9271). The CLI
 commands, the `.trusty-memories/` git layout, and the export-time secret-scan
 gate are a follow-up PR and are NOT in the code this describes.
 
@@ -38,13 +38,13 @@ appends a loser drawer's text into the survivor and unions its tags;
 with a rewritten tag set. A metadata-inclusive digest would fork identity on a
 consolidation pass that changed nothing a reader would call a new fact.
 
-Implemented as `memory_core::content_hash::memory_content_hash`.
+Implemented as `trusty_memory::engine::content_hash::memory_content_hash`.
 
 ## Decision 2 — the hash coexists with `Drawer.id`, it does not replace it
 
 `Drawer.id: Uuid` is three things at once: the HNSW vector-store key, the
 `drawer:{id}` KG triple subject, and the value in the `DRAWERS_BY_FACT_KEY` slot
-index (`memory_core/palace.rs`, `retrieval/tier_c.rs`). Replacing it means
+index (`crates/trusty-memory/src/engine/palace.rs`, `crates/trusty-memory/src/engine/retrieval/tier_c.rs`). Replacing it means
 rewiring all three, for no gain — the UUID answers "which row is this" and the
 digest answers "is this the same fact", and both questions are live.
 
@@ -72,11 +72,12 @@ Nothing reads the digest from disk, so a stale digest is unreachable and no
 migration exists. `#[serde(default)]` decodes pre-field JSON to
 `ContentHash::UNSET`, and the hydration paths replace the sentinel.
 
-## Decision 3 — one hashing entry point, owned by `memory_core`
+## Decision 3 — one hashing entry point, owned by the memory engine
 
 There was no shared hash entry point. `trusty-common` alone holds four
 independent `Sha256::new()` sites: `error_capture/fingerprint.rs`,
-`memory_core/semantic_consolidation/types.rs` (a batch cache key),
+`memory_core/semantic_consolidation/types.rs` (a batch cache key; since #9271
+`crates/trusty-memory/src/engine/semantic_consolidation/types.rs`),
 `symgraph/registry.rs`, and `symgraph/contracts/mod.rs`. A fifth ad-hoc call
 would put the normalization contract somewhere no other caller can find it.
 CLAUDE.md's common-entry-point rule applies.
@@ -96,7 +97,7 @@ Nothing normalized memory text: `PalaceHandle::remember_with_options` stores
 policy. Two clients that recorded the same sentence hold bytes differing in ways
 no reader would call a difference.
 
-The contract, in order (`memory_core::content_hash::normalize_for_hash`):
+The contract, in order (`trusty_memory::engine::content_hash::normalize_for_hash`):
 
 1. `\r\n` and lone `\r` become `\n`.
 2. Invisible characters: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ) and U+FEFF
@@ -171,7 +172,7 @@ and — the load-bearing half, [#1713](https://github.com/bobmatnyc/trusty-tools
 mark the original evictable ONLY once that triple write durably succeeds. No
 second supersede concept was invented and no tombstone field was added.
 
-What changed: the writer was extracted to `memory_core::share::supersede`, and
+What changed: the writer was extracted to `engine::share::supersede`, and
 `dream::cycle::record_provenance_and_collect_superseded` now calls it. Both paths
 assert one edge shape, so a fix to the guarantee lands once. The eviction
 decision stays with the dream cycle, because only that caller evicts.
@@ -274,7 +275,7 @@ All in `crates/trusty-memory/src/engine/share/tests.rs`.
 
 ## 🔴 Open: the export path can carry secrets
 
-`memory_core::filter::check_secret` runs at WRITE time only. It runs on no export
+`trusty_memory::engine::filter::check_secret` runs at WRITE time only. It runs on no export
 path, because until #5902 there was no export path. Any credential that predates
 the secret filter, or that its heuristics missed, is already sitting in a palace,
 and `export_palace_records` will copy it out verbatim.

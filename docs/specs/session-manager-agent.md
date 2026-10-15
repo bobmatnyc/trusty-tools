@@ -17,6 +17,8 @@ endpoints (`daemon/coordinator.rs`, `daemon/api/coordinator_routes.rs`,
 `daemon/llm_overseer.rs`), the `session-manager-driver` skill, and issues
 **#1269** (trust-dialog / headless-spawn blocker), **#1272** (SM TUI epic).
 
+> **Path note (2026-10-12, #9271):** `crates/trusty-common/src/memory_core/` (`trusty_common::memory_core`) moved to `crates/trusty-memory/src/engine/` (`trusty_memory::engine`). Citations below keep the old path; replace the prefix to follow one. See [Path moves](../adr/README.md#path-moves).
+
 > **Scope note.** This is a **behavior + architecture requirements** spec for the
 > **session manager (SM) agent** — the LLM brain the operator talks to in the
 > coordinator TUI input box (DOC-13). It specifies *what the SM agent is*, its

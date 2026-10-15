@@ -1041,7 +1041,7 @@ jobs:
       #       --workspace` step below. Every other non-ignored test that
       #       touches the shared embedder pre-seeds a MockEmbedder instead via
       #       seed_shared_embedder_with_mock() (issue #850,
-      #       crates/trusty-common/src/memory_core/retrieval/embedder.rs), so
+      #       crates/trusty-memory/src/engine/retrieval/embedder.rs), so
       #       cargo test never needs HuggingFace network access for those.
       #
       #       ONE exception (issue #3493 P0 part 2):
@@ -1690,8 +1690,9 @@ jobs:
           cargo test "${args[@]}" --no-fail-fast
 
       # Owner ruling 2026-09-27: a default `cargo test -p trusty-mpm` compiles
-      # neither memory-core nor ONNX, so the memory-palace tests gated behind
-      # `sm-memory` / `manager-memory` run in this step, one build for both.
+      # neither the trusty-memory engine nor ONNX, so the memory-palace tests
+      # gated behind `sm-memory` / `manager-memory` run in this step, one build
+      # for both.
       - name: cargo test -p trusty-mpm --features sm-memory,manager-memory,memory-test-support
         if: contains(format(' {0} ', matrix.crates), ' trusty-mpm ')
         run: cargo test -p trusty-mpm --features sm-memory,manager-memory,memory-test-support --no-fail-fast

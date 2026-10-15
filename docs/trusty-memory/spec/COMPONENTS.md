@@ -3,6 +3,7 @@
 > **Status:** Historical product baseline · not a current component map
 > **Last reviewed:** 2026-06-01
 > **Derived from:** code/docs/tickets audit (v0.14.0)
+> **Path note (2026-10-12, #9271):** the storage engine this document places in trusty-common's `memory_core` module (`memory-core` feature) is now trusty-memory's own `engine` module, `crates/trusty-memory/src/engine/`. Path citations were repointed where the new file exists; prose about the trusty-common split describes the earlier layout.
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -11,8 +12,9 @@ types/modules** (with `src/` paths), **Current state**, and **Known gaps**, fram
 Vision / Current / Gap. For the frontend/core split and transport model see
 [ARCHITECTURE.md](./ARCHITECTURE.md); for product framing see [PRD.md](./PRD.md).
 
-Paths under `memory_core/` are in `crates/trusty-common/src/memory_core/`; all
-others are in `crates/trusty-memory/src/`.
+All paths are in `crates/trusty-memory/src/`. Paths under `engine/` were under
+`crates/trusty-common/src/memory_core/` until #9271 (2026-10-12); a
+`memory_core/` path left below has no clear new home.
 
 ---
 
@@ -78,7 +80,7 @@ Single-instance guard prevents launchd zombie herds (#464).
 
 ---
 
-## 3. Palace Store & Data Model — `memory_core/palace.rs`, `registry.rs`, `store/`, `project_root.rs`
+## 3. Palace Store & Data Model — `engine/palace.rs`, `registry.rs`, `store/`, `project_root.rs`
 
 **Responsibility.** Own the spatial memory data model (Palace → Wing → Room →
 Drawer), the concurrent multi-palace registry, durable per-palace storage,
@@ -87,11 +89,11 @@ the cross-cutting keyword → drawer-ids inverted index held on `PalaceHandle`
 (ADR-0027 D3).
 
 **Key types/modules.**
-- `memory_core/palace.rs` — `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, `Drawer`, `DrawerType`.
-- `memory_core/registry.rs` — `PalaceRegistry` (`DashMap<PalaceId, Arc<PalaceHandle>>`).
-- `memory_core/store/palace_store.rs` — `palace.json` + `identity.txt` atomic persistence.
-- `memory_core/store/l1_cache.rs` — L1 essential-drawer snapshot.
-- `memory_core/store/payload_store.rs`, `chat_sessions.rs` — redb sidecars (#46/#52/#56).
+- `engine/palace.rs` — `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, `Drawer`, `DrawerType`.
+- `engine/registry.rs` — `PalaceRegistry` (`DashMap<PalaceId, Arc<PalaceHandle>>`).
+- `engine/store/palace_store.rs` — `palace.json` + `identity.txt` atomic persistence.
+- `engine/store/l1_cache.rs` — L1 essential-drawer snapshot.
+- `engine/store/payload_store/`, `chat_sessions.rs` — redb sidecars (#46/#52/#56).
 - `project_root.rs` — `project_slug()` + `personal` sentinel, plus `.trusty-tools/trusty-memory.yaml` pin-file management (#88, #446). `ProjectPin`, `PIN_FILE_REL`, `write_project_pin`, `read_project_pin`.
 - `startup_scan.rs` — `scan_pin_map` builds `AppState::pin_project_map` at startup from a single directory-tree pass (#470).
 - `attribution.rs` — `creator:*` tag namespace on every write (#202).
@@ -116,19 +118,19 @@ writing into temp/home/root directories (#492).
 
 ---
 
-## 4. Retrieval & Ranking — `memory_core/retrieval.rs`, `filter.rs`, `decay.rs`, `analytics.rs`
+## 4. Retrieval & Ranking — `engine/retrieval/`, `filter.rs`, `decay.rs`, `analytics.rs`
 
 **Responsibility.** Return the most relevant drawers cheaply via 4-layer
 progressive retrieval, keep noise out at ingest, de-weight stale memories, and
 close the feedback loop on recall usefulness.
 
 **Key types/modules.**
-- `memory_core/retrieval.rs` — L0 (identity), L1 (essential, cached ~900 tokens),
+- `engine/retrieval/` — L0 (identity), L1 (essential, cached ~900 tokens),
   L2 (on-demand vector + BM25), L3 (deep); the canonical `PalaceHandle`.
-- `memory_core/filter.rs` — `FilterConfig` / `classify` / `apply` (#61) + rolling
+- `engine/filter.rs` — `FilterConfig` / `classify` / `apply` (#61) + rolling
   Jaro-Winkler dedup window (#220).
-- `memory_core/decay.rs` — `effective_importance` (90-day half-life, access boost).
-- `memory_core/analytics.rs` — redb-backed `RecallLog` (#57).
+- `engine/decay.rs` — `effective_importance` (90-day half-life, access boost).
+- `engine/analytics.rs` — redb-backed `RecallLog` (#57).
 
 **Current state.** ✅ `memory_recall` (L0+L1+L2), `memory_recall_deep` (L3),
 `memory_recall_all` (cross-palace). Hybrid lexical (BM25 sidecar) + dense (HNSW)
@@ -165,21 +167,21 @@ per-child RSS ceiling of #2846 with a figure that is attributable per palace.
 ---
 
 
-## 6. Knowledge Graph & Facts — `kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `memory_core/store/kg*.rs`, `community.rs`
+## 6. Knowledge Graph & Facts — `kg_extract.rs`, `bootstrap.rs`, `discovery.rs`, `prompt_facts.rs`, `engine/store/kg*`, `community.rs`
 
 **Responsibility.** Maintain a temporal triple store, populate it automatically on
 write and at palace creation, surface hot facts into the model's working context,
 and detect knowledge gaps.
 
 **Key types/modules.**
-- `memory_core/store/kg.rs` + `kg_redb.rs` + `kg_store.rs` + `kg_writer.rs` —
+- `engine/store/kg/` + `kg_redb.rs` + `kg_store.rs` + `kg_writer.rs` —
   redb-backed `KnowledgeGraph` / `Triple` with `valid_from`/`valid_to` (#44).
 - `memory_core/store/kg_sqlite.rs` — legacy SQLite KG (`sqlite-kg` feature, #45).
 - `kg_extract.rs` — deterministic `extract_triples` on write (#97).
 - `bootstrap.rs` — `bootstrap_palace` / `scan_project` from project files (#60).
 - `discovery.rs` — alias discovery → `is_alias_for` triples.
 - `prompt_facts.rs` — `HOT_PREDICATES`, `PromptFactsCache`, `get_prompt_context`.
-- `memory_core/community.rs` — Louvain community detection → knowledge gaps (#52).
+- `engine/community.rs` — Louvain community detection → knowledge gaps (#52).
 
 **Current state.** ✅ `kg_assert`/`kg_query`/`kg_gaps`/`kg_bootstrap`/`add_alias`/
 `discover_aliases` and the prompt-facts tools. Auto-extraction on every write keeps
@@ -195,16 +197,16 @@ delete via `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` (#278).
 
 ---
 
-## 7. Dream / Consolidation — `memory_core/dream.rs`, `semantic_consolidation.rs`
+## 7. Dream / Consolidation — `engine/dream/`, `semantic_consolidation.rs`
 
 **Responsibility.** Keep a palace healthy as it grows: prune low-value/stale
 drawers, dedup near-duplicates, compact storage, refresh closet indexes, and
 (optionally) collapse paraphrases/aliases with an LLM.
 
 **Key types/modules.**
-- `memory_core/dream.rs` — `DreamConfig`, `DreamStats`, `Dreamer` (idle clock +
+- `engine/dream/` — `DreamConfig`, `DreamStats`, `Dreamer` (idle clock +
   `dream_cycle`: content-prune #222, dedup, prune, compaction, closet refresh).
-- `memory_core/semantic_consolidation.rs` — `Inference` trait;
+- `engine/semantic_consolidation/` — `Inference` trait;
   `OpenRouterInference` / `OllamaInference` / `MockInference`; `SemanticConsolidator`
   (Alias / Merge / Flag actions, additive `superseded_by` lineage, SHA-256 response
   cache, per-cycle call budget) (#87).
@@ -327,7 +329,7 @@ start/serve/stop matching trusty-search; kuzu config + data migration; diagnosti
 
 ---
 
-## 12. Storage Backends (shared core) — `memory_core/store/`
+## 12. Storage Backends (shared core) — `engine/store/`
 
 **Responsibility.** Pure-Rust embedded persistence for every palace concern, with
 no rusqlite/usearch native chain on the default path (the redb sweep, #43–#56).

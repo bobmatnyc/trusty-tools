@@ -9,7 +9,9 @@ following have all been absorbed here behind feature flags: `trusty-mcp-core`
 (`mcp`), `trusty-rpc` (`rpc`), `trusty-embedder` (`embedder`),
 `trusty-embedder-client` (`embedder-client`), `trusty-symgraph` (`symgraph` /
 `symgraph-parser`), `trusty-memory-core` (`memory-core`), `trusty-tickets`
-(`tickets`), and `trusty-monitor-tui` (`monitor-tui`).
+(`tickets`), and `trusty-monitor-tui` (`monitor-tui`). The memory engine has
+since moved to `trusty-memory` as `trusty_memory::engine` (#9271); the
+`memory-core` feature remains as a no-op.
 
 Each subsystem is feature-gated so consumers only pay for what they use.
 
@@ -38,14 +40,13 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `embedder-cuda` | GPU-accelerated embedding via CUDA execution provider |
 | `embedder-load-dynamic` | Dynamic ORT loading for AL2023 / glibc < 2.38 builds |
 | `embedder-test-support` | Expose `MockEmbedder` outside `cfg(test)` for downstream tests |
-| `memory-core-test-support` | Expose `memory_core::store::format_v0_fixture`, a format-0 palace for downstream migration tests |
 | `embedder-coreml` | CoreML execution provider on Apple Silicon (no-op alias on other platforms) |
 | `embedder-candle` | Candle Metal embedding backend |
 | `embedder-client` | UDS JSON-RPC client for the `trusty-embedderd` sidecar (formerly `trusty-embedder-client`) |
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
-| `memory-core` | Memory Palace storage engine — HNSW (`hnsw_rs`), redb metadata + KG, dream cycle (formerly `trusty-memory-core`) |
+| `memory-core` | No-op since #9271. The Memory Palace engine it enabled moved to `trusty-memory` as `trusty_memory::engine`; depend on trusty-memory instead. It implies nothing, so name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly if you relied on it. |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
 | `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |
@@ -201,10 +202,6 @@ library slot. Enable it in at most one crate per build graph (typically
 `trusty-agents`). Downstream crates that only need the data types enable `symgraph`
 (contracts only) and stop there.
 
-### Palace format guard (`memory-core`)
-
-`PalaceStore` refuses a palace whose format marker or `palace.json` `format_version` names a format newer than the binary reads, before any file changes (ADR-0067, #9274). The binary reads format 1. A writer-intent `PalaceHandle` open migrates a format-0 palace at its first open, behind a verified backup under `<data_root>/backups/format-migration/<palace>/`; a read-only open of a format-0 palace is refused until the daemon has migrated it. One migration of a palace runs at a time: a second writer open in the process waits for it, and another process fails while it holds the palace directory's lock. `palace_format::palace_format_status` reads a palace's state without writing, and reports `Unverified` when `kg.redb` cannot be read without writing (held by a running daemon, or in need of crash repair). `PalaceStoreError` carries the `FormatTooNew`, `FormatNeedsMigration`, `FormatTooOld`, `FormatMarkerMismatch`, `FormatMarkerUnreadable` and `FormatMigrationFailed` variants and is `#[non_exhaustive]`, so a `match` outside the crate needs a wildcard arm.
-
 ## Migrations (`migrations` feature)
 
 Shared schema-migration kernel (issue #179) for long-lived trusty-* stores.
@@ -264,7 +261,7 @@ are unaffected: the guard is `cfg(test)`-scoped.
 
 | What you changed | Command |
 |---|---|
-| `memory_core` | `cargo test -p trusty-common --features memory-core,embedder-test-support` |
+| the memory engine (`memory_core` until #9271) | not here: `cargo test -p trusty-memory --no-fail-fast` |
 | any other gated module | `cargo test -p trusty-common --features <feature>` |
 | only unconditional modules (`port`, `slug`, `chat`, …) | `cargo test -p trusty-common --features unconditional-only` |
 

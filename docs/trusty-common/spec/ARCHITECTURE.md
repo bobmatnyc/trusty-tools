@@ -3,6 +3,7 @@
 > **Status:** Historical baseline · not a current architecture map
 > **Last reviewed:** 2026-05-29
 > **Derived from:** code/docs/tickets audit
+> **Path note (2026-10-12, #9271):** the memory-palace engine described here (`memory_core`, `memory-core` feature) moved to trusty-memory as `crates/trusty-memory/src/engine/`, and `memory-core` is now a no-op. Path citations were repointed; prose and feature tables describe the earlier layout.
 
 This document predates later package extractions and consolidations. See the
 [behavior-contract catalog](../../specs/README.md) and current crate README.
@@ -201,7 +202,7 @@ These are enforced by the root `CLAUDE.md` and visible throughout the source:
 | `src/bm25_client.rs` | `bm25-client` | UDS JSON-RPC client for `trusty-bm25-daemon`. |
 | `src/migrations/` | `migrations` | `SchemaVersion`, `Migration<S>`, `MigrationRunner`, `file_stamp`, `redb_stamp` (doc-only). |
 | `src/symgraph/` | `symgraph`/`-parser`/`-server` | Contracts surface; tree-sitter parser → registry → emit; editor; HTTP server. |
-| `src/memory_core/` | `memory-core`(+sub) | Palace hierarchy, registry, retrieval, stores (HNSW/redb-KG/payload/chat/L1), dream/decay/analytics/community/consolidation/git. |
+| `crates/trusty-memory/src/engine/` | `memory-core`(+sub) | Palace hierarchy, registry, retrieval, stores (HNSW/redb-KG/payload/chat/L1), dream/decay/analytics/community/consolidation/git. |
 | `src/tickets/` | `tickets` | `api::*` (config/models/Backend/GitHub/JIRA/Linear), MCP `server`, `tools` schema. |
 | `src/help.rs` | `cli-help` | `HelpConfig` YAML model, `render_help`, Jaro-Winkler `suggest`. |
 | `src/monitor/` | `monitor-tui` | `search_tui`/`memory_tui` ratatui apps + typed HTTP clients + shared dashboard/utils. |
@@ -210,7 +211,7 @@ These are enforced by the root `CLAUDE.md` and visible throughout the source:
 
 ---
 
-## 6. Memory-core internal topology (`src/memory_core/`)
+## 6. Memory-core internal topology (`crates/trusty-memory/src/engine/`)
 
 The heaviest subsystem warrants its own sub-map. The palace engine is a layered
 store stack behind a single `PalaceHandle`:
@@ -254,8 +255,8 @@ cargo test -p trusty-common --features axum-server,mcp,rpc,symgraph
 # Embedder (ONNX-backed tests are #[ignore] by default)
 cargo test -p trusty-common --features embedder -- --include-ignored
 
-# Memory-palace engine
-cargo test -p trusty-common --features memory-core
+# Memory-palace engine (moved to trusty-memory in #9271)
+cargo test -p trusty-memory
 ```
 
 Because every consumer build is atomic in the workspace, a change to a

@@ -3,6 +3,7 @@
 > **Status:** Historical product baseline · not a current architecture map
 > **Last reviewed:** 2026-06-08
 > **Derived from:** code/docs/tickets audit (v0.15.0)
+> **Path note (2026-10-12, #9271):** the storage engine this document places in trusty-common's `memory_core` module (`memory-core` feature) is now trusty-memory's own `engine` module, `crates/trusty-memory/src/engine/`. Path citations were repointed where the new file exists; prose about the trusty-common split describes the earlier layout.
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -27,9 +28,9 @@ This revision refreshes the spec to v0.15.0. The changes affecting architecture:
   tools now accept an optional `palace` argument to scope alias operations to a
   specific palace instead of the active/default one.
 
-Module paths under `memory_core/` refer to
-`crates/trusty-common/src/memory_core/`; all other paths refer to
-`crates/trusty-memory/src/`.
+All paths refer to `crates/trusty-memory/src/`. Paths under `engine/` were
+under `crates/trusty-common/src/memory_core/` until #9271 (2026-10-12); a
+`memory_core/` path left below has no clear new home.
 
 ---
 
@@ -71,7 +72,7 @@ understand about the codebase — see [ADR-0001](../decisions/0001-frontend-core
 - **The historical `trusty-memory-core` crate no longer exists.** It was fully
   **absorbed into `trusty-common`** as the `memory_core` module (issue #5, phase
   2d) so the toolchain links one internal library and ships one fewer published
-  crate. The module-level doc says so explicitly (`memory_core/mod.rs`). ✅
+  crate. The module-level doc says so explicitly (`engine/mod.rs`). ✅
   > Note: the *workspace-root* `CLAUDE.md` still lists `crates/trusty-memory-core/`
   > as a shim crate; that is stale — the worktree's `CLAUDE.md` correctly says
   > "re-export shim — absorbed into trusty-common's memory-core feature," and the
@@ -236,7 +237,7 @@ trusty-memory note "fact" --palace p --tag t
 
 ---
 
-## 4. Storage Model (`memory_core/store/`)
+## 4. Storage Model (`engine/store/`)
 
 All storage is **pure-Rust embedded** on the default path. The redb migration
 sweep (#43–#56) removed the rusqlite/r2d2 and C++ usearch chains.
@@ -250,20 +251,20 @@ sweep (#43–#56) removed the rusqlite/r2d2 and C++ usearch chains.
 | L1 cache | JSON snapshot | `store/l1_cache.json` (`l1_cache.rs`) | Top-N essential drawers; hydrated on open, refreshed lazily. |
 | External payloads | **redb** | `store/payload_store.rs` | Durable string-id↔uuid↔JSON map for open-mpm's `TrustyBackedMemoryStore` (#46/#52). |
 | Chat sessions | **redb** | `store/chat_sessions.rs` | Web-UI chat resume (#56). |
-| Recall analytics | **redb** | `memory_core/analytics.rs` | Hit/miss `RecallLog` (#57); one-shot SQLite→redb migration on first open. |
+| Recall analytics | **redb** | `engine/analytics.rs` | Hit/miss `RecallLog` (#57); one-shot SQLite→redb migration on first open. |
 | Multi-process reads | redb snapshot copy | `store/concurrent_open.rs` | Falls back to a tmp snapshot on `DatabaseAlreadyOpen` (#59). |
 | kuzu import | KuzuDB reader | `store/kuzu.rs` | Import-only; `kuzu` feature swaps the stub for real Cypher reads (#277). |
 
 ### Embeddings
 
-`memory_core/embed.rs` is now a **re-export shim** for the unified `Embedder` /
+`engine/embed.rs` is now a **re-export shim** for the unified `Embedder` /
 `FastEmbedder` (`AllMiniLML6V2Q`, **384-dim**, `EMBED_DIM`) that moved to the
 shared embedder surface in `trusty-common` so trusty-memory and trusty-search ship
 the same code. The model cache (~22 MB) downloads on first run (~100 MB disk).
 
 ---
 
-## 5. Progressive Retrieval (L0–L3) — `memory_core/retrieval.rs`
+## 5. Progressive Retrieval (L0–L3) — `engine/retrieval/`
 
 LLM context is precious, so recall is **layered and paid lazily**. The
 `PalaceHandle` owns the per-palace storage handles plus the pre-cached L0/L1.
@@ -364,7 +365,7 @@ browser. ✅
 | `commands/` | Subcommand handlers: `serve`/`start`/`stop`, `setup`, `service` (launchd), `migrate`/`kuzu_migrate`/`migrations`, `monitor`, `note`, `send_message`, `inbox_check`, `doctor`, `kg_rebuild`, `prompt_context`, `port`, `upgrade`, `link`, `single_instance`. |
 | `bin/mcp_bridge.rs` | `trusty-memory-mcp-bridge` — stdio↔UDS byte pipe with idle-safe exponential-backoff reconnect (PR #149, #535). |
 
-### 8.2 Core — `crates/trusty-common/src/memory_core/`
+### 8.2 Core — `crates/trusty-memory/src/engine/`
 
 | Module | Responsibility |
 |---|---|
