@@ -93,7 +93,7 @@ digit or `_`.
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`, and on Unix the tier-3 client `granted`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
-| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`), the Keeper backend (`store::keeper`) and the GitHub Actions sync target (`store::github_actions`). Unix only. Implies `store`. |
+| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`), the Keeper backend (`store::keeper`), the GitHub Actions sync target (`store::github_actions`) and the Vercel sync target (`store::vercel`). Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
 A caller that only names keys can depend on `api` alone:
@@ -177,7 +177,7 @@ unlock the Keychain and retry.
 machine config the selected backend comes from, the account's own machine
 config (the one file that can enable 1Password or Keeper), the selected
 backend and its posture, and one row per backend: `keychain`, `file`,
-`onepassword`, `keeper` and `github-actions`, on every build. A row the server cannot open says
+`onepassword`, `keeper`, `github-actions` and `vercel`, on every build. A row the server cannot open says
 why, as `reason` plus a `detail` with the fix:
 
 | `reason` | Meaning |
@@ -335,6 +335,49 @@ secrets:
   `gh` is `backend_locked` and nothing is pushed.
 - Key names must be GitHub secret names: `[A-Za-z0-9_]`, not starting with a
   digit or `GITHUB_`; `gh` stores them uppercased.
+
+## Vercel push
+
+Shims only, provisional: no test has run against a real Vercel project, so
+the CLI's flags, output shapes and messages below are not yet confirmed
+([#9069](https://github.com/bobmatnyc/trusty-tools/issues/9069)).
+
+With the `cli-backends` feature (Unix), `copy --to vercel` pushes named keys
+into the `production` and `preview` environment variables of the Vercel
+project the account's own machine config maps the checkout to. The same
+rules as the GitHub Actions push apply: key list required, Claude Code
+callers refused, never read back, swept or configured as a backend.
+
+```yaml
+secrets:
+  vercel:
+    program: /Users/me/.local/share/pnpm/vercel   # required; PATH is never searched
+    config_path: /Users/me/.vercel-cli            # optional; passed as --global-config
+    projects:
+      acme/web:                                   # the origin remote's <owner>/<repo>
+        org_id: team_abc123
+        project_id: prj_def456
+```
+
+- No `projects` entry for the checkout is `backend_not_enabled`, before the
+  CLI runs. A tracked project file with a `vercel:` section is refused.
+- Each run uses the CLI's own login, runs in a fresh empty 0700 directory
+  passed as `--cwd`, gets `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` from the
+  mapping, and has every inherited `VERCEL_*` variable removed, so a
+  `.vercel/project.json` or a spawner's variable cannot redirect the push.
+  Its `PATH` is the program's directory plus `/usr/bin:/bin`.
+- Per key: `vercel env ls` on both targets, then `vercel env add KEY
+  <target> --sensitive --force` with the value on stdin for `production`,
+  then `preview`, then the listings again. `development` is never pushed.
+- A key is copied only when both listings name it afterwards. A target that
+  fails fails the key, and the reason says a target may have been written.
+  Output the parser does not recognise is a failure.
+- A variable that already existed is overwritten in place (`--force`, never
+  removed first), but a listing cannot show that its value changed, so the
+  key is reported failed with a fixed reason until the live check settles
+  how to prove an update.
+- Key names must be Vercel variable names: `[A-Za-z0-9_]`, not starting
+  with a digit.
 
 ## Audit trail
 

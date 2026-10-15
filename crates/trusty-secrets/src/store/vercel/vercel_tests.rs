@@ -278,6 +278,11 @@ fn vercel_errors_never_carry_the_value_or_cli_output() {
     shim.fail_add("API_KEY", "production");
     let backend = shim.backend();
     let failed = push(&backend, "API_KEY").unwrap_err();
+    assert_eq!(
+        shim.stdin("API_KEY", "production").as_deref(),
+        Some(VALUE),
+        "the CLI saw and echoed the value"
+    );
     let text = format!("{failed} {failed:?} {backend:?}");
     assert!(
         !text.contains(VALUE) && !text.contains("status 500"),

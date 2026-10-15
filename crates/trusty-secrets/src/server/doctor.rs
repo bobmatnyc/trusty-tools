@@ -448,6 +448,7 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
     let mut backends = rows(state, &target.selected, target.refused);
     // #9069: D15 — doctor lists sync targets; the console's copy dialog does not.
     backends.push(judge_sync_target(state, BackendId::github_actions()));
+    backends.push(judge_sync_target(state, BackendId::vercel()));
     to_json(&DoctorResponse {
         socket: state.settings.socket.clone(),
         index_root: state.settings.index_root.clone(),
