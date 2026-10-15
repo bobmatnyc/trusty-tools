@@ -13,7 +13,11 @@
 //! inside the same trust anchor, so it survives a Claude `session_id` change
 //! (Dfc) and [`reapply`] re-writes the taint for the new id. The mark names
 //! the session's workspace, so [`covering_mark`] scopes the SessionStart
-//! hook's own re-apply (D09) to that workspace. Each taint record carries its
+//! hook's own re-apply (D09) to that workspace. Beside the mark,
+//! `managed/<managed_id>.seen` lists every Claude id a SessionStart reported
+//! for the session: [`reapply`] appends before it reads the mark, and
+//! [`taint_managed_session`] reads it after it writes the mark, so one of the
+//! two always taints a new id (#9877). Each taint record carries its
 //! own workspace scope, which a retire's hand-off keeps (C1). Only [`retire`]
 //! removes either, when the managed session ends; no timer exists. The
 //! verdict reads presence only: absent is untainted, and every other outcome,
@@ -34,6 +38,9 @@ pub const REAPPLY_FAILED_CHANNEL: &str = "reapply-failed";
 
 /// The subdirectory holding the per-managed-session markers.
 const MANAGED_DIR: &str = "managed";
+
+/// The suffix of a managed session's seen-id list in [`MANAGED_DIR`] (#9877).
+const SEEN_SUFFIX: &str = ".seen";
 
 /// The file in the taint directory the hook appends to when its own re-apply
 /// write fails too (D09). It sits under the trust anchor so no session can
@@ -358,9 +365,17 @@ pub fn managed_mark(dir: &Path, managed: &str) -> Result<Option<TaintMark>, Tain
 
 /// Taint managed session `managed` and its current Claude id (P5's writer).
 ///
-/// What: the Claude id's file first, then the managed marker, so a failure
-/// at either step is an `Err` the caller turns into "do not deliver".
-/// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`.
+/// Why (#9877): the deliverer's half of the seen-id handshake. A lost or late
+/// `SessionEnd` leaves the record on an old id while the pane runs a new one
+/// whose `SessionStart` found no marker, so the ids the session has reported
+/// are tainted too.
+/// What: the Claude id's file first, then the managed marker, then every id
+/// in the seen list ([`reapply`] records each) that reads untainted. A
+/// failure at any step is an `Err` the caller turns into "do not deliver".
+/// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`,
+/// `reapply_before_the_marker_write_still_taints_the_new_id`,
+/// `a_seen_list_that_cannot_be_read_fails_the_taint`,
+/// `a_seen_id_whose_taint_cannot_be_written_fails_the_taint`.
 pub fn taint_managed_session(
     dir: &Path,
     managed: &str,
@@ -368,20 +383,102 @@ pub fn taint_managed_session(
     mark: &TaintMark,
 ) -> Result<(), TaintError> {
     write_taint(dir, &mark.record_for(claude_session_id, managed))?;
-    mark_managed(dir, managed, mark)
+    mark_managed(dir, managed, mark)?;
+    handshake_gap();
+    // #9877: read after the marker write, so an id this read misses was
+    // recorded after it, and that id's own reapply finds the marker.
+    for seen in seen_ids(dir, managed)? {
+        if seen != claude_session_id && read_state(dir, &seen) == TaintState::Untainted {
+            write_taint(dir, &mark.record_for(&seen, managed))?;
+        }
+    }
+    Ok(())
+}
+
+/// The seen-id list of `managed` in `dir`, beside its marker (#9877).
+fn seen_path(dir: &Path, managed: &str) -> Result<PathBuf, TaintError> {
+    Ok(dir
+        .join(MANAGED_DIR)
+        .join(format!("{}{SEEN_SUFFIX}", sanitize_id(managed)?)))
+}
+
+/// Append `claude_session_id` to `managed`'s seen-id list (#9877).
+///
+/// What: one `<id>\n` line, appended to a 0600 file in a 0700 directory and
+/// synced. A bad id and any failed step are an `Err`.
+/// Test: `a_seen_record_that_cannot_be_written_fails_the_reapply`.
+fn record_seen(dir: &Path, managed: &str, claude_session_id: &str) -> Result<(), TaintError> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let line = format!("{}\n", sanitize_id(claude_session_id)?);
+    let path = seen_path(dir, managed)?;
+    let parent = dir.join(MANAGED_DIR);
+    let io = |path: &Path, source| TaintError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&parent)
+        .map_err(|e| io(&parent, e))?;
+    write_fault()
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .mode(0o600)
+                .open(&path)
+        })
+        .and_then(|mut file| {
+            file.write_all(line.as_bytes())
+                .and_then(|()| file.sync_data())
+        })
+        .map_err(|e| io(&path, e))
+}
+
+/// The ids in `managed`'s seen-id list; none when the list is absent.
+///
+/// What: a read error other than `NotFound`, and a line that is not a plain
+/// session id, are each an `Err`.
+/// Test: `a_seen_list_that_cannot_be_read_fails_the_taint`.
+fn seen_ids(dir: &Path, managed: &str) -> Result<Vec<String>, TaintError> {
+    let path = seen_path(dir, managed)?;
+    let text = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(TaintError::Io { path, source }),
+        Ok(text) => text,
+    };
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| match sanitize_id(line) {
+            Ok(id) => Ok(id.to_owned()),
+            Err(_) => Err(TaintError::Malformed {
+                path: path.clone(),
+                reason: format!("{line:?} is not a plain session id"),
+            }),
+        })
+        .collect()
 }
 
 /// Re-apply `managed`'s taint to a new Claude id; `Ok(true)` when written.
 ///
 /// Why (Dfc, D09): a new `session_id` in a tainted managed session must read
 /// tainted before its first tool call, and a failure must be visible to the
-/// SessionStart caller, never logged and dropped.
-/// What: `Ok(false)` when the managed session carries no mark; otherwise
-/// writes the taint file for `claude_session_id`. A marker that cannot be
-/// read and a write that fails are each an `Err`.
+/// SessionStart caller, never logged and dropped. #9877: the SessionStart
+/// half of the seen-id handshake with [`taint_managed_session`].
+/// What: records `claude_session_id` in the seen list first, for every
+/// managed session; then `Ok(false)` when it carries no mark, else writes
+/// the taint file for `claude_session_id`. A seen record, a marker read or a
+/// write that fails is each an `Err`.
 /// Test: `session_start_with_new_id_reapplies_taint_for_tainted_managed_session`,
-/// `session_start_for_untainted_managed_session_writes_nothing`.
+/// `session_start_for_untainted_managed_session_writes_nothing`,
+/// `reapply_before_the_marker_write_still_taints_the_new_id`,
+/// `a_seen_record_that_cannot_be_written_fails_the_reapply`.
 pub fn reapply(dir: &Path, managed: &str, claude_session_id: &str) -> Result<bool, TaintError> {
+    // #9877: record before the marker read, so a deliverer whose marker
+    // write this read misses still finds the id afterwards.
+    record_seen(dir, managed, claude_session_id)?;
+    handshake_gap();
     let Some(mark) = managed_mark(dir, managed)? else {
         return Ok(false);
     };
@@ -431,15 +528,19 @@ fn json_stem(name: &str) -> Option<&str> {
 /// [`Presence`] of taint under `dir`, the markers in `managed/` included.
 ///
 /// What: any entry other than `managed/` itself is `Some`, the
-/// [`REAPPLY_FAILURES_FILE`] included; a listing error is `Unknown`.
+/// [`REAPPLY_FAILURES_FILE`] included; a seen-id list in `managed/` is not a
+/// taint (#9877). A listing error is `Unknown`.
 /// Test: `presence_counts_files_and_marks`,
-/// `presence_is_unknown_when_a_dir_cannot_be_read`.
+/// `presence_is_unknown_when_a_dir_cannot_be_read`,
+/// `the_seen_list_is_no_taint_and_a_retire_removes_it`.
 pub fn presence(dir: &Path) -> Presence {
     let mut seen = Presence::None;
-    for sub in [dir.to_path_buf(), dir.join(MANAGED_DIR)] {
+    for (sub, marks) in [(dir.to_path_buf(), false), (dir.join(MANAGED_DIR), true)] {
+        // #9877: every SessionStart writes a seen list; only a mark taints.
+        let taint = |name: &String| name != MANAGED_DIR && !(marks && name.ends_with(SEEN_SUFFIX));
         match entry_names(&sub) {
             Err(_) => return Presence::Unknown,
-            Ok(names) if names.iter().any(|name| name != MANAGED_DIR) => seen = Presence::Some,
+            Ok(names) if names.iter().any(taint) => seen = Presence::Some,
             Ok(_) => {}
         }
     }
@@ -555,9 +656,12 @@ fn heir<'a>(others: &'a [OtherMark], scope: &Path) -> Option<&'a str> {
 /// file's own `workspace` scope (`heir`), else removes it. Marks that cannot
 /// be listed, a file that cannot be read or parsed, a record with no scope,
 /// and a failed rewrite or removal each leave the file in place and make
-/// the retire an `Err`; the mark is then kept. Returns how many files were
-/// removed.
+/// the retire an `Err`; the mark is then kept. Then the seen-id list goes
+/// (#9877), and a failed removal keeps the mark too. Returns how many files
+/// were removed.
 /// Test: `retire_removes_only_that_managed_sessions_files`,
+/// `the_seen_list_is_no_taint_and_a_retire_removes_it`,
+/// `a_seen_list_a_retire_cannot_remove_keeps_the_mark`,
 /// `retire_hands_a_shared_id_to_the_other_tainted_session_in_its_workspace`,
 /// `retire_hands_an_id_to_a_mark_nested_in_its_workspace`,
 /// `retire_keeps_a_shared_id_when_another_mark_cannot_be_read`,
@@ -615,6 +719,17 @@ pub fn retire(dir: &Path, managed: &str) -> Result<usize, TaintError> {
     if let Some(err) = first_err {
         return Err(err);
     }
+    // #9877: the seen list ends with the session; one that stays keeps the mark.
+    let seen = seen_path(dir, managed)?;
+    match std::fs::remove_file(&seen) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(TaintError::Io {
+                path: seen,
+                source: e,
+            });
+        }
+        _ => {}
+    }
     match std::fs::remove_file(&marker) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(TaintError::Io {
             path: marker,
@@ -648,5 +763,33 @@ fn write_fault() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// The step [`at_handshake_gap`] runs once at the next handshake gap.
+    static HANDSHAKE_GAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam (#9877): run `step` once, on this thread, at the next gap
+/// between the two halves of the seen-id handshake ([`reapply`] or
+/// [`taint_managed_session`]), to force one interleaving of the two.
+#[cfg(test)]
+pub(crate) fn at_handshake_gap(step: impl FnOnce() + 'static) {
+    HANDSHAKE_GAP.with(|gap| *gap.borrow_mut() = Some(Box::new(step)));
+}
+
+/// The gap between the two halves of the seen-id handshake; a no-op outside
+/// a test that armed [`at_handshake_gap`].
+fn handshake_gap() {
+    #[cfg(test)]
+    if let Some(step) = HANDSHAKE_GAP.with(|gap| gap.borrow_mut().take()) {
+        step();
+    }
+}
+
+#[cfg(test)]
 #[path = "channels_taint_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "channels_taint_seen_tests.rs"]
+mod seen_tests;

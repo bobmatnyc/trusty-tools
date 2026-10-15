@@ -186,6 +186,30 @@ fn doctor_row_is_unknown_when_delivery_log_unreadable() {
     }
 }
 
+/// 🔴 #9877 (closure 3): a D09 re-apply failures record that exists but
+/// cannot be read (a directory in its place) or is corrupt (not UTF-8) is a
+/// `Fail` naming it, never `Ok` with zero failures counted.
+#[test]
+fn unreadable_reapply_failures_record_is_never_ok() {
+    let (_home, dir, live) = live_dir();
+    let failures = dir.join(channels_taint::REAPPLY_FAILURES_FILE);
+    std::fs::create_dir_all(&failures).expect("block the record");
+    let blocked = channel_taint_row(&dir, &live);
+    std::fs::remove_dir(&failures).expect("unblock");
+    std::fs::write(&failures, [0xff, 0xfe, b'\n']).expect("corrupt");
+    let corrupt = channel_taint_row(&dir, &live);
+    for (case, row) in [("unreadable", blocked), ("corrupt", corrupt)] {
+        assert_eq!(row.status, CheckStatus::Fail, "{case}: {}", row.message);
+        for needle in [channels_taint::REAPPLY_FAILURES_FILE, "unreadable"] {
+            assert!(
+                row.message.contains(needle),
+                "{case}, {needle}: {}",
+                row.message
+            );
+        }
+    }
+}
+
 /// A live taint dir for `live-1` and the live set.
 fn live_dir() -> (tempfile::TempDir, std::path::PathBuf, HashSet<String>) {
     let home = tempfile::tempdir().expect("tempdir");
