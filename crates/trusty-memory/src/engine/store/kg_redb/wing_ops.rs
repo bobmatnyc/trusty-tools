@@ -42,7 +42,7 @@ impl KgStoreRedb {
     /// error, so a corrupt index degrades to "unregistered" instead of making
     /// the palace unusable — the same posture `lookup_room_id` takes.
     /// Test: `wing_create_is_idempotent`.
-    pub fn lookup_wing_id(&self, key: &str) -> Result<Option<Uuid>> {
+    pub(crate) fn lookup_wing_id(&self, key: &str) -> Result<Option<Uuid>> {
         let rtx = self.db().begin_read().context("begin lookup_wing_id txn")?;
         let table = rtx.open_table(WING_KEYS).context("open wing_keys table")?;
         let Some(v) = table.get(key).context("read wing_keys row")? else {
@@ -67,7 +67,7 @@ impl KgStoreRedb {
     /// name instead of having the original key resurrected as an alias.
     /// What: point read of `WINGS`, postcard-decoded.
     /// Test: `wing_rename_survives_reseed`.
-    pub fn get_wing(&self, id: Uuid) -> Result<Option<WingRecord>> {
+    pub(crate) fn get_wing(&self, id: Uuid) -> Result<Option<WingRecord>> {
         let rtx = self.db().begin_read().context("begin get_wing txn")?;
         let table = rtx.open_table(WINGS).context("open wings table")?;
         let Some(v) = table
@@ -90,7 +90,12 @@ impl KgStoreRedb {
     /// written only when `id` is absent; the `WING_KEYS` entry only when `key`
     /// is absent. Returns `true` when a new `WINGS` row was written.
     /// Test: `wing_insert_is_insert_only`, `wing_create_is_idempotent`.
-    pub fn insert_wing_if_absent(&self, id: Uuid, key: &str, record: &WingRecord) -> Result<bool> {
+    pub(crate) fn insert_wing_if_absent(
+        &self,
+        id: Uuid,
+        key: &str,
+        record: &WingRecord,
+    ) -> Result<bool> {
         self.check_writable()?;
         let value = encode_value(record).context("encode WingRecord")?;
         // #6652: the swap-exclusion guard must outlive the txn.
@@ -128,7 +133,7 @@ impl KgStoreRedb {
     /// A row that fails to decode is logged and skipped so one bad row cannot
     /// hide the rest.
     /// Test: `wing_list_reports_seeded_and_created_wings`.
-    pub fn list_wings(&self) -> Result<Vec<(Uuid, WingRecord)>> {
+    pub(crate) fn list_wings(&self) -> Result<Vec<(Uuid, WingRecord)>> {
         let rtx = self.db().begin_read().context("begin list_wings txn")?;
         let table = rtx.open_table(WINGS).context("open wings table")?;
         let mut out = Vec::new();
@@ -172,7 +177,7 @@ impl KgStoreRedb {
     /// Test: `wing_rename_changes_no_room_or_drawer_rows`,
     /// `wing_rename_retires_the_old_label`,
     /// `wing_rename_applies_every_effect_together`.
-    pub fn rename_wing_in_place(
+    pub(crate) fn rename_wing_in_place(
         &self,
         id: Uuid,
         new_key: &str,
@@ -244,7 +249,8 @@ impl KgStoreRedb {
     /// recognise which shape wrote these rows. Seeding idempotency does NOT
     /// depend on it; that comes from the by-id existence probe.
     /// Test: `default_wing_is_seeded_once`.
-    pub fn wing_schema_version(&self) -> Result<Option<u32>> {
+    #[cfg(test)]
+    pub(crate) fn wing_schema_version(&self) -> Result<Option<u32>> {
         let rtx = self
             .db()
             .begin_read()
@@ -277,7 +283,7 @@ impl KgStoreRedb {
     /// What: overwrites the nil-uuid `WINGS` row with the current version.
     /// Test: `default_wing_is_seeded_once`,
     /// `reseeding_does_not_restamp_the_schema_version`.
-    pub fn set_wing_schema_version(&self) -> Result<()> {
+    pub(crate) fn set_wing_schema_version(&self) -> Result<()> {
         self.check_writable()?;
         let value = encode_value(&WingSchemaMarker {
             schema_version: WING_SCHEMA_VERSION,

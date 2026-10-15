@@ -44,7 +44,8 @@ impl KnowledgeGraph {
     /// map holds `superseded -> replacement` for each id that has an active
     /// edge to another drawer.
     /// Test: `superseded_by_many_maps_only_active_drawer_edges`.
-    pub async fn superseded_by_many(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn superseded_by_many(
         &self,
         ids: Vec<Uuid>,
     ) -> Result<std::collections::HashMap<Uuid, Uuid>> {
@@ -61,7 +62,7 @@ impl KnowledgeGraph {
     /// What: runs `KgStoreRedb::verify_with_many` on the blocking pool. The map
     /// holds `drawer -> command` for each id with an active command.
     /// Test: `slot_retirement_closes_the_retirees_verify_command`.
-    pub async fn verify_with_many(
+    pub(crate) async fn verify_with_many(
         &self,
         ids: Vec<Uuid>,
     ) -> Result<std::collections::HashMap<Uuid, String>> {
@@ -85,7 +86,8 @@ impl KnowledgeGraph {
     /// Why: KG Explorer UI shows a triple-count badge next to each subject.
     /// What: Delegates to `KgStoreRedb::list_subjects_with_counts`.
     /// Test: `list_subjects_with_counts_returns_grouped_counts`.
-    pub fn list_subjects_with_counts(&self, limit: usize) -> Result<Vec<(String, u64)>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn list_subjects_with_counts(&self, limit: usize) -> Result<Vec<(String, u64)>> {
         self.store.list_subjects_with_counts(limit)
     }
 
@@ -94,7 +96,8 @@ impl KnowledgeGraph {
     /// Why: KG Explorer "All" mode pages through every active triple.
     /// What: Delegates to `KgStoreRedb::list_active` on the blocking pool.
     /// Test: `list_active_returns_ordered_window`.
-    pub async fn list_active(&self, limit: usize, offset: usize) -> Result<Vec<Triple>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn list_active(&self, limit: usize, offset: usize) -> Result<Vec<Triple>> {
         let store = self.store.clone();
         let triples = tokio::task::spawn_blocking(move || store.list_active(limit, offset))
             .await
@@ -128,7 +131,8 @@ impl KnowledgeGraph {
     /// node counts are diagnostic, not critical, so we degrade gracefully
     /// rather than propagating the error.
     /// Test: `kg_graph_tests::node_and_edge_count_match_adjacency`.
-    pub fn node_count(&self) -> usize {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn node_count(&self) -> usize {
         match self.adj.read() {
             Ok(adj) => adj.graph.node_count(),
             Err(_) => 0,
@@ -145,7 +149,8 @@ impl KnowledgeGraph {
     /// What: Acquires the adjacency read lock and returns
     /// `StableGraph::edge_count()`. Returns `0` on a poisoned lock.
     /// Test: `kg_graph_tests::node_and_edge_count_match_adjacency`.
-    pub fn edge_count(&self) -> usize {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn edge_count(&self) -> usize {
         match self.adj.read() {
             Ok(adj) => adj.graph.edge_count(),
             Err(_) => 0,
@@ -166,7 +171,8 @@ impl KnowledgeGraph {
     /// them, and a KG write invalidates exactly the palace it touched.
     /// Test: `kg_graph_tests::community_count_returns_partition_size`,
     /// `kg_graph_tests::community_count_is_cached_until_the_graph_changes`.
-    pub fn community_count(&self) -> usize {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn community_count(&self) -> usize {
         // #7106: memoised per adjacency generation. `palaces_list` asks every
         // resident palace for this on every poll and `kg_graph` asks again on
         // every call; before the cache each ask was a full Louvain partition
@@ -206,7 +212,8 @@ impl KnowledgeGraph {
     /// graphs per poll.
     /// What: a relaxed load of the per-handle counter, shared across clones.
     /// Test: `community_count_is_cached_until_the_graph_changes`.
-    pub fn community_computations(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn community_computations(&self) -> u64 {
         self.community_computations
             .load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -219,7 +226,7 @@ impl KnowledgeGraph {
     /// second handle across the swap.
     /// What: `&self.store`.
     /// Test: `compaction_swaps_the_live_handle_in_place`.
-    pub fn redb_store(&self) -> &crate::engine::store::kg_redb::KgStoreRedb {
+    pub(crate) fn redb_store(&self) -> &crate::engine::store::kg_redb::KgStoreRedb {
         &self.store
     }
 
@@ -231,7 +238,8 @@ impl KnowledgeGraph {
     /// What: Delegates to `KgStoreRedb::checkpoint` (a no-op) and returns the
     /// (wal_pages, checkpointed_pages) tuple as `(0, 0)`.
     /// Test: `wal_checkpoint_returns_pages`.
-    pub fn checkpoint(&self) -> Result<(i64, i64)> {
+    #[cfg(test)]
+    pub(crate) fn checkpoint(&self) -> Result<(i64, i64)> {
         self.store.checkpoint()?;
         Ok((0, 0))
     }
@@ -268,7 +276,7 @@ impl KnowledgeGraph {
     /// Read-only handles are rejected by `apply_batch`'s own writability check.
     /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
     /// `concurrent_tier_c_writes_to_one_slot_leave_exactly_one_claimant`.
-    pub async fn upsert_drawers_atomic(&self, drawers: Vec<Drawer>) -> Result<()> {
+    pub(crate) async fn upsert_drawers_atomic(&self, drawers: Vec<Drawer>) -> Result<()> {
         use crate::engine::store::kg_redb::BatchWriteOp;
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
@@ -293,7 +301,7 @@ impl KnowledgeGraph {
     /// to yield to.
     /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
     /// `fact_key_index_tracks_upsert_and_delete`.
-    pub fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
+    pub(crate) fn drawer_id_for_fact_key(&self, fact_key: &str) -> Result<Option<Uuid>> {
         self.store.drawer_id_for_fact_key(fact_key)
     }
 
@@ -309,7 +317,7 @@ impl KnowledgeGraph {
     /// `Ok(None)` is a dangling index entry; `Err` is a row present but
     /// unreadable, which the caller must not treat as absence.
     /// Test: `an_on_disk_incumbent_absent_from_the_mirror_is_still_retired`.
-    pub fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
+    pub(crate) fn load_drawer(&self, id: Uuid) -> Result<Option<Drawer>> {
         self.store.load_drawer(id)
     }
 
@@ -319,21 +327,8 @@ impl KnowledgeGraph {
     /// metadata row. Same coalescing rationale as `upsert_drawer`.
     /// What: Forwards to `KgWriter::delete_drawer`.
     /// Test: `delete_drawer_removes_row`.
-    pub async fn delete_drawer(&self, id: Uuid) -> Result<()> {
+    pub(crate) async fn delete_drawer(&self, id: Uuid) -> Result<()> {
         self.writer.delete_drawer(id).await
-    }
-
-    /// Synchronous drawer delete used by palace open-time pruning.
-    ///
-    /// Why: Issue #61's TTL sweep runs inside `PalaceHandle::open`, which is
-    /// synchronous and predates any tokio runtime context. The async writer
-    /// path requires an executor we don't have here; going straight to the
-    /// underlying redb store keeps the sweep contention-free at startup.
-    /// Outside of open we always prefer `delete_drawer` so writes coalesce.
-    /// What: Forwards directly to `KgStoreRedb::delete_drawer`.
-    /// Test: Covered indirectly by `purge_expired_drops_only_past_ttl`.
-    pub fn delete_drawer_sync(&self, id: Uuid) -> Result<()> {
-        self.store.delete_drawer(id)
     }
 
     /// Load the set of drawer IDs currently stored.
@@ -341,7 +336,7 @@ impl KnowledgeGraph {
     /// Why: Compaction only needs "is this UUID a live drawer?".
     /// What: Delegates to `KgStoreRedb::load_drawer_ids`.
     /// Test: `load_drawer_ids_matches_load_drawers`.
-    pub fn load_drawer_ids(&self) -> Result<std::collections::HashSet<Uuid>> {
+    pub(crate) fn load_drawer_ids(&self) -> Result<std::collections::HashSet<Uuid>> {
         self.store.load_drawer_ids()
     }
 
@@ -351,7 +346,8 @@ impl KnowledgeGraph {
     /// HNSW vector hit back to metadata.
     /// What: Delegates to `KgStoreRedb::load_drawers`.
     /// Test: `upsert_drawer_then_load_drawers_round_trips`.
-    pub fn load_drawers(&self) -> Result<Vec<Drawer>> {
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) fn load_drawers(&self) -> Result<Vec<Drawer>> {
         self.store.load_drawers()
     }
 
@@ -364,7 +360,7 @@ impl KnowledgeGraph {
     /// `(rows, skipped)`.
     /// Test: `drawer_load_degraded_true_on_partial_row_corruption` in
     /// `retrieval::tests`.
-    pub fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
+    pub(crate) fn load_drawers_with_skipped(&self) -> Result<(Vec<Drawer>, usize)> {
         self.store.load_drawers_with_skipped()
     }
 
@@ -411,7 +407,7 @@ impl KnowledgeGraph {
     /// failure and carries on.
     /// Test: `cascade_delete_removes_triples_for_drawer`,
     /// `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
-    pub async fn cascade_delete_by_drawer(&self, drawer_id: Uuid) -> Result<usize> {
+    pub(crate) async fn cascade_delete_by_drawer(&self, drawer_id: Uuid) -> Result<usize> {
         self.ensure_adjacency_live("cascade_delete_by_drawer")?;
         // Canonical subject format used by `kg_extract.rs::drawer_subject`.
         let subject = format!("drawer:{drawer_id}");
@@ -463,7 +459,8 @@ impl KnowledgeGraph {
     /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`,
     /// `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`,
     /// `poisoned_adjacency_error_downcasts_with_the_committed_row_count`.
-    pub async fn retract_triple(
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub(crate) async fn retract_triple(
         &self,
         subject: &str,
         predicate: &str,
@@ -496,7 +493,8 @@ impl KnowledgeGraph {
     /// direct write path without spawning an executor.
     /// What: Delegates to `KgWriter::assert_sync` on the bypass path.
     /// Test: `backfill_uses_kg_dictionary`.
-    pub fn assert_sync(&self, triple: &Triple) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn assert_sync(&self, triple: &Triple) -> Result<()> {
         self.writer.assert_sync(triple)
     }
 
@@ -531,7 +529,8 @@ impl KnowledgeGraph {
     /// consistency checks.
     /// What: Delegates to `KgStoreRedb::dump_all_triples`.
     /// Test: Covered indirectly by `kg_redb::tests::assert_supersedes_prior`.
-    pub fn dump_all_triples(&self) -> Result<Vec<Triple>> {
+    #[cfg(all(test, feature = "server"))]
+    pub(crate) fn dump_all_triples(&self) -> Result<Vec<Triple>> {
         self.store.dump_all_triples()
     }
 }

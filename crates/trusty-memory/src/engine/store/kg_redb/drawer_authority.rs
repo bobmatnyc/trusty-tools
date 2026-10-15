@@ -28,7 +28,7 @@ impl KgStoreRedb {
     /// Why/What: see the module doc. Presence alone counts; a missing
     /// `kg_schema` table reads as unstamped.
     /// Test: `a_stale_second_handle_does_not_revive_a_forgotten_drawer_on_reopen`.
-    pub fn drawers_authoritative(&self) -> Result<bool> {
+    pub(crate) fn drawers_authoritative(&self) -> Result<bool> {
         let rtx = self
             .db()
             .begin_read()
@@ -53,7 +53,7 @@ impl KgStoreRedb {
     /// given up on this write can stop it landing behind a later writer.
     /// Test: `a_legacy_snapshot_drawer_is_adopted_and_kept_when_adoption_is_skipped`,
     /// `an_adoption_that_overran_its_budget_never_commits`.
-    pub fn adopt_snapshot_drawers(
+    pub(crate) fn adopt_snapshot_drawers(
         &self,
         drawers: &[Drawer],
         may_commit: impl FnOnce() -> bool,

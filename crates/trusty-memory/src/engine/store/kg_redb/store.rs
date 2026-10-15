@@ -88,7 +88,7 @@ impl KgStoreRedb {
     /// `writer_intent_open_fails_loud_on_locked_file`,
     /// `a_direct_kg_open_of_an_n_plus_one_file_is_refused`,
     /// `the_post_open_gate_reads_the_opened_file_not_the_pre_open_marker`.
-    pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
+    pub(crate) fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         // #9659: an observer reads a copy of the live file and shares no handle
         // through the cache, so it never creates, gates or locks the live file.
         let observer = intent == OpenIntent::Observer;
@@ -313,7 +313,7 @@ impl KgStoreRedb {
     /// crate-private.
     /// What: clone of the path passed to `open_with_intent`.
     /// Test: `kg_redb_path_reports_the_open_path`.
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 

@@ -82,7 +82,7 @@ impl KgStoreRedb {
     /// What: Delegates to [`batch_retract`] inside one write transaction.
     /// Test: `retract_closes_active_interval`,
     /// `retract_closes_every_object_at_the_pair`.
-    pub fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
+    pub(crate) fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
         self.retract_in_txn(subject, predicate, None)
     }
 
@@ -112,7 +112,12 @@ impl KgStoreRedb {
     /// `retract_triple_on_the_only_object_clears_the_active_count`,
     /// `concurrent_retract_triples_at_one_pair_close_every_object`,
     /// `concurrent_retract_triple_and_assert_at_one_pair_agree_on_the_count`.
-    pub fn retract_triple(&self, subject: &str, predicate: &str, object: &str) -> Result<usize> {
+    pub(crate) fn retract_triple(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<usize> {
         // #5396: three-argument retract so object-side noise can be removed
         // without collateral loss of the good siblings at the same pair.
         self.retract_in_txn(subject, predicate, Some(object))
@@ -196,7 +201,7 @@ impl KgStoreRedb {
     /// that no longer exists. No-op on unknown id.
     /// Test: `delete_drawer_removes_row`,
     /// `fact_key_index_tracks_upsert_and_delete`.
-    pub fn delete_drawer(&self, id: Uuid) -> Result<()> {
+    pub(crate) fn delete_drawer(&self, id: Uuid) -> Result<()> {
         self.check_writable()?;
         // #6652: the swap-exclusion guard must outlive the txn.
         let gw = self
@@ -227,7 +232,7 @@ impl KgStoreRedb {
     /// closed — and retracts each pair. Returns the number of rows closed.
     /// Test: `cascade_delete_removes_triples_for_subject`,
     /// `cascade_delete_closes_every_object_of_a_multivalued_pair`.
-    pub fn delete_by_subject(&self, subject: &str) -> Result<usize> {
+    pub(crate) fn delete_by_subject(&self, subject: &str) -> Result<usize> {
         self.check_writable()?;
         let prefix = subject_prefix(subject);
         let end = prefix_range_end(&prefix);
