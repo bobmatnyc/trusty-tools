@@ -56,7 +56,7 @@ cat > "$TMP/base.api" <<EOF
 pub mod trusty_memory::engine::store::kg_redb
 #[non_exhaustive] pub enum $K::Step
 pub $K::Step::Copy
-pub struct $K::Store
+#[non_exhaustive] pub struct $K::Store
 pub $K::Store::path: std::path::PathBuf
 impl $K::Store
 pub fn $K::Store::open<P: core::convert::AsRef<std::path::Path>>(P) -> anyhow::Result<Self>
@@ -233,6 +233,91 @@ cp "$TMP/base.tsv" "$TMP/case.tsv"
 printf '%s::Store::path\tmethod\tKEEP\ttests/a.rs\tA3a\n' "$K" >> "$TMP/case.tsv"
 with_line shared-name "pub fn $K::Store::path(&self) -> &std::path::Path"
 run_case field-and-method-share-path 0 '7 audited path(s) match' "$TMP/shared-name.api"
+
+# #9278 A2b: a public struct with a public field (named, or a `(pub ` tuple
+# field) carries `#[non_exhaustive]`, unless its struct KEEP row's reason
+# starts `exhaustive: `. The join runs after the whole listing, so line order
+# does not matter. An opaque and a unit struct print alike and pass (known gap).
+# struct_case <name> <rows> <line...>: base.api plus the lines as
+# $TMP/<name>.api; base.tsv plus <rows> (kind=path, space-separated, KEEP).
+struct_case() {
+  local name="$1" rows="$2" r
+  shift 2
+  with_line "$name" "$@"
+  cp "$TMP/base.tsv" "$TMP/case.tsv"
+  for r in $rows; do
+    printf '%s\t%s\tKEEP\ttests/a.rs\tA2b\n' "${r#*=}" "${r%%=*}" >> "$TMP/case.tsv"
+  done
+}
+X="$K::Rec"
+REC="struct=$X field=$X::n"
+struct_case s-unmarked "$REC" "pub struct $X" "pub $X::n: u8"
+run_case unmarked-struct-pub-field 1 "UNMARKED $X${NL}check_engine_api_audit: FAIL — 1 path(s)" "$TMP/s-unmarked.api"
+struct_case s-marked "$REC" "#[non_exhaustive] pub struct $X" "pub $X::n: u8"
+run_case marked-struct-passes 0 '9 audited path(s) match' "$TMP/s-marked.api"
+struct_case s-reexport "$REC struct=trusty_memory::engine::Rec field=trusty_memory::engine::Rec::n" \
+  "pub struct $X" "pub $X::n: u8" 'pub struct trusty_memory::engine::Rec' 'pub trusty_memory::engine::Rec::n: u8'
+run_case unmarked-struct-reexport 1 "UNMARKED trusty_memory::engine::Rec${NL}UNMARKED $X${NL}check_engine_api_audit: FAIL — 2 path(s)" "$TMP/s-reexport.api"
+struct_case s-field-first "$REC" "pub $X::n: u8" "pub struct $X"
+run_case struct-field-before-struct-line 1 "UNMARKED $X" "$TMP/s-field-first.api"
+struct_case s-opaque "struct=$K::Opaque method=$K::Opaque::len struct=$K::Unit" \
+  "pub struct $K::Opaque" "impl $K::Opaque" "pub fn $K::Opaque::len(&self) -> usize" "pub struct $K::Unit"
+run_case struct-opaque-and-unit-pass 0 '10 audited path(s) match' "$TMP/s-opaque.api"
+struct_case s-tuple "struct=$K::Id" "pub struct $K::Id(pub alloc::string::String)"
+run_case tuple-pub-field-unmarked 1 "UNMARKED $K::Id" "$TMP/s-tuple.api"
+struct_case s-tuple-private "struct=$K::Hash" "pub struct $K::Hash(_)"
+run_case tuple-private-field-passes 0 '8 audited path(s) match' "$TMP/s-tuple-private.api"
+GEN="struct=$K::Wrap field=$K::Wrap::inner struct=$K::Tup"
+struct_case s-generic "$GEN" "pub struct $K::Wrap<T>" "pub $K::Wrap::inner: T" "pub struct $K::Tup<'a, T: core::clone::Clone>(pub &'a T)"
+run_case generic-struct-unmarked 1 "UNMARKED $K::Tup${NL}UNMARKED $K::Wrap${NL}check_engine_api_audit: FAIL — 2 path(s)" "$TMP/s-generic.api"
+struct_case s-generic-marked "$GEN" "#[non_exhaustive] pub struct $K::Wrap<T>" "pub $K::Wrap::inner: T" "#[non_exhaustive] pub struct $K::Tup<'a, T: core::clone::Clone>(pub &'a T)"
+run_case generic-struct-marked 0 '10 audited path(s) match' "$TMP/s-generic-marked.api"
+struct_case s-variant "enum=$K::Ev variant=$K::Ev::Moved field=$K::Ev::Moved::from" \
+  "#[non_exhaustive] pub enum $K::Ev" "pub $K::Ev::Moved" "pub $K::Ev::Moved::from: u8"
+run_case variant-field-not-a-struct-field 0 '10 audited path(s) match' "$TMP/s-variant.api"
+struct_case s-prefix "struct=$K::A struct=$K::A2 field=$K::A2::f" \
+  "pub struct $K::A" "#[non_exhaustive] pub struct $K::A2" "pub $K::A2::f: u8"
+run_case parent-prefix-not-confused 0 '10 audited path(s) match' "$TMP/s-prefix.api"
+
+# The exemption: a struct KEEP row whose reason starts `exhaustive: `. A
+# stale or misplaced one fails closed (exit 2), so a row cannot outlive the
+# shape it excuses.
+exempt_row() { printf '%s\t%s\t%s\texhaustive: shape is the contract\tA2b\n' "$1" "$2" "$3" >> "$TMP/case.tsv"; }
+struct_case s-exempt "field=$X::n" "pub struct $X" "pub $X::n: u8" "pub struct $K::Id(pub alloc::string::String)"
+exempt_row "$X" struct KEEP
+exempt_row "$K::Id" struct KEEP
+run_case exempt-row-passes 0 '10 audited path(s) match' "$TMP/s-exempt.api"
+struct_case s-exempt-marked "field=$X::n" "#[non_exhaustive] pub struct $X" "pub $X::n: u8"
+exempt_row "$X" struct KEEP
+run_case exempt-row-on-marked-struct 2 "stale exemption $X: the struct is #[non_exhaustive]" "$TMP/s-exempt-marked.api"
+struct_case s-exempt-opaque '' "pub struct $X"
+exempt_row "$X" struct KEEP
+run_case exempt-row-on-opaque-struct 2 "stale exemption $X: the struct has no public field" "$TMP/s-exempt-opaque.api"
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+exempt_row "$K::Gone" struct KEEP
+run_case exempt-row-on-unlisted-path 2 "stale exemption $K::Gone: not a listed struct" "$TMP/base.api"
+cp "$TMP/base.tsv" "$TMP/case.tsv"
+exempt_row "$K::Store::path" method KEEP
+exempt_row "$K::Gone" struct NARROW
+run_case exempt-prefix-on-non-struct-kind 2 "stale exemption $K::Store::path: exhaustive: is only for a struct KEEP row (method KEEP)${NL}check_engine_api_audit: stale exemption $K::Gone: exhaustive: is only for a struct KEEP row (struct NARROW)" "$TMP/base.api"
+struct_case s-no-prefix '' "pub struct $K::Id(pub alloc::string::String)"
+printf '%s\tstruct\tKEEP\tnewtype; exhaustive: by design\tA2b\n' "$K::Id" >> "$TMP/case.tsv"
+run_case exempt-reason-without-prefix 1 "UNMARKED $K::Id" "$TMP/s-no-prefix.api"
+
+# #9278 A1 LOW gaps, for enums and structs: an attribute glued to `pub`
+# fails closed, and `#[non_exhaustive]` counts in either attribute order.
+struct_case glued-enum "enum=$K::Mode" "#[non_exhaustive]pub enum $K::Mode"
+run_case attr-without-trailing-space-enum 2 'unparsable listing line 9' "$TMP/glued-enum.api"
+struct_case glued-struct "$REC" "#[non_exhaustive]pub struct $X" "pub $X::n: u8"
+run_case attr-without-trailing-space-struct 2 'unparsable listing line 9' "$TMP/glued-struct.api"
+struct_case multi-enum "enum=$K::Mode enum=$K::Mode2" \
+  "#[repr(u8)] #[non_exhaustive] pub enum $K::Mode" "#[non_exhaustive] #[repr(u8)] pub enum $K::Mode2"
+run_case multi-attr-both-orders-enum 0 '9 audited path(s) match' "$TMP/multi-enum.api"
+struct_case multi-struct "$REC struct=$K::Rec2 field=$K::Rec2::n" \
+  "#[repr(C)] #[non_exhaustive] pub struct $X" "pub $X::n: u8" "#[non_exhaustive] #[repr(C)] pub struct $K::Rec2" "pub $K::Rec2::n: u8"
+run_case multi-attr-both-orders-struct 0 '11 audited path(s) match' "$TMP/multi-struct.api"
+struct_case s-other-attr "$REC enum=$K::Mode" "#[repr(C)] pub struct $X" "pub $X::n: u8" "#[repr(u8)] pub enum $K::Mode"
+run_case other-attr-only-unmarked 1 "UNMARKED $K::Mode${NL}UNMARKED $X${NL}check_engine_api_audit: FAIL — 2 path(s)" "$TMP/s-other-attr.api"
 
 # Listing errors.
 cp "$TMP/base.tsv" "$TMP/case.tsv"

@@ -19,6 +19,7 @@ use crate::engine::palace::{Drawer, DrawerType};
 /// originating layer index.
 /// Test: See `l0_l1_always_present` and `l2_returns_relevant_drawer`.
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: fields stay additive for other crates.
 pub struct RecallResult {
     pub drawer: Drawer,
     pub score: f32,
@@ -94,6 +95,7 @@ pub(super) use crate::engine::palace::drawer_listing_order;
 /// `remember_force_and_allow_secret_like_stores_secret_shaped_content` cover
 /// the two-tier `force`/`allow_secret_like` split (issue #2520).
 #[derive(Debug, Clone)]
+#[non_exhaustive] // #9278 A2b: build with `Default`, then assign.
 pub struct RememberOptions {
     pub filter: FilterConfig,
     pub force: bool,

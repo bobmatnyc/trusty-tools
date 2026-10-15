@@ -560,7 +560,7 @@ trusty_memory::engine::palace::Palace::id	field	KEEP	trusty-mpm src/core/sm/memo
 trusty_memory::engine::palace::Palace::name	field	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs (build Palace literals)	A4
 trusty_memory::engine::palace::Palace::new	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; trusty-memory tests (constructor)	A2a
 trusty_memory::engine::palace::Palace::with_description	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; trusty-memory tests (constructor)	A2a
-trusty_memory::engine::palace::PalaceId	struct	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
+trusty_memory::engine::palace::PalaceId	struct	KEEP	exhaustive: newtype over String; shape is the contract	A2b
 trusty_memory::engine::palace::PalaceId::as_str	method	KEEP	tests/palaces_list_poll_residency.rs, tests/recall_all_residency.rs	A4
 trusty_memory::engine::palace::PalaceId::fmt	trait_method	KEEP	member of PalaceId (Display impl)	A4
 trusty_memory::engine::palace::PalaceId::new	method	KEEP	trusty-mpm src/core/sm/memory.rs, src/daemon/manager/memory.rs; tests/	A4
@@ -1359,11 +1359,11 @@ trusty_memory::engine::store::chat_sessions::ChatImageAsset::mime_type	field	NAR
 trusty_memory::engine::store::chat_sessions::ChatImageAsset::name	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatImageAsset::session_id	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatMessage	struct	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
-trusty_memory::engine::store::chat_sessions::ChatMessage::attachments	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
+trusty_memory::engine::store::chat_sessions::ChatMessage::attachments	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals); type carries trusty_common StoredAttachment; D5 wrap-or-pin pending	A3b
 trusty_memory::engine::store::chat_sessions::ChatMessage::content	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
 trusty_memory::engine::store::chat_sessions::ChatMessage::new	method	KEEP	trusty-agents src/chat_attachments.rs (constructor)	A2a
 trusty_memory::engine::store::chat_sessions::ChatMessage::role	field	KEEP	trusty-agents src/chat_attachments.rs (builds ChatMessage literals)	A3b
-trusty_memory::engine::store::chat_sessions::ChatMessage::with_attachments	method	KEEP	trusty-agents src/chat_attachments.rs (constructor)	A2a
+trusty_memory::engine::store::chat_sessions::ChatMessage::with_attachments	method	KEEP	trusty-agents src/chat_attachments.rs (constructor); signature carries trusty_common StoredAttachment; D5 wrap-or-pin pending	A2a
 trusty_memory::engine::store::chat_sessions::ChatSession	struct	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatSession::created_at	field	NARROW	no consumer outside the library	A3b
 trusty_memory::engine::store::chat_sessions::ChatSession::history	field	NARROW	no consumer outside the library	A3b
