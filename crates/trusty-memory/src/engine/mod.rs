@@ -25,7 +25,10 @@ pub mod dream;
 // name `trusty_common::embedder`.
 pub(crate) mod embed;
 pub mod filter;
-pub mod git;
+// #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+#[cfg(test)]
+#[expect(dead_code, reason = "#9278 T3d: kept unused, not deleted")]
+mod git;
 // #8733: per-data-root election of the one process that runs maintenance.
 pub(crate) mod maintenance_lease;
 // #8732: durable trail of drawer deletions made by maintenance paths.

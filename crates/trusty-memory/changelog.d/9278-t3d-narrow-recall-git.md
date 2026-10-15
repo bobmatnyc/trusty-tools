@@ -1,0 +1,2 @@
+Breaking
+- `engine::analytics::RecallLog::{record, hit_count, miss_rate, top_drawers, missed_queries}` and the whole `engine::git` module (`GitExtractor`, `GitFact`, `ConventionalCommit`, `CommitEntities`, `parse_conventional_commit`, `classify_file_path`, `score_importance`, `extract_entities`, `build_narrative`) are no longer public. They had no caller outside trusty-memory's own unit tests and now compile only for them. The `RecallLog` and `RecallEvent` types stay public ([#9278](https://github.com/bobmatnyc/trusty-tools/issues/9278))

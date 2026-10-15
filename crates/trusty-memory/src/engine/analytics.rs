@@ -110,9 +110,8 @@ pub struct RecallEvent {
 /// redb-backed hit/miss event log.
 ///
 /// Why: Provides durable analytics for the Memory Palace without the rusqlite
-/// dependency chain. The public surface (`record`, `hit_count`, `miss_rate`,
-/// `top_drawers`, `missed_queries`) is preserved as-is so retrieval.rs and the
-/// CLI/MCP plumbing keep working unchanged.
+/// dependency chain. Production writes go through `record_batch`; `record`
+/// and the read methods are test-only (#9278 T3d).
 /// What: Owns an `Arc<redb::Database>` over a single `recall.redb` file. Each
 /// `record` writes one row into the RECALL_LOG table; the read methods range-
 /// scan the whole table (the log is bounded by retention windows / palace
@@ -309,7 +308,9 @@ impl RecallLog {
     /// What: Allocates a unique event id, postcard-encodes the event, and
     /// writes one row into the RECALL_LOG table under a single write txn.
     /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
-    pub async fn record(&self, event: RecallEvent) -> Result<()> {
+    // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+    #[cfg(test)]
+    pub(crate) async fn record(&self, event: RecallEvent) -> Result<()> {
         self.record_batch(vec![event]).await
     }
 
@@ -401,7 +402,9 @@ impl RecallLog {
     /// Why: Frequently recalled drawers should bubble up in importance.
     /// What: Snapshot then count events whose `drawer_id == Some(drawer_id)`.
     /// Test: record twice for same drawer → hit_count == 2.
-    pub async fn hit_count(&self, drawer_id: Uuid) -> Result<u64> {
+    // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+    #[cfg(test)]
+    pub(crate) async fn hit_count(&self, drawer_id: Uuid) -> Result<u64> {
         let events = self.snapshot_async().await?;
         let mut count: u64 = 0;
         for ev in events {
@@ -417,7 +420,9 @@ impl RecallLog {
     /// Why: High miss rate signals knowledge gaps in the palace.
     /// What: distinct miss queries / distinct total queries within window.
     /// Test: only-miss events → 1.0; only-hit events → 0.0.
-    pub async fn miss_rate(&self, palace_id: &str, window_days: u32) -> Result<f32> {
+    // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+    #[cfg(test)]
+    pub(crate) async fn miss_rate(&self, palace_id: &str, window_days: u32) -> Result<f32> {
         let events = self.snapshot_async().await?;
         let since = Utc::now() - chrono::Duration::days(window_days as i64);
         use std::collections::HashSet;
@@ -444,7 +449,13 @@ impl RecallLog {
     /// What: Group events by drawer_id (palace-filtered), sort by hit count
     /// descending, return top `limit`.
     /// Test: drawer with 3 hits ranks above drawer with 1 hit.
-    pub async fn top_drawers(&self, palace_id: &str, limit: usize) -> Result<Vec<(Uuid, u64)>> {
+    // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+    #[cfg(test)]
+    pub(crate) async fn top_drawers(
+        &self,
+        palace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(Uuid, u64)>> {
         let events = self.snapshot_async().await?;
         use std::collections::HashMap;
         let mut counts: HashMap<Uuid, u64> = HashMap::new();
@@ -468,7 +479,13 @@ impl RecallLog {
     /// What: Group events where `drawer_id is None` by `query_hash`
     /// (palace-filtered), sort by miss count descending, return top `limit`.
     /// Test: query missed 3 times ranks above query missed 1 time.
-    pub async fn missed_queries(&self, palace_id: &str, limit: usize) -> Result<Vec<(u64, u64)>> {
+    // #9278 T3d: test-only, crate-private (owner ruling: narrow, not delete).
+    #[cfg(test)]
+    pub(crate) async fn missed_queries(
+        &self,
+        palace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64)>> {
         let events = self.snapshot_async().await?;
         use std::collections::HashMap;
         let mut counts: HashMap<u64, u64> = HashMap::new();
@@ -490,6 +507,8 @@ impl RecallLog {
     /// remain `async fn` so retrieval.rs callers are unchanged.
     /// What: Wraps `snapshot()` in `tokio::task::spawn_blocking`.
     /// Test: indirectly covered by every public read-method test.
+    // #9278 T3d: only the test-only read methods above call it.
+    #[cfg(test)]
     async fn snapshot_async(&self) -> Result<Vec<RecallEvent>> {
         let db = self.db.clone();
         let path = self.path.clone();
