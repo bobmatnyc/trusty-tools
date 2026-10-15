@@ -869,6 +869,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn a_stalled_commit_rolls_back_and_its_writer_gets_the_typed_deadline_error() {
+        use crate::engine::store::kg::KgError;
         use crate::engine::store::write_deadline::WriteTxnError;
         const STALLED: &str = "a write whose own commit stalls";
         const NEXT: &str = "a write queued behind the stalled one";
@@ -911,9 +912,12 @@ mod tests {
             .await
             .expect("writer A task")
             .expect_err("#8749: a write rolled back at its deadline must not report success");
+        // #9278: the root is the typed `KgError`; a root downcast to the
+        // inner `WriteTxnError` misses by design.
+        assert!(err.downcast_ref::<WriteTxnError>().is_none(), "{err:#}");
         assert!(
             matches!(
-                err.downcast_ref::<WriteTxnError>(),
+                err.downcast_ref::<KgError>().and_then(KgError::as_write_deadline),
                 Some(WriteTxnError::DeadlineExceeded { palace, .. })
                     if &**palace == "write-budget-test"
             ),
