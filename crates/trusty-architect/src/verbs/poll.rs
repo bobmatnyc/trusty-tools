@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use super::VerbError;
 use crate::clock::SystemClock;
 use crate::error::RunError;
+use crate::poller::steps::notify_macos::Osascript;
+use crate::poller::steps::usage::ScriptProbe;
 use crate::poller::{Config, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
 use crate::tmux::SystemTmux;
 
@@ -83,12 +85,16 @@ pub fn poll(args: &PollArgs, config: &Config) -> Result<(), VerbError> {
         .tmux_socket
         .as_ref()
         .map_or_else(SystemTmux::new, SystemTmux::with_socket);
+    // #9801: the real usage probe (usage-probe.sh) and macOS notifier.
+    let usage_probe = ScriptProbe::new(&config.usage);
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
         probe: &SystemHostProbe,
         triage: &WakeAll,
         config,
+        usage_probe: &usage_probe,
+        notifier: &Osascript::default(),
         dry_run: args.dry_run,
     };
     let result = if args.once || args.dry_run {

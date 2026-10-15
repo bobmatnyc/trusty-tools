@@ -9,6 +9,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
+use trusty_architect::poller::steps::notify_macos::RecordingNotifier;
+use trusty_architect::poller::steps::usage::RecordingProbe;
 use trusty_architect::poller::{Config, DiskUsage, HostProbe, Runner, WakeAll};
 use trusty_architect::{FakeClock, ScriptedTmux};
 
@@ -18,6 +20,10 @@ pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 pub struct Env {
     pub dir: TempDir,
     pub config: Config,
+    /// #9801: the usage probe launcher `runner` uses; it records, never types.
+    pub probe: RecordingProbe,
+    /// #9801: the notifier `runner` uses; it records, never notifies.
+    pub notifier: RecordingNotifier,
 }
 
 impl Env {
@@ -28,7 +34,12 @@ impl Env {
         let config = config_at(dir.path(), vars)?;
         fs::create_dir_all(&config.inbox)?;
         fs::write(config.events(), "")?;
-        Ok(Self { dir, config })
+        Ok(Self {
+            dir,
+            config,
+            probe: RecordingProbe::default(),
+            notifier: RecordingNotifier::default(),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -122,6 +133,8 @@ impl Env {
             probe,
             triage: &WakeAll,
             config: &self.config,
+            usage_probe: &self.probe,
+            notifier: &self.notifier,
             dry_run: false,
         }
     }

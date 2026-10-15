@@ -14,7 +14,8 @@
 //! box and [`dispatch_wake`] carries the pending count (#9171). A3b-2 adds
 //! the cycle and the loop: [`collect`] (one cycle's sensing and dedup),
 //! [`Runner`] (`run_once`, `run_loop`), [`PollSession`], [`PollLock`],
-//! [`rename_windows`], [`architect_busy`] and the [`Triage`] seam.
+//! [`rename_windows`], [`architect_busy`] and the [`Triage`] seam. #9801
+//! slice 1 adds [`steps`]: the usage step and `notify_macos`.
 //! Test: `tests/poller_ported.rs`, `tests/wake_ported.rs`,
 //! `tests/cycle_ported.rs` and `tests/architect_ported.rs` (the prototype's
 //! tests, by name), `tests/parity_a3.rs` and `tests/parity_wake.rs` (goldens
@@ -37,6 +38,7 @@ mod self_ctx_alerts;
 mod session;
 mod sink;
 mod state;
+pub mod steps;
 mod triage;
 mod wake;
 mod windows;

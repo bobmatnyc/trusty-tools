@@ -1,0 +1,1933 @@
+{
+ "alerts": [
+  {
+   "name": "week_thresholds_and_cutover",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T14:30:00Z",
+     "account": "a2@example.com",
+     "pct5h": 1,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 60,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a2@example.com"
+  },
+  {
+   "name": "five_hour_exhaustion",
+   "now": "2026-10-07T16:21:00Z",
+   "current": "a2@example.com",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T15:40:00Z",
+     "account": "a2@example.com",
+     "pct5h": 30,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:20:00Z",
+     "account": "a2@example.com",
+     "pct5h": 70,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "five_hour_far",
+   "now": "2026-10-07T16:21:00Z",
+   "current": "a2@example.com",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T14:00:00Z",
+     "account": "a2@example.com",
+     "pct5h": 1,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:20:00Z",
+     "account": "a2@example.com",
+     "pct5h": 10,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "limit_reached_means_now",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a3@example.com"
+  },
+  {
+   "name": "healthy_no_cutover",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a5@example.com"
+  },
+  {
+   "name": "float_percents",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "f@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T15:00:00Z",
+     "account": "f@x",
+     "pct5h": 12.5,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 90.5,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:10:00Z",
+     "account": "f@x",
+     "pct5h": 20.25,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 91.75,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "float_limit_reached",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "f@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:10:00Z",
+     "account": "f@x",
+     "pct5h": 100.0,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 40.0,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "no_eligible_account",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a@x",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 50,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:01:00Z",
+     "account": "b@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 100,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:02:00Z",
+     "account": "c@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": null,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:03:00Z",
+     "account": "d@x",
+     "pct5h": 97,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 10,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "current_not_in_ledger",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "now": "2026-10-07T16:20:00Z",
+   "current": "nobody@x"
+  },
+  {
+   "name": "other_account_over_48h_old",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a2@example.com",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T14:30:00Z",
+     "account": "a2@example.com",
+     "pct5h": 1,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 60,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-04T10:00:00Z",
+     "account": "old@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 5,
+     "resetwk": "2026-10-14T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "current_5h_reading_over_3h_old",
+   "now": "2026-10-07T20:20:00Z",
+   "current": "a@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a@x",
+     "pct5h": 40,
+     "reset5h": "2026-10-07T21:00:00Z",
+     "pctwk": 85,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "winter_est_times",
+   "now": "2027-01-15T14:20:00Z",
+   "current": "w@x",
+   "rows": [
+    {
+     "ts": "2027-01-15T13:00:00Z",
+     "account": "w@x",
+     "pct5h": 20,
+     "reset5h": "2027-01-15T17:00:00Z",
+     "pctwk": 60,
+     "resetwk": "2027-01-18T05:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2027-01-15T14:10:00Z",
+     "account": "w@x",
+     "pct5h": 66,
+     "reset5h": "2027-01-15T17:00:00Z",
+     "pctwk": 88,
+     "resetwk": "2027-01-18T05:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2027-01-15T14:00:00Z",
+     "account": "v@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": "2027-01-20T05:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "dst_start_boundary",
+   "now": "2027-03-14T06:30:00Z",
+   "current": "w@x",
+   "rows": [
+    {
+     "ts": "2027-03-14T05:30:00Z",
+     "account": "w@x",
+     "pct5h": 10,
+     "reset5h": "2027-03-14T09:00:00Z",
+     "pctwk": 50,
+     "resetwk": "2027-03-14T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2027-03-14T06:20:00Z",
+     "account": "w@x",
+     "pct5h": 60,
+     "reset5h": "2027-03-14T09:00:00Z",
+     "pctwk": 79,
+     "resetwk": "2027-03-14T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2027-03-14T06:00:00Z",
+     "account": "v@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": "2027-03-14T06:59:59Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "dst_end_boundary",
+   "now": "2026-11-01T05:30:00Z",
+   "current": "w@x",
+   "rows": [
+    {
+     "ts": "2026-11-01T04:40:00Z",
+     "account": "w@x",
+     "pct5h": 10,
+     "reset5h": "2026-11-01T09:00:00Z",
+     "pctwk": 81,
+     "resetwk": "2026-11-01T06:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-11-01T05:25:00Z",
+     "account": "w@x",
+     "pct5h": 55,
+     "reset5h": "2026-11-01T09:00:00Z",
+     "pctwk": 83,
+     "resetwk": "2026-11-01T06:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-11-01T05:00:00Z",
+     "account": "v@x",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": "2026-11-01T06:30:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "null_reset_exhaustion",
+   "now": "2026-10-07T16:21:00Z",
+   "current": "n@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T15:40:00Z",
+     "account": "n@x",
+     "pct5h": 30,
+     "reset5h": null,
+     "pctwk": 20,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:20:00Z",
+     "account": "n@x",
+     "pct5h": 70,
+     "reset5h": null,
+     "pctwk": 20,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "inferred_windows",
+   "now": "2026-10-12T12:00:00Z",
+   "current": "d@x",
+   "rows": [
+    {
+     "ts": "2026-10-12T05:00:00Z",
+     "account": "d@x",
+     "pct5h": 91,
+     "reset5h": null,
+     "pctwk": 95,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-12T04:00:00Z",
+     "account": "e@x",
+     "pct5h": 99,
+     "reset5h": "2026-10-12T06:00:00Z",
+     "pctwk": 20,
+     "resetwk": "2026-10-19T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "bad_timestamp",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "a2@example.com",
+   "rows": [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a2@example.com",
+     "pct5h": 9,
+     "reset5h": "2026-10-07T20:50:00Z",
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a4@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 89,
+     "resetwk": "2026-10-12T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:17:00Z",
+     "account": "a1@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 93,
+     "resetwk": "2026-10-10T15:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:16:00Z",
+     "account": "a6@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 96,
+     "resetwk": "2026-10-11T09:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:18:00Z",
+     "account": "a5@example.com",
+     "pct5h": 0,
+     "reset5h": null,
+     "pctwk": 50,
+     "resetwk": "2026-10-12T11:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "garbage",
+     "account": "a2@example.com",
+     "pct5h": 1,
+     "reset5h": null,
+     "pctwk": 2,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "non_numeric_percent",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "s@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "s@x",
+     "pct5h": "lots",
+     "reset5h": null,
+     "pctwk": 20,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "tiny_rate_overflows",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "t@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T15:00:00Z",
+     "account": "t@x",
+     "pct5h": 10,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 50,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "t@x",
+     "pct5h": 10.000000000001,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 50,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  },
+  {
+   "name": "offset_timestamps",
+   "now": "2026-10-07T16:20:00Z",
+   "current": "o@x",
+   "rows": [
+    {
+     "ts": "2026-10-07T11:00:00-04:00",
+     "account": "o@x",
+     "pct5h": 20,
+     "reset5h": "2026-10-07T19:00:00.500000+00:00",
+     "pctwk": 81,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T12:10:00.250-04:00",
+     "account": "o@x",
+     "pct5h": 60,
+     "reset5h": "2026-10-07T19:00:00.500000+00:00",
+     "pctwk": 82,
+     "resetwk": "2026-10-12T00:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ]
+  }
+ ],
+ "effective": [
+  [
+   "reset_passed_5h",
+   {
+    "ts": "2026-10-06T18:58:00Z",
+    "account": "d",
+    "pct5h": 91,
+    "reset5h": "2026-10-06T21:00:00Z",
+    "pctwk": 25,
+    "resetwk": "2026-10-12T11:00:00Z",
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-07T16:00:00Z"
+  ],
+  [
+   "reset_passed_week",
+   {
+    "ts": "2026-10-06T18:58:00Z",
+    "account": "d",
+    "pct5h": 91,
+    "reset5h": "2026-10-06T21:00:00Z",
+    "pctwk": 25,
+    "resetwk": "2026-10-12T11:00:00Z",
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-12T12:00:00Z"
+  ],
+  [
+   "window_not_started",
+   {
+    "ts": "2026-10-07T16:17:00Z",
+    "account": "r",
+    "pct5h": 0,
+    "reset5h": null,
+    "pctwk": 89,
+    "resetwk": "2026-10-12T15:00:00Z",
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-07T16:30:00Z"
+  ],
+  [
+   "no_reset_over_5h",
+   {
+    "ts": "2026-10-07T10:00:00Z",
+    "account": "r",
+    "pct5h": 40,
+    "reset5h": null,
+    "pctwk": 89,
+    "resetwk": null,
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-07T16:30:00Z"
+  ],
+  [
+   "null_pct_over_5h",
+   {
+    "ts": "2026-10-07T10:00:00Z",
+    "account": "r",
+    "pct5h": null,
+    "reset5h": null,
+    "pctwk": null,
+    "resetwk": null,
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-07T16:30:00Z"
+  ],
+  [
+   "stale_day_old",
+   {
+    "ts": "2026-10-05T10:00:00Z",
+    "account": "r",
+    "pct5h": 12.5,
+    "reset5h": "2026-10-10T00:00:00Z",
+    "pctwk": 30.0,
+    "resetwk": "2026-10-12T00:00:00Z",
+    "weekly_models": {},
+    "source": "manual"
+   },
+   "2026-10-07T16:30:00Z"
+  ]
+ ],
+ "project": [
+  [
+   "masa_pair_week",
+   [
+    {
+     "ts": "2026-10-07T13:09:00Z",
+     "account": "a3@example.com",
+     "pct5h": 3,
+     "reset5h": "2026-10-07T17:59:00Z",
+     "pctwk": 1,
+     "resetwk": "2026-10-13T10:59:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:15:00Z",
+     "account": "a3@example.com",
+     "pct5h": 100,
+     "reset5h": "2026-10-07T18:00:00Z",
+     "pctwk": 27,
+     "resetwk": "2026-10-13T11:00:00Z",
+     "weekly_models": {
+      "fable": 0
+     },
+     "source": "manual"
+    }
+   ],
+   "a3@example.com",
+   "2026-10-07T16:20:00Z",
+   "wk"
+  ],
+  [
+   "one_sample",
+   [
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a",
+     "pct5h": 9,
+     "reset5h": null,
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-08T00:00:00Z",
+   "wk"
+  ],
+  [
+   "gap_breaks_run",
+   [
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a",
+     "pct5h": 9,
+     "reset5h": null,
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T23:50:00Z",
+     "account": "a",
+     "pct5h": 9,
+     "reset5h": null,
+     "pctwk": 90,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-08T00:00:00Z",
+   "wk"
+  ],
+  [
+   "other_window",
+   [
+    {
+     "ts": "2026-10-07T16:12:00Z",
+     "account": "a",
+     "pct5h": 9,
+     "reset5h": null,
+     "pctwk": 84,
+     "resetwk": "2026-10-09T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:40:00Z",
+     "account": "a",
+     "pct5h": 9,
+     "reset5h": null,
+     "pctwk": 90,
+     "resetwk": "2026-10-16T07:00:00Z",
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-08T00:00:00Z",
+   "wk"
+  ],
+  [
+   "falling",
+   [
+    {
+     "ts": "2026-10-07T15:00:00Z",
+     "account": "a",
+     "pct5h": 50,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a",
+     "pct5h": 40,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-07T16:10:00Z",
+   "5h"
+  ],
+  [
+   "under_min_span",
+   [
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a",
+     "pct5h": 10,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:05:00Z",
+     "account": "a",
+     "pct5h": 20,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-07T16:10:00Z",
+   "5h"
+  ],
+  [
+   "after_reset_not_reached",
+   [
+    {
+     "ts": "2026-10-07T15:00:00Z",
+     "account": "a",
+     "pct5h": 10,
+     "reset5h": "2026-10-07T16:30:00Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a",
+     "pct5h": 20,
+     "reset5h": "2026-10-07T16:30:00Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-07T16:10:00Z",
+   "5h"
+  ],
+  [
+   "reset_jitter_under_300s",
+   [
+    {
+     "ts": "2026-10-07T15:00:00Z",
+     "account": "a",
+     "pct5h": 10,
+     "reset5h": "2026-10-07T19:00:00Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T16:00:00Z",
+     "account": "a",
+     "pct5h": 30,
+     "reset5h": "2026-10-07T19:04:59Z",
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-07T16:10:00Z",
+   "5h"
+  ],
+  [
+   "newest_older_than_span",
+   [
+    {
+     "ts": "2026-10-07T10:00:00Z",
+     "account": "a",
+     "pct5h": 10,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    },
+    {
+     "ts": "2026-10-07T11:00:00Z",
+     "account": "a",
+     "pct5h": 20,
+     "reset5h": null,
+     "pctwk": 10,
+     "resetwk": null,
+     "weekly_models": {},
+     "source": "manual"
+    }
+   ],
+   "a",
+   "2026-10-07T16:10:00Z",
+   "5h"
+  ]
+ ],
+ "cache": [
+  {
+   "name": "epoch_seconds",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+   "age": 60
+  },
+  {
+   "name": "epoch_millis",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000123}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000999}}}\n",
+   "age": 60
+  },
+  {
+   "name": "iso_strings",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": \"2026-10-07T20:50:00Z\"}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": \"2026-10-09T07:00:00.900+00:00\"}}}\n",
+   "age": 60
+  },
+  {
+   "name": "fractional_epoch",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000.9999995}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000.5}}}\n",
+   "age": 60
+  },
+  {
+   "name": "stale",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+   "age": 1801
+  },
+  {
+   "name": "edge_of_max_age",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+   "age": 1800
+  },
+  {
+   "name": "no_rate_limits",
+   "text": "a2@example.com\n{\"x\": 1}\n",
+   "age": 60
+  },
+  {
+   "name": "both_percent_null",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": null, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": null, \"resets_at\": 1791500000}}}\n",
+   "age": 60
+  },
+  {
+   "name": "one_window_only",
+   "text": "a2@example.com\n{\"rate_limits\": {\"seven_day\": {\"used_percentage\": 7}}}",
+   "age": 60
+  },
+  {
+   "name": "bad_json",
+   "text": "a2@example.com\n{nope",
+   "age": 60
+  },
+  {
+   "name": "not_an_object",
+   "text": "a2@example.com\n[1, 2]",
+   "age": 60
+  },
+  {
+   "name": "empty_account_line",
+   "text": "  \n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 3}}}",
+   "age": 60
+  },
+  {
+   "name": "five_hour_is_a_list",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": [\"x\"], \"seven_day\": {\"used_percentage\": 1}}}",
+   "age": 60
+  },
+  {
+   "name": "reset_garbage",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": \"soon\"}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+   "age": 60
+  },
+  {
+   "name": "reset_empty_string",
+   "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": \"\"}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+   "age": 60
+  },
+  {
+   "name": "missing_file",
+   "text": null,
+   "age": 0
+  }
+ ],
+ "cache_now": 1791380000.0,
+ "poll": [
+  {
+   "name": "account_change_probe",
+   "state": {
+    "usage": {
+     "account": "a3@example.com",
+     "since": 0
+    }
+   },
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": null,
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 600,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 700,
+     "idle": []
+    }
+   ]
+  },
+  {
+   "name": "hourly_not_more",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": null,
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 600,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 1200,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 3700,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "pending_retries_capped_at_three",
+   "state": {
+    "usage": {
+     "account": "other@x",
+     "since": 0
+    }
+   },
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": null,
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 600,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 1200,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 1800,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 4900,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cache_sample_recorded_once",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": {
+    "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+    "age": 60
+   },
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    },
+    {
+     "dt": 60,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "cache_of_another_account",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": {
+    "text": "a1@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+    "age": 60
+   },
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "carry_over_after_login",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": "{\"ts\": \"2026-10-07T23:00:00Z\", \"account\": \"a3@example.com\", \"pct5h\": 5, \"reset5h\": \"2026-10-07T21:46:40Z\", \"pctwk\": 27, \"resetwk\": \"2026-10-09T01:33:20Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n",
+   "cache": {
+    "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+    "age": 60
+   },
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "dry_run_samples_and_probes_nothing",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": null,
+   "cache": {
+    "text": "a2@example.com\n{\"rate_limits\": {\"five_hour\": {\"used_percentage\": 12.5, \"resets_at\": 1791400000}, \"seven_day\": {\"used_percentage\": 84, \"resets_at\": 1791500000}}}\n",
+    "age": 60
+   },
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ],
+     "dry_run": true
+    }
+   ]
+  },
+  {
+   "name": "alerts_from_the_ledger",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": "{\"ts\": \"2026-10-07T13:09:00Z\", \"account\": \"a3@example.com\", \"pct5h\": 3, \"reset5h\": \"2026-10-07T17:59:00Z\", \"pctwk\": 1, \"resetwk\": \"2026-10-13T10:59:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:15:00Z\", \"account\": \"a3@example.com\", \"pct5h\": 100, \"reset5h\": \"2026-10-07T18:00:00Z\", \"pctwk\": 27, \"resetwk\": \"2026-10-13T11:00:00Z\", \"weekly_models\": {\"fable\": 0}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:12:00Z\", \"account\": \"a2@example.com\", \"pct5h\": 9, \"reset5h\": \"2026-10-07T20:50:00Z\", \"pctwk\": 84, \"resetwk\": \"2026-10-09T07:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:17:00Z\", \"account\": \"a4@example.com\", \"pct5h\": 0, \"reset5h\": null, \"pctwk\": 89, \"resetwk\": \"2026-10-12T15:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:17:00Z\", \"account\": \"a1@example.com\", \"pct5h\": 0, \"reset5h\": null, \"pctwk\": 93, \"resetwk\": \"2026-10-10T15:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:16:00Z\", \"account\": \"a6@example.com\", \"pct5h\": 0, \"reset5h\": null, \"pctwk\": 96, \"resetwk\": \"2026-10-11T09:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T16:18:00Z\", \"account\": \"a5@example.com\", \"pct5h\": 0, \"reset5h\": null, \"pctwk\": 50, \"resetwk\": \"2026-10-12T11:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\n{\"ts\": \"2026-10-07T14:30:00Z\", \"account\": \"a2@example.com\", \"pct5h\": 1, \"reset5h\": \"2026-10-07T20:50:00Z\", \"pctwk\": 60, \"resetwk\": \"2026-10-09T07:00:00Z\", \"weekly_models\": {}, \"source\": \"manual\"}\nnot json\n\n[1]\n{\"account\": \"\", \"ts\": \"x\"}\n",
+   "cache": null,
+   "steps": [
+    {
+     "now": 1791390000.0,
+     "idle": []
+    }
+   ]
+  },
+  {
+   "name": "no_account",
+   "state": {
+    "other": 1
+   },
+   "claude": null,
+   "ledger": null,
+   "cache": null,
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "account_not_a_string",
+   "state": {},
+   "claude": "{\"oauthAccount\": \"x\"}",
+   "ledger": null,
+   "cache": null,
+   "steps": [
+    {
+     "dt": 0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "name": "crlf_ledger_lines",
+   "state": {},
+   "claude": "{\"oauthAccount\": {\"emailAddress\": \"a2@example.com\"}}",
+   "ledger": "{\"ts\": \"2026-10-07T16:12:00Z\", \"account\": \"a2@example.com\", \"pct5h\": 9, \"reset5h\": \"2026-10-07T20:50:00Z\", \"pctwk\": 84, \"resetwk\": \"2026-10-09T07:00:00Z\", \"weekly_models\": {}, \"source\": \"usage-cmd\"}\r\n{\"ts\": \"2026-10-07T16:13:00Z\", \"account\": \"a2@example.com\", \"pct5h\": 9, \"reset5h\": \"2026-10-07T20:50:00Z\", \"pctwk\": 85, \"resetwk\": \"2026-10-09T07:00:00Z\", \"weekly_models\": {}, \"source\": \"usage-cmd\"}\r",
+   "cache": null,
+   "steps": [
+    {
+     "now": 1791390000.0,
+     "idle": [
+      [
+       "tm-x",
+       "%1"
+      ]
+     ]
+    }
+   ]
+  }
+ ],
+ "poll_now": 1791380000.0,
+ "notify": [
+  [
+   "Architect watchdog",
+   "[tm-architect]: architect_dead: no pane for tm-architect"
+  ],
+  [
+   "Architect watchdog",
+   "say \"hi\" then C:\\temp\\x and \\\"both\\\""
+  ],
+  [
+   "T\"i\\tle",
+   "caf\u00e9 \u276f \ud83d\udcc5 done"
+  ],
+  [
+   "",
+   ""
+  ]
+ ]
+}

@@ -1,11 +1,12 @@
-//! #9171 A3: every prototype test A3a and A3b own is ported by name.
+//! #9171 A3: every prototype test A3a and A3b own is ported by name; #9801
+//! slice 1 adds `test_usage.py`'s.
 //!
 //! What: reads each golden list (`tests/fixtures/a3/python_tests_a3a.txt`,
-//! `python_tests_a3b.txt`) and every `tests/*.rs` file, and requires, for each
-//! listed name, exactly one Rust `fn <name>(` directly preceded by a
-//! `// Python: <name>` line (an attribute line may sit between them). A
-//! dropped, renamed or merged case fails, and so does a `// Python:` marker
-//! naming a test that is on neither list.
+//! `python_tests_a3b.txt`, `tests/fixtures/9801/python_tests_9801.txt`) and
+//! every `tests/*.rs` file, and requires, for each listed name, exactly one
+//! Rust `fn <name>(` directly preceded by a `// Python: <name>` line (an
+//! attribute line may sit between them). A dropped, renamed or merged case
+//! fails, and so does a `// Python:` marker naming a test on no list.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,7 +36,7 @@ fn markers(src: &str) -> Vec<(String, Option<String>)> {
 /// The names on one golden list, comments and blank lines dropped.
 fn golden(list: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = fs::read_to_string(root.join("tests/fixtures/a3").join(list))?;
+    let text = fs::read_to_string(root.join("tests/fixtures").join(list))?;
     Ok(text
         .lines()
         .map(str::trim)
@@ -73,8 +74,10 @@ fn found() -> Result<BTreeMap<String, Vec<String>>, Box<dyn std::error::Error>> 
 fn check(list: &str, size: usize) -> TestResult {
     let want = golden(list)?;
     let known: Vec<String> = [
-        golden("python_tests_a3a.txt")?,
-        golden("python_tests_a3b.txt")?,
+        golden("a3/python_tests_a3a.txt")?,
+        golden("a3/python_tests_a3b.txt")?,
+        // #9801 slice 1: test_usage.py.
+        golden("9801/python_tests_9801.txt")?,
     ]
     .concat();
     let found = found()?;
@@ -90,7 +93,7 @@ fn check(list: &str, size: usize) -> TestResult {
     let extra: Vec<&String> = found.keys().filter(|k| !known.contains(k)).collect();
     assert!(
         extra.is_empty(),
-        "markers for tests on no A3 list: {extra:?}"
+        "markers for tests on no golden list: {extra:?}"
     );
     assert_eq!(want.len(), size, "the {list} list itself changed size");
     Ok(())
@@ -98,13 +101,19 @@ fn check(list: &str, size: usize) -> TestResult {
 
 #[test]
 fn every_a3a_python_test_is_ported_by_name() -> TestResult {
-    check("python_tests_a3a.txt", 28)
+    check("a3/python_tests_a3a.txt", 28)
 }
 
 /// #9171 A3b: plan cases 1-10 (A3b-1) and 11-19 (A3b-2).
 #[test]
 fn every_a3b_python_test_is_ported_by_name() -> TestResult {
-    check("python_tests_a3b.txt", 19)
+    check("a3/python_tests_a3b.txt", 19)
+}
+
+/// #9801 slice 1: test_usage.py's poller tests.
+#[test]
+fn every_9801_slice1_python_test_is_ported_by_name() -> TestResult {
+    check("9801/python_tests_9801.txt", 12)
 }
 
 #[test]
