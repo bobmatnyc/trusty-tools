@@ -238,7 +238,7 @@ pub fn cli_backends() -> Vec<BackendId> {
 /// `server_doctor_lists_the_vercel_target_without_spawning`.
 pub fn sync_targets() -> Vec<BackendId> {
     if CLI_BACKENDS_COMPILED {
-        vec![BackendId::github_actions()]
+        vec![BackendId::github_actions(), BackendId::vercel()]
     } else {
         Vec::new()
     }
@@ -284,6 +284,7 @@ pub(crate) fn open_sync_target_at_in(
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     match id.as_str() {
         BackendId::GITHUB_ACTIONS => open_github_actions(machine_config, identity, dirs),
+        BackendId::VERCEL => open_vercel(machine_config, identity, work_root),
         _ => Err(SecretsError::UnknownBackend {
             backend: id.to_string(),
         }),
@@ -308,6 +309,8 @@ pub(crate) fn sync_target_ready(
         BackendId::GITHUB_ACTIONS => {
             super::github_actions::ready(machine_config, &onepassword_dirs())
         }
+        #[cfg(all(unix, feature = "cli-backends"))]
+        BackendId::VERCEL => super::vercel::ready(machine_config),
         _ => {
             let _ = machine_config;
             Err(SecretsError::UnknownBackend {

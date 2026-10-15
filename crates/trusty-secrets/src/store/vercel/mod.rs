@@ -242,12 +242,37 @@ impl SecretBackend for VercelBackend {
         key: &SecretKey,
         value: &SecretValue,
     ) -> Result<(), SecretsError> {
-        // #9069: red skeleton — no push yet.
-        let _ = (vault, key, value);
-        Err(SecretsError::Unsupported {
-            backend: BackendId::VERCEL.to_string(),
-            operation: "set",
-        })
+        let name = key.as_str();
+        if !listing::is_variable_name(name) {
+            return Err(self.failed(vault, key, BAD_NAME));
+        }
+        let work = WorkDir::create(&self.settings.work_root)?;
+        // #9069: the baseline also proves the login and the link.
+        let mut existed = false;
+        for target in TARGETS {
+            existed |= self.lists(vault, key, &work, name, target)?;
+        }
+        // #9069: V3 — the first failing target fails the key; no later one runs.
+        for target in TARGETS {
+            self.push(vault, key, &work, target, value)?;
+        }
+        for target in TARGETS {
+            // #9069: D8 — fail closed; a deadline keeps its own kind and text.
+            let shown = self
+                .lists(vault, key, &work, name, target)
+                .map_err(|e| match e {
+                    SecretsError::DeadlineExceeded { .. } => e,
+                    _ => self.failed(vault, key, UNCONFIRMED),
+                })?;
+            if !shown {
+                return Err(self.failed(vault, key, NOT_SHOWN));
+            }
+        }
+        // #9069: D9 (a) — presence cannot prove an overwrite took.
+        if existed {
+            return Err(self.failed(vault, key, UPDATE_UNPROVEN));
+        }
+        Ok(())
     }
 
     fn delete(&self, _vault: &VaultName, _key: &SecretKey) -> Result<bool, SecretsError> {

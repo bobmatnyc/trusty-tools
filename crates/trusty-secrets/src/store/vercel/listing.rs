@@ -28,9 +28,25 @@ const NONE_FOUND: &str = "no environment variables found";
 /// and no notice, is `None`.
 /// Test: `vercel_listing_parser_table`.
 pub(super) fn names(stdout: &str) -> Option<BTreeSet<String>> {
-    // #9069: red skeleton.
-    let _ = (stdout, HEADER, NONE_FOUND);
-    None
+    let mut rows = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    loop {
+        let line = rows.next()?.to_ascii_lowercase();
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        if columns.starts_with(&HEADER) {
+            break;
+        }
+        if line.contains(NONE_FOUND) {
+            return Some(BTreeSet::new());
+        }
+    }
+    rows.map(|row| {
+        let first = row.split_whitespace().next()?;
+        is_variable_name(first).then(|| first.to_string())
+    })
+    .collect()
 }
 
 /// Whether `name` is a Vercel environment variable name.
